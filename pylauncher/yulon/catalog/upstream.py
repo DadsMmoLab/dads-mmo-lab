@@ -196,6 +196,9 @@ class SourceNews:
     For a source that follows releases (T126) the "upstream" is the newest
     release's commit, and any positive count is reported as that release.
     """
+    checked_unix: int = 0
+    """When THIS source was asked. Per source, so one that failed (a 403, a timeout)
+    is asked again after `RETRY_SECONDS` while the ones that answered keep their day."""
     follow: str = "branch"
     """The catalog's `Source.follow`, kept so a cache about the other mode is not served."""
     release: str = ""
@@ -242,48 +245,51 @@ def line(news: UpstreamNews | None) -> str:
 
 def read_cached(
     server_dir: Path, sources: Sequence[tuple[str, str]], now: float
-) -> UpstreamNews | None:
-    """The cached reading if it is still fresh for these sources, else None.
+) -> dict[str, SourceNews]:
+    """The cached rows that are still fresh, by repository. Empty when there are none.
 
-    Stale when older than `MAX_AGE_SECONDS` (or `RETRY_SECONDS` if nothing
-    answered), when it is from the future (a clock set back), or when it is
-    about a different set of sources -- a newer app that moves a different
-    source, or follows one differently (`(repo, follow)` pairs), must not be
-    told a count about the old one.
+    Freshness is PER SOURCE: a row that answered is kept `MAX_AGE_SECONDS`, a
+    row that could not be asked `RETRY_SECONDS`, each from its own
+    `checked_unix`. So a 403 on one source is asked about again within the
+    hour without re-asking the sources that answered.
+
+    Nothing is served from a file that is damaged, from the future (a clock set
+    back), or about a different set of sources -- a newer app that moves a
+    different source, or follows one differently (`(repo, follow)` pairs), must
+    not be told a count about the old one.
     """
     path = server_dir / UPSTREAM_FILE
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return {}
     try:
         if payload["version"] != CACHE_VERSION:
-            return None
+            return {}
         checked = int(payload["checked_unix"])
-        rows = payload["sources"]
-        news = UpstreamNews(
-            checked_unix=checked,
-            sources=tuple(
-                SourceNews(
-                    repo=str(row["repo"]),
-                    label=str(row["label"]),
-                    behind=None if row["behind"] is None else int(row["behind"]),
-                    follow=str(row.get("follow", "branch")),
-                    release=str(row.get("release", "")),
-                )
-                for row in rows
-            ),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
+        rows = [
+            SourceNews(
+                repo=str(row["repo"]),
+                label=str(row["label"]),
+                behind=None if row["behind"] is None else int(row["behind"]),
+                checked_unix=int(row.get("checked_unix", checked)),
+                follow=str(row.get("follow", "branch")),
+                release=str(row.get("release", "")),
+            )
+            for row in payload["sources"]
+        ]
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
         logger.debug(f"{path} is not a reading this build can use: {exc}")
-        return None
-    if [(source.repo, source.follow) for source in news.sources] != list(sources):
-        return None
-    age = now - checked
-    limit = MAX_AGE_SECONDS if news.answered() else RETRY_SECONDS
-    if age < 0 or age >= limit:
-        return None
-    return news
+        return {}
+    if [(row.repo, row.follow) for row in rows] != list(sources):
+        return {}
+    fresh: dict[str, SourceNews] = {}
+    for row in rows:
+        age = now - row.checked_unix
+        limit = MAX_AGE_SECONDS if row.behind is not None else RETRY_SECONDS
+        if 0 <= age < limit:
+            fresh[row.repo] = row
+    return fresh
 
 
 def write_cached(server_dir: Path, news: UpstreamNews) -> None:
@@ -297,6 +303,7 @@ def write_cached(server_dir: Path, news: UpstreamNews) -> None:
                 "repo": source.repo,
                 "label": source.label,
                 "behind": source.behind,
+                "checked_unix": source.checked_unix or news.checked_unix,
                 "follow": source.follow,
                 "release": source.release,
             }

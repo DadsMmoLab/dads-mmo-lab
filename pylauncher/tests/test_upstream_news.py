@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import UNGUARDED_HTTPS_GET
 from tests.support_native import ENTRY, Recorder, engine, install
 from tests.test_update_to_latest import OLD, _press, _ready
 from yulon.catalog import native, upstream
@@ -202,6 +204,54 @@ def test_only_github_is_asked(repo: str, slug: str | None) -> None:
     assert upstream.github_slug(repo) == slug
 
 
+# -- wired into the route the tab holds -------------------------------------
+
+
+class _CountingEngine:
+    """Stands in for the engine behind `install_wiring`; answers a marked reading."""
+
+    def __init__(self, asked: list[Path]) -> None:
+        self.asked = asked
+
+    def sources_that_move(self) -> tuple[object, ...]:
+        return ENTRY.emulator.sources
+
+    def upstream_news(
+        self, options: InstallOptions | None = None, *, now: int | None = None
+    ) -> upstream.UpstreamNews:
+        assert options is not None and options.server_dir is not None
+        self.asked.append(options.server_dir)
+        return upstream.UpstreamNews(T0, (upstream.SourceNews("x/y", "server", 7),))
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tortoise"])
+def test_the_route_the_tab_holds_carries_the_count(
+    game: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through `ControllerServices.for_entry()`: the wiring, and Tortoise's botpool wrap.
+
+    The review replaced `upstream_news=` in `install_wiring` with `None` and
+    133 tests still passed. This drives the real factory, so a route that
+    loses the field -- at the wiring, or in `botpool.wrap_route()`'s
+    `replace()` -- fails here.
+    """
+    from yulon import install_wiring
+    from yulon.catalog.catalog import load_catalog
+    from yulon.ui.controller_view import ControllerServices
+
+    asked: list[Path] = []
+    monkeypatch.setattr(install_wiring, "installer_for", lambda _entry: _CountingEngine(asked))
+    entry = load_catalog().get(game)
+    server_dir = tmp_path / "server"
+    route = ControllerServices.for_entry(entry, server_dir).update_to_latest
+    assert route is not None
+    assert route.upstream_news is not None, f"{game}'s route lost its count"
+    assert upstream.line(route.upstream_news()).startswith("Upstream has new code")
+    assert asked == [server_dir]
+    bare = install_wiring.update_to_latest_for_app(entry, server_dir)
+    assert bare is not None and bare.upstream_news is not None
+
+
 # -- dropped when a press moves the sources ---------------------------------
 
 
@@ -243,6 +293,99 @@ def test_a_press_that_fails_after_moving_drops_the_count_too(tmp_path: Path) -> 
     assert not (server_dir / upstream.UPSTREAM_FILE).exists()
 
 
+def test_a_count_asked_while_the_press_runs_is_not_served_the_pre_press_figure(
+    tmp_path: Path,
+) -> None:
+    """The FIRST drop: before any source moves, the day's cache is already gone.
+
+    Without it a tab that asked mid-press (a second window, a Refresh landing
+    as the press starts) would be served "300 commits" about HEADs that are
+    being moved under it.
+    """
+    rec, server_dir = _ready(tmp_path)
+    _cached(rec, server_dir)
+    repos = [s.repo for s in ENTRY.emulator.sources]
+    seen: list[dict[str, upstream.SourceNews]] = []
+    rec.on_clone = lambda dest: seen.append(upstream.read_cached(server_dir, repos, T0 + 1))
+    _press(rec, server_dir)
+    assert seen and all(found == {} for found in seen), seen
+
+
+def _recounting(rec: Recorder, server_dir: Path) -> None:
+    """A tab re-counting while the press runs: a cache written after the first drop."""
+    rec.on_clone = lambda dest: _cached(rec, server_dir)
+
+
+def test_a_count_cached_mid_press_is_dropped_when_the_update_succeeds(tmp_path: Path) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _recounting(rec, server_dir)
+    _press(rec, server_dir)
+    assert not (server_dir / upstream.UPSTREAM_FILE).exists()
+
+
+def test_a_count_cached_mid_press_is_dropped_when_a_step_before_the_build_fails(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir = _ready(tmp_path)
+    _recounting(rec, server_dir)
+
+    def refuse(*args: object, **kwargs: object) -> Iterator[str]:
+        raise InstallerError("the carried patch no longer applies")
+
+    made = engine(rec)
+    made.check_carried_patches = refuse  # type: ignore[method-assign]
+    with pytest.raises(InstallerError):
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert not (server_dir / upstream.UPSTREAM_FILE).exists()
+
+
+def test_a_count_cached_mid_press_is_dropped_when_the_press_is_abandoned(
+    tmp_path: Path,
+) -> None:
+    """A generator closed half way raises GeneratorExit, which no handler catches."""
+    rec, server_dir = _ready(tmp_path)
+    _recounting(rec, server_dir)
+    press = engine(rec).update_to_latest(InstallOptions(server_dir=server_dir))
+    for _line in press:
+        if (server_dir / upstream.UPSTREAM_FILE).exists():
+            break
+    assert (server_dir / upstream.UPSTREAM_FILE).exists(), "the fixture never recounted"
+    press.close()
+    assert not (server_dir / upstream.UPSTREAM_FILE).exists()
+
+
+def test_one_source_that_failed_is_asked_again_within_the_hour_and_only_it(
+    tmp_path: Path,
+) -> None:
+    """A 403 on one source must not hide it for a day, nor re-ask the one that answered."""
+    rec, server_dir = _installed(tmp_path)
+    rec.github = {CORE: 300}
+    first = _news(rec, server_dir, T0)
+    assert [s.behind for s in first.sources] == [300, None]
+    assert len(rec.gets) == 2
+    _news(rec, server_dir, T0 + upstream.RETRY_SECONDS - 1)
+    assert len(rec.gets) == 2, "asked again before the hour was up"
+    rec.github = {CORE: 999, BOTS: 50}
+    later = _news(rec, server_dir, T0 + upstream.RETRY_SECONDS)
+    assert rec.gets[2:] == [
+        f"https://api.github.com/repos/{BOTS}/compare/{OLD}...master?per_page=1&page=2"
+    ]
+    assert [s.behind for s in later.sources] == [300, 50], "the answered source kept its day"
+    _news(rec, server_dir, T0 + upstream.RETRY_SECONDS + 60)
+    assert len(rec.gets) == 3
+    after_a_day = _news(rec, server_dir, T0 + DAY)
+    assert [s.behind for s in after_a_day.sources] == [999, 50]
+    assert rec.gets[3:] == [
+        f"https://api.github.com/repos/{CORE}/compare/{OLD}...Playerbot?per_page=1&page=2"
+    ]
+
+
+def test_the_default_github_seam_is_looked_up_when_called_so_the_suite_guard_sees_it() -> None:
+    """`Seams().upstream_get` must reach the patched `upstream.https_get` (conftest's guard)."""
+    with pytest.raises(AssertionError, match="asked GitHub"):
+        native.Seams().upstream_get("https://api.github.com/repos/x/y/compare/a...b", "x")
+
+
 def test_a_refused_press_keeps_the_count(tmp_path: Path) -> None:
     """Nothing moved, so the reading is still true and asking again would be a wasted request."""
     rec, server_dir = _ready(tmp_path)
@@ -275,6 +418,6 @@ def test_the_real_get_is_verified_and_capped(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(upstream.urllib.request, "urlopen", fake)
     with pytest.raises(OSError):
-        upstream.https_get("https://api.github.com/x", "application/json")
+        UNGUARDED_HTTPS_GET("https://api.github.com/x", "application/json")
     assert seen["context"] is upstream.platform.verify_context()
     assert isinstance(urllib.error.URLError("x"), OSError), "the failure the engine catches"

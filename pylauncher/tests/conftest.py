@@ -28,6 +28,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon import log as log_module
 from yulon import platform
+from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -779,6 +780,27 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     # Disarm the slot too, so NO `QMessageBox` modal can block an offscreen run
     # (verified: the class-level `exec` patch takes effect on Shiboken 6.11.2).
     monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.No)
+
+
+UNGUARDED_HTTPS_GET = upstream.https_get
+"""The real GET, kept for the one test that proves it is verified and capped."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any test that would reach GitHub through `upstream.https_get` fails, loudly (T124).
+
+    Every network read T124/T126 add goes through that one function: the
+    `Seams.upstream_get` default looks it up at call time for exactly this
+    reason. AssertionError, not OSError, because every caller turns an OSError
+    into "no network" -- which would let a forgotten double pass as a quiet
+    "nothing new".
+    """
+
+    def refuse(url: str, accept: str) -> bytes:
+        raise AssertionError(f"a test asked GitHub for {url}; give it a double")
+
+    monkeypatch.setattr(upstream, "https_get", refuse)
 
 
 @pytest.fixture(autouse=True)
