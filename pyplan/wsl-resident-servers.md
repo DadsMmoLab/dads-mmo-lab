@@ -160,6 +160,30 @@ convenient. Start still starts it, because that is something the user asked for.
 is in a stopped distro can still reach it in one click; a user who does not is
 not made to wait for distros they do not care about.
 
+### A distro lives only while a session is attached (T132)
+
+Measured on `yulon-win11` (WSL 2.7.12, 2026-09-26): a distro stops **15-25 s after the
+last `wsl.exe` attached to it exits**. Neither systemd, nor a running `dockerd`, nor running
+containers keep it up, and Docker Desktop running beside it (its own distro, same VM)
+changes nothing. `[wsl2] vmIdleTimeout` is about the VM, not the distro; `[general]
+instanceIdleTimeout=-1` does keep a distro up, but for every distro of that user, and only
+after a `wsl --shutdown`.
+
+Start is one short `wsl -d … docker compose up -d`, so before T132 a WSL server lived only
+while the Server tab's five-second poll kept calling in, and closing the app killed the world
+and the database 25 s later. `Controller.start()` now ends with `wsl.hold()`: one detached
+`wsl.exe -d <distro> --exec sh -c "exec flock -n … sh -c 'echo $$ > …pid; exec sleep
+infinity'"`, keyed by the world container's name, with its lock and pid file in the
+distro's `/dev/shm`, so the next launch's Stop can find it without remembering it.
+`stop()`/`remove()` end it with `wsl.release()`, only when something of this install went
+down, and never by asking a stopped distro (it holds nothing).
+
+Still open, measured the same night: **reading anything under `\\wsl.localhost\<distro>`
+from the user's desktop session starts that distro** (1.35 s, then running). The Server
+tab reads the install's files at open, so opening the app boots an adopted server's distro,
+which is exactly what the poll rule above exists to prevent. A killed (not stopped) server's
+containers then come back on their own through `restart: unless-stopped`.
+
 ---
 
 ## 4a. Accepting a parameter is not passing one

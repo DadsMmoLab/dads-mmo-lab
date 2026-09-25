@@ -8,6 +8,7 @@ details a plausible-looking fixture would smooth over.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -312,3 +313,175 @@ def test_a_listing_that_could_not_answer_never_accuses_a_distro_of_being_deleted
         "dml-arch", WSL_NO_SUCH_DISTRO_RETURNCODE, WSL_NO_SUCH_DISTRO_STDOUT
     )
     assert said is not None and "dml-arch" in said
+
+
+# -- T132: holding a distro open while its server runs --------------------------------
+#
+# Measured on yulon-win11 (WSL 2.7.12, 2026-09-26), `.notes/gates/t132-*`: a distro
+# stops 15-25 s after the last wsl.exe session exits -- with systemd, dockerd and a
+# running container inside it, and with or without Docker Desktop -- while one
+# held `wsl.exe -d <distro> -- sleep infinity` kept it up indefinitely.
+
+
+class _FakeProc:
+    def __init__(self, returncode: int | None) -> None:
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+class _FakePopen:
+    def __init__(self, returncode: int | None = None, refuse_breakaway: bool = False) -> None:
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+        self.returncode = returncode
+        self.refuse_breakaway = refuse_breakaway
+
+    def __call__(self, argv: list[str], **kwargs: object) -> _FakeProc:
+        self.calls.append((argv, kwargs))
+        flags = int(kwargs.get("creationflags", 0))  # type: ignore[call-overload]
+        if self.refuse_breakaway and flags & wsl.CREATE_BREAKAWAY_FROM_JOB:
+            raise PermissionError(5, "Access is denied")
+        return _FakeProc(self.returncode)
+
+
+@pytest.fixture
+def _wsl_exe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wsl.platform, "_which", lambda name: "C:/Windows/System32/wsl.exe")
+
+
+def test_hold_runs_one_flocked_sleep_in_the_distro_without_a_shell_in_between(
+    _wsl_exe: None,
+) -> None:
+    """`--exec`, so no login shell re-reads the script and expands `$$` for itself."""
+    popen = _FakePopen(returncode=None)
+    assert wsl.hold("Ubuntu", "vanilla-mangosd", popen=popen, sleep=lambda s: None) is True
+    [(argv, kwargs)] = popen.calls
+    assert argv[:6] == ["C:/Windows/System32/wsl.exe", "-d", "Ubuntu", "--exec", "sh", "-c"]
+    script = argv[6]
+    assert "flock -n -E 75 /dev/shm/yulon-hold-vanilla-mangosd.lock" in script
+    assert "/dev/shm/yulon-hold-vanilla-mangosd.pid" in script
+    assert script.rstrip().endswith("exec sleep infinity'")
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+
+
+def test_the_hold_is_spawned_to_outlive_the_app(
+    _wsl_exe: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its own process group, no console, and out of any job the app runs in.
+
+    A job with kill-on-close would take the hold down with the app, which is the
+    moment it exists for.
+    """
+    monkeypatch.setattr(wsl.sys, "platform", "win32")
+    popen = _FakePopen(returncode=None)
+    wsl.hold("Ubuntu", "k", popen=popen, sleep=lambda s: None)
+    flags = int(popen.calls[0][1]["creationflags"])  # type: ignore[call-overload]
+    for flag in (
+        wsl.CREATE_NO_WINDOW,
+        wsl.CREATE_NEW_PROCESS_GROUP,
+        wsl.CREATE_BREAKAWAY_FROM_JOB,
+    ):
+        assert flags & flag, hex(flag)
+
+
+def test_a_job_that_refuses_breakaway_still_gets_a_hold(
+    _wsl_exe: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(wsl.sys, "platform", "win32")
+    popen = _FakePopen(returncode=None, refuse_breakaway=True)
+    assert wsl.hold("Ubuntu", "k", popen=popen, sleep=lambda s: None) is True
+    assert len(popen.calls) == 2
+    assert not int(popen.calls[1][1]["creationflags"]) & wsl.CREATE_BREAKAWAY_FROM_JOB  # type: ignore[call-overload]
+
+
+def test_a_hold_that_is_already_there_counts_as_held(_wsl_exe: None) -> None:
+    """flock's conflict code: a second Start must not stack a second session."""
+    assert wsl.hold("Ubuntu", "k", popen=_FakePopen(returncode=75), sleep=lambda s: None) is True
+
+
+def test_a_hold_that_died_at_once_is_reported_not_trusted(
+    _wsl_exe: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No flock in the distro, say: the server still starts, and the log says why it may stop."""
+    assert wsl.hold("Ubuntu", "k", popen=_FakePopen(returncode=127), sleep=lambda s: None) is False
+    assert "127" in caplog.text
+
+
+def test_no_wsl_exe_means_no_hold_and_no_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wsl.platform, "_which", lambda name: None)
+    popen = _FakePopen()
+    assert wsl.hold("Ubuntu", "k", popen=popen, sleep=lambda s: None) is False
+    assert popen.calls == []
+
+
+def test_the_hold_key_cannot_reach_the_script_as_anything_but_a_file_name(_wsl_exe: None) -> None:
+    popen = _FakePopen(returncode=None)
+    wsl.hold("Ubuntu", "a b;rm -rf /$(x)'", popen=popen, sleep=lambda s: None)
+    script = popen.calls[0][0][6]
+    assert "/dev/shm/yulon-hold-a_b_rm_-rf____x__.lock" in script
+    assert ";rm" not in script and "$(x)" not in script
+
+
+def test_release_never_boots_a_stopped_distro(
+    _wsl_exe: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stopped distro holds nothing, and `wsl -d` would start it (§2)."""
+    ran: list[list[str]] = []
+    monkeypatch.setattr(wsl, "known_stopped", lambda distro: True)
+    wsl.release("Ubuntu", "k", run=lambda argv: ran.append(argv))
+    assert ran == []
+
+
+def test_release_ends_only_the_sleep_it_started(
+    _wsl_exe: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pid file is checked against `/proc/<pid>/comm` before anything is killed."""
+    ran: list[list[str]] = []
+    monkeypatch.setattr(wsl, "known_stopped", lambda distro: False)
+    wsl.release("Ubuntu", "vanilla-mangosd", run=lambda argv: ran.append(argv))
+    [argv] = ran
+    assert argv[:6] == ["C:/Windows/System32/wsl.exe", "-d", "Ubuntu", "--exec", "sh", "-c"]
+    script = argv[6]
+    assert "/dev/shm/yulon-hold-vanilla-mangosd.pid" in script
+    assert "/proc/$p/comm" in script and "sleep" in script
+    assert "kill" in script
+
+
+def test_the_hold_script_really_runs_and_release_really_ends_it(tmp_path: Path) -> None:
+    """The two scripts, run by a real `sh` with the folder moved: the argv tests
+    above check spelling; this checks that the spelling does what it says."""
+    import shutil
+    import time
+
+    if shutil.which("flock") is None or shutil.which("sh") is None:
+        pytest.skip("needs sh and flock (util-linux)")
+    hold_script = wsl.hold_script("k").replace("/dev/shm", str(tmp_path))
+    first = subprocess.Popen(["sh", "-c", hold_script])
+    try:
+        for _ in range(50):
+            if (tmp_path / "yulon-hold-k.pid").exists():
+                break
+            time.sleep(0.05)
+        second = subprocess.run(["sh", "-c", hold_script], timeout=10)
+        assert second.returncode == wsl.HOLD_ALREADY_HELD
+        assert first.poll() is None
+        subprocess.run(["sh", "-c", wsl.release_script("k").replace("/dev/shm", str(tmp_path))])
+        assert first.wait(timeout=10) is not None
+        assert not (tmp_path / "yulon-hold-k.pid").exists()
+    finally:
+        if first.poll() is None:
+            first.kill()
+
+
+def test_the_suite_refuses_a_real_hold_or_release(
+    _wsl_exe: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conftest guard's own guard: the defaults really are refused in a test."""
+    with pytest.raises(pytest.fail.Exception, match="real WSL hold"):
+        wsl.hold("Ubuntu", "k", sleep=lambda s: None)
+    monkeypatch.setattr(wsl, "known_stopped", lambda distro: False)
+    with pytest.raises(pytest.fail.Exception, match="real WSL hold"):
+        wsl.release("Ubuntu", "k")

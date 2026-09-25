@@ -218,6 +218,11 @@ class Controller:
         # like a health wait that no longer happens. Compose does the waiting
         # now, through the project's own `service_healthy` conditions.
         docker.start_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        if self.wsl_distro is not None:
+            # AFTER the start, so a start that failed pins nothing. The distro
+            # would otherwise stop 15-25 s after this app's last call into it,
+            # killing the server it just started (T132, `wsl.hold()`).
+            wsl.hold(self.wsl_distro, self.spec.world)
 
     def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
         """Where each blocking container came from, best effort and never fatal."""
@@ -306,7 +311,9 @@ class Controller:
             logger.debug(f"{self.wsl_distro} is not running; nothing to stop")
             return False
         self._save_evidence()
-        return docker.stop_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        stopped = docker.stop_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        self._let_the_distro_go(stopped)
+        return stopped
 
     def remove(self) -> bool:
         """Stop the install and remove its containers, keeping every volume.
@@ -320,7 +327,20 @@ class Controller:
             there was nothing of it to remove.
         """
         self._save_evidence()
-        return docker.remove_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        removed = docker.remove_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        self._let_the_distro_go(removed)
+        return removed
+
+    def _let_the_distro_go(self, ours_went_down: bool) -> None:
+        """End the hold `start()` put on this server's distro, once the server is down.
+
+        Only when something of THIS install was stopped: two installs of one
+        game share container names, so the hold under these names belongs to
+        whichever of them is running, and Stop pressed on the other tab found
+        nothing of its own and must not let that distro go (T132).
+        """
+        if self.wsl_distro is not None and ours_went_down:
+            wsl.release(self.wsl_distro, self.spec.world)
 
     def _save_evidence(self) -> None:
         """Run the pre-stop hook, and never let it stand between a user and a stop.
