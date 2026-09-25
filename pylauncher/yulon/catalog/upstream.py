@@ -69,6 +69,7 @@ _MAX_BYTES = 1024 * 1024
 """A compare page two is ~15 kB; anything past a megabyte is not an answer."""
 
 _SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def https_get(url: str, accept: str) -> bytes:
@@ -133,6 +134,56 @@ def commits_ahead(slug: str, base: str, ref: str, *, get: HttpGet) -> int | None
 
 
 @dataclass(frozen=True)
+class Release:
+    """A published release: its tag, and the commit that tag names (T126)."""
+
+    tag: str
+    sha: str
+
+
+def newest_release(slug: str, *, get: HttpGet) -> Release | None:
+    """The newest published release of `slug` and its commit, or None if GitHub would not say.
+
+    `releases/latest` is GitHub's own answer to "newest": the most recent release
+    that is neither a draft nor a pre-release. It never returns a bare tag with
+    no release behind it, which is what keeps a rolling tag out -- and a source
+    only asks this at all if its catalog entry says `follow: releases`, so
+    cmangos' `latest` (a release, but a rolling one) is never asked about.
+
+    The tag is then resolved to its commit through `commits/{tag}` in the
+    `vnd.github.sha` form, which peels an annotated tag and answers forty hex
+    characters and nothing else. Resolved at the moment of asking, not cached
+    by name: a dated tag here has been moved during its own day (the
+    2026-09-25 release is titled "builds v1-v31"), and what is built must be
+    the commit the tag names NOW.
+    """
+    base = f"https://api.github.com/repos/{slug}"
+    try:
+        payload = json.loads(get(f"{base}/releases/latest", "application/vnd.github+json"))
+    except (OSError, ValueError) as exc:
+        logger.debug(f"could not ask GitHub for the newest release of {slug}: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    tag = payload.get("tag_name")
+    if not isinstance(tag, str) or not tag or payload.get("draft") or payload.get("prerelease"):
+        logger.debug(
+            f"GitHub's newest release of {slug} is not one to follow: {str(payload)[:200]}"
+        )
+        return None
+    try:
+        sha = get(f"{base}/commits/{quote(tag, safe='')}", "application/vnd.github.sha")
+    except OSError as exc:
+        logger.debug(f"could not ask GitHub which commit {slug} {tag} is: {exc}")
+        return None
+    said = sha.decode("utf-8", errors="replace").strip()
+    if not _SHA.match(said):
+        logger.debug(f"GitHub did not answer {slug} {tag} with a commit: {said[:80]!r}")
+        return None
+    return Release(tag=tag, sha=said)
+
+
+@dataclass(frozen=True)
 class SourceNews:
     """One moving source's reading: how far upstream is past what was built."""
 
@@ -140,7 +191,15 @@ class SourceNews:
     label: str
     """What the line calls it: "server" for the core, the repository's name otherwise."""
     behind: int | None
-    """Commits upstream has past this checkout's HEAD. `None` = could not ask."""
+    """Commits upstream has past this checkout's HEAD. `None` = could not ask.
+
+    For a source that follows releases (T126) the "upstream" is the newest
+    release's commit, and any positive count is reported as that release.
+    """
+    follow: str = "branch"
+    """The catalog's `Source.follow`, kept so a cache about the other mode is not served."""
+    release: str = ""
+    """The newest release's tag, for a source that follows releases and reached one."""
 
 
 @dataclass(frozen=True)
@@ -165,7 +224,11 @@ def line(news: UpstreamNews | None) -> str:
     if news is None:
         return ""
     said = [
-        f"{source.label} {source.behind} {'commit' if source.behind == 1 else 'commits'}"
+        (
+            f"{source.label} new release {source.release}"
+            if source.release
+            else f"{source.label} {source.behind} {'commit' if source.behind == 1 else 'commits'}"
+        )
         for source in news.sources
         if source.behind
     ]
@@ -177,13 +240,16 @@ def line(news: UpstreamNews | None) -> str:
     )
 
 
-def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> UpstreamNews | None:
+def read_cached(
+    server_dir: Path, sources: Sequence[tuple[str, str]], now: float
+) -> UpstreamNews | None:
     """The cached reading if it is still fresh for these sources, else None.
 
     Stale when older than `MAX_AGE_SECONDS` (or `RETRY_SECONDS` if nothing
     answered), when it is from the future (a clock set back), or when it is
     about a different set of sources -- a newer app that moves a different
-    source must not be told a count about the old one.
+    source, or follows one differently (`(repo, follow)` pairs), must not be
+    told a count about the old one.
     """
     path = server_dir / UPSTREAM_FILE
     try:
@@ -202,6 +268,8 @@ def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> UpstreamN
                     repo=str(row["repo"]),
                     label=str(row["label"]),
                     behind=None if row["behind"] is None else int(row["behind"]),
+                    follow=str(row.get("follow", "branch")),
+                    release=str(row.get("release", "")),
                 )
                 for row in rows
             ),
@@ -209,7 +277,7 @@ def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> UpstreamN
     except (KeyError, TypeError, ValueError) as exc:
         logger.debug(f"{path} is not a reading this build can use: {exc}")
         return None
-    if [source.repo for source in news.sources] != list(repos):
+    if [(source.repo, source.follow) for source in news.sources] != list(sources):
         return None
     age = now - checked
     limit = MAX_AGE_SECONDS if news.answered() else RETRY_SECONDS
@@ -225,7 +293,13 @@ def write_cached(server_dir: Path, news: UpstreamNews) -> None:
         "version": CACHE_VERSION,
         "checked_unix": news.checked_unix,
         "sources": [
-            {"repo": source.repo, "label": source.label, "behind": source.behind}
+            {
+                "repo": source.repo,
+                "label": source.label,
+                "behind": source.behind,
+                "follow": source.follow,
+                "release": source.release,
+            }
             for source in news.sources
         ],
     }

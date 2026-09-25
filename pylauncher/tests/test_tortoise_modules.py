@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from yulon.apply import Applier, ApplyError
+from yulon.catalog import upstream
 from yulon.catalog.catalog import load_catalog
 from yulon.controller_wow_tortoise import autoupdate
 from yulon.controller_wow_tortoise import modules as tortoise_modules
@@ -779,6 +780,11 @@ class _AddonGit:
         return None
 
 
+def _a_release(slug: str) -> upstream.Release:
+    """T126: `tortoise-bots-manager` follows its releases; this stands in for GitHub's answer."""
+    return upstream.Release("v2026-09-25", "8edc9ddba7f39078bc66fda153c709aac942c634")
+
+
 ADDONS = {
     "tortoise-bots-manager": (
         "TortoiseBotsManager",
@@ -830,6 +836,7 @@ def test_each_addon_lands_in_the_clients_own_addons_folder_under_its_toc_name(
         git=_AddonGit(toc, files),
         sql=_RecordingSql(),
         client_dir=client,
+        newest_release=_a_release,
     ).install(manifest)
 
     addon = client / "Interface" / "AddOns" / folder
@@ -864,9 +871,12 @@ def test_an_addon_install_on_a_tab_with_no_client_dir_is_refused_by_name(
     """
     _folder, toc, files = ADDONS[item]
     manifest = tortoise_modules.store().load("mod", item)
-    report = Applier(tmp_path / "server", git=_AddonGit(toc, files), sql=_RecordingSql()).install(
-        manifest
-    )
+    report = Applier(
+        tmp_path / "server",
+        git=_AddonGit(toc, files),
+        sql=_RecordingSql(),
+        newest_release=_a_release,
+    ).install(manifest)
     assert any("no client dir configured" in line for line in report.skipped), report.skipped
     assert any("client" in line for line in report.skipped), report.skipped
 

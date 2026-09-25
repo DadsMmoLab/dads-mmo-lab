@@ -531,6 +531,16 @@
           "description": "Shallow-clone depth, or null for a full clone. Data because the warning in `git.CloneSpec` is a per-source fact: AzerothCore's core repo must say null, since its `genrev.cmake` reads the revision out of git history and a shallow clone hands a three-hour build the wrong answer.",
           "title": "Depth"
         },
+        "follow": {
+          "default": "branch",
+          "description": "What \"latest\" means for this source (T126). `branch`: the tip of `branch` (or the default branch). `releases`: the commit of the newest published GitHub release (not a draft, not a pre-release), for a repository that publishes versioned releases. Declared per source and never guessed: a rolling tag such as cmangos' `latest` is not a version, and a source that does not say `releases` follows its branch whatever tags it carries. GitHub-hosted repositories only.",
+          "enum": [
+            "branch",
+            "releases"
+          ],
+          "title": "Follow",
+          "type": "string"
+        },
         "repo": {
           "minLength": 3,
           "title": "Repo",

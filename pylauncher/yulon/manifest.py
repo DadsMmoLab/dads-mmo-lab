@@ -79,6 +79,26 @@ class Source(_Strict):
         ),
     )
 
+    follow: Literal["branch", "releases"] = Field(
+        default="branch",
+        description=(
+            'What "latest" means for this source (T126). `branch`: the tip of `branch` '
+            "(or the default branch). `releases`: the commit of the newest published GitHub "
+            "release (not a draft, not a pre-release), for a repository that publishes "
+            "versioned releases. Declared per source and never guessed: a rolling tag such as "
+            "cmangos' `latest` is not a version, and a source that does not say `releases` "
+            "follows its branch whatever tags it carries. GitHub-hosted repositories only."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _releases_are_githubs(self) -> Source:
+        """`releases` is answered by GitHub's releases API, so it is refused elsewhere."""
+        if self.follow == "releases" and "://" in self.repo:
+            if (urlsplit(self.repo).hostname or "").lower() != "github.com":
+                raise ValueError(f"follow: releases needs a GitHub repository, got {self.repo!r}")
+        return self
+
     @field_validator("repo")
     @classmethod
     def _repo_is_allowed(cls, value: str) -> str:

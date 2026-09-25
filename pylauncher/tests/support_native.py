@@ -359,6 +359,9 @@ class Recorder:
     gets: list[str] = field(default_factory=list)
     """Every URL the engine asked GitHub for, in order: the rate-limit rule is a count."""
 
+    releases: dict[str, tuple[str, str]] = field(default_factory=dict)
+    """T126: each slug's newest published release as `(tag, commit)`. Absent = GitHub silent."""
+
     edits: dict[Path, tuple[str, ...]] = field(default_factory=dict)
     """Tracked files the user has changed in each checkout — `local_edits()`'s answer.
 
@@ -393,6 +396,12 @@ class Recorder:
     def upstream_get(self, url: str, accept: str) -> bytes:
         """GitHub, as far as T124 asks it: one compare per source."""
         self.gets.append(url)
+        for slug, (tag, sha) in self.releases.items():
+            if url == f"https://api.github.com/repos/{slug}/releases/latest":
+                body = {"tag_name": tag, "draft": False, "prerelease": False}
+                return json.dumps(body).encode("utf-8")
+            if url == f"https://api.github.com/repos/{slug}/commits/{tag}":
+                return sha.encode("utf-8")
         for slug, ahead in self.github.items():
             if f"/repos/{slug}/compare/" in url:
                 status = "ahead" if ahead else "identical"

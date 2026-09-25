@@ -502,6 +502,12 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # window to bind the write seam into nor a folder to report, so both
         # read `None` here regardless of which game's entry this loop is on.
         unwindowed = {"client_dir", "set_client_dir"}
+        # T126's `module_notes`: one extra sentence on a Modules row, which only
+        # Tortoise has to say -- its TortoiseBots Manager addon and its
+        # TortoiseBots server module publish releases in lockstep, and the row
+        # names both. No other game pairs a client addon with a server module,
+        # so the seam is absent there by design, the reference included.
+        unpaired = set() if game == "wow-tortoise" else {"module_notes"}
         allowed = (
             unstocked
             | unmeasured
@@ -516,9 +522,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unupdatable
             | unadoptable
             | unwindowed
+            | unpaired
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable | unadoptable | unwindowed
+            reference = unprobed | unupdatable | unadoptable | unwindowed | unpaired
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

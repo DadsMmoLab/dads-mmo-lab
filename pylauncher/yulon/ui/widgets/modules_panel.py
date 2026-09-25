@@ -198,8 +198,14 @@ the app's own convention: that press opens a dialog first.
 """
 
 
-def chip_update_label(behind: int) -> str:
-    """The update chip's own label, so the view and the tests cannot spell it apart."""
+def chip_update_label(behind: int, release: str = "") -> str:
+    """The update chip's own label, so the view and the tests cannot spell it apart.
+
+    A module that follows its releases (T126) is offered the RELEASE, not a
+    count of the commits between it and the branch tip.
+    """
+    if release:
+        return f"Update available — new release {release}"
     plural = "" if behind == 1 else "s"
     return f"Update available — {behind} commit{plural} behind"
 
@@ -305,6 +311,14 @@ class ModuleRow:
     install_reason: str | None = None
     """The sentence behind `installable=False`, or `None` when Install is open."""
 
+    note: str | None = None
+    """One plain extra line under the description, or `None` for none (T126).
+
+    Drawn wrapped and in full, not elided like the description: it is a
+    sentence about THIS install (which release is on it and whether that
+    matches the server's), and a clipped one would drop the half that matters.
+    """
+
     install_incomplete: bool = False
     """This clone is on disk and its install never finished, so the row keeps Install (T68).
 
@@ -353,6 +367,12 @@ class SessionState:
     manifest the press was about, and `apply.module_updates()` enumerates ONE
     clone directory, so every key it returns is in the `module` family by
     construction.
+    """
+    releases: Mapping[tuple[str, str], str] = field(default_factory=dict)
+    """T126: the newest release's tag for a row in `behind` that follows its releases.
+
+    Keyed like `behind` and read only for a key `behind` has, so a count that
+    goes (an update, a removal) takes its release with it.
     """
 
 
@@ -506,13 +526,20 @@ def _chips_for(
             )
         )
     behind = session.behind.get(key, 0)
+    release = session.releases.get(key, "")
     if behind > 0:
+        said = (
+            f"{item_id}: {release} is its newest published release, and this checkout is not "
+            f"on it. Update fetches and RESETS the clone to that release, "
+            if release
+            else f"{item_id}: its upstream has {behind} commit(s) this checkout does not. "
+            "Update fetches and RESETS the clone to the upstream tip, "
+        )
         chips.append(
             Chip(
                 "owed",
-                chip_update_label(behind),
-                f"{item_id}: its upstream has {behind} commit(s) this checkout does not. "
-                "Update fetches and RESETS the clone to the upstream tip, then re-deploys "
+                chip_update_label(behind, release),
+                said + "then re-deploys "
                 "and re-applies everything the manifest declares — and it may ask this "
                 "module's install questions again. It REFUSES rather than reset if the "
                 "folder is a different repository, has uncommitted changes in it, or "
@@ -602,6 +629,7 @@ def build_module_rows(
     client_dir: Path | None,
     versions: Mapping[tuple[str, str], str] | None = None,
     unfinished: Mapping[str, frozenset[str]] | None = None,
+    notes: Mapping[tuple[str, str], str] | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
 
@@ -627,6 +655,9 @@ def build_module_rows(
     # read here: this function is pure and stays pure, and the reading is the
     # one part of the version line that costs a subprocess (`VersionCache`).
     seen_versions = versions or {}
+    # T126's per-row sentence, keyed like the versions and handed in for the
+    # same reason: this function reads nothing.
+    row_notes = notes or {}
     # Keyed by (FAMILY, id) and collected as a LIST, and both halves are the
     # round-2 fix. Nothing makes a manifest id unique across families -- the
     # store loads `manifests/<game>/<family>/` one directory at a time and no
@@ -751,6 +782,7 @@ def build_module_rows(
             installable=lock_reason is None,
             install_reason=lock_reason,
             install_incomplete=halfway,
+            note=row_notes.get((manifest.type, manifest.id)),
         )
 
     # T41's per-FOLDER accounting, moved here from `reload_modules()`. `ale` and
@@ -1330,6 +1362,12 @@ class RowWidget(QFrame):
         self.description_label = _ElidedLabel(data.description, self)
         self.description_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         left.addWidget(self.description_label)
+        # T126's plain extra line, only where there is one to say.
+        self.note_label: QLabel | None = None
+        if data.note:
+            self.note_label = QLabel(data.note, self)
+            self.note_label.setWordWrap(True)
+            left.addWidget(self.note_label)
         box.addLayout(left, 1)
 
         middle = QHBoxLayout()

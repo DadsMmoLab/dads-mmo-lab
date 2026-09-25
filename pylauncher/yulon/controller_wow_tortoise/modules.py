@@ -49,7 +49,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from yulon import resources
-from yulon.apply import ApplyReport, SqlRunner
+from yulon.apply import CLONE_DIRS, ApplyReport, SqlRunner, clone_release
+from yulon.catalog.native import read_state
 from yulon.controller_wow_tortoise import autoupdate
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
 from yulon.git import Git
@@ -168,3 +169,47 @@ def apply_module(
         start_database=start_database,
         client_dir=client_dir,
     ).install(manifest, values)
+
+
+ADDON_ID = "tortoise-bots-manager"
+"""The client addon whose release is paired with the server's bot module (T126)."""
+
+BOTS_REPO = "Sagiroth/TortoiseBots"
+"""The catalog source the addon's release is compared against (T126).
+
+Both publish dated releases in lockstep (v2026-09-23, -24, -25 on both, read
+2026-09-25), and the addon's README says it degrades gracefully against an older
+server (`TBM:CAPS`), so a skew is a note and never a refusal.
+"""
+
+
+def release_note(addon: str, server: str) -> str:
+    """The TortoiseBots Manager row's extra line: its release, and the server's if known."""
+    said = f"Installed: release {addon}."
+    if not server:
+        return said
+    said += f" The server's bot module is on {server}."
+    if server != addon:
+        said += (
+            f"\nThe addon ({addon}) and the server's bot module ({server}) are from different "
+            "releases. They work together, but updating both keeps them in step."
+        )
+    return said
+
+
+def release_notes(server_dir: Path) -> dict[tuple[str, str], str]:
+    """Per-row notes for this install's Modules tab: the addon's release against the server's.
+
+    Two small file reads and nothing else -- the addon's clone claim, where the
+    install recorded the release it checked out, and the install record, where
+    "Update the server to latest…" recorded the release the bot module moved
+    to. An addon installed before T126 recorded none and gets no line; a server
+    still on its tested pin is on no release, so only the addon's is said.
+    """
+    clone = server_dir / CLONE_DIRS["mod"] / ADDON_ID
+    addon = clone_release(clone, item_id=ADDON_ID)
+    if not addon:
+        return {}
+    state = read_state(server_dir, valid=())
+    rev = state.rev_for(BOTS_REPO) if state is not None else None
+    return {("mod", ADDON_ID): release_note(addon, rev.release if rev is not None else "")}
