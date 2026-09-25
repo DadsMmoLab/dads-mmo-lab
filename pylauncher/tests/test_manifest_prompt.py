@@ -16,7 +16,7 @@ import pytest
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import parse_manifest
 from yulon.ui.widgets.manifest_prompt import (
-    COMPOUNDS_NOTE,
+    REAPPLIES_NOTE,
     REMEMBERED_NOTE,
     REMOVE_NO_RECORD_NOTE,
     ManifestPromptDialog,
@@ -203,24 +203,55 @@ def test_a_remove_with_no_record_asks_the_multiplier_and_says_why(qapp: object) 
     assert "running it again applies" not in dialog.notes(), "a Remove is not a re-run"
 
 
-def test_updating_a_compounding_mod_warns_that_it_multiplies_again(qapp: object) -> None:
-    """Update re-runs `HealthModifier*{hp}` on top of what is there (T115); the dialog says so."""
+def test_a_remove_prefilled_from_the_last_answers_still_says_there_is_no_applied_record(
+    qapp: object,
+) -> None:
+    """T115: Remove asks only when Yu'lon has no record that the mod is applied now.
+
+    The last ANSWERS may still be there (T104 keeps them after a Remove), and
+    they pre-fill the boxes, but "OK applies what is shown" is not what a
+    Remove does, and the note about dividing is the one the player needs.
+
+    Mutation: gate the remove note on `missing` again and a pre-filled Remove
+    dialog carries no note at all.
+    """
     manifest = _baby_mobs()
+    last = {"hp": "2", "dmg": "2", "arm": "2", "spd": "2"}
+    dialog = ManifestPromptDialog(
+        None,
+        manifest,
+        manifest.prompts,  # type: ignore[attr-defined]
+        again=True,
+        remembered=last,
+        removing=True,
+    )
+    assert REMOVE_NO_RECORD_NOTE in dialog.notes()
+    assert REMEMBERED_NOTE not in dialog.notes()
+    assert dialog.answers() == last
+
+
+def test_running_a_mob_mod_again_says_the_new_values_replace_the_last(qapp: object) -> None:
+    """T115: a re-run undoes the last values first, so the dialog no longer warns of stacking.
+
+    Mutation: put back T104's `COMPOUNDS_NOTE` and "compound" is in the notes.
+    """
+    manifest = _baby_mobs()
+    last = {"hp": "2", "dmg": "2", "arm": "2", "spd": "2"}
     again = ManifestPromptDialog(
-        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+        None, manifest, manifest.prompts, again=True, remembered=last  # type: ignore[attr-defined]
     )
     first = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
-    assert COMPOUNDS_NOTE in again.notes()
-    assert COMPOUNDS_NOTE not in first.notes()
-    assert "as the new setting" not in again.notes(), "false for a module that compounds"
+    assert REAPPLIES_NOTE in again.notes()
+    assert REAPPLIES_NOTE not in first.notes()
+    assert "compound" not in again.notes() and "on top of" not in again.notes()
 
 
-def test_updating_a_mod_that_does_not_compound_gets_no_such_warning(qapp: object) -> None:
+def test_running_a_mod_that_is_not_relative_again_gets_no_such_note(qapp: object) -> None:
     manifest = _hearthstone()
     dialog = ManifestPromptDialog(
         None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
     )
-    assert COMPOUNDS_NOTE not in dialog.notes()
+    assert REAPPLIES_NOTE not in dialog.notes()
 
 
 def test_accountwides_thirteen_questions_scroll_rather_than_clip_at_the_minimum_window(

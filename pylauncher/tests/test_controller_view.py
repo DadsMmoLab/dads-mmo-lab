@@ -1122,12 +1122,17 @@ def test_removing_a_mob_multiplier_with_no_usable_record_asks_the_multiplier(
 def test_removing_a_mob_multiplier_with_a_record_asks_nothing_and_uses_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """With a valid record the answer is known: no dialog, and the applier fills it in."""
+    """With a valid record the answer is known: no dialog, and the applier fills it in.
+
+    Since T115 the record that counts is the APPLIED one, which an install
+    writes and a Remove clears; the answers alone are only a pre-fill.
+    """
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     manifest = modules.store().load("mod", "baby-mobs")
     answers = {"hp": "0.5", "dmg": "0.25", "arm": "0.25", "spd": "1.5"}
     assert module_answers.record_answers(server_dir, manifest, answers) == ""
+    assert module_answers.record_applied(server_dir, manifest, answers) == ""
     asked: list[str] = []
     services = _services(ps, tmp_path, [])
     services.applier = _FakeApplier(server_dir)
@@ -1145,6 +1150,100 @@ def test_removing_a_mob_multiplier_with_a_record_asks_nothing_and_uses_it(
     assert isinstance(applier, _FakeApplier)
     assert applier.removed == ["baby-mobs"] and applier.values == [None]
     assert applier._values(manifest, None)["hp"] == "0.5"
+
+
+def test_removing_a_mob_multiplier_that_is_not_recorded_as_applied_asks(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T115: the last answers survive a Remove (T104), so they cannot say it is applied now.
+
+    A second Remove used to divide again, silently, by those answers. Now it
+    asks, pre-filled with them, and the dialog says why.
+
+    Mutation: gate remove on the remembered answers again and nothing is asked.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    manifest = modules.store().load("mod", "baby-mobs")
+    answers = {"hp": "0.5", "dmg": "0.25", "arm": "0.25", "spd": "1.5"}
+    assert module_answers.record_answers(server_dir, manifest, answers) == ""
+    asked: list[dict[str, object]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        asked.append(kw)
+        return answers
+
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+
+    assert len(asked) == 1 and asked[0]["removing"] is True
+    assert asked[0]["remembered"] == answers, "pre-filled with the last answers"
+
+
+def test_installing_an_applied_mob_multiplier_again_is_a_rerun(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T115: a sourceless mod leaves no folder, so the row reads Not installed after Install.
+
+    The applied record is what says a second Install is a re-run, so its dialog
+    opens with `again` and says the new values replace the last ones.
+
+    Mutation: drop the record from the view's `again` and it is False.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    manifest = modules.store().load("mod", "baby-mobs")
+    applied = {"hp": "2", "dmg": "2", "arm": "2", "spd": "2"}
+    assert module_answers.record_answers(server_dir, manifest, applied) == ""
+    assert module_answers.record_applied(server_dir, manifest, applied) == ""
+    asked: list[dict[str, object]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        asked.append(kw)
+        return {"hp": "3", "dmg": "3", "arm": "3", "spd": "3"}
+
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
+    assert not view.modules_panel.row("baby-mobs").data.installed
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+
+    assert len(asked) == 1 and asked[0]["again"] is True
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == ["baby-mobs"]
+
+
+def test_installing_a_mob_multiplier_over_an_unusable_record_is_refused_before_the_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T115's ruling, said before any question (T55): no answer can make this press safe."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / module_answers.ANSWERS_FILE).write_text(
+        json.dumps({"applied": {"mod/baby-mobs": {"hp": "lots"}}}), encoding="utf-8"
+    )
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+
+    assert asked == []
+    assert "Remove it first, then Install" in view.module_report.toPlainText()
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == []
 
 
 def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:

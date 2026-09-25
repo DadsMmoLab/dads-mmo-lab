@@ -76,11 +76,11 @@ RERUN_SETS_NOTE = (
     "This is already installed, and running it again applies the answers below as the new "
     "setting."
 )
-"""The lead-in to `NO_RECORD_NOTE`, for a module whose re-run REPLACES the setting.
+"""The lead-in to `NO_RECORD_NOTE`, for a module run again.
 
-Not said of a module whose re-run compounds (`COMPOUNDS_NOTE` says what happens
-there instead): "as the new setting" would be false for the mob multipliers,
-measured in the fix-wave live check on m910q, where both sentences appeared.
+True of the mob multipliers too since T115, which undo the last values before
+applying these (`REAPPLIES_NOTE`). Until then it was withheld from them, because
+a re-run compounded.
 """
 
 
@@ -104,28 +104,29 @@ REMEMBERED_NOTE = (
 
 
 REMOVE_NO_RECORD_NOTE = (
-    "Yu'lon has no record of the value used when this was installed. Enter the one you "
-    "chose: Remove undoes the install with it, so with any other value the change is not "
-    "undone exactly (a multiplier stays multiplied)."
+    "Yu'lon has no record that this is applied to this server's database now: it may have "
+    "been installed by an older version, or removed already. Remove divides by the values "
+    "below, so enter the ones it was installed with (what is filled in is your last answer, "
+    "else the default). If it is not applied now, Cancel: removing it would still divide."
 )
-"""Shown when Remove has to ask what install used (cold review + Codex, T104 fix wave).
+"""Shown whenever Remove has to ask (T104 fix wave; reworded for T115).
 
-The mob multipliers undo `HealthModifier*{hp}` with `HealthModifier/{hp}`. With
-no usable record -- an install made before T104, or a damaged file -- the only
-other value to hand is the manifest's default, and dividing by it in silence
-would leave every creature multiplied whenever the player had picked another.
-So Remove asks, pre-filled with the default, and says why.
+The mob multipliers undo `HealthModifier*{hp}` with `HealthModifier/{hp}`. The
+Modules tab asks only when there is no usable APPLIED record (T115), and the
+last answers T104 keeps after a Remove cannot stand in for one: they pre-fill
+the boxes, and this says what OK then does.
 """
 
 
-COMPOUNDS_NOTE = (
-    "Running this again applies the values below again, on top of what the database holds "
-    "now, so they compound. To change them, Remove it and then Install it instead."
+REAPPLIES_NOTE = (
+    "Running this again first undoes the values Yu'lon applied last time, then applies the "
+    "ones below, in one database transaction: they replace the old ones rather than stack."
 )
-"""Shown when a module whose install is relative to the current values is run again.
+"""Shown when a module whose install is relative to the current values is run again (T115).
 
-`apply.reapplies_on_top()`: the four mob multipliers. Compounding on Update is
-pre-existing and tracked as T115; until it is fixed, the dialog says what OK does.
+`apply.reapplies_on_top()`: the four mob multipliers. It replaced T104's
+`COMPOUNDS_NOTE` ("they compound ... Remove it and then Install it instead"),
+which was true until `Applier.install()` learned to undo the applied record.
 """
 
 
@@ -177,24 +178,25 @@ class ManifestPromptDialog(QDialog):
                 from_record.append(prompt)
             elif prompt.default is not None:
                 prefill[prompt.key] = prompt.default
-        if from_record:
-            self._notes.append(REMEMBERED_NOTE)
         missing = [p for p in self._prompts if p not in from_record]
         if removing:
-            if missing:
-                self._notes.append(REMOVE_NO_RECORD_NOTE)
-        elif again:
-            compounds = reapplies_on_top(manifest)
+            # A Remove asks only what it has no record of (`apply.must_ask`), so
+            # this dialog opening IS the no-record case, whatever pre-fills it.
+            self._notes.append(REMOVE_NO_RECORD_NOTE)
+        elif from_record:
+            self._notes.append(REMEMBERED_NOTE)
+        if again and not removing:
             if missing:
                 questions = (
                     "the questions below"
                     if len(missing) == len(self._prompts) and len(missing) > 1
                     else "these: " + "; ".join(p.question for p in missing)
                 )
-                lead = "" if compounds else RERUN_SETS_NOTE + " "
-                self._notes.append(lead + NO_RECORD_NOTE.format(questions=questions))
-            if compounds:
-                self._notes.append(COMPOUNDS_NOTE)
+                self._notes.append(
+                    RERUN_SETS_NOTE + " " + NO_RECORD_NOTE.format(questions=questions)
+                )
+            if reapplies_on_top(manifest):
+                self._notes.append(REAPPLIES_NOTE)
         for text in self._notes:
             note = QLabel(text, self)
             note.setWordWrap(True)
