@@ -742,6 +742,10 @@ _ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
 # How long a partial line must sit unchanged before it is looked at.
 _PROMPT_QUIET_SECONDS = 0.3
 
+# Yielded by `interact()` when its reader's end-of-stream sentinel was never
+# consumed, so a cut-off log says it is cut off instead of just stopping.
+_OUTPUT_MAY_BE_CUT_OFF = "[Yu'lon] The rest of this output may be cut off: it was still arriving."
+
 
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences (the install scripts colour everything)."""
@@ -1003,6 +1007,15 @@ def interact(
             return False
         return _write((reply + "\n").encode("utf-8"))
 
+    def _complete_lines() -> Iterator[str]:
+        """Yield every complete line in `buffer`, and let `respond()` see each one."""
+        nonlocal buffer
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            yield line
+            _answer(line)
+
     try:
         eof = False
         cancelled = False
@@ -1026,11 +1039,9 @@ def interact(
                     # last line had no trailing newline never took it — and on
                     # cancel those bytes were dropped, which was exactly the
                     # text the bash engine's `run()` built its failure message
-                    # from. Yield them, then stop (review, 2026-08-23).
+                    # from. They are yielded below, after whatever the reader
+                    # still had (review, 2026-08-23; T108).
                     logger.debug("child exited; ending the read rather than waiting for EOF")
-                    if buffer:
-                        yield buffer
-                        buffer = ""
                     break
                 # A partial line that has gone quiet is the child waiting for
                 # input — or just a slow build. Ask about it once.
@@ -1054,15 +1065,68 @@ def interact(
                 break
             buffer += data.decode("utf-8", errors="replace")
             answered_partial = False
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.rstrip("\r")
-                yield line
-                _answer(line)
+            yield from _complete_lines()
         if not cancelled:
             # Bounded: an orphan holding the slave keeps the reader in os.read
             # long after the child is gone, and this join used to be unbounded.
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+            # The loop above can stop on "the child is gone" while the reader
+            # still holds the child's last output: already read but not yet
+            # queued, or still in the kernel buffer waiting for the reader
+            # thread to get a CPU. The join has now let the reader queue it,
+            # so read the queue once more. Until T108 nothing did, and on a
+            # busy machine the tail of the output was lost whenever a quiet
+            # tick fell between the child's exit and the reader's last put().
+            # Measured: 1 run in 100 at loadavg ~5 lost `GOT:hunter2` in
+            # test_prompt's /dev/tty test. The reader is given the join's bound
+            # to deliver, not one quiet tick.
+            #
+            # The drain takes only what is queued when it starts (`qsize()`,
+            # read once), or up to the end-of-stream sentinel if that comes
+            # first. An orphan that keeps writing keeps the reader queueing,
+            # and an unbounded drain would follow it forever.
+            for _ in range(chunks.qsize()):
+                try:
+                    data = chunks.get_nowait()
+                except queue.Empty:
+                    break
+                if data is None:
+                    eof = True
+                    break
+                buffer += data.decode("utf-8", errors="replace")
+            if not eof and not reader.is_alive():
+                # The reader finished after the snapshot: its tail and its
+                # sentinel may be queued now. A finished reader's queue is
+                # finite, so it is drained to the sentinel without a bound.
+                # The `qsize()` bound above is only for a reader still alive,
+                # which an orphan can keep feeding forever.
+                while True:
+                    try:
+                        data = chunks.get_nowait()
+                    except queue.Empty:
+                        break
+                    if data is None:
+                        eof = True
+                        break
+                    buffer += data.decode("utf-8", errors="replace")
+            yield from _complete_lines()
+            if buffer:
+                yield buffer
+                buffer = ""
+            if not eof:
+                # The end-of-stream sentinel was never consumed, by the loop
+                # or by either drain. Only the sentinel proves the reader
+                # handed over everything. The reader was alive at the check
+                # above: an orphan holds the terminal, or it was starved for
+                # the whole join. Whatever it queues from here is never read.
+                # Closing that gap would take an unbounded wait, so it is said
+                # instead, in the log and in the output (T108 review).
+                logger.warning(
+                    f"the reader of {command[0]} had not reached end of stream "
+                    f"{_SHUTDOWN_TIMEOUT_SECONDS}s after the child exited; "
+                    "its last output may be missing"
+                )
+                yield _OUTPUT_MAY_BE_CUT_OFF
             proc.wait()
             if proc.returncode:
                 raise subprocess.CalledProcessError(proc.returncode, command)

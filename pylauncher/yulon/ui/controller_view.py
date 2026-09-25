@@ -26,7 +26,7 @@ import re
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -92,6 +92,7 @@ from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
 from yulon.controller_wow_tortoise import autoupdate as tortoise_autoupdate
+from yulon.controller_wow_tortoise import botpool as tortoise_botpool
 from yulon.controller_wow_tortoise import console as tortoise_console
 from yulon.controller_wow_tortoise import controller as tortoise_controller
 from yulon.controller_wow_tortoise import maintenance as tortoise_maintenance
@@ -150,6 +151,16 @@ def _realm_badge_status(status: InstallStatus) -> str:
     if status.any_running:
         return "starting"
     return "stopped"
+
+
+class _GearReadBroke(RuntimeError):
+    """A Characters gear read that raised, carrying which selection it was for (T96)."""
+
+    def __init__(self, generation: int, name: str, cause: Exception) -> None:
+        super().__init__(f"{name}: {cause}")
+        self.generation = generation
+        self.name = name
+        self.cause = cause
 
 
 class UnsupportedGameError(RuntimeError):
@@ -2150,7 +2161,10 @@ def _for_tortoise(
         sql=sql,
         channel_for_saved=channel.live_channel,
     )
-    return _assemble(
+    lifecycle = tortoise_controller.controller_for(
+        server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+    )
+    services = _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
@@ -2161,9 +2175,7 @@ def _for_tortoise(
         accounts=accounts_admin,
         play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=tortoise_controller.controller_for(
-            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
-        ),
+        controller=lifecycle,
         sql=sql,
         # This package's `send()` takes no container: it addresses its own
         # entry's worldserver, which is the same catalog fact `spec.world` is.
@@ -2236,6 +2248,31 @@ def _for_tortoise(
         ),
         restore=lambda plan: tortoise_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
+        ),
+    )
+    # T123. Moving the bots module onto its registry (TortoiseBots #265) leaves
+    # the bots an older module made on accounts it ignores, and only the update
+    # route moves that checkout. So both of its presses end by enrolling them --
+    # over SOAP first, which this core runs at console level, then the attach
+    # console -- and restarting the world, which is when the module loads them.
+    # `botpool.py` holds the measurement.
+    console_channel = channel_module.AttachChannel(
+        send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
+    )
+
+    def adoption_channels() -> list[channel_module.Channel]:
+        soap = channel.live_channel()
+        found = [soap] if isinstance(soap, channel_module.SoapChannel) else []
+        return [*found, console_channel]
+
+    return replace(
+        services,
+        update_to_latest=tortoise_botpool.wrap_route(
+            services.update_to_latest,
+            entry,
+            server_dir,
+            channels=adoption_channels,
+            restart=lambda: tortoise_botpool.restart_world(lifecycle),
         ),
     )
 
@@ -5900,6 +5937,11 @@ class ControllerView(QWidget):
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
+        self._gear_generation = 0
+        # One gear read at a time, and only the newest row waits behind it
+        # (T96 review): see `_ask_for_gear()`.
+        self._gear_in_flight = False
+        self._gear_waiting: tuple[int, str] | None = None
         self.character_report.setWordWrap(True)
         self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # A tree whose Play block nobody has measured gets a SENTENCE rather
@@ -5977,8 +6019,11 @@ class ControllerView(QWidget):
 
     def _character_chosen(self, row: int) -> None:
         """Name the chosen character in every button, or wait for one."""
+        # Any gear read still out is about a row that is no longer chosen (T96).
+        self._gear_generation += 1
         item = self.character_list.item(row) if row >= 0 else None
         if item is None:
+            self._gear_waiting = None
             for button, label in self._character_actions():
                 button.setText(label)
                 button.setEnabled(False)
@@ -6029,8 +6074,68 @@ class ControllerView(QWidget):
             # teleport's own help says so in as many words.
             self.revive_button.setEnabled(False)
             self.revive_button.setText(f"{name} has to be logged in to be revived")
-        pieces, mails, refusal = self._gear_set_size(name)
+        # The gear read is two `docker exec ... mysql` calls, so it runs through
+        # the job runner and the button waits for it (T96). It ran right here
+        # until then, on the GUI thread: ~240 ms per call on Docker Desktop
+        # (yulon-win11, 2026-09-23), so every arrow key through the list, and
+        # every refresh that kept a row selected, froze the window for about
+        # half a second. Until the answer lands the button promises nothing.
+        self.send_gear_button.setText(f"Reading what {name} is wearing…")
+        self.send_gear_button.setEnabled(False)
+        self._ask_for_gear(self._gear_generation, name)
+
+    def _ask_for_gear(self, generation: int, name: str) -> None:
+        """Start this row's gear read, or let it wait behind the one already out.
+
+        ONE read at a time, and only the NEWEST row waits (Codex, T96 review):
+        a read per row change meant an arrow key held down a 900-row roster
+        started hundreds of workers and twice as many `docker exec`s, every one
+        of them to be thrown away, and a closing tab then waited on all of them.
+        A row that waits replaces whatever row waited before it; when the read
+        out lands, `_next_gear_read()` starts the one waiting.
+        """
+        if self._gear_in_flight:
+            self._gear_waiting = (generation, name)
+            return
+        self._gear_in_flight = True
+        self._gear_waiting = None
+        # Everything the worker needs is taken HERE, on the GUI thread: the
+        # worker must not reach back into a view it may outlive.
+        play, size = self.services.play, self._gear_set_size
+
+        def read() -> tuple[int, str, tuple[int, int, tuple[str, str] | None]]:
+            try:
+                return (generation, name, size(play, name))
+            except Exception as exc:  # noqa: BLE001 - carried to the GUI thread with its row
+                raise _GearReadBroke(generation, name, exc) from exc
+
+        self._run(read, self._gear_read, self._gear_read_failed)
+
+    def _next_gear_read(self) -> None:
+        """The read out has landed: start the row waiting behind it, if any.
+
+        The row waiting is always the one chosen now: every choice replaces it,
+        and choosing nothing clears it (`_character_chosen`). Nothing is
+        started once the tab is closing -- `shutdown()` has joined what was
+        running and nothing may be queued after it.
+        """
+        self._gear_in_flight = False
+        waiting, self._gear_waiting = self._gear_waiting, None
+        if waiting is None or getattr(self, "_closed", False):
+            return
+        self._ask_for_gear(*waiting)
+
+    @Slot(object)
+    def _gear_read(self, answer: object) -> None:
+        """Draw the gear button from a read, if it is about the row still chosen."""
+        generation, name, (pieces, mails, refusal) = cast(
+            tuple[int, str, tuple[int, int, tuple[str, str] | None]], answer
+        )
+        self._next_gear_read()
+        if generation != self._gear_generation:
+            return
         self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
+        self.send_gear_button.setEnabled(True)
         if refusal is not None:
             # The read did not answer, and WHY is the only useful thing to draw.
             # Measured on the live Vanilla server, 2026-09-07 (8.4c): two
@@ -6048,6 +6153,23 @@ class ControllerView(QWidget):
             # server would refuse an empty mail with a sentence about item ids.
             self.send_gear_button.setText(f"{name} is wearing nothing")
             self.send_gear_button.setEnabled(False)
+
+    @Slot(object)
+    def _gear_read_failed(self, exc: object) -> None:
+        """`_gear_set_size()` answers its own failures; this is the boundary if it ever does not.
+
+        For the row still chosen the button says the read broke -- disabled, as
+        the refusal branch above is, because nothing safe is known to press --
+        instead of staying on "Reading…" for good. A break about a row already
+        left says nothing about the one chosen now.
+        """
+        logger.warning(f"could not size the chosen character's gear: {exc}")
+        self._next_gear_read()
+        if not isinstance(exc, _GearReadBroke) or exc.generation != self._gear_generation:
+            return
+        self.send_gear_button.setText(f"Could not read what {exc.name} is wearing")
+        self.send_gear_button.setToolTip(str(exc.cause))
+        self.send_gear_button.setEnabled(False)
 
     def _revive_works_offline(self) -> bool:
         """Only where this tree's own box measured that it does.
@@ -6069,10 +6191,14 @@ class ControllerView(QWidget):
         play = self.entry.play
         return (play.rename_offline_refusal or "") if play is not None else ""
 
-    def _gear_set_size(self, name: str) -> tuple[int, int, tuple[str, str] | None]:
+    @staticmethod
+    def _gear_set_size(play: object, name: str) -> tuple[int, int, tuple[str, str] | None]:
         """The set's size, or why there is not one -- short enough for the
-        button, and in full for the tooltip behind it."""
-        play = self.services.play
+        button, and in full for the tooltip behind it.
+
+        Static, and handed the seam: it runs on a worker (T96), which must not
+        read the view -- a view being torn down has already lost `services`.
+        """
         if play is None:
             return (0, 0, None)
         try:
@@ -6102,11 +6228,22 @@ class ControllerView(QWidget):
             return
         self._character_generation += 1
         generation = self._character_generation
+        # The generation rides WITH the answer rather than in a lambda around the
+        # callback (T97). A lambda handed to the runner is delivered on the
+        # worker thread, so the list was cleared and refilled there while this
+        # thread painted it: on m910q, 2026-09-23, Send gold on a 900-character
+        # bot server segfaulted the app in 4 of 5 runs.
         self._run(
-            play.listing,  # type: ignore[attr-defined]
-            lambda listed: self._characters_listed_at(generation, listed),
+            lambda: (generation, play.listing()),  # type: ignore[attr-defined]
+            self._characters_arrived,
             self._characters_failed,
         )
+
+    @Slot(object)
+    def _characters_arrived(self, answer: object) -> None:
+        """A list read, on the GUI thread, with the generation it was asked at."""
+        generation, listed = cast(tuple[int, object], answer)
+        self._characters_listed_at(generation, listed)
 
     def _characters_listed_at(self, generation: int, listed: object) -> None:
         """Take this answer only if it is the newest one asked for.
@@ -8909,7 +9046,9 @@ class ControllerView(QWidget):
             return
         self._set_busy(True)
         self.tuning_report.setPlainText("restarting the server…")
-        self._run(self._do_restart, self._tuning_job_done("restart"), self._tuning_job_failed)
+        self._run(
+            lambda: ("restart", self._do_restart()), self._tuning_job_done, self._tuning_job_failed
+        )
 
     @Slot()
     def recreate_containers(self) -> None:
@@ -8929,7 +9068,11 @@ class ControllerView(QWidget):
             return
         self._set_busy(True)
         self.tuning_report.setPlainText("recreating the containers…")
-        self._run(self._do_recreate, self._tuning_job_done("recreate"), self._tuning_job_failed)
+        self._run(
+            lambda: ("recreate", self._do_recreate()),
+            self._tuning_job_done,
+            self._tuning_job_failed,
+        )
 
     def _do_restart(self) -> bool:
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
@@ -8948,24 +9091,27 @@ class ControllerView(QWidget):
         controller.start()
         return removed
 
-    def _tuning_job_done(self, job: str) -> Callable[[object], None]:
+    @Slot(object)
+    def _tuning_job_done(self, answer: object) -> None:
         """The handler for a finished restart or recreate: forget what it covered.
 
         A recreate covers a restart as well -- the containers are new, so they
         have both the current environment and the current conf files -- which
         is why it clears both and a restart clears only its own.
+
+        A bound slot that is told which job it was, not a closure made per job
+        (T97): the closure was a plain callable, so the runner delivered it on
+        the worker thread, and this wrote the report and started the status
+        read from there.
         """
-
-        def done(_result: object) -> None:
-            self._set_busy(False)
-            self._tuning_owed.pop("restart", None)
-            if job == "recreate":
-                self._tuning_owed.pop("recreate", None)
-            self._refresh_tuning_owed()
-            self.tuning_report.setPlainText(f"{job}: done.")
-            self.refresh_status()
-
-        return done
+        job = cast(tuple[str, object], answer)[0]
+        self._set_busy(False)
+        self._tuning_owed.pop("restart", None)
+        if job == "recreate":
+            self._tuning_owed.pop("recreate", None)
+        self._refresh_tuning_owed()
+        self.tuning_report.setPlainText(f"{job}: done.")
+        self.refresh_status()
 
     @Slot(object)
     def _tuning_job_failed(self, exc: object) -> None:

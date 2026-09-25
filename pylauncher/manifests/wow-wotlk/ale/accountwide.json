@@ -14,7 +14,13 @@
   "deploy": [
     {
       "src": "lua_scripts/AccountWide/",
-      "dest": "env/dist/etc/modules/lua_scripts/accountwide/"
+      "dest": "env/dist/etc/modules/lua_scripts/accountwide/",
+      "rename": [
+        [
+          "AccountReputation (default AC-Wotlk).lua",
+          "AccountReputation.lua"
+        ]
+      ]
     }
   ],
   "sql": [
@@ -319,6 +325,7 @@
   ],
   "notes": [
     "Fresh server recommended; 00_AccountWideUtils.lua is mandatory. All flags ship false upstream. wow-manage.sh 3563-3772.",
-    "Two reputation variants ship; configure deletes the non-chosen one. AccountPvPRank.lua's RUN_INIT_SEED_ON_STARTUP defaults true — set false after the first start."
+    "Two reputation variants ship; configure deletes the non-chosen one. AccountPvPRank.lua's RUN_INIT_SEED_ON_STARTUP defaults true — set false after the first start.",
+    "Upstream ships no AccountReputation.lua: the stock 'AccountReputation (default AC-Wotlk).lua' is deployed under that name, the file the reputation flag's patch edits (T119)."
   ]
 }
