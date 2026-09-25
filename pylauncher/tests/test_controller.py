@@ -501,6 +501,85 @@ def test_polling_status_asks_docker_when_the_distro_is_up(
     assert ctl.status().any_running
 
 
+def _wsl_exe(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    listed: tuple[str, ...] | Exception | int,
+    running: tuple[str, ...] | Exception | int,
+) -> None:
+    """`wsl.exe -l -q [--running]` as the machine answers it: names, an exit code, or a raise."""
+    wsl = controller_module.wsl
+    monkeypatch.setattr(wsl.platform, "_which", lambda _program: "wsl.exe")
+
+    def run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        answer = running if "--running" in cmd else listed
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, int):
+            return subprocess.CompletedProcess(cmd, answer, b"", b"")
+        out = "".join(f"{name}\r\n" for name in answer).encode("utf-16le")
+        return subprocess.CompletedProcess(cmd, 0, out, b"")
+
+    monkeypatch.setattr(wsl.subprocess, "run", run)
+
+
+def _stop_recorder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    asked: list[str] = []
+    monkeypatch.setattr(
+        docker, "stop_staged", lambda *a, **kw: asked.append("stop") or True  # type: ignore[func-returns-value]
+    )
+    return asked
+
+
+def test_stopping_does_not_start_a_stopped_distro(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T95: a removal always stops first, and `wsl -d` STARTS a distro.
+
+    Nothing runs in a distro that is down, so "nothing was stopped" is true
+    without asking; asking would boot the distro to learn it. Only when both
+    listings ANSWERED: the full one names the distro, `--running` does not.
+    """
+    asked = _stop_recorder(monkeypatch)
+    _wsl_exe(monkeypatch, listed=("dml-arch", "docker-desktop"), running=("docker-desktop",))
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert ctl.stop() is False
+    assert asked == [], "the stop shelled into a stopped distro and started it"
+
+    _wsl_exe(monkeypatch, listed=("dml-arch",), running=("dml-arch",))
+    assert ctl.stop() is True
+    assert asked == ["stop"]
+
+
+def test_a_stop_whose_distro_listing_failed_still_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail CLOSED (T95 re-review): an unanswered listing is not "the distro is down".
+
+    `_wsl_list()` answers `()` for no wsl.exe, a raise (the 60 s timeout among
+    them) and a non-zero exit alike, and read as "not running" that made Stop
+    say nothing ran, a removal forget a running server, and Restart skip its
+    stop. The `--running` half failing alone is the case a check on
+    `distro_states()` still misses: the full list names the distro, and the
+    empty running set reads as "stopped".
+    """
+    timeout = subprocess.TimeoutExpired(["wsl.exe"], 60)
+    failures: tuple[tuple[object, object], ...] = (
+        ((), ()),  # the listing named nothing: no proof either way
+        (timeout, timeout),
+        (1, 1),
+        (("dml-arch",), timeout),  # only `--running` failed
+        (("dml-arch",), 4294967295),
+    )
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    for listed, running in failures:
+        asked = _stop_recorder(monkeypatch)
+        _wsl_exe(monkeypatch, listed=listed, running=running)  # type: ignore[arg-type]
+        assert ctl.stop() is True, (listed, running)
+        assert asked == ["stop"], f"a failed listing skipped the stop: {(listed, running)}"
+
+    asked = _stop_recorder(monkeypatch)
+    monkeypatch.setattr(controller_module.wsl.platform, "_which", lambda _program: None)
+    assert ctl.stop() is True
+    assert asked == ["stop"], "no wsl.exe was read as a stopped distro"
+
+
 class _ForeignProjectRunner(_FakeRunner):
     """A neighbour install whose stack is bigger than the ports it publishes.
 

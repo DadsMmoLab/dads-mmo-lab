@@ -572,6 +572,81 @@ def test_container_state_reads_the_restart_count_in_the_same_inspect(
     assert docker.container_state("x") == docker.ContainerState("running", "T", 0)
 
 
+def test_container_state_says_missing_only_when_docker_answered_no_such_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T95: a container that does not exist is an ANSWER, and a daemon that did not answer is not.
+
+    The wordings are real. Newer CLIs said `error: no such object: <name>` from
+    this very call on yulon-ubuntu (8.9a gate, 2026-09-08). Older CLIs say
+    `Error: No such object:` (native.py:2173), and `docker stop` says
+    `No such container`. The unreachable ones are from `volume_exists`'s
+    docstring, and none of them may read as missing, because "no such file
+    or directory" contains "no such".
+    """
+    cases = (
+        ("error: no such object: tbc-mangosd\n", True),
+        ("Error: No such object: tbc-mangosd\n", True),
+        ("Error response from daemon: No such container: tbc-mangosd\n", True),
+        (
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+            "Is the docker daemon running?\n",
+            False,
+        ),
+        (
+            "failed to connect to the docker API at unix:///var/run/docker.sock: "
+            "connect: no such file or directory\n",
+            False,
+        ),
+        (
+            "error during connect: this error may indicate that the docker daemon is not running\n",
+            False,
+        ),
+        ("", False),
+    )
+    for stderr, missing in cases:
+        monkeypatch.setattr(
+            docker.runner,
+            "run",
+            lambda cmd, cwd=None, timeout=None, e=stderr: _completed(returncode=1, stderr=e),
+        )
+        state = docker.container_state("tbc-mangosd")
+        assert state.status == "", "an unread state must still read as unread everywhere else"
+        assert state.missing is missing, stderr
+
+
+def test_docker_stop_and_container_state_read_already_gone_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two readers of docker's "no such container", pinned together so they cannot drift (T95).
+
+    `_run_docker_stop()` takes a stop of a vanished container as done, and
+    `container_state()` reads the same answer as `missing`. Every wording the
+    stop takes as gone must read as missing, and an unreachable daemon must be
+    neither: a stop that failed is not a stop that was not needed.
+    """
+    gone = "Error response from daemon: No such container: tbc-mangosd\n"
+    unreachable = (
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running?\n"
+    )
+    for stderr in (gone, unreachable):
+        monkeypatch.setattr(
+            docker.runner,
+            "run",
+            lambda cmd, cwd=None, timeout=None, e=stderr: _completed(returncode=1, stderr=e),
+        )
+        if stderr is gone:
+            docker._run_docker_stop("tbc-mangosd")  # already gone: no raise
+            assert docker.container_state("tbc-mangosd").missing
+            assert docker._STOP_SAYS_GONE in stderr
+        else:
+            with pytest.raises(docker.DockerCommandError):
+                docker._run_docker_stop("tbc-mangosd")
+            assert not docker.container_state("tbc-mangosd").missing
+    assert docker._NO_SUCH_CONTAINER.search(docker._STOP_SAYS_GONE), "the two readings drifted"
+
+
 def test_wait_db_healthy_for_uses_spec_db_container(monkeypatch: pytest.MonkeyPatch) -> None:
     """`wait_db_healthy_for()` reads the container name from the spec."""
     seen: list[str] = []
