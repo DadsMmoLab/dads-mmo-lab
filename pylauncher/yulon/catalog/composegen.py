@@ -188,6 +188,61 @@ _world_env = world_env
 that name is in scope. One function, two spellings of the reference."""
 
 
+CHANNEL_BACKUP_SUFFIX = ".before-channel"
+"""The override as it was before the command channel's first press, kept beside it.
+
+`channel_setup.BACKUP_SUFFIX` is this constant. It lives here because the
+channel's state is read by every writer of the override, and the install
+stages in `native.py` cannot import `channel_setup`.
+"""
+
+CHANNEL_PORT_VAR = "DOCKER_SOAP_EXTERNAL_PORT"
+"""The `.env` key the channel claims its host port under (`channel_setup.HOST_PORT_VAR`)."""
+
+CHANNEL_PORT_RELEASED = "127.0.0.1:0"
+"""What a rollback writes there, on both of its arms (`channel_setup.RELEASED_HOST_PORT`)."""
+
+
+def channel_is_on(server_dir: Path) -> bool:
+    """Whether this install's command-channel press is live.
+
+    Two records, both the channel's own. `channel_setup.enable()` writes
+    `<override>.before-channel` on the FIRST press and only a complete
+    `roll_back()` deletes it, so the file is the record that a press stands.
+    But a rollback that finds the override edited since the press releases the
+    port and KEEPS that file (and one interrupted before its last step keeps
+    it too), and both arms write the released claim first. So a released claim
+    is a rollback the user pressed, and the backup beside it is not a live
+    press. Measured on yulon-ubuntu 2026-09-24 (T101): without this, the next
+    Repair would have switched the channel's environment back on.
+    """
+    if not (server_dir / f"{OVERRIDE_FILE}{CHANNEL_BACKUP_SUFFIX}").is_file():
+        return False
+    return dotenv_value(server_dir, CHANNEL_PORT_VAR) != CHANNEL_PORT_RELEASED
+
+
+def channel_world_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str] | None:
+    """The environment a REGENERATED override carries: `None` unless a channel press is live.
+
+    `None` is `render()`'s own default, the install's environment. While the
+    press is live it is that environment plus the channel's Enable
+    (`operations.enable_env`), merged as `channel_setup.enable()` merges it, so
+    the file is the one the press wrote. Every writer that regenerates the
+    override asks this: the install's `generate-compose` stage (a first
+    install, a Repair, and Update to latest's put-back) and the T94 reset. Until
+    T101 the stage rendered without it, so a Repair on WotLK wrote the
+    pre-channel override back and its own `up` brought the world up with SOAP
+    off (yulon-ubuntu, 2026-09-24).
+
+    A channel switched on through `enable_conf` (the CMaNGOS trees) has nothing
+    here: its keys are in `mangosd.conf`, which no regeneration rewrites.
+    """
+    operations = entry.operations
+    if operations is None or not operations.enable_env or not channel_is_on(server_dir):
+        return None
+    return {**world_env(entry), **operations.enable_env}
+
+
 def shadowed_by_env(text: str, env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
     """Which of this conf's keys the container environment overrides, and by what.
 
@@ -1055,6 +1110,30 @@ def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
         lines.append("# Written by Yu'lon's install engine.")
         lines += [f"{key}={remaining[key]}" for key in sorted(remaining)]
     return "\n".join(lines) + "\n"
+
+
+def dotenv_value(server_dir: Path, key: str) -> str | None:
+    """What `<server_dir>/.env` sets `key` to, or `None` when it does not set it.
+
+    The LAST assignment, because that is the one compose takes; read with the
+    same rules `merge_dotenv()` writes by (`export ` prefix, spaces around the
+    key). A missing or unreadable file sets nothing.
+    """
+    try:
+        text = (server_dir / DOTENV_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    found: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].lstrip()
+        if "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        if name.strip() == key:
+            found = value.strip()
+    return found
 
 
 def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:

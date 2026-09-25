@@ -6065,6 +6065,14 @@ class StagedInstaller:
         # exception was `write_plan()`'s, below, which was already translated.
         # This body is bound by EVERY family (`azerothcore.py`'s stage tuple and
         # `cmangos.py`'s both name this method), so it was never one game's bug.
+        #
+        # `world_env` keeps a live command channel on (T101). A Repair and
+        # Update to latest's put-back run this same body over a finished
+        # install, and without it the override went back to the pre-channel
+        # file: measured on yulon-ubuntu 2026-09-24, the Repair's own `up`
+        # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
+        # channel's port. `None` on a first install (no press yet), which is
+        # `render()`'s own default.
         try:
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
@@ -6124,6 +6132,9 @@ class StagedInstaller:
             self.entry,
             server_dir,
             templates_root=self.installers_root,
+            # A live channel press is kept by every regeneration (T101); a CMaNGOS
+            # tree's channel lives in its .conf, so this is None there.
+            world_env=composegen.channel_world_env(self.entry, server_dir),
             db_password=secrets.db_password,
             bind_label=label,
             platform_id=self._seams.platform_id,
