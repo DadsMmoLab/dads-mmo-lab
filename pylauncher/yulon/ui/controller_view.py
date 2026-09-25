@@ -779,7 +779,7 @@ class ControllerServices:
     is there" — the one thing this fact does not change. `None` for a game with
     no clone folders, which is the same gate `installed_modules` rides on.
     """
-    unknown_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None
+    unknown_modules: Callable[[], Mapping[str, Mapping[str, apply_module.Doubt]]] | None = None
     """Which recorded sourceless mods a press stopped on mid-statement, per family (T121).
 
     `apply.unknown_modules()`: a `pending` mark left in the answers file by a
@@ -1185,7 +1185,7 @@ def _assemble(
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
-    unknown_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
+    unknown_modules: Callable[[], Mapping[str, Mapping[str, apply_module.Doubt]]] | None = None,
     module_version: Callable[[Path], str | None] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
@@ -1367,6 +1367,25 @@ def _adopt_route(
     )
 
 
+def _record_backed_keys(store: ManifestStore) -> Callable[[], frozenset[str]]:
+    """The mods whose installed state is the answers-file record, read once on first use (T121).
+
+    `apply.relative_keys()` over the store's `mod` family -- the four mob
+    multipliers, the only relative manifests, and all of them SQL mods. Lazy
+    because building the services must not read the catalog; once because the
+    shipped set does not change while the app runs. An unreadable record puts
+    exactly these in doubt (fix wave).
+    """
+    cached: list[frozenset[str]] = []
+
+    def keys() -> frozenset[str]:
+        if not cached:
+            cached.append(apply_module.relative_keys(store.load_all("mod")))
+        return cached[0]
+
+    return keys
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -1375,6 +1394,7 @@ def _for_wotlk(
 ) -> ControllerServices:
     """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
     spec = entry.container_spec()
+    record_backed = _record_backed_keys(wotlk_modules.store())
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -1642,10 +1662,14 @@ def _for_wotlk(
         # mob multipliers leave no folder and read Not installed for ever
         # without it -- and `conflicts_with` never saw them.
         installed_modules=(
-            (lambda: apply_module.installed_modules(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_modules(server_dir, record_backed()))
+            if entry.has_manifests
+            else None
         ),
         unknown_modules=(
-            (lambda: apply_module.unknown_modules(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.unknown_modules(server_dir, record_backed()))
+            if entry.has_manifests
+            else None
         ),
         # T68: which of those clones stopped part-way through their install,
         # read from the claim this app writes inside each one. Bound to the same
@@ -2618,6 +2642,15 @@ def _pending_sql_names(report: ApplyReport) -> tuple[str, ...]:
         names += list(pending.files) if pending.files else [pending.path]
     return tuple(names)
 
+
+FORGET_RECORD_ACTION = "Forget Yu'lon's record…"
+"""The context-menu entry beside Remove on a record-backed mob multiplier row (T121 fix wave)."""
+
+FORGET_RECORD_QUESTION = (
+    "Yu'lon forgets that {name} is applied. The database is not changed. Use this only if the "
+    "creature values are already at their normal values, for example after restoring a backup."
+)
+"""What the Forget question says, word for word (T121 fix wave)."""
 
 UNCATALOGUED_PRESS = (
     "This module is installed in this server's folder, but this game's catalog has no "
@@ -7324,7 +7357,7 @@ class ControllerView(QWidget):
             logger.warning(f"could not read which module installs were left unfinished: {exc}")
             return {}
 
-    def _unknown_modules(self) -> Mapping[str, frozenset[str]]:
+    def _unknown_modules(self) -> Mapping[str, Mapping[str, apply_module.Doubt]]:
         """Which recorded mods a press stopped on mid-statement, per family (T121).
 
         `{}` for no reader and for a reader that raised, as `_unfinished_clones()`
@@ -9520,6 +9553,57 @@ class ControllerView(QWidget):
         self.modules_panel.select(module_id)
         self._module_menu(module_id).exec(pos)
 
+    def _selected_row_is_record_backed(self) -> bool:
+        """Whether the selected row is Installed (or in doubt) because of the answers-file record.
+
+        A relative manifest (the four mob multipliers) leaves no folder, so its
+        row can only read installed from the record (T121). That is the row a
+        stale record can lie on, and the one Forget is for.
+        """
+        manifest = self.selected_manifest()
+        row = self.modules_panel.selected_row()
+        return (
+            manifest is not None
+            and row is not None
+            and row.data.installed
+            and reapplies_on_top(manifest)
+        )
+
+    @Slot()
+    def _forget_module_record(self) -> None:
+        """ "Forget Yu'lon's record…": drop the selected mod's applied record, sending no SQL.
+
+        The way out of a record that no longer describes the database -- a fresh
+        or restored `acore_world` -- where Remove would divide base values and
+        halve every creature (T121 fix wave). Asked first, No by default, in
+        words that say the database is not changed.
+        """
+        manifest = self.selected_manifest()
+        applier = self.services.applier
+        if manifest is None or applier is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Forget Yu'lon's record?",
+            FORGET_RECORD_QUESTION.format(name=manifest.name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if not said_yes(answer):
+            self.module_report.setPlainText(
+                f"forget {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
+        problem = applier.forget_applied(manifest)
+        if problem:
+            self.module_report.setPlainText(f"forget {manifest.id}: not done — {problem}")
+        else:
+            self.module_report.setPlainText(
+                f"forget {manifest.id}: Yu'lon no longer records it as applied. The database "
+                "was not changed."
+            )
+        self.reload_modules()
+
     def _module_menu(self, module_id: str) -> QMenu:
         """The menu for the SELECTED row: what it offers, and what each entry does."""
         menu = QMenu(self)
@@ -9536,6 +9620,9 @@ class ControllerView(QWidget):
             inst_act.triggered.connect(lambda: self._module_action("install"))
             rem_act = menu.addAction("Remove Selected Module")
             rem_act.triggered.connect(lambda: self._module_action("remove"))
+            if self._selected_row_is_record_backed():
+                forget_act = menu.addAction(FORGET_RECORD_ACTION)
+                forget_act.triggered.connect(self._forget_module_record)
             menu.addSeparator()
         copy_act = menu.addAction("Copy Module ID")
         copy_act.triggered.connect(lambda: self._copy_to_clipboard(module_id))

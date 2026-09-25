@@ -6161,6 +6161,23 @@ class StagedInstaller:
                 "Importing over them would overwrite it, so nothing was run. Use an empty "
                 "folder for a new install."
             )
+        # T121 fix wave: the databases are about to be made from nothing, so no
+        # mob multiplier is applied to them, whatever the answers file -- one of
+        # `OUR_OWN_FILES`, so it survives into a new install in this folder --
+        # still says about the old ones. Left there, it read Baby Mobs as
+        # installed on stock creatures, and the Remove it offered would have
+        # divided them. The saved answers stay.
+        forgot, problem = module_answers.forget_database_records(ctx.server_dir)
+        if problem:
+            yield (
+                f"Yu'lon's record of which mob multipliers are applied could not be cleared "
+                f"({problem}); the Modules tab will show them as State unknown."
+            )
+        elif forgot:
+            yield (
+                "Cleared Yu'lon's record of the mob multipliers applied to the old databases: "
+                "these are new."
+            )
         if before.state == "partial":
             yield f"Clearing the half-written databases first ({before.detail})."
             # `reset()` INSIDE a `try`. It was called bare until 2026-09-02, and

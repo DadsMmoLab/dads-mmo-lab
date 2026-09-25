@@ -28,7 +28,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -145,7 +145,55 @@ def _by_family(keys: frozenset[str]) -> dict[str, frozenset[str]]:
     return {family: frozenset(ids) for family, ids in found.items()}
 
 
-def recorded_modules(server_dir: Path) -> dict[str, frozenset[str]]:
+PENDING_DOUBT = "a press on it stopped while its SQL was being sent"
+"""Why a mod with a `pending` mark may or may not be in the database (T115's mark, T121)."""
+
+
+def unreadable_record(detail: str) -> str:
+    """The sentence for an answers file that cannot be read, naming the file (T121 fix wave)."""
+    return (
+        f"Yu'lon cannot read {module_answers.ANSWERS_FILE} in the server folder ({detail}). "
+        "That file is where it records which mob multiplier is applied, so it cannot tell "
+        "whether this one or one of its alternatives is already in the database, and running "
+        "it could stack on top. Fix that file, or move it aside if the creature values are at "
+        "their normal values."
+    )
+
+
+@dataclass(frozen=True)
+class Doubt:
+    """Why nobody can say whether a record-backed mod is in the database (T121).
+
+    `pending`: a press stopped between marking its statement and recording the
+    result (T115). `unreadable`: the answers file itself cannot be read, so every
+    mod whose state lives in it is in doubt (fix wave, Codex high).
+    """
+
+    kind: Literal["pending", "unreadable"]
+    detail: str = ""
+
+    def lock_reason(self, name: str) -> str:
+        """The sentence behind a SIBLING's locked Install, in the applier's own words."""
+        if self.kind == "unreadable":
+            return unreadable_record(self.detail)
+        return (
+            f"{name} may be in this server's database: {PENDING_DOUBT}. The catalog records the "
+            f"two as alternatives that cannot both be installed. Remove {name} first."
+        )
+
+
+def relative_keys(manifests: Iterable[Manifest]) -> frozenset[str]:
+    """`<type>/<id>` of every manifest whose installed state is the answers-file record (T121).
+
+    The relative ones (`reapplies_on_top()`): the four mob multipliers. They
+    leave no folder, so an unreadable record puts exactly these in doubt.
+    """
+    return frozenset(f"{m.type}/{m.id}" for m in manifests if reapplies_on_top(m))
+
+
+def recorded_modules(
+    server_dir: Path, relative: frozenset[str] = frozenset()
+) -> dict[str, frozenset[str]]:
     """The sourceless mods whose record says they are, or may be, in the database (T121).
 
     Baby, Nerf, Buff and Extreme Buff Mobs install one inline statement and
@@ -155,24 +203,37 @@ def recorded_modules(server_dir: Path) -> dict[str, frozenset[str]]:
     creatures at x0.5 (measured through the real `Applier`, 2026-09-25). Since
     T115 their install writes an `applied` record and marks a statement in
     flight as `pending`; both mean "this may be in the database", so both are
-    listed. `unknown_modules()` says which are only marked.
+    listed -- and when the file cannot be read, every key in `relative` is
+    (fix wave: unreadable is not "nothing recorded"). `unknown_modules()` says
+    which are only in doubt.
     """
-    applied, pending = module_answers.recorded_keys(server_dir)
-    return _by_family(applied | pending)
+    read = module_answers.recorded_keys(server_dir)
+    doubtful = relative if read.unreadable else frozenset()
+    return _by_family(read.applied | read.pending | doubtful)
 
 
-def unknown_modules(server_dir: Path) -> dict[str, frozenset[str]]:
-    """The mods a press stopped on mid-statement: installed or not, nobody can say (T121).
+def unknown_modules(
+    server_dir: Path, relative: frozenset[str] = frozenset()
+) -> dict[str, dict[str, Doubt]]:
+    """The record-backed mods nobody can say are in the database or not, and why (T121).
 
-    A `pending` mark left behind (`module_answers.record_pending()`). The row
-    reads "State unknown" and offers Remove, which asks for the values -- T115's
-    remedy, and the only press T115 lets through over a mark.
+    A `pending` mark left behind (`module_answers.record_pending()`), or -- for
+    every key in `relative` -- an answers file that cannot be read. The row reads
+    "State unknown"; its alternatives stay locked.
     """
-    _applied, pending = module_answers.recorded_keys(server_dir)
-    return _by_family(pending)
+    read = module_answers.recorded_keys(server_dir)
+    doubts: dict[str, Doubt] = {key: Doubt("pending") for key in read.pending}
+    if read.unreadable:
+        doubts.update({key: Doubt("unreadable", read.unreadable) for key in relative})
+    found: dict[str, dict[str, Doubt]] = {}
+    for family, ids in _by_family(frozenset(doubts)).items():
+        found[family] = {item_id: doubts[f"{family}/{item_id}"] for item_id in ids}
+    return found
 
 
-def installed_modules(server_dir: Path) -> dict[str, frozenset[str]]:
+def installed_modules(
+    server_dir: Path, relative: frozenset[str] = frozenset()
+) -> dict[str, frozenset[str]]:
     """What is installed per family: the clone folders, plus the recorded sourceless mods (T121).
 
     The Modules tab's reading and the applier's conflict and requirement
@@ -181,7 +242,7 @@ def installed_modules(server_dir: Path) -> dict[str, frozenset[str]]:
     One directory listing per family and one small JSON read, on every reload.
     """
     found = {family: set(ids) for family, ids in installed_clones(server_dir).items()}
-    for family, ids in recorded_modules(server_dir).items():
+    for family, ids in recorded_modules(server_dir, relative).items():
         found.setdefault(family, set()).update(ids)
     return {family: frozenset(ids) for family, ids in found.items()}
 
@@ -2661,16 +2722,22 @@ class Applier:
         conflict that reaches across families -- an ale script against the
         module it shadows -- is exactly the one a same-family check would miss.
         """
+        # T121 fix wave (Codex high): a mod whose installed state IS the record
+        # cannot be checked against its alternatives when the record cannot be
+        # read. Refused here, before the database is started or any SQL is sent,
+        # rather than at the pending-mark write after both.
+        read = module_answers.recorded_keys(self.server_dir)
+        if read.unreadable and reapplies_on_top(manifest):
+            return f"{manifest.id}: {unreadable_record(read.unreadable)} Nothing was changed."
         if not manifest.conflicts_with:
             return None
         # T121: the four mob multipliers leave no folder, so the record is what
         # says one of them is in the database. Asked first: it has no seat to open.
-        applied, pending = module_answers.recorded_keys(self.server_dir)
+        applied, pending = read.applied, read.pending
         for other, kind in conflicting_installed(manifest, installed_modules(self.server_dir)):
             if f"{kind}/{other}" in applied | pending:
                 where = (
-                    "may be in this server's database: a press on it stopped while its SQL "
-                    "was being sent"
+                    f"may be in this server's database: {PENDING_DOUBT}"
                     if f"{kind}/{other}" in pending
                     else f"is applied to this server's database (Yu'lon's record of it is in "
                     f"{module_answers.ANSWERS_FILE})"
@@ -3944,6 +4011,15 @@ class Applier:
             out[prompt.key] = value
         return out, ""
 
+    def forget_applied(self, manifest: Manifest) -> str:
+        """Forget that `manifest` is applied, sending no SQL; `""` if done, else why not (T121).
+
+        For a record that no longer describes the database -- a restored backup,
+        a database made again by hand. The tab asks first and says the database
+        is not changed; `module_answers.forget_applied()` does the write.
+        """
+        return module_answers.forget_applied(self.server_dir, manifest)
+
     def reapply_refusal(self, manifest: Manifest) -> str | None:
         """Why running this relative manifest's install again is refused, or `None` (T115).
 
@@ -3957,6 +4033,12 @@ class Applier:
         """
         if not reapplies_on_top(manifest):
             return None
+        # T121 fix wave: an answers file that cannot be read says nothing about
+        # this mod or its alternatives, so nothing may run over it. The same
+        # sentence `_conflict_refusal()` raises, said before any dialog.
+        unreadable = module_answers.recorded_keys(self.server_dir).unreadable
+        if unreadable:
+            return f"{manifest.id}: {unreadable_record(unreadable)} Nothing was changed."
         applied, why = self.applied_record(manifest)
         if applied is not None:
             problem = reapply_steps_problem(manifest)

@@ -1264,12 +1264,15 @@ def _mob_tab(ps: _Ps, tmp_path: Path) -> tuple[ControllerView, _RecordingSql, li
         return {"hp": "2", "dmg": "2", "arm": "2", "spd": "2"}
 
     services = _services(ps, tmp_path, [])
+    relative = apply_module.relative_keys(modules.store().load_all("mod"))
     object.__setattr__(services, "applier", Applier(server_dir, sql=sql))
     object.__setattr__(
-        services, "installed_modules", lambda: apply_module.installed_modules(server_dir)
+        services,
+        "installed_modules",
+        lambda: apply_module.installed_modules(server_dir, relative),
     )
     object.__setattr__(
-        services, "unknown_modules", lambda: apply_module.unknown_modules(server_dir)
+        services, "unknown_modules", lambda: apply_module.unknown_modules(server_dir, relative)
     )
     return ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker), sql, asked
 
@@ -1342,6 +1345,108 @@ def test_the_real_services_read_mob_mods_from_the_answers_file(ps: _Ps, tmp_path
     assert services.installed_modules is not None and services.unknown_modules is not None
     assert "baby-mobs" in services.installed_modules()["mod"]
     assert services.unknown_modules() == {}
+    # Fix wave: the wiring knows which mods take their state from the record, so an
+    # unreadable file puts those four in doubt rather than reading them as absent.
+    (tmp_path / module_answers.ANSWERS_FILE).write_text("{ not json", encoding="utf-8")
+    assert set(services.unknown_modules()["mod"]) == {
+        "baby-mobs",
+        "buff-mobs",
+        "nerf-mobs",
+        "xbuff-mobs",
+    }
+
+
+def test_an_unreadable_answers_file_refuses_a_mob_mod_on_the_tab_naming_the_file(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Codex high, fix wave: unreadable is not "nothing recorded". All four read State
+    unknown, and Install is refused before its dialog with the file named; no SQL."""
+    view, sql, asked = _mob_tab(ps, tmp_path)
+    (tmp_path / "srv" / module_answers.ANSWERS_FILE).write_text("{ not json", encoding="utf-8")
+    view.reload_modules()
+    for item_id in ("baby-mobs", "buff-mobs", "nerf-mobs", "xbuff-mobs"):
+        assert view.modules_panel.row(item_id).data.badge == "State unknown", item_id
+    _select_module(view, "buff-mobs")
+    view._module_action("install")
+    report = view.module_report.toPlainText()
+    assert module_answers.ANSWERS_FILE in report and "Nothing was changed" in report, report
+    assert asked == [] and sql.statements == []
+
+
+FORGET_ACTION = "Forget Yu'lon's record…"
+
+
+def _forget_action(view: ControllerView, module_id: str) -> Any:
+    view.modules_panel.select(module_id)
+    menu = view._module_menu(module_id)
+    found = [a for a in menu.actions() if a.text() == FORGET_ACTION]
+    return found[0] if found else None
+
+
+def test_forget_clears_a_mob_mods_record_without_any_sql(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix wave: a stale record (a fresh database, a restored backup) has a way out
+    that does not divide base values. It asks first, No by default, and says
+    exactly what it does."""
+    view, sql, _asked = _mob_tab(ps, tmp_path)
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+    assert view.modules_panel.row("baby-mobs").data.badge == "Installed"
+    asked: list[tuple[object, ...]] = []
+
+    def question(*a: object, **k: object) -> object:
+        asked.append(a)
+        return int(controller_view_module.QMessageBox.StandardButton.Yes)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    action = _forget_action(view, "baby-mobs")
+    assert action is not None, "Forget is offered on a record-backed row"
+    action.trigger()
+
+    assert len(asked) == 1
+    text = str(asked[0][2])
+    assert text == (
+        "Yu'lon forgets that Baby Mobs is applied. The database is not changed. Use this only "
+        "if the creature values are already at their normal values, for example after "
+        "restoring a backup."
+    )
+    assert asked[0][4] == controller_view_module.QMessageBox.StandardButton.No, "default No"
+    assert len(sql.statements) == 1, "no SQL was sent by Forget"
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.read_applied(tmp_path / "srv", manifest) is None
+    assert view.modules_panel.row("baby-mobs").data.badge == "Not installed"
+    assert view.modules_panel.row("buff-mobs").data.installable
+
+
+def test_forget_answered_no_changes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, _sql, _asked = _mob_tab(ps, tmp_path)
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
+    )
+    _forget_action(view, "baby-mobs").trigger()
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.read_applied(tmp_path / "srv", manifest) is not None
+    assert view.modules_panel.row("baby-mobs").data.badge == "Installed"
+
+
+def test_forget_is_offered_only_where_the_record_is_the_state(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Not on a mob mod with no record, and not on a mod whose state is its folder."""
+    view, _sql, _asked = _mob_tab(ps, tmp_path)
+    assert _forget_action(view, "baby-mobs") is None
+    assert _forget_action(view, "hearthstone-cd") is None
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.record_pending(tmp_path / "srv", manifest, {"hp": "2"}) == ""
+    view.reload_modules()
+    assert _forget_action(view, "baby-mobs") is not None, "a pending mark is the record too"
 
 
 def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:

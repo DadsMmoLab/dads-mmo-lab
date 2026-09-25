@@ -20,6 +20,9 @@ one the real install wrote.
 
 from __future__ import annotations
 
+import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -66,13 +69,17 @@ def _all(value: str) -> dict[str, str]:
     return {"hp": value, "dmg": value, "arm": value, "spd": value}
 
 
+def _relative() -> frozenset[str]:
+    return apply_module.relative_keys(_catalog())
+
+
 def _rows(server_dir: Path) -> dict[str, ModuleRow]:
     rows = build_module_rows(
         _catalog(),
-        apply_module.installed_modules(server_dir),
+        apply_module.installed_modules(server_dir, _relative()),
         SessionState(),
         None,
-        unknown=apply_module.unknown_modules(server_dir),
+        unknown=apply_module.unknown_modules(server_dir, _relative()),
     )
     return {row.id: row for row in rows}
 
@@ -114,7 +121,7 @@ def test_a_pending_mark_reads_as_an_honest_unknown(tmp_path: Path) -> None:
     row = _rows(tmp_path)["baby-mobs"]
     assert row.badge == BADGE_STATE_UNKNOWN
     assert row.installed, "Remove is the press on offer"
-    assert apply_module.unknown_modules(tmp_path).get("mod", frozenset()) == {"baby-mobs"}
+    assert set(apply_module.unknown_modules(tmp_path).get("mod", {})) == {"baby-mobs"}
 
 
 def test_an_applied_record_with_a_pending_mark_still_reads_unknown(tmp_path: Path) -> None:
@@ -126,10 +133,75 @@ def test_an_applied_record_with_a_pending_mark_still_reads_unknown(tmp_path: Pat
     assert _rows(tmp_path)["baby-mobs"].badge == BADGE_STATE_UNKNOWN
 
 
-def test_an_unreadable_answers_file_reads_as_nothing_recorded(tmp_path: Path) -> None:
-    (tmp_path / module_answers.ANSWERS_FILE).write_text("{ not json", encoding="utf-8")
-    assert apply_module.installed_modules(tmp_path).get("mod", frozenset()) == frozenset()
-    assert apply_module.unknown_modules(tmp_path) == {}
+def test_the_four_relative_mods_are_the_ones_whose_state_comes_from_the_record() -> None:
+    assert _relative() == {f"mod/{item_id}" for item_id in MOB_MODS}
+
+
+def _corrupt(server_dir: Path, how: str) -> None:
+    """The two ways the answers file cannot be read: bad JSON, or no permission."""
+    path = server_dir / module_answers.ANSWERS_FILE
+    if how == "malformed":
+        path.write_text("{ not json", encoding="utf-8")
+        return
+    path.write_text(json.dumps({"applied": {"mod/baby-mobs": _all("2")}}), encoding="utf-8")
+    path.chmod(0)
+
+
+UNREADABLE = pytest.mark.parametrize(
+    "how",
+    [
+        "malformed",
+        pytest.param(
+            "permission",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                reason="chmod 0 does not stop this user reading",
+            ),
+        ),
+    ],
+)
+
+
+@UNREADABLE
+def test_an_unreadable_answers_file_puts_every_record_backed_mod_in_doubt(
+    tmp_path: Path, how: str
+) -> None:
+    """Codex high, fix wave: `recorded_keys()` read an unreadable file as "nothing recorded".
+
+    So the exclusive rule failed open: every mob row read Not installed and a
+    second one was allowed to stack. Unreadable is its own answer now.
+    """
+    _corrupt(tmp_path, how)
+    read = module_answers.recorded_keys(tmp_path)
+    assert read.unreadable, "unreadable is not the same answer as no file"
+    rows = _rows(tmp_path)
+    for item_id in MOB_MODS:
+        assert rows[item_id].badge == BADGE_STATE_UNKNOWN, item_id
+        assert rows[item_id].installed, "offers Remove, not a second Install"
+        assert module_answers.ANSWERS_FILE in (rows[item_id].state_detail or ""), item_id
+    # The re-run check the tab asks before any dialog (T55's order) says it too.
+    refusal = Applier(tmp_path, sql=_Recorder()).reapply_refusal(_mob("buff-mobs"))
+    assert refusal is not None and module_answers.ANSWERS_FILE in refusal, refusal
+
+
+def test_no_answers_file_is_nothing_recorded_and_not_a_doubt(tmp_path: Path) -> None:
+    read = module_answers.recorded_keys(tmp_path)
+    assert (read.applied, read.pending, read.unreadable) == (frozenset(), frozenset(), "")
+    assert apply_module.unknown_modules(tmp_path, _relative()) == {}
+
+
+@UNREADABLE
+@pytest.mark.parametrize("item_id", MOB_MODS)
+def test_an_unreadable_answers_file_refuses_a_mob_mod_before_any_sql(
+    tmp_path: Path, how: str, item_id: str
+) -> None:
+    _corrupt(tmp_path, how)
+    db = _Recorder()
+    with pytest.raises(ApplyError) as refused:
+        Applier(tmp_path, sql=db).install(_mob(item_id), _all("2"))
+    message = str(refused.value)
+    assert module_answers.ANSWERS_FILE in message and "Nothing was changed" in message, message
+    assert db.texts == []
 
 
 # ------------------------------------------------------------ the exclusive rule
@@ -172,7 +244,13 @@ def test_a_pending_baby_mobs_blocks_buff_mobs_too(tmp_path: Path) -> None:
     with pytest.raises(ApplyError, match="baby-mobs"):
         Applier(tmp_path, sql=db).install(_mob("buff-mobs"), _all("2"))
     assert db.texts == []
-    assert not _rows(tmp_path)["buff-mobs"].installable
+    buff = _rows(tmp_path)["buff-mobs"]
+    assert not buff.installable
+    # Fix wave (minor): the tab's lock says what the applier says, not "is installed here".
+    reason = buff.install_reason or ""
+    assert "Baby Mobs may be in this server's database" in reason, reason
+    assert "a press on it stopped while its SQL was being sent" in reason, reason
+    assert "is installed here" not in reason, reason
 
 
 def test_after_remove_the_row_reads_not_installed_and_buff_mobs_installs(

@@ -43,7 +43,7 @@ from tests.support_native import (
     engine,
     install,
 )
-from yulon import docker, git, platform, resources, rmtree, runner
+from yulon import docker, git, module_answers, platform, resources, rmtree, runner
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog import families as family_registry
 from yulon.catalog import installer as installer_module
@@ -1234,6 +1234,53 @@ def test_a_half_written_import_is_cleared_before_it_is_re_run(tmp_path: Path) ->
     rec = Recorder(images=False, probe_answers=[PARTIAL, IMPORTED])
     install(rec, tmp_path / "wow")
     assert rec.calls.index("reset") < rec.calls.index("one-shot:ac-db-import")
+
+
+def _answers_with_a_record(server_dir: Path) -> Path:
+    """What a folder keeps after its server was deleted: only our own dotfiles (T121)."""
+    server_dir.mkdir(parents=True, exist_ok=True)
+    path = server_dir / module_answers.ANSWERS_FILE
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "modules": {"mod/baby-mobs": {"hp": "2"}},
+                "applied": {"mod/baby-mobs": {"hp": "2"}},
+                "pending": {"mod/buff-mobs": {"to": {"hp": "2"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_fresh_database_import_forgets_what_was_applied_and_keeps_the_answers(
+    tmp_path: Path,
+) -> None:
+    """T121 fix wave: a record that survived into a new database said Baby Mobs was applied.
+
+    The dotfile is one of `OUR_OWN_FILES`, so a fresh install into the folder keeps
+    it; the only way out the tab offered was Remove, which divides BASE values. An
+    import onto an empty database is proof that nothing is applied.
+    """
+    server_dir = tmp_path / "wow"
+    path = _answers_with_a_record(server_dir)
+    rec = Recorder(images=False)
+    install(rec, server_dir)
+    assert "one-shot:ac-db-import" in rec.calls
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    assert "applied" not in kept and "pending" not in kept, kept
+    assert kept["modules"] == {"mod/baby-mobs": {"hp": "2"}}, "the answers are kept"
+
+
+def test_a_resume_over_a_finished_import_keeps_the_record(tmp_path: Path) -> None:
+    """The control: no import ran, so the database is the one the record describes."""
+    server_dir = tmp_path / "wow"
+    path = _answers_with_a_record(server_dir)
+    rec = Recorder(images=False, probe_answers=[IMPORTED])
+    install(rec, server_dir)
+    assert "one-shot:ac-db-import" not in rec.calls
+    assert json.loads(path.read_text(encoding="utf-8"))["applied"] == {"mod/baby-mobs": {"hp": "2"}}
 
 
 def test_a_finished_import_is_left_alone_by_a_resume(tmp_path: Path) -> None:

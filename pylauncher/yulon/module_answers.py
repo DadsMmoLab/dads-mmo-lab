@@ -32,6 +32,7 @@ import json
 import os
 import tempfile
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -192,36 +193,101 @@ def record_applied(server_dir: Path, manifest: Manifest, values: Mapping[str, st
     return _write_record(server_dir, change, f"what was applied for {_key(manifest)}")
 
 
-def recorded_keys(server_dir: Path) -> tuple[frozenset[str], frozenset[str]]:
-    """Every `<type>/<id>` with an `applied` entry, and every one with a `pending` mark (T121).
+@dataclass(frozen=True)
+class RecordedKeys:
+    """The answers file's `applied` and `pending` keys (`<type>/<id>`), or why it cannot be read.
+
+    THREE answers, not two (T121 fix wave, Codex high). No file is "nothing
+    recorded". A file that is there and cannot be read -- not JSON, no
+    permission, a shape this build does not know -- is `unreadable`, never
+    "nothing recorded": read that way, every mob multiplier's row said Not
+    installed and the rule that two of them cannot be installed together
+    passed, because the one place that says one IS installed could not be read.
+    """
+
+    applied: frozenset[str] = frozenset()
+    pending: frozenset[str] = frozenset()
+    unreadable: str = ""
+    """Why the file could not be read, or `""` for a usable file or no file at all."""
+
+
+def recorded_keys(server_dir: Path) -> RecordedKeys:
+    """Every `<type>/<id>` with an `applied` entry, every one with a `pending` mark (T121).
 
     One read of the file for the whole install, because the Modules tab asks it
     on every reload, on the GUI thread, beside the clone-folder listing. The
     four mob multipliers leave no folder, so this record is the only thing that
     can say one of them is in the database (`apply.installed_modules()`).
 
-    `(frozenset(), frozenset())` for no file and for any file this build cannot
-    read, as `read_applied()` answers `None` for one. An `applied` entry that is
-    there but unusable still counts as applied: it says a Remove is owed, which
-    is the reading the Remove dialog and T115's re-run refusal already give it.
+    An `applied` entry that is there but unusable still counts as applied: it
+    says a Remove is owed, which is the reading the Remove dialog and T115's
+    re-run refusal already give it.
     """
     path = server_dir / ANSWERS_FILE
     try:
         with path.open(encoding="utf-8-sig") as fh:
             parsed = json.load(fh)
+    except FileNotFoundError:
+        return RecordedKeys()
     except (OSError, ValueError) as exc:
-        logger.debug(f"no usable applied record in {server_dir}: {exc}")
-        return frozenset(), frozenset()
+        return RecordedKeys(unreadable=f"{type(exc).__name__}: {exc}")
     if not isinstance(parsed, dict):
-        return frozenset(), frozenset()
-
-    def keys(field: str) -> frozenset[str]:
-        entries = parsed.get(field)
+        return RecordedKeys(unreadable="it is not in a shape this version knows")
+    found: dict[str, frozenset[str]] = {}
+    for field in ("applied", "pending"):
+        entries = parsed.get(field, {})
         if not isinstance(entries, dict):
-            return frozenset()
-        return frozenset(key for key in entries if isinstance(key, str))
+            return RecordedKeys(unreadable=f"its `{field}` is not in a shape this version knows")
+        found[field] = frozenset(key for key in entries if isinstance(key, str))
+    return RecordedKeys(applied=found["applied"], pending=found["pending"])
 
-    return keys("applied"), keys("pending")
+
+def forget_applied(server_dir: Path, manifest: Manifest) -> str:
+    """Drop `manifest`'s `applied` entry and `pending` mark, running no SQL (T121 fix wave).
+
+    The Modules tab's "Forget Yu'lon's record…", for a record that no longer
+    describes the database: a restored `acore_world` backup, say. The only other
+    way out was Remove, which divides whatever is there -- base values, on a
+    restored database -- and so halves every creature. The saved answers stay.
+    `""` if written (or nothing to drop), else why not.
+    """
+    key = _key(manifest)
+    read = recorded_keys(server_dir)
+    if not read.unreadable and key not in read.applied | read.pending:
+        return ""
+
+    def change(everything: dict[str, Any]) -> None:
+        for field in ("applied", "pending"):
+            entries = everything.get(field)
+            if isinstance(entries, dict) and key in entries:
+                entries = dict(entries)
+                entries.pop(key)
+                everything[field] = entries
+
+    return _write_record(server_dir, change, f"the record of what was applied for {key}")
+
+
+def forget_database_records(server_dir: Path) -> tuple[bool, str]:
+    """Drop the whole `applied` and `pending` maps, for a database imported fresh (T121 fix wave).
+
+    The file is one of `catalog.native.OUR_OWN_FILES`, so it survives into a new
+    install in the same folder; its `applied` map then describes a database that
+    no longer exists, and the tab read Baby Mobs as installed on stock
+    creatures. An import onto an empty database is proof that nothing is
+    applied. The saved answers are kept: they are only what to pre-fill.
+
+    `(changed, "")`, or `(False, why)` for a file that cannot be written.
+    """
+    read = recorded_keys(server_dir)
+    if not read.unreadable and not (read.applied or read.pending):
+        return False, ""
+
+    def change(everything: dict[str, Any]) -> None:
+        everything.pop("applied", None)
+        everything.pop("pending", None)
+
+    problem = _write_record(server_dir, change, "what was applied to the old database")
+    return (not problem), problem
 
 
 def is_pending(server_dir: Path, manifest: Manifest) -> bool:
