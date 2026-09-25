@@ -358,10 +358,13 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "2026-09-17 (.notes/gates/t86-*). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "fd7ec9ec7659035cfc3ea75d542c8683005525de", (
+    assert module.rev == "c591bbb1f6921fdfa53f47e7387e3154b7362bff", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
-        "which conf keys exist, and what the world prints when it loads"
+        "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
+        "(T30, 2026-09-11) until upstream rewrote its history and left that commit on no "
+        "branch; since T120 it is c591bbb1, `main` on 2026-09-24, installed fresh and booted "
+        "with its bots online on a test box (.notes/gates/t120-tortoisebots-pin/)"
     )
     for source in sources:
         assert re.fullmatch(

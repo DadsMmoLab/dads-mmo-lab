@@ -15,7 +15,7 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
+from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -77,7 +77,7 @@ from yulon.ui.controller_view import (
     ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
-from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.job import ThreadedJobRunner, run_inline
 from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
@@ -9831,6 +9831,68 @@ def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
 
     assert view._tuning_owed.get("restart") is None, "the restart covered what owed one"
     assert view._tuning_owed.get("recreate"), "and nothing else"
+
+
+def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_runner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T97's second site. `_tuning_job_done` was a closure made per job, and a
+    plain callable handed to the job runner is delivered on the WORKER thread,
+    so a finished restart or recreate wrote the report, re-armed the bar and
+    started the status read from there.
+
+    Every other test in this file runs jobs inline, where the question cannot
+    arise, so this one uses the real runner and records the thread each widget
+    write lands on. Recreate, because it is the branch that clears BOTH owed
+    sets.
+
+    Mutation: hand `_run` a closure again (`lambda answer: self._tuning_job_done(answer)`)
+    and the writes are recorded off the GUI thread.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+    assert view._tuning_owed.get("restart") and view._tuning_owed.get("recreate")
+
+    writes: list[tuple[str, bool]] = []
+    for widget, name in (
+        (view.tuning_report, "setPlainText"),
+        (view.tuning_restart_button, "setEnabled"),
+        (view.tuning_recreate_button, "setEnabled"),
+    ):
+        real = getattr(widget, name)
+
+        def recorded(
+            *args: object, _what: str = f"{type(widget).__name__}.{name}", _real: object = real
+        ) -> object:
+            writes.append((_what, threading.current_thread() is threading.main_thread()))
+            return _real(*args)  # type: ignore[operator]
+
+        setattr(widget, name, recorded)
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    view.tuning_recreate_button.click()
+    pump_until(
+        lambda: view.tuning_report.toPlainText() == "recreate: done.", "the recreate's report"
+    )
+    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+
+    assert view._busy is False
+    assert view._tuning_owed.get("restart") is None, "a recreate covers the restart it owed"
+    assert view._tuning_owed.get("recreate") is None, "and its own"
+    off_thread = [what for what, on_gui in writes if not on_gui]
+    assert writes and off_thread == [], f"the Tuning bar was written from a worker: {off_thread}"
 
 
 def test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed(
