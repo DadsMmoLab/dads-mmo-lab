@@ -193,6 +193,44 @@ def test_a_count_changed_while_the_channel_was_on_survives_its_rollback(tmp_path
     assert not (tmp_path / BACKUP).exists()
 
 
+def test_a_labelled_override_changed_after_enable_is_still_rolled_back(tmp_path: Path) -> None:
+    """T102's two recognised texts (`:z` and unlabelled) must BOTH carry the pair.
+
+    An enforcing host's install writes `:z` on every host bind, and the press
+    keeps it. A count changed after Enable matches neither text unless each is
+    rendered with the pair off the file, and the rollback would then leave the
+    channel stuck on (the cold review of T117, merging T102).
+    """
+    _generate(tmp_path)
+    labelled = composegen.render(
+        WOTLK,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        db_password=WOTLK.install.db_password(tmp_path),
+        bind_label=":z",
+        platform_id=_linux,
+    ).override
+    (tmp_path / OVERRIDE).write_text(labelled, encoding="utf-8")
+    bot_population.write(WOTLK, tmp_path, 60)
+    pressed = _press(tmp_path)
+    assert SOAP_ON in pressed and "- ./" in pressed, "control: a channel-on override with binds"
+    assert all(
+        line.rstrip().endswith(":z")
+        for line in pressed.splitlines()
+        if line.strip().startswith("- ./")
+    ), "control: the press kept the install's label"
+    bot_population.write(WOTLK, tmp_path, 70)
+
+    assert _tab(tmp_path).roll_back()
+
+    after = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
+    assert after == labelled.replace(f'{MIN_ENV}: "500"', f'{MIN_ENV}: "70"').replace(
+        f'{MAX_ENV}: "500"', f'{MAX_ENV}: "70"'
+    )
+    assert not (tmp_path / BACKUP).exists(), "the rollback recognised its own press"
+    assert not composegen.channel_is_on(tmp_path)
+
+
 def test_a_consistent_hand_set_range_is_carried_as_it_is(tmp_path: Path) -> None:
     _generate(tmp_path)
     _set_env(tmp_path, "40", "60")

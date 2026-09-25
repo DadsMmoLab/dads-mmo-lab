@@ -573,3 +573,184 @@ def test_a_credential_older_than_the_field_is_bootstrapped_from_the_catalog(
     channel.live_channel()
 
     assert captures.endpoints[0].namespace == "urn:MaNGOS", captures.endpoints[0]
+
+
+# -- an enforcing SELinux host (T102) -----------------------------------------
+
+
+def _on_selinux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fedora as `yulon-fedora` answered on 2026-09-24: enforcing, on xfs.
+
+    Patched on `platform` and not handed in, because every `InstallChannel` the
+    app builds is constructed bare: this is the route the shipped one takes.
+    """
+    from yulon import platform
+
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: True)
+    monkeypatch.setattr(platform, "filesystem_type", lambda _path: "xfs")
+
+
+def _labelled_channel(tmp_path: Path) -> setup.InstallChannel:
+    """`_channel()` over an install rendered as that host renders it, `:z` on every bind."""
+    channel = _channel(tmp_path, answering=_Answering("yes"))
+    plan = composegen.render(
+        WOTLK, channel.server_dir, templates_root=resources.installers_dir(), bind_label=":z"
+    )
+    for name, text in (
+        (composegen.BASE_FILE, plan.base),
+        (composegen.OVERRIDE_FILE, plan.override),
+    ):
+        (channel.server_dir / name).write_text(text, encoding="utf-8", newline="\n")
+    return channel
+
+
+def _channel_on(server_dir: Path, *, bind_label: str) -> str:
+    """The override with the channel on, rendered with the given label."""
+    operations = WOTLK.operations
+    assert operations is not None
+    return composegen.render(
+        WOTLK,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_env=setup._world_env(WOTLK, operations.enable_env),
+        bind_label=bind_label,
+    ).override
+
+
+def _rolled_all_the_way_back(channel: setup.InstallChannel, installed: str) -> None:
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    assert override.read_text(encoding="utf-8") == installed
+    assert "AC_SOAP_ENABLED" not in override.read_text(encoding="utf-8")
+    assert not override.with_name(override.name + setup.BACKUP_SUFFIX).exists()
+
+
+def test_a_labelled_override_with_the_channel_on_is_still_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The channel must not stick on because the override carries the install's `:z`.
+
+    `roll_back()` restores only an override that is exactly what the press
+    would write now, and the comparison was rendered with no label. On an
+    enforcing host, an override that says channel-on WITH the install's `:z`
+    -- which is what the install's own renderer, and a settings reset through
+    it, writes -- read as "somebody edited this". Measured on `yulon-fedora`
+    2026-09-24: `AC_SOAP_ENABLED` stayed, the `.before-channel` backup stayed,
+    and only the port was released.
+    """
+    _on_selinux(monkeypatch)
+    channel = _labelled_channel(tmp_path)
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    installed = override.read_text(encoding="utf-8")
+    channel.enable(world_running=False)
+    override.write_text(_channel_on(channel.server_dir, bind_label=":z"), encoding="utf-8")
+
+    assert channel.roll_back() is True
+
+    _rolled_all_the_way_back(channel, installed)
+
+
+def test_a_press_made_before_the_label_was_kept_is_still_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix must not strand the installs the unfixed press already wrote.
+
+    Before T102 the press wrote the channel on WITHOUT the label, so an
+    enforcing host upgraded from that version has exactly that file on disk. A
+    rollback comparing only against the labelled text would call it edited and
+    leave the channel on -- the same stuck state, reached from the other side.
+    """
+    _on_selinux(monkeypatch)
+    channel = _labelled_channel(tmp_path)
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    installed = override.read_text(encoding="utf-8")
+    override.with_name(override.name + setup.BACKUP_SUFFIX).write_text(installed, encoding="utf-8")
+    override.write_text(_channel_on(channel.server_dir, bind_label=""), encoding="utf-8")
+
+    assert channel.roll_back() is True
+
+    _rolled_all_the_way_back(channel, installed)
+
+
+def test_the_press_from_the_install_keeps_its_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tab's own route: `InstallChannel.enable()` on an enforcing host keeps `:z`."""
+    _on_selinux(monkeypatch)
+    channel = _labelled_channel(tmp_path)
+    installed = channel.server_dir / composegen.OVERRIDE_FILE
+
+    channel.enable(world_running=False)
+
+    assert installed.read_text(encoding="utf-8") == _channel_on(channel.server_dir, bind_label=":z")
+
+
+@pytest.mark.parametrize("later", [False, None], ids=["permissive-now", "cannot-tell-now"])
+def test_a_labelled_press_is_rolled_back_after_the_host_stops_enforcing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, later: bool | None
+) -> None:
+    """The label on disk is what the press wrote THEN, not what the host says NOW.
+
+    Pressed while Enforcing, the override carries `:z`. A later `setenforce 0`,
+    or a probe that cannot answer, makes the host's label `""` -- and a rollback
+    that compared only against the host's current label read the press's own
+    file as edited and left the channel on (review of `70d0d642`).
+    """
+    from yulon import platform
+
+    _on_selinux(monkeypatch)
+    channel = _labelled_channel(tmp_path)
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    installed = override.read_text(encoding="utf-8")
+    channel.enable(world_running=False)
+    assert override.read_text(encoding="utf-8") == _channel_on(channel.server_dir, bind_label=":z")
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: later)
+
+    assert channel.roll_back() is True
+
+    _rolled_all_the_way_back(channel, installed)
+
+
+@pytest.mark.parametrize("label", [":z", ""], ids=["labelled", "unlabelled"])
+def test_a_channel_override_edited_in_another_way_is_still_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str
+) -> None:
+    """Accepting both labels must not widen into accepting any file.
+
+    The two texts the rollback recognises differ only in the `:z` token, so a
+    change anywhere else -- here a line a person added -- matches neither: the
+    override is kept, and only the port is released.
+    """
+    _on_selinux(monkeypatch)
+    channel = _labelled_channel(tmp_path)
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    channel.enable(world_running=False)
+    edited = _channel_on(channel.server_dir, bind_label=label) + "# a person was here\n"
+    override.write_text(edited, encoding="utf-8")
+
+    assert channel.roll_back() is True
+
+    assert override.read_text(encoding="utf-8") == edited
+    assert override.with_name(override.name + setup.BACKUP_SUFFIX).exists()
+    env = (channel.server_dir / ".env").read_text(encoding="utf-8")
+    assert f"{setup.HOST_PORT_VAR}={setup.RELEASED_HOST_PORT}" in env
+
+
+def test_the_two_recognised_texts_differ_only_in_the_label() -> None:
+    """The claim the two tests above rest on, checked on the rendered text itself.
+
+    Remove every `:z` that ends a host bind from the labelled channel-on
+    override and what is left must be the unlabelled one, byte for byte -- so no
+    other difference can ride in on the second candidate.
+    """
+    server_dir = Path("/srv/wotlk")
+    labelled = _channel_on(server_dir, bind_label=":z")
+    plain = _channel_on(server_dir, bind_label="")
+    binds = [line for line in labelled.splitlines() if line.strip().startswith("- ./")]
+    assert binds and all(line.endswith(":z") for line in binds)
+
+    stripped = "\n".join(
+        line[: -len(":z")] if line.strip().startswith("- ./") else line
+        for line in labelled.splitlines()
+    )
+
+    assert stripped + "\n" == plain
