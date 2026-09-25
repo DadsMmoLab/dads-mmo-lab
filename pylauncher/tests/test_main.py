@@ -3342,6 +3342,22 @@ def test_the_forced_exit_ends_streams_and_flushes_the_log_before_it_leaves(
     assert calls == ["streams", "log", "exit 3"]
 
 
+_REAL_HARD_EXIT = main._hard_exit
+"""`main._hard_exit` as this module found it at import, before any fixture ran.
+
+Collection imports test modules before the first test's fixtures, so this is
+the real seam - the function that calls `os._exit` - and never conftest's stub.
+"""
+
+
 def test_no_test_can_reach_the_real_os_exit_in_process() -> None:
-    """`conftest.py` swaps the seam out for every test; a forced exit would end pytest."""
-    assert main._hard_exit is not os._exit
+    """`conftest.py` swaps the seam out for every test; a forced exit would end pytest.
+
+    Compared with the function captured at import, not with `os._exit`: the
+    seam is a function that CALLS `os._exit`, so `is not os._exit` held with
+    or without the guard. The identity check comes first so that, with the
+    fixture removed, this fails on the assert instead of calling the real one.
+    """
+    assert main._hard_exit is not _REAL_HARD_EXIT, "conftest's _no_forced_exit is not applied"
+    with pytest.raises(AssertionError, match="was reached in-process"):
+        main._hard_exit(0)
