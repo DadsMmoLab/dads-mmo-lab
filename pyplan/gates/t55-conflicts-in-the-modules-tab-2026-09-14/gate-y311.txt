@@ -1,3 +1,0 @@
-yt: Python 3.11.16 in /home/perzi/wt-t55/pylauncher
-FAILED tests/test_controller_view.py::test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker
-1 failed, 4668 passed, 8 skipped, 23 deselected, 2 warnings in 173.75s (0:02:53)
