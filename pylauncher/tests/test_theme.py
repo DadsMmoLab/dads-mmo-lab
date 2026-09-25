@@ -111,6 +111,20 @@ def test_interactive_controls_declare_a_touch_target_floor() -> None:
     assert MIN_FONT_PX >= 12
 
 
+def test_the_tab_x_is_exempt_by_id_and_the_floor_rule_is_untouched() -> None:
+    """T95: the × is the one tab-bar tool button below the floor.
+
+    Exempt by objectName, never by negation.
+    """
+    from yulon.ui.theme import FORGET_TAB_BUTTON, _build_qss, _touch
+
+    qss = _build_qss(1.0)
+    rule = qss.split(f"QTabBar QToolButton#{FORGET_TAB_BUTTON} {{")[1].split("}")[0]
+    assert "max-width: 18px" in rule and "max-height: 18px" in rule
+    floor = qss.split("QTabBar QToolButton {")[1].split("}")[0]
+    assert f"min-width: {_touch(30, 1.0)};" in floor, "the scroll arrows lost their floor"
+
+
 def test_the_button_base_state_draws_a_visible_hairline() -> None:
     # The base QPushButton rule must pair its panel fill with a hairline that is
     # visibly distinct from the fill — the near-black `#3C2D14` it once used on

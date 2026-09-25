@@ -509,8 +509,20 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # key fails this until its tab offers the switch. Absent on the
         # reference too.
         undashboarded = set() if bot_dashboard.conf_file(entry) else {"bot_dashboard"}
+        # T106's compose repair, absent on the REFERENCE by decision: it exists
+        # for the family whose base compose nothing rewrites after the install
+        # (CMaNGOS), while WotLK's follows the app at Update-to-latest. Read off
+        # the family the wiring reads, so a family that gains it fails this
+        # until its tab offers it, and a CMaNGOS game that loses it fails too.
+        native_block = entry.install.native
+        unrepaired = (
+            set()
+            if native_block is not None and native_block.family == "cmangos"
+            else {"repair_compose"}
+        )
         allowed = (
-            unstocked
+            unrepaired
+            | unstocked
             | unmeasured
             | unwired
             | unlisted
@@ -526,7 +538,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | undashboarded
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable | unadoptable | unwindowed | undashboarded
+            reference = unprobed | unupdatable | unadoptable | unwindowed | undashboarded | unrepaired
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

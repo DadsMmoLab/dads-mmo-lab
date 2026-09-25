@@ -2059,6 +2059,129 @@ def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: P
     assert "no containers to remove" in view.problem_label.text()
 
 
+def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Andood's video (T95): every press ended "no containers to remove" and pointed nowhere.
+
+    The button is always there (decision 4). What this adds is the pointer: the
+    sentence names it, and the button is highlighted. Tortoise has no
+    Uninstall. It is the tree the dead end was reported on.
+    """
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=False)
+    assert view.forget_install_button is not None
+    assert not _highlighted(view.forget_install_button)
+
+    view.remove_containers()
+    view.remove_containers()
+
+    assert "no containers to remove" in view.problem_label.text()
+    assert controller_view_module.REMOVE_FROM_YULON in view.problem_label.text()
+    assert _highlighted(view.forget_install_button)
+
+
+def test_a_removal_that_removed_something_does_not_highlight_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=True)
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert not view.forget_install_button.isHidden(), "decision 4: always shown"
+    assert not _highlighted(view.forget_install_button)
+
+
+def test_a_start_takes_the_highlight_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The next Start recreates the containers, so "nothing to remove" is no longer true."""
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=False)
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+
+    view.start_server()
+
+    assert not _highlighted(view.forget_install_button)
+    assert not view.forget_install_button.isHidden()
+
+
+def _nothing_to_remove_view(ps: _Ps, tmp_path: Path, **kwargs: Any) -> ControllerView:
+    """A Tortoise tab whose last "Stop and remove containers…" found nothing (T95)."""
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, **kwargs)
+    _watch_remove(view, result=False)
+    ps.names = ""
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+    return view
+
+
+def test_a_poll_that_sees_nothing_running_keeps_the_highlight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The five-second poll must not take back the pointer it is there to hold up."""
+    view = _nothing_to_remove_view(ps, tmp_path)
+    view.refresh_status()
+    view.refresh_status()
+    assert _highlighted(view.forget_install_button)
+
+
+def test_a_poll_that_sees_the_server_running_takes_the_highlight_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A Rebuild, an Update, a Return-to-pin or an outside start brings it up without Start.
+
+    "Remove from Yu'lon…" lit with Start's own emphasis beside a live server
+    points the player at removing it (T95 Task 3 review, round 1).
+    """
+    view = _nothing_to_remove_view(ps, tmp_path)
+    ps.names = view.services.controller.spec.world + "\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+    assert not _highlighted(view.forget_install_button)
+
+
+def test_a_stale_running_answer_does_not_take_the_highlight_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A poll asked BEFORE the removal, answered after it, says nothing about now."""
+    from yulon.controller import InstallStatus
+
+    gate = _Gate()
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    _watch_remove(view, result=False)
+    gate.hold = True
+    view.refresh_status()  # the 5 s poll, asked while the server still ran
+    ((_work, on_done, on_error),) = gate.queued
+    gate.queued = []
+    gate.hold = False
+    ps.names = ""
+    view.remove_containers()
+    view.remove_containers()  # its own refresh is dropped: the poll is still out
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+
+    run_inline(lambda: InstallStatus(db=True, auth=True, world=True), on_done, on_error)
+
+    assert _highlighted(view.forget_install_button), "an answer older than the removal cleared it"
+    assert view.last_seen_running() is False, "the dropped refresh was asked again, and answered"
+
+
+def test_a_removal_that_finds_containers_after_one_that_did_not_takes_it_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _nothing_to_remove_view(ps, tmp_path)
+    _watch_remove(view, result=True)
+    view.remove_containers()
+    view.remove_containers()
+    assert not _highlighted(view.forget_install_button)
+    assert "Containers removed" in view.problem_label.text()
+
+
 UNIMPORTED = docker.ImportState(
     "absent", "none of acore_auth, acore_characters, acore_world exists on this server yet"
 )
@@ -5487,10 +5610,15 @@ def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
     assert view.uninstall_button is None
 
 
+def _highlighted(button: object) -> bool:
+    """T95 decision 4: the Remove button is always shown; "the way out" is the theme's `primary`."""
+    return bool(button.property("primary"))  # type: ignore[attr-defined]
+
+
 # -- "Forget this install…", for a folder that is gone (T34) -------------------
 
 
-def test_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_gone(
+def test_the_forget_button_is_plain_while_the_folder_exists_and_highlighted_once_gone(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Re-checked on the same poll as the status line, not only at tab-build time.
@@ -5503,17 +5631,17 @@ def test_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_go
     view = _uninstall_view(ps, tmp_path, fake)
     assert view.forget_install_button is not None
     view.refresh_status()
-    assert view.forget_install_button.isHidden()
+    assert not _highlighted(view.forget_install_button)
 
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert not view.forget_install_button.isHidden()
+    assert _highlighted(view.forget_install_button)
     # Mutation: negate `_update_forget_visibility()`'s `is_dir()` check (or
     # drop it) and this assertion is what catches it — the button would then
-    # be shown for the folder that exists and hidden for the one that is gone.
+    # be highlighted for the folder that exists and plain for the one that is gone.
 
 
-def test_the_forget_button_stays_hidden_for_a_wsl_install_with_no_folder_here(
+def test_the_forget_button_stays_plain_for_a_wsl_install_with_no_folder_here(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """`server_dir.is_dir()` asks THIS process, which is right for a native
@@ -5527,151 +5655,455 @@ def test_the_forget_button_stays_hidden_for_a_wsl_install_with_no_folder_here(
     shutil.rmtree(tmp_path)
     view.refresh_status()
     assert view.forget_install_button is not None
-    assert view.forget_install_button.isHidden()
+    assert not _highlighted(view.forget_install_button)
     # Mutation: drop the `wsl_distro is None` clause from
-    # `_update_forget_visibility()` and this fails — the button would show for
-    # a distro path this process cannot evaluate.
+    # `_update_forget_visibility()` and this fails — the button would light up
+    # for a distro path this process cannot evaluate.
 
 
-def test_answering_yes_forgets_the_record_and_emits_uninstalled(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+# -- "Remove from Yu'lon…" (T95): the tab asks the window; the window decides --
+
+
+def test_every_tab_has_the_remove_button_uninstall_or_not(
+    qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The confirm must compare with `==`, not `is` (T33's bug): this PySide6's
-    static `QMessageBox.question()` returns a plain `int`, and the fake below
-    returns exactly that — not the enum member — to prove the comparison
-    survives it.
-    """
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
-    )
-    fake = _FakeUninstall(tmp_path)
-    view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
+    """TBC and Tortoise have no Uninstall seam: until T95 they had no way off the list at all."""
+    from PySide6.QtCore import Qt
+
+    from yulon import forgetting
+
+    view = ControllerView(TBC, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.services.uninstall is None
+    assert view.uninstall_button is None, "T95 adds no Uninstall"
+    assert view.forget_install_button is not None
+    assert view.forget_install_button.text() == forgetting.BUTTON_LABEL
+    assert controller_view_module.REMOVE_FROM_YULON == forgetting.BUTTON_LABEL
     view.refresh_status()
-    seen: list[tuple[str, object]] = []
-    view.uninstalled.connect(lambda game, folder: seen.append((game, folder)))
-
-    view.forget_install()
-
-    assert fake.forgets == 1
-    assert seen == [("wow-wotlk", tmp_path)]
-    # Mutation: change `forget_install()`'s `answer == QMessageBox.StandardButton.Yes`
-    # to `answer is QMessageBox.StandardButton.Yes` and this fails — the bare
-    # `int` the fake returns is never `is` the enum member, so a real Yes reads
-    # as a No and nothing is forgotten.
-
-
-def test_answering_no_forgets_nothing(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`_no_modal_dialogs` already answers No; this asserts what that means here."""
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
-    )
-    fake = _FakeUninstall(tmp_path)
-    view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
-    view.refresh_status()
-    seen: list[object] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
-
-    view.forget_install()
-
-    assert fake.forgets == 0
-    assert seen == []
-
-
-def test_a_forget_that_raises_oserror_shows_the_error_and_keeps_the_tab(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`forget_record()`'s own docstring: `OSError` is not caught there because
-    `purge.run()` catches it for the uninstall path — this is the OTHER caller
-    of the same live-`AppState` seam, and it has to catch its own.
-    """
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
-    )
-    fake = _FakeUninstall(tmp_path, forget_error=OSError("config dir is read-only"))
-    view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
-    view.refresh_status()
-    seen: list[object] = []
-    failures: list[str] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
-    view.action_failed.connect(failures.append)
-
-    view.forget_install()
-
-    assert seen == [], "the tab was dropped over a forget that never happened"
-    assert "config dir is read-only" in view.uninstall_label.text()
-    assert failures and "config dir is read-only" in failures[0]
-
-
-def test_the_folder_reappearing_before_the_press_forgets_nothing(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The visibility poll is not trusted at press time (review, T34 round 2).
-
-    A restore, or simply undoing an accidental delete, can put the folder back
-    in the gap between the five-second poll that showed the button and the
-    click that reached it.
-    """
-    asked: list[object] = []
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: asked.append(1),
-    )
-    fake = _FakeUninstall(tmp_path)
-    view = _uninstall_view(ps, tmp_path, fake)
+    assert not view.forget_install_button.isHidden(), "decision 4: always on the Server tab"
+    assert view.forget_install_button.focusPolicy() & Qt.FocusPolicy.TabFocus, "no gamepad reach"
+    assert not _highlighted(view.forget_install_button)
     shutil.rmtree(tmp_path)
     view.refresh_status()
     assert not view.forget_install_button.isHidden()
-    tmp_path.mkdir()  # back before the press
-    seen: list[object] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
-
-    view.forget_install()
-
-    assert fake.forgets == 0
-    assert seen == []
-    assert asked == [], "the confirmation must not open for a folder that is back"
-    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+    assert _highlighted(view.forget_install_button)
+    # Mutation: put back `if self.services.uninstall is None: return False` in
+    # `_forget_is_eligible()` and the last assertion fails.
 
 
-def test_the_folder_reappearing_during_the_confirmation_forgets_nothing(
+def test_the_press_asks_the_window_and_decides_nothing_itself(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The second re-check (review, T34 round 2): the gap between Yes and the write is real too.
-
-    Mutation: drop the second `_forget_is_eligible()` call in
-    `forget_install()` — the first call still sees the folder gone, so only
-    the second one stands between this press and a forgotten record.
-    """
-
-    def question(*a: object, **k: object) -> object:
-        tmp_path.mkdir()
-        return int(controller_view_module.QMessageBox.StandardButton.Yes)
-
-    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: asked.append(a)
+    )
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
-    view.refresh_status()
-    seen: list[object] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
+    seen: list[tuple[str, object]] = []
+    view.remove_requested.connect(lambda game, folder: seen.append((game, folder)))
 
     view.forget_install()
 
-    assert fake.forgets == 0
-    assert seen == []
-    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+    assert seen == [("wow-wotlk", tmp_path)]
+    assert asked == [], "the tab opened a dialog of its own"
+    assert fake.forgets == 0, "the tab forgot the record itself"
+
+
+def test_a_removal_is_refused_while_anything_runs_and_each_refusal_names_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import forgetting
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.forget_refusal() is None
+
+    view._import_running = True
+    assert view.forget_refusal() == view.busy_reason()
+    view._import_running = False
+
+    view._backup_before_update = True
+    assert view.forget_refusal() == forgetting.UPDATE_BACKUP_RUNNING
+    view._backup_before_update = False
+
+    view._set_busy(True)
+    assert view.forget_refusal() == forgetting.SERVER_ACTION_RUNNING
+    view._set_busy(False)
+
+    # Last, because it is patched on the class for the rest of this test.
+    monkeypatch.setattr(type(view.rebuild_log), "running", property(lambda _self: True))
+    assert view.forget_refusal() == forgetting.PANEL_RUNNING
+
+
+def test_the_last_poll_is_what_says_whether_the_server_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.last_seen_running() is None, "no poll has answered yet"
+    ps.names = ""
+    view.refresh_status()
+    assert view.last_seen_running() is False
+    ps.names = "ac-worldserver\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+
+    def no_docker() -> NoReturn:
+        raise RuntimeError("Cannot connect to the Docker daemon")
+
+    view.services.controller.status = no_docker  # type: ignore[method-assign]
+    view.refresh_status()
+    assert view.last_seen_running() is None, "a failed poll kept an answer it no longer has"
+
+
+def test_the_stop_before_a_removal_goes_through_the_controller_and_reports_to_the_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    stops: list[int] = []
+
+    def stop() -> bool:
+        stops.append(1)
+        return True
+
+    view.services.controller.stop = stop  # type: ignore[method-assign]
+    seen: list[tuple[object, ...]] = []
+    view.stopped_for_removal.connect(lambda g, d, ok, why: seen.append((g, d, ok, why)))
+
+    view.stop_for_removal()
+
+    assert stops == [1]
+    assert seen == [("wow-wotlk", tmp_path, True, "")]
+    assert view.refresh_button.isEnabled(), "the busy lock outlived the stop"
+
+
+def test_a_stop_before_a_removal_leaves_no_stopping_words_behind_when_it_succeeds(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The window may still keep the tab: a job started during the stop, or a save failed.
+
+    Final review (T95): the "can take a few minutes" paragraph and the
+    "stopping…" status line stayed up for good on a tab that was kept. Cleared,
+    and asked again, before the window is told, as the failed stop does.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    ps.names = ""
+    at_the_emit: list[tuple[str, str]] = []
+    view.stopped_for_removal.connect(
+        lambda *_: at_the_emit.append((view.status_label.text(), view.problem_label.text()))
+    )
+
+    view.stop_for_removal()
+
+    ((status, problem),) = at_the_emit
+    assert status != controller_view_module.STOPPING_FOR_REMOVAL
+    assert "world down" in status, "the status was not asked again"
+    assert problem != controller_view_module.STOPPING_FOR_REMOVAL_WAIT
+
+
+def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    def refuse() -> bool:
+        raise docker.DockerCommandError("Docker would not say which project owns ac-worldserver")
+
+    view.services.controller.stop = refuse  # type: ignore[method-assign]
+    seen: list[tuple[object, ...]] = []
+    view.stopped_for_removal.connect(lambda g, d, ok, why: seen.append((g, d, ok, why)))
+
+    view.stop_for_removal()
+
+    assert seen == [
+        ("wow-wotlk", tmp_path, False, "Docker would not say which project owns ac-worldserver")
+    ]
+    assert "Docker would not say" in view.problem_label.text()
+    assert view.refresh_button.isEnabled()
+    assert (
+        view.status_label.text() != controller_view_module.STOPPING_FOR_REMOVAL
+    ), "the status line kept saying a stop was running after it had failed"
+
+
+def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The m910q gate (T95): an × on a world still loading took minutes, with locked buttons only.
+
+    mangosd ignores SIGTERM while it loads, so the stop waits out its whole
+    grace. The player is told, while it waits, what is happening and that it
+    can take that long.
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    gate.hold = True
+
+    view.stop_for_removal()
+
+    status = view.status_label.text()
+    assert status == controller_view_module.STOPPING_FOR_REMOVAL
+    assert "stopping the server first" in status
+    said = view.problem_label.text()
+    assert "still loading" in said and "few minutes" in said
+    assert not view.refresh_button.isEnabled(), "the stop is running"
+    gate.release()
+    assert view.refresh_button.isEnabled()
+
+
+class _Gate:
+    """A job runner that runs inline until `hold` is set, then keeps the jobs for `release()`.
+
+    What a threaded runner looks like from the GUI thread: the job has been
+    handed over and its answer has not come back yet (T95).
+    """
+
+    def __init__(self) -> None:
+        self.hold = False
+        self.queued: list[tuple[Any, Any, Any]] = []
+
+    def __call__(self, work: Any, on_done: Any, on_error: Any) -> None:
+        if self.hold:
+            self.queued.append((work, on_done, on_error))
+        else:
+            run_inline(work, on_done, on_error)
+
+    def release(self) -> None:
+        self.hold = False
+        queued, self.queued = self.queued, []
+        for work, on_done, on_error in queued:
+            run_inline(work, on_done, on_error)
+
+
+def test_a_poll_still_in_flight_is_not_an_answer(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    ps.names = ""
+    view.refresh_status()
+    assert view.last_seen_running() is False
+    gate.hold = True
+    view.refresh_status()
+    assert view.last_seen_running() is None, "an answer older than the poll in flight was trusted"
+    ps.names = "ac-worldserver\n"
+    gate.release()
+    assert view.last_seen_running() is True
+
+
+def test_a_poll_asked_while_an_action_ran_is_not_an_answer(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The 5 s poll runs through a Start; its "stopped" can be read before the containers came up.
+
+    It answers after the Start has finished, and the Start's own refresh
+    returned early because that poll was still pending. Stored, that stale
+    "stopped" let a removal forget a running server without stopping it (T95
+    review, round 1).
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    ps.names = "ac-worldserver\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+    view._set_busy(True)
+    gate.hold = True
+    ps.names = ""
+    view.refresh_status()  # read "stopped" before the containers came up
+    view._set_busy(False)
+    gate.release()
+    assert view.last_seen_running() is None
+    view.refresh_status()
+    assert view.last_seen_running() is False, "a poll asked while idle is an answer again"
+
+
+def test_a_poll_answered_while_an_action_runs_is_not_an_answer(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Asked just before Start was pressed, answered in the middle of it."""
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    view.refresh_status()
+    view._set_busy(True)
+    gate.release()
+    view._set_busy(False)
+    assert view.last_seen_running() is None
+
+
+def test_a_poll_that_swallowed_an_actions_refresh_is_not_an_answer_and_is_asked_again(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Asked while idle, answered after a whole Start: that Start's own refresh was dropped.
+
+    `refresh_status()` returns early while a poll is in flight, so the Start's
+    end-of-action refresh never ran, and the one answer left is the "stopped"
+    read before the containers came up. Kept, it let a removal forget a running
+    server without stopping it (T95 review, round 1, the last hole).
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    ps.names = ""
+    view.refresh_status()  # the 5 s poll, asked while idle
+    stale = view.services.controller.status()
+    ((_work, on_done, on_error),) = gate.queued
+    gate.queued = [(lambda: stale, on_done, on_error)]  # "stopped", read now, answered later
+
+    gate.hold = False
+    view.start_server()  # runs to the end; its refresh finds the poll pending
+    assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
+    assert not view._busy
+
+    gate.hold = True
+    queued, gate.queued = gate.queued, []
+    for work, done, error in queued:
+        run_inline(work, done, error)  # the late "stopped" answers
+
+    assert view.last_seen_running() is None, "the answer from before the Start was trusted"
+    assert len(gate.queued) == 1, "the refresh the Start lost was never asked again"
+    gate.release()
+    assert view.last_seen_running() is True
+
+
+def test_a_failed_poll_that_swallowed_a_refresh_asks_again_too(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    view.refresh_status()
+    view.refresh_status()  # dropped: the first is still out
+    ((_work, on_done, on_error),) = gate.queued
+
+    def no_docker() -> NoReturn:
+        raise RuntimeError("Cannot connect to the Docker daemon")
+
+    gate.queued = []
+    run_inline(no_docker, on_done, on_error)
+
+    assert view.last_seen_running() is None
+    assert len(gate.queued) == 1, "the dropped refresh was never asked again"
+    ps.names = "ac-worldserver\n"
+    gate.release()
+    assert view.last_seen_running() is True
+    gate.hold = True
+    view.refresh_status()
+    gate.release()
+    assert not gate.queued, "an answer nothing superseded asked again"
+
+
+def test_the_five_second_tick_never_supersedes_the_poll_it_finds_in_flight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A `docker ps` slower than the tick is not a reason to ask again (T95 review, Task 2).
+
+    Were the tick to count, every answer on a slow Docker Desktop would be
+    thrown away and re-asked at once: back-to-back polls per tab, and a
+    `last_seen_running()` that is never anything but None. Only an action's
+    own end-of-action refresh and the Refresh button make an answer stale.
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    ps.names = "ac-worldserver\n"
+    view._timer.timeout.emit()  # the tick asks
+    assert len(gate.queued) == 1
+    view._timer.timeout.emit()  # and ticks again while the poll is still out
+    assert len(gate.queued) == 1, "a tick queued a second poll"
+    queued, gate.queued = gate.queued, []
+    for work, done, error in queued:
+        run_inline(work, done, error)
+    assert not gate.queued, "a tick made the poll in flight ask again"
+    assert view.last_seen_running() is True, "a tick made a good answer unknown"
+
+
+def _refusal_while_held(view: ControllerView, gate: _Gate, press: Callable[[], None]) -> str | None:
+    """Press with the job held, read the refusal, let the job finish, and prove it lifts."""
+    gate.hold = True
+    press()
+    assert gate.queued, "the press started no job"
+    refusal = view.forget_refusal()
+    gate.release()
+    assert view.forget_refusal() is None, "the refusal outlived the job"
+    return refusal
+
+
+def test_a_removal_is_refused_while_a_backup_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
+
+    def refuse() -> NoReturn:
+        raise OSError("disk full")
+
+    view.services.backup = refuse
+    assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
+
+
+def test_a_removal_is_refused_while_a_restore_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The one that matters most: a stop under a half-written restore."""
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    _add_backup(view, tmp_path)
+    view.show_restore_plan()
+    assert _refusal_while_held(view, gate, view.run_restore) == forgetting.RESTORE_RUNNING
+
+
+def test_a_removal_is_refused_while_a_module_action_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        job_runner=gate,
+        prompt_asker=lambda parent, manifest, prompts, **_: {p.key: "42" for p in prompts},
+    )
+    view.modules_panel.select("mod-ah-bot")
+    refusal = _refusal_while_held(view, gate, lambda: view._module_action("install"))
+    assert refusal == forgetting.module_running("install mod-ah-bot")
+
+
+def test_a_removal_is_refused_while_a_custom_module_installs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        job_runner=gate,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    refusal = _refusal_while_held(view, gate, view.install_module_from_link)
+    assert refusal == forgetting.module_running("install from link mod-my-thing")
+
+
+def test_a_removal_is_refused_while_a_network_change_applies(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    view.show_network_plan()
+    assert _refusal_while_held(view, gate, view.apply_network_plan) == forgetting.NETWORK_RUNNING
+
+    def refuse(_plan: object) -> NoReturn:
+        raise OSError("permission denied")
+
+    view.services.network_apply = refuse
+    view.show_network_plan()
+    assert _refusal_while_held(view, gate, view.apply_network_plan) == forgetting.NETWORK_RUNNING
 
 
 # -- the rebuild control (the action `_format_report` has always named) --------
@@ -7769,7 +8201,7 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
     assert bmah[0].data.family == "keg" and bmah[0].data.catalogued is True
 
 
-def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker(
+def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach_docker(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The button's whole case is an install that is gone — Docker usually with it (T54).
@@ -7804,8 +8236,8 @@ def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker
     view.refresh_status()
 
     assert view.forget_install_button is not None
-    assert (
-        not view.forget_install_button.isHidden()
+    assert _highlighted(
+        view.forget_install_button
     ), "the poll failed, so the user is told to press a button they cannot see"
     # The failure is still reported — this must not paper over Docker being gone.
     assert "Docker not reachable" in view.status_label.text()

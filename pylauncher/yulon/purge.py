@@ -78,7 +78,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon import dbsecret, docker, logsnap, platform, rmtree
+from yulon import dbsecret, docker, forgetting, logsnap, platform, rmtree
 from yulon.catalog import composegen
 from yulon.log import get_logger
 from yulon.ownership import Ownership
@@ -218,13 +218,13 @@ def refusal_for(
 
     `UNCLAIMED` also covers a `server_dir` that does not exist at all — reading
     a record out of a folder that is not there answers exactly like reading one
-    out of a folder that never had one (T34). That case alone earns a fourth
-    sentence pointing at the way out this refusal itself cannot offer — unless
-    `wsl_distro` names one, because the Forget control this points at is itself
-    hidden for a distro install (`server_dir` there is a path on THIS process,
-    not inside the distro, so `folder_is_gone()` cannot answer for it either;
-    review, T34 round 2). Defaulted so every caller before this one is
-    unchanged.
+    out of a folder that never had one (T34). Either way the refusal ends on the
+    way out it cannot offer itself: taking the server off Yu'lon's list, which
+    deletes nothing (T95). A folder confirmed gone gets the "gone for good"
+    wording; one that is still there, or a distro install whose `server_dir` is
+    a path on THIS process and not inside the distro (so `folder_is_gone()`
+    cannot answer for it; review, T34 round 2), is told to stop Yu'lon listing
+    it. Defaulted so every caller before this one is unchanged.
     """
     if ownership is Ownership.OWNED:
         return ""
@@ -239,7 +239,17 @@ def refusal_for(
         f"{server_dir}, so this folder is not Yu'lon's to delete. Nothing was removed."
     )
     if wsl_distro is None and platform.folder_is_gone(server_dir):
-        sentence += ' If the folder is gone for good, "Forget this install…" drops this tab.'
+        sentence += (
+            f' If the folder is gone for good, "{forgetting.BUTTON_LABEL}" on the Server tab '
+            "drops this tab."
+        )
+    else:
+        # T95: the adopted install's way off the list. Forgetting it deletes nothing.
+        sentence += (
+            " To stop Yu'lon listing it without deleting anything, press the × on its tab in "
+            f'the sidebar, or "{forgetting.BUTTON_LABEL}" on the Server tab or in the tab\'s '
+            "right-click menu."
+        )
     return sentence
 
 
