@@ -7610,11 +7610,13 @@ class ControllerView(QWidget):
             return
         if action == "install" and self._stopped_for_the_client(f"install {manifest.id}", manifest):
             return
-        if action in ("install", "update"):
+        relative = reapplies_on_top(manifest)
+        if action in ("install", "update") and relative:
             # T115, before any question (T55's order): a mob multiplier applied
             # with values nobody can read cannot be run again safely, and no
             # answer in the dialog would change that. The same sentence the
-            # applier raises. One small JSON read, as `_module_values()` does.
+            # applier raises. One small JSON read, as `_module_values()` does,
+            # and only for the four relative mods.
             refusal = applier.reapply_refusal(manifest)
             if refusal is not None:
                 self._module_pending = None
@@ -7627,7 +7629,7 @@ class ControllerView(QWidget):
         again = (
             action == "update"
             or (row is not None and row.data.installed)
-            or (reapplies_on_top(manifest) and applier.applied_record(manifest)[0] is not None)
+            or (relative and applier.applied_record(manifest)[0] is not None)
         )
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action], again=again)
         if not go_ahead:

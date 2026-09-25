@@ -105,9 +105,10 @@ REMEMBERED_NOTE = (
 
 REMOVE_NO_RECORD_NOTE = (
     "Yu'lon has no record that this is applied to this server's database now: it may have "
-    "been installed by an older version, or removed already. Remove divides by the values "
-    "below, so enter the ones it was installed with (what is filled in is your last answer, "
-    "else the default). If it is not applied now, Cancel: removing it would still divide."
+    "been installed by an older version, or removed already. Remove undoes it with the values "
+    "below (a multiplier is divided back out), so enter the ones it was installed with; what "
+    "is filled in is your last answer, else the default. If it is not applied now, Cancel: "
+    "Remove would still change the database."
 )
 """Shown whenever Remove has to ask (T104 fix wave; reworded for T115).
 
