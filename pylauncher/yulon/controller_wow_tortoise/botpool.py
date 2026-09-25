@@ -78,6 +78,12 @@ Press = Callable[[threading.Event | None], Iterator[str]]
 """`LatestRoute.press`'s shape: cancel in, lines out."""
 
 
+AFTER_A_STOP = (
+    "The enrolment is saved in the database as soon as it is made, so the next start of "
+    "the server loads those bots, even if this job stops before its restart."
+)
+
+
 def console_steps(why: str) -> str:
     """The one message a player reads when this app could not run the adoption itself."""
     return (
@@ -110,7 +116,22 @@ class Unreached:
     why: str
 
 
-Outcome = Adopted | Unreached
+@dataclass(frozen=True)
+class Unconfirmed:
+    """A confirm went out and no answer came back, so the accounts MAY be enrolled.
+
+    Its own outcome and not an `Unreached`, because what follows differs
+    (cold review, round 1). SOAP queues the command on the world thread, so a
+    confirm whose answer timed out has usually still run -- and a second
+    channel's preview then says "already managed", which read as "nothing to
+    do" and skipped the restart. After one of these no channel is asked
+    anything again and the world is restarted anyway.
+    """
+
+    why: str
+
+
+Outcome = Adopted | Unreached | Unconfirmed
 
 
 def read_preview(text: str) -> Preview | None:
@@ -120,20 +141,38 @@ def read_preview(text: str) -> Preview | None:
     an answer, and reading it as "nothing to adopt" would skip the one channel
     that can run it.
     """
-    if any(line in text for line in _NOTHING):
-        return Preview(pending=0, challenge="")
+    nothing = any(line in text for line in _NOTHING)
     pending = _PENDING.search(text)
     challenge = _CHALLENGE.search(text)
+    wants = challenge is not None or (pending is not None and int(pending.group(1)) > 0)
+    if nothing and wants:
+        # Both kinds of line in one capture: the attach console hands back
+        # everything printed between two prompts, and this is not one answer.
+        # Zero would skip the adoption, so it is unreadable (Codex, round 1).
+        return None
+    if nothing:
+        return Preview(pending=0, challenge="")
     if pending is None or challenge is None:
         return None
     return Preview(pending=int(pending.group(1)), challenge=challenge.group(1))
 
 
-def adopt(channel: Channel, *, pause: Callable[[float], None] = time.sleep) -> Outcome:
-    """Preview, then confirm at once; ask again only where asking again cannot write twice."""
+def adopt(
+    channel: Channel,
+    *,
+    pause: Callable[[float], None] = time.sleep,
+    cancel: threading.Event | None = None,
+) -> Outcome:
+    """Preview, then confirm at once; ask again only where asking again cannot write twice.
+
+    `cancel` is read before each command, so a Cancel pressed while this runs
+    stops it before the next one goes out.
+    """
     previews_unanswered = 0
     rounds = 0
     while rounds < TRIES:
+        if _cancelled(cancel):
+            return Unreached(CANCELLED)
         answer = channel.send(PREVIEW)
         if not answer.known:
             previews_unanswered += 1
@@ -146,11 +185,13 @@ def adopt(channel: Channel, *, pause: Callable[[float], None] = time.sleep) -> O
             return Unreached(_first_line(answer) or "the server answered something else")
         if preview.pending == 0:
             return Adopted(0)
+        if _cancelled(cancel):
+            return Unreached(CANCELLED)
         rounds += 1
         confirm = channel.send(CONFIRM.format(challenge=preview.challenge))
         if not confirm.known:
-            # Never sent again: the registration may have happened.
-            return Unreached(confirm.reason or "the server did not answer the confirm")
+            # Never sent again, on this channel or any other: it may have run.
+            return Unconfirmed(confirm.reason or "the server did not answer the confirm")
         adopted = _ADOPTED.search(confirm.text)
         if adopted is not None:
             return Adopted(int(adopted.group(1)))
@@ -158,6 +199,13 @@ def adopt(channel: Channel, *, pause: Callable[[float], None] = time.sleep) -> O
             return Unreached(_first_line(confirm) or "the server refused the confirm")
         logger.info("adoption refused: the bot account set moved since the preview; asking again")
     return Unreached("new bot accounts kept appearing between the preview and the confirm")
+
+
+CANCELLED = "the job was cancelled"
+
+
+def _cancelled(cancel: threading.Event | None) -> bool:
+    return cancel is not None and cancel.is_set()
 
 
 def _first_line(answer: Answer) -> str:
@@ -223,27 +271,45 @@ def after_update(
     reasons: list[str] = []
     outcome: Outcome = Unreached("no command channel is set up for this server")
     for channel in channels():
-        outcome = adopt(channel, pause=pause)
-        if isinstance(outcome, Adopted):
+        outcome = adopt(channel, pause=pause, cancel=cancel)
+        if not isinstance(outcome, Unreached):
+            # Adopted, or a confirm that went out unanswered: either way no
+            # other channel is asked anything, and never a second confirm.
             break
         reasons.append(outcome.why)
+        if outcome.why == CANCELLED:
+            break
     if isinstance(outcome, Unreached):
         yield console_steps("; ".join(reasons) or outcome.why)
         return
-    if outcome.count == 0:
+    if isinstance(outcome, Adopted) and outcome.count == 0:
         yield "Every bot account was already enrolled; nothing to do."
         return
-    yield (
-        f"Enrolled {outcome.count} bot account(s). Restarting the server so their characters "
-        "log in again…"
-    )
+    if isinstance(outcome, Unconfirmed):
+        yield (
+            f"The enrol command was sent but its answer never came ({outcome.why}), so it may "
+            "well have run. Restarting the server so any bots it enrolled log in again. If the "
+            f"older bots are still missing afterwards, type `{PREVIEW}` at the server console "
+            "(the Console tab), then the `bot pool adopt confirm …` line it prints, then restart."
+        )
+    else:
+        yield (
+            f"Enrolled {outcome.count} bot account(s). Restarting the server so their "
+            "characters log in again…"
+        )
+    if _cancelled(cancel):
+        yield (
+            "The restart was not started because the job was cancelled. Restart the server "
+            f"from the Server tab to bring the older bots online. {AFTER_A_STOP}"
+        )
+        return
     try:
         restart()
     except Exception as exc:  # noqa: BLE001 - the update succeeded; this is one press left
         logger.warning(f"the restart after the adoption failed: {exc}")
         yield (
-            f"The bot accounts are enrolled, but the restart failed ({exc}). Restart the "
-            "server from the Server tab and the older bots log in again."
+            f"The restart failed ({exc}). Restart the server from the Server tab and the older "
+            f"bots log in again. {AFTER_A_STOP}"
         )
         return
     yield "Restarted. The bots come online over the next few minutes."

@@ -154,7 +154,7 @@ def test_a_confirm_with_no_answer_is_never_sent_again() -> None:
     """A write that may have run is not retried (`channel.Answer.indeterminate`)."""
     channel = ScriptedChannel([yes(PREVIEW_PENDING), TIMEOUT])
     outcome = botpool.adopt(channel, pause=lambda _s: None)
-    assert isinstance(outcome, botpool.Unreached)
+    assert isinstance(outcome, botpool.Unconfirmed)
     assert channel.sent == [botpool.PREVIEW, CONFIRM]
 
 
@@ -369,3 +369,99 @@ def test_the_tortoise_tab_update_press_runs_the_adoption_after_the_update(
     assert lines[0] == "engine: updated"
     assert typed == [botpool.PREVIEW, CONFIRM]
     assert lifecycle == ["stop", "start"]
+
+
+# ------------------------------------------------------------------ review round 1
+
+
+def test_a_soap_confirm_with_no_answer_is_not_followed_by_the_console_and_still_restarts() -> None:
+    """Cold review, Important. SOAP queues the command on the world thread, so a
+    confirm whose answer timed out has usually still run. A console preview after
+    it then says "already managed", which read as nothing to do: no restart, bots
+    offline. Once a confirm went out unanswered no channel is asked again, and the
+    world is restarted because the enrolment may have happened."""
+    soap = ScriptedChannel([yes(PREVIEW_PENDING), TIMEOUT])
+    console = ScriptedChannel([yes(PREVIEW_ALL_MANAGED)])
+    h = Harness(heads=[OLD, NEW], channels=[soap, console])
+    lines = h.run()
+    assert soap.sent == [botpool.PREVIEW, CONFIRM]
+    assert console.sent == []
+    assert h.restarts == ["restart"]
+    assert "may" in "\n".join(lines[1:]).lower()
+
+
+def test_a_capture_holding_a_pending_preview_and_a_no_op_line_is_unreadable_not_zero() -> None:
+    """Codex, medium: interleaved console output can carry both. Zero would skip
+    the adoption, so the mixed capture is refused as unreadable."""
+    mixed = PREVIEW_PENDING + "\nEvery matching account is already managed."
+    assert botpool.read_preview(mixed) is None
+    assert botpool.read_preview("Nothing to adopt.\n" + PREVIEW_PENDING) is None
+
+
+def test_a_cancel_before_the_adoption_sends_nothing_and_prints_the_console_steps() -> None:
+    import threading
+
+    cancel = threading.Event()
+    soap = ScriptedChannel([])
+    h = Harness(heads=[OLD, NEW], channels=[soap])
+
+    def update(_c: object) -> Iterator[str]:
+        yield "updated"
+        cancel.set()
+
+    lines = list(
+        botpool.after_update(
+            update,
+            cancel,
+            module_dir=Path("mod"),
+            head=h.head,
+            channels=lambda: [soap],
+            restart=h.restart,
+            pause=lambda _s: None,
+        )
+    )
+    assert soap.sent == [] and h.restarts == []
+    assert "bot pool adopt preview" in lines[-1]
+
+
+def test_a_cancel_after_the_confirm_does_not_start_the_restart() -> None:
+    import threading
+
+    cancel = threading.Event()
+
+    class CancelOnConfirm(ScriptedChannel):
+        def send(self, command: str) -> Answer:
+            answer = super().send(command)
+            if command.startswith("bot pool adopt confirm"):
+                cancel.set()
+            return answer
+
+    soap = CancelOnConfirm([yes(PREVIEW_PENDING), yes(CONFIRMED)])
+    h = Harness(heads=[OLD, NEW], channels=[soap])
+    lines = list(
+        botpool.after_update(
+            lambda _c: iter(["updated"]),
+            cancel,
+            module_dir=Path("mod"),
+            head=h.head,
+            channels=lambda: [soap],
+            restart=h.restart,
+            pause=lambda _s: None,
+        )
+    )
+    assert h.restarts == []
+    assert "restart" in lines[-1].lower()
+
+
+def test_a_restart_that_fails_says_the_next_start_loads_the_bots() -> None:
+    """Codex, high (reduced): the registry rows are written before the restart, so a
+    restart that never happens -- a failure, or Yu'lon dying -- is repaired by any
+    later start of the world. The line says so rather than implying lost work."""
+    soap = ScriptedChannel([yes(PREVIEW_PENDING), yes(CONFIRMED)])
+    h = Harness(heads=[OLD, NEW], channels=[soap])
+
+    def boom() -> None:
+        raise RuntimeError("docker said no")
+
+    h.restart = boom  # type: ignore[method-assign]
+    assert "next start" in h.run()[-1].lower()
