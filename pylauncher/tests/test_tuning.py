@@ -710,8 +710,14 @@ def test_a_write_that_fails_leaves_the_file_whole(
     """A truncate-then-write interrupted leaves a conf with half a file in it."""
     path = _write(tmp_path, CONF, CLEAN)
 
+    real_replace = tuning.os.replace
+
     def boom(src: object, dst: object) -> None:
-        raise OSError("no space left on device")
+        # Only the CONF's rename: the backup's own rename (T94 fix round 2)
+        # is the step before, and must land for the backup to exist.
+        if Path(str(dst)) == path:
+            raise OSError("no space left on device")
+        real_replace(src, dst)  # type: ignore[arg-type]
 
     monkeypatch.setattr(tuning.os, "replace", boom)
     with pytest.raises(OSError):

@@ -436,14 +436,52 @@ def _newline_of(raw: str) -> str:
     return "\r\n" if "\r\n" in raw else "\n"
 
 
-def backup(path: Path, *, now: datetime | None = None) -> Path:
+PRIVATE_MODE = 0o600
+"""What a copy is created with, before it takes its source's mode (`private_copy`)."""
+
+
+def private_copy(src: Path, dst: Path) -> None:
+    """Copy `src` to a NEW file `dst`, owner-only while the bytes land, then with `src`'s mode.
+
+    Not `shutil.copy2`: that creates `dst` at the umask default (0644, say) and
+    sets the source's mode only after the bytes are in, so a copy of a CMaNGOS
+    conf -- the database password is in it -- is readable by every local
+    account for that moment (T94 final review). Here the mode is asked for in
+    the creating syscall (`O_EXCL`: never someone else's file), the bytes are
+    copied, and `copystat` then gives `dst` exactly `src`'s mode and times, so a
+    backup or a restore keeps the file's own mode (the gate: a conf a container
+    user reads must not come back owner-only). A POSIX guarantee; the mode is a
+    no-op on Windows (`conf._write`'s docstring). Raises `OSError`; a caller
+    removes a half-written `dst`.
+    """
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_MODE)
+    with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+        shutil.copyfileobj(inp, out)
+    shutil.copystat(src, dst)
+
+
+def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     """Copy `path` beside itself, stamped, and return where it went.
+
+    `tag`, when given, goes between the stamp and `.bak` (T94: a Reset to
+    default's backups are `<name>.<stamp>.reset-<press>.bak`, so an Undo after
+    a restart can tell them from a save's and find every file of one press).
+    After the fixed-width stamp, so a name sort is still a time sort and
+    `backups_of()` still lists them.
 
     The stamp comes from the clock rather than from a counter: two saves a
     minute apart are two backups, and a name that had to be searched for a free
     suffix would be a second thing to get wrong. Metadata is copied too
-    (`copy2`), so the backup's own mtime says when the ORIGINAL was last
-    touched and the name says when it was taken.
+    (`private_copy`'s `copystat`), so the backup's own mtime says when the
+    ORIGINAL was last touched and the name says when it was taken.
+
+    The copy (`private_copy`: owner-only while it is written, then the file's
+    own mode) goes to a `.yulon-tmp` sibling and is renamed onto the `.bak` name
+    only once it is whole (T94 fix round 2): `copy2` straight onto the target
+    leaves half a file when it dies (ENOSPC), and a half `.bak` is worse than
+    none -- `backups_of()` lists it as the newest, so Revert would restore it,
+    and a Reset to default's Undo reads a tagged one as a record. A failure
+    removes the sibling and raises; nothing named `.bak` is left.
     """
     when = now or datetime.now()
     for _ in range(_BACKUP_TRIES):
@@ -453,9 +491,20 @@ def backup(path: Path, *, now: datetime | None = None) -> Path:
         # result, Save again is well inside one second, and the second backup
         # landed on top of the first -- destroying the only record of the file
         # the user actually wanted back.
-        target = path.with_name(f"{path.name}.{when:%Y%m%d-%H%M%S-%f}.bak")
+        target = path.with_name(
+            f"{path.name}.{when:%Y%m%d-%H%M%S-%f}{'.' + tag if tag else ''}.bak"
+        )
         if not target.exists():
-            shutil.copy2(path, target)
+            tmp = target.with_name(f"{target.name}{TEMP_SUFFIX}")
+            try:
+                private_copy(path, tmp)
+                os.replace(tmp, target)
+            except BaseException:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(f"could not remove {tmp}: {exc}")
+                raise
             return target
         # Not a counter suffix: `...-2.bak` sorts BEFORE `....bak`, which would
         # quietly make `backups_of()` report the wrong one as newest. The next
@@ -633,9 +682,10 @@ def restore(from_backup: Path, target: Path) -> None:
 def backups_of(path: Path) -> tuple[Path, ...]:
     """Every backup this module has taken of `path`, newest last.
 
-    Sorted by NAME, which is the stamp, and not by mtime: `copy2` gives a backup
-    the mtime of the file it copied, so two backups of an untouched file share
-    an mtime and the newest of them is not the last one taken.
+    Sorted by NAME, which is the stamp, and not by mtime: `private_copy`'s
+    `copystat` gives a backup the mtime of the file it copied, so two backups
+    of an untouched file share an mtime and the newest of them is not the last
+    one taken.
     """
     try:
         found = [p for p in path.parent.iterdir() if p.name.startswith(f"{path.name}.")]
