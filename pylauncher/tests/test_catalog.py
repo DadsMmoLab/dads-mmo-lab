@@ -219,8 +219,8 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "413bea61a85e20d9caef7d66fc601a661fdddd9d",
-        "mod-playerbots/mod-playerbots": "b949b50bfcdd4fab937781bac2d7765e39330e4b",
+        "mod-playerbots/azerothcore-wotlk": "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
+        "mod-playerbots/mod-playerbots": "7bae1b5c58c76a0aa20381155edc08096d1485b2",
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "f82e7d679c283b66bc2adc1b751aa1275e655673",
@@ -233,15 +233,18 @@ GATE_PINS = {
         "cmangos/classic-db": "22b51464f1625f6ef6275771de1f5466c6f5d19e",
     },
 }
-"""The commit each shipped source was pinned to on 2026-09-05, and the gate that ran on it.
+"""The commit each shipped source is pinned to, and the gate that ran on it.
 
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
-`dest`), never off a branch tip:
+`dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26:
 
-* `wow-wotlk`: `/home/user/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
-  2026-09-04 run installed and logged into (`.notes/gates/7.1-ubuntu-2026-09-04-clean/`;
-  its `gate71-press2.log` prints `AzerothCore revision : 413bea61a85e+` from the
-  build and names no commit for the module, so both were read off that box).
+* `wow-wotlk`: T134's fresh install on `yulon-fedora-gate` (SELinux enforcing)
+  2026-09-26, whose press read core `7f12e89e` and module `7bae1b5c` out of the
+  install's own checkouts and whose world printed `AzerothCore rev. 7f12e89ee5f4+`.
+  The two are one pair: the core's f15ad9494 moved the playerbots database out of
+  the core and the module's af078829 took it in, so neither builds with the
+  other's older commit. Until then it was `413bea61`/`b949b50b`, gate 7.1's clean
+  2026-09-04 run on `yulon-ubuntu`.
 * `wow-tbc`: `/home/user/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
   2026-09-04 (`.notes/gates/7.7-win11-tbc/source-identity.txt`) was on
   `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate
