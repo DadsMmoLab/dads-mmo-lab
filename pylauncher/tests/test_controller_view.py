@@ -2381,12 +2381,15 @@ def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_
     text = view.network_text.toPlainText()
     assert "Mode: internet" in text, text
     assert "firewall-cmd --permanent --zone=docker --add-port=3724/tcp" in text, text
+    assert "\n  firewall-cmd --zone=docker --add-port=3724/tcp\n" in text, text
+    assert "\n  firewall-cmd --zone=public --add-port=8085/tcp\n" in text, text
     assert "firewall-cmd --reload" not in text, text
     assert "REFUSED" not in text, text
     assert (
         "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public right now "
-        "(zone docker accepts all traffic: its target is ACCEPT), so the permanent rules are "
-        "written without a reload."
+        "(zone docker accepts all traffic: its target is ACCEPT), so no reload is needed: the "
+        "permanent rules are written and the ports are also added to the running firewall "
+        "now, which keeps them open even if a running rule lapses before Apply."
     ) in text, text
     view.close()
 

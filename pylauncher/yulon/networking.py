@@ -2194,6 +2194,17 @@ def _already_admitted(
     The third value is that "every pair is in effect at runtime" reading, for
     the zone-breadth note, which used to infer "in effect" from "a reload is
     in the list" alone.
+
+    When the reload goes and a permanent write stays, the same pair is also
+    added at RUNTIME (`firewall-cmd --zone=Z --add-port=P`, no `--permanent`),
+    right after the permanent writes. The runtime yes was read when the plan
+    was shown and `apply()` does not ask again, so a timed or runtime-only
+    rule that lapsed in between would leave the port closed with nothing to
+    load the permanent one until the next reload or boot (Codex review of
+    T140). Adding a port cannot take reachability away, and it is only ever
+    emitted with no reload in the plan — the reload drops every runtime-only
+    rule (`_reloads_firewalld()`), so the two never meet. A pair whose write
+    was dropped needs none: firewalld has it on both sides.
     """
     pairs = [pair for pair in (_permanent_port_write(c) for c in commands) if pair is not None]
     if not pairs:
@@ -2206,6 +2217,13 @@ def _already_admitted(
         for c in commands
         if _permanent_port_write(c) not in saved and not (in_effect and _reloads_firewalld(c))
     ]
+    written = [p for p in (_permanent_port_write(c) for c in kept) if p is not None]
+    if in_effect and written:
+        last = max(i for i, c in enumerate(kept) if _permanent_port_write(c) is not None)
+        runtime = [
+            ["firewall-cmd", f"--zone={zone}", f"--add-port={port}"] for zone, port in written
+        ]
+        kept = kept[: last + 1] + runtime + kept[last + 1 :]
     runtime_accepting = [p[0] for p in pairs if said[p].runtime_by_target] if in_effect else []
     saved_accepting = [p[0] for p in saved if said[p].permanent_by_target]
     if in_effect and len(saved) == len(pairs):
@@ -2217,8 +2235,9 @@ def _already_admitted(
     elif in_effect:
         note = (
             f"firewalld already admits {_said_pairs(pairs)} right now"
-            f"{_accepting(runtime_accepting)}, so the permanent rules are written without a "
-            "reload."
+            f"{_accepting(runtime_accepting)}, so no reload is needed: the permanent rules are "
+            "written and the ports are also added to the running firewall now, which keeps "
+            "them open even if a running rule lapses before Apply."
         )
     elif saved:
         note = (
