@@ -2325,13 +2325,18 @@ def test_the_loopback_plan_shown_in_the_tab_says_what_it_costs(
 def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_refusal(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T140, out of the real widget: the stock Steam Deck's plan as the owner reads it.
+    """T140, out of the real widget: the Steam Deck's plan as the owner reads it.
 
-    `public` on SteamOS ships `1024-65535/tcp`, so firewalld answers yes for
-    both game ports in both zones. Before T140 this text listed four
+    firewalld answers the way an unelevated probe was measured to be answered
+    on 2026-09-26 (Fedora, firewalld and Docker, uid 1000 without sudo):
+    `public`'s port range admits both game ports at runtime, Docker's `docker`
+    zone answers `--query-port` no but has `target: ACCEPT`, and every
+    `--permanent` read is rc 253. Before T140 this text listed the four
     `--permanent` writes and then "REFUSED to run `firewall-cmd --reload`",
-    on every Apply. Asserted through `_format_plan()`'s output because a line
-    the formatter dropped is a line nobody reads.
+    on every Apply. Now the writes stay (the saved side cannot be read), the
+    reload and the refusal go, and one line says why. Asserted through
+    `_format_plan()`'s output because a line the formatter dropped is a line
+    nobody reads.
     """
     zoning = networking.FirewalldZoning(
         write=("docker", "public"),
@@ -2341,6 +2346,19 @@ def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_
         configured_default_zone="public",
         machine_made=("docker",),
     )
+
+    def unelevated(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if "--permanent" in argv:
+            return subprocess.CompletedProcess(argv, 253, "", "Authorization failed.")
+        if argv[-1] == "--info-zone=docker":
+            return subprocess.CompletedProcess(argv, 0, "docker (active)\n  target: ACCEPT\n", "")
+        if argv[-1].startswith("--info-zone="):
+            return subprocess.CompletedProcess(argv, 0, "public\n  target: default\n", "")
+        docker = "--zone=docker" in argv
+        return subprocess.CompletedProcess(
+            argv, 1 if docker else 0, "no\n" if docker else "yes\n", ""
+        )
+
     services = _services(ps, tmp_path, [])
     services.network_plan = lambda mode: networking.plan(
         WOTLK,
@@ -2353,20 +2371,20 @@ def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_
         detect_ssh=lambda: networking.SshRoute(listeners_readable=False),
         detect_firewalld=lambda: "running",
         detect_zones=lambda daemon: zoning,
-        detect_admission=lambda pairs: tuple(
-            networking.PortAdmission(zone, port, True, True) for zone, port in pairs
-        ),
+        detect_admission=lambda pairs: networking.detect_firewalld_admission(pairs, run=unelevated),
     )
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     view.internet_radio.setChecked(True)
     view.show_network_plan()
     text = view.network_text.toPlainText()
     assert "Mode: internet" in text, text
-    assert "Firewall commands:" not in text, text
+    assert "firewall-cmd --permanent --zone=docker --add-port=3724/tcp" in text, text
+    assert "firewall-cmd --reload" not in text, text
     assert "REFUSED" not in text, text
     assert (
-        "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public; "
-        "nothing to change and no reload needed."
+        "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public right now "
+        "(zone docker accepts all traffic: its target is ACCEPT), so the permanent rules are "
+        "written without a reload."
     ) in text, text
     view.close()
 

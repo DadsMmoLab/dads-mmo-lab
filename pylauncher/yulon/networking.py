@@ -1981,12 +1981,19 @@ class PortAdmission:
     — not authorized, not running, no bus, a timeout, a tool that is not there,
     output that is neither word. None is read exactly as False by every caller:
     an answer nobody got may never remove a command.
+
+    `runtime_by_target` / `permanent_by_target` say the yes came from the
+    zone's `target: ACCEPT` rather than from `--query-port` — Docker's own
+    `docker` zone admits every port that way and lists none (see
+    `_zone_accepts_everything()`) — so the plan can say why.
     """
 
     zone: str
     port: str
     runtime: bool | None
     permanent: bool | None
+    runtime_by_target: bool = False
+    permanent_by_target: bool = False
 
 
 _FIREWALLD_QUERY_TIMEOUT_SECONDS = 5.0
@@ -2019,6 +2026,43 @@ def _query_port(
     return None
 
 
+def _zone_accepts_everything(
+    run: Runner, prefix: tuple[str, ...], zone: str, *, permanent: bool
+) -> bool:
+    """True only when `firewall-cmd [--permanent] --info-zone=Z` has one line, `target: ACCEPT`.
+
+    Asked because `--query-port` reads the zone's PORT list and nothing else,
+    and Docker's zone admits by its target. Measured 2026-09-26 on Fedora with
+    firewalld and Docker running, as uid 1000 without sudo: `firewall-cmd
+    --zone=docker --query-port=3724/tcp` was rc 1 `no`, while `firewall-cmd
+    --info-zone=docker` was rc 0 and printed `docker (active)` and then
+    `  target: ACCEPT` — no ports, every port admitted. On the Deck the plan
+    writes to `docker` as well as `public`, so without this the reload was kept
+    and refused exactly as before.
+
+    ONLY `ACCEPT`, spelled so. `default`, `%%REJECT%%`, `REJECT` and `DROP` do
+    not admit a port the zone does not list, and anything else — a non-zero
+    exit, no `target:` line, two of them — is not an answer; each of those
+    returns False, which falls back to `--query-port`, i.e. to what the plan
+    did before. Unelevated, the `--permanent` form is rc 253 (measured, same
+    box and day), so it only ever says yes behind a prefix that works.
+    """
+    argv = [*prefix, "firewall-cmd", *(["--permanent"] if permanent else [])]
+    argv.append(f"--info-zone={zone}")
+    try:
+        proc = run(argv)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    targets = [
+        line.strip().removeprefix("target:").strip()
+        for line in proc.stdout.splitlines()
+        if line.strip().startswith("target:")
+    ]
+    return targets == ["ACCEPT"]
+
+
 def detect_firewalld_admission(
     pairs: tuple[tuple[str, str], ...],
     run: Runner | None = None,
@@ -2035,30 +2079,54 @@ def detect_firewalld_admission(
     wrote them, then refused the reload on an unsettled socket table, and said
     so again on every Apply.
 
-    A port inside a RANGE entry answers yes. Read in firewalld source (main,
-    2026-09-26), not measured: the runtime query ends in
-    `src/firewall/core/fw_policy.py` `query_port()` and the permanent one in
-    `src/firewall/server/config_zone.py` `queryPort()`, and both test each
-    entry with `portInPortRange()` (`src/firewall/functions.py`), so 3724
-    against `1024-65535/tcp` is yes for both. A port admitted some other way —
-    by a service (`ssh`, say) or by a zone whose target is ACCEPT — is not in
-    the zone's port list and answers no: a false "not admitted", which keeps
-    the write and the reload, i.e. today's plan. That is the safe direction.
+    A port inside a RANGE entry answers yes. At runtime that is MEASURED
+    (2026-09-26, Fedora with firewalld, as uid 1000 without sudo): a zone
+    listing `1025-65535/tcp` answered `--query-port=3724/tcp` and
+    `--query-port=8085/tcp` rc 0 `yes`. For the permanent side it is read in
+    firewalld source (main, 2026-09-26), not measured — unelevated, every
+    `--permanent` query there was rc 253: `src/firewall/server/config_zone.py`
+    `queryPort()` tests each entry with `portInPortRange()`
+    (`src/firewall/functions.py`), as the runtime path does in
+    `src/firewall/core/fw_policy.py` `query_port()`.
 
-    `prefix` is `probe_prefix()`'s, like every other probe here; the query
-    needs the same authority firewalld's listings do.
+    A zone whose target is ACCEPT admits every port and lists none, and
+    `--query-port` answers no for it — measured on Docker's `docker` zone the
+    same day. So each zone's target is read first (`_zone_accepts_everything()`)
+    and a zone that ACCEPTs is admitted for every pair without a port query.
+    A port admitted by a SERVICE (`ssh`, say) is still not in the port list and
+    answers no: a false "not admitted", which keeps the write and the reload,
+    i.e. the plan as it was. That is the safe direction.
+
+    Unelevated runtime reads — `--query-port` and `--info-zone` — are allowed:
+    measured rc 0/1 from an SSH session, which polkit's firewalld policy lets
+    read (`allow_any`), so a local desktop session is let too. `prefix` is
+    `probe_prefix()`'s, like every other probe here.
     """
     do = (
         run
         if run is not None
         else (lambda argv: runner.run(argv, timeout=_FIREWALLD_QUERY_TIMEOUT_SECONDS))
     )
+    zones = tuple(dict.fromkeys(zone for zone, _ in pairs))
+    accepts = {
+        (zone, permanent): _zone_accepts_everything(do, prefix, zone, permanent=permanent)
+        for zone in zones
+        for permanent in (False, True)
+    }
+
+    def answer(zone: str, port: str, *, permanent: bool) -> bool | None:
+        if accepts[(zone, permanent)]:
+            return True
+        return _query_port(do, prefix, zone, port, permanent=permanent)
+
     return tuple(
         PortAdmission(
             zone,
             port,
-            runtime=_query_port(do, prefix, zone, port, permanent=False),
-            permanent=_query_port(do, prefix, zone, port, permanent=True),
+            runtime=answer(zone, port, permanent=False),
+            permanent=answer(zone, port, permanent=True),
+            runtime_by_target=accepts[(zone, False)],
+            permanent_by_target=accepts[(zone, True)],
         )
         for zone, port in pairs
     )
@@ -2096,6 +2164,16 @@ def _said_pairs(pairs: Iterable[tuple[str, str]]) -> str:
     return "; ".join(f"{port} in {where(zones)}" for port, zones in by_port.items())
 
 
+def _accepting(zones: Iterable[str]) -> str:
+    """` (zone docker accepts all traffic: its target is ACCEPT)`, or "" when no zone did."""
+    named = list(dict.fromkeys(zones))
+    if not named:
+        return ""
+    if len(named) == 1:
+        return f" (zone {named[0]} accepts all traffic: its target is ACCEPT)"
+    return f" (zones {_and(named)} accept all traffic: their target is ACCEPT)"
+
+
 def _already_admitted(
     commands: list[list[str]], answers: Iterable[PortAdmission]
 ) -> tuple[list[list[str]], str | None, bool]:
@@ -2124,19 +2202,24 @@ def _already_admitted(
         for c in commands
         if _permanent_port_write(c) not in saved and not (in_effect and _reloads_firewalld(c))
     ]
+    runtime_accepting = [p[0] for p in pairs if said[p].runtime_by_target] if in_effect else []
+    saved_accepting = [p[0] for p in saved if said[p].permanent_by_target]
     if in_effect and len(saved) == len(pairs):
+        why = _accepting(runtime_accepting + saved_accepting)
         note = (
-            f"firewalld already admits {_said_pairs(pairs)}; nothing to change and no reload "
-            "needed."
+            f"firewalld already admits {_said_pairs(pairs)}{why}; nothing to change and no "
+            "reload needed."
         )
     elif in_effect:
         note = (
-            f"firewalld already admits {_said_pairs(pairs)} right now, so the permanent rules "
-            "are written without a reload."
+            f"firewalld already admits {_said_pairs(pairs)} right now"
+            f"{_accepting(runtime_accepting)}, so the permanent rules are written without a "
+            "reload."
         )
     elif saved:
         note = (
-            f"firewalld's saved configuration already admits {_said_pairs(saved)}, so "
+            f"firewalld's saved configuration already admits {_said_pairs(saved)}"
+            f"{_accepting(saved_accepting)}, so "
             f"{'those rules are' if len(saved) > 1 else 'that rule is'} not written again."
         )
     else:
@@ -3610,12 +3693,26 @@ def plan(
             # interface back, and finding that out from a dead session is how
             # round 4 was refuted.
             moved = ", ".join(zoning.moved_at_runtime)
+            # Worded on the command list as it now stands: when T140's
+            # question dropped the reload, "the reload this plan runs" is a
+            # reload that is not in the plan, and the move happens at the NEXT one.
+            reloads_here = any(_reloads_firewalld(c) for c in fw_cmds)
             settled = (
-                "and `FlushAllOnReload=yes` in /etc/firewalld/firewalld.conf means the reload "
-                "this plan runs WILL undo that move"
+                (
+                    "and `FlushAllOnReload=yes` in /etc/firewalld/firewalld.conf means the reload "
+                    "this plan runs WILL undo that move"
+                    if reloads_here
+                    else "and `FlushAllOnReload=yes` in /etc/firewalld/firewalld.conf means the "
+                    "next `firewall-cmd --reload` WILL undo that move (this plan runs none)"
+                )
                 if zoning.flush_all_on_reload is not False
-                else "and `FlushAllOnReload=no` in /etc/firewalld/firewalld.conf means the "
-                "reload will leave that move in place"
+                else (
+                    "and `FlushAllOnReload=no` in /etc/firewalld/firewalld.conf means the "
+                    "reload will leave that move in place"
+                    if reloads_here
+                    else "and `FlushAllOnReload=no` in /etc/firewalld/firewalld.conf means a "
+                    "reload would leave that move in place (this plan runs none)"
+                )
             )
             warnings.append(
                 f"firewalld's runtime zones and its permanent configuration disagree: "
@@ -3635,11 +3732,16 @@ def plan(
             # it BEFORE the reload installs it — which is exactly what round 5
             # did not do. What the user is entitled to is that the zone their
             # unbound interfaces sit in is about to change under them.
+            after = (
+                "the reload"
+                if any(_reloads_firewalld(c) for c in fw_cmds)
+                else "the next reload (this plan runs none)"
+            )
             warnings.append(
                 f"firewalld's running default zone is `{zoning.default_zone}` but "
                 f"`DefaultZone={zoning.configured_default_zone}` is what {_FIREWALLD_CONF} "
-                "says, and the file is what `firewall-cmd --reload` installs — so after the "
-                "reload every interface with no zone of its own is in "
+                "says, and the file is what `firewall-cmd --reload` installs — so after "
+                f"{after} every interface with no zone of its own is in "
                 f"`{zoning.configured_default_zone}`, not `{zoning.default_zone}`. Every "
                 "`firewall-cmd` listing tags the RUNNING one `(default)`, which is why no "
                 "other reading here can see this; `sudo firewall-offline-cmd "

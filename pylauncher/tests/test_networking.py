@@ -5532,6 +5532,71 @@ def test_no_intent_file_at_all_is_no_intent(tmp_path: Path) -> None:
 # --list-ports --zone=public` answered `1024-65535/tcp 1024-65535/udp`: both
 # game ports were admitted before Yu'lon wrote anything, so the reload the
 # plan refused was never needed, and the refusal came back on every Apply.
+#
+# The shape `_measured_unelevated` answers with was measured the same day on a
+# Fedora box running firewalld and Docker, as uid 1000 without sudo — which is
+# how the Deck's probes run — and it is the Deck's shape: the port-range zone
+# answers the runtime `--query-port` yes, Docker's `docker` zone answers it no
+# while its runtime `--info-zone` says `target: ACCEPT`, and every
+# `--permanent` read is rc 253.
+
+_AUTH_FAILED = (
+    "Authorization failed.\n    Make sure polkit agent is running or run the application as "
+    "superuser."
+)
+"""firewall-cmd's own text for rc 253 (`fail_if_not_authorized()`), as measured unelevated."""
+
+_DOCKER_ZONE_INFO = (
+    "docker (active)\n"
+    "  target: ACCEPT\n"
+    "  ingress-priority: 0\n"
+    "  egress-priority: 0\n"
+    "  icmp-block-inversion: no\n"
+    "  interfaces: br-0123456789ab docker0\n"
+)
+"""`firewall-cmd --info-zone=docker` at runtime, unelevated: rc 0, the head of it as measured."""
+
+
+def _range_zone_info(zone: str, target: str = "default") -> str:
+    """`--info-zone` of a zone that admits the game ports by a range entry, not by its target."""
+    return (
+        f"{zone} (default, active)\n"
+        f"  target: {target}\n"
+        "  icmp-block-inversion: no\n"
+        "  interfaces: wlan0\n"
+        "  services: dhcpv6-client\n"
+        "  ports: 1025-65535/tcp 1025-65535/udp\n"
+    )
+
+
+def _measured_unelevated(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """firewalld as uid 1000 without sudo reads it, measured 2026-09-26 (see the block above).
+
+    Runtime reads are allowed (rc 0/1; polkit let an SSH session read them,
+    so a local desktop session is let too); every `--permanent` read is rc 253.
+    """
+    assert argv[0] == "firewall-cmd", f"an unelevated probe carries no prefix: {argv}"
+    if "--permanent" in argv:
+        return subprocess.CompletedProcess(argv, 253, "", _AUTH_FAILED)
+    last = argv[-1]
+    if last == "--info-zone=docker":
+        return subprocess.CompletedProcess(argv, 0, _DOCKER_ZONE_INFO, "")
+    if last.startswith("--info-zone="):
+        return subprocess.CompletedProcess(argv, 0, _range_zone_info(last.split("=", 1)[1]), "")
+    if last.startswith("--query-port="):
+        docker = "--zone=docker" in argv
+        return subprocess.CompletedProcess(
+            argv, 1 if docker else 0, "no\n" if docker else "yes\n", ""
+        )
+    raise AssertionError(f"not a query this plan should make: {argv}")
+
+
+def _asking(
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]],
+) -> _Admission:
+    """The admission seam bound to the REAL `detect_firewalld_admission()` over a fake firewalld."""
+    return lambda pairs: networking.detect_firewalld_admission(pairs, run=run)
+
 
 _DECK_ZONING = networking.FirewalldZoning(
     write=("docker", "public"),
@@ -5553,6 +5618,17 @@ _DECK_WRITES = [
     ("firewall-cmd", "--permanent", "--zone=public", "--add-port=8085/tcp"),
 ]
 
+_PUBLIC_WRITES = [
+    ("firewall-cmd", "--permanent", "--zone=public", "--add-port=3724/tcp"),
+    ("firewall-cmd", "--permanent", "--zone=public", "--add-port=8085/tcp"),
+]
+
+_DECK_LINE = (
+    "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public right now "
+    "(zone docker accepts all traffic: its target is ACCEPT), so the permanent rules are "
+    "written without a reload."
+)
+
 
 def _answering(
     runtime: bool | None, permanent: bool | None, asked: list[tuple[str, str]] | None = None
@@ -5573,20 +5649,25 @@ def _never_asked(pairs: tuple[tuple[str, str], ...]) -> tuple[networking.PortAdm
     raise AssertionError(f"asked firewalld about {pairs} on a plan that must not ask")
 
 
-def test_t140_a_stock_steam_deck_is_told_the_ports_are_open_and_nothing_is_refused() -> None:
-    """The reported box: every game port admitted, runtime and permanent — no write, no reload.
+def test_t140_the_steam_deck_shape_drops_the_reload_and_the_refusal() -> None:
+    """The reported box, answered the way an unelevated probe is answered: no reload, no refusal.
 
-    SteamOS's `public` zone ships `1024-65535/tcp`, and firewalld answers a
-    `--query-port` for a port inside a range entry with yes (`portInPortRange`,
-    read in firewalld source). So the plan has nothing to write and nothing to
-    reload, the lockout guard has nothing to refuse, and the owner is told in
-    one line why the list is empty.
+    `public` admits both ports at runtime by its range entry; `docker` admits
+    them by its ACCEPT target, which `--query-port` does not see; the saved
+    side cannot be read at all. So the permanent writes stay (nobody could say
+    they are there), and the reload goes (everything is in effect already) —
+    which leaves the lockout guard nothing to refuse.
     """
 
     def never() -> networking.SshRoute:
         raise AssertionError("asked about SSH for a plan that reloads nothing")
 
-    asked: list[tuple[str, str]] = []
+    ran: list[list[str]] = []
+
+    def firewalld(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        ran.append(argv)
+        return _measured_unelevated(argv)
+
     p = networking.plan(
         WOTLK,
         "internet",
@@ -5598,82 +5679,86 @@ def test_t140_a_stock_steam_deck_is_told_the_ports_are_open_and_nothing_is_refus
         detect_ssh=never,
         detect_firewalld=lambda: "running",
         detect_zones=lambda daemon: _DECK_ZONING,
-        detect_admission=_answering(True, True, asked),
+        detect_admission=_asking(firewalld),
     )
-    assert asked == [
-        ("docker", "3724/tcp"),
-        ("public", "3724/tcp"),
-        ("docker", "8085/tcp"),
-        ("public", "8085/tcp"),
-    ], "every pair the plan would write, and nothing else"
-    assert p.firewall_commands == ()
+    assert ["firewall-cmd", "--info-zone=docker"] in ran
+    assert not any(
+        "--zone=docker" in argv and "--permanent" not in argv for argv in ran
+    ), "a zone that accepts everything needs no port-by-port runtime question"
+    assert list(p.firewall_commands) == _DECK_WRITES, "the saved side could not be read"
     assert p.refusals == ()
     assert not any("REFUSED" in w for w in p.warnings), p.warnings
-    assert (
-        "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public; "
-        "nothing to change and no reload needed."
-    ) in p.warnings
-    ran: list[list[str]] = []
+    assert _DECK_LINE in p.warnings
+    applied: list[list[str]] = []
     report = networking.apply(
-        p, sql=None, run=lambda argv: (ran.append(argv), subprocess.CompletedProcess(argv, 0))[1]
+        p,
+        sql=None,
+        run=lambda argv: (applied.append(argv), subprocess.CompletedProcess(argv, 0))[1],
     )
-    assert ran == [] and report.refusals == ()
+    assert [a[2:] for a in applied] == [list(c) for c in _DECK_WRITES]
+    assert report.refusals == ()
+
+
+def test_t140_an_elevated_reading_that_admits_everything_writes_nothing() -> None:
+    """Both sides answered yes for every pair: nothing to write, nothing to reload, one line."""
+    p = _firewalld_plan(daemon="running", route=_UNSETTLED, admitted=_answering(True, True))
+    assert p.firewall_commands == ()
+    assert p.refusals == ()
+    assert (
+        "firewalld already admits 3724/tcp and 8085/tcp in zone public; nothing to change and "
+        "no reload needed."
+    ) in p.warnings
+
+
+def test_t140_an_elevated_accept_target_is_admitted_on_both_sides() -> None:
+    """Elevated, `--permanent --info-zone=docker` is readable too; ACCEPT there is a saved yes."""
+
+    def elevated(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        rest = [a for a in argv if a != "--permanent"]
+        if rest[-1] == "--info-zone=docker":
+            return subprocess.CompletedProcess(argv, 0, _DOCKER_ZONE_INFO, "")
+        if rest[-1].startswith("--info-zone="):
+            return subprocess.CompletedProcess(argv, 0, _range_zone_info("public"), "")
+        return subprocess.CompletedProcess(argv, 0, "yes\n", "")
+
+    p = _firewalld_plan(
+        daemon="running", route=_UNSETTLED, zoning=_DECK_ZONING, admitted=_asking(elevated)
+    )
+    assert p.firewall_commands == () and p.refusals == ()
+    assert (
+        "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public "
+        "(zone docker accepts all traffic: its target is ACCEPT); nothing to change and no "
+        "reload needed."
+    ) in p.warnings
 
 
 def test_t140_ports_in_effect_but_not_saved_are_written_without_a_reload() -> None:
-    """Runtime yes, permanent no: the permanent rules go in, and the reload does not.
-
-    What a runtime-only `--add-port` (or a user who reloaded by hand after an
-    earlier plan and then lost the file) leaves behind: the ports are in
-    effect now, so writing them permanently is enough and there is nothing a
-    reload would add — and so nothing for the guard to refuse.
-    """
-    p = _firewalld_plan(
-        daemon="running",
-        route=_UNSETTLED,
-        zoning=_DECK_ZONING,
-        admitted=_answering(True, False),
-        mode="internet",
-    )
-    assert list(p.firewall_commands) == _DECK_WRITES
+    """Runtime yes, permanent no: the permanent rules go in, and the reload does not."""
+    p = _firewalld_plan(daemon="running", route=_UNSETTLED, admitted=_answering(True, False))
+    assert list(p.firewall_commands) == _PUBLIC_WRITES
     assert p.refusals == ()
     assert not any("REFUSED" in w for w in p.warnings), p.warnings
     assert (
-        "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public right now, "
-        "so the permanent rules are written without a reload."
+        "firewalld already admits 3724/tcp and 8085/tcp in zone public right now, so the "
+        "permanent rules are written without a reload."
     ) in p.warnings
 
 
 def test_t140_ports_saved_but_not_in_effect_still_need_the_reload_and_its_guard() -> None:
-    """Permanent yes, runtime no: nothing is written again, and the reload is the guard's call.
-
-    The permanent configuration has the ports and the running firewall does
-    not — a write made with `--permanent` and never reloaded. Writing them
-    again changes nothing; the reload is the one thing that puts them in
-    effect, so it stays, and on an unsettled table it is refused exactly as
-    before. With a settled route that names SSH it runs, SSH rule first.
-    """
-    refused = _firewalld_plan(
-        daemon="running",
-        route=_UNSETTLED,
-        zoning=_DECK_ZONING,
-        admitted=_answering(False, True),
-        mode="internet",
-    )
+    """Permanent yes, runtime no: nothing is written again, and the reload is the guard's call."""
+    refused = _firewalld_plan(daemon="running", route=_UNSETTLED, admitted=_answering(False, True))
     assert refused.firewall_commands == ()
     assert len(refused.refusals) == 1
     assert "REFUSED to run `firewall-cmd --reload`" in refused.refusals[0]
     assert (
-        "firewalld's saved configuration already admits 3724/tcp and 8085/tcp in zones docker "
-        "and public, so those rules are not written again."
+        "firewalld's saved configuration already admits 3724/tcp and 8085/tcp in zone public, "
+        "so those rules are not written again."
     ) in refused.warnings
 
     allowed = _firewalld_plan(
         daemon="running",
         route=networking.SshRoute(connected=True, ports=(22,), listeners_readable=True),
-        zoning=_DECK_ZONING,
         admitted=_answering(False, True),
-        mode="internet",
     )
     assert allowed.refusals == ()
     assert allowed.firewall_commands[-1] == ("firewall-cmd", "--reload")
@@ -5686,14 +5771,14 @@ def test_t140_one_unknown_runtime_answer_keeps_the_reload() -> None:
 
     def mixed(pairs: tuple[tuple[str, str], ...]) -> tuple[networking.PortAdmission, ...]:
         return tuple(
-            networking.PortAdmission(zone, port, None if zone == "docker" else True, True)
+            networking.PortAdmission(zone, port, None if zone == "home" else True, True)
             for zone, port in pairs
         )
 
     p = _firewalld_plan(
         daemon="running",
         route=networking.SshRoute(connected=True, ports=(22,), listeners_readable=True),
-        zoning=_DECK_ZONING,
+        zones=("home", "public"),
         admitted=mixed,
     )
     assert ("firewall-cmd", "--reload") in p.firewall_commands
@@ -5701,20 +5786,15 @@ def test_t140_one_unknown_runtime_answer_keeps_the_reload() -> None:
 
 def test_t140_a_pair_the_seam_did_not_answer_is_not_admitted() -> None:
     """An answer missing for a pair is unknown, never yes — no command is removed for it."""
-    p = _firewalld_plan(
-        daemon="running",
-        route=_UNSETTLED,
-        zoning=_DECK_ZONING,
-        admitted=lambda pairs: (),
-    )
-    assert list(p.firewall_commands) == _DECK_WRITES
+    p = _firewalld_plan(daemon="running", route=_UNSETTLED, admitted=lambda pairs: ())
+    assert list(p.firewall_commands) == _PUBLIC_WRITES
     assert any("REFUSED to run `firewall-cmd --reload`" in r for r in p.refusals)
 
 
 def _query_run(
     rc: int, stdout: str, seen: list[list[str]]
 ) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
-    """A runner that answers every `--query-port` with `rc`/`stdout`."""
+    """A runner that answers every question with `rc`/`stdout`."""
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         seen.append(argv)
@@ -5723,13 +5803,15 @@ def _query_run(
     return run
 
 
-def test_t140_the_query_goes_out_behind_the_prefix_runtime_and_permanent() -> None:
-    """Two questions per pair, both behind the probes' authority, as firewall-cmd spells them."""
+def test_t140_the_questions_go_out_behind_the_prefix_runtime_and_permanent() -> None:
+    """The zone's target on each side, then the port on each side, all behind the probes' prefix."""
     seen: list[list[str]] = []
     answers = networking.detect_firewalld_admission(
         (("public", "3724/tcp"),), run=_query_run(0, "yes\n", seen), prefix=("sudo", "-n")
     )
     assert seen == [
+        ["sudo", "-n", "firewall-cmd", "--info-zone=public"],
+        ["sudo", "-n", "firewall-cmd", "--permanent", "--info-zone=public"],
         ["sudo", "-n", "firewall-cmd", "--zone=public", "--query-port=3724/tcp"],
         ["sudo", "-n", "firewall-cmd", "--permanent", "--zone=public", "--query-port=3724/tcp"],
     ]
@@ -5779,22 +5861,104 @@ def test_t140_a_query_that_cannot_run_is_unknown() -> None:
     assert got == (networking.PortAdmission("public", "3724/tcp", None, None),)
 
 
+@pytest.mark.parametrize(
+    ("info", "admits"),
+    [
+        (_DOCKER_ZONE_INFO, True),
+        (_DOCKER_ZONE_INFO.replace("ACCEPT", "default"), False),
+        (_DOCKER_ZONE_INFO.replace("ACCEPT", "%%REJECT%%"), False),
+        (_DOCKER_ZONE_INFO.replace("ACCEPT", "DROP"), False),
+        (_DOCKER_ZONE_INFO.replace("ACCEPT", "REJECT"), False),
+        (_DOCKER_ZONE_INFO.replace("ACCEPT", "accept"), False),
+        (_DOCKER_ZONE_INFO.replace("  target: ACCEPT\n", ""), False),
+        (_DOCKER_ZONE_INFO + "  target: ACCEPT\n", False),
+        ("", False),
+    ],
+    ids=[
+        "ACCEPT",
+        "default",
+        "%%REJECT%%",
+        "DROP",
+        "REJECT",
+        "lower-case accept",
+        "no target line",
+        "two target lines",
+        "nothing said",
+    ],
+)
+def test_t140_only_an_accept_target_admits_a_zone(info: str, admits: bool) -> None:
+    """Exactly `target: ACCEPT` admits every port; any other target falls back to the port query."""
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if "--permanent" in argv:
+            return subprocess.CompletedProcess(argv, 253, "", _AUTH_FAILED)
+        if argv[-1].startswith("--info-zone="):
+            return subprocess.CompletedProcess(argv, 0, info, "")
+        return subprocess.CompletedProcess(argv, 1, "no\n", "")
+
+    got = networking.detect_firewalld_admission((("docker", "3724/tcp"),), run=run)
+    assert got == (
+        networking.PortAdmission(
+            "docker", "3724/tcp", True if admits else False, None, runtime_by_target=admits
+        ),
+    )
+
+
+def test_t140_an_unreadable_zone_target_leaves_the_deck_plan_as_it_was() -> None:
+    """`--info-zone` rc 253: docker's runtime answer is the port query's no, so the reload stays."""
+
+    def unauthorized_info(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[-1].startswith("--info-zone="):
+            return subprocess.CompletedProcess(argv, 253, "", _AUTH_FAILED)
+        return _measured_unelevated(argv)
+
+    p = _firewalld_plan(
+        daemon="running",
+        route=_UNSETTLED,
+        zoning=_DECK_ZONING,
+        admitted=_asking(unauthorized_info),
+        mode="internet",
+    )
+    assert list(p.firewall_commands) == _DECK_WRITES
+    assert len(p.refusals) == 1 and "REFUSED to run `firewall-cmd --reload`" in p.refusals[0]
+    assert not any("already admits" in w for w in p.warnings)
+
+
+def test_t140_a_default_target_does_not_admit_the_docker_zone() -> None:
+    """A docker zone whose target is `default` is judged by its ports, and it has none."""
+
+    def default_target(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[-1] == "--info-zone=docker":
+            return subprocess.CompletedProcess(
+                argv, 0, _DOCKER_ZONE_INFO.replace("ACCEPT", "default"), ""
+            )
+        return _measured_unelevated(argv)
+
+    p = _firewalld_plan(
+        daemon="running",
+        route=_UNSETTLED,
+        zoning=_DECK_ZONING,
+        admitted=_asking(default_target),
+        mode="internet",
+    )
+    assert list(p.firewall_commands) == _DECK_WRITES
+    assert len(p.refusals) == 1 and "REFUSED to run `firewall-cmd --reload`" in p.refusals[0]
+
+
 def test_t140_an_unauthorized_query_leaves_todays_plan_and_refusal_exactly() -> None:
-    """rc 253 from every query: the same four writes, the reload refused, no admission line."""
+    """rc 253 from every question: the same four writes, the reload refused, no admission line."""
     seen: list[list[str]] = []
     p = _firewalld_plan(
         daemon="running",
         route=_UNSETTLED,
         zoning=_DECK_ZONING,
-        admitted=lambda pairs: networking.detect_firewalld_admission(
-            pairs, run=_query_run(253, "", seen)
-        ),
+        admitted=_asking(_query_run(253, "", seen)),
         mode="internet",
     )
     before = _firewalld_plan(
         daemon="running", route=_UNSETTLED, zoning=_DECK_ZONING, mode="internet"
     )
-    assert len(seen) == 8, "two questions for each of the four pairs"
+    assert len(seen) == 12, "two target reads per zone and two port questions per pair"
     assert list(p.firewall_commands) == _DECK_WRITES
     assert p.firewall_commands == before.firewall_commands
     assert p.refusals == before.refusals and len(p.refusals) == 1
@@ -5826,41 +5990,122 @@ def test_t140_the_breadth_note_says_allowed_when_the_ports_are_already_in_effect
     runtime, that inference would tell the owner the ports are not in effect
     when they are.
     """
-    zoning = networking.FirewalldZoning(
-        write=("home", "public"),
-        permanent=("home", "public"),
-        runtime=("home", "public"),
-        default_zone="public",
-        configured_default_zone="public",
+    p = _firewalld_plan(
+        daemon="running", zones=("home", "public"), admitted=_answering(True, False)
     )
-    p = _firewalld_plan(daemon="running", zoning=zoning, admitted=_answering(True, False))
     notes = [w for w in p.warnings if "every zone this machine binds" in w]
     assert len(notes) == 1, p.warnings
     assert "are allowed in `home`, `public`" in notes[0]
     assert "WRITTEN" not in notes[0]
 
 
-def test_t140_the_networking_tab_path_asks_firewalld_with_the_probes_authority(
+_MOVED = networking.FirewalldZoning(
+    write=("internal", "public", "work"),
+    permanent=("internal", "public"),
+    runtime=("work", "public"),
+    default_zone="public",
+    configured_default_zone="public",
+    flush_all_on_reload=True,
+)
+"""An interface moved to `work` at runtime; its saved binding (a reload's) is `internal`."""
+
+_DEFAULT_MOVES = networking.FirewalldZoning(
+    write=("public", "work"),
+    permanent=("public",),
+    runtime=("public",),
+    default_zone="public",
+    configured_default_zone="work",
+)
+"""The daemon's live default is `public`; `DefaultZone` in firewalld.conf is `work`."""
+
+
+@pytest.mark.parametrize("flush", [True, False], ids=["FlushAllOnReload=yes", "=no"])
+def test_t140_a_moved_interface_is_not_promised_a_reload_the_plan_dropped(flush: bool) -> None:
+    """With every pair already in effect the plan runs no reload, so none is promised."""
+    p = _firewalld_plan(
+        daemon="running",
+        zoning=dataclasses.replace(_MOVED, flush_all_on_reload=flush),
+        admitted=_answering(True, False),
+    )
+    assert ("firewall-cmd", "--reload") not in p.firewall_commands
+    said = next(w for w in p.warnings if "disagree" in w)
+    assert "the reload this plan runs" not in said and "means the reload will" not in said
+    assert "this plan runs none" in said
+
+
+@pytest.mark.parametrize(
+    ("flush", "kept"),
+    [
+        (True, "means the reload this plan runs WILL undo that move"),
+        (False, "means the reload will leave that move in place"),
+    ],
+    ids=["FlushAllOnReload=yes", "=no"],
+)
+def test_t140_a_moved_interface_with_the_reload_kept_is_told_as_before(
+    flush: bool, kept: str
+) -> None:
+    """The reload still in the plan: the sentence is the one it always was."""
+    p = _firewalld_plan(
+        daemon="running",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zoning=dataclasses.replace(_MOVED, flush_all_on_reload=flush),
+        admitted=_answering(False, False),
+    )
+    assert ("firewall-cmd", "--reload") in p.firewall_commands
+    said = next(w for w in p.warnings if "disagree" in w)
+    assert kept in said and "runs none" not in said
+
+
+def test_t140_a_default_zone_move_is_not_promised_a_reload_the_plan_dropped() -> None:
+    """The divergent DefaultZone takes over at the NEXT reload, not one this plan runs."""
+    p = _firewalld_plan(daemon="running", zoning=_DEFAULT_MOVES, admitted=_answering(True, False))
+    assert ("firewall-cmd", "--reload") not in p.firewall_commands
+    said = next(w for w in p.warnings if "DefaultZone" in w)
+    assert "so after the reload every interface" not in said
+    assert "after the next reload (this plan runs none) every interface" in said
+
+
+def test_t140_a_default_zone_move_with_the_reload_kept_is_told_as_before() -> None:
+    p = _firewalld_plan(
+        daemon="running",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zoning=_DEFAULT_MOVES,
+        admitted=_answering(False, False),
+    )
+    assert ("firewall-cmd", "--reload") in p.firewall_commands
+    said = next(w for w in p.warnings if "DefaultZone" in w)
+    assert "so after the reload every interface" in said and "runs none" not in said
+
+
+def test_t140_the_networking_tab_path_drops_the_reload_on_the_measured_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Through `plan()` with no admission seam — the call the Networking tab makes.
 
     `ui/controller_view.py` builds the tab's plan as `networking.plan(entry,
     mode, bindings=...)`: every probe is the default one. This replaces the
-    probes BELOW `plan()` (and `runner.run` itself for the query), so the
-    wiring from `plan()` to `detect_firewalld_admission()` is what is under
-    test, not a seam a test handed in.
+    probes BELOW `plan()` (and `runner.run` itself for firewalld's answers),
+    unelevated as on the Deck, over the measured Fedora zones: a
+    `FedoraWorkstation` zone admitting 1025-65535/tcp and Docker's `docker`
+    zone with target ACCEPT.
     """
-    monkeypatch.setattr(networking, "probe_prefix", lambda backend, **kw: ("sudo", "-n"))
+    zoning = networking.FirewalldZoning(
+        write=("FedoraWorkstation", "docker"),
+        permanent=("FedoraWorkstation", "docker"),
+        runtime=("FedoraWorkstation", "docker"),
+        default_zone="FedoraWorkstation",
+        configured_default_zone="FedoraWorkstation",
+        machine_made=("docker",),
+    )
+    monkeypatch.setattr(networking, "probe_prefix", lambda backend, **kw: ())
     monkeypatch.setattr(networking, "detect_ssh_route", lambda **kw: _UNSETTLED)
     monkeypatch.setattr(networking, "detect_firewalld_daemon", lambda **kw: "running")
-    monkeypatch.setattr(networking, "detect_firewalld_zones", lambda daemon, **kw: _DECK_ZONING)
-    queried: list[list[str]] = []
+    monkeypatch.setattr(networking, "detect_firewalld_zones", lambda daemon, **kw: zoning)
+    asked: list[list[str]] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert "--query-port=3724/tcp" in argv[-1] or "--query-port=8085/tcp" in argv[-1], argv
-        queried.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "yes\n", "")
+        asked.append(argv)
+        return _measured_unelevated(argv)
 
     monkeypatch.setattr(runner, "run", run)
     p = networking.plan(
@@ -5869,10 +6114,20 @@ def test_t140_the_networking_tab_path_asks_firewalld_with_the_probes_authority(
         lan_ip="192.168.1.25",
         public_ip="203.0.113.7",
         firewall="firewalld",
-        steamos=True,
+        steamos=False,
         wsl=False,
         bindings={3724: "0.0.0.0", 8085: "0.0.0.0"},
     )
-    assert len(queried) == 8 and all(argv[:3] == ["sudo", "-n", "firewall-cmd"] for argv in queried)
-    assert p.firewall_commands == () and p.refusals == ()
-    assert any("already admits 3724/tcp and 8085/tcp" in w for w in p.warnings)
+    assert ["firewall-cmd", "--info-zone=docker"] in asked
+    assert ["firewall-cmd", "--zone=FedoraWorkstation", "--query-port=3724/tcp"] in asked
+    assert ("firewall-cmd", "--reload") not in p.firewall_commands
+    assert len(p.firewall_commands) == 4 and all(
+        c[:2] == ("firewall-cmd", "--permanent") for c in p.firewall_commands
+    )
+    assert p.refusals == ()
+    assert not any("REFUSED" in w for w in p.warnings), p.warnings
+    assert (
+        "firewalld already admits 3724/tcp and 8085/tcp in zones FedoraWorkstation and docker "
+        "right now (zone docker accepts all traffic: its target is ACCEPT), so the permanent "
+        "rules are written without a reload."
+    ) in p.warnings
