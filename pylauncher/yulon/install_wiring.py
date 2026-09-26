@@ -279,6 +279,10 @@ def update_to_latest_for_app(
         pin_confirmation=lambda: return_to_pin_confirmation(entry, server_dir, repo),
         to_pin=to_pin,
         source_version=lambda: source_version(read_state(server_dir, valid=())),
+        # T124. Built per call like the presses: it is asked off the GUI thread
+        # and at most once a day reaches past its cache. No import gate: it asks
+        # nothing of the databases.
+        upstream_news=lambda: installer_for(entry).upstream_news(options),
     )
 
 

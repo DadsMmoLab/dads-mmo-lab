@@ -40,7 +40,7 @@ from yulon import (
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
-from yulon.catalog import composegen, native
+from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
@@ -10777,6 +10777,135 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     assert view.update_to_latest() is False
     assert spy.presses == []
     assert view.update_to_latest_button.isEnabled() is False
+
+
+# -- T124: "Upstream has new code since this server was built" --------------
+
+
+def _upstream_news(*counts: int | None) -> upstream.UpstreamNews:
+    labels = ("server", "mod-playerbots", "third")
+    return upstream.UpstreamNews(
+        checked_unix=1_790_000_000,
+        sources=tuple(
+            upstream.SourceNews(repo=f"x/{label}", label=label, behind=count)
+            for label, count in zip(labels, counts, strict=False)
+        ),
+    )
+
+
+def test_the_upstream_line_says_what_is_new_on_the_server_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services, spy = _latest(ps, tmp_path)
+    services.update_to_latest = replace(spy.route(), upstream_news=lambda: _upstream_news(300, 50))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.upstream_label.isHidden()
+    assert view.upstream_label.text().startswith(
+        "Upstream has new code since this server was built: server 300 commits, "
+        "mod-playerbots 50 commits."
+    )
+    # On the SERVER tab, where a player looks at the server.
+    assert view._tabs.widget(0).isAncestorOf(view.upstream_label)
+
+
+@pytest.mark.parametrize("counts", [(0, 0), (None, None), (None, 0)])
+def test_the_upstream_line_is_hidden_when_nothing_is_new_or_nothing_answered(
+    qapp: object, ps: _Ps, tmp_path: Path, counts: tuple[int | None, ...]
+) -> None:
+    services, spy = _latest(ps, tmp_path)
+    services.update_to_latest = replace(spy.route(), upstream_news=lambda: _upstream_news(*counts))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.upstream_label.isHidden()
+    assert view.upstream_label.text() == ""
+
+
+def test_an_upstream_ask_that_raises_hides_the_line_and_takes_nothing_down(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services, spy = _latest(ps, tmp_path)
+
+    def broken() -> upstream.UpstreamNews:
+        raise OSError("network is unreachable")
+
+    services.update_to_latest = replace(spy.route(), upstream_news=broken)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.upstream_label.isHidden()
+    assert view.problem_label.text() == ""
+
+
+def test_the_upstream_count_is_handed_to_the_job_runner_and_never_run_inline(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No GUI-thread network: the tab hands the ask to its runner and asks once at a time."""
+    services, spy = _latest(ps, tmp_path)
+    asked: list[str] = []
+
+    def news() -> upstream.UpstreamNews:
+        asked.append(threading.current_thread().name)
+        return _upstream_news(300, 50)
+
+    services.update_to_latest = replace(spy.route(), upstream_news=news)
+    pending: list[tuple[Callable[[], object], Callable[[object], None]]] = []
+
+    def held(work: Callable[[], object], on_done: Any, on_error: Any) -> None:
+        pending.append((work, on_done))
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=held)
+    assert asked == [], "building the tab asked upstream on the GUI thread"
+    mine = [(work, done) for work, done in pending if work is news]
+    assert len(mine) == 1
+    view.recheck()
+    view.recheck()
+    assert len([w for w, _ in pending if w is news]) == 1, "a second ask while one is in flight"
+    work, done = mine[0]
+    done(work())
+    assert view.upstream_label.text().startswith("Upstream has new code")
+    view.recheck()
+    assert len([w for w, _ in pending if w is news]) == 2, "Refresh asks again once it is back"
+
+
+def test_the_upstream_count_runs_on_a_worker_thread_with_the_real_runner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.ui.widgets import job as job_module
+
+    monkeypatch.setattr(
+        controller_view_module, "threaded_job_runner", job_module.threaded_job_runner
+    )
+    services, spy = _latest(ps, tmp_path)
+    threads: list[threading.Thread] = []
+
+    def news() -> upstream.UpstreamNews:
+        threads.append(threading.current_thread())
+        return _upstream_news(3)
+
+    services.update_to_latest = replace(spy.route(), upstream_news=news)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view.upstream_label.isHidden(), "the upstream line")
+    assert threads and all(t is not threading.main_thread() for t in threads)
+    view._jobs.wait()  # type: ignore[attr-defined]
+
+
+def test_the_upstream_line_is_asked_again_when_a_job_finishes(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The update route drops the day's count; the tab has to re-read it after the press."""
+    services, spy = _latest(ps, tmp_path)
+    answers = iter([_upstream_news(300, 50), _upstream_news(0, 0)])
+    services.update_to_latest = replace(spy.route(), upstream_news=lambda: next(answers))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.upstream_label.isHidden()
+    view._set_busy(True)
+    view._set_busy(False)
+    assert view.upstream_label.isHidden()
+
+
+def test_no_route_means_no_upstream_line(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.services.update_to_latest is None or (
+        view.services.update_to_latest.upstream_news is None
+    )
+    assert view.upstream_label.isHidden()
 
 
 def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
