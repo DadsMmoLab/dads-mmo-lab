@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import apply as apply_module
+from yulon import bot_population as botpop
 from yulon import (
     botlist,
     channel_setup,
@@ -900,6 +901,14 @@ class ControllerServices:
     included, to say which of its three sentences applies.
     """
 
+    bot_population: botpop.BotPopulationRoute | None = None
+    """The Bots tab's "Random bots" box (T99), bound to this install.
+
+    Wired in `_assemble` for every game whose install writes a bot count
+    (`bot_population.where`, a catalog fact). `None` leaves the box dead and
+    the Tuning tab without the bot card.
+    """
+
     reset_settings: reset_defaults.ResetRoute | None = None
     """The Tuning tab's Reset to default (T94), bound to this install.
 
@@ -1307,6 +1316,9 @@ def _assemble(
         repair_compose=install_wiring.repair_compose_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
+        # T99. HERE for the same reason: where a game keeps its bot count is a
+        # catalog fact. Files only, so a server inside a WSL distro is served too.
+        bot_population=botpop.bot_count_route(entry, server_dir),
     )
 
 
@@ -3787,6 +3799,35 @@ def _look_up_undo(
     return UndoLookup(generation, reset_defaults.undo_items(entry, server_dir, session))
 
 
+@dataclass(frozen=True)
+class BotCountAnswer:
+    """One read of the bot count, and which lookup asked (an older answer is dropped)."""
+
+    generation: int
+    reading: botpop.Reading
+
+
+class BotCountReadFailed(Exception):
+    """A read that raised, tagged with the lookup that asked, so a stale one can be dropped."""
+
+    def __init__(self, generation: int, why: str) -> None:
+        super().__init__(why)
+        self.generation = generation
+
+
+def _read_bot_count(route: botpop.BotPopulationRoute, generation: int) -> BotCountAnswer:
+    """The Bots tab's read, as a job: it opens a conf or the compose override (T99).
+
+    A failure is re-raised TAGGED with its lookup (review Minor 3): the job
+    runner hands the failure slot only the exception, and an untagged one let an
+    old read's failure free the box while a newer read was still pending.
+    """
+    try:
+        return BotCountAnswer(generation, route.read())
+    except Exception as exc:  # boundary: an unreadable server folder must not kill the UI
+        raise BotCountReadFailed(generation, str(exc)) from exc
+
+
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
 """The install's own conf files, listed read-only beside the module ones.
 
@@ -3795,6 +3836,15 @@ Named (in `reset_defaults`, since T94) and not discovered by a glob of
 the point of the list is that these three are the ones this tab deliberately
 will not write.
 """
+
+BOT_COUNT_LABEL = "Random bots:"
+BOT_COUNT_APPLY = "Apply…"
+BOT_COUNT_TITLE = "Random bots"
+BOT_COUNT_RUNNING = (
+    "Yu'lon is writing this server's bot count. It takes a moment; this window closes "
+    "normally once it is done."
+)
+"""The close guard's sentence while the Bots tab's write runs (`busy_reason()`)."""
 
 TUNING_RESET_LABEL = "Reset to default"
 TUNING_RESET_ALL = "All server settings…"
@@ -4485,6 +4535,8 @@ class ControllerView(QWidget):
         # QThread destroyed mid-job aborts the process (see above).
         if self._reset_running:
             return TUNING_RESET_RUNNING
+        if self._bot_count_writing:
+            return BOT_COUNT_RUNNING
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._module_sql_running:
@@ -5150,6 +5202,10 @@ class ControllerView(QWidget):
             # T94: a reset writes the same confs, and its undo puts them back.
             self.tuning_reset_button.setEnabled(False)
             self.compose_banner_button.setEnabled(False)
+            # T99: the bot count is one of those confs (or the compose override
+            # a recreate is reading), and its owed-job button is the banner's.
+            self._set_bot_count_controls()
+            self.bot_count_owed_button.setEnabled(False)
         else:
             self.compose_banner_button.setEnabled(True)
             self.refresh_button.setEnabled(True)
@@ -5177,6 +5233,7 @@ class ControllerView(QWidget):
             self.tuning_banner_button.setEnabled(True)
             # Back to whether this tab HAS a route, never unconditionally.
             self._set_reset_button()
+            self._set_bot_count_controls()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
@@ -6940,10 +6997,20 @@ class ControllerView(QWidget):
         capability that vanished because the OTHER group's seam was missing is
         exactly the shape of bug this tab must not have.
         """
-        if self.services.bots is None and self.services.my_party is None:
+        # T99's box exists whether or not the tab does, so `_set_busy()` and
+        # the Tuning tab's banner can always reach it; the tab is what shows it.
+        self._build_bot_count_group()
+        if (
+            self.services.bots is None
+            and self.services.my_party is None
+            and self.services.bot_population is None
+        ):
             return
         tab = QWidget(self)
         box = QVBoxLayout(tab)
+        self.bot_count_group.setParent(tab)
+        self.bot_count_group.setVisible(self.services.bot_population is not None)
+        box.addWidget(self.bot_count_group)
         browse = QGroupBox("Browse the bots", tab)
         browse_box = QVBoxLayout(browse)
         self.bot_summary = QLabel("", browse)
@@ -6990,6 +7057,187 @@ class ControllerView(QWidget):
         columns.addWidget(self._build_my_party_group(tab), 1)
         box.addLayout(columns)
         self._add_panel_tab(tab, "bots", "Bots")
+
+    def _build_bot_count_group(self) -> None:
+        """ "Random bots: [N] [Apply…]", the note under it, and the job it owes (T99).
+
+        The box sets Min = Max = N, as the install does. Its value is read off
+        the disk by a job (`_look_up_bot_count`, started by the Tuning tab's
+        reload) and it stays dead until that answer lands, while any job of
+        ours runs, and while its own write runs.
+        """
+        self._bot_count_generation = 0
+        self._bot_count_reading: botpop.Reading | None = None
+        self._bot_count_pending = False
+        self._bot_count_writing = False
+        self._bot_rows: tuple[tuning.TuningRow, ...] = ()
+        self.bot_count_group = QGroupBox(BOT_COUNT_TITLE, self)
+        inside = QVBoxLayout(self.bot_count_group)
+        row = QHBoxLayout()
+        row.addWidget(QLabel(BOT_COUNT_LABEL, self.bot_count_group))
+        self.bot_count_box = QSpinBox(self.bot_count_group)
+        self.bot_count_box.setRange(0, botpop.NO_CEILING)
+        self.bot_count_box.setEnabled(False)
+        self.bot_count_apply_button = QPushButton(BOT_COUNT_APPLY, self.bot_count_group)
+        self.bot_count_apply_button.clicked.connect(self.apply_bot_count)
+        self.bot_count_apply_button.setEnabled(False)
+        # The job this change owes, the Tuning banner's own button mirrored:
+        # the player is on THIS tab when the write lands, and a restart they
+        # are told about on another tab is a restart they do not find.
+        self.bot_count_owed_button = QPushButton("", self.bot_count_group)
+        self.bot_count_owed_button.clicked.connect(self._tuning_banner_pressed)
+        self.bot_count_owed_button.setVisible(False)
+        row.addWidget(self.bot_count_box)
+        row.addWidget(self.bot_count_apply_button)
+        row.addStretch(1)
+        row.addWidget(self.bot_count_owed_button)
+        # Two lines: what the files say NOW (every read rewrites it), and what
+        # the last press did (only a press writes it), so a read landing after
+        # a write cannot wipe the write's report.
+        self.bot_count_note = QLabel("", self.bot_count_group)
+        self.bot_count_note.setWordWrap(True)
+        self.bot_count_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.bot_count_report = QLabel("", self.bot_count_group)
+        self.bot_count_report.setWordWrap(True)
+        self.bot_count_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inside.addLayout(row)
+        inside.addWidget(self.bot_count_note)
+        inside.addWidget(self.bot_count_report)
+
+    def _set_bot_count_controls(self) -> None:
+        """Live with a readable count, nothing of ours running, and no read or write in flight."""
+        reading = self._bot_count_reading
+        live = (
+            self.services.bot_population is not None
+            and reading is not None
+            and reading.problem is None
+            and not self._busy
+            and not self._bot_count_pending
+            and not self._bot_count_writing
+        )
+        self.bot_count_box.setEnabled(live)
+        self.bot_count_apply_button.setEnabled(live)
+
+    def _look_up_bot_count(self) -> None:
+        """Read the bot count (and the Tuning tab's bot rows) off the GUI thread."""
+        route = self.services.bot_population
+        if route is None:
+            return
+        self._bot_count_generation += 1
+        self._bot_count_pending = True
+        self._set_bot_count_controls()
+        self._run(
+            partial(_read_bot_count, route, self._bot_count_generation),
+            self._bot_count_read,
+            self._bot_count_read_failed,
+        )
+
+    @Slot(object)
+    def _bot_count_read(self, answer: object) -> None:
+        """The box, its note and the Tuning tab's bot card, from one read; stale answers dropped."""
+        if (
+            not isinstance(answer, BotCountAnswer)
+            or answer.generation != self._bot_count_generation
+        ):
+            return
+        self._bot_count_pending = False
+        reading = answer.reading
+        self._bot_count_reading = reading
+        if reading.problem is not None:
+            self.bot_count_note.setText(f"Cannot change the bot count here: {reading.problem}")
+        else:
+            # Never past what a QSpinBox holds (a C int): `read()` clamps its
+            # ceiling, and the value is clamped again here (Codex medium).
+            top = min(reading.ceiling, botpop.NO_CEILING)
+            self.bot_count_box.setRange(0, top)
+            if reading.max is not None:
+                self.bot_count_box.setValue(max(0, min(reading.max, top)))
+            self.bot_count_box.setToolTip(f"0 to {top}: {reading.ceiling_why}")
+            self.bot_count_note.setText(self._bot_count_now(reading))
+        self._set_bot_count_controls()
+        rows = reading.rows
+        if rows != self._bot_rows:
+            self._bot_rows = rows
+            self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
+            self._set_tuning_revert_all()
+
+    def _bot_count_now(self, reading: botpop.Reading) -> str:
+        """What the note says the server is set to now, and what the install wrote."""
+        name = Path(reading.file).name
+        installed = botpop.installed_count(self.entry)
+        said = f" (Yu'lon installs {installed})" if installed is not None else ""
+        if reading.max is None:
+            return f"{name} names no random bot count; Apply writes one{said}."
+        if reading.min is not None and reading.min != reading.max:
+            return (
+                f"Now between {reading.min} and {reading.max} in {name}{said}. Apply sets both "
+                "to the one number in the box."
+            )
+        return f"Now {reading.max} in {name}{said}."
+
+    @Slot(object)
+    def _bot_count_read_failed(self, exc: object) -> None:
+        """A read that raised: said, unless a newer read is pending (then it is stale and dropped).
+
+        An untagged failure cannot say which read it was, so it is logged and
+        never frees the box: the next reload asks again.
+        """
+        generation = getattr(exc, "generation", None)
+        if generation != self._bot_count_generation:
+            logger.warning(f"a stale or untagged bot-count read failed: {exc}")
+            return
+        self._bot_count_pending = False
+        self.bot_count_note.setText(f"Could not read this server's bot count: {exc}")
+        self._set_bot_count_controls()
+
+    @Slot()
+    def apply_bot_count(self) -> None:
+        """Ask once, then write Min = Max = the box's number on the job runner (T99)."""
+        route = self.services.bot_population
+        reading = self._bot_count_reading
+        if (
+            route is None
+            or reading is None
+            or reading.problem is not None
+            or self._busy
+            or self._bot_count_pending
+            or self._bot_count_writing
+        ):
+            return
+        n = self.bot_count_box.value()
+        if not self._confirm(BOT_COUNT_TITLE, botpop.question(self.entry, reading, n)):
+            return
+        self._bot_count_writing = True
+        self._set_bot_count_controls()
+        self.bot_count_report.setText(f"setting the random bots to {n}…")
+        self._run(partial(route.write, n), self._bot_count_written, self._bot_count_failed)
+
+    @Slot(object)
+    def _bot_count_written(self, result: object) -> None:
+        self._bot_count_writing = False
+        if isinstance(result, botpop.Written):
+            name = Path(result.file).name
+            if result.backup is None:
+                self.bot_count_report.setText(
+                    f"{name} already says {result.after}, so nothing was written."
+                )
+            else:
+                self._note_tuning_owed(result.file, result.rule)
+                route: botpop.Route = "conf" if result.rule == "restart" else "env"
+                self.bot_count_report.setText(
+                    f"Random bots set to {result.after} in {name}; the file as it was is beside "
+                    f"it at {result.backup.name}.\n" + botpop.when_it_counts(route, result.after)
+                )
+        # Read again: the box, its note and the Tuning tab's bot card say what the disk says.
+        self._look_up_bot_count()
+
+    @Slot(object)
+    def _bot_count_failed(self, exc: object) -> None:
+        """A refusal `write()` raised (it wrote nothing), or a bug: said, and the box read again."""
+        self._bot_count_writing = False
+        self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
+        self.action_failed.emit(str(exc))
+        self._look_up_bot_count()
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
         """My Party's panel, or the one line saying why this game has none (8.6).
@@ -9379,7 +9627,7 @@ class ControllerView(QWidget):
             self.services.controller.server_dir,
         )
         self._tuning_rows = rows
-        self.tuning_panel.set_cards(build_tuning_cards(rows))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `TUNING_CORE_FILES` is a decision about who owns core configuration,
         # and a second copy of it inside a widget is a second place for it to
@@ -9391,6 +9639,18 @@ class ControllerView(QWidget):
         # folders and reads each core file and backup, over 9p for a server
         # inside WSL.
         self._look_up_reset_undo()
+        # T99: the bot count and this tab's bot card, read again the same way:
+        # a save of that card moves the Bots tab's box, and a reset moves both.
+        self._look_up_bot_count()
+
+    def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
+        """The modules' rows, then the server's own bot keys (T99, CMaNGOS and Tortoise).
+
+        Kept apart in `_bot_rows` rather than folded into `_tuning_rows`: the
+        latter is what T94's reset reads as "keys an installed MODULE keeps",
+        and these are the server's own keys, which a reset puts back.
+        """
+        return self._tuning_rows + self._bot_rows
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -9409,7 +9669,7 @@ class ControllerView(QWidget):
         made, and that is not what a person pressing "revert my changes"
         asked for.
         """
-        self.tuning_panel.set_cards(build_tuning_cards(self._tuning_rows))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
@@ -9460,6 +9720,13 @@ class ControllerView(QWidget):
         self.tuning_recreate_button.setEnabled(bool(recreate) and not self._busy)
         self.tuning_restart_button.setEnabled(bool(restart or recreate) and not self._busy)
         job = "recreate" if recreate else ("restart" if restart else None)
+        # T99: the Bots tab's copy of the banner's button, same job, same slot.
+        self.bot_count_owed_button.setVisible(job is not None)
+        self.bot_count_owed_button.setEnabled(not self._busy)
+        if job is not None:
+            self.bot_count_owed_button.setText(
+                TUNING_RECREATE_LABEL if job == "recreate" else TUNING_RESTART_LABEL
+            )
         if job is None:
             self.tuning_banner.setVisible(False)
             return
@@ -9956,6 +10223,8 @@ class ControllerView(QWidget):
         rule for an ambiguity `_key_for()` already settles once, in the one
         place that has to guess.
         """
+        if (family, module_id) == botpop.CARD and file == botpop.CONF_FILE:
+            return botpop.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
