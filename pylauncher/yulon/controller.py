@@ -128,6 +128,10 @@ class Controller:
         # goes or that `yulon.logsnap` exists; what it does learn is the one
         # thing only it knows — the moment before the evidence is destroyed.
         self.pre_stop = pre_stop
+        # The T132 hold this controller made or found, if any. None means "not
+        # known to be held", which the status poll reads as a reason to hold
+        # a world it sees running (`_keep_the_distro_up()`).
+        self._hold: wsl.Hold | None = None
 
     # -- queries ---------------------------------------------------------
 
@@ -164,11 +168,40 @@ class Controller:
             logger.debug(f"{self.wsl_distro} is not running; reporting nothing up")
             return InstallStatus(db=False, auth=False, world=False)
         running = set(docker.status(wsl_distro=self.wsl_distro))
-        return InstallStatus(
+        status = InstallStatus(
             db=self.spec.db in running,
             auth=self.spec.auth in running,
             world=self.spec.world in running,
         )
+        self._keep_the_distro_up(world_running=status.world)
+        return status
+
+    def _keep_the_distro_up(self, *, world_running: bool) -> None:
+        """Hold the distro of a world this poll SAW running, once, and again if the hold went.
+
+        Start is not the only way a WSL world comes to be running: it was up
+        before Yu'lon opened (started by an earlier launch whose hold died, by
+        hand, or by `restart: unless-stopped` when something booted the
+        distro), and a world nobody holds dies 15-25 s after this app closes
+        -- the T132 failure, reached without pressing Start (review, Codex).
+
+        Only from a poll that already found the world up, which it can only do
+        in a distro that `status()` saw running and asked: nothing here starts
+        a distro (§2). At most one `wsl.hold()` per install per session while
+        the hold is alive; the flock makes a repeat a no-op anyway. A world seen
+        down forgets the hold, so the next time it is seen up it is held again.
+        """
+        if self.wsl_distro is None:
+            return
+        if not world_running:
+            self._hold = None
+            return
+        if self._hold is not None and (self._hold.alive() or not self._hold.held):
+            # Alive: nothing to do. Never held (no flock in the distro, say):
+            # asking again every five seconds would spawn a failing wsl.exe per
+            # poll, so it waits for the world to be seen down and up again.
+            return
+        self._hold = wsl.hold(self.wsl_distro, self.spec.world)
 
     def port_conflicts(self) -> list[str]:
         """Return *foreign* running containers binding this install's ports.
@@ -222,7 +255,7 @@ class Controller:
             # AFTER the start, so a start that failed pins nothing. The distro
             # would otherwise stop 15-25 s after this app's last call into it,
             # killing the server it just started (T132, `wsl.hold()`).
-            wsl.hold(self.wsl_distro, self.spec.world)
+            self._hold = wsl.hold(self.wsl_distro, self.spec.world)
 
     def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
         """Where each blocking container came from, best effort and never fatal."""
@@ -273,6 +306,11 @@ class Controller:
                     to_stop.append(candidate)
         logger.info(f"stopping the server(s) holding {self.spec.ports}: {to_stop}")
         docker.stop_containers(to_stop, wsl_distro=self.wsl_distro)
+        if self.wsl_distro is not None:
+            # That server's hold is keyed by ITS world container, which is one
+            # of these and cannot be told from the others by name alone; a key
+            # nobody held releases nothing, so every stopped name is offered.
+            wsl.release(self.wsl_distro, *to_stop)
         return to_stop
 
     def stop_conflicting_and_start(self) -> list[str]:
@@ -341,6 +379,7 @@ class Controller:
         """
         if self.wsl_distro is not None and ours_went_down:
             wsl.release(self.wsl_distro, self.spec.world)
+            self._hold = None
 
     def _save_evidence(self) -> None:
         """Run the pre-stop hook, and never let it stand between a user and a stop.

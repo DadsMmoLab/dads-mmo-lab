@@ -171,12 +171,23 @@ after a `wsl --shutdown`.
 
 Start is one short `wsl -d … docker compose up -d`, so before T132 a WSL server lived only
 while the Server tab's five-second poll kept calling in, and closing the app killed the world
-and the database 25 s later. `Controller.start()` now ends with `wsl.hold()`: one detached
-`wsl.exe -d <distro> --exec sh -c "exec flock -n … sh -c 'echo $$ > …pid; exec sleep
-infinity'"`, keyed by the world container's name, with its lock and pid file in the
-distro's `/dev/shm`, so the next launch's Stop can find it without remembering it.
-`stop()`/`remove()` end it with `wsl.release()`, only when something of this install went
-down, and never by asking a stopped distro (it holds nothing).
+and the database 25 s later. Now `wsl.hold()` keeps one detached `wsl.exe -d <distro> --exec
+sh -c "… exec flock -n … sleep infinity"` alive, keyed by the world container's name. Its lock
+and pid file live in `/dev/shm/yulon-<uid>/` (tmpfs, mode 0700, refused if it is a symlink or
+not the caller's), so the next launch finds it without remembering it. Three things make a hold:
+
+* `Controller.start()`, after the containers are up;
+* `Controller.status()`, the first time a poll that already found the distro running sees
+  the world up (a world started by hand, before Yu'lon opened, or by `unless-stopped`) and
+  again if the hold it made has exited; a hold that never took is not retried per poll;
+* the flock makes every repeat a no-op (exit 75).
+
+`stop()`/`remove()` end it with `wsl.release()` when something of this install went down, and
+`stop_conflicting()` releases every container name it stopped, since the other install's
+key is one of them. `release()` kills the recorded pid only if it is still a `sleep` with
+the start time recorded beside it (`/proc/<pid>/stat` field 22), so a recycled pid is left
+alone, and it never asks a distro WSL says is stopped. A world stopped outside Yu'lon keeps
+its hold until the next Stop/Remove, `wsl --shutdown` or sign-out.
 
 Still open, measured the same night: **reading anything under `\\wsl.localhost\<distro>`
 from the user's desktop session starts that distro** (1.35 s, then running). The Server
