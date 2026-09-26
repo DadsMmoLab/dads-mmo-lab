@@ -2321,6 +2321,12 @@ def _for_tortoise(
         installed_modules=(
             (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
         ),
+        # T121's seam rides with `installed_modules`. Tortoise ships no relative
+        # (record-backed) mod, so nothing here writes a pending mark and this
+        # reads empty; wired so the Modules tab asks it the same way everywhere.
+        unknown_modules=(
+            (lambda: apply_module.unknown_modules(server_dir)) if entry.has_manifests else None
+        ),
         unfinished_modules=(
             (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
         ),
