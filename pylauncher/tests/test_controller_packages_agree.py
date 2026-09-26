@@ -451,6 +451,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # so its absence is the module surface too -- and offering it without
         # `installed_modules` would be a game reading completion marks out of
         # folders it has just said it cannot list.
+        # T121's `unknown_modules` rides with `installed_modules`, whose answer
+        # it qualifies: which of the recorded sourceless mods a press stopped on
+        # mid-statement. A game with no `installed_modules` has no row for it to
+        # mark.
         uncounted = (
             set()
             if counted
@@ -458,6 +462,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 "module_updates",
                 "installed_modules",
                 "unfinished_modules",
+                "unknown_modules",
                 "module_version",
             }
             | custom
@@ -502,8 +507,20 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # window to bind the write seam into nor a folder to report, so both
         # read `None` here regardless of which game's entry this loop is on.
         unwindowed = {"client_dir", "set_client_dir"}
+        # T106's compose repair, absent on the REFERENCE by decision: it exists
+        # for the family whose base compose nothing rewrites after the install
+        # (CMaNGOS), while WotLK's follows the app at Update-to-latest. Read off
+        # the family the wiring reads, so a family that gains it fails this
+        # until its tab offers it, and a CMaNGOS game that loses it fails too.
+        native_block = entry.install.native
+        unrepaired = (
+            set()
+            if native_block is not None and native_block.family == "cmangos"
+            else {"repair_compose"}
+        )
         allowed = (
-            unstocked
+            unrepaired
+            | unstocked
             | unmeasured
             | unwired
             | unlisted
@@ -518,7 +535,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unwindowed
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable | unadoptable | unwindowed
+            reference = unprobed | unupdatable | unadoptable | unwindowed | unrepaired
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

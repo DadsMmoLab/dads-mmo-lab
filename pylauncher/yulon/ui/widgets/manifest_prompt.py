@@ -30,18 +30,21 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
+    QFrame,
+    QGridLayout,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from yulon.apply import check_answer
+from yulon.apply import check_answer, reapplies_on_top
 from yulon.log import get_logger
 from yulon.manifest import Manifest, Prompt
 
@@ -57,19 +60,74 @@ the choice here is about what a worldserver reads, not about what passes.
 """
 
 
-RUN_AGAIN_CHOICE_NOTE = (
-    "This is already installed, and running it again applies the answer below as "
-    "the new setting. Yu'lon does not remember what you picked last time, so what "
-    "is selected now is the default: pick the one you want now."
-)
-"""Shown when an installed module's choice is asked again: an Update, or Install over it (T100).
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+"""The yes/no spellings `apply.check_answer()` accepts, split by meaning."""
 
-The dialog pre-selects the manifest's DEFAULT, and no earlier answer is kept
-anywhere, so clicking OK on an Update of Hearthstone Tweaks set back to
-30 minutes a player who had picked 5 -- without a word. Remembering the answer
-is a general feature and the owner's call (T104); until then the dialog says
-what OK will do. Only for a `choice`: that is the kind a player picks once and
-expects to stay picked.
+
+_ROWS_MIN_HEIGHT = 120
+"""The shortest the question area may get: about four rows, so a squeezed dialog shows some."""
+
+_MIN_WIDTH = 560
+"""Wide enough that most question labels fit on one line and none wraps past three."""
+
+
+RERUN_SETS_NOTE = (
+    "This is already installed, and running it again applies the answers below as the new "
+    "setting."
+)
+"""The lead-in to `NO_RECORD_NOTE`, for a module run again.
+
+True of the mob multipliers too since T115, which undo the last values before
+applying these (`REAPPLIES_NOTE`). Until then it was withheld from them, because
+a re-run compounded.
+"""
+
+
+NO_RECORD_NOTE = (
+    "Yu'lon has no record of your earlier answers to {questions}. What is filled in there is "
+    "the default (or nothing, where there is none), so change it if you set it differently."
+)
+"""Shown when an installed module is asked again and some answer is not in its record.
+
+T100 said this of every re-run ("Yu'lon does not remember what you picked last
+time"). Since T104 it is true only of an install made before answers were kept,
+or of an answer the question no longer accepts, so it names just those.
+"""
+
+
+REMEMBERED_NOTE = (
+    "Your answers from the last time this was installed or updated are filled in. "
+    "OK applies what is shown."
+)
+"""Shown when at least one answer came from this install's record (T104)."""
+
+
+REMOVE_NO_RECORD_NOTE = (
+    "Yu'lon has no record that this is applied to this server's database now: it may have "
+    "been installed by an older version, or removed already. Remove undoes it with the values "
+    "below (a multiplier is divided back out), so enter the ones it was installed with; what "
+    "is filled in is your last answer, else the default. If it is not applied now, Cancel: "
+    "Remove would still change the database."
+)
+"""Shown whenever Remove has to ask (T104 fix wave; reworded for T115).
+
+The mob multipliers undo `HealthModifier*{hp}` with `HealthModifier/{hp}`. The
+Modules tab asks only when there is no usable APPLIED record (T115), and the
+last answers T104 keeps after a Remove cannot stand in for one: they pre-fill
+the boxes, and this says what OK then does.
+"""
+
+
+REAPPLIES_NOTE = (
+    "Running this again first undoes the values Yu'lon applied last time, then applies the "
+    "ones below, in one database transaction: they replace the old ones rather than stack."
+)
+"""Shown when a module whose install is relative to the current values is run again (T115).
+
+`apply.reapplies_on_top()`: the four mob multipliers. It replaced T104's
+`COMPOUNDS_NOTE` ("they compound ... Remove it and then Install it instead"),
+which was true until `Applier.install()` learned to undo the applied record.
 """
 
 
@@ -89,10 +147,13 @@ class ManifestPromptDialog(QDialog):
         prompts: Sequence[Prompt],
         *,
         again: bool = False,
+        remembered: Mapping[str, str] | None = None,
+        removing: bool = False,
     ) -> None:
         super().__init__(parent)
         self._manifest = manifest
         self._prompts = tuple(prompts)
+        self._kinds = {prompt.key: prompt.kind for prompt in self._prompts}
         self._answers: dict[str, str] = {}
         self._controls: dict[str, QWidget] = {}
         self._questions: list[str] = []
@@ -100,23 +161,76 @@ class ManifestPromptDialog(QDialog):
         self.setModal(True)
 
         box = QVBoxLayout(self)
-        when = "its steps run again" if again else "it can be installed"
+        when = (
+            "it can be removed"
+            if removing
+            else "its steps run again" if again else "it can be installed"
+        )
         self._notes: list[str] = [f"{manifest.name} ({manifest.id}) asks for this before {when}."]
-        if again and any(prompt.kind == "choice" for prompt in self._prompts):
-            self._notes.append(RUN_AGAIN_CHOICE_NOTE)
+        # T104: what this install remembers, where the question still accepts it;
+        # else the manifest's default. A saved answer the question now refuses (a
+        # dropped `choice` option) is not shown, because OK would then be refused.
+        prefill: dict[str, str] = {}
+        from_record: list[Prompt] = []
+        for prompt in self._prompts:
+            saved = (remembered or {}).get(prompt.key)
+            if saved is not None and check_answer(prompt, saved) == "":
+                prefill[prompt.key] = saved
+                from_record.append(prompt)
+            elif prompt.default is not None:
+                prefill[prompt.key] = prompt.default
+        missing = [p for p in self._prompts if p not in from_record]
+        if removing:
+            # A Remove asks only what it has no record of (`apply.must_ask`), so
+            # this dialog opening IS the no-record case, whatever pre-fills it.
+            self._notes.append(REMOVE_NO_RECORD_NOTE)
+        elif from_record:
+            self._notes.append(REMEMBERED_NOTE)
+        if again and not removing:
+            if missing:
+                questions = (
+                    "the questions below"
+                    if len(missing) == len(self._prompts) and len(missing) > 1
+                    else "these: " + "; ".join(p.question for p in missing)
+                )
+                self._notes.append(
+                    RERUN_SETS_NOTE + " " + NO_RECORD_NOTE.format(questions=questions)
+                )
+            if reapplies_on_top(manifest):
+                self._notes.append(REAPPLIES_NOTE)
         for text in self._notes:
             note = QLabel(text, self)
             note.setWordWrap(True)
             box.addWidget(note)
-        form = QFormLayout()
-        for prompt in self._prompts:
-            label = QLabel(prompt.question, self)
+        # The rows scroll (T104, ruling A of the T92 merge). Since T92 an install
+        # also runs configure-time steps, so accountwide's Install asks all 13 of
+        # its flags; laid straight into the dialog, 13 rows made it at least
+        # ~470 px tall with no way to be shorter, which does not fit the app's
+        # 960x640 minimum window once the notes and buttons are added.
+        rows = QWidget()
+        # A grid, not a `QFormLayout`: the form's label column does not ask a
+        # word-wrapped label its height at the width it is given, and at 560 px
+        # it drew "Share currency account-wide?" over the row above (m910q,
+        # accountwide). A grid does, so every question is as tall as its lines.
+        form = QGridLayout(rows)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setColumnStretch(0, 3)
+        form.setColumnStretch(1, 2)
+        for row, prompt in enumerate(self._prompts):
+            label = QLabel(prompt.question, rows)
             label.setWordWrap(True)
             self._questions.append(prompt.question)
-            control = self._control_for(prompt)
+            control = self._control_for(prompt, rows)
             self._controls[prompt.key] = control
-            form.addRow(label, control)
-        box.addLayout(form)
+            form.addWidget(label, row, 0)
+            form.addWidget(control, row, 1, Qt.AlignmentFlag.AlignVCenter)
+        form.setRowStretch(len(self._prompts), 1)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(rows)
+        box.addWidget(scroll, 1)
 
         self._problem_label = QLabel("", self)
         self._problem_label.setWordWrap(True)
@@ -128,10 +242,45 @@ class ManifestPromptDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
         box.addWidget(self._buttons)
 
-        for prompt in self._prompts:
-            if prompt.default is not None:
-                self.set_answer(prompt.key, prompt.default)
+        for key, value in prefill.items():
+            self.set_answer(key, value)
         self._recheck()
+        self._fit(scroll, rows, parent)
+
+    def _fit(self, scroll: QScrollArea, rows: QWidget, parent: QWidget | None) -> None:
+        """Open as tall as the rows need, but never taller than the window it belongs to.
+
+        `QScrollArea`'s own size hint stops well short of 13 rows, so without this
+        a dialog that has room would open with a scrollbar it does not need. And
+        a word-wrapped question is as tall as the width it gets: a scroll area
+        that sized its rows from `minimumSizeHint()` squeezed them until the
+        two-line labels overlapped (seen on m910q, accountwide at 480 px wide).
+        So the rows' height is asked of the form AT the viewport's width, now
+        and on every resize (`eventFilter`).
+        """
+        self._scroll, self._rows = scroll, rows
+        scroll.setMinimumHeight(_ROWS_MIN_HEIGHT)
+        scroll.viewport().installEventFilter(self)
+        width = max(self.sizeHint().width(), _MIN_WIDTH)
+        chrome = self.sizeHint().width() - scroll.sizeHint().width()
+        rows_h = self._rows_height(max(width - chrome, 1))
+        wanted = self.sizeHint().height() - scroll.sizeHint().height() + rows_h
+        window = parent.window() if parent is not None else None
+        screen = self.screen().availableGeometry().height() if self.screen() else wanted
+        cap = min(window.height(), screen) if window is not None else screen
+        self.resize(width, min(wanted, cap))
+
+    def _rows_height(self, width: int) -> int:
+        layout = self._rows.layout()
+        if layout is not None and layout.hasHeightForWidth():
+            return int(layout.totalHeightForWidth(width))
+        return int(self._rows.sizeHint().height())
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Keep the rows as tall as their wrapped questions need at the current width."""
+        if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._rows.setMinimumHeight(self._rows_height(self._scroll.viewport().width()))
+        return super().eventFilter(watched, event)
 
     # -- what the tests and the caller ask ---------------------------------
 
@@ -161,7 +310,21 @@ class ManifestPromptDialog(QDialog):
         return ""
 
     def set_answer(self, key: str, value: str) -> None:
-        """State one answer, and show it in its control if that control can show it."""
+        """State one answer, and show it in its control if that control can show it.
+
+        A yes/no answer spelled as a word (`"false"`, `"yes"`, ...) is stored as
+        the `"1"`/`"0"` its box offers. Accountwide's thirteen flags default to
+        `"false"`; stored as given, the box found no such item and stayed on
+        Yes while the answer held was "false" (found on the T92 merge, once
+        "ask all" put them in a dialog). A word that is not a yes/no at all is
+        kept as given, so `problem()` can still say so.
+        """
+        if self._kinds.get(key) == "bool":
+            word = value.strip().lower()
+            if word in _TRUE_WORDS:
+                value = "1"
+            elif word in _FALSE_WORDS:
+                value = "0"
         self._answers[key] = value
         control = self._controls.get(key)
         if isinstance(control, QLineEdit):
@@ -175,9 +338,9 @@ class ManifestPromptDialog(QDialog):
 
     # -- internals ---------------------------------------------------------
 
-    def _control_for(self, prompt: Prompt) -> QWidget:
+    def _control_for(self, prompt: Prompt, owner: QWidget) -> QWidget:
         if prompt.kind == "choice":
-            combo = QComboBox(self)
+            combo = QComboBox(owner)
             for choice in prompt.choices:
                 combo.addItem(choice, choice)
             combo.currentIndexChanged.connect(
@@ -186,7 +349,7 @@ class ManifestPromptDialog(QDialog):
             self._answers[prompt.key] = str(combo.currentData() or "")
             return combo
         if prompt.kind == "bool":
-            combo = QComboBox(self)
+            combo = QComboBox(owner)
             for text, value in _BOOL_CHOICES:
                 combo.addItem(text, value)
             combo.currentIndexChanged.connect(
@@ -194,7 +357,7 @@ class ManifestPromptDialog(QDialog):
             )
             self._answers[prompt.key] = str(combo.currentData() or "")
             return combo
-        edit = QLineEdit(self)
+        edit = QLineEdit(owner)
         # No `QIntValidator`: a validator that silently drops keystrokes leaves
         # a person typing into a box that does nothing and says nothing. The
         # refusal is shown as a sentence instead, under the form.
@@ -225,6 +388,8 @@ def ask_manifest_prompts(
     prompts: Sequence[Prompt],
     *,
     again: bool = False,
+    remembered: Mapping[str, str] | None = None,
+    removing: bool = False,
 ) -> Mapping[str, str] | None:
     """Put the manifest's questions to the user. `None` means they cancelled.
 
@@ -232,7 +397,9 @@ def ask_manifest_prompts(
     cancelling must change nothing on disk, whereas an empty mapping is what a
     manifest with nothing to ask produces.
     """
-    dialog = ManifestPromptDialog(parent, manifest, prompts, again=again)
+    dialog = ManifestPromptDialog(
+        parent, manifest, prompts, again=again, remembered=remembered, removing=removing
+    )
     if dialog.exec() != int(QDialog.DialogCode.Accepted):
         logger.info(f"{manifest.id}: the user cancelled the questions; nothing was applied")
         return None

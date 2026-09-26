@@ -17,11 +17,14 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path, PureWindowsPath
+from typing import Any, NoReturn
 
 import pytest
 
@@ -742,6 +745,26 @@ def spelled_bounds(test_file: str) -> set[str]:
 
 
 @pytest.fixture(autouse=True)
+def _no_forced_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`main._hard_exit` is `os._exit`; reached in-process it would end pytest itself (T113).
+
+    `main()` leaves through it when a background job outlives the exit join.
+    Replaced here so a test that reaches it by accident FAILS, naming the seam,
+    instead of the run vanishing mid-file with no report. A test that means to
+    reach it patches it again; the real one is proved in a child process.
+    """
+    import main
+
+    def _refuse(code: int) -> NoReturn:
+        raise AssertionError(
+            f"main._hard_exit({code}) was reached in-process: a background job outlived "
+            "the exit join. Patch main._hard_exit in the test if that is the point."
+        )
+
+    monkeypatch.setattr(main, "_hard_exit", _refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a test block on a modal dialog.
 
@@ -780,6 +803,139 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     # Disarm the slot too, so NO `QMessageBox` modal can block an offscreen run
     # (verified: the class-level `exec` patch takes effect on Shiboken 6.11.2).
     monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.No)
+
+
+def _the_running_qapplication() -> object | None:
+    """The process's QApplication if a test already made one; never makes one itself.
+
+    Headless tests (`--provision` must not need Qt) import nothing from PySide6,
+    so this reads `sys.modules` rather than importing it.
+    """
+    widgets = sys.modules.get("PySide6.QtWidgets")
+    if widgets is None:
+        return None
+    return widgets.QApplication.instance()
+
+
+def _address(widget: Any) -> int:
+    import shiboken6
+
+    return int(shiboken6.getCppPointer(widget)[0])
+
+
+def top_level_widget_snapshot() -> dict[int, weakref.ref[Any]]:
+    """Every live top-level widget, by C++ address, with a WEAK reference to its wrapper.
+
+    Weak, because a strong reference to a Python-owned widget is what keeps it
+    alive: the snapshot would itself be the leak it is there to find.
+
+    The address alone is not an identity. Qt reuses a freed widget's address,
+    so a widget a test makes where a snapshotted one used to be would pass for
+    it and be spared. The weak reference tells them apart: the entry counts only
+    while it still returns that very wrapper. A widget Qt made for itself may
+    lose its wrapper as soon as this returns, so its entry can go dead while the
+    widget lives; the `createdByPython` filter below, not the snapshot, is what
+    spares those.
+    """
+    app = _the_running_qapplication()
+    if app is None:
+        return {}
+    from PySide6.QtWidgets import QApplication
+
+    return {_address(w): weakref.ref(w) for w in QApplication.topLevelWidgets()}
+
+
+def _was_in(before: Mapping[int, weakref.ref[Any]], widget: Any) -> bool:
+    then = before.get(_address(widget))
+    return then is not None and then() is widget
+
+
+def destroy_the_widgets_left_behind(before: Mapping[int, weakref.ref[Any]]) -> int:
+    """Delete every orphan top-level widget Python made that was not alive in `before`.
+
+    Returns how many it deleted. Three filters, each keeping something alive
+    that is not a test's leftover:
+
+    - in `before` (same address AND same wrapper): alive when the test started,
+      so a longer-scoped fixture's (`test_main.py`'s module-scoped `_app_window`
+      is built before any function-scoped fixture, so it is always in the
+      snapshot);
+    - `parentWidget()` set: a dialog or menu is a top-level WINDOW with a parent,
+      and its parent decides when it goes;
+    - not `createdByPython`: a widget Qt made for itself is Qt's to delete (a
+      `QCompleter`'s popup is parentless, and the completer deletes it).
+
+    `deleteLater` plus a DeferredDelete-only `sendPostedEvents`, not
+    `processEvents()`: the deletion happens here, and no other queued event gets
+    delivered after the test's own assertions finished.
+    """
+    app = _the_running_qapplication()
+    if app is None:
+        return 0
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    left = [
+        w
+        for w in QApplication.topLevelWidgets()
+        if w.parentWidget() is None and shiboken6.createdByPython(w) and not _was_in(before, w)
+    ]
+    for widget in left:
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    return len(left)
+
+
+def destroying_what_is_left_behind() -> Iterator[None]:
+    """The body of both fixtures below: snapshot, yield to the test or module, delete the rest.
+
+    A plain generator so `test_leaked_widgets.py` can drive the very code the
+    fixtures run, inside one test, without depending on test order.
+    """
+    before = top_level_widget_snapshot()
+    yield
+    destroy_the_widgets_left_behind(before)
+
+
+@pytest.fixture(autouse=True)
+def _widgets_a_test_leaves_behind_are_destroyed() -> Iterator[None]:
+    """Delete the top-level widgets a test orphaned, so the next app-wide restyle stays cheap.
+
+    T109. Most views connect a child's signal to a lambda that captures the view
+    (`button.clicked.connect(lambda: self.start_install(e))`). That is a cycle
+    through C++ that Python's collector cannot see, so every `CatalogView`,
+    `ControllerView` and `LogPanel` a test built stayed alive for the rest of the
+    run: measured 2026-09-24, 29,422 live widgets by the middle of
+    `test_controller_view.py`. `QApplication.setStyleSheet` and `setStyle`
+    re-polish every live widget, and the two app-level tests in `test_theme.py`
+    spent 146 s and 148 s there on the laptop (304 s and 266 s on m910q).
+
+    Autouse fixtures in this file are set up before, and so torn down after, a
+    test module's own function fixtures: a fixture that stops a view's threads
+    in its teardown has done so before this one deletes the view.
+    `test_leaked_widgets.py` holds this to what it deletes and what it spares.
+    """
+    yield from destroying_what_is_left_behind()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _widgets_a_module_leaves_behind_are_destroyed() -> Iterator[None]:
+    """The same, once per module, for what a module-scoped fixture built.
+
+    The per-test fixture cannot touch a module-scoped fixture's widget: pytest
+    builds it before any function fixture, so it is in every test's snapshot.
+    That is right while the module runs and wrong after. `test_main.py`'s
+    `_app_window` is stopped by its own teardown and was never deleted, so one
+    `main._Window` carried 12,731 widgets into every later module (measured
+    2026-09-24, T109).
+
+    Autouse and module-scoped, so pytest sets it up before a module's own
+    module fixtures and tears it down after them: `_app_window`'s teardown has
+    stopped the window's threads (`main._stop_background_threads`) before this
+    deletes the window.
+    """
+    yield from destroying_what_is_left_behind()
 
 
 UNGUARDED_HTTPS_GET = upstream.https_get

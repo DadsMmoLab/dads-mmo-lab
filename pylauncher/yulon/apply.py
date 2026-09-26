@@ -28,7 +28,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -36,7 +36,7 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
-from yulon import docker, platform, rmtree, runner
+from yulon import docker, module_answers, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -133,6 +133,118 @@ def installed_clones(server_dir: Path) -> dict[str, frozenset[str]]:
     return {
         str(kind): docker.clone_names(server_dir / folder) for kind, folder in CLONE_DIRS.items()
     }
+
+
+def _by_family(keys: frozenset[str]) -> dict[str, frozenset[str]]:
+    """`<type>/<id>` keys (the answers file's) as ids per family, known families only."""
+    found: dict[str, set[str]] = {}
+    for key in keys:
+        family, _, item_id = key.partition("/")
+        if family in CLONE_DIRS and item_id:
+            found.setdefault(family, set()).add(item_id)
+    return {family: frozenset(ids) for family, ids in found.items()}
+
+
+PENDING_DOUBT = "a press on it stopped while its SQL was being sent"
+"""Why a mod with a `pending` mark may or may not be in the database (T115's mark, T121)."""
+
+
+def unreadable_record(detail: str) -> str:
+    """The sentence for an answers file that cannot be read, naming the file (T121 fix wave)."""
+    return (
+        f"Yu'lon cannot read {module_answers.ANSWERS_FILE} in the server folder ({detail}). "
+        "That file is where it records which mob multiplier is applied, so it cannot tell "
+        "whether this one or one of its alternatives is already in the database, and running "
+        "it could stack on top. Fix that file, or move it aside if the creature values are at "
+        "their normal values."
+    )
+
+
+@dataclass(frozen=True)
+class Doubt:
+    """Why nobody can say whether a record-backed mod is in the database (T121).
+
+    `pending`: a press stopped between marking its statement and recording the
+    result (T115). `unreadable`: the answers file itself cannot be read, so every
+    mod whose state lives in it is in doubt (fix wave, Codex high).
+    """
+
+    kind: Literal["pending", "unreadable"]
+    detail: str = ""
+
+    def lock_reason(self, name: str) -> str:
+        """The sentence behind a SIBLING's locked Install, in the applier's own words."""
+        if self.kind == "unreadable":
+            return unreadable_record(self.detail)
+        return (
+            f"{name} may be in this server's database: {PENDING_DOUBT}. The catalog records the "
+            f"two as alternatives that cannot both be installed. Remove {name} first."
+        )
+
+
+def relative_keys(manifests: Iterable[Manifest]) -> frozenset[str]:
+    """`<type>/<id>` of every manifest whose installed state is the answers-file record (T121).
+
+    The relative ones (`reapplies_on_top()`): the four mob multipliers. They
+    leave no folder, so an unreadable record puts exactly these in doubt.
+    """
+    return frozenset(f"{m.type}/{m.id}" for m in manifests if reapplies_on_top(m))
+
+
+def recorded_modules(
+    server_dir: Path, relative: frozenset[str] = frozenset()
+) -> dict[str, frozenset[str]]:
+    """The sourceless mods whose record says they are, or may be, in the database (T121).
+
+    Baby, Nerf, Buff and Extreme Buff Mobs install one inline statement and
+    leave no folder, so `installed_clones()` never lists them: their rows read
+    Not installed for ever and `conflicts_with`, which the four declare against
+    each other, never saw one -- Baby Mobs at x0.25 then Buff Mobs at x2 left
+    creatures at x0.5 (measured through the real `Applier`, 2026-09-25). Since
+    T115 their install writes an `applied` record and marks a statement in
+    flight as `pending`; both mean "this may be in the database", so both are
+    listed -- and when the file cannot be read, every key in `relative` is
+    (fix wave: unreadable is not "nothing recorded"). `unknown_modules()` says
+    which are only in doubt.
+    """
+    read = module_answers.recorded_keys(server_dir)
+    doubtful = relative if read.unreadable else frozenset()
+    return _by_family(read.applied | read.pending | doubtful)
+
+
+def unknown_modules(
+    server_dir: Path, relative: frozenset[str] = frozenset()
+) -> dict[str, dict[str, Doubt]]:
+    """The record-backed mods nobody can say are in the database or not, and why (T121).
+
+    A `pending` mark left behind (`module_answers.record_pending()`), or -- for
+    every key in `relative` -- an answers file that cannot be read. The row reads
+    "State unknown"; its alternatives stay locked.
+    """
+    read = module_answers.recorded_keys(server_dir)
+    doubts: dict[str, Doubt] = {key: Doubt("pending") for key in read.pending}
+    if read.unreadable:
+        doubts.update({key: Doubt("unreadable", read.unreadable) for key in relative})
+    found: dict[str, dict[str, Doubt]] = {}
+    for family, ids in _by_family(frozenset(doubts)).items():
+        found[family] = {item_id: doubts[f"{family}/{item_id}"] for item_id in ids}
+    return found
+
+
+def installed_modules(
+    server_dir: Path, relative: frozenset[str] = frozenset()
+) -> dict[str, frozenset[str]]:
+    """What is installed per family: the clone folders, plus the recorded sourceless mods (T121).
+
+    The Modules tab's reading and the applier's conflict and requirement
+    guards, so the tab and the refusal agree (T55's rule). `installed_clones()`
+    keeps meaning "the folder is there" for the readers that need a folder.
+    One directory listing per family and one small JSON read, on every reload.
+    """
+    found = {family: set(ids) for family, ids in installed_clones(server_dir).items()}
+    for family, ids in recorded_modules(server_dir, relative).items():
+        found.setdefault(family, set()).update(ids)
+    return {family: frozenset(ids) for family, ids in found.items()}
 
 
 def conflicting_installed(
@@ -270,6 +382,18 @@ _CONF_KEY_WRITE_SUFFIXES = (".conf",)
 
 class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
+
+
+class SqlNotSent(ApplyError):
+    """A SQL runner failed before anything could reach the server: no process ever ran (T115).
+
+    The ONE failure a caller may read as "the database was not changed".
+    Anything else out of `run_statement()` -- a non-zero `mysql` exit, ERROR 2013,
+    a transport error -- can come after the server ran COMMIT (Codex, T115), so
+    it proves nothing either way. `DockerSql` raises this where there is no
+    docker CLI to start; it is an `ApplyError`, so every existing handler still
+    catches it.
+    """
 
 
 CLAIM_FILE = CLONE_MARKER
@@ -1039,7 +1163,7 @@ class DockerSql:
             # reported to the user as "install Docker Desktop" with nothing in the log
             # to contradict it (review finding, 2026-08-23).
             logger.warning(f"{argv[0]} could not be started: {exc}")
-            raise ApplyError(platform.DOCKER_CLI_MISSING_HELP) from exc
+            raise SqlNotSent(platform.DOCKER_CLI_MISSING_HELP) from exc
 
     def _env(self) -> dict[str, str]:
         # The distro goes with the password. Without it `mysql_env()` builds an
@@ -1064,7 +1188,7 @@ class DockerSql:
         """
         prefix = platform.docker_prefix(self.wsl_distro)
         if prefix is None:
-            raise ApplyError(platform.DOCKER_CLI_MISSING_HELP)
+            raise SqlNotSent(platform.DOCKER_CLI_MISSING_HELP)
         return [
             *prefix,
             "exec",
@@ -1586,29 +1710,83 @@ def required_prompts(manifest: Manifest, action: When) -> tuple[Prompt, ...]:
     return tuple(prompt for prompt in manifest.prompts if prompt.key in wanted)
 
 
-def must_ask(prompt: Prompt) -> bool:
-    """Whether Install has to put this required prompt to a person before it runs.
+def must_ask(
+    prompt: Prompt, action: When = "install", remembered: Mapping[str, str] | None = None
+) -> bool:
+    """Whether a press of `action` puts this required prompt to a person before it runs.
 
-    A prompt with no default cannot be filled in by the app at all. A `choice`
-    can -- and must not be, because choosing is the whole of what it is for
-    (T100): `hearthstone-cd`'s `cooldown` defaults to `30_Min`, which is
-    upstream's RESET file, and while only a missing default opened the dialog
-    every GUI install applied that and changed nothing. The dialog is handed
-    every required prompt with its default filled in, so clicking straight
-    through a FIRST install applies exactly what the old silent path did.
+    **Every question, on install** (the owner, 2026-09-24, T104: "ask all,
+    remember answers"). The dialog is handed each prompt pre-filled -- with the
+    answer this install remembers for it, else the manifest's default -- so
+    accepting is one click. Until T104 only a prompt with no default (and, from
+    T100, a `choice`) was asked, and every other answer was the default whether
+    the player wanted it or not: Stackables on Tortoise/Vanilla/TBC was always
+    200, the mob multipliers always theirs.
 
-    It is asked only of a prompt `required_prompts()` returned: a `choice` a
-    manifest declares but no template renders is never put to anyone. Which
-    shipped manifests end up asking is pinned by the view's sweep test, not
-    listed here.
+    **On remove, only what this install has no usable record of.** A remove
+    that renders an answer renders the one install USED: the mob multipliers
+    divide by the same `{hp}` install multiplied by. With a record
+    (`remembered`, from `Applier.remembered_answers()`) the applier fills it in
+    and nothing is asked. Without one -- an install made before T104, or a
+    damaged file -- the default would be a GUESS, and dividing by it in silence
+    leaves every creature multiplied whenever the player picked another value
+    (cold review + Codex, fix wave). So it is asked, pre-filled with the default
+    and with a note saying why. A prompt with no default is asked either way.
 
-    It was written for two places that answer "will Install ask me something?"
-    -- the dialog gate in `ControllerView._module_values()` and the Modules
-    row's "asks a question" chip. Since T92 the dialog gate
-    opens for EVERY required prompt, a superset of this, so it no longer reads
-    `must_ask()`; the chip still does, and is the narrower of the two.
+    It is asked only of a prompt `required_prompts()` returned: a question a
+    manifest declares but no template renders is never put to anyone
+    (`test_module_answers.py::test_no_shipped_manifest_declares_a_question_
+    nothing_uses` holds the shipped catalog to having none).
+
+    One function because two places answer "will Install ask me something?" --
+    the dialog gate in `ControllerView._module_values()` and the Modules row's
+    "asks a question" chip -- and they must not disagree.
     """
-    return prompt.default is None or prompt.kind == "choice"
+    if action == "remove":
+        return prompt.default is None or prompt.key not in (remembered or {})
+    return True
+
+
+def reapplies_on_top(manifest: Manifest) -> bool:
+    """Whether running this install again applies its answers on top of the last run.
+
+    Read off the manifest's own shape: a REMOVE that renders install's answers
+    undoes them relative to what is there (`HealthModifier/{hp}` after
+    `HealthModifier*{hp}`), so the install is relative too, and a second one --
+    an Update, or Install over it -- would compound. The four mob multipliers,
+    pinned by `test_module_answers.py`.
+
+    Since T115 such a re-run does not compound: the applier keeps a record of
+    the values it applied (`module_answers.record_applied()`) and runs the
+    manifest's own remove statements with them, then the install statements
+    with the new ones, in one transaction (`Applier._run_relative()`). Measured
+    before that: Install at x2 then again at x3 left creatures at x6.
+    """
+    install = {prompt.key for prompt in required_prompts(manifest, "install")}
+    return any(prompt.key in install for prompt in required_prompts(manifest, "remove"))
+
+
+def reapply_steps_problem(manifest: Manifest) -> str:
+    """Why this relative manifest's re-run cannot be ONE text, or `""` if it can (T115).
+
+    The undo-then-apply is sent as one `START TRANSACTION; ... COMMIT;` text, so
+    every install and remove step it covers must be an inline `direct`
+    statement on one database with no precondition and no verify: a file or a
+    `db-import` step is not text this run holds, and a per-step check has no
+    place inside one transaction. The four mob multipliers qualify
+    (`test_mob_multiplier_rerun.py`); a future manifest that does not is refused
+    a re-run rather than compounded.
+    """
+    steps = [s for s in manifest.sql if s.when in ("install", "remove")]
+    dbs = {s.db for s in steps}
+    for step in steps:
+        if step.statement is None or step.applied_by != "direct":
+            return f"its {step.when} SQL is not an inline statement"
+        if step.precondition is not None or step.verify:
+            return f"its {step.when} SQL carries a check that cannot run inside one transaction"
+    if len(dbs) > 1:
+        return "its SQL writes to more than one database"
+    return ""
 
 
 def check_answer(prompt: Prompt, value: str) -> str:
@@ -1622,13 +1800,14 @@ def check_answer(prompt: Prompt, value: str) -> str:
     if not text:
         return "this cannot be left empty"
     if prompt.kind == "int":
-        return "" if _INT.fullmatch(text) else "this must be a whole number"
+        return prompt.range_problem(text) if _INT.fullmatch(text) else "this must be a whole number"
     if prompt.kind == "float":
         try:
             float(text)
         except ValueError:
             return "this must be a number"
-        return ""
+        # T122: the question's own range, finite; see `Prompt.range_problem()`.
+        return prompt.range_problem(text)
     if prompt.kind == "bool":
         return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
     if prompt.kind == "choice":
@@ -1842,6 +2021,9 @@ class Applier:
         vals = self._values(manifest, values)
         log = _Log()
         self._check_values(manifest, "install", vals, log)
+        # T115, before anything is written: a relative install run again over
+        # values nobody can read would compound them, so it is refused here.
+        undo = self._undo_values(manifest)
         clash = self._conflict_refusal(manifest)
         if clash:
             raise ApplyError(clash)
@@ -1980,7 +2162,7 @@ class Applier:
         # pass that would be false of the configure-time one.
         if first_configure_sql:
             self._refuse_direct_sql_into_a_running_world(manifest, "configure")
-        self._sql(manifest, clone, vals, "install", log)
+        self._sql(manifest, clone, vals, "install", log, undo=undo)
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
@@ -1993,6 +2175,7 @@ class Applier:
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
         self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
+        self._remember(manifest, values, log)
         return self._report("install", manifest, log)
 
     def _finish_claim(
@@ -2316,11 +2499,23 @@ class Applier:
         self._patches(manifest, clone, vals, "configure", log)
         self._sql(manifest, clone, vals, "configure", log)
         self._conf(manifest, clone, vals, log)
+        self._remember(manifest, values, log)
         return self._report("configure", manifest, log)
 
     def remove(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
-        """Run remove-time patches/SQL, delete deployed files and the clone. DB rows are kept."""
+        """Run remove-time patches/SQL, delete deployed files and the clone. DB rows are kept.
+
+        A relative manifest (`reapplies_on_top()`) divides by the values its
+        applied record holds (T115) -- what the database was multiplied by --
+        ahead of the remembered answers, which T104 keeps after a Remove and so
+        cannot say that. Values the caller hands in still win: the Modules tab
+        asks only when there is no usable record, and then a person answered.
+        """
         vals = self._values(manifest, values)
+        relative = reapplies_on_top(manifest)
+        applied, _why = self.applied_record(manifest) if relative else (None, "")
+        vals.update(applied or {})
+        vals.update(values or {})
         log = _Log()
         self._check_values(manifest, "remove", vals, log)
         clone = self.clone_dir(manifest)
@@ -2518,16 +2713,37 @@ class Applier:
         Asked of the DISK, never of the declaration. Four of the mods name each
         other (buff/xbuff/nerf/baby-mobs), so a check that refused on the
         presence of a conflict rather than of the conflicting CLONE would make
-        all four uninstallable.
+        all four uninstallable. Those four leave no clone, so for them the disk
+        is the answers file's record (`installed_modules()`, T121): until that,
+        this never saw one, and Baby Mobs then Buff Mobs stacked.
 
         Every family folder is searched rather than this manifest's own. Ids are
         unique across the catalog, the two known pairs are same-family, and a
         conflict that reaches across families -- an ale script against the
         module it shadows -- is exactly the one a same-family check would miss.
         """
+        # An answers file that cannot be read is refused before this, for a mod
+        # whose state IS that file: `install()` asks `_undo_values()` first, and
+        # `reapply_refusal()` says so (T121 fix wave, Codex high).
+        read = module_answers.recorded_keys(self.server_dir)
         if not manifest.conflicts_with:
             return None
-        for other, kind in conflicting_installed(manifest, installed_clones(self.server_dir)):
+        # T121: the four mob multipliers leave no folder, so the record is what
+        # says one of them is in the database. Asked first: it has no seat to open.
+        applied, pending = read.applied, read.pending
+        for other, kind in conflicting_installed(manifest, installed_modules(self.server_dir)):
+            if f"{kind}/{other}" in applied | pending:
+                where = (
+                    f"may be in this server's database: {PENDING_DOUBT}"
+                    if f"{kind}/{other}" in pending
+                    else f"is applied to this server's database (Yu'lon's record of it is in "
+                    f"{module_answers.ANSWERS_FILE})"
+                )
+                return (
+                    f"{manifest.id} and {other} cannot both be installed: they are alternatives "
+                    f"to each other, and the catalog records the conflict. {other} {where}. "
+                    f"Remove it first, or keep it and leave {manifest.id} out. Nothing was changed."
+                )
             # An EMPTY directory is not an installed module. `clone_names()`
             # counts every non-hidden directory name -- no `.git`, no claim,
             # no content -- so a leftover from a failed install, or a folder
@@ -2567,10 +2783,12 @@ class Applier:
 
         Asked of the DISK and not of the catalog, so a module the SERVER install
         cloned counts as present; `missing_requirements()` says why that matters.
+        Through `installed_modules()` since T121, the tab's own reading, so a
+        recorded sourceless mod counts too (none is named in a `requires` today).
         """
         if not manifest.requires:
             return None
-        for needed in missing_requirements(manifest, installed_clones(self.server_dir)):
+        for needed in missing_requirements(manifest, installed_modules(self.server_dir)):
             return requirement_refusal(manifest.id, needed) + " Nothing was changed."
         return None
 
@@ -2975,11 +3193,16 @@ class Applier:
         target = self._deploy_target(step.src, step.dest)
         src = clone / step.src
         if src.is_dir():
+            # BOTH names of a renamed file (T104 fix wave). A rename added to a
+            # manifest after installs exist -- accountwide's Ashen Order script,
+            # `.lua` -> `.lua.unused` -- leaves every earlier install holding the
+            # OLD name, and deleting only the new one left that live script
+            # behind in silence. `_rm()` names what it found and skips what is
+            # not there, so the report says which of the two this install had.
             deployed = {entry.name for entry in src.iterdir()}
             for old, new in step.rename:
                 old_parts, new_parts = Path(old).parts, Path(new).parts
                 if len(old_parts) == 1 and old_parts[0] in deployed:
-                    deployed.discard(old_parts[0])
                     deployed.add(new_parts[0])
             for name in sorted(deployed):
                 self._rm(target / name, log)
@@ -3034,8 +3257,22 @@ class Applier:
                 )
 
     def _sql(
-        self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When, log: _Log
+        self,
+        manifest: Manifest,
+        clone: Path,
+        vals: Mapping[str, str],
+        when: When,
+        log: _Log,
+        undo: Mapping[str, str] | None = None,
     ) -> None:
+        """Run this action's SQL steps; a relative manifest's as one recorded text (T115).
+
+        A `reapplies_on_top()` manifest's install or remove goes through
+        `_run_relative()` once the guards below have passed -- the same
+        running-world refusal and the same database start as any other press.
+        `undo` is its applied record on a re-install: the values to divide out
+        first.
+        """
         plan = self._plan_sql(manifest, clone, vals, when)
         self._refuse_direct_sql_into_a_running_world(manifest, when)
         # Second, and never first: a press against a live world is refused above
@@ -3063,6 +3300,13 @@ class Applier:
             # the trade: a container that is running when it need not be, rather
             # than rows written under a live world.
             self._refuse_direct_sql_into_a_running_world(manifest, when)
+        if (
+            when in ("install", "remove")
+            and reapplies_on_top(manifest)
+            and not reapply_steps_problem(manifest)
+        ):
+            self._run_relative(manifest, vals, when, undo, log)
+            return
         for index, step in enumerate(manifest.sql):
             if step.when != when:
                 continue
@@ -3703,11 +3947,263 @@ class Applier:
 
     # -- helpers -----------------------------------------------------------
 
-    @staticmethod
-    def _values(manifest: Manifest, values: Mapping[str, str] | None) -> dict[str, str]:
+    def _values(self, manifest: Manifest, values: Mapping[str, str] | None) -> dict[str, str]:
+        """Defaults, then what this install remembers, then what the caller handed in.
+
+        The middle layer is T104's. It is what makes a Remove of a mob
+        multiplier divide by the factor install multiplied by, and what any
+        caller that asks nothing (`values=None`) now gets instead of the
+        manifest's default. An install with no record -- every one made before
+        T104 -- gets exactly the defaults it always did.
+        """
         merged = {p.key: p.default for p in manifest.prompts if p.default is not None}
+        merged.update(self.remembered_answers(manifest))
         merged.update(values or {})
         return merged
+
+    def remembered_answers(self, manifest: Manifest) -> dict[str, str]:
+        """The answers last given for `manifest` on this install that are still usable.
+
+        Only declared questions, and only answers `check_answer()` accepts: a
+        saved `choice` the manifest no longer offers is dropped rather than
+        pre-filled, and the default takes its place. Never raises; a record it
+        cannot read is no record (`module_answers._read_all()`).
+        """
+        saved = module_answers.read_answers(self.server_dir, manifest)
+        return {
+            prompt.key: saved[prompt.key]
+            for prompt in manifest.prompts
+            if prompt.key in saved and check_answer(prompt, saved[prompt.key]) == ""
+        }
+
+    def applied_record(self, manifest: Manifest) -> tuple[dict[str, str] | None, str]:
+        """What this install's database holds for a relative manifest, and why not (T115).
+
+        `(values, "")` for a usable record: every answer the remove statements
+        render, each one `check_answer()` accepts and, for a number, not zero --
+        nothing divides by zero, and MySQL would write NULL. `(None, "")` for no
+        record at all. `(None, why)` for a record that is there and cannot be
+        used, which is a known re-run with unknown values -- including one still
+        marked in flight (`module_answers.is_pending()`), where a press stopped
+        between marking its statement and recording the result.
+        """
+        if module_answers.is_pending(self.server_dir, manifest):
+            return None, (
+                "an earlier press stopped while its SQL was being sent, so Yu'lon cannot tell "
+                "whether the database holds the values from before it or after it"
+            )
+        raw = module_answers.read_applied(self.server_dir, manifest)
+        if raw is None:
+            return None, ""
+        out: dict[str, str] = {}
+        for prompt in required_prompts(manifest, "remove"):
+            value = raw.get(prompt.key)
+            if value is None:
+                return None, f"it has no value for {prompt.question!r}"
+            problem = check_answer(prompt, value)
+            if not problem and prompt.kind in ("int", "float") and float(value) == 0:
+                problem = "it is zero, and nothing divides by zero"
+            if problem:
+                return None, f"{prompt.question!r} was recorded as {value!r}: {problem}"
+            out[prompt.key] = value
+        return out, ""
+
+    def forget_applied(self, manifest: Manifest) -> str:
+        """Forget that `manifest` is applied, sending no SQL; `""` if done, else why not (T121).
+
+        For a record that no longer describes the database -- a restored backup,
+        a database made again by hand. The tab asks first and says the database
+        is not changed; `module_answers.forget_applied()` does the write.
+        """
+        return module_answers.forget_applied(self.server_dir, manifest)
+
+    def reapply_refusal(self, manifest: Manifest) -> str | None:
+        """Why running this relative manifest's install again is refused, or `None` (T115).
+
+        The ruling: a KNOWN re-run whose applied values cannot be read is refused,
+        never guessed. Known means a record that is there but unusable, or a
+        clone whose install finished with no record at all (a sourced relative
+        manifest; none is shipped). Remove asks for the values in its own dialog,
+        so the remedy is Remove, then Install. An install made by an older
+        Yu'lon leaves neither, and the database cannot say what it was
+        multiplied by, so that one is not detectable here.
+        """
+        if not reapplies_on_top(manifest):
+            return None
+        # T121 fix wave (Codex high): an answers file that cannot be read says
+        # nothing about this mod or its alternatives, so nothing may run over
+        # it. Asked by the tab before any dialog, and by `install()` (through
+        # `_undo_values()`) before the conflict guard, the database start or
+        # any SQL -- not at the pending-mark write after all three.
+        unreadable = module_answers.recorded_keys(self.server_dir).unreadable
+        if unreadable:
+            # Named the way the re-run refusal below names it, not `id:`-prefixed:
+            # the tab puts `install <id>:` in front of whatever this says.
+            return (
+                f"{manifest.name} ({manifest.id}) was not run. {unreadable_record(unreadable)} "
+                "Nothing was changed."
+            )
+        applied, why = self.applied_record(manifest)
+        if applied is not None:
+            problem = reapply_steps_problem(manifest)
+            if not problem:
+                return None
+            why = f"{problem}, so Yu'lon cannot undo the last values and apply these in one go"
+        elif not why:
+            finished = clone_install_completed(self.clone_dir(manifest), item_id=manifest.id)
+            if finished is not True:
+                return None
+            why = "there is no record of the values it was applied with"
+        return (
+            f"{manifest.name} ({manifest.id}) is already applied to this server's database, "
+            f"and running it again would multiply the values it already multiplied: {why}. "
+            f"Remove it first, then Install. Nothing was changed."
+        )
+
+    def _undo_values(self, manifest: Manifest) -> dict[str, str] | None:
+        """The applied record a re-install undoes first, `None` for a first install; or refuse."""
+        refusal = self.reapply_refusal(manifest)
+        if refusal is not None:
+            raise ApplyError(refusal)
+        if not reapplies_on_top(manifest):
+            return None
+        return self.applied_record(manifest)[0]
+
+    def _relative_text(
+        self,
+        manifest: Manifest,
+        when: When,
+        vals: Mapping[str, str],
+        undo: Mapping[str, str] | None,
+    ) -> tuple[Db, str]:
+        """One transaction: on a re-install, remove's statements with `undo` first, then `when`'s.
+
+        Sent over `run_statement()` as T100's `_run_transaction()` sends its
+        files: `mysql` stops at the first error and the session it ends rolls
+        the transaction back, so the divide never lands without the multiply.
+        `creature_template` is InnoDB on AzerothCore (read on the m910q world
+        database, T115 gate), which is what makes that rollback real.
+        """
+        passes: list[tuple[When, Mapping[str, str]]] = []
+        if when == "install" and undo is not None:
+            passes.append(("remove", {**vals, **undo}))
+        passes.append((when, vals))
+        parts: list[str] = []
+        db: Db | None = None
+        for step_when, values in passes:
+            for step in manifest.sql:
+                if step.when != step_when:
+                    continue
+                assert step.statement is not None, "`reapply_steps_problem()` refused this"
+                db = step.db
+                text = _render(step.statement, values, "sql statement").strip()
+                parts.append(text if text.endswith(";") else text + ";")
+        assert db is not None, "a relative manifest has install and remove SQL"
+        return db, "START TRANSACTION;\n" + "\n".join(parts) + "\nCOMMIT;\n"
+
+    def _run_relative(
+        self,
+        manifest: Manifest,
+        vals: Mapping[str, str],
+        when: When,
+        undo: Mapping[str, str] | None,
+        log: _Log,
+    ) -> None:
+        """Mark the record pending, send the one text, then record what the database holds.
+
+        **The order is the fix-wave's (cold review, Important).** The first
+        version wrote the new record before `_sql()`'s guards and database start,
+        which can wait up to 180 s: killed there, the record said x-new over a
+        database still at x-old, and Remove divided by the wrong number. Now:
+
+        1. Nothing is written until the statement is the very next thing.
+        2. `record_pending()` marks it in flight, fail-closed: if that cannot be
+           written, nothing is sent. A kill from here on leaves a mark that
+           `applied_record()` reads as unusable -- a re-run is refused and Remove
+           asks -- instead of an answer that may be wrong.
+        3. The statement. A failure is NOT proof of a rollback (Codex, T115):
+           ERROR 2013 or a broken `docker exec` can come after the server ran
+           COMMIT. So the mark stays and the failure says Yu'lon cannot tell
+           whether the change landed. Only `SqlNotSent` -- no process ever ran --
+           drops the mark, leaving the untouched applied record true.
+        4. After the commit, `record_applied()` writes the new values (or clears
+           them for a Remove) and drops the mark in one write.
+
+        With no SQL runner nothing is sent, so the record is left alone (Minor 3).
+        """
+        if self.sql is None:
+            log.skipped.append(f"sql → {manifest.id}: no SQL runner configured")
+            return
+        db, text = self._relative_text(manifest, when, vals, undo)
+        after = (
+            {p.key: vals[p.key] for p in required_prompts(manifest, "remove")}
+            if when == "install"
+            else None
+        )
+        was_pending = module_answers.is_pending(self.server_dir, manifest)
+        problem = module_answers.record_pending(self.server_dir, manifest, after)
+        if problem:
+            raise ApplyError(
+                f"{manifest.id}: nothing was run. Yu'lon could not note in its record that "
+                f"this SQL was about to run ({problem}), and without that note an "
+                f"interrupted run could leave the record saying the wrong values."
+            )
+        try:
+            self.sql.run_statement(db, text)
+        except SqlNotSent:
+            # Proven: no process ran, so the database is as the applied record
+            # says -- unless an EARLIER press was interrupted, whose mark stays.
+            if not was_pending:
+                dropped = module_answers.clear_pending(self.server_dir, manifest)
+                if dropped:
+                    logger.warning(
+                        f"{manifest.id}: nothing reached the database, but the in-flight mark "
+                        f"could not be dropped ({dropped}); the next Install will be refused "
+                        f"and Remove will ask for the values"
+                    )
+            raise
+        except Exception as exc:
+            # NOT proof of a rollback (Codex, T115): ERROR 2013 or a broken
+            # `docker exec` can come after the server ran COMMIT. The mark stays,
+            # so the record reads as unknown: a re-run is refused and Remove asks.
+            raise ApplyError(
+                f"{manifest.id}: the SQL failed ({exc}), and Yu'lon cannot tell whether the "
+                f"change reached the database before it did. Its record of the values is now "
+                f"marked as unknown: Install is refused until you Remove {manifest.id}, and "
+                f"Remove will ask which values are in the database."
+            ) from exc
+        if when == "install" and undo is not None:
+            log.done.append(
+                f"sql inline → {db}: undid the values applied last time and applied these, "
+                f"in one transaction"
+            )
+        else:
+            log.done.append(f"sql inline → {db}")
+        problem = module_answers.record_applied(self.server_dir, manifest, after)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the SQL ran, but the record of what it "
+                f"applied could not be updated ({problem}); it stays marked as interrupted, "
+                f"so the next Install of {manifest.id} is refused and Remove asks for the values"
+            )
+
+    def _remember(self, manifest: Manifest, values: Mapping[str, str] | None, log: _Log) -> None:
+        """Keep the answers this press was handed, once every step they fed has run (T104).
+
+        Only what the caller HANDED IN, never the defaults filled in around it:
+        `values=None` is a caller that asked nothing, and it must not overwrite
+        what the player said last time. Only declared questions.
+        """
+        declared = {prompt.key for prompt in manifest.prompts}
+        answers = {k: str(v) for k, v in (values or {}).items() if k in declared}
+        if not answers:
+            return
+        problem = module_answers.record_answers(self.server_dir, manifest, answers)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: your answers could not be saved ({problem}), "
+                f"so the next Update of {manifest.id} will offer the defaults instead"
+            )
 
     def _report(self, action: When, manifest: Manifest, log: _Log) -> ApplyReport:
         report = ApplyReport(

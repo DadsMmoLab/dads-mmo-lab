@@ -65,11 +65,17 @@ def parse_distro_names(text: str) -> tuple[str, ...]:
     return tuple(name for name in (line.strip() for line in text.splitlines()) if name)
 
 
-def _wsl_list(*args: str) -> tuple[str, ...]:
-    """Names from one `wsl -l -q ...` listing, or `()` if there is no WSL here."""
+def _wsl_listing(*args: str) -> tuple[str, ...] | None:
+    """Names from one `wsl -l -q ...` listing, or None if it did not answer (T95).
+
+    None for no wsl.exe, a raise (the timeout among them) and a non-zero exit:
+    the caller that must not mistake "no answer" for "nothing" can tell them
+    apart. Whether `--running` exits non-zero when nothing runs has not been
+    measured, so a caller reading None as "unknown" may see it then too.
+    """
     launcher = platform._which(platform.WSL_PROGRAM)
     if launcher is None:
-        return ()
+        return None
     try:
         proc = subprocess.run(
             [launcher, "-l", "-q", *args],
@@ -79,11 +85,16 @@ def _wsl_list(*args: str) -> tuple[str, ...]:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug(f"could not list WSL distros: {exc}")
-        return ()
+        return None
     if proc.returncode != 0:
-        return ()
+        return None
     # UTF-16LE, like every other `wsl.exe` listing — see `platform.wsl_distros()`.
     return parse_distro_names(proc.stdout.decode("utf-16le", errors="ignore"))
+
+
+def _wsl_list(*args: str) -> tuple[str, ...]:
+    """Names from one `wsl -l -q ...` listing, or `()` if there is no WSL here."""
+    return _wsl_listing(*args) or ()
 
 
 def distro_states() -> tuple[Distro, ...]:
@@ -108,6 +119,24 @@ def is_running(distro: str) -> bool:
     every distro it has ever adopted a server from.
     """
     return any(d.name == distro and d.running for d in distro_states())
+
+
+def known_stopped(distro: str) -> bool:
+    """True only if both listings ANSWERED: the full one names `distro`, `--running` does not.
+
+    The fail-closed half of `is_running()` (T95 re-review), for a caller about
+    to SKIP something because the distro is down. `distro_states()` reads a
+    listing that did not answer as an empty one, so a `--running` call that
+    timed out made a running distro look stopped, and a stop skipped on that
+    left a server running. Any listing that did not answer is False here.
+    """
+    running = _wsl_listing("--running")
+    if running is None:
+        return False
+    listed = _wsl_listing()
+    if listed is None:
+        return False
+    return distro in listed and distro not in running
 
 
 _DISTRO_NOT_FOUND_RETURNCODE = 0xFFFFFFFF

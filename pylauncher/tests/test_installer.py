@@ -200,6 +200,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     "Path",
     "PurePosixPath",
     "Protocol",
+    # Added deliberately 2026-09-24 with T106: `native` is imported under it for
+    # the Protocol's two compose-repair annotations only (native imports this
+    # module, so a runtime import would be a cycle). Typing, not machinery.
+    "TYPE_CHECKING",
     "composegen",
     "docker",
     "platform",

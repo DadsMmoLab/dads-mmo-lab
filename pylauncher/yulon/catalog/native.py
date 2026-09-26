@@ -52,25 +52,30 @@ which are measured on yulon-ubuntu (Linux), and which are merely written.
 
 from __future__ import annotations
 
+import difflib
 import io
 import json
 import math
 import os
 import queue
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
-from typing import ClassVar, Protocol
+from typing import ClassVar, Literal, Protocol
 
-from yulon import dbsecret, docker, git, networking, platform, resources, runner
-from yulon.catalog import composegen, preflight, upstream
+from yulon import dbsecret, docker, git, module_answers, networking, platform, resources, runner
+from yulon.catalog import bot_count, composegen, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -91,6 +96,7 @@ from yulon.catalog.installer import (
     provision_lines,
     unsupported_platform_message,
 )
+from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
 from yulon.ownership import Ownership as Ownership
 from yulon.ui import lines
@@ -100,7 +106,7 @@ logger = get_logger(__name__)
 STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
 
-OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE)
+OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
 The set `_listing()` is asked to look past when the question is "is this folder
@@ -115,7 +121,8 @@ created by this app (.yulon-network.json)` from
 `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why`,
 which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
-in one place rather than in the five call sites that ask the question.
+in one place rather than in the five call sites that ask the question. The third
+is T104's record of the answers a player gave a module's questions.
 """
 
 OPENING_NOTE = (
@@ -552,6 +559,124 @@ class LatestRoute:
     `upstream.line()` of the answer. It never raises. `None` where the wiring
     offers no count -- a spy that predates it, or a route T125 has not given one.
     """
+
+
+ComposeState = Literal["current", "stale", "foreign", "moved", "mixed", "missing", "error"]
+
+
+@dataclass(frozen=True)
+class ComposeCheck:
+    """This install's `docker-compose.yml` beside what this version of Yu'lon renders (T106).
+
+    `stale` is the one state the Server tab offers "Repair server files…" on.
+    Every other state but `current` carries `why`, the sentence a refused
+    repair says: a file that is not Yu'lon's (`foreign`), one that names
+    another folder's project (`moved`), one whose host binds disagree about
+    SELinux's `:z` (`mixed`), no file at all (`missing`), or a render or read
+    that failed (`error`).
+
+    `added`/`removed` count the lines a repair would add and take away, for the
+    confirmation; both are 0 on anything but `stale`.
+    """
+
+    state: ComposeState
+    why: str = ""
+    added: int = 0
+    removed: int = 0
+
+
+@dataclass(frozen=True)
+class ComposeRepaired:
+    """What a repair did: the file, and its backup -- `None` when nothing needed writing."""
+
+    path: Path
+    backup: Path | None
+
+
+@dataclass(frozen=True)
+class ComposeRepairRoute:
+    """The two halves of T106's control, wired for one install so they cannot arrive apart.
+
+    `check` is a READING, asked off the GUI thread when the tab opens and on
+    Refresh; it never raises. `repair` asks again at press time and writes only
+    on `stale`, refusing everything else with the check's own sentence.
+    """
+
+    check: Callable[[], ComposeCheck]
+    repair: Callable[[], ComposeRepaired]
+
+
+REPAIR_BACKUP_SUFFIX = ".repair.bak"
+"""`docker-compose.yml.<stamp>.repair.bak`: the file as it was before a repair replaced it."""
+
+
+def _backup_beside(path: Path, when: datetime) -> Path:
+    """Copy `path` to a stamped `.repair.bak` beside it that did not exist, and return it.
+
+    Microseconds in a fixed-width stamp so two presses are two files, and the next
+    free microsecond on a clash rather than a counter suffix -- `tuning.backup()`'s
+    rule, for its reason: a later copy must never land on an earlier one.
+    """
+    for _ in range(1000):
+        target = path.with_name(f"{path.name}.{when:%Y%m%d-%H%M%S-%f}{REPAIR_BACKUP_SUFFIX}")
+        if not target.exists():
+            shutil.copy2(path, target)
+            return target
+        when += timedelta(microseconds=1)
+    raise OSError(f"no free name for a backup of {path.name}")
+
+
+class ComposeChangedError(OSError):
+    """The file changed between the press's check and its write; it was left as it is."""
+
+
+def _replace_if_unchanged(path: Path, text: str, expected: str) -> None:
+    """Put `text` at `path` in one step, with `path`'s mode -- only if it still says `expected`.
+
+    `expected` is the text the press checked and backed up. The target is read
+    again as the last thing before the rename, and anything else there (an editor
+    saving, a second press) aborts the write with the file left as it is: what
+    the press validated is not what it would be replacing. A small window stays
+    between that read and the rename; two Yu'lon processes on one install are out
+    of scope (no interprocess lock), and this closes the one a person can hit.
+
+    The temp file is `tempfile.mkstemp`'s own, in the same folder, so a leftover
+    of another attempt is never clobbered; it is fsynced, chmodded to the old mode
+    BEFORE the rename (no moment at the umask default), and removed on every
+    failure. `newline="\\n"`, as `composegen.write_plan()` writes every compose file.
+
+    Raises:
+        ComposeChangedError: the file no longer says `expected`.
+        OSError: the temp file could not be written or renamed.
+    """
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".yulon-new", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        if path.read_text(encoding="utf-8") != expected:
+            raise ComposeChangedError(f"{path.name} changed after it was checked")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _lines_changed(old: str, new: str) -> tuple[int, int]:
+    """How many lines going from `old` to `new` adds and removes, for the confirmation."""
+    added = removed = 0
+    for line in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0):
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
 
 
 def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:
@@ -5481,13 +5606,14 @@ class StagedInstaller:
         # provisioning that sentence is false of the machine. The state file, the
         # ownership checks and the emptiness check are filesystem reads that no
         # daemon can help with, so a user whose folder was never usable is now
-        # told so before being asked for a root password. The answer is thrown
-        # away here: `_guard()` asks again for the state it returns.
+        # told so before being asked for a root password. `run()` does not reuse the
+        # state this returns: `_guard()` reads it again, fresh. Here it answers
+        # one question, what the free-space rows may leave out (T112, `_spent()`).
         #
         # `_refuse_foreign_containers()` deliberately does NOT move up. It asks
         # which compose project owns a container wearing this entry's names, and
         # there is no answer to that without a daemon.
-        self._claim_folder(server_dir)
+        state = self._claim_folder(server_dir)
         yield "Checking Docker."
         if not self._seams.docker_ready():
             # Provisioning prints nothing of its own and can be a Docker
@@ -5540,12 +5666,33 @@ class StagedInstaller:
                 f"Docker answered once and then would not answer again, so nothing was started: "
                 f"{exc}"
             ) from exc
-        report_checks = preflight.evaluate(self.entry, server_dir, facts)
+        spent = self._spent(state, server_dir) if facts.docker_ready else preflight.NOTHING_SPENT
+        report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
             raise InstallerError(
                 "This machine cannot install the server yet:\n" + report_checks.message()
             )
+
+    def _spent(self, state: InstallState, server_dir: Path) -> Spent:
+        """What an earlier run of this install already spent, for the free-space rows (T112).
+
+        The T95 gate on m910q (2026-09-24) was refused "21 GB free, and the
+        install needs 40 GB" reinstalling WoW TBC into a folder whose build was
+        done: preflight judged the disk before anything asked what the press
+        would skip. The answer is `build_would_be_skipped()`'s rule, asked
+        without a stage context: the record AND the daemon's images, because a
+        record alone is a hint (`InstallState.has()`), and a recorded build
+        whose images were pruned compiles again and needs the whole floor.
+
+        The daemon is asked only when the record already says `build`, so a
+        fresh install and an early resume ask nothing they did not ask before.
+        """
+        if not state.has("build"):
+            return preflight.NOTHING_SPENT
+        if self._seams.images_built(self.image_refs_at(server_dir)) is not True:
+            return preflight.NOTHING_SPENT
+        return preflight.Spent(build=True)
 
     # -- the guard -------------------------------------------------------
 
@@ -6007,9 +6154,7 @@ class StagedInstaller:
         # nothing, and preflight says "unchecked" so the user sees that the
         # question went unanswered). Collapsing it here to a bool would make
         # the two indistinguishable everywhere downstream.
-        label = platform.bind_label(
-            enforcing=self._seams.ask_selinux(), fs_type=self._seams.ask_fs(ctx.server_dir)
-        )
+        label = self._bind_label(ctx.server_dir)
         # `render()` INSIDE a `try`, not beside one. It was called bare until
         # 2026-09-02, and `ComposeGenError` is not an `InstallerError` - both
         # subclass `RuntimeError` independently, so neither `except` clause can
@@ -6023,15 +6168,21 @@ class StagedInstaller:
         # exception was `write_plan()`'s, below, which was already translated.
         # This body is bound by EVERY family (`azerothcore.py`'s stage tuple and
         # `cmangos.py`'s both name this method), so it was never one game's bug.
+        #
+        # `world_env` keeps a live command channel on (T101). A Repair and
+        # Update to latest's put-back run this same body over a finished
+        # install, and without it the override went back to the pre-channel
+        # file: measured on yulon-ubuntu 2026-09-24, the Repair's own `up`
+        # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
+        # channel's port. `None` on a first install (no press yet), which is
+        # `render()`'s own default.
+        #
+        # And the player's bot count rides over it (T117): the Bots box writes
+        # Min/Max into this same file, and rendering the catalog's 500 again put
+        # it back on every Repair and Update. Read off the file being replaced,
+        # never probed; no usable pair in it leaves the catalog's number.
         try:
-            plan = composegen.render(
-                self.entry,
-                ctx.server_dir,
-                templates_root=self.installers_root,
-                db_password=ctx.secrets.db_password,
-                bind_label=label,
-                platform_id=self._seams.platform_id,
-            )
+            plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
         replaceable = self._replaceable_compose(ctx.server_dir)
@@ -6067,6 +6218,214 @@ class StagedInstaller:
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
 
+    def _bind_label(self, server_dir: Path) -> str:
+        """`:z` or nothing, for this folder on this host; see `stage_generate_compose`."""
+        return platform.bind_label(
+            enforcing=self._seams.ask_selinux(), fs_type=self._seams.ask_fs(server_dir)
+        )
+
+    def _render_compose(
+        self, server_dir: Path, secrets: Secrets, label: str
+    ) -> composegen.ComposePlan:
+        """The three compose files for this install: the ONE render the install and T106 share.
+
+        Split out of `stage_generate_compose` so the repair cannot render a file the
+        install would not: same entry, same templates, same password plan, same bind
+        label, same platform seam.
+
+        Raises:
+            composegen.ComposeGenError: whatever `composegen.render()` refuses.
+        """
+        return composegen.render(
+            self.entry,
+            server_dir,
+            templates_root=self.installers_root,
+            # A live channel press is kept by every regeneration (T101), and so is
+            # the player's bot count off the override on disk (T117). A CMaNGOS
+            # tree keeps both in its .conf files, so this is None there.
+            world_env=bot_count.world_env(
+                self.entry, server_dir, composegen.channel_world_env(self.entry, server_dir)
+            ),
+            db_password=secrets.db_password,
+            bind_label=label,
+            platform_id=self._seams.platform_id,
+        )
+
+    def _base_compose_facts(self, server_dir: Path) -> tuple[ComposeCheck, str | None, str | None]:
+        """What the base file is now, and what this version renders for it (T106).
+
+        Only `docker-compose.yml`. The override and the build file are left to the
+        routes that already own them, and `.env` holds the password.
+
+        `resolve_secrets()` is asked for the password because `render()` requires
+        one. For a CMaNGOS entry the plan is `generated`, so the value reaches only
+        the plan's `dotenv` -- never the base text, which spells
+        `${DB_ROOT_PASSWORD:?…}` -- and this method never writes the dotenv. Even
+        the value it mints when the password file is gone is therefore harmless here.
+
+        **The SELinux label comes from the file, not from the host** (review,
+        2026-09-24). The install decided `:z` once, from the host as it was then,
+        and wrote it on every host bind. Asking the host again at press time --
+        while `getenforce` fails, or with the host briefly permissive -- answers "no
+        label", which read an enforcing install as stale and let a repair strip the
+        label its containers need. So the label is `composegen.bind_label_of()` of
+        the file on disk, and the host is asked only when there is no Yu'lon file to
+        read one from. A file whose binds disagree is refused (`mixed`).
+
+        Returns the check, the fresh render (None when it could not be made) and
+        the text on disk (None when there is none): the snapshot a repair backs up
+        and must find unchanged before it writes.
+        """
+        path = server_dir / composegen.BASE_FILE
+        name = composegen.BASE_FILE
+        try:
+            text: str | None = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = None
+        except (OSError, UnicodeDecodeError) as exc:
+            return (
+                ComposeCheck("error", f"{path} could not be read ({exc}). Nothing was written."),
+                None,
+                None,
+            )
+        ours = text is not None and composegen.is_marker_line(text)
+        label: str | None = None
+        if text is not None and ours:
+            try:
+                label = composegen.bind_label_of(text)
+            except composegen.MixedBindLabels as exc:
+                return (
+                    ComposeCheck(
+                        "mixed",
+                        f"{path}: {exc}, so Yu'lon cannot tell which way this install was made "
+                        "and does not rewrite it. Nothing was written. Give every `- ./` line "
+                        "the same ending (`:z` on all of them, or on none) and check again.",
+                    ),
+                    None,
+                    text,
+                )
+        if label is None:
+            label = self._bind_label(server_dir)
+        try:
+            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
+        except (composegen.ComposeGenError, InstallerError) as exc:
+            return (
+                ComposeCheck(
+                    "error",
+                    f"Yu'lon could not work out what {name} should say for this install: {exc} "
+                    "Nothing was written.",
+                ),
+                None,
+                text,
+            )
+        if text is None:
+            return (
+                ComposeCheck(
+                    "missing",
+                    f"{path} is not there, so there is nothing to repair. Nothing was written.",
+                ),
+                fresh,
+                None,
+            )
+        if not ours:
+            return (
+                ComposeCheck(
+                    "foreign",
+                    f"{path} does not start with Yu'lon's own first line, so it is somebody's "
+                    "own file now and Yu'lon does not rewrite it. Nothing was written.",
+                ),
+                fresh,
+                text,
+            )
+        has, wants = composegen.project_of(text), composegen.project_of(fresh)
+        if has != wants:
+            return (
+                ComposeCheck(
+                    "moved",
+                    f"{path} runs the server as the compose project {has}, and a file written "
+                    f"for this folder would name {wants}: the install was moved or copied here "
+                    "after it was made. A repair would start the server as a new project, away "
+                    "from its characters' database volume, so nothing was written.",
+                ),
+                fresh,
+                text,
+            )
+        if composegen.same_compose(text, fresh):
+            return ComposeCheck("current"), fresh, text
+        added, removed = _lines_changed(text, fresh)
+        return ComposeCheck("stale", added=added, removed=removed), fresh, text
+
+    def base_compose_check(self, options: InstallOptions | None = None) -> ComposeCheck:
+        """Is this install's `docker-compose.yml` what this version of Yu'lon writes? (T106)
+
+        A reading: it never raises and never writes. See `ComposeCheck` for the states.
+        """
+        check, _fresh, _text = self._base_compose_facts(
+            self.server_dir(options or InstallOptions())
+        )
+        return check
+
+    def repair_base_compose(
+        self, options: InstallOptions | None = None, *, now: datetime | None = None
+    ) -> ComposeRepaired:
+        """Re-render this install's `docker-compose.yml` from the current template (T106).
+
+        The press behind "Repair server files…". The owner's decision (2026-09-24):
+        the player chooses when, the file is backed up first, and nothing else is
+        touched -- not the override, not the build file, not `.env`, not a
+        container. The running containers keep the file they were created from
+        until they are recreated, which the Server tab then offers.
+
+        Asked again here rather than trusting the tab's earlier reading, because the
+        folder can change between the two. Writes only on `stale`: `current` writes
+        nothing and says so with `backup=None`; every other state refuses.
+
+        The write: a stamped `.repair.bak` copy first (`copy2`, so it keeps the old
+        mode and mtime), checked to hold exactly the text that was validated; then
+        `_replace_if_unchanged()` -- a unique fsynced temp file with the target's
+        mode, `os.replace`d onto the target only if the target still says what was
+        checked (Codex, 2026-09-24: the check-to-write race). Atomic on POSIX and
+        Windows, so a full disk leaves the old file whole and the backup beside it.
+
+        Raises:
+            InstallerError: the check's refusal, a render or read that failed, or a
+                backup or write that failed. Each says that nothing was written, or
+                that the old file is still in place.
+        """
+        server_dir = self.server_dir(options or InstallOptions())
+        path = server_dir / composegen.BASE_FILE
+        check, fresh, text = self._base_compose_facts(server_dir)
+        if check.state == "current":
+            return ComposeRepaired(path, None)
+        if check.state != "stale" or fresh is None or text is None:
+            raise InstallerError(check.why)
+        changed = (
+            f"{path} changed while it was being repaired, so it was not replaced and is "
+            "left as it is now. Check again (Refresh) and press Repair once more."
+        )
+        try:
+            backup = _backup_beside(path, now or datetime.now())
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} could not be backed up ({exc}), so it was not repaired. "
+                "Nothing was written."
+            ) from exc
+        if backup.read_text(encoding="utf-8") != text:
+            # The copy is not of the file that was checked: it changed in between.
+            backup.unlink(missing_ok=True)
+            raise InstallerError(changed)
+        try:
+            _replace_if_unchanged(path, fresh, text)
+        except ComposeChangedError as exc:
+            raise InstallerError(f"{changed} Its backup from before is {backup.name}.") from exc
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} could not be written ({exc}). The old file is still in place, and its "
+                f"backup is {backup.name}."
+            ) from exc
+        logger.info(f"repaired {path}; the old file is {backup.name}")
+        return ComposeRepaired(path, backup)
+
     def built_image_refs(self, ctx: StageContext) -> tuple[str, ...]:
         """The image references this install's build produces, fully qualified.
 
@@ -6077,8 +6436,18 @@ class StagedInstaller:
         `docker image rm` on the wrong tag either does nothing or removes
         somebody else's build -- neither of which says which happened.
         """
+        return self.image_refs_at(ctx.server_dir)
+
+    def image_refs_at(self, server_dir: Path) -> tuple[str, ...]:
+        """`built_image_refs()` for a caller with a folder and no stage context.
+
+        The ONE spelling of `composegen.built_image_refs(...)` in this class.
+        Preflight asks it before any stage context exists (T112, `_spent()`), and
+        lowering the free-space floor on a tag the build stage would not check
+        is the two-spellings defect above, pointed at a disk.
+        """
         return composegen.built_image_refs(
-            self.entry, ctx.server_dir, platform_id=self._seams.platform_id
+            self.entry, server_dir, platform_id=self._seams.platform_id
         )
 
     def built_images(self, ctx: StageContext) -> bool | None:
@@ -6305,6 +6674,12 @@ class StagedInstaller:
                     "import was not run. Nothing was changed."
                 )
             yield f"Cleared {', '.join(dropped)}."
+        # T121: HERE, and only here -- the old databases are gone (`absent`, or
+        # `partial` with `reset()` having dropped them just above), so no mob
+        # multiplier is applied to what is about to be imported. Not before the
+        # reset (Codex final pass): a reset that raises or drops nothing leaves
+        # the old schemas, and the record describing them must stay.
+        yield from self._forget_old_database_records(ctx)
         if service is None:
             return
         yield f"Importing the databases ({service}). This takes several minutes."
@@ -6322,6 +6697,32 @@ class StagedInstaller:
         except docker.DockerCommandError as exc:
             raise InstallerError(str(exc)) from exc
         yield f"The databases now read as {after.state}."
+
+    def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:
+        """Drop the answers file's `applied`/`pending` maps once the old databases are gone (T121).
+
+        The file is one of `OUR_OWN_FILES`, so it outlives the databases it
+        describes: left there, it read Baby Mobs as installed on stock creatures,
+        and the Remove it offered would divide them. The saved answers stay.
+
+        A clear that cannot be written FAILS the stage (Codex final pass): it was
+        a warning, and the import went on to leave a readable stale record. The
+        stage is not recorded, so the next Install press tries again -- and finds
+        the databases `absent`, which is this same branch.
+        """
+        forgot, problem = module_answers.forget_database_records(ctx.server_dir)
+        if problem:
+            raise InstallerError(
+                f"Yu'lon could not update {module_answers.ANSWERS_FILE} in {ctx.server_dir} "
+                f"({problem}). That file still says which mob multipliers were applied to the "
+                "old databases, and these are new, so nothing was imported. Fix its permissions "
+                "(or, if it is damaged, move it aside) and press Install again."
+            )
+        if forgot:
+            yield (
+                "Cleared Yu'lon's record of the mob multipliers applied to the old databases: "
+                "these are new."
+            )
 
     def stage_up(self, ctx: StageContext) -> Iterator[str]:
         """Start the three long-running services, and only those.
