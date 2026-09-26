@@ -6572,6 +6572,12 @@ class StagedInstaller:
                     "import was not run. Nothing was changed."
                 )
             yield f"Cleared {', '.join(dropped)}."
+        # T121: HERE, and only here -- the old databases are gone (`absent`, or
+        # `partial` with `reset()` having dropped them just above), so no mob
+        # multiplier is applied to what is about to be imported. Not before the
+        # reset (Codex final pass): a reset that raises or drops nothing leaves
+        # the old schemas, and the record describing them must stay.
+        yield from self._forget_old_database_records(ctx)
         if service is None:
             return
         yield f"Importing the databases ({service}). This takes several minutes."
@@ -6589,6 +6595,32 @@ class StagedInstaller:
         except docker.DockerCommandError as exc:
             raise InstallerError(str(exc)) from exc
         yield f"The databases now read as {after.state}."
+
+    def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:
+        """Drop the answers file's `applied`/`pending` maps once the old databases are gone (T121).
+
+        The file is one of `OUR_OWN_FILES`, so it outlives the databases it
+        describes: left there, it read Baby Mobs as installed on stock creatures,
+        and the Remove it offered would divide them. The saved answers stay.
+
+        A clear that cannot be written FAILS the stage (Codex final pass): it was
+        a warning, and the import went on to leave a readable stale record. The
+        stage is not recorded, so the next Install press tries again -- and finds
+        the databases `absent`, which is this same branch.
+        """
+        forgot, problem = module_answers.forget_database_records(ctx.server_dir)
+        if problem:
+            raise InstallerError(
+                f"Yu'lon could not update {module_answers.ANSWERS_FILE} in {ctx.server_dir} "
+                f"({problem}). That file still says which mob multipliers were applied to the "
+                "old databases, and these are new, so nothing was imported. Fix its permissions "
+                "(or, if it is damaged, move it aside) and press Install again."
+            )
+        if forgot:
+            yield (
+                "Cleared Yu'lon's record of the mob multipliers applied to the old databases: "
+                "these are new."
+            )
 
     def stage_up(self, ctx: StageContext) -> Iterator[str]:
         """Start the three long-running services, and only those.
