@@ -42,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from yulon import channel_setup, dbsecret, docker, platform, resources, tuning
+from yulon import dbsecret, docker, platform, resources, tuning
 from yulon.catalog import bot_dashboard, composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import conf
@@ -305,32 +305,28 @@ def _from_dist(server_dir: Path, files: Sequence[str]) -> Built:
     return texts, reasons
 
 
-def channel_is_on(server_dir: Path) -> bool:
-    """Whether this install's command-channel press is live (spec correction 19).
+channel_is_on = composegen.channel_is_on
+"""Whether this install's command-channel press is live (spec correction 19).
 
-    `channel_setup.enable()` writes `<override>.before-channel` on the FIRST
-    press and only `roll_back()` deletes it (`channel_setup.py:285-289`, `473`,
-    `491`), so the file IS the channel's own record that a press stands.
-    """
-    marker = f"{composegen.OVERRIDE_FILE}{channel_setup.BACKUP_SUFFIX}"
-    return (server_dir / marker).is_file()
+One function, `composegen`'s, because the install's `generate-compose` stage
+asks the same question when a Repair rewrites this file (T101).
+"""
 
 
 def _override_default(entry: CatalogEntry, server_dir: Path, seams: Seams) -> str:
     """What the install writes as `docker-compose.override.yml`, plus the channel's env if on.
 
-    The same five inputs as the install's own call (`native.py:5925-5932`). The
-    channel layer is the merge `channel_setup._world_env()` makes
-    (`channel_setup.py:534-543`), spelled from public parts; the test compares
-    the result with the file `channel_setup.enable()` really writes.
+    The same five inputs as the install's own call (`native.py`,
+    `stage_generate_compose`), and the same environment:
+    `composegen.channel_world_env()`, which both ask, so a reset and a Repair
+    write the same file; the test compares it with the file
+    `channel_setup.enable()` really writes.
     """
-    operations = entry.operations
-    extra = operations.enable_env if operations is not None and channel_is_on(server_dir) else {}
     plan = composegen.render(
         entry,
         server_dir,
         templates_root=resources.installers_dir(),
-        world_env={**composegen.world_env(entry), **extra} if extra else None,
+        world_env=composegen.channel_world_env(entry, server_dir),
         db_password=entry.install.db_password(server_dir),
         bind_label=seams.bind_label(server_dir),
         platform_id=seams.platform_id,

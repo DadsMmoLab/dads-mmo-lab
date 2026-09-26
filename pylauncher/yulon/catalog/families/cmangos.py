@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import ClassVar, cast
 
 from yulon import dbsecret, docker, platform
-from yulon.catalog import bot_dashboard, composegen
+from yulon.catalog import bot_count, bot_dashboard, composegen
 from yulon.catalog.catalog import (
     CmangosData,
     ConfPatchTable,
@@ -1172,6 +1172,11 @@ class CmangosInstaller(StagedInstaller):
         data = self._data()
         etc_dir = ctx.server_dir / ETC_DIR
         image_ref = self._image_ref(ctx, data.extract.image)
+        # The player's bot count (T117), read BEFORE `materialise()` and only
+        # once this stage has finished before: until then a Min/Max in the file
+        # is the image template's, copied by a run that stopped short of the
+        # patch, not a number anybody chose. No usable pair keeps the table's.
+        table = bot_count.conf_table(data.conf, etc_dir) if ctx.state.has("conf") else data.conf
         try:
             copied = conf.materialise(
                 data.conf,
@@ -1196,7 +1201,7 @@ class CmangosInstaller(StagedInstaller):
             # over the table's `AiPlayerbot.Observability = 0` -- the switch is
             # carried over, as T117 carries the bot count, rather than undone by a
             # resume.
-            table = bot_dashboard.overlay(data.conf, self.entry, ctx.server_dir)
+            table = bot_dashboard.overlay(table, self.entry, ctx.server_dir)
             changed = conf.apply_table(table, etc_dir, self._secret_tokens(ctx))
         except InstallerError:
             # MUST stay ahead of the broad clause: every refusal `apply_table()`

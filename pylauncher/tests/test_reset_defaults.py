@@ -1182,12 +1182,16 @@ def test_a_save_after_the_reset_does_not_hide_the_reset_from_its_undo(tmp_path: 
 
 
 def test_the_questions_last_word_is_the_job_the_banner_will_offer() -> None:
-    """A CMaNGOS `etc/` file and the override owe a recreate: the question must not say restart."""
-    for files in (["etc/mangosd.conf"], ["env/dist/etc/worldserver.conf", OVERRIDE]):
+    """The override owes a recreate: the question must not say restart.
+
+    A CMaNGOS `etc/` file owes a restart since T99 (`./etc` is bound into the
+    containers; T94's own follow-up), so it is asked about as one.
+    """
+    said = reset_defaults.question(["env/dist/etc/worldserver.conf", OVERRIDE], [])
+    assert "until its containers are recreated" in said and "restarted" not in said
+    for files in (["env/dist/etc/authserver.conf"], ["etc/mangosd.conf"]):
         said = reset_defaults.question(files, [])
-        assert "until its containers are recreated" in said and "restarted" not in said, files
-    said = reset_defaults.question(["env/dist/etc/authserver.conf"], [])
-    assert "until it is restarted" in said and "recreated" not in said
+        assert "until it is restarted" in said and "recreated" not in said, files
 
 
 def test_an_undo_backs_each_file_up_first_so_revert_brings_back_what_it_replaced(

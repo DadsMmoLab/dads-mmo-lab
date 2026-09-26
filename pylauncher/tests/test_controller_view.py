@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -16,9 +16,10 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
+from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
 from yulon import apply as apply_module
 from yulon import (
+    bot_population,
     botlist,
     channel,
     channel_setup,
@@ -27,6 +28,7 @@ from yulon import (
     docker,
     logsnap,
     manifest_store,
+    module_answers,
     networking,
     party,
     purge,
@@ -68,6 +70,7 @@ from yulon.support import runlog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
+    BOT_COUNT_RUNNING,
     RETURN_TO_PIN_BUTTON_LABEL,
     TUNING_CORE_FILES,
     TUNING_RECREATE_LABEL,
@@ -83,8 +86,8 @@ from yulon.ui.controller_view import (
     ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
-from yulon.ui.widgets.job import run_inline
-from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
+from yulon.ui.widgets.job import ThreadedJobRunner, run_inline
+from yulon.ui.widgets.manifest_prompt import REMEMBERED_NOTE, ManifestPromptDialog
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
     BADGE_NOT_INSTALLED,
@@ -792,26 +795,26 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
     assert "cancelled" in view.module_report.toPlainText().lower()
 
 
-def test_exactly_the_manifests_with_a_question_are_asked(
+def test_every_module_whose_install_renders_a_question_asks_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Which manifests open a dialog on Install, pinned by NAME (T92 widened it).
+    """T104, the owner's "ask all": a default pre-fills the dialog, it no longer hides it.
 
-    Until 2026-09-22 this pinned `["mod-ah-bot", "mod-ah-bot-plus"]` -- the two
-    with a prompt carrying no default -- and every other manifest's prompts
-    were never shown: the defaults were written unseen. Now every manifest
-    whose install renders a prompt asks, pre-filled; the ones with no prompt
-    at all still get no window. A manifest gaining or losing a question shows
-    up here by name.
-
-    `hearthstone-cd` is in the list since T100: its `cooldown` is a `choice`
-    whose default is upstream's reset file, so an install that did not ask
-    applied the reset and changed nothing (reported on Discord 2026-09-20).
+    Until T92 (2026-09-22) and T104 only the two ah-bots (a prompt with no
+    default) and, from T100, `hearthstone-cd` (a `choice`) opened the dialog;
+    the mob multipliers, xp-rates and the teleporter's Onyxia level were always
+    their defaults. Every module whose install renders a question now asks it,
+    pre-filled, and every other one still gets no window and `None` -- the call
+    it has always been given. The list is computed from the catalog, so a
+    manifest gaining or losing a question shows up here by name.
 
     Rows whose Install is LOCKED are left out of the loop rather than counted
     as installs (T69): eleven shipped manifests declare a `requires`, nothing
     is on disk in this fixture, so `_module_action()` refuses them before the
     asker — which is the guard's whole job and is asserted by its own test.
+
+    Mutation: gate `must_ask()` on `default is None` again and only the two
+    ah-bots are asked.
     """
     asked: list[str] = []
 
@@ -848,6 +851,8 @@ def test_exactly_the_manifests_with_a_question_are_asked(
     # `sitmeanrest` is absent: it requires mod-ale, locked in this fixture (T69).
     assert "mod-ah-bot" in expected and "xp-rates" in expected and "nerf-mobs" in expected
     assert "hearthstone-cd" in expected, "T100: a `choice` with a default still asks"
+    named = ["baby-mobs", "buff-mobs", "nerf-mobs", "npc-teleporter", "xbuff-mobs"]
+    assert all(item in expected for item in named), "T104: every question is asked"
     assert sorted(asked) == expected, asked
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
@@ -1025,44 +1030,435 @@ def test_installing_hearthstone_tweaks_asks_which_cooldown(
     assert applier.values == [{"cooldown": "5_Min"}]
 
 
-def test_updating_hearthstone_tweaks_says_the_shown_answer_is_applied(
+def test_updating_hearthstone_tweaks_offers_the_answer_it_was_installed_with(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T100 review: the real dialog, through the view's seam, for Update vs Install.
+    """T104: the T100 cold-review repro, through the view's seam and the REAL dialog.
 
-    The dialog is built exactly as `ask_manifest_prompts` builds it, with the
-    `again` the view hands the seam, and its text is read rather than exec'd.
-    A first install is not told anything new; an Update of the installed
-    module is told that the selected answer replaces what was chosen before.
+    Hearthstone Tweaks installed with 5 minutes; Update + OK put back 30,
+    because nothing kept the answer and the dialog pre-selected the default.
+    The install's record now says 5 minutes, the view hands it to the dialog,
+    and OK on the Update -- or on the context menu's Install over it -- keeps it.
 
-    Mutation: pass `again=False` for an update in `_module_action()` and the
-    second note has no "applies the answer".
+    Mutation: stop passing `remembered` in `_module_values()` and every dialog
+    below opens on 30_Min.
     """
-    notes: list[tuple[str, str]] = []
-
-    def asker(parent: object, manifest: object, prompts: object, *, again: bool = False) -> None:
-        dialog = ManifestPromptDialog(None, manifest, prompts, again=again)  # type: ignore[arg-type]
-        notes.append((str(manifest.id), dialog.notes()))  # type: ignore[attr-defined]
-        return None  # cancel: this test is about what the player is TOLD
-
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
     services = _services(ps, tmp_path, [])
-    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
-    _select_module(view, "hearthstone-cd")
-    view._module_action("install")
+    services.applier = _FakeApplier(server_dir)
+    manifest = modules.store().load("mod", "hearthstone-cd")
+    assert module_answers.record_answers(server_dir, manifest, {"cooldown": "5_Min"}) == ""
+
+    shown: list[tuple[bool, dict[str, str], str]] = []
+
+    def asker(
+        parent: object,
+        manifest: object,
+        prompts: object,
+        *,
+        again: bool = False,
+        remembered: Mapping[str, str] | None = None,
+        removing: bool = False,
+    ) -> Mapping[str, str] | None:
+        dialog = ManifestPromptDialog(
+            None,
+            manifest,  # type: ignore[arg-type]
+            prompts,  # type: ignore[arg-type]
+            again=again,
+            remembered=remembered,
+            removing=removing,
+        )
+        shown.append((again, dialog.answers(), dialog.notes()))
+        return dialog.answers()  # OK, clicked straight through
 
     object.__setattr__(
         services, "installed_modules", lambda: {"mod": frozenset({"hearthstone-cd"})}
     )
-    view.reload_modules()
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
     assert view.modules_panel.row("hearthstone-cd").data.installed
     _select_module(view, "hearthstone-cd")
-    view._module_action("update")
     view._module_action("install")  # the context menu's Install over an installed row
+    view._module_action("update")  # refused by the real `update()`: no clone on disk
 
-    assert [item for item, _ in notes] == ["hearthstone-cd"] * 3
-    assert "applies the answer" not in notes[0][1]
-    assert "applies the answer" in notes[1][1]
-    assert "applies the answer" in notes[2][1]
+    assert [(again, answers) for again, answers, _ in shown] == [
+        (True, {"cooldown": "5_Min"}),
+        (True, {"cooldown": "5_Min"}),
+    ]
+    assert all(REMEMBERED_NOTE in notes for _, _, notes in shown)
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.values == [{"cooldown": "5_Min"}]
+
+
+@pytest.mark.parametrize("record", ["missing", "corrupt", "invalid"])
+def test_removing_a_mob_multiplier_with_no_usable_record_asks_the_multiplier(
+    qapp: object, ps: _Ps, tmp_path: Path, record: str
+) -> None:
+    """Fix wave: with no usable record, Remove would divide by the default. So it asks.
+
+    Mutation: gate remove on `default is None` again and `asked` is empty while
+    the applier is handed `None` -- the silent default.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    path = server_dir / module_answers.ANSWERS_FILE
+    if record == "corrupt":
+        path.write_text("{ not json", encoding="utf-8")
+    elif record == "invalid":
+        path.write_text(
+            json.dumps({"modules": {"mod/baby-mobs": {"hp": "lots"}}}), encoding="utf-8"
+        )
+    asked: list[tuple[str, tuple[str, ...], dict[str, object]]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        keys = tuple(p.key for p in prompts)  # type: ignore[attr-defined]
+        asked.append((str(manifest.id), keys, kw))  # type: ignore[attr-defined]
+        return {"hp": "0.5", "dmg": "0.5", "arm": "0.5", "spd": "1.5"}
+
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+
+    assert [(item, keys) for item, keys, _ in asked] == [("baby-mobs", ("hp", "dmg", "arm", "spd"))]
+    assert asked[0][2].get("removing") is True
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.removed == ["baby-mobs"]
+    assert applier.values == [{"hp": "0.5", "dmg": "0.5", "arm": "0.5", "spd": "1.5"}]
+
+
+def test_removing_a_mob_multiplier_with_a_record_asks_nothing_and_uses_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """With a valid record the answer is known: no dialog, and the applier fills it in.
+
+    Since T115 the record that counts is the APPLIED one, which an install
+    writes and a Remove clears; the answers alone are only a pre-fill.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    manifest = modules.store().load("mod", "baby-mobs")
+    answers = {"hp": "0.5", "dmg": "0.25", "arm": "0.25", "spd": "1.5"}
+    assert module_answers.record_answers(server_dir, manifest, answers) == ""
+    assert module_answers.record_applied(server_dir, manifest, answers) == ""
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+
+    assert asked == []
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.removed == ["baby-mobs"] and applier.values == [None]
+    assert applier._values(manifest, None)["hp"] == "0.5"
+
+
+def test_removing_a_mob_multiplier_that_is_not_recorded_as_applied_asks(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T115: the last answers survive a Remove (T104), so they cannot say it is applied now.
+
+    A second Remove used to divide again, silently, by those answers. Now it
+    asks, pre-filled with them, and the dialog says why.
+
+    Mutation: gate remove on the remembered answers again and nothing is asked.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    manifest = modules.store().load("mod", "baby-mobs")
+    answers = {"hp": "0.5", "dmg": "0.25", "arm": "0.25", "spd": "1.5"}
+    assert module_answers.record_answers(server_dir, manifest, answers) == ""
+    asked: list[dict[str, object]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        asked.append(kw)
+        return answers
+
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+
+    assert len(asked) == 1 and asked[0]["removing"] is True
+    assert asked[0]["remembered"] == answers, "pre-filled with the last answers"
+
+
+def test_installing_an_applied_mob_multiplier_again_is_a_rerun(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T115: a sourceless mod leaves no folder, so the row reads Not installed after Install.
+
+    The applied record is what says a second Install is a re-run, so its dialog
+    opens with `again` and says the new values replace the last ones.
+
+    Mutation: drop the record from the view's `again` and it is False.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    manifest = modules.store().load("mod", "baby-mobs")
+    applied = {"hp": "2", "dmg": "2", "arm": "2", "spd": "2"}
+    assert module_answers.record_answers(server_dir, manifest, applied) == ""
+    assert module_answers.record_applied(server_dir, manifest, applied) == ""
+    asked: list[dict[str, object]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        asked.append(kw)
+        return {"hp": "3", "dmg": "3", "arm": "3", "spd": "3"}
+
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
+    assert not view.modules_panel.row("baby-mobs").data.installed
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+
+    assert len(asked) == 1 and asked[0]["again"] is True
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == ["baby-mobs"]
+
+
+def test_installing_a_mob_multiplier_over_an_unusable_record_is_refused_before_the_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T115's ruling, said before any question (T55): no answer can make this press safe."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / module_answers.ANSWERS_FILE).write_text(
+        json.dumps({"applied": {"mod/baby-mobs": {"hp": "lots"}}}), encoding="utf-8"
+    )
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+
+    assert asked == []
+    assert "Remove it first, then Install" in view.module_report.toPlainText()
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == []
+
+
+def _mob_tab(ps: _Ps, tmp_path: Path) -> tuple[ControllerView, _RecordingSql, list[str]]:
+    """The real Modules tab over a real applier, reading installed state the way the app does.
+
+    Both seams are the ones `ControllerServices.for_entry()` wires
+    (`apply.installed_modules` and `apply.unknown_modules`), so a row reads
+    whatever the real install left in the answers file. The dialog answers x2
+    and records which mod asked.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    sql = _RecordingSql()
+    asked: list[str] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **_: object) -> dict[str, str]:
+        asked.append(str(manifest.id))  # type: ignore[attr-defined]
+        return {"hp": "2", "dmg": "2", "arm": "2", "spd": "2"}
+
+    services = _services(ps, tmp_path, [])
+    relative = apply_module.relative_keys(modules.store().load_all("mod"))
+    object.__setattr__(services, "applier", Applier(server_dir, sql=sql))
+    object.__setattr__(
+        services,
+        "installed_modules",
+        lambda: apply_module.installed_modules(server_dir, relative),
+    )
+    object.__setattr__(
+        services, "unknown_modules", lambda: apply_module.unknown_modules(server_dir, relative)
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker), sql, asked
+
+
+def test_a_mob_mod_reads_installed_locks_its_siblings_and_frees_them_on_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T121, the ticket's sequence through the tab's own action code.
+
+    Baby Mobs installed: its row reads Installed. Buff Mobs: refused before its
+    dialog, naming Baby Mobs, nothing sent. Remove Baby Mobs: Not installed.
+    Buff Mobs then installs.
+    """
+    view, sql, asked = _mob_tab(ps, tmp_path)
+    assert view.modules_panel.row("baby-mobs").data.badge == "Not installed"
+
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+    baby = view.modules_panel.row("baby-mobs")
+    assert baby.data.installed and baby.data.badge == "Installed"
+    assert baby.remove_button is not None and baby.install_button is None
+    assert len(sql.statements) == 1 and asked == ["baby-mobs"]
+
+    _select_module(view, "buff-mobs")
+    view._module_action("install")
+    report = view.module_report.toPlainText()
+    assert "install buff-mobs: not started" in report, report
+    assert "Baby Mobs is installed here" in report, report
+    assert asked == ["baby-mobs"], "refused before the dialog"
+    assert len(sql.statements) == 1, "nothing sent for buff-mobs"
+
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+    baby = view.modules_panel.row("baby-mobs")
+    assert not baby.data.installed and baby.data.badge == "Not installed"
+    assert len(sql.statements) == 2
+    assert view.modules_panel.row("buff-mobs").data.installable
+
+    _select_module(view, "buff-mobs")
+    view._module_action("install")
+    assert view.modules_panel.row("buff-mobs").data.badge == "Installed"
+    assert asked == ["baby-mobs", "buff-mobs"] and len(sql.statements) == 3
+
+
+def test_a_mob_mod_left_pending_reads_unknown_and_offers_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T121: a press stopped mid-statement is neither Installed nor Not installed."""
+    view, _sql, _asked = _mob_tab(ps, tmp_path)
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.record_pending(tmp_path / "srv", manifest, {"hp": "2"}) == ""
+    view.reload_modules()
+
+    row = view.modules_panel.row("baby-mobs")
+    assert row.data.badge == "State unknown"
+    assert row.remove_button is not None and row.install_button is None
+    assert "Remove" in row.badge_label.toolTip()
+    assert not view.modules_panel.row("buff-mobs").data.installable
+
+
+def test_the_real_services_read_mob_mods_from_the_answers_file(ps: _Ps, tmp_path: Path) -> None:
+    """The wiring, not a fixture: `for_entry()` hands the tab the record-aware readers.
+
+    Mutation: wire `installed_modules` back to `installed_clones` and baby-mobs
+    is not in the answer.
+    """
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.record_applied(tmp_path, manifest, {"hp": "2"}) == ""
+    services = ControllerServices.for_entry(WOTLK, tmp_path)
+    assert services.installed_modules is not None and services.unknown_modules is not None
+    assert "baby-mobs" in services.installed_modules()["mod"]
+    assert services.unknown_modules() == {}
+    # Fix wave: the wiring knows which mods take their state from the record, so an
+    # unreadable file puts those four in doubt rather than reading them as absent.
+    (tmp_path / module_answers.ANSWERS_FILE).write_text("{ not json", encoding="utf-8")
+    assert set(services.unknown_modules()["mod"]) == {
+        "baby-mobs",
+        "buff-mobs",
+        "nerf-mobs",
+        "xbuff-mobs",
+    }
+
+
+def test_an_unreadable_answers_file_refuses_a_mob_mod_on_the_tab_naming_the_file(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Codex high, fix wave: unreadable is not "nothing recorded". All four read State
+    unknown, and Install is refused before its dialog with the file named; no SQL."""
+    view, sql, asked = _mob_tab(ps, tmp_path)
+    (tmp_path / "srv" / module_answers.ANSWERS_FILE).write_text("{ not json", encoding="utf-8")
+    view.reload_modules()
+    for item_id in ("baby-mobs", "buff-mobs", "nerf-mobs", "xbuff-mobs"):
+        assert view.modules_panel.row(item_id).data.badge == "State unknown", item_id
+    _select_module(view, "buff-mobs")
+    view._module_action("install")
+    report = view.module_report.toPlainText()
+    assert module_answers.ANSWERS_FILE in report and "Nothing was changed" in report, report
+    assert report.startswith("install buff-mobs: Buff Mobs (buff-mobs) was not run."), report
+    assert asked == [] and sql.statements == []
+
+
+FORGET_ACTION = "Forget Yu'lon's record…"
+
+
+def _forget_action(view: ControllerView, module_id: str) -> Any:
+    view.modules_panel.select(module_id)
+    menu = view._module_menu(module_id)
+    found = [a for a in menu.actions() if a.text() == FORGET_ACTION]
+    return found[0] if found else None
+
+
+def test_forget_clears_a_mob_mods_record_without_any_sql(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix wave: a stale record (a fresh database, a restored backup) has a way out
+    that does not divide base values. It asks first, No by default, and says
+    exactly what it does."""
+    view, sql, _asked = _mob_tab(ps, tmp_path)
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+    assert view.modules_panel.row("baby-mobs").data.badge == "Installed"
+    asked: list[tuple[object, ...]] = []
+
+    def question(*a: object, **k: object) -> object:
+        asked.append(a)
+        return int(controller_view_module.QMessageBox.StandardButton.Yes)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    action = _forget_action(view, "baby-mobs")
+    assert action is not None, "Forget is offered on a record-backed row"
+    action.trigger()
+
+    assert len(asked) == 1
+    text = str(asked[0][2])
+    assert text == (
+        "Yu'lon forgets that Baby Mobs is applied. The database is not changed. Use this only "
+        "if the creature values are already at their normal values, for example after "
+        "restoring a backup."
+    )
+    assert asked[0][4] == controller_view_module.QMessageBox.StandardButton.No, "default No"
+    assert len(sql.statements) == 1, "no SQL was sent by Forget"
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.read_applied(tmp_path / "srv", manifest) is None
+    assert view.modules_panel.row("baby-mobs").data.badge == "Not installed"
+    assert view.modules_panel.row("buff-mobs").data.installable
+
+
+def test_forget_answered_no_changes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, _sql, _asked = _mob_tab(ps, tmp_path)
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
+    )
+    _forget_action(view, "baby-mobs").trigger()
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.read_applied(tmp_path / "srv", manifest) is not None
+    assert view.modules_panel.row("baby-mobs").data.badge == "Installed"
+
+
+def test_forget_is_offered_only_where_the_record_is_the_state(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Not on a mob mod with no record, and not on a mod whose state is its folder."""
+    view, _sql, _asked = _mob_tab(ps, tmp_path)
+    assert _forget_action(view, "baby-mobs") is None
+    assert _forget_action(view, "hearthstone-cd") is None
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.record_pending(tmp_path / "srv", manifest, {"hp": "2"}) == ""
+    view.reload_modules()
+    assert _forget_action(view, "baby-mobs") is not None, "a pending mark is the record too"
 
 
 def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -9842,6 +10238,68 @@ def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
     assert view._tuning_owed.get("recreate"), "and nothing else"
 
 
+def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_runner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T97's second site. `_tuning_job_done` was a closure made per job, and a
+    plain callable handed to the job runner is delivered on the WORKER thread,
+    so a finished restart or recreate wrote the report, re-armed the bar and
+    started the status read from there.
+
+    Every other test in this file runs jobs inline, where the question cannot
+    arise, so this one uses the real runner and records the thread each widget
+    write lands on. Recreate, because it is the branch that clears BOTH owed
+    sets.
+
+    Mutation: hand `_run` a closure again (`lambda answer: self._tuning_job_done(answer)`)
+    and the writes are recorded off the GUI thread.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+    assert view._tuning_owed.get("restart") and view._tuning_owed.get("recreate")
+
+    writes: list[tuple[str, bool]] = []
+    for widget, name in (
+        (view.tuning_report, "setPlainText"),
+        (view.tuning_restart_button, "setEnabled"),
+        (view.tuning_recreate_button, "setEnabled"),
+    ):
+        real = getattr(widget, name)
+
+        def recorded(
+            *args: object, _what: str = f"{type(widget).__name__}.{name}", _real: object = real
+        ) -> object:
+            writes.append((_what, threading.current_thread() is threading.main_thread()))
+            return _real(*args)  # type: ignore[operator]
+
+        setattr(widget, name, recorded)
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    view.tuning_recreate_button.click()
+    pump_until(
+        lambda: view.tuning_report.toPlainText() == "recreate: done.", "the recreate's report"
+    )
+    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+
+    assert view._busy is False
+    assert view._tuning_owed.get("restart") is None, "a recreate covers the restart it owed"
+    assert view._tuning_owed.get("recreate") is None, "and its own"
+    off_thread = [what for what, on_gui in writes if not on_gui]
+    assert writes and off_thread == [], f"the Tuning bar was written from a worker: {off_thread}"
+
+
 def test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -14814,7 +15272,7 @@ def test_a_refused_reset_writes_nothing_says_why_and_offers_no_restart(
 def test_a_cmangos_reset_owes_what_file_rule_prices_its_etc_files_at(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Spec correction 10: `etc/` is priced as a recreate, so the banner offers Recreate."""
+    """`etc/` is bound into the containers, so the banner offers Restart (T99; T94 had Recreate)."""
     backup = tmp_path / "etc" / "mangosd.conf.20260923-120000-000000.bak"
 
     def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
@@ -14826,7 +15284,7 @@ def test_a_cmangos_reset_owes_what_file_rule_prices_its_etc_files_at(
     _reset_yes(monkeypatch)
     _menu_action(view, "mangosd.conf…").trigger()
 
-    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
     assert "etc/mangosd.conf" in view.tuning_banner_label.text()
 
 
@@ -15364,3 +15822,331 @@ def test_a_press_whose_files_cannot_be_read_says_so_and_frees_the_button(
     assert asked == [] and view._press_asking is None
     assert view.tuning_reset_button.isEnabled() is True
     assert "could not be read" in view.tuning_report.toPlainText() and failures
+
+
+# -- T99: the Bots tab's "Random bots" box, and the bot keys on the Tuning tab --------------
+
+BOT_CONF = "etc/aiplayerbot.conf"
+BOT_CONF_TEXT = (
+    "# Random bot count\n"
+    "AiPlayerbot.MinRandomBots = 500\n"
+    "AiPlayerbot.MaxRandomBots = 500\n"
+    "AiPlayerbot.RandomBotAccountCount = 100\n"
+)
+
+
+def _bot_conf(server: Path) -> bytes:
+    path = server / BOT_CONF
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(BOT_CONF_TEXT, encoding="utf-8")
+    return path.read_bytes()
+
+
+def _wotlk_override(server: Path) -> str:
+    """A Yu'lon WotLK folder's compose files, the override as the install renders it."""
+    (server / composegen.BASE_FILE).write_text(
+        composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
+    )
+    texts, reasons = reset_defaults.default_texts(
+        WOTLK, server, [composegen.OVERRIDE_FILE], seams=RESET_QUIET
+    )
+    assert reasons == {}
+    text = texts[composegen.OVERRIDE_FILE]
+    (server / composegen.OVERRIDE_FILE).write_text(text, encoding="utf-8", newline="")
+    return text
+
+
+def _bots_view(ps: _Ps, tmp_path: Path, entry: CatalogEntry = TBC, **kw: Any) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "bot_population",
+        bot_population.bot_count_route(entry, tmp_path),
+    )
+    return ControllerView(entry, services, status_poll_ms=0, **kw)
+
+
+def _bot_jobs(held: list[tuple[Any, Any, Any]], slot: Any) -> list[tuple[Any, Any, Any]]:
+    return [job for job in held if getattr(job[1], "__func__", None) is slot]
+
+
+def test_the_bots_tab_shows_the_count_read_off_the_gui_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No file read on the GUI thread: the tab only QUEUES the read, and the box waits for it."""
+    _bot_conf(tmp_path)
+    reads: list[int] = []
+    real = bot_population.read
+
+    def spy(*args: Any, **kwargs: Any) -> bot_population.Reading:
+        reads.append(threading.get_ident())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bot_population, "read", spy)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+
+    assert reads == [], "the bot count was read on the GUI thread"
+    assert view.bot_count_box.isEnabled() is False, "editable before its value landed"
+    assert view.bot_count_apply_button.isEnabled() is False
+    jobs = _bot_jobs(held, ControllerView._bot_count_read)
+    assert len(jobs) == 1
+    work, done, failed = jobs[0]
+    assert done.__self__ is view and failed.__self__ is view
+    assert failed.__func__ is ControllerView._bot_count_read_failed
+    done(work())
+
+    assert reads, "control: the spy saw the job's own read"
+    assert view.bot_count_box.value() == 500
+    assert view.bot_count_box.maximum() == 900, "100 bot accounts x 9 characters"
+    assert view.bot_count_box.isEnabled() is True and view.bot_count_apply_button.isEnabled()
+    assert "500" in view.bot_count_note.text()
+
+
+@pytest.mark.parametrize("entry", [TBC, TORTOISE], ids=lambda e: e.id)
+def test_apply_backs_the_conf_up_writes_both_numbers_and_offers_a_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: CatalogEntry
+) -> None:
+    before = _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path, entry)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    text = (tmp_path / BOT_CONF).read_text(encoding="utf-8")
+    assert "MinRandomBots = 50\n" in text and "MaxRandomBots = 50\n" in text
+    backups = sorted((tmp_path / "etc").glob("aiplayerbot.conf.*.bak"))
+    assert len(backups) == 1 and backups[0].read_bytes() == before
+    assert len(asked) == 1 and "50" in asked[0] and "restarted" in asked[0]
+    assert "RECREATED" not in asked[0]
+    assert view.tuning_banner.isHidden() is False
+    assert BOT_CONF in view.tuning_banner_label.text()
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
+    assert view.bot_count_owed_button.isHidden() is False
+    assert view.bot_count_owed_button.text() == TUNING_RESTART_LABEL
+    assert view.bot_count_box.value() == 50, "the box was read again after the write"
+    assert backups[0].name in view.bot_count_report.text()
+    assert "Now 50" in view.bot_count_note.text()
+
+
+def test_no_on_the_bot_count_question_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    before = _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    asked: list[str] = []
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    assert len(asked) == 1
+    assert (tmp_path / BOT_CONF).read_bytes() == before
+    assert not list(tmp_path.rglob("*.bak"))
+    assert view.tuning_banner.isHidden() is True and view.bot_count_owed_button.isHidden()
+
+
+def test_a_wotlk_bot_count_is_written_into_the_override_and_asks_for_a_recreate(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _wotlk_override(tmp_path)
+    view = _bots_view(ps, tmp_path, WOTLK)
+    assert view.bot_count_box.value() == 500
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(60)
+    view.bot_count_apply_button.click()
+
+    now = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert now == installed.replace('RANDOM_BOTS: "500"', 'RANDOM_BOTS: "60"')
+    assert len(asked) == 1 and "RECREATED" in asked[0]
+    assert "by hand" not in asked[0], "nothing was added by hand, so nothing is dropped"
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert composegen.OVERRIDE_FILE in view.tuning_banner_label.text()
+    assert view.bot_count_owed_button.text() == TUNING_RECREATE_LABEL
+
+
+def test_a_hand_added_wotlk_line_survives_apply(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex high: Apply re-rendered the whole override and dropped what a player added."""
+    installed = _wotlk_override(tmp_path)
+    before = installed.replace("    environment:\n", "    environment:\n      TZ: Europe/Oslo\n")
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(before, encoding="utf-8", newline="")
+    view = _bots_view(ps, tmp_path, WOTLK)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(60)
+    view.bot_count_apply_button.click()
+
+    assert len(asked) == 1 and "by hand" not in asked[0]
+    assert (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8") == before.replace(
+        'RANDOM_BOTS: "500"', 'RANDOM_BOTS: "60"'
+    )
+
+
+def test_a_huge_account_count_reaches_the_box_clamped_not_as_an_overflow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Codex medium: accounts x 9 above Qt's int made `setRange` raise inside the slot."""
+    path = tmp_path / BOT_CONF
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        BOT_CONF_TEXT.replace(
+            "RandomBotAccountCount = 100", f"RandomBotAccountCount = {10**12}"
+        ).replace("MaxRandomBots = 500", f"MaxRandomBots = {10**11}"),
+        encoding="utf-8",
+    )
+    view = _bots_view(ps, tmp_path)
+    assert view.bot_count_box.maximum() == bot_population.NO_CEILING
+    assert view.bot_count_box.value() == bot_population.NO_CEILING
+    assert view.bot_count_box.isEnabled() is True
+
+
+def test_an_older_read_landing_late_is_dropped(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Review Minor 3: the generation check in `_bot_count_read`, pinned.
+
+    Mutation: drop the check and the late 500 overwrites the newer 70.
+    """
+    _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    ((old_work, old_done, _),) = _bot_jobs(held, ControllerView._bot_count_read)
+    stale = old_work()  # read while the file said 500
+    (tmp_path / BOT_CONF).write_text(BOT_CONF_TEXT.replace("= 500", "= 70"), encoding="utf-8")
+    view.reload_tuning()
+    new_work, new_done, _ = _bot_jobs(held, ControllerView._bot_count_read)[-1]
+    new_done(new_work())
+    assert view.bot_count_box.value() == 70
+    old_done(stale)
+    assert view.bot_count_box.value() == 70, "a stale read was applied"
+    assert "Now 70" in view.bot_count_note.text()
+
+
+def test_an_older_read_that_failed_does_not_free_a_newer_pending_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Review Minor 3: the failure slot keeps the same generation rule as the ready one."""
+    _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    ((_w, _d, old_failed),) = _bot_jobs(held, ControllerView._bot_count_read)
+    view.reload_tuning()
+    new_work, new_done, new_failed = _bot_jobs(held, ControllerView._bot_count_read)[-1]
+    assert old_failed.__func__ is ControllerView._bot_count_read_failed
+    old_failed(controller_view_module.BotCountReadFailed(1, "an old read broke"))
+    assert view._bot_count_pending is True, "an old failure freed the newer read"
+    assert view.bot_count_box.isEnabled() is False
+    new_failed(
+        controller_view_module.BotCountReadFailed(view._bot_count_generation, "this one broke")
+    )
+    assert view._bot_count_pending is False
+    assert "this one broke" in view.bot_count_note.text()
+
+
+def test_the_bot_count_write_runs_on_the_job_runner_and_holds_the_box(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write is a job, handed back to bound slots (T97), and the box is dead while it runs."""
+    before = _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    for work, done, _failed in _bot_jobs(held, ControllerView._bot_count_read):
+        done(work())
+    _reset_yes(monkeypatch)
+    view.bot_count_box.setValue(40)
+    view.bot_count_apply_button.click()
+
+    assert (tmp_path / BOT_CONF).read_bytes() == before, "the press wrote on the GUI thread"
+    jobs = _bot_jobs(held, ControllerView._bot_count_written)
+    assert len(jobs) == 1
+    work, done, failed = jobs[0]
+    assert (done.__self__, failed.__self__) == (view, view)
+    assert failed.__func__ is ControllerView._bot_count_failed
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    assert view.busy_reason() == BOT_COUNT_RUNNING
+    done(work())
+    assert "MaxRandomBots = 40" in (tmp_path / BOT_CONF).read_text(encoding="utf-8")
+    assert view.busy_reason() is None
+
+
+def test_the_box_is_dead_while_any_job_of_ours_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    assert view.bot_count_box.isEnabled() is True
+    view._set_busy(True)
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    view._set_busy(False)
+    assert view.bot_count_box.isEnabled() is True
+    assert view.bot_count_apply_button.isEnabled() is True
+
+
+def test_a_refused_bot_count_writes_nothing_says_why_and_offers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    (tmp_path / BOT_CONF).unlink()  # gone between the read and the press
+    _reset_yes(monkeypatch)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    assert not (tmp_path / BOT_CONF).exists()
+    assert "aiplayerbot.conf" in view.bot_count_report.text() and failures
+    assert "NOT changed" in view.bot_count_report.text()
+    assert view.tuning_banner.isHidden() is True
+
+
+def test_a_game_with_its_count_unreadable_says_so_and_keeps_the_box_dead(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _bots_view(ps, tmp_path)  # no aiplayerbot.conf on disk
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    assert "aiplayerbot.conf" in view.bot_count_note.text()
+
+
+@pytest.mark.parametrize(
+    ("entry", "shown"),
+    [(TBC, True), (TORTOISE, True), (WOTLK, False)],
+    ids=["tbc", "tortoise", "wotlk"],
+)
+def test_the_tuning_tab_shows_the_bot_keys_for_cmangos_and_tortoise_only(
+    qapp: object, ps: _Ps, tmp_path: Path, entry: CatalogEntry, shown: bool
+) -> None:
+    _bot_conf(tmp_path)
+    _wotlk_override(tmp_path)
+    view = _bots_view(ps, tmp_path, entry)
+    cards = {card.card.module_id: card for card in view.tuning_panel._cards.values()}
+    assert (bot_population.CARD[1] in cards) is shown
+    if shown:
+        card = cards[bot_population.CARD[1]].card
+        keys = [row.key for row in card.rows]
+        assert bot_population.MAX_KEY in keys and bot_population.MIN_KEY in keys
+        assert card.rules == ("restart",)
+        spec = view._tuning_spec(*bot_population.CARD, BOT_CONF)
+        assert spec == bot_population.conf_keys(entry)
+
+
+def test_a_tuning_save_of_the_bot_card_moves_the_bots_tab_box(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    (tmp_path / BOT_CONF).write_text(BOT_CONF_TEXT.replace("= 500", "= 70"), encoding="utf-8")
+    view.reload_tuning()
+    assert view.bot_count_box.value() == 70

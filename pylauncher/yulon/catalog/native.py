@@ -74,8 +74,8 @@ from pathlib import Path
 from secrets import token_hex
 from typing import ClassVar, Literal, Protocol
 
-from yulon import dbsecret, docker, git, networking, platform, resources, runner
-from yulon.catalog import composegen, preflight
+from yulon import dbsecret, docker, git, module_answers, networking, platform, resources, runner
+from yulon.catalog import bot_count, composegen, preflight
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -96,6 +96,7 @@ from yulon.catalog.installer import (
     provision_lines,
     unsupported_platform_message,
 )
+from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
 from yulon.ownership import Ownership as Ownership
 from yulon.ui import lines
@@ -105,7 +106,7 @@ logger = get_logger(__name__)
 STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
 
-OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE)
+OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
 The set `_listing()` is asked to look past when the question is "is this folder
@@ -120,7 +121,8 @@ created by this app (.yulon-network.json)` from
 `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why`,
 which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
-in one place rather than in the five call sites that ask the question.
+in one place rather than in the five call sites that ask the question. The third
+is T104's record of the answers a player gave a module's questions.
 """
 
 OPENING_NOTE = (
@@ -5502,13 +5504,14 @@ class StagedInstaller:
         # provisioning that sentence is false of the machine. The state file, the
         # ownership checks and the emptiness check are filesystem reads that no
         # daemon can help with, so a user whose folder was never usable is now
-        # told so before being asked for a root password. The answer is thrown
-        # away here: `_guard()` asks again for the state it returns.
+        # told so before being asked for a root password. `run()` does not reuse the
+        # state this returns: `_guard()` reads it again, fresh. Here it answers
+        # one question, what the free-space rows may leave out (T112, `_spent()`).
         #
         # `_refuse_foreign_containers()` deliberately does NOT move up. It asks
         # which compose project owns a container wearing this entry's names, and
         # there is no answer to that without a daemon.
-        self._claim_folder(server_dir)
+        state = self._claim_folder(server_dir)
         yield "Checking Docker."
         if not self._seams.docker_ready():
             # Provisioning prints nothing of its own and can be a Docker
@@ -5561,12 +5564,33 @@ class StagedInstaller:
                 f"Docker answered once and then would not answer again, so nothing was started: "
                 f"{exc}"
             ) from exc
-        report_checks = preflight.evaluate(self.entry, server_dir, facts)
+        spent = self._spent(state, server_dir) if facts.docker_ready else preflight.NOTHING_SPENT
+        report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
             raise InstallerError(
                 "This machine cannot install the server yet:\n" + report_checks.message()
             )
+
+    def _spent(self, state: InstallState, server_dir: Path) -> Spent:
+        """What an earlier run of this install already spent, for the free-space rows (T112).
+
+        The T95 gate on m910q (2026-09-24) was refused "21 GB free, and the
+        install needs 40 GB" reinstalling WoW TBC into a folder whose build was
+        done: preflight judged the disk before anything asked what the press
+        would skip. The answer is `build_would_be_skipped()`'s rule, asked
+        without a stage context: the record AND the daemon's images, because a
+        record alone is a hint (`InstallState.has()`), and a recorded build
+        whose images were pruned compiles again and needs the whole floor.
+
+        The daemon is asked only when the record already says `build`, so a
+        fresh install and an early resume ask nothing they did not ask before.
+        """
+        if not state.has("build"):
+            return preflight.NOTHING_SPENT
+        if self._seams.images_built(self.image_refs_at(server_dir)) is not True:
+            return preflight.NOTHING_SPENT
+        return preflight.Spent(build=True)
 
     # -- the guard -------------------------------------------------------
 
@@ -6042,6 +6066,19 @@ class StagedInstaller:
         # exception was `write_plan()`'s, below, which was already translated.
         # This body is bound by EVERY family (`azerothcore.py`'s stage tuple and
         # `cmangos.py`'s both name this method), so it was never one game's bug.
+        #
+        # `world_env` keeps a live command channel on (T101). A Repair and
+        # Update to latest's put-back run this same body over a finished
+        # install, and without it the override went back to the pre-channel
+        # file: measured on yulon-ubuntu 2026-09-24, the Repair's own `up`
+        # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
+        # channel's port. `None` on a first install (no press yet), which is
+        # `render()`'s own default.
+        #
+        # And the player's bot count rides over it (T117): the Bots box writes
+        # Min/Max into this same file, and rendering the catalog's 500 again put
+        # it back on every Repair and Update. Read off the file being replaced,
+        # never probed; no usable pair in it leaves the catalog's number.
         try:
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
@@ -6101,6 +6138,12 @@ class StagedInstaller:
             self.entry,
             server_dir,
             templates_root=self.installers_root,
+            # A live channel press is kept by every regeneration (T101), and so is
+            # the player's bot count off the override on disk (T117). A CMaNGOS
+            # tree keeps both in its .conf files, so this is None there.
+            world_env=bot_count.world_env(
+                self.entry, server_dir, composegen.channel_world_env(self.entry, server_dir)
+            ),
             db_password=secrets.db_password,
             bind_label=label,
             platform_id=self._seams.platform_id,
@@ -6291,8 +6334,18 @@ class StagedInstaller:
         `docker image rm` on the wrong tag either does nothing or removes
         somebody else's build -- neither of which says which happened.
         """
+        return self.image_refs_at(ctx.server_dir)
+
+    def image_refs_at(self, server_dir: Path) -> tuple[str, ...]:
+        """`built_image_refs()` for a caller with a folder and no stage context.
+
+        The ONE spelling of `composegen.built_image_refs(...)` in this class.
+        Preflight asks it before any stage context exists (T112, `_spent()`), and
+        lowering the free-space floor on a tag the build stage would not check
+        is the two-spellings defect above, pointed at a disk.
+        """
         return composegen.built_image_refs(
-            self.entry, ctx.server_dir, platform_id=self._seams.platform_id
+            self.entry, server_dir, platform_id=self._seams.platform_id
         )
 
     def built_images(self, ctx: StageContext) -> bool | None:
@@ -6519,6 +6572,12 @@ class StagedInstaller:
                     "import was not run. Nothing was changed."
                 )
             yield f"Cleared {', '.join(dropped)}."
+        # T121: HERE, and only here -- the old databases are gone (`absent`, or
+        # `partial` with `reset()` having dropped them just above), so no mob
+        # multiplier is applied to what is about to be imported. Not before the
+        # reset (Codex final pass): a reset that raises or drops nothing leaves
+        # the old schemas, and the record describing them must stay.
+        yield from self._forget_old_database_records(ctx)
         if service is None:
             return
         yield f"Importing the databases ({service}). This takes several minutes."
@@ -6536,6 +6595,32 @@ class StagedInstaller:
         except docker.DockerCommandError as exc:
             raise InstallerError(str(exc)) from exc
         yield f"The databases now read as {after.state}."
+
+    def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:
+        """Drop the answers file's `applied`/`pending` maps once the old databases are gone (T121).
+
+        The file is one of `OUR_OWN_FILES`, so it outlives the databases it
+        describes: left there, it read Baby Mobs as installed on stock creatures,
+        and the Remove it offered would divide them. The saved answers stay.
+
+        A clear that cannot be written FAILS the stage (Codex final pass): it was
+        a warning, and the import went on to leave a readable stale record. The
+        stage is not recorded, so the next Install press tries again -- and finds
+        the databases `absent`, which is this same branch.
+        """
+        forgot, problem = module_answers.forget_database_records(ctx.server_dir)
+        if problem:
+            raise InstallerError(
+                f"Yu'lon could not update {module_answers.ANSWERS_FILE} in {ctx.server_dir} "
+                f"({problem}). That file still says which mob multipliers were applied to the "
+                "old databases, and these are new, so nothing was imported. Fix its permissions "
+                "(or, if it is damaged, move it aside) and press Install again."
+            )
+        if forgot:
+            yield (
+                "Cleared Yu'lon's record of the mob multipliers applied to the old databases: "
+                "these are new."
+            )
 
     def stage_up(self, ctx: StageContext) -> Iterator[str]:
         """Start the three long-running services, and only those.

@@ -12,12 +12,16 @@
     {
       "db": "world",
       "path": "data/sql/db-world/teleporter_capital.dist",
-      "note": "applied if {capital}; '@ONY_LEVEL := N' is replaced with {ony_level} first"
+      "note": "upstream sets @ONY_LEVEL := 60 at line 18 and uses it in one row (line 189); the step below writes the answer into that row, so the clone stays unmodified"
     },
     {
       "db": "world",
-      "path": "data/sql/db-world/teleporter_starting_zone.dist",
-      "note": "applied if {startzone}"
+      "path": "data/sql/db-world/teleporter_starting_zone.dist"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE conditions SET ConditionValue1={ony_level} WHERE SourceTypeOrReferenceId=15 AND SourceGroup=50004 AND SourceEntry=11 AND ConditionTypeOrReference=27;",
+      "note": "T104: the Onyxia portal's level requirement, the one row teleporter_capital.dist builds from @ONY_LEVEL (upstream @06e5242: `(15, @GOSSIP_MENU+4, 11, 27, @ONY_LEVEL, 3, 0, ...)` with @GOSSIP_MENU := 50000)"
     },
     {
       "db": "world",
@@ -28,25 +32,13 @@
   "prompts": [
     {
       "key": "ony_level",
-      "question": "Onyxia level",
+      "question": "Level needed for the Onyxia's Lair teleport (60 for classic content, 80 for WotLK)",
       "kind": "choice",
       "choices": [
         "60",
         "80"
       ],
       "default": "60"
-    },
-    {
-      "key": "capital",
-      "question": "Install the capital-city NPC?",
-      "kind": "bool",
-      "default": "true"
-    },
-    {
-      "key": "startzone",
-      "question": "Install the starting-zone NPC?",
-      "kind": "bool",
-      "default": "true"
     }
   ],
   "npcs": [
@@ -60,6 +52,6 @@
     }
   ],
   "notes": [
-    "Install fails if both NPCs are disabled. Originally by Rochet2."
+    "Both NPCs are always installed. Originally by Rochet2."
   ]
 }

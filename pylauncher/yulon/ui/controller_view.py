@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import apply as apply_module
+from yulon import bot_population as botpop
 from yulon import (
     botlist,
     channel_setup,
@@ -81,7 +82,15 @@ from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon import steam as steam_module
-from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
+from yulon.apply import (
+    Applier,
+    ApplyReport,
+    DockerSql,
+    PendingSql,
+    must_ask,
+    reapplies_on_top,
+    required_prompts,
+)
 from yulon.catalog import bot_dashboard, composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import clientdir
@@ -154,6 +163,16 @@ def _realm_badge_status(status: InstallStatus) -> str:
     if status.any_running:
         return "starting"
     return "stopped"
+
+
+class _GearReadBroke(RuntimeError):
+    """A Characters gear read that raised, carrying which selection it was for (T96)."""
+
+    def __init__(self, generation: int, name: str, cause: Exception) -> None:
+        super().__init__(f"{name}: {cause}")
+        self.generation = generation
+        self.name = name
+        self.cause = cause
 
 
 class UnsupportedGameError(RuntimeError):
@@ -440,9 +459,11 @@ class PromptAsker(Protocol):
     the answer — install with it, or change nothing at all.
 
     `again` is True when the module is already installed -- an Update, or the
-    context menu's Install over it -- so the dialog can say that the answer it
-    shows (the default; nothing remembers the last one) is what gets applied
-    now (T100 review).
+    context menu's Install over it -- so the dialog can say that what it shows
+    is what gets applied now (T100 review). `remembered` is what this install
+    last answered (T104, `Applier.remembered_answers()`), filled in over the
+    manifest's defaults. `removing` is True for a Remove, which asks only what
+    the record cannot answer (`apply.must_ask()`).
     """
 
     def __call__(
@@ -452,6 +473,8 @@ class PromptAsker(Protocol):
         prompts: Sequence[Prompt],
         *,
         again: bool = False,
+        remembered: Mapping[str, str] | None = None,
+        removing: bool = False,
     ) -> Mapping[str, str] | None: ...
 
 
@@ -797,6 +820,18 @@ class ControllerServices:
     is there" — the one thing this fact does not change. `None` for a game with
     no clone folders, which is the same gate `installed_modules` rides on.
     """
+    unknown_modules: Callable[[], Mapping[str, Mapping[str, apply_module.Doubt]]] | None = None
+    """Which recorded sourceless mods a press stopped on mid-statement, per family (T121).
+
+    `apply.unknown_modules()`: a `pending` mark left in the answers file by a
+    mob multiplier's press that never recorded its result (T115). Those ids are
+    also in `installed_modules` -- the database may hold them -- and this says
+    which of them the row must call `State unknown` rather than `Installed`.
+    A separate seam for `unfinished_modules`' reason: the other readers of
+    `installed_modules` do not change on it. One small JSON read per reload,
+    on the GUI thread beside the folder listing: `reload_modules()` is not a
+    job, and the file is the same one `_module_values()` already reads there.
+    """
     module_from_link: Callable[[str], Manifest] | None = None
     """Derive a manifest from a link the user pasted, or raise with the refusal.
 
@@ -915,6 +950,14 @@ class ControllerServices:
     below wants it turned into something else first (`_client_dir_for_addons()`
     for the applier, the Steam entry), and the row wants the raw value, `None`
     included, to say which of its three sentences applies.
+    """
+
+    bot_population: botpop.BotPopulationRoute | None = None
+    """The Bots tab's "Random bots" box (T99), bound to this install.
+
+    Wired in `_assemble` for every game whose install writes a bot count
+    (`bot_population.where`, a catalog fact). `None` leaves the box dead and
+    the Tuning tab without the bot card.
     """
 
     reset_settings: reset_defaults.ResetRoute | None = None
@@ -1206,6 +1249,7 @@ def _assemble(
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
+    unknown_modules: Callable[[], Mapping[str, Mapping[str, apply_module.Doubt]]] | None = None,
     module_version: Callable[[Path], str | None] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
@@ -1273,6 +1317,9 @@ def _assemble(
         # T68's reading of the same folders, on the same flag once more: it
         # opens the claim inside each clone the line above listed.
         unfinished_modules=unfinished_modules,
+        # T121: the sourceless mods a press stopped on mid-statement, read from
+        # the same answers file `installed_modules` reads them from.
+        unknown_modules=unknown_modules,
         # T44's version line, on the same flag again: it reads a clone's own
         # `.git`, and a game with no clones has none to read.
         module_version=module_version,
@@ -1314,16 +1361,19 @@ def _assemble(
         update_to_latest=install_wiring.update_to_latest_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
+        # T94. HERE for the rebuild's reason: the file set and how each default
+        # is made are catalog facts every game's tab reads the same way. The
+        # WSL refusal lives in the route, where the distro is known.
+        reset_settings=reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T106. Here for the rebuild's reason: which installs are offered it is a
         # fact of `catalog.json` (the family) and of the install (its distro),
         # both answered in `install_wiring`.
         repair_compose=install_wiring.repair_compose_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
-        # T94. HERE for the rebuild's reason: the file set and how each default
-        # is made are catalog facts every game's tab reads the same way. The
-        # WSL refusal lives in the route, where the distro is known.
-        reset_settings=reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T99. HERE for the same reason: where a game keeps its bot count is a
+        # catalog fact. Files only, so a server inside a WSL distro is served too.
+        bot_population=botpop.bot_count_route(entry, server_dir),
     )
 
 
@@ -1394,6 +1444,25 @@ def _adopt_route(
     )
 
 
+def _record_backed_keys(store: ManifestStore) -> Callable[[], frozenset[str]]:
+    """The mods whose installed state is the answers-file record, read once on first use (T121).
+
+    `apply.relative_keys()` over the store's `mod` family -- the four mob
+    multipliers, the only relative manifests, and all of them SQL mods. Lazy
+    because building the services must not read the catalog; once because the
+    shipped set does not change while the app runs. An unreadable record puts
+    exactly these in doubt (fix wave).
+    """
+    cached: list[frozenset[str]] = []
+
+    def keys() -> frozenset[str]:
+        if not cached:
+            cached.append(apply_module.relative_keys(store.load_all("mod")))
+        return cached[0]
+
+    return keys
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -1402,6 +1471,7 @@ def _for_wotlk(
 ) -> ControllerServices:
     """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
     spec = entry.container_spec()
+    record_backed = _record_backed_keys(wotlk_modules.store())
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -1665,8 +1735,18 @@ def _for_wotlk(
         # T41: the cheap half of the same question, on every reload. Bound to
         # the same `has_manifests` flag, so the three CMaNGOS games — which have
         # no modules folder — keep a list of the catalog and nothing else.
+        # T121: the folders plus the answers file's record, because the four
+        # mob multipliers leave no folder and read Not installed for ever
+        # without it -- and `conflicts_with` never saw them.
         installed_modules=(
-            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_modules(server_dir, record_backed()))
+            if entry.has_manifests
+            else None
+        ),
+        unknown_modules=(
+            (lambda: apply_module.unknown_modules(server_dir, record_backed()))
+            if entry.has_manifests
+            else None
         ),
         # T68: which of those clones stopped part-way through their install,
         # read from the claim this app writes inside each one. Bound to the same
@@ -2746,6 +2826,15 @@ def _pending_sql_names(report: ApplyReport) -> tuple[str, ...]:
         names += list(pending.files) if pending.files else [pending.path]
     return tuple(names)
 
+
+FORGET_RECORD_ACTION = "Forget Yu'lon's record…"
+"""The context-menu entry beside Remove on a record-backed mob multiplier row (T121 fix wave)."""
+
+FORGET_RECORD_QUESTION = (
+    "Yu'lon forgets that {name} is applied. The database is not changed. Use this only if the "
+    "creature values are already at their normal values, for example after restoring a backup."
+)
+"""What the Forget question says, word for word (T121 fix wave)."""
 
 UNCATALOGUED_PRESS = (
     "This module is installed in this server's folder, but this game's catalog has no "
@@ -3860,6 +3949,35 @@ def _look_up_undo(
     return UndoLookup(generation, reset_defaults.undo_items(entry, server_dir, session))
 
 
+@dataclass(frozen=True)
+class BotCountAnswer:
+    """One read of the bot count, and which lookup asked (an older answer is dropped)."""
+
+    generation: int
+    reading: botpop.Reading
+
+
+class BotCountReadFailed(Exception):
+    """A read that raised, tagged with the lookup that asked, so a stale one can be dropped."""
+
+    def __init__(self, generation: int, why: str) -> None:
+        super().__init__(why)
+        self.generation = generation
+
+
+def _read_bot_count(route: botpop.BotPopulationRoute, generation: int) -> BotCountAnswer:
+    """The Bots tab's read, as a job: it opens a conf or the compose override (T99).
+
+    A failure is re-raised TAGGED with its lookup (review Minor 3): the job
+    runner hands the failure slot only the exception, and an untagged one let an
+    old read's failure free the box while a newer read was still pending.
+    """
+    try:
+        return BotCountAnswer(generation, route.read())
+    except Exception as exc:  # boundary: an unreadable server folder must not kill the UI
+        raise BotCountReadFailed(generation, str(exc)) from exc
+
+
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
 """The install's own conf files, listed read-only beside the module ones.
 
@@ -3868,6 +3986,15 @@ Named (in `reset_defaults`, since T94) and not discovered by a glob of
 the point of the list is that these three are the ones this tab deliberately
 will not write.
 """
+
+BOT_COUNT_LABEL = "Random bots:"
+BOT_COUNT_APPLY = "Apply…"
+BOT_COUNT_TITLE = "Random bots"
+BOT_COUNT_RUNNING = (
+    "Yu'lon is writing this server's bot count. It takes a moment; this window closes "
+    "normally once it is done."
+)
+"""The close guard's sentence while the Bots tab's write runs (`busy_reason()`)."""
 
 TUNING_RESET_LABEL = "Reset to default"
 TUNING_RESET_ALL = "All server settings…"
@@ -4563,6 +4690,8 @@ class ControllerView(QWidget):
         # QThread destroyed mid-job aborts the process (see above).
         if self._reset_running:
             return TUNING_RESET_RUNNING
+        if self._bot_count_writing:
+            return BOT_COUNT_RUNNING
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._module_sql_running:
@@ -5225,9 +5354,13 @@ class ControllerView(QWidget):
             self.tuning_recreate_button.setEnabled(False)
             self.tuning_restart_button.setEnabled(False)
             self.tuning_banner_button.setEnabled(False)
-            self.compose_banner_button.setEnabled(False)
             # T94: a reset writes the same confs, and its undo puts them back.
             self.tuning_reset_button.setEnabled(False)
+            self.compose_banner_button.setEnabled(False)
+            # T99: the bot count is one of those confs (or the compose override
+            # a recreate is reading), and its owed-job button is the banner's.
+            self._set_bot_count_controls()
+            self.bot_count_owed_button.setEnabled(False)
         else:
             self.compose_banner_button.setEnabled(True)
             self.refresh_button.setEnabled(True)
@@ -5255,6 +5388,7 @@ class ControllerView(QWidget):
             self.tuning_banner_button.setEnabled(True)
             # Back to whether this tab HAS a route, never unconditionally.
             self._set_reset_button()
+            self._set_bot_count_controls()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
@@ -6405,6 +6539,11 @@ class ControllerView(QWidget):
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
+        self._gear_generation = 0
+        # One gear read at a time, and only the newest row waits behind it
+        # (T96 review): see `_ask_for_gear()`.
+        self._gear_in_flight = False
+        self._gear_waiting: tuple[int, str] | None = None
         self.character_report.setWordWrap(True)
         self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # A tree whose Play block nobody has measured gets a SENTENCE rather
@@ -6482,8 +6621,11 @@ class ControllerView(QWidget):
 
     def _character_chosen(self, row: int) -> None:
         """Name the chosen character in every button, or wait for one."""
+        # Any gear read still out is about a row that is no longer chosen (T96).
+        self._gear_generation += 1
         item = self.character_list.item(row) if row >= 0 else None
         if item is None:
+            self._gear_waiting = None
             for button, label in self._character_actions():
                 button.setText(label)
                 button.setEnabled(False)
@@ -6534,8 +6676,68 @@ class ControllerView(QWidget):
             # teleport's own help says so in as many words.
             self.revive_button.setEnabled(False)
             self.revive_button.setText(f"{name} has to be logged in to be revived")
-        pieces, mails, refusal = self._gear_set_size(name)
+        # The gear read is two `docker exec ... mysql` calls, so it runs through
+        # the job runner and the button waits for it (T96). It ran right here
+        # until then, on the GUI thread: ~240 ms per call on Docker Desktop
+        # (yulon-win11, 2026-09-23), so every arrow key through the list, and
+        # every refresh that kept a row selected, froze the window for about
+        # half a second. Until the answer lands the button promises nothing.
+        self.send_gear_button.setText(f"Reading what {name} is wearing…")
+        self.send_gear_button.setEnabled(False)
+        self._ask_for_gear(self._gear_generation, name)
+
+    def _ask_for_gear(self, generation: int, name: str) -> None:
+        """Start this row's gear read, or let it wait behind the one already out.
+
+        ONE read at a time, and only the NEWEST row waits (Codex, T96 review):
+        a read per row change meant an arrow key held down a 900-row roster
+        started hundreds of workers and twice as many `docker exec`s, every one
+        of them to be thrown away, and a closing tab then waited on all of them.
+        A row that waits replaces whatever row waited before it; when the read
+        out lands, `_next_gear_read()` starts the one waiting.
+        """
+        if self._gear_in_flight:
+            self._gear_waiting = (generation, name)
+            return
+        self._gear_in_flight = True
+        self._gear_waiting = None
+        # Everything the worker needs is taken HERE, on the GUI thread: the
+        # worker must not reach back into a view it may outlive.
+        play, size = self.services.play, self._gear_set_size
+
+        def read() -> tuple[int, str, tuple[int, int, tuple[str, str] | None]]:
+            try:
+                return (generation, name, size(play, name))
+            except Exception as exc:  # noqa: BLE001 - carried to the GUI thread with its row
+                raise _GearReadBroke(generation, name, exc) from exc
+
+        self._run(read, self._gear_read, self._gear_read_failed)
+
+    def _next_gear_read(self) -> None:
+        """The read out has landed: start the row waiting behind it, if any.
+
+        The row waiting is always the one chosen now: every choice replaces it,
+        and choosing nothing clears it (`_character_chosen`). Nothing is
+        started once the tab is closing -- `shutdown()` has joined what was
+        running and nothing may be queued after it.
+        """
+        self._gear_in_flight = False
+        waiting, self._gear_waiting = self._gear_waiting, None
+        if waiting is None or getattr(self, "_closed", False):
+            return
+        self._ask_for_gear(*waiting)
+
+    @Slot(object)
+    def _gear_read(self, answer: object) -> None:
+        """Draw the gear button from a read, if it is about the row still chosen."""
+        generation, name, (pieces, mails, refusal) = cast(
+            tuple[int, str, tuple[int, int, tuple[str, str] | None]], answer
+        )
+        self._next_gear_read()
+        if generation != self._gear_generation:
+            return
         self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
+        self.send_gear_button.setEnabled(True)
         if refusal is not None:
             # The read did not answer, and WHY is the only useful thing to draw.
             # Measured on the live Vanilla server, 2026-09-07 (8.4c): two
@@ -6553,6 +6755,23 @@ class ControllerView(QWidget):
             # server would refuse an empty mail with a sentence about item ids.
             self.send_gear_button.setText(f"{name} is wearing nothing")
             self.send_gear_button.setEnabled(False)
+
+    @Slot(object)
+    def _gear_read_failed(self, exc: object) -> None:
+        """`_gear_set_size()` answers its own failures; this is the boundary if it ever does not.
+
+        For the row still chosen the button says the read broke -- disabled, as
+        the refusal branch above is, because nothing safe is known to press --
+        instead of staying on "Reading…" for good. A break about a row already
+        left says nothing about the one chosen now.
+        """
+        logger.warning(f"could not size the chosen character's gear: {exc}")
+        self._next_gear_read()
+        if not isinstance(exc, _GearReadBroke) or exc.generation != self._gear_generation:
+            return
+        self.send_gear_button.setText(f"Could not read what {exc.name} is wearing")
+        self.send_gear_button.setToolTip(str(exc.cause))
+        self.send_gear_button.setEnabled(False)
 
     def _revive_works_offline(self) -> bool:
         """Only where this tree's own box measured that it does.
@@ -6574,10 +6793,14 @@ class ControllerView(QWidget):
         play = self.entry.play
         return (play.rename_offline_refusal or "") if play is not None else ""
 
-    def _gear_set_size(self, name: str) -> tuple[int, int, tuple[str, str] | None]:
+    @staticmethod
+    def _gear_set_size(play: object, name: str) -> tuple[int, int, tuple[str, str] | None]:
         """The set's size, or why there is not one -- short enough for the
-        button, and in full for the tooltip behind it."""
-        play = self.services.play
+        button, and in full for the tooltip behind it.
+
+        Static, and handed the seam: it runs on a worker (T96), which must not
+        read the view -- a view being torn down has already lost `services`.
+        """
         if play is None:
             return (0, 0, None)
         try:
@@ -6607,11 +6830,22 @@ class ControllerView(QWidget):
             return
         self._character_generation += 1
         generation = self._character_generation
+        # The generation rides WITH the answer rather than in a lambda around the
+        # callback (T97). A lambda handed to the runner is delivered on the
+        # worker thread, so the list was cleared and refilled there while this
+        # thread painted it: on m910q, 2026-09-23, Send gold on a 900-character
+        # bot server segfaulted the app in 4 of 5 runs.
         self._run(
-            play.listing,  # type: ignore[attr-defined]
-            lambda listed: self._characters_listed_at(generation, listed),
+            lambda: (generation, play.listing()),  # type: ignore[attr-defined]
+            self._characters_arrived,
             self._characters_failed,
         )
+
+    @Slot(object)
+    def _characters_arrived(self, answer: object) -> None:
+        """A list read, on the GUI thread, with the generation it was asked at."""
+        generation, listed = cast(tuple[int, object], answer)
+        self._characters_listed_at(generation, listed)
 
     def _characters_listed_at(self, generation: int, listed: object) -> None:
         """Take this answer only if it is the newest one asked for.
@@ -6918,10 +7152,20 @@ class ControllerView(QWidget):
         capability that vanished because the OTHER group's seam was missing is
         exactly the shape of bug this tab must not have.
         """
-        if self.services.bots is None and self.services.my_party is None:
+        # T99's box exists whether or not the tab does, so `_set_busy()` and
+        # the Tuning tab's banner can always reach it; the tab is what shows it.
+        self._build_bot_count_group()
+        if (
+            self.services.bots is None
+            and self.services.my_party is None
+            and self.services.bot_population is None
+        ):
             return
         tab = QWidget(self)
         box = QVBoxLayout(tab)
+        self.bot_count_group.setParent(tab)
+        self.bot_count_group.setVisible(self.services.bot_population is not None)
+        box.addWidget(self.bot_count_group)
         browse = QGroupBox("Browse the bots", tab)
         browse_box = QVBoxLayout(browse)
         self.bot_summary = QLabel("", browse)
@@ -6970,6 +7214,187 @@ class ControllerView(QWidget):
         if self.services.bot_dashboard is not None:
             box.addWidget(self._build_bot_dashboard_group(tab))
         self._add_panel_tab(tab, "bots", "Bots")
+
+    def _build_bot_count_group(self) -> None:
+        """ "Random bots: [N] [Apply…]", the note under it, and the job it owes (T99).
+
+        The box sets Min = Max = N, as the install does. Its value is read off
+        the disk by a job (`_look_up_bot_count`, started by the Tuning tab's
+        reload) and it stays dead until that answer lands, while any job of
+        ours runs, and while its own write runs.
+        """
+        self._bot_count_generation = 0
+        self._bot_count_reading: botpop.Reading | None = None
+        self._bot_count_pending = False
+        self._bot_count_writing = False
+        self._bot_rows: tuple[tuning.TuningRow, ...] = ()
+        self.bot_count_group = QGroupBox(BOT_COUNT_TITLE, self)
+        inside = QVBoxLayout(self.bot_count_group)
+        row = QHBoxLayout()
+        row.addWidget(QLabel(BOT_COUNT_LABEL, self.bot_count_group))
+        self.bot_count_box = QSpinBox(self.bot_count_group)
+        self.bot_count_box.setRange(0, botpop.NO_CEILING)
+        self.bot_count_box.setEnabled(False)
+        self.bot_count_apply_button = QPushButton(BOT_COUNT_APPLY, self.bot_count_group)
+        self.bot_count_apply_button.clicked.connect(self.apply_bot_count)
+        self.bot_count_apply_button.setEnabled(False)
+        # The job this change owes, the Tuning banner's own button mirrored:
+        # the player is on THIS tab when the write lands, and a restart they
+        # are told about on another tab is a restart they do not find.
+        self.bot_count_owed_button = QPushButton("", self.bot_count_group)
+        self.bot_count_owed_button.clicked.connect(self._tuning_banner_pressed)
+        self.bot_count_owed_button.setVisible(False)
+        row.addWidget(self.bot_count_box)
+        row.addWidget(self.bot_count_apply_button)
+        row.addStretch(1)
+        row.addWidget(self.bot_count_owed_button)
+        # Two lines: what the files say NOW (every read rewrites it), and what
+        # the last press did (only a press writes it), so a read landing after
+        # a write cannot wipe the write's report.
+        self.bot_count_note = QLabel("", self.bot_count_group)
+        self.bot_count_note.setWordWrap(True)
+        self.bot_count_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.bot_count_report = QLabel("", self.bot_count_group)
+        self.bot_count_report.setWordWrap(True)
+        self.bot_count_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inside.addLayout(row)
+        inside.addWidget(self.bot_count_note)
+        inside.addWidget(self.bot_count_report)
+
+    def _set_bot_count_controls(self) -> None:
+        """Live with a readable count, nothing of ours running, and no read or write in flight."""
+        reading = self._bot_count_reading
+        live = (
+            self.services.bot_population is not None
+            and reading is not None
+            and reading.problem is None
+            and not self._busy
+            and not self._bot_count_pending
+            and not self._bot_count_writing
+        )
+        self.bot_count_box.setEnabled(live)
+        self.bot_count_apply_button.setEnabled(live)
+
+    def _look_up_bot_count(self) -> None:
+        """Read the bot count (and the Tuning tab's bot rows) off the GUI thread."""
+        route = self.services.bot_population
+        if route is None:
+            return
+        self._bot_count_generation += 1
+        self._bot_count_pending = True
+        self._set_bot_count_controls()
+        self._run(
+            partial(_read_bot_count, route, self._bot_count_generation),
+            self._bot_count_read,
+            self._bot_count_read_failed,
+        )
+
+    @Slot(object)
+    def _bot_count_read(self, answer: object) -> None:
+        """The box, its note and the Tuning tab's bot card, from one read; stale answers dropped."""
+        if (
+            not isinstance(answer, BotCountAnswer)
+            or answer.generation != self._bot_count_generation
+        ):
+            return
+        self._bot_count_pending = False
+        reading = answer.reading
+        self._bot_count_reading = reading
+        if reading.problem is not None:
+            self.bot_count_note.setText(f"Cannot change the bot count here: {reading.problem}")
+        else:
+            # Never past what a QSpinBox holds (a C int): `read()` clamps its
+            # ceiling, and the value is clamped again here (Codex medium).
+            top = min(reading.ceiling, botpop.NO_CEILING)
+            self.bot_count_box.setRange(0, top)
+            if reading.max is not None:
+                self.bot_count_box.setValue(max(0, min(reading.max, top)))
+            self.bot_count_box.setToolTip(f"0 to {top}: {reading.ceiling_why}")
+            self.bot_count_note.setText(self._bot_count_now(reading))
+        self._set_bot_count_controls()
+        rows = reading.rows
+        if rows != self._bot_rows:
+            self._bot_rows = rows
+            self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
+            self._set_tuning_revert_all()
+
+    def _bot_count_now(self, reading: botpop.Reading) -> str:
+        """What the note says the server is set to now, and what the install wrote."""
+        name = Path(reading.file).name
+        installed = botpop.installed_count(self.entry)
+        said = f" (Yu'lon installs {installed})" if installed is not None else ""
+        if reading.max is None:
+            return f"{name} names no random bot count; Apply writes one{said}."
+        if reading.min is not None and reading.min != reading.max:
+            return (
+                f"Now between {reading.min} and {reading.max} in {name}{said}. Apply sets both "
+                "to the one number in the box."
+            )
+        return f"Now {reading.max} in {name}{said}."
+
+    @Slot(object)
+    def _bot_count_read_failed(self, exc: object) -> None:
+        """A read that raised: said, unless a newer read is pending (then it is stale and dropped).
+
+        An untagged failure cannot say which read it was, so it is logged and
+        never frees the box: the next reload asks again.
+        """
+        generation = getattr(exc, "generation", None)
+        if generation != self._bot_count_generation:
+            logger.warning(f"a stale or untagged bot-count read failed: {exc}")
+            return
+        self._bot_count_pending = False
+        self.bot_count_note.setText(f"Could not read this server's bot count: {exc}")
+        self._set_bot_count_controls()
+
+    @Slot()
+    def apply_bot_count(self) -> None:
+        """Ask once, then write Min = Max = the box's number on the job runner (T99)."""
+        route = self.services.bot_population
+        reading = self._bot_count_reading
+        if (
+            route is None
+            or reading is None
+            or reading.problem is not None
+            or self._busy
+            or self._bot_count_pending
+            or self._bot_count_writing
+        ):
+            return
+        n = self.bot_count_box.value()
+        if not self._confirm(BOT_COUNT_TITLE, botpop.question(self.entry, reading, n)):
+            return
+        self._bot_count_writing = True
+        self._set_bot_count_controls()
+        self.bot_count_report.setText(f"setting the random bots to {n}…")
+        self._run(partial(route.write, n), self._bot_count_written, self._bot_count_failed)
+
+    @Slot(object)
+    def _bot_count_written(self, result: object) -> None:
+        self._bot_count_writing = False
+        if isinstance(result, botpop.Written):
+            name = Path(result.file).name
+            if result.backup is None:
+                self.bot_count_report.setText(
+                    f"{name} already says {result.after}, so nothing was written."
+                )
+            else:
+                self._note_tuning_owed(result.file, result.rule)
+                route: botpop.Route = "conf" if result.rule == "restart" else "env"
+                self.bot_count_report.setText(
+                    f"Random bots set to {result.after} in {name}; the file as it was is beside "
+                    f"it at {result.backup.name}.\n" + botpop.when_it_counts(route, result.after)
+                )
+        # Read again: the box, its note and the Tuning tab's bot card say what the disk says.
+        self._look_up_bot_count()
+
+    @Slot(object)
+    def _bot_count_failed(self, exc: object) -> None:
+        """A refusal `write()` raised (it wrote nothing), or a bug: said, and the box read again."""
+        self._bot_count_writing = False
+        self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
+        self.action_failed.emit(str(exc))
+        self._look_up_bot_count()
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
         """My Party's panel, or the one line saying why this game has none (8.6).
@@ -8013,6 +8438,21 @@ class ControllerView(QWidget):
             logger.warning(f"could not read which module installs were left unfinished: {exc}")
             return {}
 
+    def _unknown_modules(self) -> Mapping[str, Mapping[str, apply_module.Doubt]]:
+        """Which recorded mods a press stopped on mid-statement, per family (T121).
+
+        `{}` for no reader and for a reader that raised, as `_unfinished_clones()`
+        answers: it only changes the badge of a row that is already drawn.
+        """
+        reader = self.services.unknown_modules
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as exc:  # boundary: an unreadable record must not kill the UI
+            logger.warning(f"could not read which module presses were left unfinished: {exc}")
+            return {}
+
     def _load_manifests(self) -> tuple[list[Manifest], list[str]]:
         """This game's catalog in the store's own order, and what would not parse.
 
@@ -8078,6 +8518,8 @@ class ControllerView(QWidget):
                 # answers must come from the same moment, or a row is drawn
                 # from a folder list and a completion mark taken a press apart.
                 unfinished=self._unfinished_clones(),
+                # T121, the same moment again: which recorded mods are in doubt.
+                unknown=self._unknown_modules(),
             )
         )
         if broken:
@@ -8321,9 +8763,28 @@ class ControllerView(QWidget):
             return
         if action == "install" and self._stopped_for_the_client(f"install {manifest.id}", manifest):
             return
+        relative = reapplies_on_top(manifest)
+        if action in ("install", "update") and relative:
+            # T115, before any question (T55's order): a mob multiplier applied
+            # with values nobody can read cannot be run again safely, and no
+            # answer in the dialog would change that. The same sentence the
+            # applier raises. One small JSON read, as `_module_values()` does,
+            # and only for the four relative mods.
+            refusal = applier.reapply_refusal(manifest)
+            if refusal is not None:
+                self._module_pending = None
+                self.module_report.setPlainText(f"{action} {manifest.id}: {refusal}")
+                return
         # An update re-runs the INSTALL-time steps -- it is the install over
-        # content that has moved -- so it answers the install's prompts.
-        again = action == "update" or (row is not None and row.data.installed)
+        # content that has moved -- so it answers the install's prompts. A mob
+        # multiplier leaves no folder; its applied record is what says a second
+        # Install is a re-run (T115), and since T121 it also marks the row
+        # installed -- read here directly too, for a game wired without that.
+        again = (
+            action == "update"
+            or (row is not None and row.data.installed)
+            or (relative and applier.applied_record(manifest)[0] is not None)
+        )
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action], again=again)
         if not go_ahead:
             self._module_pending = None
@@ -8357,23 +8818,48 @@ class ControllerView(QWidget):
         filled in every prompt that HAD a default and then raised on the one
         that did not, after the clone. See `widgets/manifest_prompt.py`.
 
-        The gate: a dialog opens when this action would render ANY prompt,
-        pre-filled with the manifest's defaults, and a manifest that renders
-        none gets no window and hands the applier `None` — the call it has
-        always been given. Until T92 (2026-09-22) it opened only for a prompt
-        with NO default, which in the shipped catalog is `mod-ah-bot`'s two
-        GUIDs and nothing else — so `xp-rates` never asked its rates,
-        `sitmeanrest` never asked its seconds, and `unlimitedammo` would have
-        had the catalog's `true` written over the script's own `false` without
-        a word. A default shown in a box the person can change is an answer;
-        a default written unseen is not. `hearthstone-cd`'s `choice` (T100) is
-        the sharpest case: its default is upstream's RESET file, so an install
-        that did not ask applied the reset and changed nothing.
+        The gate is `apply.must_ask()`: since T104 (the owner, "ask all,
+        remember answers") every question an install or update renders is put,
+        pre-filled with what this install answered last time, else the
+        manifest's default; a remove asks only what the install's record cannot
+        answer, and the applier fills the rest from that record. Which shipped manifests
+        ask is pinned by `test_every_module_whose_install_renders_a_question_
+        asks_it`, not written here. A manifest that asks nothing gets no window
+        and the applier gets `None` rather than `{}` — the call it has always
+        been given.
+
+        T92 (2026-09-22) had already widened Install to every prompt it renders:
+        until then only a prompt with NO default opened the dialog, so `xp-rates`
+        never asked its rates, `sitmeanrest` never asked its seconds, and
+        `hearthstone-cd`'s `choice` (T100) applied upstream's RESET file unasked.
+        A default shown in a box the person can change is an answer; a default
+        written unseen is not.
         """
         needed = required_prompts(manifest, action)
         if not needed:
             return True, None
-        answers = self._prompt_asker(self, manifest, needed, again=again)
+        # Read here, on the GUI thread: one small JSON file in the server folder,
+        # the same class of read as the clone-folder listing `reload_modules()`
+        # already does here, and the dialog that needs it opens on this thread.
+        applier = self.services.applier
+        remembered = applier.remembered_answers(manifest) if applier is not None else {}
+        # A Remove of a mob multiplier divides by what the database was
+        # multiplied by, which is the APPLIED record (T115); the answers T104
+        # keeps after a Remove only pre-fill the boxes.
+        known = remembered
+        if action == "remove" and applier is not None and reapplies_on_top(manifest):
+            known = applier.applied_record(manifest)[0] or {}
+        asked = tuple(p for p in needed if must_ask(p, action, known))
+        if not asked:
+            return True, None
+        answers = self._prompt_asker(
+            self,
+            manifest,
+            asked,
+            again=again,
+            remembered=remembered,
+            removing=action == "remove",
+        )
         return (False, None) if answers is None else (True, answers)
 
     def _custom_route(self) -> CustomModuleInstall | None:
@@ -9562,7 +10048,7 @@ class ControllerView(QWidget):
             self.services.controller.server_dir,
         )
         self._tuning_rows = rows
-        self.tuning_panel.set_cards(build_tuning_cards(rows))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
         # `TUNING_CORE_FILES` is a decision about who owns core configuration,
         # and a second copy of it inside a widget is a second place for it to
@@ -9574,6 +10060,18 @@ class ControllerView(QWidget):
         # folders and reads each core file and backup, over 9p for a server
         # inside WSL.
         self._look_up_reset_undo()
+        # T99: the bot count and this tab's bot card, read again the same way:
+        # a save of that card moves the Bots tab's box, and a reset moves both.
+        self._look_up_bot_count()
+
+    def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
+        """The modules' rows, then the server's own bot keys (T99, CMaNGOS and Tortoise).
+
+        Kept apart in `_bot_rows` rather than folded into `_tuning_rows`: the
+        latter is what T94's reset reads as "keys an installed MODULE keeps",
+        and these are the server's own keys, which a reset puts back.
+        """
+        return self._tuning_rows + self._bot_rows
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -9592,7 +10090,7 @@ class ControllerView(QWidget):
         made, and that is not what a person pressing "revert my changes"
         asked for.
         """
-        self.tuning_panel.set_cards(build_tuning_cards(self._tuning_rows))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
@@ -9643,6 +10141,13 @@ class ControllerView(QWidget):
         self.tuning_recreate_button.setEnabled(bool(recreate) and not self._busy)
         self.tuning_restart_button.setEnabled(bool(restart or recreate) and not self._busy)
         job = "recreate" if recreate else ("restart" if restart else None)
+        # T99: the Bots tab's copy of the banner's button, same job, same slot.
+        self.bot_count_owed_button.setVisible(job is not None)
+        self.bot_count_owed_button.setEnabled(not self._busy)
+        if job is not None:
+            self.bot_count_owed_button.setText(
+                TUNING_RECREATE_LABEL if job == "recreate" else TUNING_RESTART_LABEL
+            )
         if job is None:
             self.tuning_banner.setVisible(False)
             return
@@ -9791,7 +10296,9 @@ class ControllerView(QWidget):
             return
         self._set_busy(True)
         self.tuning_report.setPlainText("restarting the server…")
-        self._run(self._do_restart, self._tuning_job_done("restart"), self._tuning_job_failed)
+        self._run(
+            lambda: ("restart", self._do_restart()), self._tuning_job_done, self._tuning_job_failed
+        )
 
     @Slot()
     def recreate_containers(self) -> None:
@@ -9811,7 +10318,11 @@ class ControllerView(QWidget):
             return
         self._set_busy(True)
         self.tuning_report.setPlainText("recreating the containers…")
-        self._run(self._do_recreate, self._tuning_job_done("recreate"), self._tuning_job_failed)
+        self._run(
+            lambda: ("recreate", self._do_recreate()),
+            self._tuning_job_done,
+            self._tuning_job_failed,
+        )
 
     def _do_restart(self) -> bool:
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
@@ -9830,24 +10341,27 @@ class ControllerView(QWidget):
         controller.start()
         return removed
 
-    def _tuning_job_done(self, job: str) -> Callable[[object], None]:
+    @Slot(object)
+    def _tuning_job_done(self, answer: object) -> None:
         """The handler for a finished restart or recreate: forget what it covered.
 
         A recreate covers a restart as well -- the containers are new, so they
         have both the current environment and the current conf files -- which
         is why it clears both and a restart clears only its own.
+
+        A bound slot that is told which job it was, not a closure made per job
+        (T97): the closure was a plain callable, so the runner delivered it on
+        the worker thread, and this wrote the report and started the status
+        read from there.
         """
-
-        def done(_result: object) -> None:
-            self._set_busy(False)
-            self._tuning_owed.pop("restart", None)
-            if job == "recreate":
-                self._tuning_owed.pop("recreate", None)
-            self._refresh_tuning_owed()
-            self.tuning_report.setPlainText(f"{job}: done.")
-            self.refresh_status()
-
-        return done
+        job = cast(tuple[str, object], answer)[0]
+        self._set_busy(False)
+        self._tuning_owed.pop("restart", None)
+        if job == "recreate":
+            self._tuning_owed.pop("recreate", None)
+        self._refresh_tuning_owed()
+        self.tuning_report.setPlainText(f"{job}: done.")
+        self.refresh_status()
 
     @Slot(object)
     def _tuning_job_failed(self, exc: object) -> None:
@@ -10130,6 +10644,8 @@ class ControllerView(QWidget):
         rule for an ambiguity `_key_for()` already settles once, in the one
         place that has to guess.
         """
+        if (family, module_id) == botpop.CARD and file == botpop.CONF_FILE:
+            return botpop.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
             return {}
@@ -10552,6 +11068,57 @@ class ControllerView(QWidget):
         self.modules_panel.select(module_id)
         self._module_menu(module_id).exec(pos)
 
+    def _selected_row_is_record_backed(self) -> bool:
+        """Whether the selected row is Installed (or in doubt) because of the answers-file record.
+
+        A relative manifest (the four mob multipliers) leaves no folder, so its
+        row can only read installed from the record (T121). That is the row a
+        stale record can lie on, and the one Forget is for.
+        """
+        manifest = self.selected_manifest()
+        row = self.modules_panel.selected_row()
+        return (
+            manifest is not None
+            and row is not None
+            and row.data.installed
+            and reapplies_on_top(manifest)
+        )
+
+    @Slot()
+    def _forget_module_record(self) -> None:
+        """ "Forget Yu'lon's record…": drop the selected mod's applied record, sending no SQL.
+
+        The way out of a record that no longer describes the database -- a fresh
+        or restored `acore_world` -- where Remove would divide base values and
+        halve every creature (T121 fix wave). Asked first, No by default, in
+        words that say the database is not changed.
+        """
+        manifest = self.selected_manifest()
+        applier = self.services.applier
+        if manifest is None or applier is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Forget Yu'lon's record?",
+            FORGET_RECORD_QUESTION.format(name=manifest.name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if not said_yes(answer):
+            self.module_report.setPlainText(
+                f"forget {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
+        problem = applier.forget_applied(manifest)
+        if problem:
+            self.module_report.setPlainText(f"forget {manifest.id}: not done — {problem}")
+        else:
+            self.module_report.setPlainText(
+                f"forget {manifest.id}: Yu'lon no longer records it as applied. The database "
+                "was not changed."
+            )
+        self.reload_modules()
+
     def _module_menu(self, module_id: str) -> QMenu:
         """The menu for the SELECTED row: what it offers, and what each entry does."""
         menu = QMenu(self)
@@ -10568,6 +11135,9 @@ class ControllerView(QWidget):
             inst_act.triggered.connect(lambda: self._module_action("install"))
             rem_act = menu.addAction("Remove Selected Module")
             rem_act.triggered.connect(lambda: self._module_action("remove"))
+            if self._selected_row_is_record_backed():
+                forget_act = menu.addAction(FORGET_RECORD_ACTION)
+                forget_act.triggered.connect(self._forget_module_record)
             menu.addSeparator()
         copy_act = menu.addAction("Copy Module ID")
         copy_act.triggered.connect(lambda: self._copy_to_clipboard(module_id))

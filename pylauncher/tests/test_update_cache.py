@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import HANG_BOUND
+from tests.conftest import HANG_BOUND, spelled_bounds
 from tests.support_update import FEED
 from yulon import update
 from yulon.update import (
@@ -306,8 +306,115 @@ def test_urllib_turns_a_304_into_an_answer_not_an_exception(
     )
 
 
+TRICKLE_DEADLINE = 2.0
+"""The deadline the trickle test hands `_urllib_fetch`: short, so the file stays fast."""
+
+PROMPT_ALLOWANCE = 2.0
+"""How long a step that costs microseconds may take on a loaded box. Not a speed claim.
+
+The trickle test times exactly two steps, both the code's own: from the call
+to the watchdog being STARTED (a few lines of setup), and from the moment the
+code gave up to the `TimeoutError` reaching the caller (one wake of the
+fetching thread after its socket is shut down). What it deliberately does NOT
+time is when the scheduler gets round to running the watchdog thread: that
+was the whole of T105. Measured on the laptop (3 cores, WSL2) 2026-09-24
+beside 12 CPU spinners, a watchdog armed at the right moment with the right
+interval fired at 3.212 s against a 2 s deadline in one run of sixteen, and
+with both CI legs running the old `elapsed < 3.0` failed at 3.3-3.5 s. A
+player's check is late by the same amount, and no watchdog thread can be
+more punctual than the scheduler that wakes it; the 15 s bound still ends.
+
+What is asserted instead is causal and cannot be moved by load: the timer is
+armed with exactly the deadline it was given, it is armed within this
+allowance of the fetch starting, and the fetch is out within this allowance
+of giving up. Measured in two runs of 60 fetches beside the full suite and
+two CPU spinners (loadavg 3-6 on 3 cores, 2026-09-24): arming, up to the
+return of `start()`, took at most 2.9 ms and getting out at most 47 ms, while
+in the first run one watchdog woke 1.406 s late and its fetch ended at
+3.407 s -- a failure under the old bound, a pass under this one, because
+neither step the code owns was slow. Two seconds is forty times the worst
+step and still well short of every defect the test exists for: a watchdog
+armed late (a `start()` that takes three seconds included), a socket shut
+five seconds after the timer fired, and a read the shutdown does not wake,
+which runs the server's whole `TRICKLE_SECONDS`.
+"""
+
+TRICKLE_SECONDS = 30.0
+"""How long the test server keeps trickling if the client never hangs up.
+
+A correct fetch hangs up at the deadline and the server stops there, so this
+costs nothing on a green run. It is only as long as a BROKEN run takes, and it
+is the trickle test's hang breaker: a fetch still running when the server ends
+was never cut off at all, and is reported as that rather than as slow.
+"""
+
+
+class WatchdogSpy:
+    """What `_Deadline` did and when, stamped from inside it rather than guessed from outside.
+
+    `intervals` is what each timer was armed with, `starting` when its
+    `start()` was called and `armed` when that call RETURNED, `fired` when
+    `_abort` began, and `readings` every value the fetch read from the clock it
+    was handed (`clock`). The first reading is the one `_urllib_fetch` builds
+    its `stop_at` from.
+
+    `armed` is stamped after the real `start()` and not before it, because
+    `Timer.start()` does not return until the timer's thread is running, and
+    the countdown only begins in that thread: a `start()` that took three
+    seconds and then counted two passed every assertion when this was stamped
+    on the way in, with a fetch of five (second Codex review of T105).
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.intervals: list[float] = []
+        self.starting: list[float] = []
+        self.armed: list[float] = []
+        self.fired: list[float] = []
+        self.readings: list[float] = []
+        init, abort = update._Deadline.__init__, update._Deadline._abort
+
+        def spied_init(watcher: update._Deadline, seconds: float) -> None:
+            init(watcher, seconds)
+            timer = watcher._timer
+            self.intervals.append(timer.interval)
+            start = timer.start
+
+            def stamped_start() -> None:
+                self.starting.append(time.monotonic())
+                start()
+                self.armed.append(time.monotonic())
+
+            monkeypatch.setattr(timer, "start", stamped_start)
+
+        def stamped_abort(watcher: update._Deadline) -> None:
+            self.fired.append(time.monotonic())
+            abort(watcher)
+
+        monkeypatch.setattr(update._Deadline, "__init__", spied_init)
+        monkeypatch.setattr(update._Deadline, "_abort", stamped_abort)
+
+    def clock(self) -> float:
+        reading = time.monotonic()
+        self.readings.append(reading)
+        return reading
+
+    def gave_up(self, deadline: float) -> float | None:
+        """The first moment the code itself decided the deadline had passed, if it did.
+
+        Either the watchdog began shutting the socket down, or the fetching
+        thread read a clock value at or past its own `stop_at` (the `body` and
+        `chunked` shapes often get there first, and then the timer is
+        cancelled before it fires).
+        """
+        stop_at = self.readings[0] + deadline if self.readings else float("inf")
+        seen = [reading for reading in self.readings if reading >= stop_at]
+        return min(self.fired[:1] + seen[:1], default=None)
+
+
 @contextlib.contextmanager
-def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Iterator[str]:
+def a_server_that(
+    shape: str, *, seconds: float = TRICKLE_SECONDS, gap: float = 0.05
+) -> Iterator[str]:
     """A real socket on 127.0.0.1 that trickles, so the bound is proved not argued.
 
     A faked response object cannot show this: `http.client`'s `read(n)` blocks
@@ -393,7 +500,9 @@ def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Ite
 
 
 @pytest.mark.parametrize("shape", ["body", "chunked", "headers"])
-def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(shape: str) -> None:
+def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(
+    shape: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Measured before the fix, against this very server with a 2 s deadline:
 
         body 12.0s   chunked 12.0s   headers 12.0s (and it RETURNED an answer)
@@ -401,18 +510,85 @@ def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(shape: str) -> N
     Two reasons a clock checked between reads could not see it: `read(n)`
     blocks until it has n bytes, and the header phase is inside `urlopen`,
     which had not returned yet — the deadline was computed after it did.
+
+    Judged by what the code did rather than by one outer stopwatch (T105):
+    that stopwatch also measured when the scheduler woke the watchdog, and
+    failed at 3.5 s on a busy laptop with nothing wrong. `PROMPT_ALLOWANCE`
+    says what is timed and what is not.
     """
+    spy = WatchdogSpy(monkeypatch)
+
     with a_server_that(shape) as url:
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            update._urllib_fetch(url, None, deadline=2.0)
-        elapsed = time.monotonic() - started
+            update._urllib_fetch(url, None, now=spy.clock, deadline=TRICKLE_DEADLINE)
+        exited = time.monotonic()
 
-    assert elapsed < 3.0, f"the {shape} shape ran {elapsed:.1f}s against a 2.0s deadline"
+    gave_up = spy.gave_up(TRICKLE_DEADLINE)
+    story = (
+        f"{shape}: start() called {[round(t - started, 3) for t in spy.starting]},"
+        f" armed {[round(t - started, 3) for t in spy.armed]}"
+        f" with {spy.intervals}, fired {[round(t - started, 3) for t in spy.fired]},"
+        f" exited {exited - started:.3f}s"
+    )
+    assert spy.intervals == [TRICKLE_DEADLINE], f"armed with the wrong deadline ({story})"
+    assert len(spy.armed) == 1, f"the watchdog was not started exactly once ({story})"
+    assert spy.armed[0] - started < PROMPT_ALLOWANCE, f"the watchdog was armed late ({story})"
+    assert gave_up is not None, f"nothing in the code gave up; the timeout is not ours ({story})"
+    assert exited - gave_up < PROMPT_ALLOWANCE, f"it gave up but did not get out ({story})"
+    assert exited - started >= TRICKLE_DEADLINE, f"it gave up early ({story})"
+    assert exited - started < TRICKLE_SECONDS, f"it was never cut off ({story})"
 
 
-def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
-    """The bound must not truncate or delay an ordinary answer."""
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """The bounds audit `test_job.py` and `test_log_panel.py` run on themselves.
+
+    **What it cannot see, stated so the price is known.** The trickle test's
+    ASSERTION is an elapsed-time comparison, which `conftest.spelled_bounds`
+    does not read: its bounds are `PROMPT_ALLOWANCE`, `TRICKLE_DEADLINE` and
+    `TRICKLE_SECONDS`, named and argued above, and a bare number typed into
+    one of those comparisons would not change this set. `time.monotonic()` is
+    here because that test, its spy and the server measure with it; `gap` is the
+    server's pacing between trickled bytes, not a wait on the subject.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "gap", "time.monotonic()"}
+
+
+def test_a_server_that_answers_normally_is_read_whole_and_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound must not truncate or delay an ordinary answer.
+
+    Two checks, because "delay" comes in two sizes. The watchdog must be armed
+    with exactly the deadline. And the whole call, from the call to the
+    return, must fit in `NORMAL_ANSWER_ALLOWANCE`. A delay long enough to reach
+    the deadline makes the watchdog fire, and the fetch then raises, so that
+    size fails on its own. A shorter delay does not: a `time.sleep(6)` before
+    the return passed a version of this test that only checked the watchdog
+    (T108 review), so the allowance is what catches it.
+
+    Until T108 this asserted `elapsed < 5.0`. That bound had no name and no
+    argument behind it; the allowance's docstring gives both.
+    """
+    deadline = 10.0
+    armed: list[float | None] = []
+    fired: list[bool] = []
+    real_enter = update._Deadline.__enter__
+    real_abort = update._Deadline._abort
+
+    def enter(self: update._Deadline) -> update._Deadline:
+        entered = real_enter(self)
+        # None when the Timer was not actually started: "never fired" would
+        # then prove nothing.
+        armed.append(self._timer.interval if self._timer.is_alive() else None)
+        return entered
+
+    def abort(self: update._Deadline) -> None:
+        fired.append(True)
+        real_abort(self)
+
+    monkeypatch.setattr(update._Deadline, "__enter__", enter)
+    monkeypatch.setattr(update._Deadline, "_abort", abort)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -451,7 +627,7 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
     thread.start()
     try:
         started = time.monotonic()
-        answer = update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=10.0)
+        answer = update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=deadline)
         elapsed = time.monotonic() - started
     finally:
         stop.set()
@@ -464,12 +640,37 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
     assert answer.status == 200
     assert answer.text == FEED
     assert answer.etag == 'W/"one"'
-    assert elapsed < 5.0, "an ordinary answer waited on the deadline"
+    assert armed == [deadline], f"the watchdog was not armed with the deadline: {armed}"
+    assert fired == [], "an ordinary answer waited on the deadline: the watchdog fired"
+    assert elapsed < NORMAL_ANSWER_ALLOWANCE, (
+        f"an ordinary answer took {elapsed:.2f}s from the call to the return; "
+        f"the allowance is {NORMAL_ANSWER_ALLOWANCE}s"
+    )
     # The watchdog is cancelled on the normal path: no Timer is left ticking,
     # and removing that `cancel()` used to fail nothing at all. Counted by
     # NAME rather than with `active_count()`, which is process-global and saw
     # an unrelated thread on the 3.11 leg.
     assert _live_watchdogs() == [], "a watchdog Timer outlived the fetch"
+
+
+NORMAL_ANSWER_ALLOWANCE = 2.0
+"""How long an ordinary loopback answer may take on a loaded box. Not a speed claim.
+
+The same idea and the same number as `PROMPT_ALLOWANCE` in the trickle test
+(T105, PR #207): a step that costs milliseconds gets 2 s, so load cannot fail
+it but a real stall still does. It is a separate name only because this branch
+was cut before #207 existed, and a second definition of one name would merge as
+a silent duplicate. Once both are in, the two can become one.
+
+What it times is all the code's own work: building the TLS context, one
+loopback connect, and reading a small body that is already sent. The test server
+is listening before the call. Measured on the laptop (3 cores, WSL2) beside the
+full suite and two CPU spinners (loadavg 4-7), 2026-09-24: 230 fetches, worst
+25.7 ms, so the allowance is about 80 times the worst. It stays well short of
+the delays the test exists for. A 6 s stall before the return passed
+the watchdog-only version and fails this one. A wait of the full 10 s deadline
+fires the watchdog and fails both.
+"""
 
 
 def _live_watchdogs() -> list[threading.Thread]:
