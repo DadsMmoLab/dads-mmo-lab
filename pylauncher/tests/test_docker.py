@@ -1257,9 +1257,12 @@ def test_pin_project_name_never_truncates_the_env_on_a_write_failure(
     def boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "write_bytes", boom)
+    # T127: the write goes through `platform.write_private_atomically()` (a 0600
+    # temp file and a rename), so the failure is injected at its write.
+    monkeypatch.setattr(docker.platform.os, "fdopen", boom)
     assert docker.pin_project_name(tmp_path) is None
     assert env.read_text(encoding="utf-8") == "DB_ROOT_PASSWORD=hunter2\n"
+    assert not list(tmp_path.glob("*.yulon-new")), "the temp file is cleaned up"
 
 
 def test_pin_project_name_leaves_non_utf8_bytes_alone(

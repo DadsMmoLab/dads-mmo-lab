@@ -4330,3 +4330,40 @@ def _keep_awake_windows() -> Iterator[None]:
         yield
     finally:
         _windows_execution_state(_ES_CONTINUOUS)
+
+
+PRIVATE_MODE = 0o600
+"""Owner read/write: the most a file holding a password may be (`.env`)."""
+
+
+def write_private_atomically(path: Path, data: bytes) -> None:
+    """Replace `path` with `data` atomically, never leaving it readable by anyone else (T127).
+
+    `.env` holds the database root password and the bot dashboard's session
+    secret. The two writers of it wrote a temp file with `write_text()`, which
+    takes the umask (0644 or 0664), and renamed it over the file -- so every
+    write WIDENED a 0600 `.env` to world-readable. Measured on yulon-ubuntu:
+    `~/t120`'s `.env` was 0664.
+
+    The temp file is created 0600 by `os.open(O_CREAT | O_EXCL)`, so it is
+    private from the first byte. It then takes the old file's mode only where
+    that is at least as strict (`old & 0o600`): a 0400 file stays 0400, and a
+    0664 one comes back 0600. On Windows the mode is not enforced (see
+    `families.conf._write`), so this is a POSIX guarantee.
+    """
+    try:
+        old = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        old = None
+    mode = PRIVATE_MODE if old is None else old & PRIVATE_MODE
+    tmp = path.with_name(path.name + ".yulon-new")
+    tmp.unlink(missing_ok=True)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_MODE)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)  # atomic on POSIX and on Windows
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
