@@ -2082,12 +2082,13 @@ def detect_firewalld_admission(
     A port inside a RANGE entry answers yes. At runtime that is MEASURED
     (2026-09-26, Fedora with firewalld, as uid 1000 without sudo): a zone
     listing `1025-65535/tcp` answered `--query-port=3724/tcp` and
-    `--query-port=8085/tcp` rc 0 `yes`. For the permanent side it is read in
-    firewalld source (main, 2026-09-26), not measured — unelevated, every
-    `--permanent` query there was rc 253: `src/firewall/server/config_zone.py`
-    `queryPort()` tests each entry with `portInPortRange()`
-    (`src/firewall/functions.py`), as the runtime path does in
-    `src/firewall/core/fw_policy.py` `query_port()`.
+    `--query-port=8085/tcp` rc 0 `yes`. The permanent side answered the same
+    (`--permanent --zone=FedoraWorkstation --query-port=3724/tcp` rc 0 `yes`)
+    from a process in that user's logged-in desktop session; from an SSH
+    session every `--permanent` query was rc 253. The source agrees for both:
+    `src/firewall/server/config_zone.py` `queryPort()` tests each entry with
+    `portInPortRange()` (`src/firewall/functions.py`), as the runtime path does
+    in `src/firewall/core/fw_policy.py` `query_port()` (main, 2026-09-26).
 
     A zone whose target is ACCEPT admits every port and lists none, and
     `--query-port` answers no for it — measured on Docker's `docker` zone the
@@ -2097,10 +2098,13 @@ def detect_firewalld_admission(
     answers no: a false "not admitted", which keeps the write and the reload,
     i.e. the plan as it was. That is the safe direction.
 
-    Unelevated runtime reads — `--query-port` and `--info-zone` — are allowed:
-    measured rc 0/1 from an SSH session, which polkit's firewalld policy lets
-    read (`allow_any`), so a local desktop session is let too. `prefix` is
-    `probe_prefix()`'s, like every other probe here.
+    What an unelevated caller may read depends on its session, measured the
+    same day: from SSH, runtime `--query-port` and `--info-zone` answered but
+    `--state`, `--permanent --list-all-zones` and every `--permanent` query
+    were rc 253 "Authorization failed" — so the zones are unknown and this is
+    never reached; from the logged-in desktop session (where a Steam Deck
+    player runs Yu'lon) all of them answered. `prefix` is `probe_prefix()`'s,
+    like every other probe here.
     """
     do = (
         run
