@@ -973,7 +973,7 @@
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "fd7ec9ec7659035cfc3ea75d542c8683005525de"
+            "rev": "c591bbb1f6921fdfa53f47e7387e3154b7362bff"
           }
         ]
       },
