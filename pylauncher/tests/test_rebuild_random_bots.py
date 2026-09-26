@@ -306,6 +306,17 @@ class World:
     backup_fails: bool = False
     scoped: bool = True
     restart_fails: bool = False
+    running_after_failed_restart: bool | None | str = True
+    """What `world_running()` says after a restart that raised; "raise" makes it raise."""
+    restart_tried: bool = False
+
+    def world_running(self) -> bool | None:
+        if not self.restart_tried:
+            return self.running
+        answer = self.running_after_failed_restart
+        if answer == "raise":
+            raise RuntimeError("docker inspect said no")
+        return answer  # type: ignore[return-value]
 
     def channel(self) -> object:
         world = self
@@ -325,7 +336,12 @@ class World:
         return conf.split("RandomBotPoolReset = ")[1].split()[0]
 
     def restart(self) -> None:
+        self.restart_tried = True
         if self.restart_fails:
+            if self.running_after_failed_restart is True:
+                # compose exited non-zero AFTER the world came up and read the key.
+                self.events.append("restart:" + self.key())
+                self.restarts += 1
             raise RuntimeError("docker said no")
         self.events.append("restart:" + self.key())
         self.restarts += 1
@@ -349,7 +365,7 @@ class World:
         return poolreset.PoolRebuild(
             entry=TORTOISE,
             server_dir=self.tmp,
-            world_running=lambda: self.running,
+            world_running=self.world_running,
             channels=self.channels,  # type: ignore[arg-type]
             restart=self.restart,
             world_log=self.world_log,
@@ -423,10 +439,55 @@ def test_two_presses_write_two_different_tokens(tmp_path: Path) -> None:
     world.log_after_restart = [applied(second)]
     world.run()
     assert second != TOKEN
-    assert f"RandomBotPoolReset = once:{second}" in path.read_text()
     assert world.events.count(f"restart:once:{TOKEN}") == 1
     assert world.events.count(f"restart:once:{second}") == 1
-    assert len(tuning.backups_of(path)) == 2
+    assert len(tuning.backups_of(path)) == 2, "one per request; the take-backs make none"
+
+
+def test_an_applied_rebuild_takes_the_request_back_so_a_restored_backup_is_not_rebuilt(
+    tmp_path: Path,
+) -> None:
+    """The applied generation lives in the characters database, which a backup dumps: a
+    restore of the backup taken first rolls it back, and a `once:` left in the conf would
+    then delete the restored bots at the next start."""
+    path = _conf(tmp_path)
+    world = World(tmp_path)
+    lines = world.run()
+    assert world.key() == "off"
+    assert "made again" in lines[-1] and "back to off" in lines[-1]
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8")
+
+
+def test_already_applied_takes_the_request_back_too(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    line = f"TortoiseBots: random pool generation '{TOKEN}' already applied; reset skipped"
+    world = World(tmp_path, log_after_restart=[line])
+    world.run()
+    assert world.key() == "off"
+
+
+@pytest.mark.parametrize("outcome", ["refused", "applied"])
+def test_revert_after_a_take_back_lands_on_the_file_before_the_request(
+    qapp: object, tmp_path: Path, outcome: str
+) -> None:
+    """Through the Tuning tab's real Revert: the take-back makes no backup of its own, so the
+    newest one is `write_key`'s -- the file as it was, with the key off."""
+    from yulon import bot_population
+
+    path = _conf(tmp_path)
+    world = World(
+        tmp_path, log_after_restart=[REFUSALS["guild"] if outcome == "refused" else applied()]
+    )
+    if outcome == "refused":
+        with pytest.raises(poolreset.PoolResetError):
+            world.run()
+    else:
+        world.run()
+    assert len(tuning.backups_of(path)) == 1
+    view = _view(tmp_path, None, bot_population=bot_population.bot_count_route(TORTOISE, tmp_path))
+    view.revert_tuning(*bot_population.CARD)
+    assert world.key() == "off"
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8")
 
 
 TAKEN_BACK = "nothing will happen at the next restart"
@@ -446,7 +507,7 @@ def test_every_refusal_sets_the_key_back_to_off_so_no_later_restart_rebuilds(
     assert world.restarts == 1
     assert world.key() == "off"
     assert path.read_bytes() == CONF_TEXT.encode("utf-8"), "only the value moved, and back"
-    assert len(tuning.backups_of(path)) == 2, "the take-back is backed up like the write"
+    assert len(tuning.backups_of(path)) == 1, "the take-back makes no backup (Revert)"
 
 
 def test_a_part_way_failure_keeps_the_request_so_the_module_finishes_it(tmp_path: Path) -> None:
@@ -459,13 +520,46 @@ def test_a_part_way_failure_keeps_the_request_so_the_module_finishes_it(tmp_path
     assert "next start" in str(caught.value) and TAKEN_BACK not in str(caught.value)
 
 
-def test_a_restart_that_fails_takes_the_request_back(tmp_path: Path) -> None:
+def test_a_restart_that_fails_with_the_world_down_takes_the_request_back(tmp_path: Path) -> None:
     _conf(tmp_path)
-    world = World(tmp_path, restart_fails=True)
+    world = World(tmp_path, restart_fails=True, running_after_failed_restart=False)
     with pytest.raises(poolreset.PoolResetError) as caught:
         world.run()
     assert "docker said no" in str(caught.value) and TAKEN_BACK in str(caught.value)
     assert world.key() == "off"
+
+
+def test_a_restart_that_fails_with_the_world_up_keeps_the_request_and_watches(
+    tmp_path: Path,
+) -> None:
+    """`start_staged` raises when compose exits non-zero -- after the world may have come up,
+    read the key and begun deleting. Taking it back then would be a lie."""
+    _conf(tmp_path)
+    world = World(
+        tmp_path,
+        restart_fails=True,
+        running_after_failed_restart=True,
+        log_after_restart=[scheduled(), progress(25)],
+    )
+    ticks = iter(range(0, 100_000, 10))
+    lines = world.run(monotonic=lambda: float(next(ticks)), timeout_s=60.0)
+    assert any("docker said no" in line and "came up" in line for line in lines)
+    assert any("25/500" in line for line in lines), "the log was watched"
+    assert world.key() == f"once:{TOKEN}"
+
+
+@pytest.mark.parametrize("answer", [None, "raise"], ids=["unknown", "check-raised"])
+def test_a_restart_that_fails_with_the_world_unknown_keeps_the_request(
+    tmp_path: Path, answer: object
+) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, restart_fails=True, running_after_failed_restart=answer)  # type: ignore[arg-type]
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        world.run()
+    assert world.key() == f"once:{TOKEN}"
+    assert "docker said no" in str(caught.value)
+    assert "may run at the next start" in str(caught.value)
+    assert TAKEN_BACK not in str(caught.value)
 
 
 def test_a_watch_that_runs_out_says_where_to_look_and_is_not_a_failure(tmp_path: Path) -> None:
@@ -527,6 +621,16 @@ def test_an_owed_restart_still_runs_when_the_backup_fails(tmp_path: Path) -> Non
     assert world.events == ["backup", "restart:off"]
 
 
+def test_a_failed_owed_restart_after_a_failed_backup_reports_both(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, backup_fails=True, restart_fails=True)
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        world.run(backup=world.backup, restart_owed=True)
+    said = str(caught.value)
+    assert "mysqldump said no" in said and "docker said no" in said
+    assert said.index("mysqldump said no") < said.index("docker said no")
+
+
 def test_an_owed_restart_is_the_rebuilds_own_one_restart(tmp_path: Path) -> None:
     _conf(tmp_path)
     world = World(tmp_path)
@@ -547,7 +651,7 @@ def test_an_unscoped_log_with_an_old_refusal_does_not_end_the_watch(tmp_path: Pa
     world = World(tmp_path, scoped=False, log_after_restart=[REFUSALS["guild"], applied()])
     lines = world.run()
     assert "made again" in lines[-1]
-    assert world.key() == f"once:{TOKEN}"
+    assert world.key() == "off"
 
 
 # ------------------------------------------------------------------ this run's log
@@ -729,12 +833,19 @@ class _NoBots:
 
 
 def _view(
-    tmp_path: Path, seam: object | None, entry: object = TORTOISE, **extra: object
+    tmp_path: Path,
+    seam: object | None,
+    entry: object = TORTOISE,
+    made: object | None = None,
+    **extra: object,
 ) -> controller_view_module.ControllerView:
     from tests.test_controller_view import _Ps, _services
 
     services = replace(
-        _services(_Ps(), tmp_path, []), bots=_NoBots(), bot_pool_rebuild=seam, **extra
+        _services(_Ps(), tmp_path, [], made),  # type: ignore[arg-type]
+        bots=_NoBots(),
+        bot_pool_rebuild=seam,
+        **extra,
     )
     return controller_view_module.ControllerView(
         entry, services, status_poll_ms=0, job_runner=run_inline  # type: ignore[arg-type]
@@ -847,7 +958,7 @@ def test_the_real_flow_through_the_button_writes_the_key_and_restarts_once(
     view.rebuild_random_bots()
     _wait(view)
     assert world.events == ["preview", "confirm", f"restart:once:{TOKEN}"]
-    assert f"once:{TOKEN}" in path.read_text()
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8"), "taken back once applied"
     assert "made again" in view.bot_rebuild_log.text()  # type: ignore[union-attr]
 
 
@@ -899,6 +1010,36 @@ def test_the_bot_count_and_the_tuning_reset_are_refused_while_a_rebuild_runs(
         view.reset_to_default([CONF])
         assert asked == [], "neither asked its question while the rebuild ran"
         assert path.read_bytes() == CONF_TEXT.encode("utf-8")
+    finally:
+        release.set()
+    _wait(view)
+
+
+@pytest.mark.parametrize("press", ["back up", "restore"])
+def test_back_up_and_restore_are_refused_while_a_rebuild_runs(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: str
+) -> None:
+    from tests.test_controller_view import _FakeMaintenance
+
+    made = _FakeMaintenance()
+    release = threading.Event()
+    seam = _Seam(release)
+    view = _view(tmp_path, seam, made=made)
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda _p, _t, text, *a: told.append(text))
+    _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    try:
+        assert view.rebuild_random_bots() is True
+        pump_until(lambda: seam.calls == ["rebuild"], "the rebuild job started")
+        if press == "back up":
+            view.back_up()
+            assert made.backups == 0 and view._backup_running is False
+        else:
+            view._restore_plan = made.plan(tmp_path / "x.sql")
+            view.run_restore()
+            assert made.restored == [] and view._restore_running is False
+        assert told and "random bots are being rebuilt" in told[-1]
+        assert "random bots are being rebuilt" in view.maintenance_report.toPlainText()
     finally:
         release.set()
     _wait(view)

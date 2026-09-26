@@ -4117,6 +4117,12 @@ REBUILD_BOTS_AFTER_UPDATE = (
 )
 """T144's offer after an update or a return to the pin that moved TortoiseBots. No by default."""
 
+BOT_REBUILD_RUNNING = (
+    "The random bots are being rebuilt on the Bots tab, and that restarts the server. Wait for "
+    "it to finish, then try again. Nothing was changed."
+)
+"""T144: why Back up and Restore refuse while the rebuild runs."""
+
 RESTART_OWED_LEFT = (
     "The bots enrolled during the update come online at the server's next start. Restart the "
     "server from the Server tab when nothing else is running."
@@ -7543,6 +7549,23 @@ class ControllerView(QWidget):
             "Stopped. The log below says how far it got." if cancelled else ""
         )
 
+    def _refused_during_bot_rebuild(self) -> bool:
+        """Back up and Restore, refused while the random bots are rebuilt (T144). True if refused.
+
+        Gated on the rebuild's panel ONLY, and deliberately narrower than
+        `forget_refusal()`: those two presses have never been gated on `_busy`
+        or the other jobs, and widening that is a change to every game's
+        Maintenance tab that this ticket does not own. The rebuild is the one
+        job that restarts the world under a dump or a restore on purpose, and
+        its request lives in the characters database a restore overwrites.
+        """
+        log = self.bot_rebuild_log
+        if log is None or not log.running:
+            return False
+        QMessageBox.information(self, "Something else is running", BOT_REBUILD_RUNNING)
+        self.maintenance_report.setPlainText(BOT_REBUILD_RUNNING)
+        return True
+
     def _offer_bot_rebuild_after_update(self, move: tortoise_botpool.Move) -> None:
         """T144: the update just moved TortoiseBots. Ask, No by default; Yes is the button's press.
 
@@ -8236,6 +8259,8 @@ class ControllerView(QWidget):
 
     @Slot()
     def back_up(self) -> None:
+        if self._refused_during_bot_rebuild():
+            return
         self.backup_button.setEnabled(False)
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
         self._backup_running = True  # T95: `forget_refusal()` reads it
@@ -8329,6 +8354,8 @@ class ControllerView(QWidget):
             # Belt and braces: the button is disabled without a plan, but a
             # restore is not something to leave to a widget's enabled state.
             self.maintenance_report.setPlainText("Show the restore plan first.")
+            return
+        if self._refused_during_bot_rebuild():
             return
         self.restore_button.setEnabled(False)
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")

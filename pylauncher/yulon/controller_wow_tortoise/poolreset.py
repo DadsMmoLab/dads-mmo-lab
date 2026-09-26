@@ -40,14 +40,21 @@ restart on its own, so the update path restarts the world once either way.
 **A refusal takes the request back** (owner, 2026-09-26): every outcome that
 did not complete the reset and deleted nothing -- a refusal, a skip, an unread
 or invalid setting, a failed restart, a Stop after the write -- sets the key
-back to `off`, backed up like the write, so no later ordinary restart rebuilds
+back to `off` (with no backup of its own: see below), so no later ordinary restart rebuilds
 the bots by surprise. The one exception is a reset that failed PART-WAY
 (`reset failed:`, logged after deletion may have begun): the module records the
 generation only after success and resumes at the next start while the token is
 still new, and `off` would stop that resume (`PlanAtStartup` returns on `Off`
 before anything is planned), stranding half a pool. So there the request stays.
 A watch that timed out, or was stopped, leaves it too: the rebuild may still be
-running.
+running; so does a restart that raised while the world may be up (see
+`_after_a_failed_restart`). A take-back makes NO backup of its own, so the
+Tuning tab's Revert lands on the file as it was before the request.
+
+**An applied rebuild takes the request back too.** The module records the
+applied generation in the characters database, which a Yu'lon backup dumps: a
+restore of the backup taken first would roll it back, and a `once:` left in
+the conf would then delete the restored bots at the next start.
 
 **Nothing else writes the key.** It is not in the catalog's conf table, so
 Repair and Update leave it where it is (a used token is a no-op), and Reset to
@@ -136,28 +143,40 @@ def write_key(entry: CatalogEntry, server_dir: Path, token: str) -> KeyWritten:
     if not is_valid_token(token):
         raise PoolResetError(f"{token!r} is not a token the bots module accepts")
     path, made = _write_value(entry, server_dir, f"once:{token}")
+    if made is None:  # never: `backup=True`; a plain check, because `-O` drops asserts
+        raise PoolResetError(f"no backup was made of {path.name}")
     logger.info(f"asked {entry.id} to rebuild its random bots ({KEY} = once:{token}) in {path}")
     return KeyWritten(path, made, token)
 
 
 def take_back(entry: CatalogEntry, server_dir: Path) -> Path:
-    """Write `AiPlayerbot.RandomBotPoolReset = off`, backed up like the request; the backup.
+    """Write `AiPlayerbot.RandomBotPoolReset = off`, WITHOUT a backup of its own; the file.
+
+    No backup, on purpose: a backup taken now would be of the file saying
+    `once:<token>`, and the Tuning tab's Revert restores the NEWEST backup --
+    so Revert after a take-back would arm the request again and the next
+    restart would rebuild the bots by surprise. Without one, the newest is the
+    backup `write_key` made a moment earlier: the file as it was before the
+    request, key off.
 
     Raises:
         PoolResetError: nothing was written.
     """
-    path, made = _write_value(entry, server_dir, "off")
+    path, _ = _write_value(entry, server_dir, "off", backup=False)
     logger.info(f"took {entry.id}'s random-bot rebuild request back ({KEY} = off) in {path}")
-    return made
+    return path
 
 
-def _write_value(entry: CatalogEntry, server_dir: Path, value: str) -> tuple[Path, Path]:
+def _write_value(
+    entry: CatalogEntry, server_dir: Path, value: str, *, backup: bool = True
+) -> tuple[Path, Path | None]:
     """Set the key to `value` in the install's `aiplayerbot.conf`; the file and its backup.
 
     The bot count's writer (`bot_population.write`) in miniature: a fresh read,
     `conf.patch` (every other byte kept; the key replaced where it stands, or
     appended), `tuning.backup` beside it so the Tuning tab's Revert on the
-    Playerbots card finds it, and an atomic replace.
+    Playerbots card finds it (unless `backup` is False: `take_back`), and an
+    atomic replace.
     """
     path = server_dir / bot_population.CONF_FILE
     native_block = entry.install.native
@@ -174,13 +193,14 @@ def _write_value(entry: CatalogEntry, server_dir: Path, value: str) -> tuple[Pat
             ),
             {},
         )
-        made = tuning.backup(path)
+        made = tuning.backup(path) if backup else None
     except (OSError, UnicodeDecodeError, InstallerError, tuning.TuningError) as exc:
         raise PoolResetError(f"could not write {path.name}: {exc}") from exc
     try:
         conf.replace_file(path, text)
     except InstallerError as exc:
-        made.unlink(missing_ok=True)
+        if made is not None:
+            made.unlink(missing_ok=True)
         raise PoolResetError(f"could not write {path.name}: {exc}") from exc
     return path, made
 
@@ -244,6 +264,10 @@ NOTHING_DELETED = "Nothing was deleted."
 TAKEN_BACK = (
     f"Yu'lon set {KEY} back to off, so nothing will happen at the next restart; press "
     "Rebuild random bots… again when ready."
+)
+APPLIED_TAKEN_BACK = (
+    f"{KEY} is back to off, so neither a later restart nor restoring a backup taken before "
+    "this rebuild makes it happen again."
 )
 FINISHES_AT_NEXT_START = (
     f"The request stays in aiplayerbot.conf, so the bots module finishes the rebuild at the "
@@ -469,9 +493,17 @@ class PoolRebuild:
                 return
             token = new_token(self.clock())
             written = write_key(self.entry, self.server_dir, token)
-        except PoolResetError:
+        except PoolResetError as first:
             if restart_owed and not _cancelled(cancel):
-                yield from self.restart_owed_now(cancel)
+                try:
+                    yield from self.restart_owed_now(cancel)
+                except PoolResetError as second:
+                    # Both, first failure first: the owed restart's error must not
+                    # replace the one that stopped the rebuild.
+                    raise PoolResetError(
+                        f"{first} The restart the enrolled bots were waiting for failed too: "
+                        f"{second}"
+                    ) from first
             raise
         yield (
             f"Wrote {KEY} = once:{token} into {written.file.name}; the file as it was is beside "
@@ -486,20 +518,67 @@ class PoolRebuild:
         try:
             self.restart()
         except Exception as exc:  # noqa: BLE001 - the request is written; say what is left
-            raise PoolResetError(f"The restart failed ({exc}). {self._take_back()}") from exc
-        yield "Restarted. Watching the server's log for the bots module's rebuild…"
+            yield from self._after_a_failed_restart(exc)
+        else:
+            yield "Restarted. Watching the server's log for the bots module's rebuild…"
         yield from self._watch(token, cancel)
 
-    def _take_back(self) -> str:
-        """Set the key back to off; the sentence that says so, or what to do by hand."""
+    def _after_a_failed_restart(self, exc: Exception) -> Iterator[str]:
+        """A restart that raised may still have brought the world up, and the world reads the
+        request as it starts -- so ask before taking it back.
+
+        `restart_world` is stop + `start_staged`, which raises when `compose up`
+        exits non-zero or db/auth are missing afterwards: the worldserver can be
+        up by then, have read the key, and be deleting bots. Taking the request
+        back would then be a lie ("nothing will happen at the next restart"),
+        and on a part-way failure it would stop the module's resume too.
+
+        Up: say so and return, and the caller watches the log as usual. Down:
+        take it back and raise. Unknown (None, or the check raised): keep it,
+        and raise saying it may run at the next start.
+        """
+        try:
+            up = self.world_running()
+        except Exception as check:  # noqa: BLE001 - an unknown answer is its own branch
+            logger.warning(f"could not tell whether the world came up after a restart: {check}")
+            up = None
+        if up is True:
+            yield (
+                f"The restart reported an error ({exc}), but the world came up. Watching the "
+                "server's log for the bots module's rebuild…"
+            )
+            return
+        if up is False:
+            raise PoolResetError(
+                f"The restart failed ({exc}) and the world is down. {self._take_back()}"
+            ) from exc
+        raise PoolResetError(
+            f"The restart failed ({exc}), and Yu'lon could not tell whether the world came up. "
+            "The request stays in aiplayerbot.conf, so the rebuild may run at the next start "
+            f"of the server; to call it off before then, set {KEY} to off."
+        ) from exc
+
+    def _take_back(self, *, applied: bool = False) -> str:
+        """Set the key back to off; the sentence that says so, or what to do by hand.
+
+        `applied`: the module has recorded this generation, so the request is
+        spent -- taken back anyway, because the record lives in the characters
+        database and restoring a backup taken before the rebuild rolls it back.
+        """
         try:
             take_back(self.entry, self.server_dir)
         except PoolResetError as exc:
+            if applied:
+                return (
+                    f"Yu'lon could not set {KEY} back to off ({exc}). Set it to off in "
+                    "aiplayerbot.conf yourself before restoring a backup taken before this "
+                    "rebuild, or that restore's next start rebuilds the bots again."
+                )
             return (
                 f"Yu'lon could not set {KEY} back to off ({exc}). Set it to off in "
                 "aiplayerbot.conf yourself, or the random bots are rebuilt at the next restart."
             )
-        return TAKEN_BACK
+        return APPLIED_TAKEN_BACK if applied else TAKEN_BACK
 
     def _enrol(self, cancel: threading.Event | None) -> Iterator[str]:
         """T123's enrolment over the live channel, when the world is up to answer it."""
@@ -541,7 +620,7 @@ class PoolRebuild:
                     said.add(line)
                     yield line
             if watch.final == "applied":
-                yield watch.said
+                yield f"{watch.said} {self._take_back(applied=True)}"
                 return
             if watch.final == "part-way":
                 raise PoolResetError(watch.said)
