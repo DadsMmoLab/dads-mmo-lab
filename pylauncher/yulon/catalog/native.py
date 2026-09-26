@@ -75,7 +75,7 @@ from secrets import token_hex
 from typing import ClassVar, Literal, Protocol
 
 from yulon import dbsecret, docker, git, networking, platform, resources, runner
-from yulon.catalog import composegen, preflight
+from yulon.catalog import bot_count, composegen, preflight
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -6073,6 +6073,11 @@ class StagedInstaller:
         # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
         # channel's port. `None` on a first install (no press yet), which is
         # `render()`'s own default.
+        #
+        # And the player's bot count rides over it (T117): the Bots box writes
+        # Min/Max into this same file, and rendering the catalog's 500 again put
+        # it back on every Repair and Update. Read off the file being replaced,
+        # never probed; no usable pair in it leaves the catalog's number.
         try:
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
@@ -6132,9 +6137,12 @@ class StagedInstaller:
             self.entry,
             server_dir,
             templates_root=self.installers_root,
-            # A live channel press is kept by every regeneration (T101); a CMaNGOS
-            # tree's channel lives in its .conf, so this is None there.
-            world_env=composegen.channel_world_env(self.entry, server_dir),
+            # A live channel press is kept by every regeneration (T101), and so is
+            # the player's bot count off the override on disk (T117). A CMaNGOS
+            # tree keeps both in its .conf files, so this is None there.
+            world_env=bot_count.world_env(
+                self.entry, server_dir, composegen.channel_world_env(self.entry, server_dir)
+            ),
             db_password=secrets.db_password,
             bind_label=label,
             platform_id=self._seams.platform_id,
