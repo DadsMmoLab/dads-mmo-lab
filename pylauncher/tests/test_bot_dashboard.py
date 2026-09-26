@@ -565,8 +565,8 @@ def test_the_tortoise_tab_holds_the_switch_and_the_wrapped_update_route(
         def update_to_latest(self, _options: object, **_kw: object) -> Iterator[str]:
             yield "engine: updated"
 
-    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry: Engine())
-    monkeypatch.setattr(botpool, "head_sha", lambda _dest: "same")
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry, **_kw: Engine())
+    monkeypatch.setattr(botpool, "head_sha", lambda _dest, **_kw: "same")
     server_dir = _install(tmp_path)
     fake = _Docker(monkeypatch)
     lifecycle: list[str] = []

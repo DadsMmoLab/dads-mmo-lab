@@ -1411,11 +1411,16 @@ def _updates_route(
     if wsl_distro is not None or not native.update_phases(entry):
         return None
     options = InstallOptions(server_dir=server_dir)
+    # `wsl_distro` is None past the guard above; it is passed anyway so the day
+    # this route is opened to a distro (as T125 opened Rebuild and Update to
+    # latest) the engine already asks the right Docker.
     return native.UpdateRoute(
-        confirmation=lambda: install_wiring.installer_for_app(entry).update_confirmation(options),
-        press=lambda cancel: install_wiring.installer_for_app(entry).update_databases(
-            options, cancel=cancel
-        ),
+        confirmation=lambda: install_wiring.installer_for_app(
+            entry, wsl_distro=wsl_distro
+        ).update_confirmation(options),
+        press=lambda cancel: install_wiring.installer_for_app(
+            entry, wsl_distro=wsl_distro
+        ).update_databases(options, cancel=cancel),
     )
 
 
@@ -1445,11 +1450,15 @@ def _adopt_route(
         return None
     options = InstallOptions(server_dir=server_dir)
     return native.AdoptRoute(
-        state=lambda: install_wiring.installer_for_app(entry).adopt_state(options),
-        confirmation=lambda: install_wiring.installer_for_app(entry).adopt_confirmation(options),
-        press=lambda cancel: install_wiring.installer_for_app(entry).adopt_as_imported(
-            options, cancel=cancel
+        state=lambda: install_wiring.installer_for_app(entry, wsl_distro=wsl_distro).adopt_state(
+            options
         ),
+        confirmation=lambda: install_wiring.installer_for_app(
+            entry, wsl_distro=wsl_distro
+        ).adopt_confirmation(options),
+        press=lambda cancel: install_wiring.installer_for_app(
+            entry, wsl_distro=wsl_distro
+        ).adopt_as_imported(options, cancel=cancel),
     )
 
 
@@ -2441,6 +2450,7 @@ def _for_tortoise(
             server_dir,
             channels=adoption_channels,
             restart=lambda: tortoise_botpool.restart_world(lifecycle),
+            wsl_distro=wsl_distro,
         ),
     )
 

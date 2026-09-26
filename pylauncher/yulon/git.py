@@ -1306,6 +1306,32 @@ def _is_fresh_mount_race(message: str) -> bool:
     return "Cloning into" in message and "No such file or directory" in message
 
 
+_OWNER = re.compile(r"^[0-9]+:[0-9]+$")
+
+
+def distro_owner(distro: str, inside: str) -> str | None:
+    """`uid:gid` of `inside` in `distro`, by `stat`; None if it could not be read (T125).
+
+    `--exec` so no login shell sits between wsl.exe and `stat`; the answer must
+    look like two numbers, because it becomes a `--user` argument.
+    """
+    launcher = platform._which(platform.WSL_PROGRAM)
+    if launcher is None:
+        return None
+    try:
+        proc = runner.run(
+            [launcher, "-d", distro, "--exec", "stat", "-c", "%u:%g", inside], timeout=60
+        )
+    except OSError as exc:
+        logger.debug(f"could not ask {distro} who owns {inside}: {exc}")
+        return None
+    said = proc.stdout.strip()
+    if proc.returncode != 0 or not _OWNER.match(said):
+        logger.debug(f"{distro} did not say who owns {inside}: rc={proc.returncode} {said!r}")
+        return None
+    return said
+
+
 @dataclass(frozen=True)
 class ContainerGit:
     """`Git` that runs git inside a container, for hosts without one.
@@ -1374,9 +1400,69 @@ class ContainerGit:
     selinux_enforcing: Callable[[], bool | None] | None = None
     filesystem_type: Callable[[Path], str | None] | None = None
 
+    wsl_distro: str | None = None
+    """The distro whose Docker runs this git, for a server that lives inside one (T125).
+
+    None is the local daemon, as before. Set, it changes the TRANSPORT and
+    nothing else -- `_argv()` alone reads it: the docker comes from
+    `platform.docker_prefix(distro)` (never the local CLI, wsl-resident-servers
+    §1), the bind mount is the distro's own spelling of the folder (Docker
+    Desktop refuses a `\\\\wsl.localhost\\...` bind outright), and the container
+    runs as the user who owns the checkout, because a distro's Docker Engine
+    does no ownership mapping and a root git would leave root-owned files in
+    somebody's server. Every git subcommand, the pin logic among them, is the
+    same argv either way; `test_the_wsl_route_keeps_the_pin_logic_only_the_transport_differs`
+    holds that.
+    """
+    owner: Callable[[str, str], str | None] | None = None
+    """`uid:gid` of a path inside the distro; None = `distro_owner()`, which asks by `stat`."""
+
     def _ask_selinux(self) -> bool | None:
+        if self.wsl_distro is not None:
+            # The WSL kernel runs no SELinux, so the label is "" -- which is also
+            # what the Linux Yu'lon that built the checkout rendered there.
+            return False
         ask = self.selinux_enforcing
         return (ask if ask is not None else platform.selinux_enforcing)()
+
+    def _launcher(self) -> list[str]:
+        """The argv that reaches the docker this git runs on, or `GitError` if there is none."""
+        if self.wsl_distro is None:
+            program = platform.docker_program()
+            if program is None:
+                raise GitError(platform.DOCKER_CLI_MISSING_HELP)
+            return [program]
+        prefix = platform.docker_prefix(self.wsl_distro)
+        if prefix is None:
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP)
+        return list(prefix)
+
+    def _in_distro(self, dest: Path) -> str:
+        """`dest` as the distro spells it; `GitError` for a folder the distro cannot name."""
+        try:
+            inside = platform.wsl_linux_path_in(dest, self.wsl_distro or "")
+        except platform.WslDistroMismatch as exc:
+            raise GitError(str(exc)) from exc
+        if inside is None:
+            raise GitError(
+                f"{dest} is not inside the WSL distro {self.wsl_distro}, so its git cannot run "
+                "there. Nothing was run."
+            )
+        return inside
+
+    def _user_args_for(self, dest: Path) -> list[str]:
+        """`--user` for this checkout: the local policy, or the checkout owner's inside a distro."""
+        if self.wsl_distro is None:
+            return self._user_args()
+        inside = self._in_distro(dest)
+        ask = self.owner if self.owner is not None else distro_owner
+        found = ask(self.wsl_distro, inside)
+        if found is None:
+            raise GitError(
+                f"Yu'lon could not read who owns {inside} in {self.wsl_distro}, and will not run "
+                "git there as root: every file it wrote would then belong to root. Nothing was run."
+            )
+        return ["--user", found]
 
     def _ask_filesystem(self, path: Path) -> str | None:
         ask = self.filesystem_type
@@ -1774,9 +1860,7 @@ class ContainerGit:
         an existing install can be attached, and that is the day to give the
         local calls their own argv.
         """
-        program = platform.docker_program()
-        if program is None:
-            raise GitError(platform.DOCKER_CLI_MISSING_HELP)
+        program = self._launcher()
         # `:z` on an enforcing SELinux box, and the SAME decision the generated
         # compose binds make: `platform.bind_label()` is the one place that
         # answers it, so the clone mount and the `{{BIND_LABEL}}` mounts can
@@ -1903,7 +1987,9 @@ class ContainerGit:
             )
         return proc
 
-    def _argv(self, program: str, dest: Path, git_args: list[str], *, writes: bool) -> list[str]:
+    def _argv(
+        self, program: str | Sequence[str], dest: Path, git_args: list[str], *, writes: bool
+    ) -> list[str]:
         """The one docker argv every containerized git call here runs.
 
         Its own method since T35, because the streamed clone
@@ -1929,20 +2015,22 @@ class ContainerGit:
                 *_READ_ONLY_CONTAINER_ARGS,
             ]
             untrusted = _UNTRUSTED_REPO_ARGS
+        launcher = [program] if isinstance(program, str) else list(program)
+        mount = dest if self.wsl_distro is None else self._in_distro(dest)
         return [
-            program,
+            *launcher,
             "run",
             "--rm",
             *hardening,
             "-v",
-            f"{dest}:/git{label}",
+            f"{mount}:/git{label}",
             # State the working directory rather than inheriting the image's.
             # `image` is a public field, so an override would otherwise clone
             # into the wrong place — silently, since `.` would resolve
             # somewhere inside the container instead of the bind mount.
             "-w",
             "/git",
-            *self._user_args(),
+            *self._user_args_for(dest),
             self.image,
             *untrusted,
             *_LINE_ENDING_ARGS,
@@ -2050,10 +2138,7 @@ class ContainerGit:
 
     def _streamed_capture(self, dest: Path, git_args: list[str], *, stage: str) -> Iterator[str]:
         """One containerized `git` invocation, read live. `_capture()`'s writer container."""
-        program = platform.docker_program()
-        if program is None:
-            raise GitError(platform.DOCKER_CLI_MISSING_HELP)
-        argv = self._argv(program, dest, git_args, writes=True)
+        argv = self._argv(self._launcher(), dest, git_args, writes=True)
         logger.info(f"containerized git (streamed): `{' '.join(argv[1:])}` into {dest}")
         try:
             yield from _streamed_git(argv, stage=stage)

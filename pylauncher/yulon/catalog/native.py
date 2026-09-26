@@ -53,6 +53,7 @@ which are measured on yulon-ubuntu (Linux), and which are merely written.
 from __future__ import annotations
 
 import difflib
+import functools
 import io
 import json
 import math
@@ -72,7 +73,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
-from typing import ClassVar, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
 from yulon import dbsecret, docker, git, module_answers, networking, platform, resources, runner
 from yulon.catalog import bot_count, composegen, preflight, upstream
@@ -677,6 +678,19 @@ def _lines_changed(old: str, new: str) -> tuple[int, int]:
         elif line.startswith("-"):
             removed += 1
     return added, removed
+
+
+WSL_DISTRO_STOPPED_NOTE = (
+    "The server's WSL distro is stopped; Yu'lon will check for rewritten history once it starts."
+)
+"""Said under the update question when the distro is down (T125, wsl-resident-servers §2).
+
+The question normally names any source whose upstream rewrote its history,
+read from the upstream cache in the server folder -- and reading a
+`\\\\wsl.localhost\\...` folder starts a stopped distro, which a question the
+player may cancel must not do. The press itself still refuses an unnamed
+divergence before it moves anything (T126), and names it the next time.
+"""
 
 
 def update_to_latest_confirmation(
@@ -3122,6 +3136,16 @@ class Seams:
     so a press that could not tell leaves the database exactly as it found it.
     """
 
+    install_id: Callable[[Path], str] | None = None
+    """The id this install's images and compose project are named after; None = hash the folder.
+
+    `None` is every install this app makes on this machine: the id IS the hash
+    of the folder, and `_install_id()` computes it. A server inside a WSL distro
+    (T125) answers with the id its record carries instead (`recorded_install_id`),
+    because Yu'lon on Linux hashed the distro's spelling of the folder and the
+    Windows spelling hashes to a different one -- which stays the Windows-side
+    key (credentials, dbsecret, run records) and must not name its images.
+    """
     stop_db: Callable[[list[str]], None] = docker.stop_containers
     """Stop these containers. Used by ONE press, to put back what it started.
 
@@ -3159,6 +3183,111 @@ class Seams:
         """The filesystem under `path`, through the seam if one was given, else the host."""
         ask = self.fs_type
         return (ask if ask is not None else platform.filesystem_type)(path)
+
+    @classmethod
+    def in_wsl(cls, distro: str) -> Seams:
+        """Seams for a server that lives inside the WSL distro `distro` (T125).
+
+        The erasure recorded above -- four of the 7.3 primitives take a
+        `wsl_distro` these types do not carry -- is closed HERE for the one kind
+        of install that needs it, rather than by widening the types: every seam
+        whose default can name a daemon is that same function with the distro
+        bound, every git question runs on the distro's Docker through
+        `git.ContainerGit(wsl_distro=)`, and `platform_id` is "linux" because the
+        install was made by Yu'lon on Linux inside the distro -- which is what
+        makes the recipe, the compose files and the image names it re-renders
+        the ones it rendered then.
+
+        What a rebuild or an update never asks is not addressed to the distro
+        but REFUSED: provisioning, the install's preflight, the extraction and
+        conf containers and the import check belong to an install, and Yu'lon
+        does not install into a distro (`pyplan/wsl-resident-servers.md` §7).
+        A refusal there is loud; the local default would be a quiet question to
+        the wrong Docker. `tests/test_wsl_update_route.py` derives the list of
+        seams that must be bound from their signatures, so a new docker seam
+        added to this class fails that test until it is bound here.
+        """
+        repo = git.ContainerGit(wsl_distro=distro)
+        on = functools.partial
+
+        def refused(what: str) -> Callable[..., Any]:
+            def refuse(*_args: object, **_kwargs: object) -> Any:
+                raise InstallerError(
+                    f"{what} belongs to an install, and this server lives inside the WSL "
+                    f"distro {distro}; Yu'lon rebuilds and updates it there but does not "
+                    "install into it. Nothing was started. That is a bug in this build."
+                )
+
+            return refuse
+
+        return cls(
+            platform_id=lambda: "linux",
+            docker_ready=on(docker.daemon_ready, wsl_distro=distro),
+            ensure_docker=refused("Setting Docker up"),
+            dir_problem=refused("Checking a new server folder"),
+            gather=refused("The install's preflight"),
+            clone=repo.clone,
+            remote_url=repo.remote_url,
+            file_unmodified=repo.is_unmodified,
+            local_edits=repo.local_edits,
+            no_local_commits=repo.no_local_commits,
+            head_sha=repo.head_sha,
+            head_version=repo.head_version,
+            commits_since=repo.commits_since,
+            restore_rev=repo.restore_rev,
+            images_built=on(docker.images_built, wsl_distro=distro),
+            build=on(docker.build_staged, wsl_distro=distro),
+            one_shot=on(docker.run_one_shot, wsl_distro=distro),
+            verify_import=refused("Checking a database import"),
+            container_exists=on(docker.container_exists, wsl_distro=distro),
+            container_project=on(docker.container_project, wsl_distro=distro),
+            container_working_dir=on(docker.container_working_dir, wsl_distro=distro),
+            start_db=on(docker.start_database, wsl_distro=distro),
+            start=on(docker.start_staged, wsl_distro=distro),
+            recreate=on(docker.recreate_staged, wsl_distro=distro),
+            tag_image=on(docker.tag_image, wsl_distro=distro),
+            remove_image=on(docker.remove_image, wsl_distro=distro),
+            wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
+            wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
+            world_output=on(_world_output, wsl_distro=distro),
+            selinux_enforcing=lambda: False,
+            # Asked beside `selinux_enforcing` by the compose render whatever the
+            # answer; left to default it ran `stat -f` on the HOST (found by the
+            # end-to-end argv test). No SELinux, so no filesystem to ask about.
+            fs_type=lambda _path: None,
+            run_container=refused("Running an install container"),
+            copy_from_image=refused("Copying templates out of an image"),
+            exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
+            sql_query=on(docker.sql_query, wsl_distro=distro),
+            volume_exists=on(docker.volume_exists, wsl_distro=distro),
+            world_running=on(docker.world_running, wsl_distro=distro),
+            db_running=on(docker.world_running, wsl_distro=distro),
+            stop_db=on(docker.stop_containers, wsl_distro=distro),
+            install_id=recorded_install_id,
+        )
+
+
+_INSTALL_ID = re.compile(rf"^[0-9a-f]{{{composegen.INSTALL_ID_LENGTH}}}$")
+
+
+def recorded_install_id(server_dir: Path) -> str:
+    """The install id `server_dir`'s record carries, for a server inside a WSL distro (T125).
+
+    NOT recomputed: the folder's Windows spelling hashes to a different id from
+    the Linux one Yu'lon recorded when it built the server inside the distro, and
+    the images and compose project there are named after the recorded one. The
+    record is `.yulon-install.json`, the same file every rebuild already refuses
+    without; an id that is missing or not the shape this app writes is refused
+    too, because a guess would compile images no compose file names.
+    """
+    state = read_state(server_dir, valid=())
+    ident = state.install_id if state is not None else ""
+    if not _INSTALL_ID.match(ident):
+        raise InstallerError(
+            f"{server_dir} has no usable install id in its {STATE_FILE} ({ident!r}), and the "
+            "server inside the distro is named after that id. Nothing was started."
+        )
+    return ident
 
 
 class StagedInstaller:
@@ -5687,6 +5816,9 @@ class StagedInstaller:
         an id is what both the compose project and the kept database password
         are filed under.
         """
+        ask = self._seams.install_id
+        if ask is not None:
+            return ask(server_dir)
         return composegen.install_id(server_dir, platform_id=self._seams.platform_id)
 
     def resolve_secrets(self, server_dir: Path) -> Secrets:
@@ -6058,7 +6190,10 @@ class StagedInstaller:
         wherever it is now (review, Codex, 2026-09-11).
         """
         ours = composegen.project_name(
-            self.entry.id, server_dir, platform_id=self._seams.platform_id
+            self.entry.id,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
         spec = self.entry.container_spec()
         for name in (spec.db, spec.auth, spec.world):
@@ -6453,6 +6588,7 @@ class StagedInstaller:
             db_password=secrets.db_password,
             bind_label=label,
             platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
 
     def _base_compose_facts(self, server_dir: Path) -> tuple[ComposeCheck, str | None, str | None]:
@@ -6651,7 +6787,10 @@ class StagedInstaller:
         is the two-spellings defect above, pointed at a disk.
         """
         return composegen.built_image_refs(
-            self.entry, server_dir, platform_id=self._seams.platform_id
+            self.entry,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
 
     def built_images(self, ctx: StageContext) -> bool | None:

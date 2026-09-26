@@ -936,8 +936,13 @@ def installer_for(
     installers_root: Path = DEFAULT_INSTALLERS_ROOT,
     import_probe: docker.ImportProbe | None = None,
     reset_unfinished: docker.ResetUnfinished | None = None,
+    seams: native.Seams | None = None,
 ) -> InstallEngine:
     """The engine that installs `entry`. The only place that decides.
+
+    `seams` replaces the engine's default seams whole, `platform_id` then
+    included; only `install_wiring` passes it, for a server inside a WSL
+    distro (`native.Seams.in_wsl()`, T125).
 
     One rule since 7.2, read from `catalog.json` rather than from what OS this
     is (style-guide §3): `install.native.family` names the engine, through
@@ -990,5 +995,5 @@ def installer_for(
         installers_root=installers_root,
         import_probe=import_probe,
         reset_unfinished=reset_unfinished,
-        seams=native.Seams(platform_id=platform_id),
+        seams=seams if seams is not None else native.Seams(platform_id=platform_id),
     )

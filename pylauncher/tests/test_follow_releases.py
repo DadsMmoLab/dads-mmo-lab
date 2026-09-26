@@ -760,7 +760,7 @@ def test_a_diverged_branch_source_is_said_as_rewritten_too(tmp_path: Path) -> No
 def _route(rec: Recorder, server_dir: Path, monkeypatch: pytest.MonkeyPatch) -> native.LatestRoute:
     from yulon import install_wiring
 
-    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry: _engine(rec))
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry, **_kw: _engine(rec))
     route = install_wiring.update_to_latest_for_app(_releasing(), server_dir)
     assert route is not None
     return route
