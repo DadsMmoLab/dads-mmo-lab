@@ -555,7 +555,7 @@ def _chips_for(
         asked = [
             prompt
             for prompt in apply_module.required_prompts(manifest, "install")
-            if apply_module.must_ask(prompt)
+            if apply_module.must_ask(prompt, "install")
         ]
         if asked:
             chips.append(

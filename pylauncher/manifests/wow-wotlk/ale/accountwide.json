@@ -19,6 +19,10 @@
         [
           "AccountReputation (default AC-Wotlk).lua",
           "AccountReputation.lua"
+        ],
+        [
+          "AccountReputation (modified for Ashen Order).lua",
+          "AccountReputation (modified for Ashen Order).lua.unused"
         ]
       ]
     }
@@ -311,21 +315,11 @@
       "question": "Share titles account-wide?",
       "kind": "bool",
       "default": "false"
-    },
-    {
-      "key": "reputation_variant",
-      "question": "Reputation variant (1 = default AccountReputation.lua, 2 = the alternative file); the other file is deleted so only one loads",
-      "kind": "choice",
-      "choices": [
-        "1",
-        "2"
-      ],
-      "default": "1"
     }
   ],
   "notes": [
     "Fresh server recommended; 00_AccountWideUtils.lua is mandatory. All flags ship false upstream. wow-manage.sh 3563-3772.",
-    "Two reputation variants ship; configure deletes the non-chosen one. AccountPvPRank.lua's RUN_INIT_SEED_ON_STARTUP defaults true — set false after the first start.",
+    "Upstream ships two reputation scripts and no AccountReputation.lua; a stock AzerothCore must use 'AccountReputation (default AC-Wotlk).lua' (upstream README). It is deployed as AccountReputation.lua, the file the reputation flag's patch edits (T104, after T92 made install run that patch). The Ashen Order one is for that server's modified Faction.dbc, so it is renamed to '.lua.unused' on deploy and ALE does not load it (T104). AccountPvPRank.lua's RUN_INIT_SEED_ON_STARTUP defaults true — set false after the first start.",
     "Upstream ships no AccountReputation.lua: the stock 'AccountReputation (default AC-Wotlk).lua' is deployed under that name, the file the reputation flag's patch edits (T119)."
   ]
 }

@@ -3710,7 +3710,7 @@ restart) is in the same folder. So the clause is answerable on this tree; what i
 rebuild, per module.
 ---
 
-### 45. The Modules tab can never ask for a value that has a default — 2026-09-08, OPEN
+### 45. The Modules tab can never ask for a value that has a default — 2026-09-08, **FIXED by #220 (T104)**
 
 Found by pressing the button rather than calling the applier, during the 8.7b live gate on
 `m910q` (`.notes/gates/8.7b-tbc-m910q-2026-09-08/`, `04-install-tab-press.txt`).
@@ -3772,6 +3772,16 @@ measured is a per-prompt fact — a prompt the operator is meant to answer versu
 needs a value — declared in the manifest, not inferred from whether somebody remembered to leave
 the default out. That is a schema change and an owner call, so it is filed and not fixed here.
 
+**Fixed by #220 (T104), owner decision 2026-09-24: ask every question and remember the answers.**
+The owner took the other shape than the schema field above: every question an install or update
+renders is asked, pre-filled with its default or with the answer this install last gave, and the
+answers are kept per install in `.yulon-module-answers.json`. Questions nothing used were dropped
+from the manifests rather than asked. Proved live on a WotLK server through the Modules tab
+(`.notes/gates/t104-ask-all-remember/`). Pinned by
+`test_every_question_an_install_renders_is_asked_even_with_a_default` and
+`test_every_module_whose_install_renders_a_question_asks_it`; the remembering half by
+`test_an_install_remembers_the_answer_and_the_next_update_is_offered_it`.
+
 ---
 
 ### 46. On CMaNGOS there is no compliant way to install a SQL mod at all — 2026-09-08, OPEN
@@ -3832,7 +3842,7 @@ good news in the entry.
 
 ## Found by the 8.7c / 8.9b live gates on m910q, 2026-09-08
 
-- [ ] **MEDIUM — The Modules tab never asks for the one value a `mod` exists to set.**
+- [x] **MEDIUM — The Modules tab never asks for the one value a `mod` exists to set.**
   *This is the same defect as §45 above, found independently by the 8.7b gate on `wow-tbc`
   and by the 8.7c gate on `wow-vanilla`. Both records are kept because each measured it on
   a different game and by a different route; fix them as one item.*
@@ -3851,6 +3861,8 @@ good news in the entry.
   prompts must be asked even when it has a default, or the tab always asks when a manifest has
   any prompt at all. It is the owner's, and it belongs with 9.x's UI pass rather than to a
   modules box.
+  **Fixed by #220 (T104), owner decision 2026-09-24: ask every question and remember the
+  answers** — closed with §45, which names the tests that pin it.
 - [ ] **LOW — A ticked purge deletes the built image, so "reinstall to find those characters
   again" costs a full recompile.** `purge.Uninstaller.run(keep_characters=True)` keeps
   `<project>_db-data` and removes `built_image_refs()` — correct, the image is this install's

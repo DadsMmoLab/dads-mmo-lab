@@ -15,7 +15,12 @@ import pytest
 
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import parse_manifest
-from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
+from yulon.ui.widgets.manifest_prompt import (
+    COMPOUNDS_NOTE,
+    REMEMBERED_NOTE,
+    REMOVE_NO_RECORD_NOTE,
+    ManifestPromptDialog,
+)
 
 
 def _ahbot() -> object:
@@ -98,29 +103,39 @@ def _hearthstone() -> object:
     return wotlk_modules.store().load("mod", "hearthstone-cd")
 
 
-def test_running_a_choice_again_says_the_answer_shown_is_the_one_applied(qapp: object) -> None:
-    """T100 review: an Update or a second Install re-asks with the DEFAULT selected.
-
-    Nothing remembers the earlier answer (that is T104's question for the
-    owner), so a player who picked 5 minutes, pressed Update and clicked OK got
-    30 minutes back without a word. Until answers are remembered, the dialog
-    says so: what is selected is what gets applied, now.
-
-    Mutation: drop the note and `notes()` carries no "applies the answer".
-    """
+def test_a_first_install_is_told_nothing_about_earlier_answers(qapp: object) -> None:
     manifest = _hearthstone()
     first = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
-    again = ManifestPromptDialog(
-        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    assert REMEMBERED_NOTE not in first.notes()
+    assert "no record" not in first.notes()
+    assert first.answers() == {"cooldown": "30_Min"}
+
+
+def test_the_answer_remembered_for_this_install_is_filled_in_over_the_default(
+    qapp: object,
+) -> None:
+    """T104, the T100 cold-review repro: 5 minutes installed, Update pre-filled 30.
+
+    The dialog now opens on the answer this install remembers, so an Update
+    clicked straight through keeps what the player picked.
+
+    Mutation: ignore `remembered` in the dialog and the answer is `30_Min`.
+    """
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None,
+        manifest,  # type: ignore[arg-type]
+        manifest.prompts,  # type: ignore[attr-defined]
+        again=True,
+        remembered={"cooldown": "5_Min"},
     )
-    assert "applies the answer" not in first.notes()
-    assert "applies the answer" in again.notes()
-    assert "does not remember" in again.notes()
-    assert again.answers() == {"cooldown": "30_Min"}, "still the default: the note is why"
+    assert dialog.answers() == {"cooldown": "5_Min"}
+    assert REMEMBERED_NOTE in dialog.notes()
+    assert "does not remember" not in dialog.notes(), "T100's warning is no longer true"
 
 
-def test_running_a_non_choice_again_gets_no_choice_note(qapp: object) -> None:
-    """The note is about picking between options, so a number prompt is not given it."""
+def test_a_remembered_number_is_filled_in_too(qapp: object) -> None:
+    """Every kind is remembered, not only a choice: a text box shows the saved number."""
     manifest = parse_manifest(
         {
             "id": "kindly",
@@ -130,5 +145,167 @@ def test_running_a_non_choice_again_gets_no_choice_note(qapp: object) -> None:
             "prompts": [{"key": "seconds", "question": "seconds", "kind": "int", "default": "20"}],
         }
     )
-    dialog = ManifestPromptDialog(None, manifest, manifest.prompts, again=True)
-    assert "applies the answer" not in dialog.notes()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True, remembered={"seconds": "35"}
+    )
+    assert dialog.answers() == {"seconds": "35"}
+    assert dialog.problem() == ""
+
+
+def test_a_remembered_answer_the_question_no_longer_accepts_is_not_filled_in(
+    qapp: object,
+) -> None:
+    """A saved option the manifest has since dropped falls back to the default, and says so."""
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None,
+        manifest,  # type: ignore[arg-type]
+        manifest.prompts,  # type: ignore[attr-defined]
+        again=True,
+        remembered={"cooldown": "2_Min"},
+    )
+    assert dialog.answers() == {"cooldown": "30_Min"}
+    assert "no record" in dialog.notes()
+
+
+def test_asked_again_with_nothing_remembered_says_the_defaults_are_shown(qapp: object) -> None:
+    """An install made before T104 has no record, so its Update shows the defaults -- and says so.
+
+    That much of T100's warning is still true for those installs, and only for
+    them; the question it names is the one whose default is showing.
+    """
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    )
+    assert dialog.answers() == {"cooldown": "30_Min"}
+    assert "no record" in dialog.notes()
+    assert "as the new setting" in dialog.notes()
+    assert "Hearthstone" in dialog.notes() or "cooldown" in dialog.notes().lower()
+    assert REMEMBERED_NOTE not in dialog.notes()
+
+
+def _baby_mobs() -> object:
+    return wotlk_modules.store().load("mod", "baby-mobs")
+
+
+def test_a_remove_with_no_record_asks_the_multiplier_and_says_why(qapp: object) -> None:
+    """Fix wave: Remove never divides by a default in silence.
+
+    Mutation: drop the remove note and `notes()` lacks it.
+    """
+    manifest = _baby_mobs()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True, removing=True  # type: ignore[attr-defined]
+    )
+    assert REMOVE_NO_RECORD_NOTE in dialog.notes()
+    assert dialog.answers()["hp"] == "0.25", "pre-filled with the default"
+    assert "running it again applies" not in dialog.notes(), "a Remove is not a re-run"
+
+
+def test_updating_a_compounding_mod_warns_that_it_multiplies_again(qapp: object) -> None:
+    """Update re-runs `HealthModifier*{hp}` on top of what is there (T115); the dialog says so."""
+    manifest = _baby_mobs()
+    again = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    )
+    first = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
+    assert COMPOUNDS_NOTE in again.notes()
+    assert COMPOUNDS_NOTE not in first.notes()
+    assert "as the new setting" not in again.notes(), "false for a module that compounds"
+
+
+def test_updating_a_mod_that_does_not_compound_gets_no_such_warning(qapp: object) -> None:
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    )
+    assert COMPOUNDS_NOTE not in dialog.notes()
+
+
+def test_accountwides_thirteen_questions_scroll_rather_than_clip_at_the_minimum_window(
+    qapp: object,
+) -> None:
+    """Ruling A of the T92 merge: accountwide's Install asks all 13 flags, in ONE dialog.
+
+    At the app's minimum window (960x640) the dialog must stay usable: the rows
+    scroll inside it and OK stays on screen, rather than the dialog growing past
+    the window or clipping its last rows.
+
+    Mutation: put the form back straight into the dialog's layout and the
+    dialog can no longer be shorter than its thirteen rows.
+    """
+    from PySide6.QtWidgets import QDialogButtonBox, QScrollArea
+    from PySide6.QtWidgets import QWidget as _QWidget
+
+    from main import MINIMUM_WINDOW_SIZE
+    from yulon.apply import required_prompts
+
+    manifest = wotlk_modules.store().load("ale", "accountwide")
+    prompts = required_prompts(manifest, "install")
+    assert len(prompts) == 13
+    window = _QWidget()
+    window.resize(*MINIMUM_WINDOW_SIZE)
+    dialog = ManifestPromptDialog(window, manifest, prompts, again=True)
+
+    (scroll,) = dialog.findChildren(QScrollArea)
+    inner = scroll.widget()
+    assert inner is not None
+    assert len([c for c in dialog._controls.values() if inner.isAncestorOf(c)]) == 13
+
+    dialog.show()
+    try:
+        qapp.processEvents()  # type: ignore[attr-defined]
+        assert dialog.height() <= MINIMUM_WINDOW_SIZE[1], dialog.height()
+        # No question is squeezed below the lines it wraps to (a `QFormLayout`
+        # drew two-line labels over each other on m910q).
+        from PySide6.QtWidgets import QLabel
+
+        squeezed = [
+            label.text()
+            for label in inner.findChildren(QLabel)
+            if label.height() < label.heightForWidth(label.width())
+        ]
+        assert squeezed == []
+        dialog.resize(dialog.width(), 360)
+        qapp.processEvents()  # type: ignore[attr-defined]
+        assert dialog.height() == 360, "the dialog can be shorter than its rows"
+        assert scroll.verticalScrollBar().maximum() > 0, "the rows scroll"
+        buttons = dialog.findChild(QDialogButtonBox)
+        assert buttons is not None
+        assert buttons.geometry().bottom() <= dialog.height(), "OK is still inside the dialog"
+    finally:
+        dialog.close()
+        window.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("default", "shown", "answer"), [("false", "No", "0"), ("true", "Yes", "1")]
+)
+def test_a_yes_no_default_spelled_as_a_word_is_shown_as_that_answer(
+    qapp: object, default: str, shown: str, answer: str
+) -> None:
+    """Found on the T92 merge: accountwide's flags default to `"false"`, and the box said Yes.
+
+    The yes/no box offers `"1"`/`"0"`, and `set_answer("false")` found no such
+    item, so the box stayed on its first item -- Yes -- while the answer held
+    was "false". Never asked before T104, so never seen; with "ask all" all
+    thirteen accountwide flags opened reading Yes over a No.
+
+    Mutation: store the word as given and the box reads Yes for "false".
+    """
+    from PySide6.QtWidgets import QComboBox
+
+    manifest = parse_manifest(
+        {
+            "id": "flags",
+            "name": "Flags",
+            "type": "mod",
+            "game": "wow-wotlk",
+            "prompts": [{"key": "on", "question": "on?", "kind": "bool", "default": default}],
+        }
+    )
+    dialog = ManifestPromptDialog(None, manifest, manifest.prompts)
+    (combo,) = dialog.findChildren(QComboBox)
+    assert combo.currentText() == shown
+    assert dialog.answers() == {"on": answer}

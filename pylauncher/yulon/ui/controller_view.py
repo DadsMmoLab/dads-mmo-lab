@@ -82,7 +82,14 @@ from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon import steam as steam_module
-from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
+from yulon.apply import (
+    Applier,
+    ApplyReport,
+    DockerSql,
+    PendingSql,
+    must_ask,
+    required_prompts,
+)
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import clientdir
@@ -430,9 +437,11 @@ class PromptAsker(Protocol):
     the answer — install with it, or change nothing at all.
 
     `again` is True when the module is already installed -- an Update, or the
-    context menu's Install over it -- so the dialog can say that the answer it
-    shows (the default; nothing remembers the last one) is what gets applied
-    now (T100 review).
+    context menu's Install over it -- so the dialog can say that what it shows
+    is what gets applied now (T100 review). `remembered` is what this install
+    last answered (T104, `Applier.remembered_answers()`), filled in over the
+    manifest's defaults. `removing` is True for a Remove, which asks only what
+    the record cannot answer (`apply.must_ask()`).
     """
 
     def __call__(
@@ -442,6 +451,8 @@ class PromptAsker(Protocol):
         prompts: Sequence[Prompt],
         *,
         again: bool = False,
+        remembered: Mapping[str, str] | None = None,
+        removing: bool = False,
     ) -> Mapping[str, str] | None: ...
 
 
@@ -8423,23 +8434,42 @@ class ControllerView(QWidget):
         filled in every prompt that HAD a default and then raised on the one
         that did not, after the clone. See `widgets/manifest_prompt.py`.
 
-        The gate: a dialog opens when this action would render ANY prompt,
-        pre-filled with the manifest's defaults, and a manifest that renders
-        none gets no window and hands the applier `None` — the call it has
-        always been given. Until T92 (2026-09-22) it opened only for a prompt
-        with NO default, which in the shipped catalog is `mod-ah-bot`'s two
-        GUIDs and nothing else — so `xp-rates` never asked its rates,
-        `sitmeanrest` never asked its seconds, and `unlimitedammo` would have
-        had the catalog's `true` written over the script's own `false` without
-        a word. A default shown in a box the person can change is an answer;
-        a default written unseen is not. `hearthstone-cd`'s `choice` (T100) is
-        the sharpest case: its default is upstream's RESET file, so an install
-        that did not ask applied the reset and changed nothing.
+        The gate is `apply.must_ask()`: since T104 (the owner, "ask all,
+        remember answers") every question an install or update renders is put,
+        pre-filled with what this install answered last time, else the
+        manifest's default; a remove asks only what the install's record cannot
+        answer, and the applier fills the rest from that record. Which shipped manifests
+        ask is pinned by `test_every_module_whose_install_renders_a_question_
+        asks_it`, not written here. A manifest that asks nothing gets no window
+        and the applier gets `None` rather than `{}` — the call it has always
+        been given.
+
+        T92 (2026-09-22) had already widened Install to every prompt it renders:
+        until then only a prompt with NO default opened the dialog, so `xp-rates`
+        never asked its rates, `sitmeanrest` never asked its seconds, and
+        `hearthstone-cd`'s `choice` (T100) applied upstream's RESET file unasked.
+        A default shown in a box the person can change is an answer; a default
+        written unseen is not.
         """
         needed = required_prompts(manifest, action)
         if not needed:
             return True, None
-        answers = self._prompt_asker(self, manifest, needed, again=again)
+        # Read here, on the GUI thread: one small JSON file in the server folder,
+        # the same class of read as the clone-folder listing `reload_modules()`
+        # already does here, and the dialog that needs it opens on this thread.
+        applier = self.services.applier
+        remembered = applier.remembered_answers(manifest) if applier is not None else {}
+        asked = tuple(p for p in needed if must_ask(p, action, remembered))
+        if not asked:
+            return True, None
+        answers = self._prompt_asker(
+            self,
+            manifest,
+            asked,
+            again=again,
+            remembered=remembered,
+            removing=action == "remove",
+        )
         return (False, None) if answers is None else (True, answers)
 
     def _custom_route(self) -> CustomModuleInstall | None:

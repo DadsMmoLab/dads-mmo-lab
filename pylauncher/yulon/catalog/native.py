@@ -74,7 +74,7 @@ from pathlib import Path
 from secrets import token_hex
 from typing import ClassVar, Literal, Protocol
 
-from yulon import dbsecret, docker, git, networking, platform, resources, runner
+from yulon import dbsecret, docker, git, module_answers, networking, platform, resources, runner
 from yulon.catalog import bot_count, composegen, preflight
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -106,7 +106,7 @@ logger = get_logger(__name__)
 STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
 
-OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE)
+OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
 The set `_listing()` is asked to look past when the question is "is this folder
@@ -121,7 +121,8 @@ created by this app (.yulon-network.json)` from
 `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why`,
 which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
-in one place rather than in the five call sites that ask the question.
+in one place rather than in the five call sites that ask the question. The third
+is T104's record of the answers a player gave a module's questions.
 """
 
 OPENING_NOTE = (
