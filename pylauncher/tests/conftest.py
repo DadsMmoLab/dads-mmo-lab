@@ -960,6 +960,26 @@ def _no_unit_test_asks_github(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_unit_test_asks_github_for_a_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An `Applier` built without a `newest_release` seam asks GitHub; no test may (T126).
+
+    Found by the suite itself: the addon install tests built a bare `Applier`
+    for `tortoise-bots-manager`, which follows its releases since T126, and
+    passed -- having resolved the REAL newest release over the network. One of
+    them then failed only because the real commit was not in its local origin.
+    A test that needs a release passes the seam; one that forgot fails here,
+    loudly, instead of depending on GitHub.
+    """
+
+    def refuse(slug: str) -> None:
+        raise AssertionError(
+            f"a test asked GitHub for the newest release of {slug}; pass `newest_release=`"
+        )
+
+    monkeypatch.setattr(apply_module, "_github_newest_release", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _classic_mysql_client_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer the client probe without touching the seam the tests assert on.
 

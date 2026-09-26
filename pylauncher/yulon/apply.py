@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -37,7 +37,7 @@ from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
 from yulon import docker, module_answers, platform, rmtree, runner
-from yulon.catalog import composegen
+from yulon.catalog import composegen, upstream
 from yulon.dbreads import SqlReader
 from yulon.git import (
     CLONE_MARKER,
@@ -637,6 +637,23 @@ def clone_install_completed(clone: Path, *, item_id: str) -> bool | None:
     return parsed.get(COMPLETED_KEY) is not False
 
 
+RELEASE_KEY = "release"
+"""The claim key naming the release tag an install checked out (T126)."""
+
+
+def clone_release(clone: Path, *, item_id: str) -> str:
+    """The release tag THIS app's install of `item_id` checked out, or `""` (T126).
+
+    `""` for everything that is not our own claim naming one: no claim, somebody
+    else's, a module that follows its branch, a claim written before T126.
+    """
+    if read_clone_claim(clone, item_id=item_id) is not Ownership.OWNED:
+        return ""
+    parsed = _parse_clone_claim(clone)
+    said = parsed.get(RELEASE_KEY) if parsed is not None else None
+    return said if isinstance(said, str) else ""
+
+
 def clone_install_unfinished(clone: Path, *, item_id: str) -> bool:
     """Does THIS app's claim in `clone` say the install stopped before it finished? (T68)
 
@@ -733,6 +750,7 @@ def write_clone_claim(
     url: str,
     completed: bool = False,
     client_files: Sequence[ClientCopy] = (),
+    release: str = "",
 ) -> None:
     """Record that this app put `item_id`'s clone here. Raises `OSError` if it cannot.
 
@@ -793,6 +811,11 @@ def write_clone_claim(
     }
     if client_files:
         payload["client_files"] = [copy.as_json() for copy in client_files]
+    if release:
+        # T126: the release tag an install of a `follow: releases` source
+        # checked out. Only when there is one, so every other claim is byte
+        # for byte what it was.
+        payload[RELEASE_KEY] = release
     fd, name = tempfile.mkstemp(dir=clone, prefix=CLAIM_FILE + ".", suffix=".tmp")
     os.close(fd)
     tmp = Path(name)
@@ -1840,8 +1863,16 @@ class Applier:
         server_dir_claim: Callable[[Path], Ownership] | None = None,
         world_running: Callable[[], bool | None] | None = None,
         start_database: Callable[[], bool] | None = None,
+        newest_release: Callable[[str], upstream.Release | None] | None = None,
     ) -> None:
         self.server_dir = server_dir
+        # T126: "which published release is newest, and which commit is it?" for
+        # a manifest whose source says `follow: releases`. A seam because it is
+        # the network, and a test that could not make it fail could not show an
+        # Install refusing rather than falling back to the branch tip.
+        self._newest_release: Callable[[str], upstream.Release | None] = (
+            newest_release if newest_release is not None else _github_newest_release
+        )
         # Not resolved here: `_default_git()` probes for git, and an Applier is
         # built on UI paths that never clone. Three controller tests that assert
         # exactly which commands a tab runs went red on the extra
@@ -1973,6 +2004,28 @@ class Applier:
         """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
         return self.server_dir / CLONE_DIRS[manifest.type] / manifest.id
 
+    def _release_for(self, manifest: Manifest) -> upstream.Release | None:
+        """The release an Install or Update of `manifest` checks out, or None to follow its branch.
+
+        Raises `ApplyError` for a manifest that follows its releases when GitHub
+        cannot say which is newest: the branch tip is exactly the in-between
+        commit such a manifest is marked to avoid, so it is not a fallback.
+        Asked BEFORE anything touches the folder, so the refusal is true when it
+        says nothing was changed.
+        """
+        source = manifest.source
+        if source is None or source.follow != "releases":
+            return None
+        slug = upstream.github_slug(source.repo)
+        release = self._newest_release(slug) if slug is not None else None
+        if release is None:
+            raise ApplyError(
+                f"{manifest.id} follows the releases {source.repo} publishes, and Yu'lon could "
+                f"not ask GitHub which release is the newest. Nothing was changed; try again "
+                f"when GitHub can be reached."
+            )
+        return release
+
     def install(
         self,
         manifest: Manifest,
@@ -2043,6 +2096,9 @@ class Applier:
         # report has already said the folder will not be recognised next time.
         claimed = False
         url = ""
+        # T126: the release this run checked out, for the claim to carry. Empty
+        # for a module that follows its branch, and for a folder or no source.
+        release_tag = ""
         # Read BEFORE the clone or the copy touches that folder, because
         # `update()` runs this whole method again over a module that is already
         # installed and finished. The first claim write below carries this value
@@ -2084,6 +2140,7 @@ class Applier:
             ):
                 self._require_own_clone(manifest, clone, "install")
         else:
+            release = self._release_for(manifest)
             self._require_own_clone(manifest, clone, "install")
             self._costly_reset(manifest, clone, replacing)
             try:
@@ -2093,7 +2150,7 @@ class Applier:
                         dest=clone,
                         branch=manifest.source.branch,
                         sparse_path=manifest.source.sparse_path,
-                        rev=manifest.source.rev,
+                        rev=release.sha if release is not None else manifest.source.rev,
                     )
                 )
             except FileNotFoundError as exc:
@@ -2112,7 +2169,11 @@ class Applier:
                 ) from exc
             except GitError as exc:  # one failure vocabulary for the whole applier
                 raise ApplyError(str(exc)) from exc
-            log.done.append(f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}")
+            log.done.append(
+                f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}"
+                + (f" at release {release.tag}" if release is not None else "")
+            )
+            release_tag = release.tag if release is not None else ""
         if folder is not None or manifest.source is not None:
             # This app filled the folder, by either route, so both of the files
             # it writes INTO a checkout go in — and they are written here rather
@@ -2136,6 +2197,7 @@ class Applier:
                     url=url,
                     completed=was_completed,
                     client_files=previous_copies,
+                    release=release_tag,
                 )
                 claimed = True
             except OSError as exc:
@@ -2174,7 +2236,15 @@ class Applier:
             self._sql(manifest, clone, vals, "configure", log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
-        self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
+        self._finish_claim(
+            manifest,
+            clone,
+            url,
+            claimed,
+            log,
+            log.client_copies or previous_copies,
+            release=release_tag,
+        )
         self._remember(manifest, values, log)
         return self._report("install", manifest, log)
 
@@ -2186,6 +2256,8 @@ class Applier:
         claimed: bool,
         log: _Log,
         client_files: Sequence[ClientCopy] = (),
+        *,
+        release: str = "",
     ) -> None:
         """The ONE claim write that happens after the steps: this install finished (T68).
 
@@ -2223,6 +2295,7 @@ class Applier:
                 url=url,
                 completed=True,
                 client_files=client_files,
+                release=release,
             )
         except OSError as exc:
             # Not fatal for the same reason the first write is not: the install
@@ -4498,6 +4571,31 @@ class ModuleUpdate:
     ask": no `.git`, an offline machine, a repository that has gone private.
     Never collapsed into `0` — see `git.BehindReader`."""
 
+    family: str = "module"
+    """Which manifest family's clone folder this row was read from (T126).
+
+    `modules/` was the only folder counted until T126, so every row was a
+    `module`. Tortoise counts `sql_scripts/clones/` -- its two client addons are
+    `mod`s -- and the tab keys its chips by `(family, id)`.
+    """
+
+    installed_release: str = ""
+    """The release tag this app's install recorded in the clone's claim, or `""`."""
+
+    head: str = ""
+    """The commit the checkout was on when counted: what a cached row is valid for."""
+
+    checked_unix: int = 0
+    """When this row was counted, for `cached_module_updates()`."""
+
+    release: str = ""
+    """For a module that follows its releases (T126): the newest release's tag.
+
+    Its `behind` is then counted against that release's commit rather than the
+    branch tip, and the row says "new release vX" instead of a commit count --
+    a count of in-between commits is not what an update of such a module brings.
+    """
+
     @property
     def line(self) -> str:
         """The row as the Modules tab prints it.
@@ -4511,6 +4609,11 @@ class ModuleUpdate:
             return f"{self.key}: not a git checkout — nothing to compare"
         if self.behind is None:
             return f"{self.key}: could not ask (no answer from git)"
+        if self.release:
+            if self.behind:
+                word = upstream.release_word(self.release, self.installed_release)
+                return f"{self.key}: {word} {self.release}"
+            return f"{self.key}: on the newest release, {self.release}"
         plural = "" if self.behind == 1 else "s"
         return f"{self.key}: {self.behind} commit{plural} behind"
 
@@ -4521,6 +4624,8 @@ def module_updates(
     git: BehindReader,
     branches: Mapping[str, str | None] | None = None,
     kind: ManifestType = "module",
+    releases: Mapping[str, str] | None = None,
+    newest_release: Callable[[str], upstream.Release | None] | None = None,
 ) -> tuple[ModuleUpdate, ...]:
     """How far behind each installed module of `server_dir` is (checklist 8.7a).
 
@@ -4540,9 +4645,16 @@ def module_updates(
     Costs one `git fetch` per checkout, so it belongs behind a control the user
     pressed. Nothing outside each clone's `.git` is written and no working tree
     is touched.
+
+    `releases` maps a module key to the GitHub repository of a manifest that
+    says `follow: releases` (T126). Such a checkout is counted against its
+    newest release's commit -- the fetch names that commit instead of a branch
+    -- and its row carries the release's tag.
     """
     root = server_dir / CLONE_DIRS[kind]
     branch_of = branches or {}
+    release_of = releases or {}
+    resolve = newest_release if newest_release is not None else _github_newest_release
     try:
         entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
     except OSError as exc:
@@ -4551,12 +4663,186 @@ def module_updates(
         # different problem than one with nothing installed. Logged, either way.
         logger.debug(f"no {CLONE_DIRS[kind]} folder to list under {server_dir}: {exc}")
         return ()
+    return tuple(
+        _module_update(
+            path, kind, git, branch_of.get(path.name), release_of.get(path.name), resolve
+        )
+        for path in entries
+    )
+
+
+def _module_update(
+    path: Path,
+    kind: ManifestType,
+    git: BehindReader,
+    branch: str | None,
+    slug: str | None,
+    resolve: Callable[[str], upstream.Release | None],
+) -> ModuleUpdate:
+    """One clone's row: counted against its branch, or against its newest release (T126)."""
+    checkout = (path / ".git").is_dir()
+    if not checkout:
+        return ModuleUpdate(key=path.name, path=path, is_checkout=False, behind=None, family=kind)
+    if slug is None:
+        return ModuleUpdate(
+            key=path.name,
+            path=path,
+            is_checkout=True,
+            behind=git.commits_behind(path, branch),
+            family=kind,
+        )
+    release = resolve(slug)
+    return ModuleUpdate(
+        key=path.name,
+        path=path,
+        is_checkout=True,
+        behind=git.commits_behind(path, release.sha) if release is not None else None,
+        family=kind,
+        release=release.tag if release is not None else "",
+        installed_release=clone_release(path, item_id=path.name),
+    )
+
+
+MODULE_UPDATES_FILE = ".yulon-module-updates.json"
+"""The day's cached "Check for updates" rows, beside `.yulon-install.json` (T126)."""
+
+
+class CountingGit(BehindReader, Protocol):
+    """What `cached_module_updates()` asks git: the count, and what a row is valid for."""
+
+    def head_sha(self, dest: Path) -> str | None: ...
+
+
+def cached_module_updates(
+    server_dir: Path,
+    *,
+    kind: ManifestType,
+    git: CountingGit | None = None,
+    branches: Mapping[str, str | None] | None = None,
+    releases: Mapping[str, str] | None = None,
+    newest_release: Callable[[str], upstream.Release | None] | None = None,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """`module_updates()`, with each row kept for a day -- T124's rule, for modules (T126).
+
+    A row is reused while the clone is still on the commit it was counted at
+    (`head`) and it is younger than `upstream.MAX_AGE_SECONDS` -- or
+    `upstream.RETRY_SECONDS` for a row that could not be asked. An Update moves
+    the clone's HEAD, so the row it made stale is recounted on the next press
+    without anybody having to drop it. A release-following module costs two
+    GitHub requests per count, so without this a Check pressed repeatedly would
+    spend the unauthenticated limit.
+
+    A clone whose HEAD cannot be read is counted every time and never cached:
+    there is nothing to say what a cached row would be valid for.
+    """
+    reader: CountingGit = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
+    clock = upstream.now_unix() if now is None else now
+    resolve = newest_release if newest_release is not None else _github_newest_release
+    kept = _read_module_updates(server_dir, clock)
+    root = server_dir / CLONE_DIRS[kind]
+    try:
+        entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError as exc:
+        logger.debug(f"no {CLONE_DIRS[kind]} folder to list under {server_dir}: {exc}")
+        return ()
     rows: list[ModuleUpdate] = []
+    asked = False
     for path in entries:
-        checkout = (path / ".git").is_dir()
-        behind = git.commits_behind(path, branch_of.get(path.name)) if checkout else None
-        rows.append(ModuleUpdate(key=path.name, path=path, is_checkout=checkout, behind=behind))
+        head = reader.head_sha(path) if (path / ".git").is_dir() else None
+        old = kept.get((kind, path.name))
+        if head is not None and old is not None and old.head == head:
+            rows.append(replace(old, path=path))
+            continue
+        asked = True
+        row = _module_update(
+            path,
+            kind,
+            reader,
+            (branches or {}).get(path.name),
+            (releases or {}).get(path.name),
+            resolve,
+        )
+        rows.append(replace(row, head=head or "", checked_unix=clock))
+    if asked:
+        _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
     return tuple(rows)
+
+
+def _read_module_updates(server_dir: Path, now: int) -> dict[tuple[str, str], ModuleUpdate]:
+    """The cached rows still fresh at `now`, by `(family, key)`. Empty on any damage."""
+    fresh: dict[tuple[str, str], ModuleUpdate] = {}
+    for key, row in _read_module_updates_any_age(server_dir).items():
+        limit = upstream.MAX_AGE_SECONDS if row.behind is not None else upstream.RETRY_SECONDS
+        if 0 <= now - row.checked_unix < limit:
+            fresh[key] = row
+    return fresh
+
+
+def _write_module_updates(
+    server_dir: Path,
+    rows: Sequence[ModuleUpdate],
+    *,
+    keep: Mapping[tuple[str, str], ModuleUpdate],
+    family: str,
+) -> None:
+    """Write the rows, keeping other families' fresh rows. Best-effort, logged."""
+    others = [row for (fam, _key), row in keep.items() if fam != family]
+    payload = {
+        "version": 1,
+        "rows": [
+            {
+                "family": row.family,
+                "key": row.key,
+                "head": row.head,
+                "behind": row.behind,
+                "release": row.release,
+                "installed_release": row.installed_release,
+                "checked_unix": row.checked_unix,
+            }
+            for row in [*others, *rows]
+        ],
+    }
+    path = server_dir / MODULE_UPDATES_FILE
+    tmp = path.with_name(path.name + ".new")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        logger.warning(f"could not keep the module-update reading in {path}: {exc}")
+
+
+def cached_module_update(server_dir: Path, family: str, key: str) -> ModuleUpdate | None:
+    """The last cached row for one clone, however old, or None (T126).
+
+    What the Tortoise addon's note reads to tell a release name that matches the
+    server's from one that has since been re-published: a file read, no git.
+    """
+    return _read_module_updates_any_age(server_dir).get((family, key))
+
+
+def _read_module_updates_any_age(server_dir: Path) -> dict[tuple[str, str], ModuleUpdate]:
+    """Every cached row regardless of age, by `(family, key)`. Empty on any damage."""
+    path = server_dir / MODULE_UPDATES_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            (str(row["family"]), str(row["key"])): ModuleUpdate(
+                key=str(row["key"]),
+                path=server_dir,
+                is_checkout=True,
+                behind=None if row["behind"] is None else int(row["behind"]),
+                family=str(row["family"]),
+                release=str(row.get("release", "")),
+                installed_release=str(row.get("installed_release", "")),
+                head=str(row["head"]),
+                checked_unix=int(row["checked_unix"]),
+            )
+            for row in payload["rows"]
+        }
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -4952,3 +5238,8 @@ def module_sql_report(
                 f"already in its updates ledger looks like"
             )
     return tuple(lines)
+
+
+def _github_newest_release(slug: str) -> upstream.Release | None:
+    """`Applier`'s default release resolver: GitHub's releases API, over verified HTTPS."""
+    return upstream.newest_release(slug, get=upstream.https_get)

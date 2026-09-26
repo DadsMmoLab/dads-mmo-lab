@@ -2465,6 +2465,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "which have no `modules/` at all, so the OSError is logged and answers an empty tuple "
         "rather than a refusal"
     ),
+    ("apply.py", "cached_module_updates"): (
+        "T126. The same listing as `module_updates`, one family's clone folder (Tortoise's "
+        "`sql_scripts/clones/`), to count each clone and keep the row a day; it decides no "
+        "write - the one file it writes is its own cache - and an unreadable or absent folder "
+        "is logged and answers an empty tuple rather than a refusal"
+    ),
     ("platform.py", "_windows_drive_mounts"): (
         "T39. Lists `/mnt` inside a WSL distro to find the letters that are mounted Windows "
         "drives. It decides no write: the answer is a candidate list for the search below, "

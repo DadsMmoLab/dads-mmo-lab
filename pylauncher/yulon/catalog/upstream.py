@@ -69,6 +69,7 @@ _MAX_BYTES = 1024 * 1024
 """A compare page two is ~15 kB; anything past a megabyte is not an answer."""
 
 _SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def https_get(url: str, accept: str) -> bytes:
@@ -107,14 +108,35 @@ def github_slug(repo: str) -> str | None:
     return path if _SLUG.match(path) else None
 
 
-def commits_ahead(slug: str, base: str, ref: str, *, get: HttpGet) -> int | None:
-    """How many commits `ref` on GitHub carries that `base` does not. None = could not ask.
+@dataclass(frozen=True)
+class Comparison:
+    """How `ref` on GitHub stands to `base`: GitHub's `ahead_by`, `behind_by` and `status`.
 
-    `ahead_by` of `compare/{base}...{ref}`, which is `git rev-list --count
-    base..ref` -- the Modules tab's `HEAD..FETCH_HEAD`, asked of GitHub instead
-    of a fetched clone. A diverged pair (a pin that upstream rewrote away)
-    still answers `ahead_by`: those are commits upstream has and the checkout
-    does not, which is what the line reports.
+    Both counts, because one of them alone cannot tell a forward move from a
+    rewritten history (T126, Codex's final pass): a release on history that
+    has diverged from the checkout is AHEAD of it and BEHIND it at once, and
+    reading `ahead_by` only made that look like a plain update.
+    """
+
+    ahead: int
+    """Commits `ref` has that `base` does not."""
+    behind: int
+    """Commits `base` has that `ref` does not."""
+    status: str
+
+    @property
+    def diverged(self) -> bool:
+        """Both sides carry commits the other lacks: upstream rewrote its history."""
+        return self.ahead > 0 and self.behind > 0
+
+
+def compare(slug: str, base: str, ref: str, *, get: HttpGet) -> Comparison | None:
+    """`compare/{base}...{ref}` on GitHub, whole. None = could not ask, never a guess.
+
+    `ahead_by` is `git rev-list --count base..ref` -- the Modules tab's
+    `HEAD..FETCH_HEAD`, asked of GitHub instead of a fetched clone -- and
+    `behind_by` is the other direction. A body missing either count, or holding
+    a negative one, is "could not ask".
     """
     url = (
         f"https://api.github.com/repos/{slug}/compare/"
@@ -123,13 +145,78 @@ def commits_ahead(slug: str, base: str, ref: str, *, get: HttpGet) -> int | None
     try:
         payload = json.loads(get(url, "application/vnd.github+json").decode("utf-8"))
     except (OSError, ValueError) as exc:
-        logger.debug(f"could not ask GitHub how far {slug} {ref} is past {base}: {exc}")
+        logger.debug(f"could not ask GitHub how {slug} {ref} stands to {base}: {exc}")
         return None
-    ahead = payload.get("ahead_by") if isinstance(payload, dict) else None
-    if isinstance(ahead, bool) or not isinstance(ahead, int) or ahead < 0:
-        logger.debug(f"GitHub's compare of {slug} did not carry a count: {str(payload)[:200]}")
+    if not isinstance(payload, dict):
         return None
-    return ahead
+    ahead, behind = _count(payload.get("ahead_by")), _count(payload.get("behind_by"))
+    if ahead is None or behind is None:
+        logger.debug(f"GitHub's compare of {slug} did not carry counts: {str(payload)[:200]}")
+        return None
+    return Comparison(ahead=ahead, behind=behind, status=str(payload.get("status", "")))
+
+
+def _count(value: object) -> int | None:
+    """A non-negative int from JSON, or None. `True` is not a count."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def commits_ahead(slug: str, base: str, ref: str, *, get: HttpGet) -> int | None:
+    """`compare()`'s `ahead_by` alone, or None: for a caller that only counts."""
+    said = compare(slug, base, ref, get=get)
+    return None if said is None else said.ahead
+
+
+@dataclass(frozen=True)
+class Release:
+    """A published release: its tag, and the commit that tag names (T126)."""
+
+    tag: str
+    sha: str
+
+
+def newest_release(slug: str, *, get: HttpGet) -> Release | None:
+    """The newest published release of `slug` and its commit, or None if GitHub would not say.
+
+    `releases/latest` is GitHub's own answer to "newest": the most recent release
+    that is neither a draft nor a pre-release. It never returns a bare tag with
+    no release behind it, which is what keeps a rolling tag out -- and a source
+    only asks this at all if its catalog entry says `follow: releases`, so
+    cmangos' `latest` (a release, but a rolling one) is never asked about.
+
+    The tag is then resolved to its commit through `commits/{tag}` in the
+    `vnd.github.sha` form, which peels an annotated tag and answers forty hex
+    characters and nothing else. Resolved at the moment of asking, not cached
+    by name: a dated tag here has been moved during its own day (the
+    2026-09-25 release is titled "builds v1-v31"), and what is built must be
+    the commit the tag names NOW.
+    """
+    base = f"https://api.github.com/repos/{slug}"
+    try:
+        payload = json.loads(get(f"{base}/releases/latest", "application/vnd.github+json"))
+    except (OSError, ValueError) as exc:
+        logger.debug(f"could not ask GitHub for the newest release of {slug}: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+    tag = payload.get("tag_name")
+    if not isinstance(tag, str) or not tag or payload.get("draft") or payload.get("prerelease"):
+        logger.debug(
+            f"GitHub's newest release of {slug} is not one to follow: {str(payload)[:200]}"
+        )
+        return None
+    try:
+        sha = get(f"{base}/commits/{quote(tag, safe='')}", "application/vnd.github.sha")
+    except OSError as exc:
+        logger.debug(f"could not ask GitHub which commit {slug} {tag} is: {exc}")
+        return None
+    said = sha.decode("utf-8", errors="replace").strip()
+    if not _SHA.match(said):
+        logger.debug(f"GitHub did not answer {slug} {tag} with a commit: {said[:80]!r}")
+        return None
+    return Release(tag=tag, sha=said)
 
 
 @dataclass(frozen=True)
@@ -140,10 +227,33 @@ class SourceNews:
     label: str
     """What the line calls it: "server" for the core, the repository's name otherwise."""
     behind: int | None
-    """Commits upstream has past this checkout's HEAD. `None` = could not ask."""
+    """Commits upstream has past this checkout's HEAD. `None` = could not ask.
+
+    For a source that follows releases (T126) the "upstream" is the newest
+    release's commit, and any positive count is reported as that release.
+    """
     checked_unix: int = 0
     """When THIS source was asked. Per source, so one that failed (a 403, a timeout)
     is asked again after `RETRY_SECONDS` while the ones that answered keep their day."""
+    follow: str = "branch"
+    """The catalog's `Source.follow`, kept so a cache about the other mode is not served."""
+    release: str = ""
+    """The newest release's tag, for a source that follows releases and reached one."""
+    rewritten: int = 0
+    """Commits this checkout has that upstream no longer does, when the two DIVERGED.
+
+    Non-zero only when upstream is both ahead of and behind the checkout: it
+    rewrote its history (TortoiseBots did, T120). The line then says so rather
+    than offering a plain count, because "Update" onto that history drops these.
+    """
+    installed: str = ""
+    """The release tag the install record says this source was moved to, or `""`.
+
+    Read so that a tag moved within its own day -- v2026-09-25 was re-published
+    as "builds v1-v31" -- is said as an UPDATED release rather than as being in
+    step: `behind` compares commits, and a positive count against a release of
+    the same name is a newer build of it.
+    """
 
 
 @dataclass(frozen=True)
@@ -158,6 +268,28 @@ class UpstreamNews:
         return any(source.behind is not None for source in self.sources)
 
 
+def release_word(newest: str, installed: str) -> str:
+    """ "new release" or "updated release": the second when the NAME is the one installed.
+
+    Only ever asked about a release whose commit is ahead of what is installed,
+    so a matching name means the tag was moved to newer commits since.
+    """
+    return "updated release" if installed and installed == newest else "new release"
+
+
+def _said(source: SourceNews) -> str:
+    """One source's part of the line."""
+    if source.release:
+        what = f"{release_word(source.release, source.installed)} {source.release}"
+    else:
+        what = f"{source.behind} {'commit' if source.behind == 1 else 'commits'}"
+    if source.rewritten:
+        if not source.release:
+            what = f"{source.behind} new {'commit' if source.behind == 1 else 'commits'}"
+        return f"{source.label} upstream rewrote its history ({what})"
+    return f"{source.label} {what}"
+
+
 def line(news: UpstreamNews | None) -> str:
     """The Server tab's sentence, or `""` when there is nothing new or nothing known.
 
@@ -167,11 +299,7 @@ def line(news: UpstreamNews | None) -> str:
     """
     if news is None:
         return ""
-    said = [
-        f"{source.label} {source.behind} {'commit' if source.behind == 1 else 'commits'}"
-        for source in news.sources
-        if source.behind
-    ]
+    said = [_said(source) for source in news.sources if source.behind]
     if not said:
         return ""
     return (
@@ -180,7 +308,9 @@ def line(news: UpstreamNews | None) -> str:
     )
 
 
-def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> dict[str, SourceNews]:
+def read_cached(
+    server_dir: Path, sources: Sequence[tuple[str, str]], now: float
+) -> dict[str, SourceNews]:
     """The cached rows that are still fresh, by repository. Empty when there are none.
 
     Freshness is PER SOURCE: a row that answered is kept `MAX_AGE_SECONDS`, a
@@ -190,7 +320,8 @@ def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> dict[str,
 
     Nothing is served from a file that is damaged, from the future (a clock set
     back), or about a different set of sources -- a newer app that moves a
-    different source must not be told a count about the old one.
+    different source, or follows one differently (`(repo, follow)` pairs), must
+    not be told a count about the old one.
     """
     path = server_dir / UPSTREAM_FILE
     try:
@@ -207,13 +338,17 @@ def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> dict[str,
                 label=str(row["label"]),
                 behind=None if row["behind"] is None else int(row["behind"]),
                 checked_unix=int(row.get("checked_unix", checked)),
+                follow=str(row.get("follow", "branch")),
+                release=str(row.get("release", "")),
+                installed=str(row.get("installed", "")),
+                rewritten=int(row.get("rewritten", 0)),
             )
             for row in payload["sources"]
         ]
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         logger.debug(f"{path} is not a reading this build can use: {exc}")
         return {}
-    if [row.repo for row in rows] != list(repos):
+    if [(row.repo, row.follow) for row in rows] != list(sources):
         return {}
     fresh: dict[str, SourceNews] = {}
     for row in rows:
@@ -222,6 +357,26 @@ def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> dict[str,
         if 0 <= age < limit:
             fresh[row.repo] = row
     return fresh
+
+
+def cached_row(server_dir: Path, repo: str) -> SourceNews | None:
+    """The last cached reading of one source, however old, or None (T126).
+
+    What the Tortoise addon's note reads to learn whether the server's bot
+    module is behind a newer build of the release it is named after.
+    """
+    try:
+        payload = json.loads((server_dir / UPSTREAM_FILE).read_text(encoding="utf-8"))
+        row = next(r for r in payload["sources"] if r["repo"] == repo)
+        return SourceNews(
+            repo=repo,
+            label=str(row["label"]),
+            behind=None if row["behind"] is None else int(row["behind"]),
+            release=str(row.get("release", "")),
+            installed=str(row.get("installed", "")),
+        )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
+        return None
 
 
 def write_cached(server_dir: Path, news: UpstreamNews) -> None:
@@ -236,6 +391,10 @@ def write_cached(server_dir: Path, news: UpstreamNews) -> None:
                 "label": source.label,
                 "behind": source.behind,
                 "checked_unix": source.checked_unix or news.checked_unix,
+                "follow": source.follow,
+                "release": source.release,
+                "installed": source.installed,
+                "rewritten": source.rewritten,
             }
             for source in news.sources
         ],

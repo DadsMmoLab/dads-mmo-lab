@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from yulon import docker, platform
+from yulon.catalog import upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
 # `native` in a walrus (`entry.install.native`), and a module of the same name
@@ -46,8 +47,10 @@ from yulon.catalog.installer import (
 from yulon.catalog.native import (
     ComposeRepairRoute,
     LatestRoute,
+    RewrittenHistory,
     read_state,
     return_to_pin_confirmation,
+    rewritten_line,
     source_version,
     update_to_latest_confirmation,
 )
@@ -267,14 +270,47 @@ def update_to_latest_for_app(
     # dialog can never name a database repository this press does not touch.
     repo = moving[0].repo if moving else entry.emulator.sources[0].repo
 
+    # T126: a release on history upstream rewrote moves only when the question
+    # the player answered said so. What the question said is kept here, between
+    # `confirmation()` and `press()`, and a press that met a divergence the
+    # question did not describe (the day's count was stale or missing) is
+    # remembered, so the next question carries its line.
+    acknowledged: dict[str, str] = {}
+    met: dict[str, str] = {}
+
+    def rewritten() -> dict[str, str]:
+        # A file read, no network and no engine: this runs on the GUI thread,
+        # inside the press, before the question is shown.
+        keys = [(source.repo, source.follow) for source in moving]
+        rows = upstream.read_cached(server_dir, keys, upstream.now_unix()).values()
+        found = {
+            row.repo: rewritten_line(row.repo, row.release, row.rewritten)
+            for row in rows
+            if row.rewritten and row.release
+        }
+        return {**found, **met}
+
+    def confirmation() -> str:
+        said = rewritten()
+        acknowledged.clear()
+        acknowledged.update(said)
+        return update_to_latest_confirmation(entry, server_dir, repo, tuple(said.values()))
+
     def press(cancel: threading.Event | None = None) -> Iterator[str]:
-        yield from installer_for_app(entry).update_to_latest(options, cancel=cancel)
+        try:
+            yield from installer_for_app(entry).update_to_latest(
+                options, cancel=cancel, rewritten_ok=frozenset(acknowledged)
+            )
+        except RewrittenHistory as exc:
+            met[exc.repo] = exc.line
+            raise
+        met.clear()
 
     def to_pin(cancel: threading.Event | None = None) -> Iterator[str]:
         yield from installer_for_app(entry).update_to_latest(options, to_pin=True, cancel=cancel)
 
     return LatestRoute(
-        confirmation=lambda: update_to_latest_confirmation(entry, server_dir, repo),
+        confirmation=confirmation,
         press=press,
         pin_confirmation=lambda: return_to_pin_confirmation(entry, server_dir, repo),
         to_pin=to_pin,

@@ -421,6 +421,15 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # Read off the store the services were handed, so the day a CMaNGOS game
         # ships its first module manifest this fails until its wiring lands.
         counted = services.store is not None and any(services.store.load_all("module"))
+        # T126 review: Tortoise's two client addons are CLONES (`mod`s in
+        # `sql_scripts/clones/`) with a repository behind them, so it has
+        # checkouts to count, list, mark and read a version from, though no
+        # `modules/`. Read off its store, as above: a game whose manifests
+        # clone something is counted; the custom-module seams stay `modules/`'s.
+        cloned = counted or (
+            services.store is not None
+            and any(m.source is not None for m in services.store.load_all("mod"))
+        )
         # The four seams behind "Install from link…" and "Install from
         # folder…" (module-from-link, 2026-09-08) ride on the same fact: a
         # custom module is a C++ checkout or a copy under `modules/`, so it
@@ -457,7 +466,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # mark.
         uncounted = (
             set()
-            if counted
+            if cloned
             else {
                 "module_updates",
                 "installed_modules",
@@ -465,8 +474,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 "unknown_modules",
                 "module_version",
             }
-            | custom
-        )
+        ) | (set() if counted else custom)
         # 8.6's My Party, and the one seam whose absence is decided by the
         # ENGINE rather than by a measurement. The route is `mod-ale`, an
         # AzerothCore Lua module hooking AzerothCore's command table, and the
@@ -518,6 +526,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             if native_block is not None and native_block.family == "cmangos"
             else {"repair_compose"}
         )
+
+        # T126's `module_notes`: one extra sentence on a Modules row, which only
+        # Tortoise has to say -- its TortoiseBots Manager addon and its
+        # TortoiseBots server module publish releases in lockstep, and the row
+        # names both. No other game pairs a client addon with a server module,
+        # so the seam is absent there by design, the reference included.
+        unpaired = set() if game == "wow-tortoise" else {"module_notes"}
         allowed = (
             unrepaired
             | unstocked
@@ -533,9 +548,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unupdatable
             | unadoptable
             | unwindowed
+            | unpaired
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable | unadoptable | unwindowed | unrepaired
+            reference = unprobed | unupdatable | unadoptable | unwindowed | unrepaired | unpaired
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

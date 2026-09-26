@@ -679,7 +679,9 @@ def _lines_changed(old: str, new: str) -> tuple[int, int]:
     return added, removed
 
 
-def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:
+def update_to_latest_confirmation(
+    entry: CatalogEntry, server_dir: Path, repo: str, rewritten: Sequence[str] = ()
+) -> str:
     """The one question asked before an update to latest. The approved design's own words.
 
     Three facts and no fourth, and every one of them is a fact rather than a
@@ -699,6 +701,11 @@ def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: s
       covers the checkout, and neither of them covers a schema migration a
       worldserver ran at boot.
 
+    `rewritten` are `rewritten_line()`s (T126): one per source whose newest
+    release sits on history upstream rewrote. They are the only part of this
+    question that is not always the same, and the press moves such a source
+    only if its line was here.
+
     It names the repository being fetched from, because "the newest code" is not
     a thing a user can look at and the repository is: the sha in the log
     afterwards belongs to that repo, and so does the issue they will file.
@@ -707,13 +714,14 @@ def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: s
     sentence in this module does -- `ui/` may not author copy that has to be
     tested, and this has assertions on it that run without Qt.
     """
+    said = "".join(f"\n\n{line}" for line in rewritten)
     return (
         f"Update {entry.name} in {server_dir} to the newest {repo} code?\n\n"
         f"This builds code nobody has tested with this app. It takes as long as your first "
         f"build ({MEASURED_BUILD_TIMES}) and it can fail — a module may no longer compile, or "
         f"the new server may refuse your database. If the build fails, the build you have now "
         f"is put back. Anything the new server writes into your database on first start is not "
-        f"put back — that is what the backup is for."
+        f"put back — that is what the backup is for.{said}"
     )
 
 
@@ -769,6 +777,10 @@ def commits_past_pin(rev: SourceRev) -> str:
     """
     said = rev.built.split(git.VERSION_SEPARATOR)
     head = f"built from {said[0]} ({said[1]})" if len(said) == 2 else f"built from {rev.built}"
+    if rev.release:
+        # T126: a source that follows releases is named by the release it is
+        # on, which is the name a player reads on the project's page.
+        head = f"{rev.repo.rsplit('/', 1)[-1]} {rev.release}, {head}"
     if not rev.pin:
         return head
     short = rev.pin[:_SHORT_SHA]
@@ -880,7 +892,12 @@ def source_revs_line(state: InstallState | None) -> str:
         # with a capital in it reaches this line they would not.
         said = commits_past_pin(state.source_revs[0])
         return said[0].upper() + said[1:]
-    return "\n".join(f"{rev.repo}: {commits_past_pin(rev)}" for rev in state.source_revs)
+    # A row that names its release names its source as well ("TortoiseBots
+    # v2026-09-25, built from ..."), so the repo prefix would say it twice.
+    return "\n".join(
+        commits_past_pin(rev) if rev.release else f"{rev.repo}: {commits_past_pin(rev)}"
+        for rev in state.source_revs
+    )
 
 
 @dataclass(frozen=True)
@@ -1389,6 +1406,51 @@ def _by_repo(rev: SourceRev) -> str:
     return rev.repo
 
 
+def _commits(count: int) -> str:
+    return f"{count} commit" if count == 1 else f"{count} commits"
+
+
+def rewritten_line(repo: str, tag: str, count: int) -> str:
+    """The extra line the update question carries for a release on rewritten history (T126).
+
+    The lead's words, with the repository in front so a two-source question
+    says which one. Said in the confirmation BEFORE the answer and again in the
+    press's output, which is the record that it happened.
+    """
+    return (
+        f"{repo}: Upstream rewrote its history: the release {tag} does not contain "
+        f"{_commits(count)} this server was built from. Updating moves the server onto the "
+        f"release as upstream publishes it."
+    )
+
+
+class RewrittenHistory(InstallerError):
+    """A release on rewritten history that the answered question did not describe (T126).
+
+    Carries the line, so the route can put it in front of the player the next
+    time it asks. Raised before any source moves.
+    """
+
+    def __init__(self, repo: str, line: str) -> None:
+        super().__init__(
+            f"{line} The question you answered did not say so, so nothing was changed. "
+            f"Press \u201cUpdate the server to latest\u2026\u201d again: it will ask with "
+            f"that line in it."
+        )
+        self.repo = repo
+        self.line = line
+
+
+@dataclass(frozen=True)
+class ReleaseTarget:
+    """Where an update moves a source that follows its releases, and what it says (T126)."""
+
+    tag: str
+    rev: str
+    """The release's commit, or the checkout's own HEAD when that already contains it."""
+    line: str
+
+
 @dataclass(frozen=True)
 class SourceRev:
     """Where ONE source of this install stands against the commit the gates ran on (T64).
@@ -1421,6 +1483,13 @@ class SourceRev:
     built: str
     pin: str = ""
     ahead: int | None = None
+    release: str = ""
+    """The release tag this source was moved to, for a source that follows releases (T126).
+
+    Empty for every branch-following source and for a return to the pin: the
+    pin is a commit the gates ran on, not a release, and naming the release
+    the pin happens to sit near would be a guess.
+    """
 
 
 @dataclass(frozen=True)
@@ -1688,6 +1757,7 @@ def _parse_source_revs(raw: object, path: Path) -> tuple[SourceRev, ...]:
             continue
         pin = record.get("pin")
         ahead = record.get("ahead")
+        release = record.get("release")
         found.append(
             SourceRev(
                 repo=repo,
@@ -1697,9 +1767,18 @@ def _parse_source_revs(raw: object, path: Path) -> tuple[SourceRev, ...]:
                 # commit past the pin -- a number on somebody's screen with
                 # nothing behind it.
                 ahead=ahead if isinstance(ahead, int) and not isinstance(ahead, bool) else None,
+                release=release if isinstance(release, str) else "",
             )
         )
     return tuple(sorted(found, key=lambda rev: rev.repo))
+
+
+def _rev_record(rev: SourceRev) -> dict[str, object]:
+    """One `source_revs` row as the file holds it. `release` only when there is one (T126)."""
+    record: dict[str, object] = {"built": rev.built, "pin": rev.pin, "ahead": rev.ahead}
+    if rev.release:
+        record["release"] = rev.release
+    return record
 
 
 def write_state(server_dir: Path, state: InstallState) -> None:
@@ -1733,10 +1812,7 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         # for byte what it was before T64: an empty mapping in every state file
         # in existence would be a change to a file other things read, made for a
         # feature most installs will never press.
-        payload["source_revs"] = {
-            rev.repo: {"built": rev.built, "pin": rev.pin, "ahead": rev.ahead}
-            for rev in state.source_revs
-        }
+        payload["source_revs"] = {rev.repo: _rev_record(rev) for rev in state.source_revs}
     tmp = path.with_name(path.name + ".new")
     try:
         server_dir.mkdir(parents=True, exist_ok=True)
@@ -1971,6 +2047,12 @@ def _git_head_version(dest: Path) -> str | None:
 def _git_commits_since(dest: Path, rev: str) -> int | None:
     """How many commits this checkout carries past `rev`, containerised."""
     return git.ContainerGit().commits_since(dest, rev)
+
+
+def _installed_release(state: InstallState | None, repo: str) -> str:
+    """The release tag the install record says `repo` was moved to, or `""` (T126)."""
+    rev = state.rev_for(repo) if state is not None else None
+    return rev.release if rev is not None else ""
 
 
 def _upstream_get(url: str, accept: str) -> bytes:
@@ -4345,10 +4427,11 @@ class StagedInstaller:
         server_dir = self.server_dir(opts)
         moving = self.sources_that_move()
         clock = upstream.now_unix() if now is None else now
-        repos = [source.repo for source in moving]
-        fresh = upstream.read_cached(server_dir, repos, clock)
+        keys = [(source.repo, source.follow) for source in moving]
+        fresh = upstream.read_cached(server_dir, keys, clock)
         found: list[upstream.SourceNews] = []
         asked = False
+        record = read_state(server_dir, valid=())
         for index, source in enumerate(moving):
             kept = fresh.get(source.repo)
             if kept is not None:
@@ -4356,12 +4439,17 @@ class StagedInstaller:
                 continue
             asked = True
             label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
+            stands, release = self._behind(server_dir, source)
             found.append(
                 upstream.SourceNews(
                     repo=source.repo,
                     label=label,
-                    behind=self._behind(server_dir, source),
+                    behind=None if stands is None else stands.ahead,
+                    rewritten=stands.behind if stands is not None and stands.diverged else 0,
                     checked_unix=clock,
+                    follow=source.follow,
+                    release=release,
+                    installed=_installed_release(record, source.repo),
                 )
             )
         taken = clock if asked or not found else min(row.checked_unix for row in found)
@@ -4370,17 +4458,30 @@ class StagedInstaller:
             upstream.write_cached(server_dir, news)
         return news
 
-    def _behind(self, server_dir: Path, source: EmulatorSource) -> int | None:
-        """One source's count, or None when its HEAD or GitHub could not be asked."""
+    def _behind(
+        self, server_dir: Path, source: EmulatorSource
+    ) -> tuple[upstream.Comparison | None, str]:
+        """How upstream stands to one source and, for a releases source, the newest release.
+
+        `(None, "")` when its HEAD or GitHub could not be asked. A source that
+        follows releases is compared with the newest release's commit rather
+        than the branch tip, so a checkout already on (or past) that release
+        answers 0 however far the branch has moved on. The WHOLE comparison is
+        returned, because a history upstream rewrote is ahead and behind at once.
+        """
         slug = upstream.github_slug(source.repo)
         if slug is None:
-            return None
+            return None, ""
         head = self._seams.head_sha(server_dir / source.dest)
         if head is None:
-            return None
-        return upstream.commits_ahead(
-            slug, head, source.branch or "HEAD", get=self._seams.upstream_get
-        )
+            return None, ""
+        get = self._seams.upstream_get
+        if source.follow == "releases":
+            release = upstream.newest_release(slug, get=get)
+            if release is None:
+                return None, ""
+            return upstream.compare(slug, head, release.sha, get=get), release.tag
+        return upstream.compare(slug, head, source.branch or "HEAD", get=get), ""
 
     def sources_that_move(self) -> tuple[EmulatorSource, ...]:
         """Which of this entry's sources an update to latest moves. The `*-db` ones do not.
@@ -4517,8 +4618,12 @@ class StagedInstaller:
         *,
         to_pin: bool = False,
         cancel: threading.Event | None = None,
+        rewritten_ok: Collection[str] = (),
     ) -> Iterator[str]:
         """Move this install's sources and rebuild on them. Yields output live (T64).
+
+        `rewritten_ok` names the sources whose rewritten history the player's
+        confirmation already described (T126); see `_release_targets()`.
 
         The owner's ask of 2026-09-15, in one route for all four families: "a
         update server to latest, with a warning and recommendation to take a
@@ -4592,9 +4697,17 @@ class StagedInstaller:
         # the pre-press figure; and dropped again in the `finally` below, for
         # a count cached while the press ran.
         upstream.forget(server_dir)
+        # T126: where a source follows its releases, "latest" is the newest
+        # release's commit. Resolved for every such source BEFORE the first
+        # fetch, for `_refuse_unless_updatable()`'s reason: a press that moved
+        # the core and then could not say which release the bots are on would
+        # leave the folder half a version ahead of the image.
+        targets = {} if to_pin else self._release_targets(plan, rewritten_ok)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
         yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
         yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
+        for said in targets.values():
+            yield said.line
         self._check_cancel(cancel)
         try:
             moved: list[tuple[EmulatorSource, Path, str]] = []
@@ -4620,7 +4733,7 @@ class StagedInstaller:
                             branch=source.branch,
                             sparse_path=source.sparse_path,
                             depth=source.depth,
-                            rev=source.rev if to_pin else None,
+                            rev=source.rev if to_pin else self._latest_rev(source, targets),
                         ),
                         UPDATE_SOURCES_STAGE,
                     )
@@ -4648,7 +4761,12 @@ class StagedInstaller:
                 # pair that makes the folder and the running container agree again.
                 yield from self._restore_the_folder(moved, server_dir, opts, state)
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
-            self._record_source_revs(server_dir, state, moved)
+            self._record_source_revs(
+                server_dir,
+                state,
+                moved,
+                {repo: said.tag for repo, said in targets.items() if said.tag},
+            )
             landed = (
                 "the commit this app was tested against" if to_pin else "the newest upstream code"
             )
@@ -4660,6 +4778,90 @@ class StagedInstaller:
             # exceptions). It exists for a count asked WHILE the press ran,
             # which cached the moved -- or about-to-be-restored -- HEADs.
             upstream.forget(server_dir)
+
+    def _release_targets(
+        self,
+        plan: Sequence[tuple[EmulatorSource, Path, str]],
+        rewritten_ok: Collection[str] = (),
+    ) -> dict[str, ReleaseTarget]:
+        """The commit "latest" means for each source that follows its releases (T126).
+
+        Asked of GitHub's releases API, per source, now: `upstream.newest_release()`
+        holds why a tag is resolved at the moment of asking rather than by name.
+        A source whose checkout already CONTAINS that release -- a return to a
+        pin newer than the newest release, say -- stays where it is: moving it
+        onto the release would be a step backwards dressed as an update.
+
+        Raises `InstallerError` when GitHub cannot say, because the other answer
+        -- the branch tip -- is exactly the in-between commit this source was
+        marked to avoid.
+
+        **A DIVERGED release -- upstream rewrote its history -- moves, but only
+        if the question the player answered said so** (`rewritten_ok`, the repos
+        whose `rewritten_line()` the confirmation carried). The lead's ruling
+        (Codex's final pass): refusing would lock an install built on the
+        rewritten-away history (TortoiseBots' old pin `fd7ec9ec`, T120) out of
+        updates for good, and moving silently would drop commits the server was
+        built from without a word. Not acknowledged, it raises `RewrittenHistory`
+        before anything moves, and the route asks again with the line in it.
+        """
+        found: dict[str, ReleaseTarget] = {}
+        for source, dest, old in plan:
+            if source.follow != "releases":
+                continue
+            slug = upstream.github_slug(source.repo)
+            release = (
+                None
+                if slug is None
+                else upstream.newest_release(slug, get=self._seams.upstream_get)
+            )
+            if slug is None or release is None:
+                raise InstallerError(
+                    f"{source.repo} follows its published releases, and Yu'lon could not ask "
+                    f"GitHub which release is the newest. Nothing in that folder was changed; "
+                    f"try again when GitHub can be reached."
+                )
+            stands = upstream.compare(slug, old, release.sha, get=self._seams.upstream_get)
+            if stands is None:
+                # Refused, not guessed (T126 review, Codex high): without the
+                # comparison nobody knows whether the release is ahead of this
+                # checkout or behind it, and moving onto it could be a step back.
+                raise InstallerError(
+                    f"{source.repo} follows its published releases, and GitHub did not answer "
+                    f"whether {release.tag} is ahead of what {dest} is on. Nothing in that "
+                    f"folder was changed; try again later."
+                )
+            if stands.ahead == 0 and old != release.sha:
+                # No tag recorded: the checkout is PAST the release, and a
+                # version line naming the release would name a commit it is not on.
+                past = _commits(stands.behind)
+                found[source.repo] = ReleaseTarget(
+                    tag="",
+                    rev=old,
+                    line=(
+                        f"{source.repo} follows its releases; the newest, {release.tag} "
+                        f"({release.sha[:7]}), is already in {old[:7]}, which is {past} past "
+                        f"it, so it stays there."
+                    ),
+                )
+                continue
+            said = (
+                f"{source.repo} follows its releases; the newest is {release.tag} "
+                f"({release.sha[:7]})."
+            )
+            if stands.diverged:
+                warning = rewritten_line(source.repo, release.tag, stands.behind)
+                if source.repo not in rewritten_ok:
+                    raise RewrittenHistory(source.repo, warning)
+                said = f"{said}\n{warning}"
+            found[source.repo] = ReleaseTarget(tag=release.tag, rev=release.sha, line=said)
+        return found
+
+    @staticmethod
+    def _latest_rev(source: EmulatorSource, targets: Mapping[str, ReleaseTarget]) -> str | None:
+        """What an update checks out for `source`: its release's commit, or `None` for the tip."""
+        said = targets.get(source.repo)
+        return said.rev if said is not None else None
 
     def _refuse_unless_updatable(
         self, server_dir: Path, moving: Sequence[EmulatorSource]
@@ -4850,6 +5052,7 @@ class StagedInstaller:
         server_dir: Path,
         state: InstallState,
         moved: Sequence[tuple[EmulatorSource, Path, str]],
+        releases: Mapping[str, str] | None = None,
     ) -> None:
         """Write where each moved source ended up into the install record.
 
@@ -4890,6 +5093,7 @@ class StagedInstaller:
                     built=built,
                     pin=pin,
                     ahead=self._seams.commits_since(dest, pin) if pin else None,
+                    release=(releases or {}).get(source.repo, ""),
                 )
             )
         if not found:
