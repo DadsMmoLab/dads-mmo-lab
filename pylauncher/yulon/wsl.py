@@ -390,9 +390,17 @@ def _hold_name(key: str) -> str:
 
 _OWN_DIR = (
     f'd={HOLD_DIR}; mkdir -p -m 700 "$d" 2>/dev/null; '
-    f'[ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || exit {HOLD_DIR_REFUSED}; '
+    f'{{ [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && chmod 700 "$d" '
+    f'&& [ "$(stat -c %a "$d")" = 700 ]; }} || exit {HOLD_DIR_REFUSED}; '
 )
-"""The prefix both scripts share: make the private directory, refuse one that is not ours."""
+"""The prefix both scripts share: make the private directory, close it, refuse one that is not ours.
+
+`mkdir -m 700` sets the mode only of a directory it creates, so one that was
+already there -- the same owner, left at 0777 -- has to be closed here, and the
+mode is read back rather than trusted (Codex, final pass). The symlink and
+owner tests come first, so `chmod` only ever touches a directory of the
+caller's own; `/dev/shm` is sticky, so another account cannot swap it after.
+"""
 
 
 def hold_script(key: str) -> str:
@@ -421,11 +429,12 @@ def release_script(*keys: str) -> str:
     """
     names = " ".join(_hold_name(key) for key in keys)
     return _OWN_DIR + (
-        f"for n in {names}; do "
+        f"rc=0; for n in {names}; do "
         'f="$d/$n.pid"; set -- $(cat "$f" 2>/dev/null); '
         'if [ -n "$1" ] && [ "$(cat /proc/$1/comm 2>/dev/null)" = sleep ] '
-        '&& [ "$(cut -d" " -f22 /proc/$1/stat 2>/dev/null)" = "$2" ]; then kill "$1"; fi; '
-        'rm -f "$f"; done'
+        '&& [ "$(cut -d" " -f22 /proc/$1/stat 2>/dev/null)" = "$2" ]; then '
+        'if kill "$1"; then rm -f "$f"; else rc=1; fi; '
+        'else rm -f "$f"; fi; done; exit $rc'
     )
 
 
@@ -539,8 +548,14 @@ def hold(
     return Hold(held=False)
 
 
-def release(distro: str, *keys: str, run: Run | None = None) -> None:
+def release(distro: str, *keys: str, run: Run | None = None) -> bool:
     """End the holds `hold(distro, key)` made for `keys`, if the distro is up. Never raises.
+
+    True when nothing is left holding the distro for `keys`: the script ended
+    them, there was nothing to end, or the distro is stopped (a stopped distro
+    holds nothing). False when the release could not be run or the script
+    exited non-zero -- a directory it refused, a kill that failed -- and then
+    the caller still owes it (`Controller._let_the_distro_go()` tries again).
 
     Several keys in one call because a Stop of ANOTHER install's server (the
     port-conflict path) knows the containers it stopped but not which of them
@@ -553,13 +568,30 @@ def release(distro: str, *keys: str, run: Run | None = None) -> None:
     not answer is no reason to leave the distro pinned open.
     """
     if not keys or known_stopped(distro):
-        return
+        return True
+    named = ", ".join(keys)
     argv = _exec_argv(distro, release_script(*keys))
     if argv is None:
-        return
+        logger.warning(
+            f"no {platform.WSL_PROGRAM}; could not release the hold on {distro} for {named}"
+        )
+        return False
     try:
-        (run if run is not None else _run_release)(argv)
+        done = (run if run is not None else _run_release)(argv)
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning(f"could not release the hold on {distro} for {', '.join(keys)}: {exc}")
-        return
-    logger.info(f"released the hold on {distro} for {', '.join(keys)}")
+        logger.warning(f"could not release the hold on {distro} for {named}: {exc}")
+        return False
+    code = getattr(done, "returncode", None)
+    if code != 0:
+        said = " ".join(
+            str(part).strip()
+            for part in (getattr(done, "stdout", ""), getattr(done, "stderr", ""))
+            if part
+        )
+        why = "its folder is not the user's own" if code == HOLD_DIR_REFUSED else f"exit {code}"
+        logger.warning(
+            f"the hold on {distro} for {named} was not released ({why}): {said or 'no output'}"
+        )
+        return False
+    logger.info(f"released the hold on {distro} for {named}")
+    return True

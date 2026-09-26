@@ -132,6 +132,11 @@ class Controller:
         # known to be held", which the status poll reads as a reason to hold
         # a world it sees running (`_keep_the_distro_up()`).
         self._hold: wsl.Hold | None = None
+        # A release the distro refused (T132, Codex final pass): owed until one
+        # works, so a later Stop or Remove retries it even when it finds
+        # nothing of this install running. Separate from `_hold`, which the
+        # status poll forgets the moment it sees the world down.
+        self._release_owed = False
 
     # -- queries ---------------------------------------------------------
 
@@ -310,7 +315,10 @@ class Controller:
             # That server's hold is keyed by ITS world container, which is one
             # of these and cannot be told from the others by name alone; a key
             # nobody held releases nothing, so every stopped name is offered.
-            wsl.release(self.wsl_distro, *to_stop)
+            if not wsl.release(self.wsl_distro, *to_stop):
+                logger.warning(
+                    f"the hold that kept {self.wsl_distro} open for {to_stop} may still be in place"
+                )
         return to_stop
 
     def stop_conflicting_and_start(self) -> list[str]:
@@ -375,10 +383,14 @@ class Controller:
         Only when something of THIS install was stopped: two installs of one
         game share container names, so the hold under these names belongs to
         whichever of them is running, and Stop pressed on the other tab found
-        nothing of its own and must not let that distro go (T132).
+        nothing of its own and must not let that distro go (T132). Or when an
+        earlier release from this controller was refused: that one is still
+        owed, whatever this stop found.
         """
-        if self.wsl_distro is not None and ours_went_down:
-            wsl.release(self.wsl_distro, self.spec.world)
+        if self.wsl_distro is None or not (ours_went_down or self._release_owed):
+            return
+        self._release_owed = not wsl.release(self.wsl_distro, self.spec.world)
+        if not self._release_owed:
             self._hold = None
 
     def _save_evidence(self) -> None:

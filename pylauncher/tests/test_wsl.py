@@ -456,7 +456,7 @@ def test_release_never_boots_a_stopped_distro(
     """A stopped distro holds nothing, and `wsl -d` would start it (§2)."""
     ran: list[list[str]] = []
     monkeypatch.setattr(wsl, "known_stopped", lambda distro: True)
-    wsl.release("Ubuntu", "k", run=lambda argv: ran.append(argv))
+    assert wsl.release("Ubuntu", "k", run=lambda argv: ran.append(argv)) is True
     assert ran == []
 
 
@@ -465,7 +465,12 @@ def test_release_ends_every_named_hold_in_one_call(
 ) -> None:
     ran: list[list[str]] = []
     monkeypatch.setattr(wsl, "known_stopped", lambda distro: False)
-    wsl.release("Ubuntu", "vanilla-mangosd", "vanilla-db", run=lambda argv: ran.append(argv))
+    wsl.release(
+        "Ubuntu",
+        "vanilla-mangosd",
+        "vanilla-db",
+        run=lambda argv: ran.append(argv) or subprocess.CompletedProcess(argv, 0),
+    )
     [argv] = ran
     assert argv[:6] == ["C:/Windows/System32/wsl.exe", "-d", "Ubuntu", "--exec", "sh", "-c"]
     script = argv[6]
@@ -563,3 +568,63 @@ def test_a_hold_directory_that_is_not_the_users_own_is_refused(tmp_path: Path) -
     released = subprocess.run(["sh", "-c", _local(wsl.release_script("k"), own)], timeout=10)
     assert released.returncode == wsl.HOLD_DIR_REFUSED
     assert list(elsewhere.iterdir()) == []
+
+
+def test_a_pre_existing_hold_directory_open_to_others_is_closed_before_use(tmp_path: Path) -> None:
+    """Same owner, but mode 0777: another account could plant a pid in it (Codex, final pass).
+
+    `mkdir -p -m 700` leaves an existing directory's mode alone, so the scripts
+    must close it themselves -- and refuse if they cannot -- before trusting it.
+    """
+    own = _real_shell(tmp_path)
+    own.mkdir()
+    own.chmod(0o777)
+    first = subprocess.Popen(["sh", "-c", _local(wsl.hold_script("k"), own)])
+    try:
+        _wait_for(own / "yulon-hold-k.pid")
+        assert oct(own.stat().st_mode & 0o777) == "0o700"
+    finally:
+        first.kill()
+    own.chmod(0o777)
+    subprocess.run(["sh", "-c", _local(wsl.release_script("k"), own)], timeout=10)
+    assert oct(own.stat().st_mode & 0o777) == "0o700"
+
+
+def test_a_release_the_distro_refused_is_a_warning_and_false(
+    _wsl_exe: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The script's own exit code is the answer, not the absence of an exception."""
+    monkeypatch.setattr(wsl, "known_stopped", lambda distro: False)
+
+    def refused(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, wsl.HOLD_DIR_REFUSED, "", "not ours")
+
+    with caplog.at_level("INFO", logger=wsl.logger.name):
+        assert wsl.release("Ubuntu", "k", run=refused) is False
+    assert "released the hold" not in caplog.text
+    assert any(r.levelname == "WARNING" and "not ours" in r.getMessage() for r in caplog.records)
+
+
+def test_a_release_that_ran_cleanly_is_true(
+    _wsl_exe: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(wsl, "known_stopped", lambda distro: False)
+    done = wsl.release("Ubuntu", "k", run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""))
+    assert done is True
+
+
+def test_a_release_that_ended_its_sleep_exits_zero_and_drops_the_record(tmp_path: Path) -> None:
+    """The success half of the exit code `release()` now reads: a matching record, killed, gone."""
+    own = _real_shell(tmp_path)
+    own.mkdir(mode=0o700)
+    sleeper = subprocess.Popen(["sleep", "30"])
+    try:
+        start = (Path(f"/proc/{sleeper.pid}/stat").read_text().rsplit(")", 1)[1].split())[19]
+        (own / "yulon-hold-k.pid").write_text(f"{sleeper.pid} {start}\n")
+        done = subprocess.run(["sh", "-c", _local(wsl.release_script("k"), own)], timeout=10)
+        assert done.returncode == 0
+        assert sleeper.wait(timeout=5) is not None
+        assert not (own / "yulon-hold-k.pid").exists()
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()

@@ -528,7 +528,7 @@ def _stop_recorder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     # The T132 hold's release follows a stop that took something down; these
     # tests are about the stop, so it is answered here rather than refused by
     # the suite's guard against touching a real distro.
-    monkeypatch.setattr(controller_module.wsl, "release", lambda distro, *keys: None)
+    monkeypatch.setattr(controller_module.wsl, "release", lambda distro, *keys: True)
     monkeypatch.setattr(
         docker, "stop_staged", lambda *a, **kw: asked.append("stop") or True  # type: ignore[func-returns-value]
     )
@@ -774,8 +774,9 @@ class _HoldRecorder:
         self.events.append(f"hold {distro} {key}")
         return controller_module.wsl.Hold(held=True)
 
-    def release(self, distro: str, *keys: str) -> None:
+    def release(self, distro: str, *keys: str) -> bool:
         self.events.append(f"release {distro} {' '.join(keys)}")
+        return True
 
 
 def _no_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -884,8 +885,9 @@ class _Distro:
 
         return controller_module.wsl.Hold(held=True, proc=_Proc())
 
-    def release(self, distro: str, *keys: str) -> None:
+    def release(self, distro: str, *keys: str) -> bool:
         self.holds -= set(keys)
+        return True
 
 
 def _docker_ps(monkeypatch: pytest.MonkeyPatch, names: list[str]) -> list[list[str]]:
@@ -1013,3 +1015,26 @@ def test_switching_servers_through_the_conflict_path_leaves_no_hold_behind(
     assert distro.holds == {SPEC.world}
     assert b.stop() is True
     assert distro.holds == set()
+
+
+def test_a_release_that_failed_is_retried_by_the_next_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop said the server went down but the distro refused the release: the next Stop
+    or Remove tries again, even though it finds nothing of this install running."""
+    released: list[str] = []
+    answers = [False, True]
+    monkeypatch.setattr(
+        controller_module.wsl,
+        "release",
+        lambda distro, *keys: released.append(",".join(keys)) or answers.pop(0),
+    )
+    downs = [True, False, False]
+    monkeypatch.setattr(docker, "stop_staged", lambda spec, sd, **kw: downs.pop(0))
+    monkeypatch.setattr(docker, "remove_staged", lambda spec, sd, **kw: downs.pop(0))
+    monkeypatch.setattr(controller_module.wsl, "known_stopped", lambda distro: False)
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert ctl.stop() is True
+    assert released == [SPEC.world]
+    assert ctl.remove() is False
+    assert released == [SPEC.world, SPEC.world], "the owed release was not retried"
+    assert ctl.stop() is False
+    assert released == [SPEC.world, SPEC.world], "a release that worked was repeated"
