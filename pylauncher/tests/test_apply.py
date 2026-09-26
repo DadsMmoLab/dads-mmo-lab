@@ -23,6 +23,7 @@ from typing import Any, NoReturn
 import pytest
 
 from yulon import apply as apply_module
+from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
 from yulon.git import CloneSpec, RunnerGit, git_available
@@ -351,9 +352,15 @@ def test_ale_install_deploys_runs_its_first_configure_and_removes(tmp_path: Path
     assert report.skipped == ()
     assert any(step.startswith("patch ") for step in report.done)
 
-    # configure re-applies: default when no value is given; an explicit value wins.
+    # configure re-applies: an explicit value wins, and is remembered (T104).
     applier.configure(m, {"duration": "45"})
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    # No value given: the answer this install remembers beats the default --
+    # defaults < remembered < caller, the lead's ruling on the T92/T104 merge.
+    applier.configure(m)
+    assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    # An install with no remembered answer (one made before T104) gets the default.
+    (tmp_path / module_answers.ANSWERS_FILE).unlink()
     applier.configure(m)
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"
 
@@ -3712,7 +3719,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
 
     The brief for the press called `mod-arac` *the only shipped manifest with a
     direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
-    (`manifest.py:136`), so every step that names no route is one: 44 steps
+    (`manifest.py:136`), so every step that names no route is one: 45 steps
     across 19 manifests in all four games. `mod-arac` and `mod-city-bots` are
     the only `module`-type ones, which is the narrower true statement.
 
@@ -3731,6 +3738,10 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     upstream's reset and then the chosen file as ONE `then` step (one
     transaction), and its remove became that reset file instead of an inline
     `spell_dbc` statement -- two steps before, two after, all into `world`.
+
+    45 after T104: `npc-teleporter` writes the Onyxia-level answer into the one
+    `conditions` row upstream builds from `@ONY_LEVEL`, as an inline `world`
+    step after the file, so the question it always asked finally does something.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -3751,7 +3762,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        44,
+        45,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )

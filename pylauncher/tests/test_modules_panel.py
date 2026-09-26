@@ -278,13 +278,14 @@ def test_the_update_chip_counts_and_is_absent_at_zero() -> None:
     assert not [c for c in _row(rows, "mod-b").chips if c.label.startswith("Update available")]
 
 
-def test_the_asks_a_question_chip_is_only_on_an_uninstalled_manifest_with_no_default() -> None:
-    """The two AH-bot manifests are the shipped shape of this: a prompt with no default.
+def test_the_asks_a_question_chip_is_on_every_uninstalled_manifest_whose_install_asks() -> None:
+    """T104: Install asks every question it renders, default or not, so the row says so.
 
-    It is a fact about INSTALLING, so an installed row must not carry it.
+    It is a fact about INSTALLING, so an installed row must not carry it, and a
+    question no install template renders is never asked, so it gets no chip.
 
-    Mutation: drop the `default is None` clause and every manifest with any
-    prompt at all carries the chip.
+    Mutation: gate the chip on `default is None` again and `mod-defaulted`
+    loses it.
     """
     asks = _m(
         "mod-ah-bot",
@@ -292,12 +293,17 @@ def test_the_asks_a_question_chip_is_only_on_an_uninstalled_manifest_with_no_def
         patches=(Patch(file="x.conf", find="a", replace="{bot_guid}"),),
     )
     defaulted = _m(
-        "mod-quiet",
+        "mod-defaulted",
         prompts=(Prompt(key="level", question="Which level?", default="80"),),
         patches=(Patch(file="y.conf", find="a", replace="{level}"),),
     )
-    rows = _rows([asks, defaulted])
+    unrendered = _m(
+        "mod-quiet",
+        prompts=(Prompt(key="level", question="Which level?", default="80"),),
+    )
+    rows = _rows([asks, defaulted, unrendered])
     assert mp.CHIP_ASKS_A_QUESTION in _labels(_row(rows, "mod-ah-bot"))
+    assert mp.CHIP_ASKS_A_QUESTION in _labels(_row(rows, "mod-defaulted"))
     assert mp.CHIP_ASKS_A_QUESTION not in _labels(_row(rows, "mod-quiet"))
 
     installed = _rows([asks], {"module": frozenset({"mod-ah-bot"})})

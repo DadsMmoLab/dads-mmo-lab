@@ -15,7 +15,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from yulon import platform
 from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
@@ -95,6 +95,33 @@ player actually uses (T90, third review).
 
 ABSURD_URL_CHARS = 2000
 """Past this, a link is refused outright rather than shown or copied."""
+
+
+PANEL_JOIN_MS = 5000
+"""How long the exit waits for each log panel's job after asking it to stop."""
+
+UPDATE_JOIN_MS = 8000
+"""How long the exit waits for the launch update check's thread."""
+
+UPDATE_CHECK_LABEL = "the launch update check"
+"""What the exit log calls the update check's thread: its hold and its join use this one string."""
+
+EXIT_JOIN_MS = 8000
+"""How long the exit waits for background jobs nobody else joined (`in_flight().wait_all`).
+
+A job still running after it is left running, and the process leaves through
+`_leave_with_jobs_still_running()` rather than Qt's teardown (T113).
+"""
+
+
+def _hard_exit(code: int) -> NoReturn:
+    """`os._exit`, behind a name a test can replace (T113).
+
+    `conftest.py` replaces it for every in-process test: reached for real, it
+    would end pytest itself. The one test that needs the real thing runs the
+    app in a child process, where no conftest applies.
+    """
+    os._exit(code)
 
 
 def _short(url: str) -> str:
@@ -433,11 +460,19 @@ def downloads_dir() -> Path:
 
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
-    from PySide6.QtCore import QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
-    from PySide6.QtGui import QDesktopServices, QGuiApplication
-    from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QPushButton, QWidget
+    from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
+    from PySide6.QtGui import QDesktopServices, QGuiApplication, QHoverEvent
+    from PySide6.QtWidgets import (
+        QMainWindow,
+        QMenu,
+        QMessageBox,
+        QPushButton,
+        QTabBar,
+        QToolButton,
+        QWidget,
+    )
 
-    from yulon import __version__
+    from yulon import __version__, forgetting
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
     from yulon.selfupdate.apply import (
@@ -459,12 +494,13 @@ def build_window() -> object:
         start_helper,
     )
     from yulon.state import KnownInstall, load_state
+    from yulon.ui.answers import said_yes
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.logs_view import LogsView
     from yulon.ui.tab_titles import retitle_controller_tabs
-    from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.theme import FORGET_TAB_BUTTON, apply_dadcraft_theme
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
@@ -505,6 +541,9 @@ def build_window() -> object:
 
         yulon_gamepad: GamepadSource
         yulon_keyboard: KeyboardSource
+        # The sidebar's right-click menu, built and not shown (T95): a test
+        # drives the builder, because `QMenu.exec` cannot be replaced.
+        yulon_tab_menu: Callable[[QPoint], QMenu | None]
 
         def resizeEvent(self, event: object) -> None:
             """Re-scale the theme's font sizes with the window width.
@@ -601,11 +640,11 @@ def build_window() -> object:
     tabs.setTabToolTip(1, "Yu'lon's own logs, and a file to send when something goes wrong")
     navigator.invalidate()
 
-    def _on_tab_bar_context_menu(pos: QPoint) -> None:
+    def _build_tab_menu(pos: QPoint) -> QMenu | None:
         tab_bar = tabs.tabBar()
         index = tab_bar.tabAt(pos)
         if index < 0:
-            return
+            return None
         menu = QMenu(tab_bar)
         if index == 0:
             act = menu.addAction("Catalog of Server Emulators")
@@ -614,7 +653,7 @@ def build_window() -> object:
             widget = tabs.widget(index)
             if not isinstance(widget, ControllerView):
                 # The Logs tab (T93): nothing to open or start from its handle.
-                return
+                return None
             cv = widget
             sd = cv.services.controller.server_dir
             open_dir_act = menu.addAction("Open Server Folder in File Manager")
@@ -630,7 +669,22 @@ def build_window() -> object:
             if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
                 stop_act = menu.addAction("Stop Server")
                 stop_act.triggered.connect(cv.stop_server)
-        menu.exec(tab_bar.mapToGlobal(pos))
+            # T95: the ×'s dialog, for anyone who reads the menu first.
+            # The same entry point and the same refusals.
+            menu.addSeparator()
+            remove_act = menu.addAction(forgetting.BUTTON_LABEL)
+            menu_key = (cv.entry.id, sd)
+            remove_act.triggered.connect(lambda _checked=False, k=menu_key: request_removal(*k))
+        return menu
+
+    def _on_tab_bar_context_menu(pos: QPoint) -> None:
+        # Built apart from being shown (T95): `QMenu.exec` cannot be replaced
+        # from Python, so the tests drive `_build_tab_menu` instead.
+        menu = _build_tab_menu(pos)
+        if menu is not None:
+            menu.exec(tabs.tabBar().mapToGlobal(pos))
+
+    window.yulon_tab_menu = _build_tab_menu
 
     tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     tabs.tabBar().customContextMenuRequested.connect(_on_tab_bar_context_menu)
@@ -667,6 +721,7 @@ def build_window() -> object:
         index = tabs.indexOf(view)
         if index != -1:
             tabs.removeTab(index)
+            forget_buttons.tabs_changed()
         # The tab tree changed; the navigator's cached focus chain is stale.
         navigator.invalidate()
         # `removeTab()` only unparents the page, it does not delete it. Without
@@ -680,8 +735,10 @@ def build_window() -> object:
 
         def forget() -> None:
             # Remembered before forgetting, and put back on a failed save
-            # (review, T34 round 2): `ControllerView.forget_install()` catches
-            # `OSError` and keeps the tab open, which promises the record is
+            # (review, T34 round 2): `finish_removal()` (T95; before it,
+            # `ControllerView.forget_install()`) catches `OSError` and keeps the
+            # tab open, and `purge.run()` catches it for an uninstall. Keeping
+            # the tab promises the record is
             # still there — a promise the live `AppState` broke the moment
             # `state.forget()` ran, before this ever tried to write anything.
             # Nothing else calls `remember()` between here and the raise, so a
@@ -757,6 +814,199 @@ def build_window() -> object:
             # title longer than it needs to be.
             retitle_controller_tabs(tabs, controllers.values())
         catalog_view.forget_installed(game, state.installed_dirs())
+
+    removal_pending: set[tuple[str, Path]] = set()
+    """Removals waiting on their stop (T95). A key is added right before
+    `stop_for_removal()` and taken out by the first answer to it."""
+
+    def request_removal(game: str, server_dir: object) -> None:
+        """Take one server off Yu'lon's list, deleting nothing (T95). THE entry point.
+
+        Three routes land here and nowhere else: the × on the server's sidebar
+        tab, "Remove from Yu'lon…" in that tab's right-click menu, and the
+        Server tab's button of the same name (`ControllerView.remove_requested`,
+        T34's "Forget this install…" renamed). One path is one refusal rule,
+        one dialog and one forget, so the routes cannot drift apart.
+
+        Refused, with the tab's own reason, while anything runs on it
+        (`forget_refusal()`). Dropping the tab is `drop_controller()`, and a
+        teardown during an import is the abort `busy_reason()` exists to
+        prevent. Asked once, default No, read through `said_yes` (T33).
+
+        Every server whose folder exists is stopped first on the tab's own job
+        runner, whatever the last poll said, and the rest continues in
+        `on_stopped_for_removal()`. A folder that is gone is never stopped:
+        without the folder, no project name can be proved (T34's rule).
+
+        If the window is closed during that stop, the record stays. The stop's
+        answer is queued into a loop that has already ended
+        (`_stop_background_threads()`), which is the same thing an interrupted
+        install does. Nothing half-forgotten is left behind.
+        """
+        key = (game, Path(str(server_dir)))
+        view = controllers.get(key)
+        if view is None or key in removal_pending:
+            return
+        refusal = view.forget_refusal()
+        if refusal is not None:
+            QMessageBox.information(window, forgetting.REFUSED_TITLE, refusal)
+            return
+        folder_gone = view.folder_is_gone()
+        facts = forgetting.Facts(
+            name=view.entry.name,
+            server_dir=key[1],
+            wsl_distro=view.services.controller.wsl_distro,
+            folder_gone=folder_gone,
+            running=view.last_seen_running(),
+        )
+        answer = QMessageBox.question(
+            window,
+            forgetting.TITLE,
+            forgetting.question(facts),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if not said_yes(answer):
+            return
+        if folder_gone:
+            finish_removal(key)
+            return
+        # Always, whatever the last poll said (Codex, final review, T95): its
+        # "stopped" stays on file until the next poll begins, and a server
+        # started outside Yu'lon in that gap would be forgotten while it ran.
+        # `stop_staged()` checks ownership and answers False when nothing ran.
+        removal_pending.add(key)
+        view.stop_for_removal()
+
+    def on_stopped_for_removal(game: str, server_dir: object, ok: bool, why: str) -> None:
+        """The stop a removal asked for has ended. Forget, or ask once more if it failed (T95).
+
+        The refusal is asked again before the forget, for the reason noted there.
+        """
+        key = (game, Path(str(server_dir)))
+        if key not in removal_pending:
+            return
+        removal_pending.discard(key)
+        view = controllers.get(key)
+        if view is None:
+            return
+        if not ok:
+            answer = QMessageBox.question(
+                window,
+                forgetting.STOP_FAILED_TITLE,
+                forgetting.stop_failed_question(view.entry.name, why),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if not said_yes(answer):
+                return
+        # Asked again: only the Server buttons were locked during the stop, so
+        # a Restore, a backup or a module job may have started in that gap, and
+        # dropping the tab now would cut it off (T95 review, round 1).
+        refusal = view.forget_refusal()
+        if refusal is not None:
+            QMessageBox.information(window, forgetting.REFUSED_TITLE, refusal)
+            return
+        finish_removal(key)
+
+    def finish_removal(key: tuple[str, Path]) -> None:
+        """Forget the record, then drop the tab: `_forget_live_record()` + `on_uninstalled()`.
+
+        These are the same two steps an uninstall ends in, called by the window
+        itself rather than through `services.uninstall.forget`, which exists
+        only on the two families with an Uninstall.
+
+        A failed write keeps the tab. `_forget_live_record()` has already put
+        the record back into the live state, and a tab dropped over a record
+        that is still in `state.json` would come back at the next launch.
+        """
+        game, folder = key
+        try:
+            _forget_live_record(game, folder)()
+        except OSError as exc:
+            logger.error(f"could not forget {game} at {folder}: {exc}")
+            QMessageBox.warning(
+                window, forgetting.SAVE_FAILED_TITLE, forgetting.save_failed(folder, exc)
+            )
+            return
+        logger.info(
+            f"{game} at {folder} removed from Yu'lon's list; "
+            "nothing on disk or in Docker was deleted"
+        )
+        on_uninstalled(game, folder)
+
+    # Where the × sits: the style's own close-button side (Fusion's
+    # `SH_TabBar_CloseButtonPosition`), which on this West rail is the TOP of the
+    # tab (measured offscreen 2026-09-23: the button's y equals the tab's).
+    FORGET_SIDE = QTabBar.ButtonPosition.RightSide
+
+    class _ForgetButtons(QObject):
+        """Shows a server tab's × on the tab under the mouse and on the current one (T95).
+
+        An event filter on the sidebar's `QTabBar`, which has `WA_Hover` on by
+        default. Moving onto the × still sends the bar `HoverMove`, and leaving
+        the bar sends `Leave`/`HoverLeave` (both measured), so the × never
+        blinks out under the pointer. A hidden tab button still reserves its
+        length, so showing it moves nothing.
+        """
+
+        def __init__(self, bar: QTabBar) -> None:
+            super().__init__(bar)
+            self._bar = bar
+            self._hovered = -1
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+            if isinstance(event, QHoverEvent) and event.type() != QEvent.Type.HoverLeave:
+                self._hovered = self._bar.tabAt(event.position().toPoint())
+            elif event.type() in (QEvent.Type.HoverLeave, QEvent.Type.Leave):
+                self._hovered = -1
+            else:
+                return False
+            self.sync()
+            return False
+
+        def attach(self, index: int, button: QToolButton) -> None:
+            self._bar.setTabButton(index, FORGET_SIDE, button)
+            self.sync()
+
+        @Slot()
+        def sync(self) -> None:
+            current = self._bar.currentIndex()
+            for index in range(self._bar.count()):
+                button = self._bar.tabButton(index, FORGET_SIDE)
+                if button is not None:
+                    button.setVisible(index in (current, self._hovered))
+
+        @Slot(int)
+        def current_changed(self, _index: int) -> None:
+            self.sync()
+
+        def tabs_changed(self) -> None:
+            """A tab went: its index no longer names what the pointer was over."""
+            self._hovered = -1
+            self.sync()
+
+    forget_buttons = _ForgetButtons(tabs.tabBar())
+    tabs.tabBar().installEventFilter(forget_buttons)
+    tabs.currentChanged.connect(forget_buttons.current_changed)
+
+    def _forget_button(key: tuple[str, Path], name: str) -> QToolButton:
+        """The × for one server tab. Parented to the bar, which deletes it with its tab.
+
+        `QTabBar.removeTab()` deletes a tab's buttons (measured offscreen, 2026-09-24).
+        """
+        button = QToolButton(tabs.tabBar())
+        button.setObjectName(FORGET_TAB_BUTTON)
+        button.setText("×")
+        button.setAutoRaise(True)
+        # Not a gamepad stop: a control that comes and goes with the mouse would
+        # be a destructive target in the D-pad chain, and a stale entry in the
+        # navigator's cache. The Server tab's button is the gamepad's route.
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setToolTip(f"{forgetting.BUTTON_LABEL} {name}")
+        button.setAccessibleName(forgetting.BUTTON_LABEL)
+        button.clicked.connect(lambda _checked=False, k=key: request_removal(*k))
+        return button
 
     def on_client_dir_changed(game: str, server_dir: object, client_dir: object) -> None:
         """This install's client folder was set, changed or cleared (T36): rebuild its tab.
@@ -859,6 +1109,9 @@ def build_window() -> object:
         view = ControllerView(entry, services)
         view.uninstalled.connect(on_uninstalled)
         view.client_dir_changed.connect(on_client_dir_changed)
+        # T95: the Server tab's "Remove from Yu'lon…", and the stop a removal waits for.
+        view.remove_requested.connect(request_removal)
+        view.stopped_for_removal.connect(on_stopped_for_removal)
         # Every failure this view reports also lands in the app log. Each one is
         # already shown on its own tab, but the log is what a user pastes into a
         # bug report, and until now none of them reached it (review, 2026-08-22).
@@ -870,6 +1123,9 @@ def build_window() -> object:
         panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
         tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
+        # T95: the ×, on a server page only. Catalog (and T93's Logs) never get
+        # one, because only this function attaches it and only to a ControllerView.
+        forget_buttons.attach(tabs.indexOf(view), _forget_button(key, entry.name))
         # A new page entered the tree; the navigator's focus chain is stale.
         navigator.invalidate()
         # The leaf folder alone was the title, and it is the one part of the
@@ -1564,7 +1820,7 @@ def build_window() -> object:
     # lazy-import comments (review, 2026-08-28).
     from yulon.ui.widgets.job import in_flight
 
-    in_flight().hold(update_thread, update_worker)
+    in_flight().hold(update_thread, update_worker, label=UPDATE_CHECK_LABEL)
     window.setProperty("update_thread", update_thread)
     window.setProperty("update_worker", update_worker)
     update_thread.start()
@@ -1756,6 +2012,9 @@ def main() -> int:
     platform.declare_gui_thread()
     window = build_window()
     assert isinstance(window, QMainWindow)
+    # What `main()` returns, kept outside the `try` for the forced exit below,
+    # which has to leave with the same answer the return would have given.
+    code = 0
     try:
         if os.environ.get("YULON_SMOKE_TEST"):
             # CI / packaging check: prove the frozen app can build its window, then leave.
@@ -1808,13 +2067,25 @@ def main() -> int:
         # After show(), so the app is visibly UP before it admits to anything:
         # the log file failing is not a reason to hold the window back.
         _warn_about_the_log_file(window)
-        return int(app.exec())
+        code = int(app.exec())
+        return code
     finally:
-        _stop_background_threads(window)
+        stuck = _stop_background_threads(window)
+        if stuck:
+            # A job is still running and nothing can stop it (T113). Returning
+            # from here hands its QThread to interpreter teardown, and Qt aborts
+            # there: exit 134, a crash report on Windows and macOS. The window is
+            # already closed and nothing is saved at close (state.json is written
+            # at each action), so leaving now loses nothing a return would keep.
+            failure = sys.exc_info()[1]
+            if failure is not None:
+                logger.error("the launcher ended on an exception", exc_info=failure)
+                code = 1
+            _leave_with_jobs_still_running(code, stuck)
 
 
-def _stop_background_threads(window: object) -> None:
-    """Stop every live worker before the interpreter tears Qt down.
+def _stop_background_threads(window: object) -> list[str]:
+    """Stop every live worker before the interpreter tears Qt down; name any still running.
 
     A `QThread` destroyed while running does not warn — it ABORTS the process
     (0xC0000409, verified): closing the window mid-install or while following
@@ -1837,6 +2108,21 @@ def _stop_background_threads(window: object) -> None:
     install: `_on_finished` is queued into this same blocked thread, so
     `run_finished` never fires, `CatalogView._on_run_finished()` never runs and
     nothing is written to `state.json` on this path.
+
+    The answer is every thread still running after its join, named; empty
+    when everything finished. A non-empty answer means a job's work is blocked
+    where `quit()` cannot reach it, and `main()` must not return into a
+    teardown with it still running (T113). EVERY join's result counts, not only
+    `wait_all`'s: today each panel's and the update check's thread is also held
+    by `in_flight()`, so its survivor would be named there too, but a thread
+    this function joins and nobody else holds must not be able to slip through
+    on that coincidence. A survivor both lists name is named once, by the
+    label its owner gave it (`LogPanel.job_label`, `UPDATE_CHECK_LABEL`).
+
+    The controllers' `shutdown()` joins are not collected here: their jobs run
+    in `ThreadedJobRunner`, whose every pair `in_flight()` holds, and their
+    panels are in `yulon_log_panels`. The gamepad's thread is not held by
+    `in_flight()` on this branch (T111 moves it there).
     """
     from PySide6.QtCore import QThread
 
@@ -1844,18 +2130,23 @@ def _stop_background_threads(window: object) -> None:
     # Read off the window as attributes: `build_window()`'s `_Window` records
     # why - a list put through `setProperty()` comes back as a copy frozen at
     # that call, and the tabs that matter here are the ones opened after it.
+    unjoined: list[str] = []
     for view in getattr(window, "yulon_controllers", []):
         view.shutdown()
     for panel in getattr(window, "yulon_log_panels", []):
         panel.stop()
-        panel.wait(5000)
+        if not panel.wait(PANEL_JOIN_MS):
+            unjoined.append(panel.job_label)
     thread = prop("update_thread")
     if isinstance(thread, QThread) and thread.isRunning():
         thread.quit()
-        thread.wait(8000)
+        if not thread.wait(UPDATE_JOIN_MS):
+            unjoined.append(UPDATE_CHECK_LABEL)
     # The gamepad poller and keyboard filter. The gamepad's 120 Hz QThread must
     # be stopped and joined BEFORE the window is torn down — a QThread destroyed
     # while running aborts the process, exactly like every other worker here.
+    # `stop()` only tells it to; the join is `wait_all()` below, which holds the
+    # pair since T111 (its own 500 ms wait lost to a slow SDL release).
     # Read as attributes (not `setProperty`) for the reason `_Window` documents.
     gamepad = getattr(window, "yulon_gamepad", None)
     if gamepad is not None:
@@ -1868,7 +2159,71 @@ def _stop_background_threads(window: object) -> None:
     # the join for a worker whose panel is already gone.
     from yulon.ui.widgets.job import in_flight
 
-    in_flight().wait_all(8000)
+    in_flight().wait_all(EXIT_JOIN_MS)
+    # Read AFTER the join rather than from its answer: a panel that missed its
+    # own join may have finished during `wait_all`'s, and is not stuck now.
+    held = in_flight().still_running()
+    return held + [name for name in unjoined if name not in held and _still_joined(window, name)]
+
+
+def _still_joined(window: object, name: str) -> bool:
+    """Whether the thread `_stop_background_threads()` named `name` is running now."""
+    from PySide6.QtCore import QThread
+
+    if name == UPDATE_CHECK_LABEL:
+        thread = getattr(window, "property", lambda _name: None)("update_thread")
+        return isinstance(thread, QThread) and thread.isRunning()
+    return any(
+        panel.running and panel.job_label == name
+        for panel in getattr(window, "yulon_log_panels", [])
+    )
+
+
+def _leave_with_jobs_still_running(code: int, stuck: list[str]) -> NoReturn:
+    """Name what is stuck, do what the skipped atexit hooks would have done, and leave (T113).
+
+    `os._exit` rather than a return, because a return reaches interpreter
+    teardown, which destroys the still-running QThread `job.InFlight` holds,
+    and Qt aborts on that ("QThread: Destroyed while thread is still running",
+    exit 134, measured 2026-09-25).
+
+    `os._exit` skips every atexit hook. Listed in the real app on 2026-09-25
+    by recording `atexit.register` before any import, there are four:
+
+    - `yulon.runner._close_abandoned_streams` - RUN here: it ends a `stream()`
+      child nobody closed, which would otherwise outlive the app with PPID 1.
+      It may also be what unblocks the stuck job, if that job was reading one.
+    - `logging.shutdown` - RUN here, after the above so its lines land: the
+      file handler's buffer is support's only record of this exit.
+    - `PySide6.QtCore.__moduleShutdown` - NOT run: it is the Qt teardown this
+      function exists to avoid.
+    - `pygame.base.quit` - NOT run: `SDL_Quit` from this thread while the
+      stuck thread may be inside an SDL poll is a second way to hang or crash,
+      and the OS releases the joystick handles when the process ends.
+
+    Nothing is connected to `aboutToQuit`, and it has fired inside `app.exec()`
+    before this runs anyway. Nothing is written at close: `state.json` is saved
+    at each action, and there is no settings or geometry save.
+    """
+    import logging
+
+    from yulon import runner
+
+    logger.error(
+        f"closing with {len(stuck)} background job(s) still running: "
+        f"{', '.join(stuck) or 'none named'}; leaving without Qt's teardown, "
+        "which would abort on them"
+    )
+    runner._close_abandoned_streams()
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        # `None` in the windowed build (`console=False`), where there is nothing to flush.
+        if stream is not None:
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+    _hard_exit(code)
 
 
 if __name__ == "__main__":

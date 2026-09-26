@@ -128,10 +128,11 @@ def test_a_choice_prompt_is_one_the_install_dialog_must_put_to_the_player() -> N
     being asked is the whole of what a choice is for.
 
     Mutation: make `must_ask()` return `prompt.default is None` and this fails.
+    Since T104 every question an install renders is asked, a choice included.
     """
     needed = apply_module.required_prompts(_hearthstone(), "install")
     assert [p.key for p in needed] == ["cooldown"]
-    assert [p.key for p in needed if apply_module.must_ask(p)] == ["cooldown"]
+    assert [p.key for p in needed if apply_module.must_ask(p, "install")] == ["cooldown"]
 
 
 @pytest.mark.parametrize("choice", ["1_Sec", "1_Min", "5_Min", "15_Min", "30_Min"])

@@ -45,6 +45,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import (
+    ComposeRepairRoute,
     LatestRoute,
     RewrittenHistory,
     read_state,
@@ -318,6 +319,41 @@ def update_to_latest_for_app(
         # and at most once a day reaches past its cache. No import gate: it asks
         # nothing of the databases.
         upstream_news=lambda: installer_for(entry).upstream_news(options),
+    )
+
+
+def repair_compose_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> ComposeRepairRoute | None:
+    """T106's "Repair server files…" for this install, or None when it has none.
+
+    Offered to the CMaNGOS family (TBC, Vanilla, Tortoise) and nothing else, read
+    off `install.native.family`. Those installs keep the `docker-compose.yml`
+    they were installed with: `rebuild_stages()` leaves generate-compose out on
+    purpose, and Update-to-latest rewrites a compose file only for a source whose
+    `dest` is the server dir (`app_written_paths()`), which is WotLK's alone. So
+    WotLK is not offered it -- its base file already follows the app on Update,
+    and its override is the Tuning tab's (T94/T101) -- and a family added later
+    is not offered it until somebody decides it should be.
+
+    None as well for a server inside a WSL distro, for `rebuild_for_app()`'s
+    reason: the engine's seams address this host, so the folder it would render
+    for is not the one the containers were made from.
+
+    The engine is built per call, for `rebuild_for_app()`'s reason.
+    """
+    if wsl_distro is not None:
+        return None
+    block = entry.install.native
+    if block is None or block.family != "cmangos":
+        return None
+    options = InstallOptions(server_dir=server_dir)
+    return ComposeRepairRoute(
+        check=lambda: installer_for_app(entry).base_compose_check(options),
+        repair=lambda: installer_for_app(entry).repair_base_compose(options),
     )
 
 

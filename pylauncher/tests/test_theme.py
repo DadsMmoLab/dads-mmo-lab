@@ -111,6 +111,20 @@ def test_interactive_controls_declare_a_touch_target_floor() -> None:
     assert MIN_FONT_PX >= 12
 
 
+def test_the_tab_x_is_exempt_by_id_and_the_floor_rule_is_untouched() -> None:
+    """T95: the × is the one tab-bar tool button below the floor.
+
+    Exempt by objectName, never by negation.
+    """
+    from yulon.ui.theme import FORGET_TAB_BUTTON, _build_qss, _touch
+
+    qss = _build_qss(1.0)
+    rule = qss.split(f"QTabBar QToolButton#{FORGET_TAB_BUTTON} {{")[1].split("}")[0]
+    assert "max-width: 18px" in rule and "max-height: 18px" in rule
+    floor = qss.split("QTabBar QToolButton {")[1].split("}")[0]
+    assert f"min-width: {_touch(30, 1.0)};" in floor, "the scroll arrows lost their floor"
+
+
 def test_the_button_base_state_draws_a_visible_hairline() -> None:
     # The base QPushButton rule must pair its panel fill with a hairline that is
     # visibly distinct from the fill — the near-black `#3C2D14` it once used on
@@ -194,6 +208,29 @@ def test_the_generated_sheet_contains_no_negation_selector() -> None:
         qss = _build_qss(scale_for_width(width))
         assert ":not(" not in qss
         assert "not(" not in qss
+
+
+LIVE_WIDGETS_A_RESTYLE_MAY_REPOLISH = 2000
+"""How many live widgets the app-wide restyles below may find. T109.
+
+`QApplication.setStyleSheet` and `setStyle` re-polish every live widget, so the
+two app-level tests here cost whatever earlier modules left alive. Measured on
+the full suite, 2026-09-24: 22,506 at this point before the fix (the parse test
+16 s on the laptop, 38 s on m910q), and 12,732 with only the per-test teardown
+(one module-scoped `main._Window` from `test_main.py` was never deleted). Run
+alone, this module starts at 0.
+"""
+
+
+def test_no_earlier_module_left_widgets_for_the_restyle_to_repolish(qapp: QApplication) -> None:
+    # Guards the two tests below from what OTHER modules do, and says so by
+    # name rather than as a slow run nobody reads: a leak shows up here first.
+    live = len(QApplication.allWidgets())
+    tops = {type(w).__name__ for w in QApplication.topLevelWidgets() if w.parentWidget() is None}
+    assert live <= LIVE_WIDGETS_A_RESTYLE_MAY_REPOLISH, (
+        f"{live} widgets are alive before an app-wide restyle; orphan windows: {sorted(tops)}. "
+        "Something outlived the test or module that made it (conftest.py tears these down)."
+    )
 
 
 def test_qt_actually_parses_the_generated_stylesheet(qapp: QApplication) -> None:

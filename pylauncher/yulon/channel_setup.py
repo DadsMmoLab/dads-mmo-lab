@@ -52,8 +52,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from yulon import commands, platform, soap
-from yulon.catalog import composegen
+from yulon import bot_population, commands, platform, soap
+from yulon.catalog import bot_count, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
 from yulon.log import get_logger
@@ -212,7 +212,7 @@ State = Idle | Pending | Verified | Refused | GaveUp
 # -- the enable press --------------------------------------------------------
 
 
-HOST_PORT_VAR = "DOCKER_SOAP_EXTERNAL_PORT"
+HOST_PORT_VAR = composegen.CHANNEL_PORT_VAR
 """The `.env` key the base compose reads for SOAP's whole host binding.
 
 Named in `docker-compose.yml` beside the mapping itself: the value carries the
@@ -220,11 +220,17 @@ address AND the port, because a literal `127.0.0.1:` prefix on the mapping would
 render `127.0.0.1:127.0.0.1:7878:7878` once this key is set.
 """
 
-RELEASED_HOST_PORT = "127.0.0.1:0"
-"""What a rolled-back channel claims: loopback, and whatever port is free."""
+RELEASED_HOST_PORT = composegen.CHANNEL_PORT_RELEASED
+"""What a rolled-back channel claims: loopback, and whatever port is free.
 
-BACKUP_SUFFIX = ".before-channel"
-"""The override as it was before the first press, kept beside it."""
+`composegen.channel_is_on()` reads it back: a released claim is a rollback (T101).
+"""
+
+BACKUP_SUFFIX = composegen.CHANNEL_BACKUP_SUFFIX
+"""The override as it was before the first press, kept beside it.
+
+Defined in `composegen`, which every writer of the override can import (T101).
+"""
 
 
 class EnableRefused(RuntimeError):
@@ -239,6 +245,56 @@ class Enabled:
     changed: bool
 
 
+def install_bind_label(server_dir: Path) -> str:
+    """The `:z` (or nothing) the install put on this folder's host binds, asked again now.
+
+    The install's own decision and its own inputs -- `platform.bind_label()` fed
+    `selinux_enforcing()` and `filesystem_type()`, as `stage_generate_compose()`
+    feeds it -- for a press whose installed override cannot say which label it
+    carries (`_label_on_disk()` comes first; T102). Both are looked up on the call, not
+    bound at import, so a test that patches `platform` reaches the route every
+    `InstallChannel` the app builds takes. The filesystem is asked only when
+    SELinux enforces, as `git.ContainerGit` asks it: off SELinux the answer
+    cannot matter and `stat` is a subprocess.
+    """
+    enforcing = platform.selinux_enforcing()
+    return platform.bind_label(
+        enforcing=enforcing,
+        fs_type=platform.filesystem_type(server_dir) if enforcing is True else None,
+    )
+
+
+def _label_on_disk(override: Path) -> str | None:
+    """The label the installed override's host binds carry, or None if it cannot say.
+
+    `":z"` when every `- ./` bind ends with it, `""` when none does. None when
+    there is no file, the file is not this engine's (no generated marker), or
+    it has no host bind at all -- the CMaNGOS overrides have none -- and the
+    caller then asks the host. Binds that disagree are no install's rendering,
+    so that is a refusal rather than a guess.
+    """
+    if not override.is_file() or not composegen.is_ours(override):
+        return None
+    binds = [
+        line.strip()
+        for line in override.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("- ./")
+    ]
+    if not binds:
+        return None
+    labelled = [line.endswith(":z") for line in binds]
+    if all(labelled):
+        return ":z"
+    if not any(labelled):
+        return ""
+    raise EnableRefused(
+        f"{override.name} has some host folders labelled for SELinux (`:z`) and some not, "
+        "which is not how Yu'lon writes it, so the command channel was not turned on and "
+        "nothing was written. Give every `- ./` line the same ending, or none, and press "
+        "this again."
+    )
+
+
 def enable(
     entry: CatalogEntry,
     server_dir: Path,
@@ -246,6 +302,7 @@ def enable(
     templates_root: Path,
     world_running: bool,
     db_password: str | None = None,
+    bind_label: str | None = None,
 ) -> Enabled:
     """Write this install's channel on, and only while the world is down.
 
@@ -263,6 +320,20 @@ def enable(
     Only the override is rewritten. The SOAP environment lives in that block
     rather than in the install's own so that Phase 7.1's byte-identical
     compose fixtures keep asserting what they assert.
+
+    It is rewritten WITH the install's bind label: `bind_label` if given,
+    else the label the installed override's binds already carry
+    (`_label_on_disk()`), else the host's answer through
+    `install_bind_label()`. The file comes before the probe because the probe
+    can be wrong at press time -- `getenforce` failing, or a host briefly
+    permissive -- and the file is what the install actually wrote, which is
+    also what the rollback recognises. Until T102 it was
+    rendered with none, and on an enforcing SELinux host the press turned the
+    install's `./modules:/azerothcore/modules:z` into a bind with no label --
+    measured on `yulon-fedora` (Fedora 44, 2026-09-24). The world still read
+    the folder while the install's relabel was on it, and crash-looped on
+    `Permission denied` once the folder lost that label; with the `:z` kept,
+    the daemon relabelled the same folder at the next Start and it came up.
     """
     operations = entry.operations
     if operations is None:
@@ -276,13 +347,19 @@ def enable(
             "starts, and writing it under a running world risks the world."
         )
 
+    target = server_dir / composegen.OVERRIDE_FILE
+    # Before anything is written, so a mixed file is refused with nothing touched.
+    if bind_label is None:
+        bind_label = _label_on_disk(target)
+    if bind_label is None:
+        bind_label = install_bind_label(server_dir)
+
     # The conf half first, and deliberately: a tree that reads no environment is
     # not switched on by the override at all, and the override's only job there
     # is publishing the port. Doing it first means a refusal -- a conf that is
     # not where the entry says -- happens before anything has been written.
     conf_changed = _write_the_conf(entry, server_dir)
 
-    target = server_dir / composegen.OVERRIDE_FILE
     before = target.read_text(encoding="utf-8") if target.exists() else ""
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     # Written once, by the FIRST press. A second press would otherwise back up
@@ -300,8 +377,11 @@ def enable(
         entry,
         server_dir,
         templates_root=templates_root,
-        world_env=_world_env(entry, operations.enable_env),
+        # The player's bot count, off the file this replaces (T117): the press
+        # rendered the catalog's 500 until then.
+        world_env=bot_count.world_env(entry, server_dir, _world_env(entry, operations.enable_env)),
         db_password=db_password,
+        bind_label=bind_label,
     )
     if plan.override == before:
         logger.info(f"{entry.id}'s command channel was already switched on in {target.name}")
@@ -463,7 +543,11 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
         )
         composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
         return True
-    target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    target.write_text(
+        _keep_the_bot_count(entry, now, backup.read_text(encoding="utf-8")),
+        encoding="utf-8",
+        newline="\n",
+    )
     # The `.env` before the unlink, and the unlink last. An interruption then
     # leaves the backup on disk with the override already restored, and running
     # this again is a no-op that finishes the job -- whereas deleting the only
@@ -478,6 +562,23 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
     _forget_the_conf_backup(entry, server_dir)
     logger.info(f"rolled {entry.id}'s command channel back and released its host port")
     return True
+
+
+def _keep_the_bot_count(entry: CatalogEntry, now: str, restored: str) -> str:
+    """The pre-press file to put back, carrying the bot count `now` holds (T117).
+
+    The backup is the override before the FIRST press, so it holds the count
+    from then: one changed on the Bots tab while the channel was on would go
+    back with the channel. Only the two values move; a backup without the two
+    lines, or a `now` without a usable pair, is put back as it was.
+    """
+    kept = bot_count.in_override_text(now, entry)
+    if not kept:
+        return restored
+    try:
+        return bot_population.patch_env(restored, entry, composegen.OVERRIDE_FILE, kept)
+    except bot_population.BotCountError:
+        return restored
 
 
 def _forget_the_conf_backup(entry: CatalogEntry, server_dir: Path) -> None:
@@ -994,20 +1095,51 @@ class InstallChannel:
         Hands `roll_back()` the text the press would write NOW, so a file that
         has been changed since is left alone rather than overwritten from a
         backup that may be arbitrarily old.
+
+        Compared against BOTH renderings, with the `:z` label and without it,
+        whatever the host says now (T102). Compared without one, an enforcing
+        host's channel-on override -- `:z` on its bind, as the press and the
+        install's renderer write it -- read as "edited since", so only the port
+        was released and the channel stuck on (measured on `yulon-fedora`,
+        2026-09-24). Compared only against the host's CURRENT label, the same
+        stick comes back the moment the host stops answering "enforcing"
+        (`setenforce 0`, or a probe that cannot tell): the file carries the
+        label the press wrote then, not the one the host would pick now. And
+        the unlabelled text is what the press wrote before T102, so it is what
+        an install upgraded from then has on disk, on any host.
+
+        Each candidate is still an exact match. The two differ only in the
+        `:z` token at the end of each host bind
+        (`test_the_two_recognised_texts_differ_only_in_the_label`), so a file a
+        person has edited in any other way matches neither and is left alone.
         """
         operations = self.entry.operations
         expected: str | None = None
         if operations is not None:
             try:
-                expected = composegen.render(
-                    self.entry,
-                    self.server_dir,
-                    templates_root=self.templates_root,
-                    world_env=_world_env(self.entry, operations.enable_env),
-                    db_password=self._db_password,
-                ).override
+                # Both renders carry the player's bot count off the file (T117):
+                # without it a count changed after Enable matches neither, and the
+                # rollback leaves the channel stuck on.
+                env = bot_count.world_env(
+                    self.entry, self.server_dir, _world_env(self.entry, operations.enable_env)
+                )
+                texts = [
+                    composegen.render(
+                        self.entry,
+                        self.server_dir,
+                        templates_root=self.templates_root,
+                        world_env=env,
+                        db_password=self._db_password,
+                        bind_label=each,
+                    ).override
+                    for each in (":z", "")
+                ]
             except Exception as exc:  # noqa: BLE001 - an unrenderable plan is not a reason to stop
                 logger.info(f"could not re-render {self.entry.id}'s override to compare: {exc}")
+            else:
+                target = self.server_dir / composegen.OVERRIDE_FILE
+                now = target.read_text(encoding="utf-8") if target.is_file() else None
+                expected = now if now in texts else texts[0]
         return roll_back(self.entry, self.server_dir, expected=expected)
 
     def enable(self, *, world_running: bool) -> Enabled:

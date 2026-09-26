@@ -472,6 +472,32 @@
           "title": "Kind",
           "type": "string"
         },
+        "max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "int/float only: the largest answer accepted, inclusive (T122). The mob multipliers declare 100: at 1e39 the FLOAT column overflows.",
+          "title": "Max"
+        },
+        "min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "int/float only: the smallest answer accepted, inclusive (T122). The mob multipliers declare 0.01: `X=X*{m}` at 0 -- or at 1e-50, which a FLOAT column rounds to 0 -- cannot be divided back by their Remove.",
+          "title": "Min"
+        },
         "question": {
           "minLength": 1,
           "title": "Question",
