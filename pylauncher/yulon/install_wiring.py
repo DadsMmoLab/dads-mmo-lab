@@ -28,7 +28,7 @@ import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-from yulon import docker, platform
+from yulon import docker, platform, wsl
 from yulon.catalog import upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
@@ -48,6 +48,8 @@ from yulon.catalog.native import (
     ComposeRepairRoute,
     LatestRoute,
     RewrittenHistory,
+    Seams,
+    SourceVersion,
     read_state,
     return_to_pin_confirmation,
     rewritten_line,
@@ -153,21 +155,75 @@ def installer_for_app(
     *,
     platform_id: Callable[[], str] = platform.detect,
     installers_root: Path = DEFAULT_INSTALLERS_ROOT,
+    wsl_distro: str | None = None,
 ) -> InstallEngine:
     """The engine the app drives for `entry`: `installer_for()` plus this game's import gate.
 
-    No `wsl_distro`: an install creates the server here, on whatever daemon
-    `docker` reaches from this process. Only an EXISTING install can live in a
-    distro the app has to name, and that is the Server tab's question.
+    `wsl_distro` is for an EXISTING install that lives inside a distro -- the
+    Server tab's Rebuild and Update to latest (T125) -- and builds the engine on
+    `Seams.in_wsl()`, whose every docker and git question goes to that distro's
+    Docker. An install never passes one: it creates the server on whatever
+    daemon this process reaches, and Yu'lon does not install into a distro
+    (`pyplan/wsl-resident-servers.md` §7).
     """
-    probe, reset = import_gate_for(entry)
+    probe, reset = import_gate_for(entry, wsl_distro=wsl_distro)
+    if wsl_distro is None:
+        return installer_for(
+            entry,
+            platform_id=platform_id,
+            installers_root=installers_root,
+            import_probe=probe,
+            reset_unfinished=reset,
+        )
     return installer_for(
         entry,
-        platform_id=platform_id,
         installers_root=installers_root,
         import_probe=probe,
         reset_unfinished=reset,
+        seams=Seams.in_wsl(wsl_distro),
     )
+
+
+def _refuse_unless_in_the_distro(server_dir: Path, wsl_distro: str) -> None:
+    """The folder must be a WSL folder IN `wsl_distro`; refused before anything is read or run.
+
+    `platform.wsl_linux_path_in()` keeps the distro the UNC path names and
+    compares it with the one the install is remembered under, so a stale name
+    cannot send a rebuild to the same Linux path in another distro (a clone of
+    it, say). The image names come from the install's own record
+    (`native.recorded_install_id()`), read only after this has passed.
+    """
+    try:
+        inside = platform.wsl_linux_path_in(server_dir, wsl_distro)
+    except platform.WslDistroMismatch as exc:
+        raise InstallerError(str(exc)) from exc
+    if inside is None:
+        raise InstallerError(
+            f"{server_dir} is not a folder inside the WSL distro {wsl_distro}, so there is no "
+            "server there to rebuild. Nothing was started."
+        )
+
+
+def _in_the_distro(server_dir: Path, wsl_distro: str | None) -> bool:
+    """`_refuse_unless_in_the_distro()` as a yes/no, for a READING, which must not raise."""
+    if wsl_distro is None:
+        return True
+    try:
+        _refuse_unless_in_the_distro(server_dir, wsl_distro)
+    except InstallerError as exc:
+        logger.warning(f"not reading {server_dir}: {exc}")
+        return False
+    return True
+
+
+def _distro_down(wsl_distro: str | None) -> bool:
+    """True when this install's distro is not running, so a READING must not touch it.
+
+    `wsl.is_running()` reads WSL's own listing, which starts nothing; asking the
+    folder (`\\\\wsl.localhost\\...`) or its Docker would boot the distro
+    (`pyplan/wsl-resident-servers.md` §2). A local install is never down here.
+    """
+    return wsl_distro is not None and not wsl.is_running(wsl_distro)
 
 
 RebuildSource = Callable[[threading.Event | None], Iterator[str]]
@@ -194,34 +250,21 @@ def rebuild_for_app(
     on the press also means a rebuild after a Docker reinstall gets a fresh
     engine rather than one bound at startup.
 
-    **A server living inside a WSL distro is refused, and that refusal is this
-    function's whole reason for existing.** `native.Seams` addresses the local
-    daemon: its own docstring records that a repair reaching a stage on an
-    adopted install "would hand these seams a container living on another
-    daemon, and the erasure would then send all of them to the wrong one
-    silently". A rebuild is exactly such a repair. Left to run it would compile
-    four images on the Windows-local daemon, then ask that daemon to recreate
-    containers it has never heard of — the loud half — and the quiet half is
-    worse: the folder is reachable from Windows as `\\\\wsl.localhost\\...`, so
-    the build would very probably SUCCEED, spend an hour, and leave the distro's
-    server running exactly the binary it was running before. That is the user's
-    original complaint, reproduced by the fix for it.
-
-    Refused here rather than in the engine because this is where the distro is
-    known. `installer_for_app()` takes none and says why: an install creates the
-    server on whatever daemon this process reaches.
+    **A server living inside a WSL distro is rebuilt THERE (T125).** Until
+    T125 this refused, and the refusal was right for the seams it had: they
+    addressed the local daemon, so a rebuild would have compiled on Windows'
+    own Docker and left the distro's server running the build it already had.
+    `installer_for_app(wsl_distro=)` now builds the engine on
+    `Seams.in_wsl()`, which addresses the distro's Docker for every docker and
+    git question. Its images are named after the install id the folder's
+    record carries (`native.recorded_install_id()`), after the folder is
+    checked to be in that distro at all (`_refuse_unless_in_the_distro()`).
     """
 
     def rebuild(cancel: threading.Event | None = None) -> Iterator[str]:
         if wsl_distro is not None:
-            raise InstallerError(
-                f"{entry.name} in {server_dir} was adopted from the WSL distro "
-                f"{wsl_distro}, and Yu'lon cannot rebuild a server that lives inside a "
-                f"distro: it would compile on Windows' own Docker and leave the server in "
-                f"{wsl_distro} running the build it already has. Nothing was started. "
-                f"Rebuild it from inside {wsl_distro}, where its Docker is."
-            )
-        engine = installer_for_app(entry)
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
+        engine = installer_for_app(entry, wsl_distro=wsl_distro)
         yield from engine.rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
 
     return rebuild
@@ -242,14 +285,12 @@ def update_to_latest_for_app(
       off the catalog rather than off an id, so an entry that gains the flag
       gains the control with no code change here. An entry with no `native`
       block at all has no engine either and is the same answer.
-    * **The server lives inside a WSL distro.** `rebuild_for_app()` holds this
-      argument in full and this press ENDS in that very rebuild, so the refusal
-      it would raise is the one that applies. It is made here as an ABSENT
-      control rather than there as a refusal, for the reason the app already
-      applies to a missing pty: a control that is visibly unavailable beats one
-      that is pressed and then explains itself. `rebuild_for_app()` keeps its own
-      refusal as well, because the Rebuild button is reached without passing
-      through here.
+
+    A server inside a WSL distro is offered it too since T125, on the engine
+    `installer_for_app(wsl_distro=)` builds there. Its two READINGS --
+    `source_version` on every tab reload, `upstream_news` once a day -- answer
+    "nothing to say" while the distro is stopped rather than read the folder
+    or ask its git, either of which would boot it (wsl-resident-servers §2).
 
     The engine is built inside each callable, per press, for `rebuild_for_app()`'s
     reason — except `source_version`, which is called on every tab reload and
@@ -257,8 +298,6 @@ def update_to_latest_for_app(
     what says so, and `catalog.native._parse_state()` documents it as "the caller is not
     asking about stages", which this one is not.
     """
-    if wsl_distro is not None:
-        return None
     block = entry.install.native
     if block is None or not block.update_to_latest:
         return None
@@ -296,9 +335,14 @@ def update_to_latest_for_app(
         acknowledged.update(said)
         return update_to_latest_confirmation(entry, server_dir, repo, tuple(said.values()))
 
+    def engine() -> InstallEngine:
+        if wsl_distro is not None:
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
+        return installer_for_app(entry, wsl_distro=wsl_distro)
+
     def press(cancel: threading.Event | None = None) -> Iterator[str]:
         try:
-            yield from installer_for_app(entry).update_to_latest(
+            yield from engine().update_to_latest(
                 options, cancel=cancel, rewritten_ok=frozenset(acknowledged)
             )
         except RewrittenHistory as exc:
@@ -307,18 +351,32 @@ def update_to_latest_for_app(
         met.clear()
 
     def to_pin(cancel: threading.Event | None = None) -> Iterator[str]:
-        yield from installer_for_app(entry).update_to_latest(options, to_pin=True, cancel=cancel)
+        yield from engine().update_to_latest(options, to_pin=True, cancel=cancel)
+
+    def version() -> SourceVersion:
+        if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
+            return SourceVersion(line="", past_the_pin=False)
+        return source_version(read_state(server_dir, valid=()))
+
+    def news() -> upstream.UpstreamNews:
+        # T124. Built per call like the presses: it is asked off the GUI thread
+        # and at most once a day reaches past its cache. No import gate: it asks
+        # nothing of the databases.
+        if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
+            # "Could not ask", which the tab shows as nothing: no cache read (a
+            # read of the folder boots the distro as well) and no git.
+            return upstream.UpstreamNews(checked_unix=upstream.now_unix(), sources=())
+        if wsl_distro is None:
+            return installer_for(entry).upstream_news(options)
+        return installer_for(entry, seams=Seams.in_wsl(wsl_distro)).upstream_news(options)
 
     return LatestRoute(
         confirmation=confirmation,
         press=press,
         pin_confirmation=lambda: return_to_pin_confirmation(entry, server_dir, repo),
         to_pin=to_pin,
-        source_version=lambda: source_version(read_state(server_dir, valid=())),
-        # T124. Built per call like the presses: it is asked off the GUI thread
-        # and at most once a day reaches past its cache. No import gate: it asks
-        # nothing of the databases.
-        upstream_news=lambda: installer_for(entry).upstream_news(options),
+        source_version=version,
+        upstream_news=news,
     )
 
 

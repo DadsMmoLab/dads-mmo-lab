@@ -340,9 +340,9 @@ def test_the_tortoise_tab_update_press_runs_the_adoption_after_the_update(
         def update_to_latest(self, _options: object, **_kw: object) -> Iterator[str]:
             yield "engine: updated"
 
-    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry: Engine())
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry, **_kw: Engine())
     heads = iter([OLD, NEW])
-    monkeypatch.setattr(botpool, "head_sha", lambda _dest: next(heads))
+    monkeypatch.setattr(botpool, "head_sha", lambda _dest, **_kw: next(heads))
     typed: list[str] = []
     answers = iter([PREVIEW_PENDING, CONFIRMED])
 
