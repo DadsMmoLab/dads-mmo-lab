@@ -203,39 +203,54 @@ def test_a_folder_nothing_claims_is_refused_too_and_says_something_different(
     assert rec.order == ["claim"], rec.order
 
 
-def test_a_refusal_over_a_folder_that_is_entirely_gone_points_at_forget(tmp_path: Path) -> None:
+def test_a_refusal_over_a_folder_that_is_entirely_gone_points_at_the_server_tab_button(
+    tmp_path: Path,
+) -> None:
     """T34: a deleted folder's UNCLAIMED refusal names the one way out it cannot offer itself.
 
     `server_dir` never being written also answers UNCLAIMED - reading a claim
     file out of a folder that is not there is the same `not is_file()` as
     reading one out of a folder that never had one - so this clause is the only
-    thing telling the two apart in the sentence a user reads.
+    thing telling the two apart in the sentence a user reads. T95 renamed the
+    button it points at; the old name pointed at a button that no longer exists.
     """
     gone = tmp_path / "gone-for-good"
     message = purge.refusal_for(Ownership.UNCLAIMED, gone)
     assert "Nothing here says Yu'lon installed it" in message
-    assert 'If the folder is gone for good, "Forget this install…" drops this tab.' in message
-
-
-def test_an_unclaimed_folder_that_still_exists_gets_no_such_clause(tmp_path: Path) -> None:
-    """The offer to forget is wrong advice for a folder that is still there to look at."""
-    message = purge.refusal_for(Ownership.UNCLAIMED, tmp_path)
+    assert (
+        'If the folder is gone for good, "Remove from Yu\'lon…" on the Server tab drops this tab.'
+        in message
+    )
     assert "Forget this install" not in message
 
 
-def test_a_wsl_installs_missing_host_path_gets_no_forget_clause_either(tmp_path: Path) -> None:
-    """The button the clause points at is itself hidden for a distro install (review, T34 round 2).
+def test_an_unclaimed_folder_that_still_exists_is_pointed_at_the_x(tmp_path: Path) -> None:
+    """T95: forgetting a folder that is still there is allowed now (decision 1), so say how."""
+    message = purge.refusal_for(Ownership.UNCLAIMED, tmp_path)
+    assert "gone for good" not in message
+    assert "press the × on its tab in the sidebar" in message
+    assert "deleting nothing" in message or "without deleting anything" in message
+    assert '"Remove from Yu\'lon…" on the Server tab' in message, "the gamepad way (decision 4)"
+    assert "Forget this install" not in message
 
+
+def test_a_wsl_installs_missing_host_path_gets_the_x_and_not_the_gone_clause(
+    tmp_path: Path,
+) -> None:
+    """No "gone for good" for a distro path, and the × still works on a WSL tab (T95).
+
+    `folder_is_gone()` cannot answer for a distro path (review, T34 round 2):
     `server_dir` for a WSL install is a path on THIS process, not inside the
     distro, so it reading as gone proves nothing about the distro's own
-    filesystem — the same reason the Forget button stays hidden there.
+    filesystem.
     """
     gone = tmp_path / "gone-for-good"
     message = purge.refusal_for(Ownership.UNCLAIMED, gone, wsl_distro="dml-arch")
     assert "Nothing here says Yu'lon installed it" in message
-    assert "Forget this install" not in message
+    assert "gone for good" not in message
+    assert "press the × on its tab in the sidebar" in message
     # Mutation: ignore `wsl_distro` in `refusal_for()`'s clause condition and
-    # this fails — the clause would appear for a folder path this process
+    # this fails — the gone clause would appear for a folder path this process
     # cannot prove is gone from the distro's point of view.
 
 

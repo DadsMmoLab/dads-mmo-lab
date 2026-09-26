@@ -960,6 +960,78 @@ def is_ours(path: Path) -> bool:
         return False
 
 
+_NAME_LINE = re.compile(r"^name:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+
+
+def project_of(text: str) -> str | None:
+    """The compose project a base file names on its top-level `name:` line, or None (T106).
+
+    The project is where the install's character volume lives (`project_name()`), so
+    this is the one line a repair must never change: a folder moved after install
+    renders a different name, and writing it would start the server under a new
+    project with an empty database volume beside the old one.
+    """
+    found = _NAME_LINE.search(text)
+    return found.group(1) if found else None
+
+
+class MixedBindLabels(ComposeGenError):
+    """A compose file whose host binds disagree about `:z`: no install renders that (T106)."""
+
+
+def bind_label_of(text: str) -> str | None:
+    """The SELinux label a rendered compose file's host binds carry: `":z"`, `""` or None (T106).
+
+    `":z"` when every `- ./` bind ends with it, `""` when none does, None when the
+    text has no host bind at all. This is the install's own decision, read back
+    off what it wrote, and a re-render must use it rather than ask the host again:
+    asked while `getenforce` fails or the host is briefly permissive, the host
+    says "no label", and a file written from that answer strips `:z` from an
+    install whose containers then cannot read `./etc` once enforcing is back.
+
+    The same rule as T102's `channel_setup._label_on_disk()` (branch
+    `fix/t102-channel-selinux`, not merged when this was written), over text
+    rather than a path; the two are meant to be folded into one.
+
+    Raises:
+        MixedBindLabels: some binds carry `:z` and some do not.
+    """
+    binds = [line.strip() for line in text.splitlines() if line.strip().startswith("- ./")]
+    if not binds:
+        return None
+    labelled = [line.endswith(":z") for line in binds]
+    if all(labelled):
+        return ":z"
+    if not any(labelled):
+        return ""
+    raise MixedBindLabels(
+        "some of its host folders are labelled for SELinux (`:z`) and some are not, which is "
+        "not how Yu'lon writes it"
+    )
+
+
+def _meaningful_lines(text: str) -> list[str]:
+    return [
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def same_compose(a: str, b: str) -> bool:
+    """Do two compose texts say the same thing, whole-line comments and blank lines aside? (T106)
+
+    The templates carry long comments that get reworded (T98's own review
+    corrected two), and a reworded comment is no reason to ask a player to
+    recreate a running server. Only whole-line comments are set aside: a trailing
+    `# …` after a value is compared as written, which errs towards offering.
+    A `#` line inside a block scalar is script text, not a YAML comment; the one
+    such block the templates carry (T98's shell wrapper) has none, and a comment
+    in a shell script would change nothing the script does either.
+    """
+    return _meaningful_lines(a) == _meaningful_lines(b)
+
+
 def write_plan(
     plan: ComposePlan, server_dir: Path, *, replaceable: Sequence[str] = ()
 ) -> tuple[Path, ...]:

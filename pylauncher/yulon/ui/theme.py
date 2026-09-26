@@ -106,6 +106,14 @@ across platforms: missing faces fall through to the platform UI font, which is
 exactly the modern look the brief asks for."""
 
 
+FORGET_TAB_BUTTON = "tab-forget"
+"""objectName of the × a server's sidebar tab carries (T95, `main.py`).
+
+One spelling for the widget and its QSS rule. That rule is the one exemption
+from the tab-bar tool-button touch floor.
+"""
+
+
 # --- Handheld geometry floors -------------------------------------------------
 # The launcher ships on the Steam Deck (1280x800, 7"), driven by controller and
 # touch. Every interactive widget gets a floor of at least `TOUCH_TARGET_PX` in
@@ -292,6 +300,27 @@ QTabBar QToolButton:focus {{
 QTabBar QToolButton:disabled {{
     border-color: {COLOR_BRASS_DEEP};
     color: #5A5A5A;
+}}
+
+/* T95: the × on a server's sidebar tab. Exempt, by objectName, from the scroll
+   arrows' touch floor just above. At that floor it was a 37px square on a 64px
+   rail and made every server tab 41px longer (measured offscreen 2026-09-23);
+   at 18px it costs 22. The tab under it stays the touch target, and the tab's
+   right-click entry and the Server tab's button open the same dialog. An ID
+   selector outranks the type rule above, whatever the order. */
+QTabBar QToolButton#{FORGET_TAB_BUTTON} {{
+    background-color: transparent;
+    border: none;
+    color: {COLOR_TEXT_MUTED};
+    padding: 0px;
+    min-width: 16px;
+    min-height: 16px;
+    max-width: 18px;
+    max-height: 18px;
+}}
+
+QTabBar QToolButton#{FORGET_TAB_BUTTON}:hover {{
+    color: {COLOR_DANGER};
 }}
 
 /* --- Buttons: flat sheets with a hairline, amber on interaction --- */

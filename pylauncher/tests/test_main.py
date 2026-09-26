@@ -1626,11 +1626,11 @@ def test_the_tabs_uninstaller_forgets_the_windows_own_live_state(
 def test_a_failing_save_restores_the_forgotten_record_in_the_live_state(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`ControllerView.forget_install()` catches `OSError` and keeps the tab open — a
-    promise about the record that the live `AppState` broke the moment
-    `state.forget()` ran, before the write that never landed (review, T34
-    round 2). Object identity, not a fresh load: the state this asserts on is
-    the same one every other tab still writes into.
+    """`main.finish_removal()` (T95; `ControllerView.forget_install()` until then)
+    catches `OSError` and keeps the tab open — a promise about the record that
+    the live `AppState` broke the moment `state.forget()` ran, before the write
+    that never landed (review, T34 round 2). Object identity, not a fresh load:
+    the state this asserts on is the same one every other tab still writes into.
     """
     server_dir = tmp_path / "forget-restore-me"
     seen_states: list[Any] = []
@@ -1652,6 +1652,498 @@ def test_a_failing_save_restores_the_forgotten_record_in_the_live_state(
     # Mutation: drop the `state.remember(install)` restore in
     # `main._forget_live_record()`'s `except OSError` and this fails — the
     # live state stays forgotten even though nothing was ever written.
+
+
+# --------------------------------------------- T95: removing a server from Yu'lon
+#
+# One path for the ×, the tab's right-click entry and the Server tab's button:
+# `request_removal()` refuses while busy, asks once, stops a running server
+# first, forgets through `_forget_live_record()` and drops the tab through
+# `on_uninstalled()`. Driven through the widgets a user presses.
+
+
+def _answer(monkeypatch: pytest.MonkeyPatch, *replies: bool) -> list[tuple[str, str, object]]:
+    """Answer each `QMessageBox.question` in turn, as the plain int the static call gives (T33)."""
+    from PySide6.QtWidgets import QMessageBox
+
+    asked: list[tuple[str, str, object]] = []
+    queue = list(replies)
+
+    def question(
+        _parent: object, title: str, text: str, _buttons: object = None, default: object = None
+    ) -> int:
+        asked.append((title, text, default))
+        yes = queue.pop(0) if queue else False
+        return int(QMessageBox.StandardButton.Yes if yes else QMessageBox.StandardButton.No)
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    return asked
+
+
+def _told(monkeypatch: pytest.MonkeyPatch, kind: str) -> list[str]:
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, kind, lambda *a, **k: told.append(a[2]))
+    return told
+
+
+def _removable_tab(
+    window: Any, monkeypatch: pytest.MonkeyPatch, server_dir: Path, game: str = "wow-tbc"
+) -> tuple[Any, list[int]]:
+    """A tab over a real folder, its jobs run inline, and its Stop recorded rather than run."""
+    from yulon.ui import controller_view as controller_view_module
+    from yulon.ui.widgets.job import run_inline
+
+    # Read at view construction (`ControllerView.__init__`), so it must be set before the emit.
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
+    server_dir.mkdir(parents=True, exist_ok=True)
+    (server_dir / "keep-me.txt").write_text("the player's own file\n", encoding="utf-8")
+    _catalog_view(window).installed.emit(game, server_dir, None)
+    view = _tab_for(window, server_dir)
+    stops: list[int] = []
+
+    def stop() -> bool:
+        stops.append(1)
+        return True
+
+    view.services.controller.stop = stop
+
+    def no_docker() -> Any:
+        # The failed-stop path re-polls, as `_stop_failed()` does; the real
+        # status would shell out to docker (`conftest.py`'s guard).
+        raise RuntimeError("Docker is not asked in a unit test")
+
+    view.services.controller.status = no_docker
+    return view, stops
+
+
+def _remembered(window: Any, game: str, server_dir: Path) -> bool:
+    """The window's LIVE state: `saved_states[-1]` is the one `AppState` every tab writes into."""
+    return window.saved_states[-1].find(game, server_dir) is not None
+
+
+def test_the_server_tab_button_on_a_tbc_tab_asks_stops_forgets_and_keeps_every_file(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TBC has no Uninstall seam, so `services.uninstall.forget` never existed on it.
+
+    The window's own `_forget_live_record()` is what forgets. The tab was never
+    polled, so whether it runs is unknown, and unknown is stopped first.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-tbc"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+    assert view.services.uninstall is None
+    tabs = window.property("tabs")
+    # What the Catalog's own install does before it emits `installed`; the
+    # emit above is the window's half only.
+    _catalog_view(window)._remember_installed("wow-tbc", server_dir)
+    assert str(server_dir) in _catalog_view(window).button_for("wow-tbc").toolTip()
+    saves_before = len(window.saved_states)
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1
+    title, text, default = asked[0]
+    assert title == forgetting.TITLE
+    assert "Nothing is deleted" in text and "stopped first" in text
+    assert default == QMessageBox.StandardButton.No, "the dialog must default to No"
+    assert stops == [1], "a server that may be running was forgotten without a stop"
+    assert tabs.indexOf(view) == -1
+    assert view not in window.yulon_controllers
+    assert not _remembered(window, "wow-tbc", server_dir)
+    assert (server_dir / "keep-me.txt").is_file(), "removing from Yu'lon deleted a file"
+    assert len(window.saved_states) > saves_before, "the forget was never written to state.json"
+    tile = _catalog_view(window).button_for("wow-tbc")
+    assert str(server_dir) not in tile.toolTip(), "the Catalog still names the removed server"
+    survivors = window.saved_states[-1].installed_dirs()
+    assert "wow-tbc" not in survivors, "the fixture remembers another TBC install"
+    assert tile.text() == "Install" and tile.isEnabled(), "the tile was not handed back"
+
+
+def test_answering_no_keeps_the_tab_the_record_and_the_server(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _answer(monkeypatch, False)
+    server_dir = tmp_path / "t95-no"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1
+    assert stops == []
+    assert window.property("tabs").indexOf(view) != -1
+    assert _remembered(window, "wow-tbc", server_dir)
+    # Mutation: compare the answer with `is StandardButton.Yes` in `request_removal()`
+    # and the Yes test above fails: the fake returns a plain int (T33).
+
+
+def test_a_server_the_last_poll_saw_stopped_is_still_stopped_before_it_is_forgotten(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex, final review (T95): a poll's "stopped" is trusted until the next poll begins.
+
+    A server started outside Yu'lon after that poll and before the press was
+    forgotten while it ran, with nothing left managing it. The stop now runs
+    for every server whose folder exists, whatever the last poll said; the
+    poll only chooses the dialog's words. `stop_staged()` is the ownership-
+    checking stop, and it answers False when nothing was running.
+    """
+    from yulon.controller import InstallStatus
+
+    asked = _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-started-behind-our-back"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+    view.services.controller.status = lambda: InstallStatus(db=False, auth=False, world=False)
+    view.refresh_status()
+    assert view.last_seen_running() is False
+    remembered_at_the_stop: list[bool] = []
+
+    def stop_what_was_started_outside() -> bool:
+        stops.append(1)
+        remembered_at_the_stop.append(_remembered(window, "wow-tbc", server_dir))
+        return True  # something was running, and is down now
+
+    view.services.controller.stop = stop_what_was_started_outside
+
+    view.forget_install_button.click()
+
+    assert "If it is running, it is stopped first" in asked[0][1]
+    assert stops == [1], "a server the last poll saw stopped was forgotten without a stop"
+    assert remembered_at_the_stop == [True], "it was forgotten before the stop"
+    assert window.property("tabs").indexOf(view) == -1
+    assert not _remembered(window, "wow-tbc", server_dir)
+
+
+def test_a_stop_that_finds_nothing_running_goes_on_to_forget(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-nothing-to-stop"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+
+    def nothing_running() -> bool:
+        stops.append(1)
+        return False
+
+    view.services.controller.stop = nothing_running
+
+    view.forget_install_button.click()
+
+    assert stops == [1]
+    assert window.property("tabs").indexOf(view) == -1
+    assert not _remembered(window, "wow-tbc", server_dir)
+
+
+def test_a_server_the_last_poll_saw_running_is_told_it_is_running(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.controller import InstallStatus
+
+    asked = _answer(monkeypatch, False)
+    view, _ = _removable_tab(window, monkeypatch, tmp_path / "t95-running")
+    view.services.controller.status = lambda: InstallStatus(db=True, auth=True, world=True)
+    view.refresh_status()
+
+    view.forget_install_button.click()
+
+    assert "It is running, so it is stopped first" in asked[0][1]
+
+
+def test_a_busy_tab_refuses_with_its_own_reason_and_asks_nothing(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _answer(monkeypatch, True)
+    told = _told(monkeypatch, "information")
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-busy")
+    monkeypatch.setattr(
+        type(view), "busy_reason", lambda _self: "The database import is still running."
+    )
+
+    view.forget_install_button.click()
+
+    assert told == ["The database import is still running."]
+    assert asked == [] and stops == []
+    assert window.property("tabs").indexOf(view) != -1
+
+
+def test_a_failed_stop_asks_again_and_no_keeps_everything(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from yulon import docker, forgetting
+
+    asked = _answer(monkeypatch, True, False)
+    server_dir = tmp_path / "t95-stop-fails"
+    view, _ = _removable_tab(window, monkeypatch, server_dir)
+
+    def refuse() -> bool:
+        raise docker.DockerCommandError("Docker would not say which project owns tbc-mangosd")
+
+    view.services.controller.stop = refuse
+
+    view.forget_install_button.click()
+
+    assert [title for title, _, _ in asked] == [forgetting.TITLE, forgetting.STOP_FAILED_TITLE]
+    assert "Docker would not say" in asked[1][1]
+    assert asked[1][2] == QMessageBox.StandardButton.No
+    assert window.property("tabs").indexOf(view) != -1
+    assert _remembered(window, "wow-tbc", server_dir)
+    assert "Docker would not say" in view.problem_label.text()
+
+
+def test_a_failed_stop_overridden_by_a_second_yes_forgets_anyway(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import docker
+
+    _answer(monkeypatch, True, True)
+    server_dir = tmp_path / "t95-stop-fails-yes"
+    view, _ = _removable_tab(window, monkeypatch, server_dir)
+
+    def refuse() -> bool:
+        raise docker.DockerCommandError("cannot stop")
+
+    view.services.controller.stop = refuse
+
+    view.forget_install_button.click()
+
+    assert window.property("tabs").indexOf(view) == -1
+    assert not _remembered(window, "wow-tbc", server_dir)
+
+
+def test_a_job_started_during_the_stop_refuses_the_forget_after_it(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the Server buttons are locked while the removal's stop runs; a Restore is not.
+
+    So the refusal is asked again when the stop answers, and a restore
+    started in that gap keeps the tab, the record and the job's own thread.
+    """
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    told = _told(monkeypatch, "information")
+    server_dir = tmp_path / "t95-restore-in-the-gap"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+
+    def stop_while_a_restore_starts() -> bool:
+        stops.append(1)
+        view._restore_running = True  # pressed on the Maintenance tab mid-stop
+        return True
+
+    view.services.controller.stop = stop_while_a_restore_starts
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1 and stops == [1]
+    assert told == [forgetting.RESTORE_RUNNING]
+    assert window.property("tabs").indexOf(view) != -1
+    assert _remembered(window, "wow-tbc", server_dir)
+    view._restore_running = False
+
+
+def test_a_record_that_cannot_be_written_keeps_the_tab_and_the_live_record(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T34's OSError test, moved to the one path that now forgets."""
+    _answer(monkeypatch, True)
+    told = _told(monkeypatch, "warning")
+    server_dir = tmp_path / "t95-unwritable"
+    view, _ = _removable_tab(window, monkeypatch, server_dir)
+
+    def _refuse(app_state: Any, path: Any = None) -> None:
+        raise PermissionError(13, "Access is denied", "state.json")
+
+    monkeypatch.setattr(state, "save_state", _refuse)
+
+    view.forget_install_button.click()
+
+    assert told and "Access is denied" in told[0]
+    assert window.property("tabs").indexOf(view) != -1, "the tab went over a record still on disk"
+    assert _remembered(window, "wow-tbc", server_dir), "the failed forget was not undone"
+
+
+def test_a_gone_folder_is_forgotten_without_a_stop_and_with_t34s_words(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-gone"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+    shutil.rmtree(server_dir)
+
+    view.forget_install_button.click()
+
+    assert "no longer exists" in asked[0][1] and "NOT touched" in asked[0][1]
+    assert stops == [], "a folder that is gone was stopped by a project-name guess (T34's rule)"
+    assert window.property("tabs").indexOf(view) == -1
+
+
+def _hover(bar: Any, index: int) -> None:
+    """A real `QHoverEvent`, sent the way Qt sends one.
+
+    Measured offscreen, an unshown window included.
+    """
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QHoverEvent
+    from PySide6.QtWidgets import QApplication
+
+    centre = QPointF(bar.tabRect(index).center())
+    QApplication.sendEvent(bar, QHoverEvent(QEvent.Type.HoverMove, centre, centre, QPointF(-1, -1)))
+
+
+def _leave(bar: Any) -> None:
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.sendEvent(bar, QEvent(QEvent.Type.Leave))
+
+
+def _x_of(window: Any, view: Any) -> Any:
+    from PySide6.QtWidgets import QTabBar
+
+    tabs = window.property("tabs")
+    return tabs.tabBar().tabButton(tabs.indexOf(view), QTabBar.ButtonPosition.RightSide)
+
+
+def test_only_server_tabs_carry_an_x(window: Any, tmp_path: Any) -> None:
+    """Decided by page type, not index: Catalog is 0 and T93 puts Logs at 1."""
+    from PySide6.QtWidgets import QTabBar
+
+    from yulon.ui.controller_view import ControllerView
+    from yulon.ui.theme import FORGET_TAB_BUTTON
+
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t95-has-x", None)
+    tabs = window.property("tabs")
+    bar = tabs.tabBar()
+    for index in range(tabs.count()):
+        page = tabs.widget(index)
+        right = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+        left = bar.tabButton(index, QTabBar.ButtonPosition.LeftSide)
+        assert left is None
+        if isinstance(page, ControllerView):
+            assert right is not None and right.objectName() == FORGET_TAB_BUTTON
+        else:
+            assert right is None, f"{tabs.tabText(index)!r} has an ×"
+
+
+def test_the_x_shows_on_the_hovered_tab_and_the_current_one_and_nowhere_else(
+    window: Any, tmp_path: Any
+) -> None:
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", tmp_path / "t95-first", None)
+    catalog.installed.emit("wow-wotlk", tmp_path / "t95-second", None)
+    first, second = _tab_for(window, tmp_path / "t95-first"), _tab_for(
+        window, tmp_path / "t95-second"
+    )
+    tabs = window.property("tabs")
+    bar = tabs.tabBar()
+    x_first, x_second = _x_of(window, first), _x_of(window, second)
+    assert tabs.currentWidget() is second
+
+    assert x_first.isHidden() and not x_second.isHidden(), "only the current tab's × at rest"
+    _hover(bar, tabs.indexOf(first))
+    assert not x_first.isHidden() and not x_second.isHidden(), "hover shows it, current keeps it"
+    _leave(bar)
+    assert x_first.isHidden() and not x_second.isHidden()
+    tabs.setCurrentWidget(first)
+    assert not x_first.isHidden() and x_second.isHidden(), "the × follows the current tab"
+    shown = [
+        index
+        for index in range(tabs.count())
+        if (x := _x_of(window, tabs.widget(index))) is not None and not x.isHidden()
+    ]
+    assert shown == [tabs.indexOf(first)], "an × is showing on a tab nobody is on or over"
+
+
+def test_the_x_is_not_a_gamepad_stop_and_is_exempt_from_the_touch_floor(
+    window: Any, tmp_path: Any
+) -> None:
+    from PySide6.QtCore import Qt
+
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t95-size", None)
+    x = _x_of(window, _tab_for(window, tmp_path / "t95-size"))
+    x.ensurePolished()
+    assert x.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert x.maximumWidth() <= 18 and x.maximumHeight() <= 18, x.maximumSize()
+
+
+def test_pressing_the_x_is_the_same_removal(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-x-press")
+
+    _x_of(window, view).click()
+
+    assert [title for title, _, _ in asked] == [forgetting.TITLE]
+    assert stops == [1]
+    assert window.property("tabs").indexOf(view) == -1
+
+
+def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Driven through the menu's builder, the way `test_controller_view.py`'s `_row_menu()` is.
+
+    `QMenu.exec` cannot be replaced from Python (a Shiboken slot: the patch is
+    accepted and ignored), and a popup driven from inside its own loop is
+    unbounded if anything runs that loop first. So the right-click's menu is
+    built by `window.yulon_tab_menu(pos)` and shown by a two-line caller, and
+    the entry is triggered here, with no popup open, as Qt triggers one after
+    the menu has closed.
+    """
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, False)
+    view, _ = _removable_tab(window, monkeypatch, tmp_path / "t95-menu")
+    tabs = window.property("tabs")
+    bar = tabs.tabBar()
+
+    menu = window.yulon_tab_menu(bar.tabRect(tabs.indexOf(view)).center())
+    entries = {action.text(): action for action in menu.actions()}
+    assert "Copy Server Path" in entries, "not this tab's menu"
+    assert forgetting.BUTTON_LABEL in entries
+    entries[forgetting.BUTTON_LABEL].trigger()
+    assert [title for title, _, _ in asked] == [forgetting.TITLE], "not the same dialog"
+    assert tabs.indexOf(view) != -1, "answered No, yet the tab went"
+
+    catalog = window.yulon_tab_menu(bar.tabRect(0).center())
+    assert catalog.actions(), "not the Catalog's menu"
+    assert forgetting.BUTTON_LABEL not in [
+        a.text() for a in catalog.actions()
+    ], "the Catalog's menu offers a removal"
+
+
+def test_the_tab_menu_answered_yes_removes_the_server(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-menu-yes")
+    tabs = window.property("tabs")
+    menu = window.yulon_tab_menu(tabs.tabBar().tabRect(tabs.indexOf(view)).center())
+
+    next(a for a in menu.actions() if a.text() == forgetting.BUTTON_LABEL).trigger()
+
+    assert [title for title, _, _ in asked] == [forgetting.TITLE]
+    assert stops == [1]
+    assert tabs.indexOf(view) == -1
+
+
+def test_a_right_click_off_every_tab_builds_no_menu(window: Any) -> None:
+    from PySide6.QtCore import QPoint
+
+    assert window.yulon_tab_menu(QPoint(-50, -50)) is None
 
 
 # ------------------------------------------------ T36: the client-folder seam
@@ -3162,3 +3654,298 @@ def test_the_windows_flags_are_the_ones_the_gate_settled() -> None:
     without = windows_creation_flags(fake, breakaway=False)
     assert without == 0x08000000 | 0x00000200
     assert not without & fake.CREATE_BREAKAWAY_FROM_JOB
+
+
+# ------------------------------------------- closing while a background job is stuck (T113)
+
+# A child process for `_ENTRY_POINT`'s reason, and a second one: the thing
+# under test is what happens AFTER `main()` - interpreter teardown, where Qt
+# aborts on a QThread destroyed while running - and no in-process test can
+# reach past its own interpreter's end. The window is the REAL one; only the
+# GitHub update check is stubbed (it would ask the network and write
+# `update.json`), and the docker-group re-exec, which would replace the child.
+_CLOSE_WITH_A_JOB = """\
+import os, sys, threading, time
+
+sys.argv = ["yulon"]
+from yulon import log, update
+
+kind = os.environ["YULON_TEST_JOB"]
+never = threading.Event()
+
+
+def an_update_check_that_never_returns(*_a, **_k) -> None:
+    never.wait()
+
+
+update.check_with_cache = (
+    an_update_check_that_never_returns if kind == "stuck-update" else (lambda *a, **k: None)
+)
+
+from PySide6.QtCore import QObject, QTimer, Slot
+
+import main
+from yulon.ui.widgets.job import threaded_job_runner
+
+main._regain_docker_group = lambda: None
+
+
+def a_job_that_never_returns() -> None:
+    never.wait()
+
+
+def a_job_that_returns() -> None:
+    return None
+
+
+def a_log_source_that_never_ends():
+    never.wait()
+    yield "never reached"
+
+
+class _Ignore(QObject):
+    @Slot(object)
+    def outcome(self, _outcome: object) -> None:
+        pass
+
+
+real_build_window = main.build_window
+
+
+def build_window():
+    window = real_build_window()
+    ignore = _Ignore(window)
+    runner = threaded_job_runner(window)
+    work = a_job_that_never_returns if kind == "stuck" else a_job_that_returns
+
+    def start_then_close() -> None:
+        if kind == "stuck-panel":
+            # The first panel is the catalog's install log, and `LogPanel.run`
+            # is the real entry: the same call an install makes.
+            window.yulon_log_panels[0].run(a_log_source_that_never_ends, title="following")
+        elif kind != "stuck-update":
+            runner(work, ignore.outcome, ignore.outcome)
+        print(f"T113 log {log.file_path()}", flush=True)
+        print(f"T113 closing at {time.time()}", flush=True)
+        window.close()
+
+    QTimer.singleShot(0, start_then_close)
+    return window
+
+
+main.build_window = build_window
+code = main.main()
+print(f"T113 main returned {code}", flush=True)
+raise SystemExit(code)
+"""
+
+EXIT_MARGIN_SECONDS = 10.0
+"""What the stuck close may take beyond `main.EXIT_JOIN_MS`, the join it has to sit out.
+
+The rest of the exit is ending abandoned `stream()` children (none here),
+flushing the log and `os._exit`. Measured on the laptop 2026-09-25 before the
+fix: 8.3 s from `window.close()` to the abort, i.e. the join plus 0.3 s. Ten
+seconds is headroom for a loaded box, not an expectation.
+"""
+
+
+def _close_the_real_window_with(job: str, tmp_path: Path) -> tuple[Any, float, float, str]:
+    """Run `_CLOSE_WITH_A_JOB`; answer (process, closed at, ended at, the log file's text)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    scratch_temp = tmp_path / "temp"
+    scratch_temp.mkdir()
+    env = dict(os.environ)
+    env.update(
+        {
+            "YULON_TEST_JOB": job,
+            "HOME": str(home),  # macOS: config_dir() is under HOME and nothing else
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(scratch_temp),
+            "TEMP": str(scratch_temp),
+            "TMP": str(scratch_temp),
+        }
+    )
+    for name in ("YULON_SMOKE_TEST", "YULON_PROVISION"):
+        env.pop(name, None)
+    pylauncher = Path(main.__file__).parent
+    env["PYTHONPATH"] = str(pylauncher)
+
+    done = subprocess.run(
+        [sys.executable, "-c", _CLOSE_WITH_A_JOB],
+        cwd=pylauncher,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    ended = time.time()
+    said = done.stdout.splitlines()
+    closing = [line for line in said if line.startswith("T113 closing at ")]
+    logged = [line for line in said if line.startswith("T113 log ")]
+    assert closing and logged, f"the window never closed:\n{done.stdout}\n{done.stderr}"
+    closed_at = float(closing[0].removeprefix("T113 closing at "))
+    log_file = Path(logged[0].removeprefix("T113 log "))
+    return done, closed_at, ended, log_file.read_text(encoding="utf-8")
+
+
+def test_closing_while_a_job_is_stuck_exits_cleanly_and_names_the_job(tmp_path: Path) -> None:
+    """T113: a job blocked forever must not turn a close into a crash report.
+
+    Before the fix, measured on the laptop 2026-09-25: `main()` returned 0,
+    and then interpreter teardown destroyed the QThread `InFlight` still held
+    and Qt aborted - "QThread: Destroyed while thread '' is still running",
+    exit 134, a core dump on Linux and a crash report on Windows and macOS.
+
+    The log is read from the FILE, not stderr, because the forced exit skips
+    `logging.shutdown()`'s atexit hook and a line still in a buffer is a line
+    support never sees. "main returned" must be absent: the process left
+    through `main._hard_exit`, not by returning into an interpreter teardown
+    that would abort on the running thread.
+    """
+    done, closed_at, ended, log_text = _close_the_real_window_with("stuck", tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert done.returncode == 0, report
+    assert "T113 main returned" not in done.stdout, report
+    assert ended - closed_at <= main.EXIT_JOIN_MS / 1000 + EXIT_MARGIN_SECONDS, report
+    assert "a_job_that_never_returns" in log_text, f"the log does not name the job:\n{log_text}"
+
+
+@pytest.mark.parametrize(
+    ("job", "named"),
+    [
+        ("stuck-panel", 'log panel "following"'),
+        ("stuck-update", "the launch update check"),
+    ],
+)
+def test_a_stuck_log_panel_or_update_check_reaches_the_forced_exit_by_name(
+    job: str, named: str, tmp_path: Path
+) -> None:
+    """The two threads `_stop_background_threads()` joins itself, stuck (T113, Codex pass).
+
+    A log panel following a source that never yields, and a launch update
+    check that never returns. Each must end at the forced exit with the code
+    `main()` would have returned (0), and the log must name it by what it IS -
+    the panel's job, the update check - not by a worker class every panel
+    shares. Measured on 3a6c9933, before the joins were collected: both
+    already exited 0, because `in_flight()` holds these threads too and its
+    `wait_all` caught them, but the log said `_StreamWorker` and
+    `_UpdateWorker`.
+    """
+    done, closed_at, ended, log_text = _close_the_real_window_with(job, tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert done.returncode == 0, report
+    assert "T113 main returned" not in done.stdout, report
+    closing = [line for line in log_text.splitlines() if "still running:" in line]
+    assert closing and named in closing[0], f"the log does not name {named}:\n{log_text}"
+    assert closing[0].count(named) == 1, f"named twice:\n{closing[0]}"
+    bound = (main.PANEL_JOIN_MS + main.UPDATE_JOIN_MS + main.EXIT_JOIN_MS) / 1000
+    assert ended - closed_at <= bound + EXIT_MARGIN_SECONDS, report
+
+
+def test_closing_with_every_job_finished_returns_from_main_as_before(tmp_path: Path) -> None:
+    """The normal close is untouched: `main()` returns, and nothing is called stuck."""
+    done, closed_at, ended, log_text = _close_the_real_window_with("finishes", tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert done.returncode == 0, report
+    assert "T113 main returned 0" in done.stdout, report
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert "still running" not in log_text, log_text
+    assert ended - closed_at < main.EXIT_JOIN_MS / 1000, report
+
+
+def test_the_forced_exit_ends_streams_and_flushes_the_log_before_it_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order `os._exit` makes the app responsible for, since no atexit hook runs.
+
+    `runner._close_abandoned_streams` first, so a `docker logs -f` child is not
+    left behind with PPID 1 (and so its own log lines are written); then the
+    log handlers are flushed and closed; then the exit, with the code `main()`
+    was going to return. PySide's `__moduleShutdown` and `pygame.quit` are the
+    two atexit hooks deliberately NOT run - see `_leave_with_jobs_still_running`.
+    """
+    import logging
+
+    from yulon import runner
+
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "_close_abandoned_streams", lambda: calls.append("streams"))
+    monkeypatch.setattr(logging, "shutdown", lambda: calls.append("log"))
+    monkeypatch.setattr(main, "_hard_exit", lambda code: calls.append(f"exit {code}"))
+
+    main._leave_with_jobs_still_running(3, ["the launch update check"])
+
+    assert calls == ["streams", "log", "exit 3"]
+
+
+_REAL_HARD_EXIT = main._hard_exit
+"""`main._hard_exit` as this module found it at import, before any fixture ran.
+
+Collection imports test modules before the first test's fixtures, so this is
+the real seam - the function that calls `os._exit` - and never conftest's stub.
+"""
+
+
+def test_no_test_can_reach_the_real_os_exit_in_process() -> None:
+    """`conftest.py` swaps the seam out for every test; a forced exit would end pytest.
+
+    Compared with the function captured at import, not with `os._exit`: the
+    seam is a function that CALLS `os._exit`, so `is not os._exit` held with
+    or without the guard. The identity check comes first so that, with the
+    fixture removed, this fails on the assert instead of calling the real one.
+    """
+    assert main._hard_exit is not _REAL_HARD_EXIT, "conftest's _no_forced_exit is not applied"
+    with pytest.raises(AssertionError, match="was reached in-process"):
+        main._hard_exit(0)
+
+
+def test_a_join_that_fails_counts_even_when_nothing_else_holds_the_thread(qapp: object) -> None:
+    """Every join `_stop_background_threads()` makes counts, not only `wait_all`'s (T113).
+
+    Today each panel's thread is also held by `in_flight()`, which is why the
+    child-process tests above would pass on `wait_all` alone. This is the case
+    that coincidence hides: a panel whose join failed and whose thread nobody
+    else holds must still be named, or `main()` returns into the Qt abort.
+    """
+    from types import SimpleNamespace
+
+    class _StuckPanel:
+        job_label = 'log panel "a thread nobody else holds"'
+        running = True
+
+        def stop(self) -> None:
+            pass
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return False
+
+    window = SimpleNamespace(yulon_log_panels=[_StuckPanel()], property=lambda _name: None)
+
+    assert main._stop_background_threads(window) == [_StuckPanel.job_label]
+
+
+def test_a_panel_that_finished_during_the_last_join_is_not_called_stuck(qapp: object) -> None:
+    """A panel that missed its own join but is done by the end is no reason to force the exit."""
+    from types import SimpleNamespace
+
+    class _LatePanel:
+        job_label = 'log panel "late but done"'
+        running = False
+
+        def stop(self) -> None:
+            pass
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return False
+
+    window = SimpleNamespace(yulon_log_panels=[_LatePanel()], property=lambda _name: None)
+
+    assert main._stop_background_threads(window) == []
