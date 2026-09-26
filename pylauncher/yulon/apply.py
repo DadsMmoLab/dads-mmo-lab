@@ -1688,13 +1688,14 @@ def check_answer(prompt: Prompt, value: str) -> str:
     if not text:
         return "this cannot be left empty"
     if prompt.kind == "int":
-        return "" if _INT.fullmatch(text) else "this must be a whole number"
+        return prompt.range_problem(text) if _INT.fullmatch(text) else "this must be a whole number"
     if prompt.kind == "float":
         try:
             float(text)
         except ValueError:
             return "this must be a number"
-        return ""
+        # T122: the question's own range, finite; see `Prompt.range_problem()`.
+        return prompt.range_problem(text)
     if prompt.kind == "bool":
         return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
     if prompt.kind == "choice":
