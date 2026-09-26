@@ -88,6 +88,7 @@ from yulon.apply import (
     DockerSql,
     PendingSql,
     must_ask,
+    reapplies_on_top,
     required_prompts,
 )
 from yulon.catalog import composegen, native, preflight
@@ -8398,9 +8399,27 @@ class ControllerView(QWidget):
             return
         if action == "install" and self._stopped_for_the_client(f"install {manifest.id}", manifest):
             return
+        relative = reapplies_on_top(manifest)
+        if action in ("install", "update") and relative:
+            # T115, before any question (T55's order): a mob multiplier applied
+            # with values nobody can read cannot be run again safely, and no
+            # answer in the dialog would change that. The same sentence the
+            # applier raises. One small JSON read, as `_module_values()` does,
+            # and only for the four relative mods.
+            refusal = applier.reapply_refusal(manifest)
+            if refusal is not None:
+                self._module_pending = None
+                self.module_report.setPlainText(f"{action} {manifest.id}: {refusal}")
+                return
         # An update re-runs the INSTALL-time steps -- it is the install over
-        # content that has moved -- so it answers the install's prompts.
-        again = action == "update" or (row is not None and row.data.installed)
+        # content that has moved -- so it answers the install's prompts. A mob
+        # multiplier leaves no folder, so its row never reads installed; its
+        # applied record is what says a second Install is a re-run (T115).
+        again = (
+            action == "update"
+            or (row is not None and row.data.installed)
+            or (relative and applier.applied_record(manifest)[0] is not None)
+        )
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action], again=again)
         if not go_ahead:
             self._module_pending = None
@@ -8459,7 +8478,13 @@ class ControllerView(QWidget):
         # already does here, and the dialog that needs it opens on this thread.
         applier = self.services.applier
         remembered = applier.remembered_answers(manifest) if applier is not None else {}
-        asked = tuple(p for p in needed if must_ask(p, action, remembered))
+        # A Remove of a mob multiplier divides by what the database was
+        # multiplied by, which is the APPLIED record (T115); the answers T104
+        # keeps after a Remove only pre-fill the boxes.
+        known = remembered
+        if action == "remove" and applier is not None and reapplies_on_top(manifest):
+            known = applier.applied_record(manifest)[0] or {}
+        asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
         answers = self._prompt_asker(

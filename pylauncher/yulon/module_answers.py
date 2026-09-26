@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +97,12 @@ def _load_for_write(path: Path) -> tuple[dict[str, Any] | None, str]:
             parsed = json.load(fh)
     except (OSError, ValueError) as exc:
         return None, f"{path.name} is there but could not be read ({exc}); it was left as it is"
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("modules", {}), dict):
+    if (
+        not isinstance(parsed, dict)
+        or not isinstance(parsed.get("modules", {}), dict)
+        or not isinstance(parsed.get("applied", {}), dict)
+        or not isinstance(parsed.get("pending", {}), dict)
+    ):
         return None, f"{path.name} is not in a shape this version knows; it was left as it is"
     return parsed, ""
 
@@ -121,18 +126,148 @@ def record_answers(server_dir: Path, manifest: Manifest, answers: Mapping[str, s
     the next Update shows defaults -- worth a line in the report, not an
     exception over a successful install.
     """
+
+    def change(everything: dict[str, Any]) -> None:
+        modules = dict(everything.get("modules", {}))
+        before = modules.get(_key(manifest))
+        merged = dict(before) if isinstance(before, dict) else {}
+        merged.update({str(k): str(v) for k, v in answers.items()})
+        modules[_key(manifest)] = merged
+        everything["modules"] = modules
+
+    return _write_record(server_dir, change, f"the answers for {_key(manifest)}")
+
+
+def read_applied(server_dir: Path, manifest: Manifest) -> dict[str, str] | None:
+    """The values Yu'lon last put into the database for `manifest`, raw, or `None` (T115).
+
+    Kept apart from the answers on purpose. The answers are what the player
+    said last, and T104 keeps them after a Remove so a re-install is pre-filled;
+    so they cannot also say whether a RELATIVE install (`HealthModifier*{hp}`)
+    is in the database now. This entry can: an install of such a module writes
+    it and its Remove deletes it.
+
+    `None` for no entry, and also for no usable file. An entry that is there but
+    is not an object of strings reads as `{}` -- present and unusable -- so the
+    caller can tell "never applied" from "applied with values nobody can read".
+    """
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no usable applied record in {server_dir}: {exc}")
+        return None
+    applied = parsed.get("applied") if isinstance(parsed, dict) else None
+    if not isinstance(applied, dict) or _key(manifest) not in applied:
+        return None
+    entry = applied[_key(manifest)]
+    if not isinstance(entry, dict):
+        return {}
+    return {k: v for k, v in entry.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def record_applied(server_dir: Path, manifest: Manifest, values: Mapping[str, str] | None) -> str:
+    """Record `values` as what the database now holds for `manifest`; `None` deletes it (T115).
+
+    Called once the SQL has COMMITTED, so it also drops this module's `pending`
+    mark (`record_pending()`). `""` if written (or if there was nothing to
+    change), else why not. The same careful write as `record_answers()`: every
+    other entry and field is kept.
+    """
+    if values is None and read_applied(server_dir, manifest) is None:
+        if not is_pending(server_dir, manifest):
+            return ""
+
+    def change(everything: dict[str, Any]) -> None:
+        applied = everything.get("applied", {})
+        applied = dict(applied) if isinstance(applied, dict) else {}
+        if values is None:
+            applied.pop(_key(manifest), None)
+        else:
+            applied[_key(manifest)] = {str(k): str(v) for k, v in values.items()}
+        everything["applied"] = applied
+        _drop_pending(everything, manifest)
+
+    return _write_record(server_dir, change, f"what was applied for {_key(manifest)}")
+
+
+def is_pending(server_dir: Path, manifest: Manifest) -> bool:
+    """Whether a press marked `manifest`'s relative SQL as being sent and never finished (T115).
+
+    A mark left behind means the app stopped while the statement was in flight:
+    it may have committed or not, so the applied record cannot be trusted.
+    `Applier.applied_record()` reads that as unusable -- a re-run is refused and
+    Remove asks -- rather than as either answer. Unreadable file: `False`, as
+    `read_applied()` answers `None` for it.
+    """
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    pending = parsed.get("pending") if isinstance(parsed, dict) else None
+    return isinstance(pending, dict) and _key(manifest) in pending
+
+
+def record_pending(server_dir: Path, manifest: Manifest, values: Mapping[str, str] | None) -> str:
+    """Mark `manifest`'s relative SQL as about to be sent, towards `values` (`None`: a Remove).
+
+    Written immediately before the statement -- after the running-world guards
+    and the database start, which can wait up to 180 s (cold review, T115 fix
+    wave) -- and replaced by `record_applied()` once it has committed. The
+    applied record itself is not touched here. A failure PROVEN to be before
+    the server (`apply.SqlNotSent`) needs only `clear_pending()`; any other
+    failure leaves the mark, since the COMMIT may have landed. `""` if written,
+    else why not; the caller refuses the press on that, having sent nothing.
+    """
+
+    def change(everything: dict[str, Any]) -> None:
+        pending = everything.get("pending", {})
+        pending = dict(pending) if isinstance(pending, dict) else {}
+        target = None if values is None else {str(k): str(v) for k, v in values.items()}
+        pending[_key(manifest)] = {"to": target}
+        everything["pending"] = pending
+
+    return _write_record(server_dir, change, f"the SQL about to run for {_key(manifest)}")
+
+
+def clear_pending(server_dir: Path, manifest: Manifest) -> str:
+    """Drop the `pending` mark when nothing reached the server (`apply.SqlNotSent`)."""
+    if not is_pending(server_dir, manifest):
+        return ""
+    return _write_record(
+        server_dir,
+        lambda everything: _drop_pending(everything, manifest),
+        f"the SQL mark for {_key(manifest)}",
+    )
+
+
+def _drop_pending(everything: dict[str, Any], manifest: Manifest) -> None:
+    pending = everything.get("pending")
+    if isinstance(pending, dict) and _key(manifest) in pending:
+        pending = dict(pending)
+        pending.pop(_key(manifest))
+        everything["pending"] = pending
+
+
+def _write_record(server_dir: Path, change: Callable[[dict[str, Any]], None], what: str) -> str:
+    """Load the whole record, apply `change` to it, and write it back atomically.
+
+    Through a uniquely named temp file in the same folder (`mkstemp`) and
+    `os.replace`, as `module_source._write_atomically()` does: a rename across
+    filesystems would be a copy, and a fixed temp name is one two writers could
+    share. A file that is there and cannot be used is left alone
+    (`_load_for_write()`), and a NEWER `schema_version` is written back as read.
+    """
     path = server_dir / ANSWERS_FILE
     everything, problem = _load_for_write(path)
     if everything is None:
-        logger.warning(f"did not remember the answers for {_key(manifest)}: {problem}")
+        logger.warning(f"did not record {what}: {problem}")
         return problem
-    modules = dict(everything.get("modules", {}))
-    before = modules.get(_key(manifest))
-    merged = dict(before) if isinstance(before, dict) else {}
-    merged.update({str(k): str(v) for k, v in answers.items()})
-    modules[_key(manifest)] = merged
     payload = dict(everything)
-    payload["modules"] = modules
+    change(payload)
     payload.setdefault("schema_version", SCHEMA_VERSION)
     tmp: Path | None = None
     try:
@@ -144,6 +279,6 @@ def record_answers(server_dir: Path, manifest: Manifest, answers: Mapping[str, s
     except OSError as exc:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
-        logger.warning(f"could not remember the answers for {_key(manifest)} in {path}: {exc}")
+        logger.warning(f"could not record {what} in {path}: {exc}")
         return str(exc)
     return ""
