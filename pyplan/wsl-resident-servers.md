@@ -316,6 +316,66 @@ already handle, which is what keeps the change to a seam rather than a rewrite.
 
 ---
 
+## 6a. Rebuild and update inside a distro (T125)
+
+"Rebuild the server…" and "Update the server to latest…" run for a server that
+lives inside a distro, on that distro's Docker. Until T125 both were withheld
+(Update hidden, Rebuild refusing by name), because the install engine's
+`native.Seams` addressed only the local daemon: a rebuild would have compiled on
+Windows' own Docker and left the distro's server on its old build.
+
+**Who it serves.** A server that Yu'lon built on Linux INSIDE the distro and the
+Windows app then adopted with "Find in WSL…". A DML-built server has no
+`.yulon-install.json` and no Yu'lon compose files, and keeps the engine's own
+refusal ("rebuild that one the way it was built"). Installing into a distro is
+still out of scope (§7).
+
+**How.**
+
+* `installer_for_app(entry, wsl_distro=)` builds the engine on
+  `native.Seams.in_wsl(distro)`: every seam whose default can name a daemon is
+  that function with the distro bound; `docker_ready` is
+  `docker.daemon_ready(wsl_distro=)` (`docker info` through the prefix, never
+  the local CLI); `platform_id` is "linux", because Linux Yu'lon made the
+  install and the recipe and compose files it re-renders must be the ones it
+  rendered then; SELinux is answered off (the WSL kernel runs none). Seams only
+  an INSTALL asks (provisioning, preflight, extraction, conf, the import check)
+  refuse rather than default to the local daemon.
+* Git runs through `git.ContainerGit(wsl_distro=)`. Only `_argv()` differs: the
+  distro's docker prefix, the bind mount in the distro's own spelling (Docker
+  Desktop refuses a `\\wsl.localhost\...` bind), and `--user` = the checkout's
+  owner (`stat -c %u:%g` inside the distro; refused rather than run as root when
+  unknown). Every git subcommand is the same argv, so the pin logic
+  (`CloneSpec.rev`, T126's releases, "Return to the tested pin") is unchanged.
+* **Two ids, and neither replaces the other.** The Windows-side id --
+  `composegen.install_id()` of the `\\wsl.localhost\<distro>\...` spelling,
+  lowercased -- keys the command-channel credential, its GM account name,
+  dbsecret, altbot memory and the run records, and is left exactly as it was:
+  re-hashing it would orphan every WSL install adopted before (and merge two
+  distros holding the same Linux path). The distro's images and compose project
+  are named after the id Linux Yu'lon RECORDED in `.yulon-install.json`: the WSL
+  engine's `Seams.install_id` is `native.recorded_install_id()`, which reads it
+  and refuses a missing or malformed one, and every `composegen.image_tag() /
+  project_name() / built_image_refs() / render()` the engine calls takes it as
+  `install_id=`. Measured on the fixture: recorded `2f1c23d4`, Windows-side
+  `27a96c15`.
+* **The distro is part of the path.** `platform.wsl_location()` parses the
+  distro and the Linux path together, and `wsl_linux_path_in(path, distro)` --
+  the one conversion `docker._docker()`, `run_attached()`, `compose_run_stdin()`
+  and `ContainerGit` use -- refuses a folder whose UNC path names another distro
+  than the one the install is remembered in (compared case-insensitively),
+  before anything is read or run. The wiring checks it first of all.
+* **§2 for the two readings.** `LatestRoute.source_version` (every tab reload)
+  and `upstream_news` (T124, once a day) answer "nothing to say" while
+  `wsl.is_running()` says the distro is down: no read of the folder (a UNC read
+  boots it, T133) and no git. The presses may start it; the user asked.
+* The backup offered before an update is the existing one, which already passes
+  `MYSQL_PWD` through `WSLENV` (§4).
+* Tests: `tests/test_wsl_update_route.py` -- a Seams completeness test derived
+  from `inspect.signature`, and both presses driven end to end with every argv
+  recorded at the `runner` level, asserted to start `wsl -d <distro>` (it found
+  a host `stat -f` the compose render asked through the `fs_type` seam).
+
 ## 7. Where installing would plug in
 
 `docker_prefix()` is the only thing that knows a server can live somewhere other

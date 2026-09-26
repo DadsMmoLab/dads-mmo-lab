@@ -235,9 +235,12 @@ def restart_world(controller: Controller) -> None:
     controller.start()
 
 
-def head_sha(dest: Path) -> str | None:
-    """The commit the checkout is on, through the transport the update route itself uses."""
-    return git.ContainerGit().head_sha(dest)
+def head_sha(dest: Path, *, wsl_distro: str | None = None) -> str | None:
+    """The commit the checkout is on, through the transport the update route itself uses.
+
+    Inside a WSL distro that is the distro's Docker (T125), as it is for the route.
+    """
+    return git.ContainerGit(wsl_distro=wsl_distro).head_sha(dest)
 
 
 def after_update(
@@ -322,8 +325,12 @@ def wrap_route(
     *,
     channels: Callable[[], Sequence[Channel]],
     restart: Callable[[], object],
+    wsl_distro: str | None = None,
 ) -> LatestRoute | None:
     """The update route with `after_update()` around both presses; unchanged when it cannot be.
+
+    `replace()`, so every other field -- `upstream_news` (T124) among them -- is
+    the route's own. `wsl_distro` reaches the module's head read (T125).
 
     Both directions: "Return to the tested pin" moves the module as well.
     `head_sha` is looked up per press, so a test can replace it on this module.
@@ -338,7 +345,7 @@ def wrap_route(
                 press,
                 cancel,
                 module_dir=dest,
-                head=lambda d: head_sha(d),
+                head=lambda d: head_sha(d, wsl_distro=wsl_distro),
                 channels=channels,
                 restart=restart,
             )

@@ -300,6 +300,11 @@ def install_id(server_dir: Path, *, platform_id: Callable[[], str] = platform.de
     ]
 
 
+def _install_id(server_dir: Path, platform_id: Callable[[], str]) -> str:
+    """`install_id()` under a name the functions below can call beside an `install_id=` keyword."""
+    return install_id(server_dir, platform_id=platform_id)
+
+
 def _identity_key(server_dir: Path, platform_id: Callable[[], str]) -> str:
     text = str(Path(os.path.abspath(server_dir))).replace("\\", "/")
     while len(text) > 1 and text.endswith("/"):
@@ -318,7 +323,11 @@ distinction a hand-typed second copy of `"yulon-"` could quietly drift from.
 
 
 def project_name(
-    game_id: str, server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
+    game_id: str,
+    server_dir: Path,
+    *,
+    platform_id: Callable[[], str] = platform.detect,
+    install_id: str | None = None,
 ) -> str:
     """This install's compose project: `yulon-<game>-<install id>`.
 
@@ -331,11 +340,16 @@ def project_name(
     project too: two installs of one game under one project name would share a
     database volume, and the second `up` would mount the first's characters.
     """
-    return f"{PROJECT_PREFIX}{_slug(game_id)}-{install_id(server_dir, platform_id=platform_id)}"
+    ident = install_id if install_id is not None else _install_id(server_dir, platform_id)
+    return f"{PROJECT_PREFIX}{_slug(game_id)}-{ident}"
 
 
 def built_image_refs(
-    entry: CatalogEntry, server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    platform_id: Callable[[], str] = platform.detect,
+    install_id: str | None = None,
 ) -> tuple[str, ...]:
     """The image references this install's build produces, fully qualified.
 
@@ -356,7 +370,7 @@ def built_image_refs(
     `.image_prefix`) since 7.1, so two games cannot tag into one namespace.
     """
     native = _native_of(entry)
-    tag = image_tag(server_dir, platform_id=platform_id)
+    tag = image_tag(server_dir, platform_id=platform_id, install_id=install_id)
     return tuple(f"{native.image_prefix}{name}:{tag}" for name in native.images)
 
 
@@ -370,9 +384,23 @@ def _native_of(entry: CatalogEntry) -> NativeInstall:
     return entry.install.native
 
 
-def image_tag(server_dir: Path, *, platform_id: Callable[[], str] = platform.detect) -> str:
-    """Default tag for images built for this install, so two builds cannot overwrite each other."""
-    return f"native-{install_id(server_dir, platform_id=platform_id)}"
+def image_tag(
+    server_dir: Path,
+    *,
+    platform_id: Callable[[], str] = platform.detect,
+    install_id: str | None = None,
+) -> str:
+    """Default tag for images built for this install, so two builds cannot overwrite each other.
+
+    `install_id` is the id an EXISTING install recorded, and is used instead of
+    hashing `server_dir` when given -- the same keyword on `project_name()`,
+    `built_image_refs()` and `render()`. Only a server inside a WSL distro needs
+    it (T125): Yu'lon on Linux recorded the id of `/home/...`, and the Windows
+    spelling the app holds hashes to another id, which is right for everything
+    keyed on the Windows side and wrong for the distro's images and project.
+    """
+    ident = install_id if install_id is not None else _install_id(server_dir, platform_id)
+    return f"native-{ident}"
 
 
 def _slug(text: str) -> str:
@@ -438,6 +466,7 @@ def render(
     db_password: str | None = None,
     bind_label: str = "",
     platform_id: Callable[[], str] = platform.detect,
+    install_id: str | None = None,
 ) -> ComposePlan:
     """Render this entry's three compose files for an install in `server_dir`.
 
@@ -495,8 +524,8 @@ def render(
             f"the bind label {bind_label!r} is not a mount option this engine writes; "
             "only ':z' or nothing is spliced after a host bind."
         )
-    tag = image_tag(server_dir, platform_id=platform_id)
-    project = project_name(entry.id, server_dir, platform_id=platform_id)
+    tag = image_tag(server_dir, platform_id=platform_id, install_id=install_id)
+    project = project_name(entry.id, server_dir, platform_id=platform_id, install_id=install_id)
     # The entry's own settings layered over the structural defaults, and an
     # explicit `world_env` overriding both — that is the seam a settings
     # surface arrives through.

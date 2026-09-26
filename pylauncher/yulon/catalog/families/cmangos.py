@@ -772,7 +772,10 @@ class CmangosInstaller(StagedInstaller):
     def _db_volume(self, server_dir: Path) -> str:
         """`<compose project>_<volume key>` — what `docker volume ls` shows for this install."""
         project = composegen.project_name(
-            self.entry.id, server_dir, platform_id=self._seams.platform_id
+            self.entry.id,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
         return f"{project}_{DB_DATA_VOLUME}"
 
@@ -2038,13 +2041,16 @@ class CmangosInstaller(StagedInstaller):
         """
         native_block = self._native()
         platform_id = self._seams.platform_id
+        ident = self._install_id(server_dir)
         return {
             **composegen.entry_tokens(self.entry),
             "PROJECT_NAME": composegen.project_name(
-                self.entry.id, server_dir, platform_id=platform_id
+                self.entry.id, server_dir, platform_id=platform_id, install_id=ident
             ),
             "IMAGE_PREFIX": native_block.image_prefix,
-            "IMAGE_TAG": composegen.image_tag(server_dir, platform_id=platform_id),
+            "IMAGE_TAG": composegen.image_tag(
+                server_dir, platform_id=platform_id, install_id=ident
+            ),
             "DB_PORT": str(self.entry.ports.db),
             "AUTH_PORT": str(self.entry.ports.auth),
             "WORLD_PORT": str(self.entry.ports.world),
@@ -2125,7 +2131,10 @@ class CmangosInstaller(StagedInstaller):
         """`_image_ref()`'s body, keyed on the folder alone (T94)."""
         prefix = self._native().image_prefix
         refs = composegen.built_image_refs(
-            self.entry, server_dir, platform_id=self._seams.platform_id
+            self.entry,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
         for ref in refs:
             if ref.startswith(f"{prefix}{service}:"):
