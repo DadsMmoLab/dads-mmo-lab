@@ -361,15 +361,17 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "f858f9c97758d73469423162d0692cd72fe82687", (
+    assert module.rev == "632e1b636328cba92f49871db5614bc75e03b4da", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
         "(T30, 2026-09-11) until upstream rewrote its history and left that commit on no "
-        "branch; T120 moved it to c591bbb1, `main` on 2026-09-24, and since T136 it is "
+        "branch; T120 moved it to c591bbb1, `main` on 2026-09-24; T136 moved it to "
         "f858f9c9, the commit release v2026-09-25 names (the source follows releases since "
         "T126), installed fresh and booted with its bots online on `yulon-ubuntu` 2026-09-26 "
-        "(.notes/gates/t136-tortoise-pins/)"
+        "(.notes/gates/t136-tortoise-pins/); and since T143 it is 632e1b63, the commit "
+        "release v2026-09-26 names: 11 commits, no conf key, SQL or build change, LFT fill "
+        "and BG auto-queue on by default"
     )
     for source in sources:
         assert re.fullmatch(
@@ -773,6 +775,10 @@ def test_the_fatal_pattern_catches_the_shape_this_core_dies_in() -> None:
         "TortoiseBots: native module loaded (AI enabled)",
         # The same line since T136's module pin: it names the release build instead.
         "TortoiseBots 2026-09-25-v31 (AI enabled)",
+        # T143's pin prints its build and then, on a line of its own, the author credit.
+        "TortoiseBots 2026-09-26-v1 (AI enabled)",
+        "TortoiseBots by Sagiroth - https://github.com/Sagiroth/TortoiseBots "
+        "(AGPL-3.0, source available)",
     ):
         assert not re.search(
             ready.fatal, healthy
