@@ -606,3 +606,76 @@ def test_the_tortoise_adoption_reads_the_module_checkout_through_the_distro(
         route, tortoise, tmp_path, channels=lambda: [], restart=lambda: None, wsl_distro=DISTRO
     )
     assert wrapped is not None and wrapped.upstream_news is route.upstream_news
+
+
+# -- §2 for the question itself (Codex, final pass on 0bbd813d) -----------------------------
+
+
+def _no_share_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    def boom(*a: object, **kw: object) -> object:
+        raise AssertionError(f"the share or a command was touched: {a!r}")
+
+    real_open = builtins.open
+
+    def guarded_open(file: object, *a: object, **kw: object) -> object:
+        if "wsl.localhost" in str(file):
+            raise AssertionError(f"opened {file}")
+        return real_open(file, *a, **kw)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(upstream, "read_cached", boom)
+    monkeypatch.setattr(install_wiring, "read_state", boom)
+    for name in ("run", "stream", "stream_progress"):
+        monkeypatch.setattr(runner, name, boom)
+    monkeypatch.setattr(docker, "_docker", boom)
+
+
+def test_asking_the_update_question_does_not_start_a_stopped_distro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pressing the button and cancelling must not boot the distro to read a cache."""
+    route = install_wiring.update_to_latest_for_app(ENTRY, Path(UNC_SERVER), wsl_distro=DISTRO)
+    assert route is not None
+    monkeypatch.setattr(install_wiring.wsl, "is_running", lambda distro: False)
+    _no_share_access(monkeypatch)
+    said = route.confirmation()
+    assert native.WSL_DISTRO_STOPPED_NOTE in said
+    assert said.startswith("Update ")
+
+
+def test_a_divergence_met_while_stopped_is_named_by_the_next_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T126's rule still holds: the press refuses an unnamed rewrite before moving
+    anything, and the next question -- distro still stopped, nothing read -- names it."""
+    route = install_wiring.update_to_latest_for_app(ENTRY, Path(UNC_SERVER), wsl_distro=DISTRO)
+    assert route is not None
+    monkeypatch.setattr(install_wiring.wsl, "is_running", lambda distro: False)
+    line = "cmangos/x rewrote its history; 3 commits of yours would be dropped."
+
+    class _Engine:
+        def update_to_latest(self, options: object, **kw: object) -> Iterator[str]:
+            assert kw.get("rewritten_ok") == frozenset(), "nothing was named, nothing is ok"
+            raise native.RewrittenHistory("cmangos/x", line)
+            yield ""  # pragma: no cover
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **kw: _Engine())
+    route.confirmation()
+    with pytest.raises(native.RewrittenHistory):
+        list(route.press(None))
+    _no_share_access(monkeypatch)
+    again = route.confirmation()
+    assert line in again and native.WSL_DISTRO_STOPPED_NOTE in again
+
+
+def test_a_running_distro_still_reads_the_rewrite_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = install_wiring.update_to_latest_for_app(ENTRY, Path(UNC_SERVER), wsl_distro=DISTRO)
+    assert route is not None
+    monkeypatch.setattr(install_wiring.wsl, "is_running", lambda distro: True)
+    asked: list[object] = []
+    monkeypatch.setattr(upstream, "read_cached", lambda *a: asked.append(a[0]) or {})
+    said = route.confirmation()
+    assert asked == [Path(UNC_SERVER)]
+    assert native.WSL_DISTRO_STOPPED_NOTE not in said

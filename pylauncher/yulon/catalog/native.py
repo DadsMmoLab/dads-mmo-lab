@@ -680,6 +680,19 @@ def _lines_changed(old: str, new: str) -> tuple[int, int]:
     return added, removed
 
 
+WSL_DISTRO_STOPPED_NOTE = (
+    "The server's WSL distro is stopped; Yu'lon will check for rewritten history once it starts."
+)
+"""Said under the update question when the distro is down (T125, wsl-resident-servers §2).
+
+The question normally names any source whose upstream rewrote its history,
+read from the upstream cache in the server folder -- and reading a
+`\\\\wsl.localhost\\...` folder starts a stopped distro, which a question the
+player may cancel must not do. The press itself still refuses an unnamed
+divergence before it moves anything (T126), and names it the next time.
+"""
+
+
 def update_to_latest_confirmation(
     entry: CatalogEntry, server_dir: Path, repo: str, rewritten: Sequence[str] = ()
 ) -> str:

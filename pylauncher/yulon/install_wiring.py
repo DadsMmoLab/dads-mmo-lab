@@ -45,6 +45,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import (
+    WSL_DISTRO_STOPPED_NOTE,
     ComposeRepairRoute,
     LatestRoute,
     RewrittenHistory,
@@ -330,10 +331,21 @@ def update_to_latest_for_app(
         return {**found, **met}
 
     def confirmation() -> str:
-        said = rewritten()
+        # §2: the cache lives in the server folder, and reading a WSL folder
+        # starts its distro -- for a question the player may cancel. The folder
+        # is checked to be in THIS distro before anything else, and a stopped
+        # distro is asked only through WSL's own listing. What an earlier press
+        # met (`met`) is in memory and still named; a divergence nobody could
+        # read now is refused by the press before anything moves (T126) and
+        # named the next time.
+        # (A folder in another distro is not read either; the press refuses it.)
+        elsewhere = not _in_the_distro(server_dir, wsl_distro)
+        stopped = not elsewhere and _distro_down(wsl_distro)
+        said = dict(met) if (elsewhere or stopped) else rewritten()
         acknowledged.clear()
         acknowledged.update(said)
-        return update_to_latest_confirmation(entry, server_dir, repo, tuple(said.values()))
+        text = update_to_latest_confirmation(entry, server_dir, repo, tuple(said.values()))
+        return f"{text}\n\n{WSL_DISTRO_STOPPED_NOTE}" if stopped else text
 
     def engine() -> InstallEngine:
         if wsl_distro is not None:
