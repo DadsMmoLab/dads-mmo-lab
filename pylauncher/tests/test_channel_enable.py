@@ -19,12 +19,24 @@ from pathlib import Path
 import pytest
 
 from yulon import channel_setup as setup
-from yulon import resources
+from yulon import platform, resources
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.composegen import BASE_FILE, BUILD_FILE, OVERRIDE_FILE
 
 WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
+
+
+@pytest.fixture(autouse=True)
+def _a_host_without_selinux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The machine these tests describe has no SELinux, unless a test says it has.
+
+    The press asks the host for the install's bind label (T102), so without
+    this every byte comparison below would mean something different on a
+    Fedora test box than on the Ubuntu CI runner.
+    """
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: False)
+
 
 CONF_BEFORE = (
     "# a mangosd.conf, as the install leaves it\n"
@@ -552,3 +564,114 @@ def test_the_conf_backup_outlives_a_rollback_that_could_not_finish(tmp_path: Pat
 
     assert backup.is_file(), "the conf's only copy was deleted before the job was done"
     assert "SOAP.Enabled = 0" in conf.read_text(encoding="utf-8")
+
+
+# -- an enforcing SELinux host (T102) -----------------------------------------
+
+
+def _on_selinux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fedora as `yulon-fedora` answered on 2026-09-24: enforcing, on xfs."""
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: True)
+    monkeypatch.setattr(platform, "filesystem_type", lambda _path: "xfs")
+
+
+def _installed_with_label(tmp_path: Path) -> Path:
+    """A server dir as the install leaves it on that host: every host bind ends `:z`."""
+    from yulon.catalog import composegen
+
+    plan = composegen.render(
+        WOTLK, tmp_path, templates_root=resources.installers_dir(), bind_label=":z"
+    )
+    composegen.write_plan(plan, tmp_path)
+    return tmp_path
+
+
+def _host_binds(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip().startswith("- ./")]
+
+
+def test_the_press_keeps_the_selinux_label_the_install_put_on_every_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The press re-renders the override, and it used to render it unlabelled.
+
+    Measured on `yulon-fedora` (Fedora 44, Enforcing, xfs) on 2026-09-24: the
+    install wrote `- ./modules:/azerothcore/modules:z`, the press rewrote it as
+    `- ./modules:/azerothcore/modules`. A bind with no `:z` is readable only
+    while the folder happens to carry a shared container label already; the
+    busybox stand-in on the same box was refused on an unlabelled folder and
+    on a privately labelled one.
+    """
+    _on_selinux(monkeypatch)
+    server_dir = _installed_with_label(tmp_path)
+    installed = _host_binds((server_dir / OVERRIDE_FILE).read_text(encoding="utf-8"))
+    assert installed, "the override has no host bind; this test proves nothing"
+    assert all(line.endswith(":z") for line in installed)
+
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    written = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert 'AC_SOAP_ENABLED: "1"' in written
+    assert _host_binds(written) == installed
+
+
+@pytest.mark.parametrize("probe", [False, None], ids=["permissive-now", "cannot-tell-now"])
+def test_the_press_takes_the_label_from_the_installed_override_not_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe: bool | None
+) -> None:
+    """A probe that answers wrongly at press time must not strip the install's `:z`.
+
+    `getenforce` failing (None) or a host briefly permissive (False) made the
+    press render with no label, which is T102 again (final review of
+    `424ac7a9`). The installed override already says which label this install
+    uses, so the press reads it there.
+    """
+    server_dir = _installed_with_label(tmp_path)
+    installed = _host_binds((server_dir / OVERRIDE_FILE).read_text(encoding="utf-8"))
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: probe)
+
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    written = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert 'AC_SOAP_ENABLED: "1"' in written
+    assert _host_binds(written) == installed
+
+
+def test_an_unlabelled_install_stays_unlabelled_on_an_enforcing_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file wins in this direction too: the press writes what the install wrote.
+
+    That is also the text the rollback recognises, so the press cannot move an
+    install onto a label its own undo would then have to guess at.
+    """
+    server_dir = _installed(tmp_path)
+    _on_selinux(monkeypatch)
+
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    binds = _host_binds((server_dir / OVERRIDE_FILE).read_text(encoding="utf-8"))
+    assert binds and not any(line.endswith(":z") for line in binds)
+
+
+def test_an_override_with_mixed_labels_is_refused_and_nothing_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Some binds labelled and some not is no install's rendering; the press will not pick one."""
+    _on_selinux(monkeypatch)
+    server_dir = _installed_with_label(tmp_path)
+    override = server_dir / OVERRIDE_FILE
+    labelled = "      - ./modules:/azerothcore/modules:z\n"
+    text = override.read_text(encoding="utf-8")
+    assert labelled in text
+    mixed = text.replace(labelled, labelled + "      - ./extra:/azerothcore/extra\n")
+    override.write_text(mixed, encoding="utf-8")
+
+    with pytest.raises(setup.EnableRefused, match="label"):
+        setup.enable(
+            WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False
+        )
+
+    assert override.read_text(encoding="utf-8") == mixed
+    assert not override.with_name(override.name + setup.BACKUP_SUFFIX).exists()
+    assert not (server_dir / ".env").exists()

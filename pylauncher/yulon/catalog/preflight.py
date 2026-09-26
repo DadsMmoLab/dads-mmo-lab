@@ -144,6 +144,50 @@ class Facts:
 
 
 @dataclass(frozen=True)
+class Spent:
+    """What an earlier run of THIS install already put on disk, for the free-space rows (T112).
+
+    Not a machine fact, so not a field of `Facts`: it is a fact about one
+    folder's install record read against the daemon, and only the engine can
+    establish it (`StagedInstaller._spent()`). The default is "nothing", which
+    is a fresh install's floor — the safe direction for any caller that does not
+    know.
+
+    Found by the T95 gate on m910q (2026-09-24): installing WoW TBC into the
+    folder that already held a finished, built TBC install was refused after one
+    second, "21 GB free, and the install needs 40 GB". The floor on one drive is
+    the data-root pair plus the server-folder pair, and the data-root pair is the
+    BUILD's share (`NativeInstall.min_data_root_gb`: images and build cache) — a
+    share that press was never going to spend again.
+    """
+
+    build: bool = False
+    """The build is recorded AND the daemon holds every image it makes.
+
+    `StagedInstaller.build_would_be_skipped()`'s rule, the one `stage_build`
+    follows, so the floor is lowered on exactly the presses that skip the
+    compile. A recorded build whose images are gone, or a daemon that will not
+    say, compiles again and is asked for the whole floor.
+
+    **The only thing spent that lowers a floor.** A first cut also had an
+    `everything` flag (every recorded stage done) that turned any shortfall
+    into a warning, 0 GB included. The record is a hint: each stage re-checks
+    its own evidence and writes maps, mmaps or client data again when it finds
+    them gone -- AzerothCore's client-data runs on every press -- so a full
+    drive is refused whatever the record says (Codex review, 2026-09-24).
+    """
+
+
+NOTHING_SPENT = Spent()
+
+BUILD_SPENT_NOTE = (
+    " (this folder's build is already done and its images exist, so the build's share "
+    "is not asked for again)"
+)
+"""Said on every free-space row a spent build lowered, so the smaller number explains itself."""
+
+
+@dataclass(frozen=True)
 class Report:
     """Every check, and the shortcuts a caller needs to act on them."""
 
@@ -430,13 +474,23 @@ def _volume_of(path: Path, platform_id: str) -> object:
     return probe.stat().st_dev
 
 
-def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
+def evaluate(
+    entry: CatalogEntry, server_dir: Path, facts: Facts, spent: Spent = NOTHING_SPENT
+) -> Report:
     """Turn machine facts plus this entry's floors into refusals, warnings and unknowns.
 
     Pure: every threshold in the table below is testable without a daemon, a
     disk or a Mac. The order is the order a user should read them in — the
     cheapest fix first, and the daemon check first of all because every number
     below it is fabricated without one.
+
+    `spent` is what this install already did (T112). With the build spent, the
+    free-space rows are judged against the server-folder pair alone: the
+    data-root pair is documented as the build's (images and build cache), and
+    no catalog number sizes the stages after it on their own, so the smaller,
+    remaining half of the same unmeasured floor stands in for them. That is a
+    stand-in, not a measurement, and it still refuses: nothing spent turns a
+    shortfall into a warning.
     """
     native = entry.install.native
     if native is None:
@@ -455,18 +509,27 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
     checks.append(_cpu_check(native, facts))
     refuse_root, warn_root = native.min_data_root_gb, native.warn_data_root_gb
     refuse_dir, warn_dir = native.min_server_dir_gb, native.warn_server_dir_gb
-    if facts.same_volume:
+    if spent.build:
+        # The build's share is spent, so it neither stands alone on Docker's
+        # disk nor adds on one drive; what is left is judged against the
+        # server-folder pair everywhere (see the docstring for why that pair).
+        refuse_root, warn_root = refuse_dir, warn_dir
+    elif facts.same_volume:
         # One pool, so each floor is not enough on its own — they add.
         refuse_root, warn_root = native.floors_gb(same_volume=True)
         refuse_dir, warn_dir = refuse_root, warn_root
     if facts.same_volume and facts.platform_id != "macos":
-        checks.append(_one_volume_space_check(facts, refuse_root, warn_root))
+        checks.append(_one_volume_space_check(facts, refuse_root, warn_root, spent))
     else:
         checks.append(
-            _space_check("Docker's disk", facts.data_root_free, refuse_root, warn_root, facts)
+            _space_check(
+                "Docker's disk", facts.data_root_free, refuse_root, warn_root, facts, spent
+            )
         )
         checks.append(
-            _space_check("the server folder", facts.server_dir_free, refuse_dir, warn_dir, facts)
+            _space_check(
+                "the server folder", facts.server_dir_free, refuse_dir, warn_dir, facts, spent
+            )
         )
     checks.append(_folder_check(facts, server_dir))
     checks.append(_bind_check(facts, server_dir))
@@ -929,7 +992,9 @@ is what a caller looking for the data-root row matches on.
 """
 
 
-def _one_volume_space_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
+def _one_volume_space_check(
+    facts: Facts, refuse_gb: float, warn_gb: float, spent: Spent = NOTHING_SPENT
+) -> Check:
     """The one-drive case: one pool, one measurement, one row.
 
     Two rows here were two spellings of a single fact. Both readings come off
@@ -955,11 +1020,16 @@ def _one_volume_space_check(facts: Facts, refuse_gb: float, warn_gb: float) -> C
     """
     readings = [free for free in (facts.data_root_free, facts.server_dir_free) if free is not None]
     free = min(readings) if readings else None
-    return _space_check(ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts)
+    return _space_check(ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts, spent)
 
 
 def _space_check(
-    what: str, free: int | None, refuse_gb: float, warn_gb: float, facts: Facts
+    what: str,
+    free: int | None,
+    refuse_gb: float,
+    warn_gb: float,
+    facts: Facts,
+    spent: Spent = NOTHING_SPENT,
 ) -> Check:
     # On macOS, "Docker's disk" is the HOST volume holding the sparse VM image,
     # and host free space is an upper bound on what the VM can still grow into —
@@ -968,7 +1038,7 @@ def _space_check(
     # does), but an ample reading proves nothing about the cap and must never
     # become a pass. See `_space_check_macos_bounded()`.
     if what == "Docker's disk" and facts.platform_id == "macos":
-        return _space_check_macos_bounded(free, refuse_gb, warn_gb, facts)
+        return _space_check_macos_bounded(free, refuse_gb, warn_gb, facts, spent)
     if free is None:
         return Check(
             f"free space on {what}",
@@ -977,7 +1047,9 @@ def _space_check(
             f"Make sure there is at least {warn_gb:.0f} GB free before starting a long build.",
         )
     gigabytes = free / GIB
-    if facts.same_volume:
+    if spent.build:
+        note = BUILD_SPENT_NOTE
+    elif facts.same_volume:
         note = " (the server folder and Docker's disk share one drive, so both needs add up)"
     else:
         note = ""
@@ -1075,7 +1147,7 @@ def _space_remedy(what: str, facts: Facts) -> str:
 
 
 def _space_check_macos_bounded(
-    free: int | None, refuse_gb: float, warn_gb: float, facts: Facts
+    free: int | None, refuse_gb: float, warn_gb: float, facts: Facts, spent: Spent = NOTHING_SPENT
 ) -> Check:
     """The macOS-host case of `_space_check`: refuse-when-low, but never a pass.
 
@@ -1102,11 +1174,12 @@ def _space_check_macos_bounded(
             "virtual disk is not near its size cap, before a long build.",
         )
     gigabytes = free / GIB
+    note = BUILD_SPENT_NOTE if spent.build else ""
     if gigabytes < refuse_gb:
         return Check(
             "free space on Docker's disk",
             "refuse",
-            f"{gigabytes:.0f} GB free on the drive, and the install needs {refuse_gb:.0f} GB",
+            f"{gigabytes:.0f} GB free on the drive, and the install needs {refuse_gb:.0f} GB{note}",
             _docker_disk_remedy(facts),
         )
     if gigabytes < warn_gb:

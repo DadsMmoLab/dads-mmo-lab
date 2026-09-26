@@ -10,14 +10,16 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
+from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
 from yulon import apply as apply_module
 from yulon import (
+    bot_population,
     botlist,
     channel,
     channel_setup,
@@ -30,6 +32,7 @@ from yulon import (
     networking,
     party,
     purge,
+    reset_defaults,
     runner,
     state,
     steam,
@@ -67,8 +70,13 @@ from yulon.support import runlog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
+    BOT_COUNT_RUNNING,
     RETURN_TO_PIN_BUTTON_LABEL,
+    TUNING_CORE_FILES,
     TUNING_RECREATE_LABEL,
+    TUNING_RESET_ALL,
+    TUNING_RESET_RUNNING,
+    TUNING_RESET_UNDO,
     TUNING_RESTART_LABEL,
     UPDATE_TO_LATEST_BUTTON_LABEL,
     ControllerServices,
@@ -78,7 +86,7 @@ from yulon.ui.controller_view import (
     ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
-from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.job import ThreadedJobRunner, run_inline
 from yulon.ui.widgets.manifest_prompt import REMEMBERED_NOTE, ManifestPromptDialog
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
@@ -469,11 +477,14 @@ def test_send_refuses_a_second_command_while_one_is_in_flight(
     view = ControllerView(
         WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=never_finishes
     )
+    # Counted from here: building the view queues its own jobs (T94's Undo
+    # lookup reads the disk off the GUI thread), none of them an attach.
+    queued = len(pending)
     view.command_edit.setText("server info")
     view.send_console_command()
     view.command_edit.setText("gm list")
     view.send_console_command()
-    assert len(pending) == 1, "a second attach was started while the first was still open"
+    assert len(pending) == queued + 1, "a second attach was started while the first was still open"
     assert not view.send_button.isEnabled()
     assert "gm list" not in view.console_log.text()
 
@@ -2451,6 +2462,129 @@ def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: P
     view.remove_containers()
     view.remove_containers()
     assert "no containers to remove" in view.problem_label.text()
+
+
+def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Andood's video (T95): every press ended "no containers to remove" and pointed nowhere.
+
+    The button is always there (decision 4). What this adds is the pointer: the
+    sentence names it, and the button is highlighted. Tortoise has no
+    Uninstall. It is the tree the dead end was reported on.
+    """
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=False)
+    assert view.forget_install_button is not None
+    assert not _highlighted(view.forget_install_button)
+
+    view.remove_containers()
+    view.remove_containers()
+
+    assert "no containers to remove" in view.problem_label.text()
+    assert controller_view_module.REMOVE_FROM_YULON in view.problem_label.text()
+    assert _highlighted(view.forget_install_button)
+
+
+def test_a_removal_that_removed_something_does_not_highlight_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=True)
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert not view.forget_install_button.isHidden(), "decision 4: always shown"
+    assert not _highlighted(view.forget_install_button)
+
+
+def test_a_start_takes_the_highlight_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The next Start recreates the containers, so "nothing to remove" is no longer true."""
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=False)
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+
+    view.start_server()
+
+    assert not _highlighted(view.forget_install_button)
+    assert not view.forget_install_button.isHidden()
+
+
+def _nothing_to_remove_view(ps: _Ps, tmp_path: Path, **kwargs: Any) -> ControllerView:
+    """A Tortoise tab whose last "Stop and remove containers…" found nothing (T95)."""
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, **kwargs)
+    _watch_remove(view, result=False)
+    ps.names = ""
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+    return view
+
+
+def test_a_poll_that_sees_nothing_running_keeps_the_highlight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The five-second poll must not take back the pointer it is there to hold up."""
+    view = _nothing_to_remove_view(ps, tmp_path)
+    view.refresh_status()
+    view.refresh_status()
+    assert _highlighted(view.forget_install_button)
+
+
+def test_a_poll_that_sees_the_server_running_takes_the_highlight_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A Rebuild, an Update, a Return-to-pin or an outside start brings it up without Start.
+
+    "Remove from Yu'lon…" lit with Start's own emphasis beside a live server
+    points the player at removing it (T95 Task 3 review, round 1).
+    """
+    view = _nothing_to_remove_view(ps, tmp_path)
+    ps.names = view.services.controller.spec.world + "\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+    assert not _highlighted(view.forget_install_button)
+
+
+def test_a_stale_running_answer_does_not_take_the_highlight_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A poll asked BEFORE the removal, answered after it, says nothing about now."""
+    from yulon.controller import InstallStatus
+
+    gate = _Gate()
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    _watch_remove(view, result=False)
+    gate.hold = True
+    view.refresh_status()  # the 5 s poll, asked while the server still ran
+    ((_work, on_done, on_error),) = gate.queued
+    gate.queued = []
+    gate.hold = False
+    ps.names = ""
+    view.remove_containers()
+    view.remove_containers()  # its own refresh is dropped: the poll is still out
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+
+    run_inline(lambda: InstallStatus(db=True, auth=True, world=True), on_done, on_error)
+
+    assert _highlighted(view.forget_install_button), "an answer older than the removal cleared it"
+    assert view.last_seen_running() is False, "the dropped refresh was asked again, and answered"
+
+
+def test_a_removal_that_finds_containers_after_one_that_did_not_takes_it_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _nothing_to_remove_view(ps, tmp_path)
+    _watch_remove(view, result=True)
+    view.remove_containers()
+    view.remove_containers()
+    assert not _highlighted(view.forget_install_button)
+    assert "Containers removed" in view.problem_label.text()
 
 
 UNIMPORTED = docker.ImportState(
@@ -5881,10 +6015,15 @@ def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
     assert view.uninstall_button is None
 
 
+def _highlighted(button: object) -> bool:
+    """T95 decision 4: the Remove button is always shown; "the way out" is the theme's `primary`."""
+    return bool(button.property("primary"))  # type: ignore[attr-defined]
+
+
 # -- "Forget this install…", for a folder that is gone (T34) -------------------
 
 
-def test_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_gone(
+def test_the_forget_button_is_plain_while_the_folder_exists_and_highlighted_once_gone(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Re-checked on the same poll as the status line, not only at tab-build time.
@@ -5897,17 +6036,17 @@ def test_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_go
     view = _uninstall_view(ps, tmp_path, fake)
     assert view.forget_install_button is not None
     view.refresh_status()
-    assert view.forget_install_button.isHidden()
+    assert not _highlighted(view.forget_install_button)
 
     shutil.rmtree(tmp_path)
     view.refresh_status()
-    assert not view.forget_install_button.isHidden()
+    assert _highlighted(view.forget_install_button)
     # Mutation: negate `_update_forget_visibility()`'s `is_dir()` check (or
     # drop it) and this assertion is what catches it — the button would then
-    # be shown for the folder that exists and hidden for the one that is gone.
+    # be highlighted for the folder that exists and plain for the one that is gone.
 
 
-def test_the_forget_button_stays_hidden_for_a_wsl_install_with_no_folder_here(
+def test_the_forget_button_stays_plain_for_a_wsl_install_with_no_folder_here(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """`server_dir.is_dir()` asks THIS process, which is right for a native
@@ -5921,151 +6060,455 @@ def test_the_forget_button_stays_hidden_for_a_wsl_install_with_no_folder_here(
     shutil.rmtree(tmp_path)
     view.refresh_status()
     assert view.forget_install_button is not None
-    assert view.forget_install_button.isHidden()
+    assert not _highlighted(view.forget_install_button)
     # Mutation: drop the `wsl_distro is None` clause from
-    # `_update_forget_visibility()` and this fails — the button would show for
-    # a distro path this process cannot evaluate.
+    # `_update_forget_visibility()` and this fails — the button would light up
+    # for a distro path this process cannot evaluate.
 
 
-def test_answering_yes_forgets_the_record_and_emits_uninstalled(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+# -- "Remove from Yu'lon…" (T95): the tab asks the window; the window decides --
+
+
+def test_every_tab_has_the_remove_button_uninstall_or_not(
+    qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The confirm must compare with `==`, not `is` (T33's bug): this PySide6's
-    static `QMessageBox.question()` returns a plain `int`, and the fake below
-    returns exactly that — not the enum member — to prove the comparison
-    survives it.
-    """
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
-    )
-    fake = _FakeUninstall(tmp_path)
-    view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
+    """TBC and Tortoise have no Uninstall seam: until T95 they had no way off the list at all."""
+    from PySide6.QtCore import Qt
+
+    from yulon import forgetting
+
+    view = ControllerView(TBC, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.services.uninstall is None
+    assert view.uninstall_button is None, "T95 adds no Uninstall"
+    assert view.forget_install_button is not None
+    assert view.forget_install_button.text() == forgetting.BUTTON_LABEL
+    assert controller_view_module.REMOVE_FROM_YULON == forgetting.BUTTON_LABEL
     view.refresh_status()
-    seen: list[tuple[str, object]] = []
-    view.uninstalled.connect(lambda game, folder: seen.append((game, folder)))
-
-    view.forget_install()
-
-    assert fake.forgets == 1
-    assert seen == [("wow-wotlk", tmp_path)]
-    # Mutation: change `forget_install()`'s `answer == QMessageBox.StandardButton.Yes`
-    # to `answer is QMessageBox.StandardButton.Yes` and this fails — the bare
-    # `int` the fake returns is never `is` the enum member, so a real Yes reads
-    # as a No and nothing is forgotten.
-
-
-def test_answering_no_forgets_nothing(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`_no_modal_dialogs` already answers No; this asserts what that means here."""
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
-    )
-    fake = _FakeUninstall(tmp_path)
-    view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
-    view.refresh_status()
-    seen: list[object] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
-
-    view.forget_install()
-
-    assert fake.forgets == 0
-    assert seen == []
-
-
-def test_a_forget_that_raises_oserror_shows_the_error_and_keeps_the_tab(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`forget_record()`'s own docstring: `OSError` is not caught there because
-    `purge.run()` catches it for the uninstall path — this is the OTHER caller
-    of the same live-`AppState` seam, and it has to catch its own.
-    """
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
-    )
-    fake = _FakeUninstall(tmp_path, forget_error=OSError("config dir is read-only"))
-    view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
-    view.refresh_status()
-    seen: list[object] = []
-    failures: list[str] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
-    view.action_failed.connect(failures.append)
-
-    view.forget_install()
-
-    assert seen == [], "the tab was dropped over a forget that never happened"
-    assert "config dir is read-only" in view.uninstall_label.text()
-    assert failures and "config dir is read-only" in failures[0]
-
-
-def test_the_folder_reappearing_before_the_press_forgets_nothing(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The visibility poll is not trusted at press time (review, T34 round 2).
-
-    A restore, or simply undoing an accidental delete, can put the folder back
-    in the gap between the five-second poll that showed the button and the
-    click that reached it.
-    """
-    asked: list[object] = []
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: asked.append(1),
-    )
-    fake = _FakeUninstall(tmp_path)
-    view = _uninstall_view(ps, tmp_path, fake)
+    assert not view.forget_install_button.isHidden(), "decision 4: always on the Server tab"
+    assert view.forget_install_button.focusPolicy() & Qt.FocusPolicy.TabFocus, "no gamepad reach"
+    assert not _highlighted(view.forget_install_button)
     shutil.rmtree(tmp_path)
     view.refresh_status()
     assert not view.forget_install_button.isHidden()
-    tmp_path.mkdir()  # back before the press
-    seen: list[object] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
-
-    view.forget_install()
-
-    assert fake.forgets == 0
-    assert seen == []
-    assert asked == [], "the confirmation must not open for a folder that is back"
-    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+    assert _highlighted(view.forget_install_button)
+    # Mutation: put back `if self.services.uninstall is None: return False` in
+    # `_forget_is_eligible()` and the last assertion fails.
 
 
-def test_the_folder_reappearing_during_the_confirmation_forgets_nothing(
+def test_the_press_asks_the_window_and_decides_nothing_itself(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The second re-check (review, T34 round 2): the gap between Yes and the write is real too.
-
-    Mutation: drop the second `_forget_is_eligible()` call in
-    `forget_install()` — the first call still sees the folder gone, so only
-    the second one stands between this press and a forgotten record.
-    """
-
-    def question(*a: object, **k: object) -> object:
-        tmp_path.mkdir()
-        return int(controller_view_module.QMessageBox.StandardButton.Yes)
-
-    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: asked.append(a)
+    )
     fake = _FakeUninstall(tmp_path)
     view = _uninstall_view(ps, tmp_path, fake)
-    shutil.rmtree(tmp_path)
-    view.refresh_status()
-    seen: list[object] = []
-    view.uninstalled.connect(lambda game, folder: seen.append(game))
+    seen: list[tuple[str, object]] = []
+    view.remove_requested.connect(lambda game, folder: seen.append((game, folder)))
 
     view.forget_install()
 
-    assert fake.forgets == 0
-    assert seen == []
-    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+    assert seen == [("wow-wotlk", tmp_path)]
+    assert asked == [], "the tab opened a dialog of its own"
+    assert fake.forgets == 0, "the tab forgot the record itself"
+
+
+def test_a_removal_is_refused_while_anything_runs_and_each_refusal_names_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import forgetting
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.forget_refusal() is None
+
+    view._import_running = True
+    assert view.forget_refusal() == view.busy_reason()
+    view._import_running = False
+
+    view._backup_before_update = True
+    assert view.forget_refusal() == forgetting.UPDATE_BACKUP_RUNNING
+    view._backup_before_update = False
+
+    view._set_busy(True)
+    assert view.forget_refusal() == forgetting.SERVER_ACTION_RUNNING
+    view._set_busy(False)
+
+    # Last, because it is patched on the class for the rest of this test.
+    monkeypatch.setattr(type(view.rebuild_log), "running", property(lambda _self: True))
+    assert view.forget_refusal() == forgetting.PANEL_RUNNING
+
+
+def test_the_last_poll_is_what_says_whether_the_server_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.last_seen_running() is None, "no poll has answered yet"
+    ps.names = ""
+    view.refresh_status()
+    assert view.last_seen_running() is False
+    ps.names = "ac-worldserver\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+
+    def no_docker() -> NoReturn:
+        raise RuntimeError("Cannot connect to the Docker daemon")
+
+    view.services.controller.status = no_docker  # type: ignore[method-assign]
+    view.refresh_status()
+    assert view.last_seen_running() is None, "a failed poll kept an answer it no longer has"
+
+
+def test_the_stop_before_a_removal_goes_through_the_controller_and_reports_to_the_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    stops: list[int] = []
+
+    def stop() -> bool:
+        stops.append(1)
+        return True
+
+    view.services.controller.stop = stop  # type: ignore[method-assign]
+    seen: list[tuple[object, ...]] = []
+    view.stopped_for_removal.connect(lambda g, d, ok, why: seen.append((g, d, ok, why)))
+
+    view.stop_for_removal()
+
+    assert stops == [1]
+    assert seen == [("wow-wotlk", tmp_path, True, "")]
+    assert view.refresh_button.isEnabled(), "the busy lock outlived the stop"
+
+
+def test_a_stop_before_a_removal_leaves_no_stopping_words_behind_when_it_succeeds(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The window may still keep the tab: a job started during the stop, or a save failed.
+
+    Final review (T95): the "can take a few minutes" paragraph and the
+    "stopping…" status line stayed up for good on a tab that was kept. Cleared,
+    and asked again, before the window is told, as the failed stop does.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    ps.names = ""
+    at_the_emit: list[tuple[str, str]] = []
+    view.stopped_for_removal.connect(
+        lambda *_: at_the_emit.append((view.status_label.text(), view.problem_label.text()))
+    )
+
+    view.stop_for_removal()
+
+    ((status, problem),) = at_the_emit
+    assert status != controller_view_module.STOPPING_FOR_REMOVAL
+    assert "world down" in status, "the status was not asked again"
+    assert problem != controller_view_module.STOPPING_FOR_REMOVAL_WAIT
+
+
+def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    def refuse() -> bool:
+        raise docker.DockerCommandError("Docker would not say which project owns ac-worldserver")
+
+    view.services.controller.stop = refuse  # type: ignore[method-assign]
+    seen: list[tuple[object, ...]] = []
+    view.stopped_for_removal.connect(lambda g, d, ok, why: seen.append((g, d, ok, why)))
+
+    view.stop_for_removal()
+
+    assert seen == [
+        ("wow-wotlk", tmp_path, False, "Docker would not say which project owns ac-worldserver")
+    ]
+    assert "Docker would not say" in view.problem_label.text()
+    assert view.refresh_button.isEnabled()
+    assert (
+        view.status_label.text() != controller_view_module.STOPPING_FOR_REMOVAL
+    ), "the status line kept saying a stop was running after it had failed"
+
+
+def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The m910q gate (T95): an × on a world still loading took minutes, with locked buttons only.
+
+    mangosd ignores SIGTERM while it loads, so the stop waits out its whole
+    grace. The player is told, while it waits, what is happening and that it
+    can take that long.
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    gate.hold = True
+
+    view.stop_for_removal()
+
+    status = view.status_label.text()
+    assert status == controller_view_module.STOPPING_FOR_REMOVAL
+    assert "stopping the server first" in status
+    said = view.problem_label.text()
+    assert "still loading" in said and "few minutes" in said
+    assert not view.refresh_button.isEnabled(), "the stop is running"
+    gate.release()
+    assert view.refresh_button.isEnabled()
+
+
+class _Gate:
+    """A job runner that runs inline until `hold` is set, then keeps the jobs for `release()`.
+
+    What a threaded runner looks like from the GUI thread: the job has been
+    handed over and its answer has not come back yet (T95).
+    """
+
+    def __init__(self) -> None:
+        self.hold = False
+        self.queued: list[tuple[Any, Any, Any]] = []
+
+    def __call__(self, work: Any, on_done: Any, on_error: Any) -> None:
+        if self.hold:
+            self.queued.append((work, on_done, on_error))
+        else:
+            run_inline(work, on_done, on_error)
+
+    def release(self) -> None:
+        self.hold = False
+        queued, self.queued = self.queued, []
+        for work, on_done, on_error in queued:
+            run_inline(work, on_done, on_error)
+
+
+def test_a_poll_still_in_flight_is_not_an_answer(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    ps.names = ""
+    view.refresh_status()
+    assert view.last_seen_running() is False
+    gate.hold = True
+    view.refresh_status()
+    assert view.last_seen_running() is None, "an answer older than the poll in flight was trusted"
+    ps.names = "ac-worldserver\n"
+    gate.release()
+    assert view.last_seen_running() is True
+
+
+def test_a_poll_asked_while_an_action_ran_is_not_an_answer(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The 5 s poll runs through a Start; its "stopped" can be read before the containers came up.
+
+    It answers after the Start has finished, and the Start's own refresh
+    returned early because that poll was still pending. Stored, that stale
+    "stopped" let a removal forget a running server without stopping it (T95
+    review, round 1).
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    ps.names = "ac-worldserver\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+    view._set_busy(True)
+    gate.hold = True
+    ps.names = ""
+    view.refresh_status()  # read "stopped" before the containers came up
+    view._set_busy(False)
+    gate.release()
+    assert view.last_seen_running() is None
+    view.refresh_status()
+    assert view.last_seen_running() is False, "a poll asked while idle is an answer again"
+
+
+def test_a_poll_answered_while_an_action_runs_is_not_an_answer(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Asked just before Start was pressed, answered in the middle of it."""
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    view.refresh_status()
+    view._set_busy(True)
+    gate.release()
+    view._set_busy(False)
+    assert view.last_seen_running() is None
+
+
+def test_a_poll_that_swallowed_an_actions_refresh_is_not_an_answer_and_is_asked_again(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Asked while idle, answered after a whole Start: that Start's own refresh was dropped.
+
+    `refresh_status()` returns early while a poll is in flight, so the Start's
+    end-of-action refresh never ran, and the one answer left is the "stopped"
+    read before the containers came up. Kept, it let a removal forget a running
+    server without stopping it (T95 review, round 1, the last hole).
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    ps.names = ""
+    view.refresh_status()  # the 5 s poll, asked while idle
+    stale = view.services.controller.status()
+    ((_work, on_done, on_error),) = gate.queued
+    gate.queued = [(lambda: stale, on_done, on_error)]  # "stopped", read now, answered later
+
+    gate.hold = False
+    view.start_server()  # runs to the end; its refresh finds the poll pending
+    assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
+    assert not view._busy
+
+    gate.hold = True
+    queued, gate.queued = gate.queued, []
+    for work, done, error in queued:
+        run_inline(work, done, error)  # the late "stopped" answers
+
+    assert view.last_seen_running() is None, "the answer from before the Start was trusted"
+    assert len(gate.queued) == 1, "the refresh the Start lost was never asked again"
+    gate.release()
+    assert view.last_seen_running() is True
+
+
+def test_a_failed_poll_that_swallowed_a_refresh_asks_again_too(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    view.refresh_status()
+    view.refresh_status()  # dropped: the first is still out
+    ((_work, on_done, on_error),) = gate.queued
+
+    def no_docker() -> NoReturn:
+        raise RuntimeError("Cannot connect to the Docker daemon")
+
+    gate.queued = []
+    run_inline(no_docker, on_done, on_error)
+
+    assert view.last_seen_running() is None
+    assert len(gate.queued) == 1, "the dropped refresh was never asked again"
+    ps.names = "ac-worldserver\n"
+    gate.release()
+    assert view.last_seen_running() is True
+    gate.hold = True
+    view.refresh_status()
+    gate.release()
+    assert not gate.queued, "an answer nothing superseded asked again"
+
+
+def test_the_five_second_tick_never_supersedes_the_poll_it_finds_in_flight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A `docker ps` slower than the tick is not a reason to ask again (T95 review, Task 2).
+
+    Were the tick to count, every answer on a slow Docker Desktop would be
+    thrown away and re-asked at once: back-to-back polls per tab, and a
+    `last_seen_running()` that is never anything but None. Only an action's
+    own end-of-action refresh and the Refresh button make an answer stale.
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    ps.names = "ac-worldserver\n"
+    view._timer.timeout.emit()  # the tick asks
+    assert len(gate.queued) == 1
+    view._timer.timeout.emit()  # and ticks again while the poll is still out
+    assert len(gate.queued) == 1, "a tick queued a second poll"
+    queued, gate.queued = gate.queued, []
+    for work, done, error in queued:
+        run_inline(work, done, error)
+    assert not gate.queued, "a tick made the poll in flight ask again"
+    assert view.last_seen_running() is True, "a tick made a good answer unknown"
+
+
+def _refusal_while_held(view: ControllerView, gate: _Gate, press: Callable[[], None]) -> str | None:
+    """Press with the job held, read the refusal, let the job finish, and prove it lifts."""
+    gate.hold = True
+    press()
+    assert gate.queued, "the press started no job"
+    refusal = view.forget_refusal()
+    gate.release()
+    assert view.forget_refusal() is None, "the refusal outlived the job"
+    return refusal
+
+
+def test_a_removal_is_refused_while_a_backup_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
+
+    def refuse() -> NoReturn:
+        raise OSError("disk full")
+
+    view.services.backup = refuse
+    assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
+
+
+def test_a_removal_is_refused_while_a_restore_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The one that matters most: a stop under a half-written restore."""
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    _add_backup(view, tmp_path)
+    view.show_restore_plan()
+    assert _refusal_while_held(view, gate, view.run_restore) == forgetting.RESTORE_RUNNING
+
+
+def test_a_removal_is_refused_while_a_module_action_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        job_runner=gate,
+        prompt_asker=lambda parent, manifest, prompts, **_: {p.key: "42" for p in prompts},
+    )
+    view.modules_panel.select("mod-ah-bot")
+    refusal = _refusal_while_held(view, gate, lambda: view._module_action("install"))
+    assert refusal == forgetting.module_running("install mod-ah-bot")
+
+
+def test_a_removal_is_refused_while_a_custom_module_installs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        job_runner=gate,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    refusal = _refusal_while_held(view, gate, view.install_module_from_link)
+    assert refusal == forgetting.module_running("install from link mod-my-thing")
+
+
+def test_a_removal_is_refused_while_a_network_change_applies(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    view.show_network_plan()
+    assert _refusal_while_held(view, gate, view.apply_network_plan) == forgetting.NETWORK_RUNNING
+
+    def refuse(_plan: object) -> NoReturn:
+        raise OSError("permission denied")
+
+    view.services.network_apply = refuse
+    view.show_network_plan()
+    assert _refusal_while_held(view, gate, view.apply_network_plan) == forgetting.NETWORK_RUNNING
 
 
 # -- the rebuild control (the action `_format_report` has always named) --------
@@ -8163,7 +8606,7 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
     assert bmah[0].data.family == "keg" and bmah[0].data.catalogued is True
 
 
-def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker(
+def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach_docker(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """The button's whole case is an install that is gone — Docker usually with it (T54).
@@ -8198,8 +8641,8 @@ def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker
     view.refresh_status()
 
     assert view.forget_install_button is not None
-    assert (
-        not view.forget_install_button.isHidden()
+    assert _highlighted(
+        view.forget_install_button
     ), "the poll failed, so the user is told to press a button they cannot see"
     # The failure is still reported — this must not paper over Docker being gone.
     assert "Docker not reachable" in view.status_label.text()
@@ -9793,6 +10236,68 @@ def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
 
     assert view._tuning_owed.get("restart") is None, "the restart covered what owed one"
     assert view._tuning_owed.get("recreate"), "and nothing else"
+
+
+def test_a_finished_recreate_is_reported_on_the_gui_thread_by_a_real_threaded_runner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T97's second site. `_tuning_job_done` was a closure made per job, and a
+    plain callable handed to the job runner is delivered on the WORKER thread,
+    so a finished restart or recreate wrote the report, re-armed the bar and
+    started the status read from there.
+
+    Every other test in this file runs jobs inline, where the question cannot
+    arise, so this one uses the real runner and records the thread each widget
+    write lands on. Recreate, because it is the branch that clears BOTH owed
+    sets.
+
+    Mutation: hand `_run` a closure again (`lambda answer: self._tuning_job_done(answer)`)
+    and the writes are recorded off the GUI thread.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+    assert view._tuning_owed.get("restart") and view._tuning_owed.get("recreate")
+
+    writes: list[tuple[str, bool]] = []
+    for widget, name in (
+        (view.tuning_report, "setPlainText"),
+        (view.tuning_restart_button, "setEnabled"),
+        (view.tuning_recreate_button, "setEnabled"),
+    ):
+        real = getattr(widget, name)
+
+        def recorded(
+            *args: object, _what: str = f"{type(widget).__name__}.{name}", _real: object = real
+        ) -> object:
+            writes.append((_what, threading.current_thread() is threading.main_thread()))
+            return _real(*args)  # type: ignore[operator]
+
+        setattr(widget, name, recorded)
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    view.tuning_recreate_button.click()
+    pump_until(
+        lambda: view.tuning_report.toPlainText() == "recreate: done.", "the recreate's report"
+    )
+    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+
+    assert view._busy is False
+    assert view._tuning_owed.get("restart") is None, "a recreate covers the restart it owed"
+    assert view._tuning_owed.get("recreate") is None, "and its own"
+    off_thread = [what for what, on_gui in writes if not on_gui]
+    assert writes and off_thread == [], f"the Tuning bar was written from a worker: {off_thread}"
 
 
 def test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed(
@@ -14497,3 +15002,1151 @@ def _index_of(tab: Any, widget: Any) -> int:
         if item is not None and item.widget() is widget:
             return index
     raise AssertionError(f"{widget} is not in {tab}'s layout")
+
+
+# --------------------------------------------- T94: Reset to default
+
+
+def _reset_menu_texts(view: ControllerView) -> list[str]:
+    return [a.text() for a in view.tuning_reset_menu.actions() if not a.isSeparator()]
+
+
+def _menu_action(view: ControllerView, text: str) -> Any:
+    return next(a for a in view.tuning_reset_menu.actions() if a.text() == text)
+
+
+def _reset_answer(monkeypatch: pytest.MonkeyPatch, answer: object, asked: list[str]) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: (asked.append(str(a[2])), answer)[1]
+    )
+
+
+def _reset_yes(monkeypatch: pytest.MonkeyPatch, asked: list[str] | None = None) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.Yes, [] if asked is None else asked)
+
+
+RESET_QUIET = reset_defaults.Seams(bind_label=lambda server_dir: "", platform_id=lambda: "linux")
+"""WotLK's reset asks no docker; this also keeps it from asking the host about SELinux."""
+
+
+def _wotlk_server(server: Path) -> dict[str, bytes]:
+    """A Yu'lon WotLK folder: three tuned confs with `.dist`s, a marked base, a broken override."""
+    defaults: dict[str, bytes] = {}
+    for file in TUNING_CORE_FILES:
+        path = server / file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        defaults[file] = f"# default {path.name}\nKey = 1\n".encode()
+        path.with_name(path.name + ".dist").write_bytes(defaults[file])
+        path.write_bytes(b"Key = 2\n")
+    (server / composegen.BASE_FILE).write_text(
+        composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
+    )
+    (server / composegen.OVERRIDE_FILE).write_text(
+        "services:\n  ac-worldserver:\n    environment:\n      TZ: Europe/Oslo\n", encoding="utf-8"
+    )
+    return defaults
+
+
+def _reset_view(
+    ps: _Ps, tmp_path: Path, route: object = None, entry: CatalogEntry = WOTLK, **kw: Any
+) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "reset_settings",
+        (
+            route
+            if route is not None
+            else reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+        ),
+    )
+    return ControllerView(entry, services, status_poll_ms=0, **kw)
+
+
+def _land_undo_lookups(held: list[tuple[Any, Any, Any]]) -> None:
+    """Run and deliver every queued Undo lookup (final review Minor 2), oldest first."""
+    for job in [job for job in held if getattr(job[1], "__func__", None) is _LOOKED_UP]:
+        held.remove(job)
+        job[1](job[0]())
+
+
+_LOOKED_UP = ControllerView._undo_looked_up
+
+
+def test_the_wotlk_core_list_is_the_reset_modules_one_list() -> None:
+    assert TUNING_CORE_FILES is reset_defaults.AZEROTHCORE_CORE_FILES
+
+
+@pytest.mark.parametrize(
+    ("game", "files"),
+    [
+        (
+            "wow-wotlk",
+            [
+                "worldserver.conf",
+                "authserver.conf",
+                "modules/playerbots.conf",
+                "docker-compose.override.yml",
+            ],
+        ),
+        ("wow-tbc", ["mangosd.conf", "realmd.conf", "aiplayerbot.conf", "ahbot.conf"]),
+        ("wow-vanilla", ["mangosd.conf", "realmd.conf", "aiplayerbot.conf", "ahbot.conf"]),
+        (
+            "wow-tortoise",
+            ["aiplayerbot.conf", "modules/tortoise_bots.conf", "mangosd.conf", "realmd.conf"],
+        ),
+    ],
+)
+def test_the_reset_menu_lists_exactly_this_games_files(
+    qapp: object, ps: _Ps, tmp_path: Path, game: str, files: list[str]
+) -> None:
+    view = _reset_view(ps, tmp_path, entry=load_catalog().get(game))
+    assert _reset_menu_texts(view) == [
+        TUNING_RESET_ALL,
+        *(f"{name}…" for name in files),
+        TUNING_RESET_UNDO,
+    ]
+    assert view.tuning_reset_button.isEnabled() is True
+    assert view.tuning_reset_undo_action.isEnabled() is False, "nothing to undo yet"
+
+
+def test_no_on_the_reset_question_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    watched = [tmp_path / composegen.OVERRIDE_FILE, *(tmp_path / "env").rglob("*")]
+    before = {p: p.read_bytes() for p in watched if p.is_file()}
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert len(asked) == 1 and "worldserver.conf" in asked[0] and "RECREATED" in asked[0]
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list(tmp_path.rglob("*.bak"))
+    assert view.tuning_banner.isHidden() is True
+
+
+def test_yes_resets_everything_asks_for_a_recreate_and_undo_brings_it_back(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision 4: the override's env needs a recreate, the dearest job owed."""
+    defaults = _wotlk_server(tmp_path)
+    tuned_override = (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert {f: (tmp_path / f).read_bytes() for f in defaults} == defaults
+    override = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert "TZ" not in override and "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS" in override
+    assert view.tuning_banner.isHidden() is False
+    assert composegen.OVERRIDE_FILE in view.tuning_banner_label.text()
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert view.tuning_reset_undo_action.isEnabled() is True
+
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+
+    assert all((tmp_path / f).read_bytes() == b"Key = 2\n" for f in defaults)
+    assert (tmp_path / composegen.OVERRIDE_FILE).read_bytes() == tuned_override
+    assert view.tuning_reset_undo_action.isEnabled() is False, "an empty undo is offered"
+    assert "put back from" in view.tuning_report.toPlainText()
+
+
+def test_one_conf_can_be_reset_alone_and_owes_only_a_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "authserver.conf…").trigger()
+
+    assert (tmp_path / "env/dist/etc/authserver.conf").read_bytes() == defaults[
+        "env/dist/etc/authserver.conf"
+    ]
+    assert (tmp_path / "env/dist/etc/worldserver.conf").read_bytes() == b"Key = 2\n"
+    assert b"TZ" in (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
+
+
+def test_the_reset_runs_on_the_job_runner_and_the_tab_is_busy_until_it_ends(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No docker on the GUI thread: the press only QUEUES the work (spec Test 7).
+
+    And the two callbacks are the view's own bound slots: a lambda or a closure
+    has no thread affinity, so the job runner would call it on the WORKER
+    thread (`ui/widgets/job.py`; T97 crashed the Characters tab on exactly that).
+    """
+    _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+    real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
+        calls.append((tuple(files), dict(keys)))
+        return real(files, keys)
+
+    view = _reset_view(
+        ps, tmp_path, route, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _reset_yes(monkeypatch)
+    _land_undo_lookups(held)
+    queued = len(held)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    # Codex (final pass): the press first reads its OWN facts, as a job.
+    assert len(held) == queued + 1 and calls == [], "the press did the work itself"
+    work, done, failed = held.pop()
+    assert (done.__self__, done.__func__) == (view, ControllerView._press_facts_ready)
+    assert (failed.__self__, failed.__func__) == (view, ControllerView._press_facts_failed)
+    assert view.tuning_reset_button.isEnabled() is False, "pressable while its facts are read"
+    done(work())
+
+    assert len(held) == queued + 1 and calls == [], "the press did the work itself"
+    assert view.busy_reason() == TUNING_RESET_RUNNING
+    assert view.tuning_reset_button.isEnabled() is False
+    work, done, failed = held[-1]
+    assert (done.__self__, done.__func__) == (view, ControllerView._reset_done)
+    assert (failed.__self__, failed.__func__) == (view, ControllerView._reset_failed)
+    done(work())
+    assert calls == [(reset_defaults.core_files(WOTLK), {})], "no module installed: no keys"
+    assert view.busy_reason() is None
+    assert view.tuning_reset_button.isEnabled() is True
+    _land_undo_lookups(held)
+
+    # The undo is the same shape: queued, busy, and handed back to bound slots.
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+    assert view.busy_reason() == TUNING_RESET_RUNNING
+    assert (tmp_path / TUNING_CORE_FILES[0]).read_bytes() != b"Key = 2\n", "the undo ran inline"
+    work, done, failed = held[-1]
+    assert (done.__self__, done.__func__) == (view, ControllerView._undo_done)
+    assert (failed.__self__, failed.__func__) == (view, ControllerView._reset_failed)
+    done(work())
+    assert (tmp_path / TUNING_CORE_FILES[0]).read_bytes() == b"Key = 2\n"
+    assert view.busy_reason() is None
+
+
+def test_a_reset_that_raised_unlocks_the_tab_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
+        raise RuntimeError("a bug in the reset")
+
+    view = _reset_view(ps, tmp_path, route)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert failures == ["a bug in the reset"]
+    assert "FAILED: a bug in the reset" in view.tuning_report.toPlainText()
+    assert view.busy_reason() is None and view.tuning_reset_button.isEnabled() is True
+
+
+def test_a_refused_reset_writes_nothing_says_why_and_offers_no_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    (tmp_path / "env/dist/etc/authserver.conf.dist").unlink()
+    view = _reset_view(ps, tmp_path)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert (tmp_path / "env/dist/etc/worldserver.conf").read_bytes() == b"Key = 2\n"
+    assert b"TZ" in (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    assert "authserver.conf.dist" in view.tuning_report.toPlainText()
+    assert failures, "a refusal must reach the window's failure line"
+    assert view.tuning_banner.isHidden() is True
+    assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_a_cmangos_reset_owes_what_file_rule_prices_its_etc_files_at(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`etc/` is bound into the containers, so the banner offers Restart (T99; T94 had Recreate)."""
+    backup = tmp_path / "etc" / "mangosd.conf.20260923-120000-000000.bak"
+
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
+        return reset_defaults.ResetReport(
+            (reset_defaults.FileResult("etc/mangosd.conf", "reset", backup),)
+        )
+
+    view = _reset_view(ps, tmp_path, route, entry=TBC)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "mangosd.conf…").trigger()
+
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
+    assert "etc/mangosd.conf" in view.tuning_banner_label.text()
+
+
+def _beastmaster_view(ps: _Ps, tmp_path: Path, route: object = None) -> ControllerView:
+    """WotLK with NPC Beastmaster installed: it keeps `Creatures.CustomIDs` in the core conf."""
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-npc-beastmaster"})}
+    )
+    object.__setattr__(
+        services,
+        "reset_settings",
+        route or reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET),
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_question_says_the_installed_modules_settings_are_kept(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision 5, in the words the player reads."""
+    _wotlk_server(tmp_path)
+    view = _beastmaster_view(ps, tmp_path)
+    names = {
+        r.module_name
+        for r in view._tuning_rows
+        if r.installed and r.file == "env/dist/etc/worldserver.conf"
+    }
+    assert names, "control: the manifest no longer keys worldserver.conf"
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, "worldserver.conf…").trigger()
+    assert all(name in asked[0] for name in names) and "are kept" in asked[0]
+    _menu_action(view, "authserver.conf…").trigger()
+    assert not any(name in asked[1] for name in names)
+
+
+def test_the_tab_hands_the_reset_its_own_rows_keys_spelled_as_wotlks_core_files(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carried from Task 3: only TBC's `etc/` spelling was tested. WotLK's is `env/dist/etc/`."""
+    _wotlk_server(tmp_path)
+    got: list[dict[str, Any]] = []
+
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
+        got.append(dict(keys))
+        return reset_defaults.ResetReport(())
+
+    view = _beastmaster_view(ps, tmp_path, route)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert list(got[0]) == ["env/dist/etc/worldserver.conf"]
+    assert set(got[0]) <= set(reset_defaults.core_files(WOTLK))
+    assert "Creatures.CustomIDs" in got[0]["env/dist/etc/worldserver.conf"]
+
+
+def test_a_cmangos_tab_hands_the_reset_its_rows_keys_spelled_as_its_core_files(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same through a TBC tab: XP Rates keys `etc/mangosd.conf`, `core_files()`'s spelling."""
+    from yulon.controller_wow_tbc import modules as tbc_modules
+
+    got: list[dict[str, Any]] = []
+
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
+        got.append(dict(keys))
+        return reset_defaults.ResetReport(())
+
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "store", tbc_modules.store())
+    object.__setattr__(services, "installed_modules", lambda: {"mod": frozenset({"xp-rates"})})
+    object.__setattr__(services, "reset_settings", route)
+    view = ControllerView(TBC, services, status_poll_ms=0)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert list(got[0]) == ["etc/mangosd.conf"]
+    assert set(got[0]) <= set(reset_defaults.core_files(TBC))
+    assert got[0]["etc/mangosd.conf"], "XP Rates' keys never reached the reset"
+
+
+def test_an_installed_modules_key_survives_a_reset_pressed_on_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision 5 end to end: the tab hands its OWN rows' keys to the reset."""
+    defaults = _wotlk_server(tmp_path)
+    world = tmp_path / "env/dist/etc/worldserver.conf"
+    world.write_bytes(b"Key = 2\nCreatures.CustomIDs = 90001\n")
+    view = _beastmaster_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "worldserver.conf…").trigger()
+
+    # The core key went back to the .dist; the module's key, absent there, was appended.
+    assert world.read_bytes() == defaults["env/dist/etc/worldserver.conf"] + (
+        b"Creatures.CustomIDs = 90001\n"
+    )
+
+
+def test_after_a_restart_undo_finds_the_last_reset_on_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed (or crashed) window loses the session's record; the backups on disk are enough.
+
+    The raw editor lists the WotLK confs read-only and its Revert refuses them,
+    so without this nothing on the tab reaches a core conf's backup.
+    """
+    defaults = _wotlk_server(tmp_path)
+    tuned_override = (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    _reset_yes(monkeypatch)
+    first = _reset_view(ps, tmp_path)
+    _menu_action(first, TUNING_RESET_ALL).trigger()
+    assert {f: (tmp_path / f).read_bytes() for f in defaults} == defaults
+    first.deleteLater()
+
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    again = _reset_view(ps, tmp_path)
+    assert again.tuning_reset_undo_action.isEnabled() is True
+    _menu_action(again, TUNING_RESET_UNDO).trigger()
+
+    assert "worldserver.conf" in asked[0] and ".bak" in asked[0], "the dialog names its backups"
+    assert all((tmp_path / f).read_bytes() == b"Key = 2\n" for f in defaults)
+    assert (tmp_path / composegen.OVERRIDE_FILE).read_bytes() == tuned_override
+    assert again.tuning_reset_undo_action.isEnabled() is False
+    assert again.tuning_banner_button.text() == TUNING_RECREATE_LABEL, "the undo owes one too"
+
+
+def test_no_on_the_undo_question_puts_nothing_back(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, [])
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+
+    assert {f: (tmp_path / f).read_bytes() for f in defaults} == defaults
+    assert view.tuning_reset_undo_action.isEnabled() is True
+
+
+def test_the_reset_button_is_locked_while_another_action_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _reset_view(ps, tmp_path)
+    view._set_busy(True)
+    assert view.tuning_reset_button.isEnabled() is False
+    view._set_busy(False)
+    assert view.tuning_reset_button.isEnabled() is True
+
+
+def test_a_tab_with_no_reset_route_has_a_dead_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.tuning_reset_button.isEnabled() is False
+    view._set_busy(True)
+    view._set_busy(False)
+    assert view.tuning_reset_button.isEnabled() is False, "a job ending handed it a route"
+
+
+def test_a_saves_backup_is_not_offered_as_a_reset_to_undo(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Only a reset's own backups arm the Undo: a Tuning save of a core conf takes one too."""
+    _wotlk_server(tmp_path)
+    world = tmp_path / TUNING_CORE_FILES[0]
+    tuning.backup(world)
+    world.write_bytes(b"Key = 3\n")
+    view = _reset_view(ps, tmp_path)
+    assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_an_undone_reset_stays_undone_after_a_save_into_the_same_conf(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1 (Important): the Undo must not re-arm and overwrite later tuning."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+    assert view.tuning_reset_undo_action.isEnabled() is False
+    tuning.write(tmp_path / TUNING_CORE_FILES[0], {"Creatures.CustomIDs": "90001"})
+
+    view.reload_tuning()
+
+    assert view.tuning_reset_undo_action.isEnabled() is False, "the undone reset re-armed"
+    again = _reset_view(ps, tmp_path)
+    assert again.tuning_reset_undo_action.isEnabled() is False, "re-armed after a restart"
+
+
+def test_a_file_put_back_by_hand_greys_the_sessions_undo(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1: the session's record gets the disk path's "already undone" test."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    assert view.tuning_reset_undo_action.isEnabled() is True
+    for item in view._last_reset:
+        assert item.backup is not None
+        tuning.restore(item.backup, tmp_path / item.file)
+
+    view.reload_tuning()
+
+    assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_a_reset_that_raised_after_writing_rereads_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1: a failure after some writes must not leave stale cards or a stale Undo."""
+    _wotlk_server(tmp_path)
+    real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
+        real(files, keys)
+        raise RuntimeError("a bug after the writes")
+
+    view = _reset_view(ps, tmp_path, route)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert view.tuning_reset_undo_action.isEnabled() is True
+
+
+def test_a_press_that_raised_hands_the_undo_to_the_disk_not_an_older_session_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 2: after a crashed press the disk's newest press is the one to undo."""
+    _wotlk_server(tmp_path)
+    auth = tmp_path / TUNING_CORE_FILES[1]
+    old = reset_defaults.reset_backup(auth, "e5e5e5e5", now=datetime(2026, 9, 1, 12, 0, 0))
+    # At its default, so the crashing press leaves it alone: only the older
+    # session press names it.
+    auth.write_bytes(auth.with_name(auth.name + ".dist").read_bytes())
+    real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+    presses: list[str] = []
+
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
+        presses.append("x")
+        if len(presses) == 1:
+            return reset_defaults.ResetReport(
+                (reset_defaults.FileResult(TUNING_CORE_FILES[1], "reset", old),)
+            )
+        real(files, keys)
+        raise RuntimeError("a bug after the writes")
+
+    view = _reset_view(ps, tmp_path, route)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "authserver.conf…").trigger()
+    assert [item.file for item in view._reset_undo_items()] == [TUNING_CORE_FILES[1]]
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    items = view._reset_undo_items()
+    assert items == reset_defaults.last_reset_on_disk(WOTLK, tmp_path)
+    assert TUNING_CORE_FILES[1] not in [item.file for item in items]
+    assert TUNING_CORE_FILES[0] in [item.file for item in items]
+
+
+def test_the_undo_lookup_reads_no_file_on_the_gui_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review Minor 2: every reload listed up to five folders and read each core file and
+    backup on the GUI thread -- over 9p for a server inside WSL. It is a job now, and the Undo
+    stays greyed until its answer lands; an answer older than the newest is dropped."""
+    _wotlk_server(tmp_path)
+    reset_defaults.reset(WOTLK, tmp_path, TUNING_CORE_FILES, seams=RESET_QUIET)
+    gui = threading.get_ident()
+    listed: list[int] = []
+    real = tuning.backups_of
+
+    def spy(path: Path) -> tuple[Path, ...]:
+        listed.append(threading.get_ident())
+        return real(path)
+
+    monkeypatch.setattr(tuning, "backups_of", spy)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    view.reload_tuning()
+
+    assert listed == [], "the Undo's lookup listed a folder on the GUI thread"
+    assert view.tuning_reset_undo_action.isEnabled() is False, "armed before its answer landed"
+    lookups = [job for job in held if getattr(job[1], "__func__", None) is _LOOKED_UP]
+    assert len(lookups) == 2, "one lookup per reload: the tab's opening, and this one"
+    for _work, done, failed in lookups:
+        assert done.__self__ is view and failed.__self__ is view
+        assert failed.__func__ is ControllerView._undo_lookup_failed
+    older, newest = lookups
+    newest[1](newest[0]())
+    assert view.tuning_reset_undo_action.isEnabled() is True
+    assert listed and gui in listed, "control: the spy saw the lookup's own reads"
+    stale = older[0]()
+    older[1](replace(stale, items=()))
+    assert view.tuning_reset_undo_action.isEnabled() is True, "a stale answer was applied"
+
+
+def test_an_undo_lookup_that_raised_leaves_the_undo_greyed(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    reset_defaults.reset(WOTLK, tmp_path, TUNING_CORE_FILES, seams=RESET_QUIET)
+
+    def boom(*args: object, **kwargs: object) -> tuple[reset_defaults.FileResult, ...]:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(reset_defaults, "undo_items", boom)
+    view = _reset_view(ps, tmp_path)
+    assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_the_dialog_names_an_override_yulon_did_not_make_before_the_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: "left alone" must be in the question, never only in the report after."""
+    _wotlk_server(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    view = _reset_view(ps, tmp_path)
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert f"Left alone: {composegen.OVERRIDE_FILE} was not made by Yu'lon." in asked[0]
+
+
+def test_a_missing_override_is_made_again_and_owes_a_recreate(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    (tmp_path / composegen.OVERRIDE_FILE).unlink()
+    view = _reset_view(ps, tmp_path)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    _menu_action(view, f"{composegen.OVERRIDE_FILE}…").trigger()
+
+    assert "made again as Yu'lon installs it" in asked[0]
+    assert (tmp_path / composegen.OVERRIDE_FILE).is_file()
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+
+
+def test_the_undo_press_checks_each_file_again_before_it_writes(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review: the cached lookup may be older than the files; a file put back since is left."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    world = next(item for item in view._last_reset if item.file == TUNING_CORE_FILES[0])
+    assert world.backup is not None
+    tuning.restore(world.backup, tmp_path / world.file)  # by hand, no reload
+
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+
+    siblings = [p.name for p in (tmp_path / world.file).parent.iterdir()]
+    assert not [n for n in siblings if n.startswith("worldserver.conf.") and ".undo-" in n]
+    assert "worldserver.conf" not in view.tuning_report.toPlainText()
+    assert (tmp_path / TUNING_CORE_FILES[1]).read_bytes() == b"Key = 2\n"
+
+
+def test_the_reset_question_reads_no_file_on_the_gui_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review, then Codex's final pass: each press reads its OWN facts, fresh, as a job --
+    never a stat or a read on the GUI thread, and never an answer cached at the last reload."""
+    _wotlk_server(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    reads: list[Path] = []
+    real = composegen.is_ours
+
+    def spy(path: Path) -> bool:
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(composegen, "is_ours", spy)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _land_undo_lookups(held)
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    before = len(reads)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    assert len(reads) == before, "the press read the disk on the GUI thread"
+    assert asked == [], "asked before this press's own facts were read"
+
+    work, done, _failed = held.pop()
+    assert done.__func__ is ControllerView._press_facts_ready
+    done(work())
+
+    assert len(reads) > before, "control: the press's job read the base compose file"
+    assert f"Left alone: {composegen.OVERRIDE_FILE} was not made by Yu'lon." in asked[0]
+    assert "modules/playerbots.conf" in asked[0]
+
+
+def test_a_file_deleted_after_the_tab_read_its_files_is_named_by_the_question(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex (final pass): the question used facts cached at the last reload, hours old."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    (tmp_path / composegen.OVERRIDE_FILE).unlink()
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, f"{composegen.OVERRIDE_FILE}…").trigger()
+
+    assert "made again as Yu'lon installs it" in asked[0]
+
+
+def test_a_file_deleted_after_the_question_refuses_the_press_and_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The facts the player said Yes to go into the job; the job refuses if the files moved."""
+    defaults = _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _land_undo_lookups(held)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    work, done, _failed = held.pop()
+    done(work())  # the question, answered Yes: the reset job is queued, not run
+    reset_job = held.pop()
+    assert reset_job[1].__func__ is ControllerView._reset_done
+    (tmp_path / composegen.OVERRIDE_FILE).unlink()
+
+    reset_job[1](reset_job[0]())
+
+    assert not (tmp_path / composegen.OVERRIDE_FILE).exists()
+    assert all((tmp_path / f).read_bytes() == b"Key = 2\n" for f in defaults)
+    assert not list(tmp_path.rglob("*.bak")), "a backup was made by a refused press"
+    report = view.tuning_report.toPlainText()
+    assert "changed since" in report and "Reset to default again" in report
+
+
+def test_a_press_whose_tab_moved_on_is_dropped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reload (or a newer press) between the press and its facts: that answer asks nothing."""
+    _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _land_undo_lookups(held)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    stale = held.pop()
+    view.reload_tuning()
+    _land_undo_lookups(held)
+    stale[1](stale[0]())
+    assert asked == [] and not held, "a press from before the reload asked or queued work"
+    assert view.tuning_reset_button.isEnabled() is True
+
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    work, done, _failed = held.pop()
+    answer = work()
+    done(replace(answer, token=answer.token - 1))
+    assert asked == [] and not held, "an answer for an older press was acted on"
+    done(answer)
+    assert len(asked) == 1, "control: the current press's own answer asks"
+
+
+def test_an_older_press_failing_leaves_the_current_press_waiting(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex (last pass): A is made stale by a reload, B starts, then A's job fails. B must
+    still be the press waiting for its answer, with the button off -- and B's answer asks."""
+    _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _land_undo_lookups(held)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    a_work, a_done, a_failed = held.pop()
+    view.reload_tuning()
+    _land_undo_lookups(held)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    b_work, b_done, _b_failed = held.pop()
+
+    a_failed(OSError(5, "Input/output error"))  # the job itself raised
+    assert view._press_asking is not None, "A's failure cleared B's press"
+    assert view.tuning_reset_button.isEnabled() is False, "pressable while B is still reading"
+
+    def unreadable(*args: object, **kwargs: object) -> reset_defaults.PressFacts:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(reset_defaults, "press_facts", unreadable)
+    a_done(a_work())  # the job caught it: a failure carried in A's own answer
+    monkeypatch.undo()
+    _reset_yes(monkeypatch, asked)
+    assert view._press_asking is not None and view.tuning_reset_button.isEnabled() is False
+
+    b_done(b_work())
+    assert len(asked) == 1, "B's own answer was dropped"
+
+
+def test_a_press_whose_files_cannot_be_read_says_so_and_frees_the_button(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    def unreadable(*args: object, **kwargs: object) -> reset_defaults.PressFacts:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(reset_defaults, "press_facts", unreadable)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert asked == [] and view._press_asking is None
+    assert view.tuning_reset_button.isEnabled() is True
+    assert "could not be read" in view.tuning_report.toPlainText() and failures
+
+
+# -- T99: the Bots tab's "Random bots" box, and the bot keys on the Tuning tab --------------
+
+BOT_CONF = "etc/aiplayerbot.conf"
+BOT_CONF_TEXT = (
+    "# Random bot count\n"
+    "AiPlayerbot.MinRandomBots = 500\n"
+    "AiPlayerbot.MaxRandomBots = 500\n"
+    "AiPlayerbot.RandomBotAccountCount = 100\n"
+)
+
+
+def _bot_conf(server: Path) -> bytes:
+    path = server / BOT_CONF
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(BOT_CONF_TEXT, encoding="utf-8")
+    return path.read_bytes()
+
+
+def _wotlk_override(server: Path) -> str:
+    """A Yu'lon WotLK folder's compose files, the override as the install renders it."""
+    (server / composegen.BASE_FILE).write_text(
+        composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
+    )
+    texts, reasons = reset_defaults.default_texts(
+        WOTLK, server, [composegen.OVERRIDE_FILE], seams=RESET_QUIET
+    )
+    assert reasons == {}
+    text = texts[composegen.OVERRIDE_FILE]
+    (server / composegen.OVERRIDE_FILE).write_text(text, encoding="utf-8", newline="")
+    return text
+
+
+def _bots_view(ps: _Ps, tmp_path: Path, entry: CatalogEntry = TBC, **kw: Any) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "bot_population",
+        bot_population.bot_count_route(entry, tmp_path),
+    )
+    return ControllerView(entry, services, status_poll_ms=0, **kw)
+
+
+def _bot_jobs(held: list[tuple[Any, Any, Any]], slot: Any) -> list[tuple[Any, Any, Any]]:
+    return [job for job in held if getattr(job[1], "__func__", None) is slot]
+
+
+def test_the_bots_tab_shows_the_count_read_off_the_gui_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No file read on the GUI thread: the tab only QUEUES the read, and the box waits for it."""
+    _bot_conf(tmp_path)
+    reads: list[int] = []
+    real = bot_population.read
+
+    def spy(*args: Any, **kwargs: Any) -> bot_population.Reading:
+        reads.append(threading.get_ident())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bot_population, "read", spy)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+
+    assert reads == [], "the bot count was read on the GUI thread"
+    assert view.bot_count_box.isEnabled() is False, "editable before its value landed"
+    assert view.bot_count_apply_button.isEnabled() is False
+    jobs = _bot_jobs(held, ControllerView._bot_count_read)
+    assert len(jobs) == 1
+    work, done, failed = jobs[0]
+    assert done.__self__ is view and failed.__self__ is view
+    assert failed.__func__ is ControllerView._bot_count_read_failed
+    done(work())
+
+    assert reads, "control: the spy saw the job's own read"
+    assert view.bot_count_box.value() == 500
+    assert view.bot_count_box.maximum() == 900, "100 bot accounts x 9 characters"
+    assert view.bot_count_box.isEnabled() is True and view.bot_count_apply_button.isEnabled()
+    assert "500" in view.bot_count_note.text()
+
+
+@pytest.mark.parametrize("entry", [TBC, TORTOISE], ids=lambda e: e.id)
+def test_apply_backs_the_conf_up_writes_both_numbers_and_offers_a_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: CatalogEntry
+) -> None:
+    before = _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path, entry)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    text = (tmp_path / BOT_CONF).read_text(encoding="utf-8")
+    assert "MinRandomBots = 50\n" in text and "MaxRandomBots = 50\n" in text
+    backups = sorted((tmp_path / "etc").glob("aiplayerbot.conf.*.bak"))
+    assert len(backups) == 1 and backups[0].read_bytes() == before
+    assert len(asked) == 1 and "50" in asked[0] and "restarted" in asked[0]
+    assert "RECREATED" not in asked[0]
+    assert view.tuning_banner.isHidden() is False
+    assert BOT_CONF in view.tuning_banner_label.text()
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
+    assert view.bot_count_owed_button.isHidden() is False
+    assert view.bot_count_owed_button.text() == TUNING_RESTART_LABEL
+    assert view.bot_count_box.value() == 50, "the box was read again after the write"
+    assert backups[0].name in view.bot_count_report.text()
+    assert "Now 50" in view.bot_count_note.text()
+
+
+def test_no_on_the_bot_count_question_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    before = _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    asked: list[str] = []
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    assert len(asked) == 1
+    assert (tmp_path / BOT_CONF).read_bytes() == before
+    assert not list(tmp_path.rglob("*.bak"))
+    assert view.tuning_banner.isHidden() is True and view.bot_count_owed_button.isHidden()
+
+
+def test_a_wotlk_bot_count_is_written_into_the_override_and_asks_for_a_recreate(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _wotlk_override(tmp_path)
+    view = _bots_view(ps, tmp_path, WOTLK)
+    assert view.bot_count_box.value() == 500
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(60)
+    view.bot_count_apply_button.click()
+
+    now = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert now == installed.replace('RANDOM_BOTS: "500"', 'RANDOM_BOTS: "60"')
+    assert len(asked) == 1 and "RECREATED" in asked[0]
+    assert "by hand" not in asked[0], "nothing was added by hand, so nothing is dropped"
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert composegen.OVERRIDE_FILE in view.tuning_banner_label.text()
+    assert view.bot_count_owed_button.text() == TUNING_RECREATE_LABEL
+
+
+def test_a_hand_added_wotlk_line_survives_apply(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex high: Apply re-rendered the whole override and dropped what a player added."""
+    installed = _wotlk_override(tmp_path)
+    before = installed.replace("    environment:\n", "    environment:\n      TZ: Europe/Oslo\n")
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(before, encoding="utf-8", newline="")
+    view = _bots_view(ps, tmp_path, WOTLK)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(60)
+    view.bot_count_apply_button.click()
+
+    assert len(asked) == 1 and "by hand" not in asked[0]
+    assert (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8") == before.replace(
+        'RANDOM_BOTS: "500"', 'RANDOM_BOTS: "60"'
+    )
+
+
+def test_a_huge_account_count_reaches_the_box_clamped_not_as_an_overflow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Codex medium: accounts x 9 above Qt's int made `setRange` raise inside the slot."""
+    path = tmp_path / BOT_CONF
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        BOT_CONF_TEXT.replace(
+            "RandomBotAccountCount = 100", f"RandomBotAccountCount = {10**12}"
+        ).replace("MaxRandomBots = 500", f"MaxRandomBots = {10**11}"),
+        encoding="utf-8",
+    )
+    view = _bots_view(ps, tmp_path)
+    assert view.bot_count_box.maximum() == bot_population.NO_CEILING
+    assert view.bot_count_box.value() == bot_population.NO_CEILING
+    assert view.bot_count_box.isEnabled() is True
+
+
+def test_an_older_read_landing_late_is_dropped(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Review Minor 3: the generation check in `_bot_count_read`, pinned.
+
+    Mutation: drop the check and the late 500 overwrites the newer 70.
+    """
+    _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    ((old_work, old_done, _),) = _bot_jobs(held, ControllerView._bot_count_read)
+    stale = old_work()  # read while the file said 500
+    (tmp_path / BOT_CONF).write_text(BOT_CONF_TEXT.replace("= 500", "= 70"), encoding="utf-8")
+    view.reload_tuning()
+    new_work, new_done, _ = _bot_jobs(held, ControllerView._bot_count_read)[-1]
+    new_done(new_work())
+    assert view.bot_count_box.value() == 70
+    old_done(stale)
+    assert view.bot_count_box.value() == 70, "a stale read was applied"
+    assert "Now 70" in view.bot_count_note.text()
+
+
+def test_an_older_read_that_failed_does_not_free_a_newer_pending_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Review Minor 3: the failure slot keeps the same generation rule as the ready one."""
+    _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    ((_w, _d, old_failed),) = _bot_jobs(held, ControllerView._bot_count_read)
+    view.reload_tuning()
+    new_work, new_done, new_failed = _bot_jobs(held, ControllerView._bot_count_read)[-1]
+    assert old_failed.__func__ is ControllerView._bot_count_read_failed
+    old_failed(controller_view_module.BotCountReadFailed(1, "an old read broke"))
+    assert view._bot_count_pending is True, "an old failure freed the newer read"
+    assert view.bot_count_box.isEnabled() is False
+    new_failed(
+        controller_view_module.BotCountReadFailed(view._bot_count_generation, "this one broke")
+    )
+    assert view._bot_count_pending is False
+    assert "this one broke" in view.bot_count_note.text()
+
+
+def test_the_bot_count_write_runs_on_the_job_runner_and_holds_the_box(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write is a job, handed back to bound slots (T97), and the box is dead while it runs."""
+    before = _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    for work, done, _failed in _bot_jobs(held, ControllerView._bot_count_read):
+        done(work())
+    _reset_yes(monkeypatch)
+    view.bot_count_box.setValue(40)
+    view.bot_count_apply_button.click()
+
+    assert (tmp_path / BOT_CONF).read_bytes() == before, "the press wrote on the GUI thread"
+    jobs = _bot_jobs(held, ControllerView._bot_count_written)
+    assert len(jobs) == 1
+    work, done, failed = jobs[0]
+    assert (done.__self__, failed.__self__) == (view, view)
+    assert failed.__func__ is ControllerView._bot_count_failed
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    assert view.busy_reason() == BOT_COUNT_RUNNING
+    done(work())
+    assert "MaxRandomBots = 40" in (tmp_path / BOT_CONF).read_text(encoding="utf-8")
+    assert view.busy_reason() is None
+
+
+def test_the_box_is_dead_while_any_job_of_ours_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    assert view.bot_count_box.isEnabled() is True
+    view._set_busy(True)
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    view._set_busy(False)
+    assert view.bot_count_box.isEnabled() is True
+    assert view.bot_count_apply_button.isEnabled() is True
+
+
+def test_a_refused_bot_count_writes_nothing_says_why_and_offers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    (tmp_path / BOT_CONF).unlink()  # gone between the read and the press
+    _reset_yes(monkeypatch)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    assert not (tmp_path / BOT_CONF).exists()
+    assert "aiplayerbot.conf" in view.bot_count_report.text() and failures
+    assert "NOT changed" in view.bot_count_report.text()
+    assert view.tuning_banner.isHidden() is True
+
+
+def test_a_game_with_its_count_unreadable_says_so_and_keeps_the_box_dead(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _bots_view(ps, tmp_path)  # no aiplayerbot.conf on disk
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    assert "aiplayerbot.conf" in view.bot_count_note.text()
+
+
+@pytest.mark.parametrize(
+    ("entry", "shown"),
+    [(TBC, True), (TORTOISE, True), (WOTLK, False)],
+    ids=["tbc", "tortoise", "wotlk"],
+)
+def test_the_tuning_tab_shows_the_bot_keys_for_cmangos_and_tortoise_only(
+    qapp: object, ps: _Ps, tmp_path: Path, entry: CatalogEntry, shown: bool
+) -> None:
+    _bot_conf(tmp_path)
+    _wotlk_override(tmp_path)
+    view = _bots_view(ps, tmp_path, entry)
+    cards = {card.card.module_id: card for card in view.tuning_panel._cards.values()}
+    assert (bot_population.CARD[1] in cards) is shown
+    if shown:
+        card = cards[bot_population.CARD[1]].card
+        keys = [row.key for row in card.rows]
+        assert bot_population.MAX_KEY in keys and bot_population.MIN_KEY in keys
+        assert card.rules == ("restart",)
+        spec = view._tuning_spec(*bot_population.CARD, BOT_CONF)
+        assert spec == bot_population.conf_keys(entry)
+
+
+def test_a_tuning_save_of_the_bot_card_moves_the_bots_tab_box(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    (tmp_path / BOT_CONF).write_text(BOT_CONF_TEXT.replace("= 500", "= 70"), encoding="utf-8")
+    view.reload_tuning()
+    assert view.bot_count_box.value() == 70

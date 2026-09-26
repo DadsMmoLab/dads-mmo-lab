@@ -182,6 +182,18 @@ def test_a_daemon_that_cannot_be_asked_says_unknown_rather_than_stopped(tmp_path
     assert verdict.players is None
 
 
+def test_a_container_docker_says_does_not_exist_is_called_that_not_unanswered(
+    tmp_path: Path,
+) -> None:
+    """Andood's screenshot (T95): containers deleted by hand read "docker did not answer"."""
+    verdict = _watch(tmp_path, [docker.ContainerState(missing=True)]).tick()
+    assert verdict.state == "missing"
+    assert not verdict.stable
+    said = dashboard.line(verdict)
+    assert "does not exist" in said
+    assert "did not answer" not in said
+
+
 def test_the_uptime_survives_dockers_nanosecond_timestamps(tmp_path: Path) -> None:
     """`fromisoformat` takes 3 or 6 fractional digits; docker prints 9."""
     verdict = _watch(tmp_path, [_running("2026-09-06T17:00:00.000000000Z")]).tick()
@@ -301,6 +313,8 @@ def test_the_warning_rides_along_with_the_counts_rather_than_replacing_them() ->
 
 def test_an_unknown_state_says_docker_could_not_be_asked_rather_than_pretending() -> None:
     assert "could not" in dashboard.line(dashboard.Verdict("unknown"))
+    assert "did not answer" in dashboard.line(dashboard.Verdict("unknown"))
+    assert "did not answer" not in dashboard.line(dashboard.Verdict("missing"))
 
 
 def test_a_stopped_server_says_stopped_and_nothing_else() -> None:
