@@ -374,7 +374,7 @@ def test_a_card_whose_rows_cost_two_different_things_says_both() -> None:
     `env/dist/etc/`), which is exactly why it is asserted here with synthetic
     rows rather than left to the first module that can.
     """
-    card = tp.build_tuning_cards((_row(key="A"), _row(file="etc/elsewhere.conf", key="B")))[0]
+    card = tp.build_tuning_cards((_row(key="A"), _row(file="conf/elsewhere.conf", key="B")))[0]
     assert card.rules == ("recreate", "restart")
     said = card.rule_sentence
     assert tuning.apply_sentence("recreate") in said

@@ -1286,7 +1286,10 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
     said["_data"] = str(from_block.value)
     with pytest.raises(InstallerError) as from_image:
         engine(Recorder())._image_ref(context(server_dir), "no-such-service")
-    said["_image_ref"] = str(from_image.value)
+    # Keyed `_image_ref_for`, called through `_image_ref`: T94 moved the body
+    # (and its tail) into the folder-keyed helper the reset shares, and the
+    # stage's own call is still what a user reaches -- `_patch_text`'s rule below.
+    said["_image_ref_for"] = str(from_image.value)
     with pytest.raises(InstallerError) as from_password:
         eng = engine_for(no_file, Recorder(), volume_exists=refuse_to_answer)
         list(eng._db_password(context(server_dir)))
@@ -1328,7 +1331,9 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
     declared: dict[str, str] = {}
     with pytest.raises(InstallerError) as from_collision:
         engine(Recorder())._secret_tokens(collided)
-    declared["_secret_tokens"] = str(from_collision.value)
+    # Keyed `conf_tokens`, called through `_secret_tokens`: T94 moved the body
+    # there so the conf stage and the reset share one; the stage's call is driven.
+    declared["conf_tokens"] = str(from_collision.value)
     assert set(declared) == functions_spending("DECLARATION_ERROR_TAIL"), (
         "a function spends the declaration tail that this test does not drive, or drives "
         "one that no longer spends it"
