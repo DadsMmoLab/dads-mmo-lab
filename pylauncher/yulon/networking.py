@@ -1972,6 +1972,178 @@ def _zoned_firewalld(commands: list[list[str]], zones: tuple[str, ...] | None) -
     return [zoned for command in commands for zoned in _zoned(command, zones)]
 
 
+@dataclass(frozen=True)
+class PortAdmission:
+    """What firewalld answered when asked whether `zone` already admits `port` (T140).
+
+    `port` is spelled the way the plan writes it (`3724/tcp`). Each answer is
+    True for a plain `yes`, False for a plain `no`, and None for anything else
+    — not authorized, not running, no bus, a timeout, a tool that is not there,
+    output that is neither word. None is read exactly as False by every caller:
+    an answer nobody got may never remove a command.
+    """
+
+    zone: str
+    port: str
+    runtime: bool | None
+    permanent: bool | None
+
+
+_FIREWALLD_QUERY_TIMEOUT_SECONDS = 5.0
+"""Same bound and same reason as `_SS_TIMEOUT_SECONDS`."""
+
+
+def _query_port(
+    run: Runner, prefix: tuple[str, ...], zone: str, port: str, *, permanent: bool
+) -> bool | None:
+    """One `firewall-cmd [--permanent] --zone=Z --query-port=P`: True, False, or None when unsaid.
+
+    firewall-cmd's query prints `yes` and exits 0, or prints `no` and exits 1
+    (`print_query_result()` in src/firewall/command.py, read in firewalld source,
+    main, 2026-09-26). Both halves are required: exit 1 alone is also what
+    `sudo` answers for a command it cannot find, and every failure firewalld
+    itself reports has its own code (253 not authorized, 252 not running, 36 no
+    system bus — see `_FIREWALLD_ACTIVE_ZONES_ARGV`).
+    """
+    argv = [*prefix, "firewall-cmd", *(["--permanent"] if permanent else [])]
+    argv += [f"--zone={zone}", f"--query-port={port}"]
+    try:
+        proc = run(argv)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    said = proc.stdout.strip()
+    if proc.returncode == 0 and said == "yes":
+        return True
+    if proc.returncode == 1 and said == "no":
+        return False
+    return None
+
+
+def detect_firewalld_admission(
+    pairs: tuple[tuple[str, str], ...],
+    run: Runner | None = None,
+    *,
+    prefix: tuple[str, ...] = (),
+) -> tuple[PortAdmission, ...]:
+    """Does firewalld already admit each `(zone, port)`, at runtime and in its saved configuration?
+
+    Asked because the plan used to write every game port and reload whatever
+    the machine already had, and the reload is the one command the lockout
+    guard may refuse. Reported 2026-09-26 from a stock Steam Deck (T140): the
+    `public` zone SteamOS ships lists `1024-65535/tcp 1024-65535/udp`, so 3724
+    and 8085 were admitted before Yu'lon wrote anything — and the plan still
+    wrote them, then refused the reload on an unsettled socket table, and said
+    so again on every Apply.
+
+    A port inside a RANGE entry answers yes. Read in firewalld source (main,
+    2026-09-26), not measured: the runtime query ends in
+    `src/firewall/core/fw_policy.py` `query_port()` and the permanent one in
+    `src/firewall/server/config_zone.py` `queryPort()`, and both test each
+    entry with `portInPortRange()` (`src/firewall/functions.py`), so 3724
+    against `1024-65535/tcp` is yes for both. A port admitted some other way —
+    by a service (`ssh`, say) or by a zone whose target is ACCEPT — is not in
+    the zone's port list and answers no: a false "not admitted", which keeps
+    the write and the reload, i.e. today's plan. That is the safe direction.
+
+    `prefix` is `probe_prefix()`'s, like every other probe here; the query
+    needs the same authority firewalld's listings do.
+    """
+    do = (
+        run
+        if run is not None
+        else (lambda argv: runner.run(argv, timeout=_FIREWALLD_QUERY_TIMEOUT_SECONDS))
+    )
+    return tuple(
+        PortAdmission(
+            zone,
+            port,
+            runtime=_query_port(do, prefix, zone, port, permanent=False),
+            permanent=_query_port(do, prefix, zone, port, permanent=True),
+        )
+        for zone, port in pairs
+    )
+
+
+def _permanent_port_write(command: Iterable[str]) -> tuple[str, str] | None:
+    """`(zone, port)` for a `firewall-cmd --permanent --zone=Z --add-port=P`, else None."""
+    argv = list(command)
+    if argv[:1] != ["firewall-cmd"] or "--permanent" not in argv:
+        return None
+    zones = [a.removeprefix("--zone=") for a in argv if a.startswith("--zone=")]
+    ports = [a.removeprefix("--add-port=") for a in argv if a.startswith("--add-port=")]
+    if len(zones) != 1 or len(ports) != 1:
+        return None
+    return zones[0], ports[0]
+
+
+def _and(items: Iterable[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    said = list(items)
+    return ", ".join(said[:-1]) + " and " + said[-1] if len(said) > 1 else "".join(said)
+
+
+def _said_pairs(pairs: Iterable[tuple[str, str]]) -> str:
+    """`3724/tcp and 8085/tcp in zones docker and public`, or per port when the zones differ."""
+    by_port: dict[str, list[str]] = {}
+    for zone, port in pairs:
+        by_port.setdefault(port, []).append(zone)
+
+    def where(zones: list[str]) -> str:
+        return f"zone{'s' if len(zones) > 1 else ''} {_and(zones)}"
+
+    if len({tuple(zones) for zones in by_port.values()}) == 1:
+        return f"{_and(by_port)} in {where(next(iter(by_port.values())))}"
+    return "; ".join(f"{port} in {where(zones)}" for port, zones in by_port.items())
+
+
+def _already_admitted(
+    commands: list[list[str]], answers: Iterable[PortAdmission]
+) -> tuple[list[list[str]], str | None, bool]:
+    """`commands` minus what firewalld already has; the line that says so; and "in effect".
+
+    A `--permanent` write is dropped only for a pair whose PERMANENT answer
+    was yes. The reload is dropped only when EVERY pair's RUNTIME answer was
+    yes: then everything the plan asked for is in effect already, and what is
+    still written permanently only has to survive the next reload, not wait
+    for one. Anything short of that keeps the reload, and the lockout guard
+    decides it as before. An answer that is None, or missing for a pair, is
+    not yes.
+
+    The third value is that "every pair is in effect at runtime" reading, for
+    the zone-breadth note, which used to infer "in effect" from "a reload is
+    in the list" alone.
+    """
+    pairs = [pair for pair in (_permanent_port_write(c) for c in commands) if pair is not None]
+    if not pairs:
+        return commands, None, False
+    said = {(a.zone, a.port): a for a in answers}
+    saved = [p for p in pairs if p in said and said[p].permanent is True]
+    in_effect = all(p in said and said[p].runtime is True for p in pairs)
+    kept = [
+        c
+        for c in commands
+        if _permanent_port_write(c) not in saved and not (in_effect and _reloads_firewalld(c))
+    ]
+    if in_effect and len(saved) == len(pairs):
+        note = (
+            f"firewalld already admits {_said_pairs(pairs)}; nothing to change and no reload "
+            "needed."
+        )
+    elif in_effect:
+        note = (
+            f"firewalld already admits {_said_pairs(pairs)} right now, so the permanent rules "
+            "are written without a reload."
+        )
+    elif saved:
+        note = (
+            f"firewalld's saved configuration already admits {_said_pairs(saved)}, so "
+            f"{'those rules are' if len(saved) > 1 else 'that rule is'} not written again."
+        )
+    else:
+        note = None
+    return kept, note, in_effect
+
+
 _ELEVATORS = frozenset({"sudo", "doas", "pkexec"})
 """Wrappers that run the REAL command as somebody else."""
 
@@ -2247,6 +2419,14 @@ class LockoutQuestion:
     firewalld_daemon: FirewalldDaemon | None = None
     zones: tuple[str, ...] | None = None
     zoning: FirewalldZoning | None = None
+    in_effect_already: bool = False
+    """firewalld answered yes at runtime for every port write the plan had (T140).
+
+    Read by the zone-breadth note only, never by the verdict. It is what lets
+    the note say "allowed" for a plan whose reload was dropped because nothing
+    needed it; before T140 a running daemon's plan always had its reload, so
+    "a reload is in the list" was the only way the ports came to be in effect.
+    """
 
 
 @dataclass(frozen=True)
@@ -2444,7 +2624,11 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
         return None
     where = ", ".join(f"`{zone}`" for zone in exposed)
     said = ", ".join(str(port) for port in question.ports)
-    in_effect = allowed and question.reloads and question.firewalld_daemon == "running"
+    in_effect = (
+        allowed
+        and (question.reloads or question.in_effect_already)
+        and question.firewalld_daemon == "running"
+    )
     lead = (
         f"firewalld: the game ports ({said}) are allowed in {where}"
         if in_effect
@@ -2490,6 +2674,7 @@ def _guard_the_way_back_in(
     firewalld_daemon: FirewalldDaemon | None = None,
     zones: tuple[str, ...] | None = None,
     zoning: FirewalldZoning | None = None,
+    in_effect_already: bool = False,
 ) -> tuple[list[list[str]], tuple[int, ...], list[str], list[str]]:
     """Make `commands` safe to run on a box whose only route in is SSH.
 
@@ -2615,6 +2800,7 @@ def _guard_the_way_back_in(
         firewalld_daemon=firewalld_daemon,
         zones=zones,
         zoning=zoning,
+        in_effect_already=in_effect_already,
     )
     verdict = decide_lockout(question)
     warnings.extend(verdict.notes)
@@ -3227,6 +3413,9 @@ def plan(
     detect_ssh: Callable[[], SshRoute] | None = None,
     detect_firewalld: Callable[[], FirewalldDaemon] | None = None,
     detect_zones: Callable[[FirewalldDaemon], FirewalldZoning | None] | None = None,
+    detect_admission: (
+        Callable[[tuple[tuple[str, str], ...]], tuple[PortAdmission, ...]] | None
+    ) = None,
     detect_lan: Callable[[], str | None] = platform.detect_lan_ip,
     detect_public: Callable[[], platform.PublicIpResult] = platform.detect_public_ip,
     detect_alf: Callable[[], platform.AlfState] = platform.detect_alf_state,
@@ -3253,6 +3442,14 @@ def plan(
     same plans for the same reason one step later: it decides WHERE the ports
     are written, and a plan that never asked wrote them to a zone the interface
     was not in (see `detect_firewalld_zones()`).
+
+    `detect_admission` is consulted on those same plans once the zones are
+    known and the daemon is not `stopped`, one step later again: it asks
+    whether each port write is already admitted, so a port firewalld already
+    has is not written again and a reload nothing needs is not run (see
+    `detect_firewalld_admission()`, T140). With the daemon stopped there is no
+    runtime to ask and the offline writes stand; with the zones unread there
+    is no pair to ask about.
 
     A `loopback` plan reaches none of that. Measured on m910q 2026-09-06 at
     `92cacc44` from a fresh `git clone --shared`, with seams that record every
@@ -3316,6 +3513,11 @@ def plan(
         if detect_zones is not None
         else (lambda daemon: detect_firewalld_zones(daemon, prefix=prefix()))
     )
+    ask_admission = (
+        detect_admission
+        if detect_admission is not None
+        else (lambda pairs: detect_firewalld_admission(pairs, prefix=prefix()))
+    )
     on_steamos = steamos if steamos is not None else platform.is_steamos()
     in_wsl = wsl if wsl is not None else platform.in_wsl()
     lan = lan_ip if lan_ip is not None else detect_lan()
@@ -3376,6 +3578,7 @@ def plan(
     firewalld_daemon: FirewalldDaemon | None = None
     firewalld_zones: tuple[str, ...] | None = None
     zoning: FirewalldZoning | None = None
+    in_effect_already = False
     if wants_firewall and backend == "firewalld":
         firewalld_daemon = ask_firewalld()
         zoning = ask_zones(firewalld_daemon)
@@ -3383,6 +3586,22 @@ def plan(
         fw_cmds = _zoned_firewalld(
             _firewalld_port_commands(fw_cmds, firewalld_daemon), firewalld_zones
         )
+        admitted_note: str | None = None
+        if firewalld_daemon != "stopped" and firewalld_zones is not None:
+            # T140. Asked BEFORE the lockout guard, so a reload nothing needs
+            # is gone before anything can refuse it. Not asked of a stopped
+            # daemon — its writes are `firewall-offline-cmd`, there is no
+            # runtime to answer, and no reload is in the list anyway — nor
+            # with the zones unread, where the writes carry no `--zone` and
+            # the zone refusal is the answer. Every pair is asked about; an
+            # unknown answer removes nothing (`_already_admitted()`).
+            pairs = tuple(
+                dict.fromkeys(pair for pair in (_permanent_port_write(c) for c in fw_cmds) if pair)
+            )
+            if pairs:
+                fw_cmds, admitted_note, in_effect_already = _already_admitted(
+                    fw_cmds, ask_admission(pairs)
+                )
         if zoning is not None and zoning.moved_at_runtime:
             # The disagreement itself, said out loud. It is not a refusal: the
             # ports go to BOTH lists (`FirewalldZoning.write`), so they are in
@@ -3444,6 +3663,8 @@ def plan(
                 "zone with `sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp` "
                 "and reload."
             )
+        if admitted_note is not None:
+            warnings.append(admitted_note)
     if any(_can_lock_out(c) for c in fw_cmds):
         # The machine is asked about SSH only when something in the list could
         # cut it: an enable that is actually being asked for, or a reload,
@@ -3459,6 +3680,7 @@ def plan(
             firewalld_daemon=firewalld_daemon,
             zones=firewalld_zones,
             zoning=zoning,
+            in_effect_already=in_effect_already,
         )
         refusals.extend(guard_refusals)
         warnings.extend(guard_warnings)

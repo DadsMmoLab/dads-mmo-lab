@@ -2322,6 +2322,55 @@ def test_the_loopback_plan_shown_in_the_tab_says_what_it_costs(
     view.close()
 
 
+def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_refusal(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T140, out of the real widget: the stock Steam Deck's plan as the owner reads it.
+
+    `public` on SteamOS ships `1024-65535/tcp`, so firewalld answers yes for
+    both game ports in both zones. Before T140 this text listed four
+    `--permanent` writes and then "REFUSED to run `firewall-cmd --reload`",
+    on every Apply. Asserted through `_format_plan()`'s output because a line
+    the formatter dropped is a line nobody reads.
+    """
+    zoning = networking.FirewalldZoning(
+        write=("docker", "public"),
+        permanent=("docker", "public"),
+        runtime=("docker", "public"),
+        default_zone="public",
+        configured_default_zone="public",
+        machine_made=("docker",),
+    )
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: networking.plan(
+        WOTLK,
+        mode,
+        lan_ip="192.168.1.25",
+        public_ip="203.0.113.7",
+        firewall="firewalld",
+        steamos=True,
+        wsl=False,
+        detect_ssh=lambda: networking.SshRoute(listeners_readable=False),
+        detect_firewalld=lambda: "running",
+        detect_zones=lambda daemon: zoning,
+        detect_admission=lambda pairs: tuple(
+            networking.PortAdmission(zone, port, True, True) for zone, port in pairs
+        ),
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.internet_radio.setChecked(True)
+    view.show_network_plan()
+    text = view.network_text.toPlainText()
+    assert "Mode: internet" in text, text
+    assert "Firewall commands:" not in text, text
+    assert "REFUSED" not in text, text
+    assert (
+        "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public; "
+        "nothing to change and no reload needed."
+    ) in text, text
+    view.close()
+
+
 def test_the_loopback_plan_in_the_tab_offers_to_open_no_ports(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
