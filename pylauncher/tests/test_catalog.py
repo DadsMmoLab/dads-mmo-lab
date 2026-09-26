@@ -223,14 +223,14 @@ GATE_PINS = {
         "mod-playerbots/mod-playerbots": "7bae1b5c58c76a0aa20381155edc08096d1485b2",
     },
     "wow-tbc": {
-        "cmangos/mangos-tbc": "f82e7d679c283b66bc2adc1b751aa1275e655673",
-        "cmangos/playerbots": "993f18091e67565986cf55c4d9b8e6eae11223f9",
-        "cmangos/tbc-db": "5078439a44d208732a903bca2d7df51941fb373a",
+        "cmangos/mangos-tbc": "75f9ae68edd5ea94dda5f7f0ddf140f1acd94a6f",
+        "cmangos/playerbots": "bc67a2ebde1f339eff2000dadec13d453ebf2cee",
+        "cmangos/tbc-db": "ba4755dee3d7375cfec9da036d903c7bbabf081b",
     },
     "wow-vanilla": {
         "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
-        "cmangos/playerbots": "993f18091e67565986cf55c4d9b8e6eae11223f9",
-        "cmangos/classic-db": "22b51464f1625f6ef6275771de1f5466c6f5d19e",
+        "cmangos/playerbots": "bc67a2ebde1f339eff2000dadec13d453ebf2cee",
+        "cmangos/classic-db": "ec4f596146be6467ea93c57397858e329e2db852",
     },
 }
 """The commit each shipped source is pinned to, and the gate that ran on it.
@@ -257,6 +257,15 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 
 `wow-tortoise` is pinned by `test_tortoise_boot_facts.py`, by value, with its
 own argument. Moving any pin here means re-running that entry's gate.
+
+T135 (2026-09-26) moved the CMaNGOS pins to upstream's heads of that week:
+`mangos-tbc` f82e7d67 -> 75f9ae68, `tbc-db` 5078439a -> ba4755de, the shared
+`playerbots` 993f1809 -> bc67a2eb, `classic-db` 22b51464 -> ec4f5961;
+`mangos-classic` 8ec338a1 was already upstream's head and did not move. The
+gate that ran on them was one fresh TBC and one fresh Vanilla install through
+the app's engine on `yulon-arch`, each read back from its own `src/` checkout.
+`contrib/` is byte-identical between the two `mangos-tbc` revisions, so every
+extractor citation made at f82e7d67 holds at 75f9ae68.
 """
 
 
