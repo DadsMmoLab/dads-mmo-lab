@@ -1443,3 +1443,116 @@ def test_another_games_restore_is_untouched(qapp: object, tmp_path: Path) -> Non
     assert made.keys_at_restore == [f"once:{TOKEN}"]
     assert path.read_bytes() == before
     assert CLEARED not in view.maintenance_report.toPlainText()
+
+
+# -- round 5: a restore that fails puts a pending request back, unless it had started loading --
+
+PENDING_TOKEN = "once:Someone-Elses-Token"
+PENDING = CONF_TEXT.replace("= off", f"= {PENDING_TOKEN}")
+
+
+def _failing_restore_view(
+    tmp_path: Path, *, loaded: bool
+) -> tuple[controller_view_module.ControllerView, _Restores]:
+    """A Tortoise tab whose restore raises -- before the load, or after writing its marker."""
+    from yulon.controller_wow_wotlk.maintenance import InterruptedRestore, MaintenanceError
+
+    view, made = _restore_view(tmp_path, World(tmp_path).rebuild())
+
+    def fail(plan: object) -> object:
+        made.keys_at_restore.append(
+            (tmp_path / CONF).read_text().split("RandomBotPoolReset = ")[1].split()[0]
+        )
+        if loaded:
+            made.inner.interrupted = InterruptedRestore(
+                marker=tmp_path / "restore.marker",
+                backup=tmp_path / "x.sql",
+                databases=("tw_char",),
+                safety_backup=(),
+                started_at="2026-09-27T01:00:00",
+            )
+            raise MaintenanceError("the restore of tw_char failed part-way: disk full")
+        raise MaintenanceError("the safety dump failed: disk full")
+
+    view.services.restore = fail  # type: ignore[assignment]
+    return view, made
+
+
+def test_a_restore_that_fails_before_loading_puts_the_request_back(
+    qapp: object, tmp_path: Path
+) -> None:
+    """`maintenance.restore` raises before `_write_marker` (confirm, re-census, safety dump,
+    the marker write itself): nothing was loaded, so the request is exactly as it was."""
+    path = _conf(tmp_path, PENDING)
+    view, made = _failing_restore_view(tmp_path, loaded=False)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _plan_and_restore(view, tmp_path)
+    assert made.keys_at_restore == ["off"], "it was off while the restore ran"
+    assert path.read_bytes() == PENDING.encode("utf-8"), "and put back byte for byte"
+    assert tuning.backups_of(path) == ()
+    said = failures[-1]
+    assert "the safety dump failed" in said
+    assert f"put back as it was (AiPlayerbot.RandomBotPoolReset = {PENDING_TOKEN})" in said
+
+
+def test_a_restore_that_fails_after_loading_started_leaves_the_request_off(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Its marker is written just before the load: the restored databases carry no record of
+    that rebuild, so re-arming it would delete the restored bots."""
+    path = _conf(tmp_path, PENDING)
+    view, made = _failing_restore_view(tmp_path, loaded=True)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _plan_and_restore(view, tmp_path)
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8"), "still off"
+    said = failures[-1]
+    assert "failed part-way" in said and "stays off" in said and PENDING_TOKEN in said
+
+
+def test_a_request_that_cannot_be_put_back_says_which_value_to_type(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.families import conf
+    from yulon.catalog.installer import InstallerError
+
+    path = _conf(tmp_path, PENDING)
+    real = conf.replace_file
+    calls: list[int] = []
+
+    def second_fails(target: Path, text: str) -> None:
+        calls.append(1)
+        if len(calls) > 1:
+            raise InstallerError("read-only file system")
+        real(target, text)
+
+    monkeypatch.setattr(conf, "replace_file", second_fails)
+    view, _made = _failing_restore_view(tmp_path, loaded=False)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _plan_and_restore(view, tmp_path)
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8")
+    said = failures[-1]
+    assert "read-only file system" in said
+    assert f"AiPlayerbot.RandomBotPoolReset = {PENDING_TOKEN}" in said and "by hand" in said
+
+
+def test_a_plan_refused_at_the_press_touches_neither_the_conf_nor_the_restore(
+    qapp: object, tmp_path: Path
+) -> None:
+    path = _conf(tmp_path, PENDING)
+    view, made = _restore_view(tmp_path, World(tmp_path).rebuild())
+    backups = tmp_path / "sql_scripts" / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / "tw_char-20260927.sql").write_text("-- dump\n")
+    view.refresh_backups()
+    view.backup_list.setCurrentRow(0)
+    view.show_restore_plan()
+    made.inner.refusals = ("the server is running",)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.run_restore()
+    assert made.keys_at_restore == [], "the restore seam was never called"
+    assert path.read_bytes() == PENDING.encode("utf-8")
+    assert failures and "the server is running" in failures[-1]

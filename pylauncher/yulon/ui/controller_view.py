@@ -335,7 +335,11 @@ class BotPoolRebuildSeam(Protocol):
 
     def restart_owed_now(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
 
-    def before_restore(self) -> str | None: ...
+    def before_restore(self) -> tortoise_poolreset.TakenBack | None: ...
+
+    def after_a_failed_restore(
+        self, taken: tortoise_poolreset.TakenBack, *, loaded: bool | None
+    ) -> str: ...
 
     def restore_warning(self) -> str | None: ...
 
@@ -8342,17 +8346,49 @@ class ControllerView(QWidget):
         new again afterwards and the next start would delete the restored bots.
         Before and not after: a restore is followed by a start the user makes,
         and a failed write refuses the restore rather than running it armed.
-        The plan is asked again first, so a restore that is about to refuse does
-        not cancel a pending rebuild for nothing.
+
+        The plan is asked again first and refused in `maintenance.restore()`'s
+        own words, so a restore that would refuse does not touch the conf.
+
+        **A restore that raises anyway** (round 5): `maintenance.restore()`
+        (controller_wow_wotlk/maintenance.py:949) runs "re-census, safety dump,
+        marker, load, marker removed". Everything before `_write_marker()` -- the
+        confirmation, the re-census, `_safety_backup()`, the marker write itself
+        ("nothing was restored") -- raises with nothing loaded; from the marker
+        on, the load may have begun ("failed part-way", marker left behind on
+        purpose). So "did it load" is read off the marker: a record that is not
+        the one there before this press means the load was reached, and the
+        request stays off; an unchanged one means nothing loaded, and it is put
+        back as it was. A marker that cannot be read counts as "could not tell"
+        and keeps it off.
         """
         seam = self.services.bot_pool_rebuild
         if seam is None:
             return self.services.restore(plan)
         fresh = self.services.plan_restore(plan.backup)
-        if not fresh.allowed or fresh.token != plan.token:
-            return self.services.restore(plan)  # refuses with its own words
-        note = seam.before_restore()
-        return _RestoredWithNote(self.services.restore(plan), note)
+        if fresh.refusals:
+            raise wotlk_maintenance.MaintenanceError(f"restore refused: {' '.join(fresh.refusals)}")
+        if fresh.token != plan.token:
+            raise wotlk_maintenance.MaintenanceError(
+                f"{plan.backup.name} is not the file that was checked — it changed in between. "
+                "Nothing was restored; look at it again."
+            )
+        marker_before = self.services.interrupted_restore()
+        taken = seam.before_restore()
+        try:
+            report = self.services.restore(plan)
+        except Exception as exc:
+            if taken is None:
+                raise
+            loaded: bool | None
+            try:
+                loaded = self.services.interrupted_restore() != marker_before
+            except Exception as check:  # noqa: BLE001 - "could not tell" is its own answer
+                logger.warning(f"could not read the restore marker after a failed restore: {check}")
+                loaded = None
+            said = seam.after_a_failed_restore(taken, loaded=loaded)
+            raise wotlk_maintenance.MaintenanceError(f"{exc} {said}") from exc
+        return _RestoredWithNote(report, taken.note if taken is not None else None)
 
     @Slot(object)
     def _restore_plan_ready(self, result: object) -> None:

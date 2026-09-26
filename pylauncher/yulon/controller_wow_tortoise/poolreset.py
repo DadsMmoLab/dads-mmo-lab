@@ -209,7 +209,11 @@ _ACTIVE = re.compile(rf"^{re.escape(KEY)}\s*=\s*(?P<value>.*?)\s*$")
 
 
 def setting(server_dir: Path) -> str:
-    """What the install's `aiplayerbot.conf` asks of the module, lowercased: `off` if unset.
+    """What the install's `aiplayerbot.conf` asks of the module, as written: `off` if unset.
+
+    The case is kept, because a `once:` token is compared case-sensitively by
+    the module and may have to be written back exactly; compare the keyword
+    with `.lower()`.
 
     Read the way `conf.patch` writes: active lines at column 0. A `once:` on
     ANY of them counts (the patch moves every copy at once). A missing file is
@@ -224,17 +228,36 @@ def setting(server_dir: Path) -> str:
             text = handle.read()
     except FileNotFoundError:
         return "off"
-    values = [
-        m["value"].lower() for line in text.splitlines() if (m := _ACTIVE.match(line.rstrip()))
-    ]
+    values = [m["value"] for line in text.splitlines() if (m := _ACTIVE.match(line.rstrip()))]
     for value in values:
-        if value.startswith("once:"):
+        if value.lower().startswith("once:"):
             return value
     return values[-1] if values else "off"
 
 
-def before_restore(entry: CatalogEntry, server_dir: Path) -> str | None:
-    """Take a pending `once:` request back before a restore; the report's line, or None.
+@dataclass(frozen=True)
+class TakenBack:
+    """A pending request `before_restore()` set to off: what it said, and the report's line."""
+
+    previous: str
+
+    @property
+    def note(self) -> str:
+        return RESTORE_CLEARED
+
+
+def put_back(entry: CatalogEntry, server_dir: Path, previous: str) -> None:
+    """Write `previous` back after a restore that loaded nothing; no backup (`take_back`).
+
+    Raises:
+        PoolResetError: nothing was written.
+    """
+    _write_value(entry, server_dir, previous, backup=False)
+    logger.info(f"put {entry.id}'s random-bot rebuild request back ({KEY} = {previous})")
+
+
+def before_restore(entry: CatalogEntry, server_dir: Path) -> TakenBack | None:
+    """Take a pending `once:` request back before a restore; what it was, or None.
 
     A restore replaces the characters database -- the bots, AND the module's
     record of the last applied generation. So a request left in the conf (a
@@ -252,13 +275,49 @@ def before_restore(entry: CatalogEntry, server_dir: Path) -> str | None:
         value = setting(server_dir)
     except (OSError, UnicodeDecodeError) as exc:
         raise PoolResetError(_restore_refused(exc)) from exc
-    if not value.startswith("once:"):
+    if not value.lower().startswith("once:"):
         return None
     try:
         take_back(entry, server_dir)
     except PoolResetError as exc:
         raise PoolResetError(_restore_refused(exc)) from exc
-    return RESTORE_CLEARED
+    return TakenBack(value)
+
+
+def after_a_failed_restore(
+    entry: CatalogEntry, server_dir: Path, taken: TakenBack, *, loaded: bool | None
+) -> str:
+    """A restore raised after `before_restore()`: put the request back if nothing loaded.
+
+    `loaded` is whether the restore's marker appeared (None: could not tell).
+    Only a restore that loaded nothing puts the request back: once loading has
+    begun, the characters database may already be the backup's, which carries
+    no record of that rebuild, and re-arming it would delete the restored bots.
+    Returns the sentence the failure is reported with.
+    """
+    if loaded is False:
+        try:
+            put_back(entry, server_dir, taken.previous)
+        except PoolResetError as exc:
+            return (
+                f"Nothing was restored, but the random-bot rebuild request could not be put back "
+                f"({exc}): set {KEY} = {taken.previous} in aiplayerbot.conf by hand, or a rebuild "
+                "that stopped part of the way through is not finished at the next start."
+            )
+        return (
+            f"The random-bot rebuild request was put back as it was ({KEY} = {taken.previous}), "
+            "since nothing was restored."
+        )
+    how = (
+        "the restore had started loading"
+        if loaded
+        else "Yu'lon could not tell whether the restore had started loading"
+    )
+    return (
+        f"The random-bot rebuild request stays off (it was {KEY} = {taken.previous}): {how}, "
+        "and the restored databases carry no record of that rebuild, so re-arming it would "
+        "delete the restored bots."
+    )
 
 
 def restore_warning(server_dir: Path) -> str | None:
@@ -534,9 +593,13 @@ class PoolRebuild:
         """Did the last update press move TortoiseBots, and is its restart owed? Answered once."""
         return self.module_moved.take()
 
-    def before_restore(self) -> str | None:
+    def before_restore(self) -> TakenBack | None:
         """`before_restore()` for this install; runs on the restore's worker."""
         return before_restore(self.entry, self.server_dir)
+
+    def after_a_failed_restore(self, taken: TakenBack, *, loaded: bool | None) -> str:
+        """`after_a_failed_restore()` for this install; runs on the restore's worker."""
+        return after_a_failed_restore(self.entry, self.server_dir, taken, loaded=loaded)
 
     def restore_warning(self) -> str | None:
         """`restore_warning()` for this install; runs on the plan's worker."""
