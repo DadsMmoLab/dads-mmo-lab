@@ -31,6 +31,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon import log as log_module
 from yulon import platform
+from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -935,6 +936,47 @@ def _widgets_a_module_leaves_behind_are_destroyed() -> Iterator[None]:
     deletes the window.
     """
     yield from destroying_what_is_left_behind()
+
+
+UNGUARDED_HTTPS_GET = upstream.https_get
+"""The real GET, kept for the one test that proves it is verified and capped."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any test that would reach GitHub through `upstream.https_get` fails, loudly (T124).
+
+    Every network read T124/T126 add goes through that one function: the
+    `Seams.upstream_get` default looks it up at call time for exactly this
+    reason. AssertionError, not OSError, because every caller turns an OSError
+    into "no network" -- which would let a forgotten double pass as a quiet
+    "nothing new".
+    """
+
+    def refuse(url: str, accept: str) -> bytes:
+        raise AssertionError(f"a test asked GitHub for {url}; give it a double")
+
+    monkeypatch.setattr(upstream, "https_get", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_github_for_a_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An `Applier` built without a `newest_release` seam asks GitHub; no test may (T126).
+
+    Found by the suite itself: the addon install tests built a bare `Applier`
+    for `tortoise-bots-manager`, which follows its releases since T126, and
+    passed -- having resolved the REAL newest release over the network. One of
+    them then failed only because the real commit was not in its local origin.
+    A test that needs a release passes the seam; one that forgot fails here,
+    loudly, instead of depending on GitHub.
+    """
+
+    def refuse(slug: str) -> None:
+        raise AssertionError(
+            f"a test asked GitHub for the newest release of {slug}; pass `newest_release=`"
+        )
+
+    monkeypatch.setattr(apply_module, "_github_newest_release", refuse)
 
 
 @pytest.fixture(autouse=True)
