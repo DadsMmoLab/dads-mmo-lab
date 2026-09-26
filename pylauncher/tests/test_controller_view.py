@@ -2322,6 +2322,78 @@ def test_the_loopback_plan_shown_in_the_tab_says_what_it_costs(
     view.close()
 
 
+def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_refusal(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T140, out of the real widget: the Steam Deck's plan as the owner reads it.
+
+    The runtime answers are the ones measured on 2026-09-26 (Fedora, firewalld
+    and Docker, uid 1000 without sudo): a port range admits both game ports,
+    and Docker's `docker` zone answers `--query-port` no but has `target:
+    ACCEPT`. The permanent side answering rc 253 while the zones are readable
+    is a constructed mix, not a measured one (over SSH the zones were
+    unreadable too; from the desktop every read answered): it is the case
+    where only the reload can be dropped. Before T140 this text listed the four
+    `--permanent` writes and then "REFUSED to run `firewall-cmd --reload`",
+    on every Apply. Now the writes stay (the saved side cannot be read), the
+    reload and the refusal go, and one line says why. Asserted through
+    `_format_plan()`'s output because a line the formatter dropped is a line
+    nobody reads.
+    """
+    zoning = networking.FirewalldZoning(
+        write=("docker", "public"),
+        permanent=("docker", "public"),
+        runtime=("docker", "public"),
+        default_zone="public",
+        configured_default_zone="public",
+        machine_made=("docker",),
+    )
+
+    def unelevated(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if "--permanent" in argv:
+            return subprocess.CompletedProcess(argv, 253, "", "Authorization failed.")
+        if argv[-1] == "--info-zone=docker":
+            return subprocess.CompletedProcess(argv, 0, "docker (active)\n  target: ACCEPT\n", "")
+        if argv[-1].startswith("--info-zone="):
+            return subprocess.CompletedProcess(argv, 0, "public\n  target: default\n", "")
+        docker = "--zone=docker" in argv
+        return subprocess.CompletedProcess(
+            argv, 1 if docker else 0, "no\n" if docker else "yes\n", ""
+        )
+
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: networking.plan(
+        WOTLK,
+        mode,
+        lan_ip="192.168.1.25",
+        public_ip="203.0.113.7",
+        firewall="firewalld",
+        steamos=True,
+        wsl=False,
+        detect_ssh=lambda: networking.SshRoute(listeners_readable=False),
+        detect_firewalld=lambda: "running",
+        detect_zones=lambda daemon: zoning,
+        detect_admission=lambda pairs: networking.detect_firewalld_admission(pairs, run=unelevated),
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.internet_radio.setChecked(True)
+    view.show_network_plan()
+    text = view.network_text.toPlainText()
+    assert "Mode: internet" in text, text
+    assert "firewall-cmd --permanent --zone=docker --add-port=3724/tcp" in text, text
+    assert "\n  firewall-cmd --zone=docker --add-port=3724/tcp\n" in text, text
+    assert "\n  firewall-cmd --zone=public --add-port=8085/tcp\n" in text, text
+    assert "firewall-cmd --reload" not in text, text
+    assert "REFUSED" not in text, text
+    assert (
+        "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public right now "
+        "(zone docker accepts all traffic: its target is ACCEPT), so no reload is needed: the "
+        "permanent rules are written and the ports are also added to the running firewall "
+        "now, which keeps them open even if a running rule lapses before Apply."
+    ) in text, text
+    view.close()
+
+
 def test_the_loopback_plan_in_the_tab_offers_to_open_no_ports(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
