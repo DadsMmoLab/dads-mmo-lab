@@ -212,6 +212,51 @@ def _first_line(answer: Answer) -> str:
     return next((line.strip() for line in answer.text.splitlines() if line.strip()), "")
 
 
+def adopt_over(
+    channels: Sequence[Channel],
+    *,
+    pause: Callable[[float], None] = time.sleep,
+    cancel: threading.Event | None = None,
+) -> Outcome:
+    """`adopt()` over each channel in turn until one reaches the command; the reasons joined.
+
+    Adopted, or a confirm that went out unanswered: either way no other channel
+    is asked anything, and never a second confirm. Shared by `after_update()`
+    and T144's rebuild, so the two cannot enrol by different rules.
+    """
+    reasons: list[str] = []
+    outcome: Outcome = Unreached("no command channel is set up for this server")
+    for channel in channels:
+        outcome = adopt(channel, pause=pause, cancel=cancel)
+        if not isinstance(outcome, Unreached):
+            return outcome
+        reasons.append(outcome.why)
+        if outcome.why == CANCELLED:
+            break
+    return Unreached("; ".join(reasons)) if reasons else outcome
+
+
+class ModuleMoved:
+    """Carries "the last update press moved the bots module" from the job to the view (T144).
+
+    Set by `after_update()` on the worker thread, taken by the view once the
+    job has finished. `take()` answers and clears in one call, so one move is
+    offered once, and a later press that fails or does not move the module
+    cannot find a stale one (`after_update()` also clears it as it starts).
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def set(self) -> None:
+        self._event.set()
+
+    def take(self) -> bool:
+        was = self._event.is_set()
+        self._event.clear()
+        return was
+
+
 def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
     """Where the bots module's checkout lives in this install, read off the catalog.
 
@@ -252,8 +297,14 @@ def after_update(
     channels: Callable[[], Sequence[Channel]],
     restart: Callable[[], object],
     pause: Callable[[float], None] = time.sleep,
+    moved: ModuleMoved | None = None,
 ) -> Iterator[str]:
     """Run the update, then enrol the older bots if the module moved, then restart.
+
+    `moved` is set once the update has succeeded AND moved the module, before
+    anything is asked of the server (T144): the view reads it after the job has
+    finished, to offer rebuilding the random bots. A modal cannot be put up from
+    inside this generator, which runs on the log panel's worker thread.
 
     A failed update raises out of here before anything is asked: its own
     handler has put the sources back, so the module did not move.
@@ -262,28 +313,22 @@ def after_update(
     preview, which is a read, and it answers "nothing to adopt" on a server
     that has nothing -- so the cost of not knowing is one question.
     """
+    if moved is not None:
+        moved.take()
     before = head(module_dir)
     yield from update(cancel)
     after = head(module_dir)
     if before is not None and before == after:
         return
+    if moved is not None:
+        moved.set()
     yield (
         "The bots module changed, and it now only runs bot accounts it has enrolled. "
         "Enrolling the ones this server already had…"
     )
-    reasons: list[str] = []
-    outcome: Outcome = Unreached("no command channel is set up for this server")
-    for channel in channels():
-        outcome = adopt(channel, pause=pause, cancel=cancel)
-        if not isinstance(outcome, Unreached):
-            # Adopted, or a confirm that went out unanswered: either way no
-            # other channel is asked anything, and never a second confirm.
-            break
-        reasons.append(outcome.why)
-        if outcome.why == CANCELLED:
-            break
+    outcome = adopt_over(channels(), pause=pause, cancel=cancel)
     if isinstance(outcome, Unreached):
-        yield console_steps("; ".join(reasons) or outcome.why)
+        yield console_steps(outcome.why)
         return
     if isinstance(outcome, Adopted) and outcome.count == 0:
         yield "Every bot account was already enrolled; nothing to do."
@@ -326,6 +371,7 @@ def wrap_route(
     channels: Callable[[], Sequence[Channel]],
     restart: Callable[[], object],
     wsl_distro: str | None = None,
+    moved: ModuleMoved | None = None,
 ) -> LatestRoute | None:
     """The update route with `after_update()` around both presses; unchanged when it cannot be.
 
@@ -334,6 +380,7 @@ def wrap_route(
 
     Both directions: "Return to the tested pin" moves the module as well.
     `head_sha` is looked up per press, so a test can replace it on this module.
+    `moved` is handed to both presses (T144).
     """
     dest = module_dir(entry, server_dir)
     if route is None or dest is None:
@@ -348,6 +395,7 @@ def wrap_route(
                 head=lambda d: head_sha(d, wsl_distro=wsl_distro),
                 channels=channels,
                 restart=restart,
+                moved=moved,
             )
 
         return run
