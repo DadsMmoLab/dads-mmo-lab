@@ -297,12 +297,27 @@ def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
     return server_dir / inside[-1].dest if inside else None
 
 
+class StopFailed(Exception):
+    """`restart_world()`'s STOP raised: the world that may still be up is the OLD run (T144).
+
+    Its own type, so a caller can tell it from a start that raised -- after
+    which the world may be the NEW run, already reading its config. The
+    message is the stop's own.
+    """
+
+
 def restart_world(controller: Controller) -> None:
     """Stop, then start: the Server tab's own restart (`_do_restart`), for the module to reload.
 
     The controller already knows which daemon it means, so nothing here names one.
+
+    Raises:
+        StopFailed: the stop raised; nothing was started.
     """
-    controller.stop()
+    try:
+        controller.stop()
+    except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
+        raise StopFailed(str(exc)) from exc
     controller.start()
 
 

@@ -335,6 +335,26 @@ class BotPoolRebuildSeam(Protocol):
 
     def restart_owed_now(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
 
+    def before_restore(self) -> str | None: ...
+
+    def restore_warning(self) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class _PlanWithWarning:
+    """A restore plan, and T144's warning about the bot request that the restore leaves alone."""
+
+    plan: wotlk_maintenance.RestorePlan
+    warning: str | None
+
+
+@dataclass(frozen=True)
+class _RestoredWithNote:
+    """A restore's report, and T144's line when a pending bot rebuild was taken back first."""
+
+    report: wotlk_maintenance.RestoreReport
+    note: str | None
+
 
 class ChannelSetup(Protocol):
     """What the Server tab needs of the command channel (8.2a).
@@ -8301,13 +8321,45 @@ class ControllerView(QWidget):
         self._restore_plan = None
         self.restore_button.setEnabled(False)
         self._run(
-            lambda: self.services.plan_restore(path),
+            lambda: self._plan_with_the_bot_request(path),
             self._restore_plan_ready,
             self._maintenance_failed,
         )
 
+    def _plan_with_the_bot_request(self, path: Path) -> object:
+        """The plan, plus T144's `always` warning where this game has the bot request (worker)."""
+        plan = self.services.plan_restore(path)
+        seam = self.services.bot_pool_rebuild
+        if seam is None:
+            return plan
+        return _PlanWithWarning(plan, seam.restore_warning())
+
+    def _restore_with_the_bot_request(self, plan: wotlk_maintenance.RestorePlan) -> object:
+        """T144: take a pending `once:` bot rebuild back, THEN restore (worker thread).
+
+        A restore replaces the characters database, the module's record of its
+        last rebuild included, so a request left in `aiplayerbot.conf` would be
+        new again afterwards and the next start would delete the restored bots.
+        Before and not after: a restore is followed by a start the user makes,
+        and a failed write refuses the restore rather than running it armed.
+        The plan is asked again first, so a restore that is about to refuse does
+        not cancel a pending rebuild for nothing.
+        """
+        seam = self.services.bot_pool_rebuild
+        if seam is None:
+            return self.services.restore(plan)
+        fresh = self.services.plan_restore(plan.backup)
+        if not fresh.allowed or fresh.token != plan.token:
+            return self.services.restore(plan)  # refuses with its own words
+        note = seam.before_restore()
+        return _RestoredWithNote(self.services.restore(plan), note)
+
     @Slot(object)
     def _restore_plan_ready(self, result: object) -> None:
+        warning = None
+        if isinstance(result, _PlanWithWarning):
+            warning = result.warning
+            result = result.plan
         if not isinstance(result, wotlk_maintenance.RestorePlan):
             return
         lines = [
@@ -8342,6 +8394,9 @@ class ControllerView(QWidget):
                 "into the databases it names rather than returning them to the state the backup "
                 "was taken from. Press Restore to go ahead."
             )
+            if warning:
+                lines.append("")
+                lines.append(warning)
         self.maintenance_report.setPlainText("\n".join(lines))
         # Only a plan that is allowed arms the button, and only for this file.
         self._restore_plan = result if result.allowed else None
@@ -8360,7 +8415,11 @@ class ControllerView(QWidget):
         self.restore_button.setEnabled(False)
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
-        self._run(lambda: self.services.restore(plan), self._restore_done, self._restore_failed)
+        self._run(
+            lambda: self._restore_with_the_bot_request(plan),
+            self._restore_done,
+            self._restore_failed,
+        )
 
     @Slot(object)
     def _restore_failed(self, exc: object) -> None:
@@ -8371,6 +8430,10 @@ class ControllerView(QWidget):
     def _restore_done(self, result: object) -> None:
         self._restore_running = False
         self._restore_plan = None
+        note = None
+        if isinstance(result, _RestoredWithNote):
+            note = result.note
+            result = result.report
         if not isinstance(result, wotlk_maintenance.RestoreReport):
             return
         safety = ", ".join(str(p) for p in result.safety_backup) or "none"
@@ -8380,7 +8443,7 @@ class ControllerView(QWidget):
         self.refresh_backups()
         self.maintenance_report.setPlainText(
             f"Restored {', '.join(result.databases)} from {result.backup}.\n"
-            f"The copy taken beforehand: {safety}"
+            f"The copy taken beforehand: {safety}" + (f"\n{note}" if note else "")
         )
 
     @Slot(object)

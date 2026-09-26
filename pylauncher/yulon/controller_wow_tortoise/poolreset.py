@@ -205,6 +205,78 @@ def _write_value(
     return path, made
 
 
+_ACTIVE = re.compile(rf"^{re.escape(KEY)}\s*=\s*(?P<value>.*?)\s*$")
+
+
+def setting(server_dir: Path) -> str:
+    """What the install's `aiplayerbot.conf` asks of the module, lowercased: `off` if unset.
+
+    Read the way `conf.patch` writes: active lines at column 0. A `once:` on
+    ANY of them counts (the patch moves every copy at once). A missing file is
+    `off`: nothing is asked of a module that has no config.
+
+    Raises:
+        OSError, UnicodeDecodeError: the file is there and could not be read.
+    """
+    path = server_dir / bot_population.CONF_FILE
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return "off"
+    values = [
+        m["value"].lower() for line in text.splitlines() if (m := _ACTIVE.match(line.rstrip()))
+    ]
+    for value in values:
+        if value.startswith("once:"):
+            return value
+    return values[-1] if values else "off"
+
+
+def before_restore(entry: CatalogEntry, server_dir: Path) -> str | None:
+    """Take a pending `once:` request back before a restore; the report's line, or None.
+
+    A restore replaces the characters database -- the bots, AND the module's
+    record of the last applied generation. So a request left in the conf (a
+    part-way failure, a Stop while watching, a watch that ran out, a restart
+    that could not be confirmed, or anybody's own `once:`) would be new again
+    after the restore, and the next start would delete the restored bots. Any
+    token, not just Yu'lon's. `always` is the user's own and is left alone:
+    `restore_warning()` says so in the plan. No backup (`take_back`).
+
+    Raises:
+        PoolResetError: the file could not be read or written; the restore
+            must not run with the request armed.
+    """
+    try:
+        value = setting(server_dir)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PoolResetError(_restore_refused(exc)) from exc
+    if not value.startswith("once:"):
+        return None
+    try:
+        take_back(entry, server_dir)
+    except PoolResetError as exc:
+        raise PoolResetError(_restore_refused(exc)) from exc
+    return RESTORE_CLEARED
+
+
+def restore_warning(server_dir: Path) -> str | None:
+    """The plan's warning when the conf says `always`, which a restore does not change."""
+    try:
+        return ALWAYS_BEFORE_RESTORE if setting(server_dir) == "always" else None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _restore_refused(exc: Exception) -> str:
+    return (
+        "The restore was not started: the random-bot rebuild request in aiplayerbot.conf "
+        f"could not be set back to off ({exc}), and restoring with it armed would delete the "
+        f"restored bots at the next start. Set {KEY} to off yourself, then restore again."
+    )
+
+
 # -- reading the world log ---------------------------------------------------------------------
 #
 # The module's format strings, verbatim from f858f9c9 (`runtime/RandomBotPoolReset.cpp`
@@ -269,15 +341,32 @@ APPLIED_TAKEN_BACK = (
     f"{KEY} is back to off, so neither a later restart nor restoring a backup taken before "
     "this rebuild makes it happen again."
 )
+WHO_CLEARS_IT = (
+    f"Yu'lon sets it back to off before any restore from the Maintenance tab, and once the "
+    f"Bots tab shows the new bots you can set {KEY} to off yourself."
+)
+"""What every message that LEAVES the request says (T144 round 4): nothing else clears it."""
 FINISHES_AT_NEXT_START = (
-    f"The request stays in aiplayerbot.conf, so the bots module finishes the rebuild at the "
-    f"next start of the server. Leave it there: setting {KEY} to off would stop that and leave "
-    "the bots half rebuilt."
+    "The request stays in aiplayerbot.conf until the rebuild has finished, so the bots module "
+    f"finishes it at the next start of the server; do not set {KEY} to off before then, or the "
+    f"bots stay half rebuilt. {WHO_CLEARS_IT}"
 )
 STILL_RUNNING = (
-    "The rebuild may still be running, so the request stays in aiplayerbot.conf until it has "
-    "finished."
+    "The rebuild may still be running, so the request stays in aiplayerbot.conf until the "
+    f"rebuild has finished. {WHO_CLEARS_IT}"
 )
+RESTORE_CLEARED = (
+    "The random-bot rebuild request in aiplayerbot.conf was set back to off: restoring this "
+    "backup replaces the bot characters, so a pending rebuild would only delete the restored "
+    "ones."
+)
+"""The restore report's line when `before_restore()` took a `once:` back (round 4)."""
+ALWAYS_BEFORE_RESTORE = (
+    f"aiplayerbot.conf says {KEY} = always, so the next start after this restore deletes and "
+    "rebuilds every random bot, the restored ones included. Yu'lon leaves that setting alone; "
+    "set it to off first if you want the restored bots kept."
+)
+"""The restore plan's warning for the one value Yu'lon never writes and never clears."""
 
 
 @dataclass(frozen=True)
@@ -445,6 +534,14 @@ class PoolRebuild:
         """Did the last update press move TortoiseBots, and is its restart owed? Answered once."""
         return self.module_moved.take()
 
+    def before_restore(self) -> str | None:
+        """`before_restore()` for this install; runs on the restore's worker."""
+        return before_restore(self.entry, self.server_dir)
+
+    def restore_warning(self) -> str | None:
+        """`restore_warning()` for this install; runs on the plan's worker."""
+        return restore_warning(self.server_dir)
+
     def restart_owed_now(self, cancel: threading.Event | None = None) -> Iterator[str]:
         """The restart T123's enrolment is owed, on its own: the offer was declined (T144)."""
         yield "Restarting the server so the bots enrolled during the update log in…"
@@ -537,6 +634,14 @@ class PoolRebuild:
         take it back and raise. Unknown (None, or the check raised): keep it,
         and raise saying it may run at the next start.
         """
+        if isinstance(exc, botpool.StopFailed):
+            # The world that is up is the OLD run: nothing it logs is about this
+            # request, and nothing was started to read it.
+            raise PoolResetError(
+                f"The server could not be stopped ({exc}), so the rebuild runs at its next "
+                "start. The request stays in aiplayerbot.conf until the rebuild has finished. "
+                f"{WHO_CLEARS_IT} To call the rebuild off before then, set {KEY} to off."
+            ) from exc
         try:
             up = self.world_running()
         except Exception as check:  # noqa: BLE001 - an unknown answer is its own branch
@@ -554,8 +659,9 @@ class PoolRebuild:
             ) from exc
         raise PoolResetError(
             f"The restart failed ({exc}), and Yu'lon could not tell whether the world came up. "
-            "The request stays in aiplayerbot.conf, so the rebuild may run at the next start "
-            f"of the server; to call it off before then, set {KEY} to off."
+            "The request stays in aiplayerbot.conf until the rebuild has finished, so it may run "
+            f"at the next start of the server. {WHO_CLEARS_IT} To call the rebuild off before "
+            f"then, set {KEY} to off."
         ) from exc
 
     def _take_back(self, *, applied: bool = False) -> str:

@@ -826,6 +826,13 @@ class _Seam:
         self.calls.append("owed-restart")
         yield "restarted"
 
+    def before_restore(self) -> str | None:
+        self.calls.append("before-restore")
+        return None
+
+    def restore_warning(self) -> str | None:
+        return None
+
 
 class _NoBots:
     def page(self, *, after: object = None, name_like: str = "") -> object:
@@ -1253,3 +1260,186 @@ def test_an_owed_restart_the_view_cannot_run_is_said_not_dropped(
     assert world.events == ["preview", "confirm"]
     assert world.restarts == 0
     assert told and "Server tab" in told[-1]
+
+
+# -- round 4: the stop that failed, and the restore that would re-arm a pending rebuild -----
+
+
+def test_a_stop_that_failed_does_not_watch_the_old_run_and_keeps_the_request(
+    tmp_path: Path,
+) -> None:
+    """The world still up after a failed STOP is the old run: its log says nothing about the
+    request, and "the world came up" would be false."""
+    _conf(tmp_path)
+    world = World(tmp_path, log_after_restart=[REFUSALS["guild"]])
+    reads: list[str] = []
+    real_log = world.world_log
+
+    def log() -> docker.RunLog:
+        reads.append("read")
+        return real_log()
+
+    def stop_fails() -> None:
+        world.restart_tried = True
+        raise botpool.StopFailed("compose stop said no")
+
+    job = world.rebuild(timeout_s=0.0)  # a watch that wrongly started ends at once
+    job.restart = stop_fails
+    job.world_log = log
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        list(job.rebuild())
+    said = str(caught.value)
+    assert "could not be stopped" in said and "compose stop said no" in said
+    assert "came up" not in said
+    assert reads == [], "the old run's log is not read"
+    assert world.key() == f"once:{TOKEN}"
+    assert "Maintenance tab" in said
+
+
+def test_restart_world_says_which_half_failed() -> None:
+    class Stops:
+        def stop(self) -> None:
+            raise RuntimeError("no stop")
+
+        def start(self) -> None:
+            raise AssertionError("never started after a failed stop")
+
+    class Starts:
+        def stop(self) -> None:
+            return None
+
+        def start(self) -> None:
+            raise RuntimeError("no start")
+
+    with pytest.raises(botpool.StopFailed, match="no stop"):
+        botpool.restart_world(Stops())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="no start") as caught:
+        botpool.restart_world(Starts())  # type: ignore[arg-type]
+    assert not isinstance(caught.value, botpool.StopFailed)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [poolreset.STILL_RUNNING, poolreset.FINISHES_AT_NEXT_START],
+    ids=["still-running", "part-way"],
+)
+def test_a_request_left_in_place_says_who_clears_it(said: str) -> None:
+    assert "Maintenance tab" in said and "Bots tab" in said
+    assert "until it has finished" not in said or "restore" in said
+
+
+class _Restores:
+    """`_FakeMaintenance`, recording the key the restore found in the conf."""
+
+    def __init__(self, conf_path: Path) -> None:
+        from tests.test_controller_view import _FakeMaintenance
+
+        self.inner = _FakeMaintenance()
+        self.conf = conf_path
+        self.keys_at_restore: list[str] = []
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.inner, name)
+
+    def do_restore(self, plan: object) -> object:
+        text = self.conf.read_text()
+        self.keys_at_restore.append(text.split("RandomBotPoolReset = ")[1].split()[0])
+        return self.inner.do_restore(plan)  # type: ignore[arg-type]
+
+
+def _restore_view(
+    tmp_path: Path, seam: object | None, entry: object = TORTOISE
+) -> tuple[controller_view_module.ControllerView, _Restores]:
+    made = _Restores(tmp_path / CONF)
+    from tests.test_controller_view import _Ps, _services
+
+    services = replace(
+        _services(_Ps(), tmp_path, [], made.inner),  # type: ignore[arg-type]
+        bots=_NoBots(),
+        bot_pool_rebuild=seam,
+        restore=made.do_restore,
+    )
+    view = controller_view_module.ControllerView(
+        entry, services, status_poll_ms=0, job_runner=run_inline  # type: ignore[arg-type]
+    )
+    return view, made
+
+
+def _plan_and_restore(view: controller_view_module.ControllerView, tmp_path: Path) -> str:
+    """Show the plan for a real listed backup, then press Restore; the plan's text."""
+    backups = tmp_path / "sql_scripts" / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / "tw_char-20260927.sql").write_text("-- dump\n")
+    view.refresh_backups()
+    view.backup_list.setCurrentRow(0)
+    view.show_restore_plan()
+    plan_text = view.maintenance_report.toPlainText()
+    view.run_restore()
+    return plan_text
+
+
+CLEARED = "The random-bot rebuild request in aiplayerbot.conf was set back to off"
+
+
+def test_a_restore_sets_a_pending_request_off_before_it_runs(qapp: object, tmp_path: Path) -> None:
+    pending = CONF_TEXT.replace("= off", "= once:someone-elses-token")
+    path = _conf(tmp_path, pending)
+    view, made = _restore_view(tmp_path, World(tmp_path).rebuild())
+    _plan_and_restore(view, tmp_path)
+    assert made.keys_at_restore == ["off"], "off BEFORE the restore seam ran"
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8"), "only the value changed"
+    assert tuning.backups_of(path) == (), "no backup of the armed file for Revert to restore"
+    report = view.maintenance_report.toPlainText()
+    assert CLEARED in report and "only delete the restored ones" in report
+
+
+def test_a_restore_with_the_request_off_leaves_the_file_alone(qapp: object, tmp_path: Path) -> None:
+    path = _conf(tmp_path)
+    before = path.stat().st_mtime_ns
+    view, made = _restore_view(tmp_path, World(tmp_path).rebuild())
+    _plan_and_restore(view, tmp_path)
+    assert made.keys_at_restore == ["off"]
+    assert path.stat().st_mtime_ns == before
+    assert CLEARED not in view.maintenance_report.toPlainText()
+
+
+def test_always_is_warned_about_in_the_plan_and_left_alone(qapp: object, tmp_path: Path) -> None:
+    path = _conf(tmp_path, CONF_TEXT.replace("= off", "= always"))
+    before = path.read_bytes()
+    view, made = _restore_view(tmp_path, World(tmp_path).rebuild())
+    plan_text = _plan_and_restore(view, tmp_path)
+    assert "= always" in plan_text and "restored ones included" in plan_text
+    assert made.keys_at_restore == ["always"]
+    assert path.read_bytes() == before
+
+
+def test_a_request_that_cannot_be_set_off_refuses_the_restore(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.families import conf
+    from yulon.catalog.installer import InstallerError
+
+    _conf(tmp_path, CONF_TEXT.replace("= off", f"= once:{TOKEN}"))
+
+    def refuse(_path: Path, _text: str) -> None:
+        raise InstallerError("read-only file system")
+
+    monkeypatch.setattr(conf, "replace_file", refuse)
+    view, made = _restore_view(tmp_path, World(tmp_path).rebuild())
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _plan_and_restore(view, tmp_path)
+    assert made.keys_at_restore == [], "the restore seam was never called"
+    report = view.maintenance_report.toPlainText()
+    assert "was not started" in report and "read-only file system" in report
+    assert failures
+
+
+def test_another_games_restore_is_untouched(qapp: object, tmp_path: Path) -> None:
+    path = _conf(tmp_path, CONF_TEXT.replace("= off", f"= once:{TOKEN}"))
+    before = path.read_bytes()
+    view, made = _restore_view(tmp_path, None, entry=CATALOG.get("wow-tbc"))
+    _plan_and_restore(view, tmp_path)
+    assert made.keys_at_restore == [f"once:{TOKEN}"]
+    assert path.read_bytes() == before
+    assert CLEARED not in view.maintenance_report.toPlainText()
