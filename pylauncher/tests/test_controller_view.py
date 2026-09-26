@@ -3241,6 +3241,18 @@ def _scan_for_seams_without_a_distro(package: Path, source: Path) -> tuple[set[s
                     by_module.setdefault(path.stem, set()).add(node.name)
 
     tree = ast.parse(source.read_text(encoding="utf-8"))
+    # `from yulon.controller_wow_tortoise import botdash as tortoise_botdash`:
+    # the call site spells the module by its ALIAS, and without this the
+    # receiver is no module stem, so `tortoise_botdash.wrap_route()` (which
+    # takes no distro) was read as the package-wide `wrap_route` -- botpool's,
+    # which does since T125 -- and reported.
+    aliases = {
+        alias.asname: alias.name.rsplit(".", 1)[-1]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in node.names
+        if alias.asname
+    }
     missing: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -3249,6 +3261,7 @@ def _scan_for_seams_without_a_distro(package: Path, source: Path) -> tuple[set[s
         if isinstance(func, ast.Attribute):
             name = func.attr
             receiver = ast.unparse(func.value)
+            receiver = aliases.get(receiver, receiver)
             # `self.<x>` and `self.services.<x>` are the view calling objects
             # that were built WITH the distro; they are not the seam.
             on_self = receiver.startswith("self")
@@ -6715,25 +6728,106 @@ def test_the_rebuild_panel_is_joined_at_shutdown_like_every_other_worker(
     assert view.rebuild_log.running is False
 
 
-def test_a_server_adopted_from_wsl_is_refused_a_rebuild_by_name(tmp_path: Path) -> None:
-    """The wiring's own refusal, and the one this app is least able to notice going wrong.
+def test_a_server_adopted_from_wsl_is_rebuilt_on_the_distros_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T125: the tab of a WSL-adopted server rebuilds THERE, not on Windows' own Docker.
 
-    `native.Seams` addresses the LOCAL daemon: four of its five 7.3 primitives
-    take a `wsl_distro` the field types do not carry, and its own docstring
-    records that a repair reaching a stage on an adopted install "would hand
-    these seams a container living on another daemon, and the erasure would then
-    send all of them to the wrong one silently". A rebuild is exactly that
-    repair. So it is refused in the wiring, where the distro is known, rather
-    than left to build images on the Windows-local daemon and then fail to find
-    containers that live inside the distro.
+    Until T125 this press refused by name, because `native.Seams` addressed only
+    the local daemon. The engine the press builds now carries `Seams.in_wsl()`,
+    which is what this asserts; `tests/test_wsl_update_route.py` drives the
+    press end to end and checks every argv goes through the distro.
     """
+    built: list[object] = []
+
+    class _Stop(Exception):
+        pass
+
+    def spy(entry: object, **kw: object) -> object:
+        built.append(kw.get("wsl_distro"))
+        raise _Stop
+
+    monkeypatch.setattr(controller_view_module.install_wiring, "installer_for_app", spy)
+    # The folder as the Windows app holds a WSL server's: inside that distro.
+    monkeypatch.setattr(
+        controller_view_module.install_wiring.platform,
+        "wsl_location",
+        lambda path: ("Ubuntu-22.04", "/home/pk/wow"),
+    )
     services = ControllerServices.for_entry(WOTLK, tmp_path, None, "Ubuntu-22.04")
     assert services.rebuild is not None
-    with pytest.raises(InstallerError) as raised:
+    assert services.update_to_latest is not None
+    with pytest.raises(_Stop):
         list(services.rebuild(None))
-    message = str(raised.value)
-    assert "Ubuntu-22.04" in message
-    assert "Nothing was started" in message
+    assert built == ["Ubuntu-22.04"]
+
+
+def test_a_world_a_wsl_rebuild_brought_up_is_held_by_the_next_status_poll(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T125 meets T132: the Rebuild and Update presses go through the install engine,
+    not `Controller.start()`, so they make no hold themselves. The status poll's
+    reconcile (`Controller._keep_the_distro_up()`) is what holds the world they
+    brought up -- asserted here on the real services a WSL tab is built with,
+    because without the hold the distro dies 15-25 s after the app closes and
+    takes the freshly rebuilt server with it.
+    """
+    from yulon import controller as controller_module
+
+    running: set[str] = set()
+    held: list[tuple[str, str]] = []
+    spec = WOTLK.container_spec()
+
+    class _Engine:
+        def rebuild(self, options: object, *, cancel: object = None) -> Iterator[str]:
+            running.update({spec.db, spec.auth, spec.world})
+            yield "WoW WotLK was rebuilt and is running"
+
+    monkeypatch.setattr(
+        controller_view_module.install_wiring,
+        "installer_for_app",
+        lambda entry, **kw: _Engine(),
+    )
+    monkeypatch.setattr(
+        controller_view_module.install_wiring.platform,
+        "wsl_location",
+        lambda path: ("Ubuntu", "/home/pk/wow"),
+    )
+    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: True)
+    monkeypatch.setattr(docker, "status", lambda **kw: sorted(running))
+    monkeypatch.setattr(
+        controller_module.wsl,
+        "hold",
+        lambda distro, key: held.append((distro, key)) or controller_module.wsl.Hold(held=True),
+    )
+    services = ControllerServices.for_entry(WOTLK, tmp_path, None, "Ubuntu")
+    assert services.rebuild is not None
+    assert not services.controller.status().world
+    assert held == [], "nothing is up, so nothing is held"
+    assert list(services.rebuild(None)) == ["WoW WotLK was rebuilt and is running"]
+    assert held == [], "the press itself holds nothing; the poll does"
+    assert services.controller.status().world
+    assert held == [("Ubuntu", spec.world)]
+    services.controller.status()
+    assert held == [("Ubuntu", spec.world)], "a live hold is not asked for again"
+
+
+def test_the_tortoise_tab_hands_its_distro_to_the_bots_adoption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T125: the T123 wrap around Update reads the bots checkout through the same distro."""
+    seen: list[object] = []
+    real = controller_view_module.tortoise_botpool.wrap_route
+
+    def spy(route: object, *args: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("wsl_distro"))
+        return real(route, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(controller_view_module.tortoise_botpool, "wrap_route", spy)
+    tortoise = next(e for e in _every_game() if e.id == "wow-tortoise")
+    ControllerServices.for_entry(tortoise, tmp_path, None, "Ubuntu-22.04")
+    ControllerServices.for_entry(tortoise, tmp_path / "local", None, None)
+    assert seen == ["Ubuntu-22.04", None]
 
 
 def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> None:
