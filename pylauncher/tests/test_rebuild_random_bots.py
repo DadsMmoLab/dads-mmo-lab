@@ -1511,6 +1511,42 @@ def test_a_restore_that_fails_after_loading_started_leaves_the_request_off(
     assert "failed part-way" in said and "stays off" in said and PENDING_TOKEN in said
 
 
+def test_an_unreadable_restore_marker_is_could_not_tell_and_keeps_the_request_off(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Round-5 review: every unreadable marker reads back as the same record, so an unreadable
+    one before the press and an unreadable one after a load that started compared "unchanged"
+    and put the request back over part-restored databases. Unreadable on either side is
+    "could not tell", and the request stays off."""
+    from yulon.controller_wow_wotlk.maintenance import InterruptedRestore, MaintenanceError
+
+    unreadable = InterruptedRestore(tmp_path / "restore.marker", Path(), (), (), "", readable=False)
+    path = _conf(tmp_path, PENDING)
+    view, made = _restore_view(tmp_path, World(tmp_path).rebuild())
+    made.inner.interrupted = unreadable
+
+    def fail(plan: object) -> object:
+        made.inner.interrupted = InterruptedRestore(
+            tmp_path / "restore.marker", Path(), (), (), "", readable=False
+        )
+        raise MaintenanceError("the restore of tw_char failed part-way: I/O error")
+
+    view.services.restore = fail  # type: ignore[assignment]
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _plan_and_restore(view, tmp_path)
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8"), "still off"
+    said = failures[-1]
+    assert "could not tell" in said and PENDING_TOKEN in said
+
+
+def test_a_mixed_case_always_is_still_warned_about(qapp: object, tmp_path: Path) -> None:
+    """Round-5 review: `setting()` keeps the case as written, so the warning compares the
+    keyword case-blind; the module does too."""
+    _conf(tmp_path, CONF_TEXT.replace("= off", "= Always"))
+    assert poolreset.restore_warning(tmp_path) is not None
+
+
 def test_a_request_that_cannot_be_put_back_says_which_value_to_type(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -323,7 +323,7 @@ def after_a_failed_restore(
 def restore_warning(server_dir: Path) -> str | None:
     """The plan's warning when the conf says `always`, which a restore does not change."""
     try:
-        return ALWAYS_BEFORE_RESTORE if setting(server_dir) == "always" else None
+        return ALWAYS_BEFORE_RESTORE if setting(server_dir).lower() == "always" else None
     except (OSError, UnicodeDecodeError):
         return None
 

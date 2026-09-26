@@ -352,6 +352,11 @@ class _PlanWithWarning:
     warning: str | None
 
 
+def _unreadable(marker: object) -> bool:
+    """A restore marker that was there but could not be parsed (`InterruptedRestore.readable`)."""
+    return marker is not None and not getattr(marker, "readable", True)
+
+
 @dataclass(frozen=True)
 class _RestoredWithNote:
     """A restore's report, and T144's line when a pending bot rebuild was taken back first."""
@@ -8382,10 +8387,18 @@ class ControllerView(QWidget):
                 raise
             loaded: bool | None
             try:
-                loaded = self.services.interrupted_restore() != marker_before
+                marker_after = self.services.interrupted_restore()
             except Exception as check:  # noqa: BLE001 - "could not tell" is its own answer
                 logger.warning(f"could not read the restore marker after a failed restore: {check}")
                 loaded = None
+            else:
+                # Every unreadable marker reads back as the same record, so two of them
+                # compare equal whatever happened in between: unreadable on either side
+                # is "could not tell", never "nothing loaded" (T144 review round 5).
+                if _unreadable(marker_before) or _unreadable(marker_after):
+                    loaded = None
+                else:
+                    loaded = marker_after != marker_before
             said = seam.after_a_failed_restore(taken, loaded=loaded)
             raise wotlk_maintenance.MaintenanceError(f"{exc} {said}") from exc
         return _RestoredWithNote(report, taken.note if taken is not None else None)
