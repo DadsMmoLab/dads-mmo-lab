@@ -6077,6 +6077,39 @@ def test_t140_a_default_zone_move_with_the_reload_kept_is_told_as_before() -> No
     assert "so after the reload every interface" in said and "runs none" not in said
 
 
+@pytest.mark.parametrize(
+    ("answers", "placed"),
+    [
+        ((True, True), "Every port here is already allowed in both "),
+        ((True, False), "Every port here is written to both "),
+        ((False, False), "Every port here is written to both "),
+    ],
+    ids=["nothing written", "all written, no reload", "all written, reload kept"],
+)
+@pytest.mark.parametrize(
+    ("zoning", "which"),
+    [(_MOVED, "disagree"), (_DEFAULT_MOVES, "DefaultZone")],
+    ids=["moved", "default"],
+)
+def test_t140_a_zone_note_says_written_only_for_ports_the_plan_writes(
+    zoning: networking.FirewalldZoning,
+    which: str,
+    answers: tuple[bool, bool],
+    placed: str,
+) -> None:
+    """ "Written to both" must not sit next to "nothing to change" (round-2 review must-fix)."""
+    p = _firewalld_plan(
+        daemon="running",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zoning=zoning,
+        admitted=_answering(*answers),
+    )
+    writes = [c for c in p.firewall_commands if any(a.startswith("--add-port=") for a in c)]
+    assert bool(writes) == (answers != (True, True))
+    said = next(w for w in p.warnings if which in w)
+    assert placed in said
+
+
 def test_t140_the_networking_tab_path_drops_the_reload_on_the_measured_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -3674,6 +3674,7 @@ def plan(
             _firewalld_port_commands(fw_cmds, firewalld_daemon), firewalld_zones
         )
         admitted_note: str | None = None
+        writes_asked = sum(1 for c in fw_cmds if _permanent_port_write(c))
         if firewalld_daemon != "stopped" and firewalld_zones is not None:
             # T140. Asked BEFORE the lockout guard, so a reload nothing needs
             # is gone before anything can refuse it. Not asked of a stopped
@@ -3689,6 +3690,20 @@ def plan(
                 fw_cmds, admitted_note, in_effect_already = _already_admitted(
                     fw_cmds, ask_admission(pairs)
                 )
+        # What the two notes below may say the ports are: "written" only while
+        # this plan still writes them all. T140 can drop a write for a pair
+        # firewalld already admits, and "written to both" next to "nothing to
+        # change" was the round-2 review's must-fix.
+        writes_kept = sum(1 for c in fw_cmds if _permanent_port_write(c))
+        placed = (
+            "is written to"
+            if writes_kept == writes_asked
+            else (
+                "is already allowed in"
+                if writes_kept == 0
+                else "is written to, or already allowed in,"
+            )
+        )
         if zoning is not None and zoning.moved_at_runtime:
             # The disagreement itself, said out loud. It is not a refusal: the
             # ports go to BOTH lists (`FirewalldZoning.write`), so they are in
@@ -3724,7 +3739,7 @@ def plan(
                 f"but not in the saved zone bindings ({', '.join(zoning.permanent or ())}), "
                 f"{settled}. Measured on firewalld 2.2.3 (fedora:41, 2026-09-04): an "
                 "interface moved with `--change-interface` and no `--permanent` was back in "
-                "its saved zone after `firewall-cmd --reload`. Every port here is written to "
+                f"its saved zone after `firewall-cmd --reload`. Every port here {placed} "
                 "both sets of zones so it is allowed either way; make the move permanent with "
                 "`sudo firewall-cmd --permanent --zone=<zone> --change-interface=<interface>` "
                 "if it was meant to last."
@@ -3752,7 +3767,7 @@ def plan(
                 "--list-all-zones` tags the file's. Measured on firewalld 2.2.3 (fedora:41, "
                 "2026-09-05): three ports written to the running default, apply 4/4 with no "
                 'refusal and no warning, and after the reload ssh answered "No route to '
-                'host". Every port here is written to both zones so it is allowed either '
+                f'host". Every port here {placed} both zones so it is allowed either '
                 "way; settle it with `sudo firewall-cmd --set-default-zone=<zone>`, which "
                 "writes the file and the daemon together."
             )

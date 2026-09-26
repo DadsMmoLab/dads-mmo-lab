@@ -2327,11 +2327,13 @@ def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_
 ) -> None:
     """T140, out of the real widget: the Steam Deck's plan as the owner reads it.
 
-    firewalld answers the way an unelevated probe was measured to be answered
-    on 2026-09-26 (Fedora, firewalld and Docker, uid 1000 without sudo):
-    `public`'s port range admits both game ports at runtime, Docker's `docker`
-    zone answers `--query-port` no but has `target: ACCEPT`, and every
-    `--permanent` read is rc 253. Before T140 this text listed the four
+    The runtime answers are the ones measured on 2026-09-26 (Fedora, firewalld
+    and Docker, uid 1000 without sudo): a port range admits both game ports,
+    and Docker's `docker` zone answers `--query-port` no but has `target:
+    ACCEPT`. The permanent side answering rc 253 while the zones are readable
+    is a constructed mix, not a measured one (over SSH the zones were
+    unreadable too; from the desktop every read answered): it is the case
+    where only the reload can be dropped. Before T140 this text listed the four
     `--permanent` writes and then "REFUSED to run `firewall-cmd --reload`",
     on every Apply. Now the writes stay (the saved side cannot be read), the
     reload and the refusal go, and one line says why. Asserted through
