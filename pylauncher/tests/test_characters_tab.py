@@ -998,7 +998,9 @@ def test_a_gear_read_that_breaks_says_so_rather_than_reading_forever(
     assert "the worker fell over" in view.send_gear_button.toolTip()
 
 
-def test_the_gear_read_does_not_reach_back_into_the_view_from_its_worker(tmp_path: Path) -> None:
+def test_the_gear_read_does_not_reach_back_into_the_view_from_its_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The read runs on a worker, possibly after the view has started coming apart.
 
     Seen in the suite's own log (T96 review round): pytest tearing a view down
@@ -1008,6 +1010,11 @@ def test_the_gear_read_does_not_reach_back_into_the_view_from_its_worker(tmp_pat
     reading the view at all: what it needs is taken on the GUI thread when the
     row is chosen. A runner that holds the work lets the view lose its services
     first, deterministically.
+
+    The services are taken away through `monkeypatch`, which puts them back at
+    teardown (T131). A bare `del` left this view without them for good, and a
+    timer it had already queued (`_fill_next_version`) then fired inside a LATER
+    test's event pump and failed that test instead.
     """
     play = _Play(characters=_people(), pieces=19)
     view = _view(tmp_path, play=play)
@@ -1016,7 +1023,8 @@ def test_the_gear_read_does_not_reach_back_into_the_view_from_its_worker(tmp_pat
     view._jobs = lambda work, on_done, on_error: held.append((work, on_done, on_error))
 
     view.character_list.setCurrentRow(1)  # Ganaar
-    del view.services  # what a view being torn down looks like to a late worker
+    # What a view being torn down looks like to a late worker.
+    monkeypatch.delattr(view, "services")
 
     work = held[-1][0]
     generation, name, (pieces, mails, refusal) = work()  # type: ignore[operator, misc]

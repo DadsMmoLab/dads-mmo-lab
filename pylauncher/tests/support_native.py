@@ -20,8 +20,10 @@ rather than answering each question the way the code under test would like.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
+import urllib.error
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -349,6 +351,26 @@ class Recorder:
     already up to date" machine.
     """
 
+    github: dict[str, int] = field(default_factory=dict)
+    """T124: what GitHub's compare API answers as `ahead_by`, per repository slug.
+
+    A slug that is not here answers as a network that is not there -- the
+    default, so no test reaches past this double by accident.
+    """
+
+    gets: list[str] = field(default_factory=list)
+    """Every URL the engine asked GitHub for, in order: the rate-limit rule is a count."""
+
+    releases: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    github_behind: dict[str, int] = field(default_factory=dict)
+    """T126: what the compare answers as `behind_by`, per slug; 0 when absent.
+
+    Non-zero together with a non-zero `github` count is a DIVERGED history --
+    upstream rewrote what the checkout was built from.
+    """
+    """T126: each slug's newest published release as `(tag, commit)`. Absent = GitHub silent."""
+
     edits: dict[Path, tuple[str, ...]] = field(default_factory=dict)
     """Tracked files the user has changed in each checkout — `local_edits()`'s answer.
 
@@ -379,6 +401,27 @@ class Recorder:
     running image disagreeing. A double that could only ever succeed could not
     produce the line that says so.
     """
+
+    def upstream_get(self, url: str, accept: str) -> bytes:
+        """GitHub, as far as T124 asks it: one compare per source."""
+        self.gets.append(url)
+        for slug, (tag, sha) in self.releases.items():
+            if url == f"https://api.github.com/repos/{slug}/releases/latest":
+                body = {"tag_name": tag, "draft": False, "prerelease": False}
+                return json.dumps(body).encode("utf-8")
+            if url == f"https://api.github.com/repos/{slug}/commits/{tag}":
+                return sha.encode("utf-8")
+        for slug, ahead in self.github.items():
+            if f"/repos/{slug}/compare/" in url:
+                behind = self.github_behind.get(slug, 0)
+                status = (
+                    "diverged"
+                    if ahead and behind
+                    else "ahead" if ahead else "behind" if behind else "identical"
+                )
+                body = {"status": status, "ahead_by": ahead, "behind_by": behind}
+                return json.dumps(body).encode("utf-8")
+        raise urllib.error.URLError("no network in this test")
 
     def head_sha(self, dest: Path) -> str | None:
         self.calls.append(f"head-sha:{dest.name}")
@@ -664,6 +707,7 @@ class Recorder:
             head_version=self.head_version,
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
+            upstream_get=self.upstream_get,
             images_built=self.images_built,
             build=build,
             one_shot=one_shot,

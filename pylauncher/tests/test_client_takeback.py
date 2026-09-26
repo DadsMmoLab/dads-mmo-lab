@@ -39,6 +39,7 @@ from tests.test_server_dbc import (
     _write,
 )
 from yulon.apply import CLAIM_FILE, Applier, ClientCopy, read_client_copies, sha256_of
+from yulon.catalog import upstream
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import Manifest
 from yulon.ui.controller_view import _format_report
@@ -282,7 +283,12 @@ def test_an_addon_folder_is_never_deleted_and_the_report_says_how_to_turn_it_off
     server_dir.mkdir()
     client_dir = tmp_path / "client"
     client_dir.mkdir()
-    applier = Applier(server_dir, client_dir=client_dir)
+    # T126: this addon follows its releases; the stand-in answers for GitHub.
+    applier = Applier(
+        server_dir,
+        client_dir=client_dir,
+        newest_release=lambda slug: upstream.Release("v2026-09-25", "a" * 40),
+    )
     applier.git = _CloneFromManifest(manifest, ())  # type: ignore[assignment]
     addon = client_dir / "Interface" / "AddOns" / "TortoiseBotsManager"
     applier.install(manifest)

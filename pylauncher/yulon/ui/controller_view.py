@@ -91,7 +91,7 @@ from yulon.apply import (
     reapplies_on_top,
     required_prompts,
 )
-from yulon.catalog import bot_dashboard, composegen, native, preflight
+from yulon.catalog import bot_dashboard, composegen, native, preflight, upstream
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
@@ -767,6 +767,13 @@ class ControllerServices:
     It costs one `git fetch` per installed checkout, which is why it is a button
     and not part of the status poll.
     """
+    module_notes: Callable[[], Mapping[tuple[str, str], str]] | None = None
+    """One extra sentence per Modules-tab row, keyed `(family, id)`, or None for none (T126).
+
+    Read on every reload, like `installed_modules`: it opens small files and
+    asks no daemon and no network. Tortoise uses it to say which release of
+    TortoiseBots Manager is installed against the server's bot module.
+    """
     module_version: Callable[[Path], str | None] | None = None
     """What one clone is AT, as `7c02b1d · 2026-09-01`, or None for a game with no clones.
 
@@ -1251,6 +1258,7 @@ def _assemble(
     unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unknown_modules: Callable[[], Mapping[str, Mapping[str, apply_module.Doubt]]] | None = None,
     module_version: Callable[[Path], str | None] | None = None,
+    module_notes: Callable[[], Mapping[tuple[str, str], str]] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
@@ -1323,6 +1331,7 @@ def _assemble(
         # T44's version line, on the same flag again: it reads a clone's own
         # `.git`, and a game with no clones has none to read.
         module_version=module_version,
+        module_notes=module_notes,
         # Defaulted for the same reason again: the four seams behind "Install
         # from link…" and "Install from folder…" belong to the one game whose
         # modules are checkouts under `modules/`, and that factory passes them.
@@ -2321,6 +2330,34 @@ def _for_tortoise(
         # guard's ledger query reaches `tw_world.migrations` rather than
         # `acore_world`'s.
         store=tortoise_modules.store() if entry.has_manifests else None,
+        # T126: the TortoiseBots Manager row says which release is installed and
+        # whether it matches the server's bot module. Two small file reads.
+        module_notes=(
+            (lambda: tortoise_modules.release_notes(server_dir)) if entry.has_manifests else None
+        ),
+        # T126 review: the four module-folder seams, so a Tortoise player can
+        # SEE and TAKE a new addon release. This game's clones are the two
+        # client addons under `sql_scripts/clones/`; its SQL and conf mods
+        # clone nothing. "Check for updates" counts them off the GUI thread
+        # (`_run`), cached a day per clone; an installed row that is behind
+        # gets the Update chip, whose press is `Applier.update()` -- the path
+        # with the repository, dirty-tree and local-commit checks.
+        module_updates=(
+            (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
+        ),
+        installed_modules=(
+            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+        ),
+        # T121's seam rides with `installed_modules`. Tortoise ships no relative
+        # (record-backed) mod, so nothing here writes a pending mark and this
+        # reads empty; wired so the Modules tab asks it the same way everywhere.
+        unknown_modules=(
+            (lambda: apply_module.unknown_modules(server_dir)) if entry.has_manifests else None
+        ),
+        unfinished_modules=(
+            (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
+        ),
+        module_version=(RunnerGit().head_version if entry.has_manifests else None),
         applier=(
             tortoise_modules.applier(
                 server_dir,
@@ -4260,6 +4297,8 @@ class ControllerView(QWidget):
         self._busy = False
         self._status_pending = False
         self._verdict_pending = False
+        # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
+        self._upstream_pending = False
         self._module_pending: str | None = None
         self._console_pending = False
         self._tabs = QTabWidget(self)
@@ -4339,6 +4378,10 @@ class ControllerView(QWidget):
         self._backup_before_update = False
         self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
         self._behind: dict[tuple[str, str], int] = {}
+        # T126: the newest release's tag for a counted row that follows its
+        # releases. Read only for a key `_behind` still has.
+        self._behind_release: dict[tuple[str, str], str] = {}
+        self._behind_updated: set[tuple[str, str]] = set()
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -4459,6 +4502,12 @@ class ControllerView(QWidget):
         self.repair_channel_button.setVisible(False)
         self.repair_channel_button.clicked.connect(self.repair_channel)
         self.status_label = QLabel("status: unknown", tab)
+        # T124: what upstream has that this server was not built from. Hidden
+        # until a reading says there is something -- and for no network, no
+        # route, or nothing new, it stays hidden rather than saying so.
+        self.upstream_label = QLabel("", tab)
+        self.upstream_label.setWordWrap(True)
+        self.upstream_label.setVisible(False)
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
         # `client` step or the Steam entry can use, and hiding the row there
@@ -4642,6 +4691,7 @@ class ControllerView(QWidget):
         box.addWidget(self.compose_banner)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
+        box.addWidget(self.upstream_label)
         box.addWidget(self.client_dir_label)
         if self.set_client_dir_button is not None:
             box.addWidget(self.set_client_dir_button)
@@ -4934,6 +4984,9 @@ class ControllerView(QWidget):
         self._import_asked = False
         self.refresh_status()
         self.check_server_files()
+        # T124: the day's cache answers this, so pressing Refresh repeatedly
+        # costs no network.
+        self._refresh_upstream_news()
 
     @Slot(object)
     def _status_ready(self, result: object) -> None:
@@ -5413,6 +5466,9 @@ class ControllerView(QWidget):
             # this runs.
             self._set_update_buttons()
             self._refresh_source_version()
+            # And the count, which the update route drops when it moves a
+            # source: re-asked here so the line does not outlive the press.
+            self._refresh_upstream_news()
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
             # button by any job of their own finishing.
@@ -8310,6 +8366,9 @@ class ControllerView(QWidget):
         # the app opens, which is what lets an install that was updated in an
         # earlier session say so without anybody pressing anything.
         self._refresh_source_version()
+        # T124's count, off the GUI thread: the cached reading on every open
+        # but the day's first, which asks GitHub.
+        self._refresh_upstream_news()
         # Keyed by (FAMILY, id) since round 2, for `modules_panel._rows`'s
         # reason: nothing makes an id unique across families, and an id-keyed
         # dict handed `selected_manifest()` the other family's manifest --
@@ -8367,6 +8426,17 @@ class ControllerView(QWidget):
         # every later moment cannot disagree about the rule.
         self._set_adopt_button()
 
+    def _module_notes(self) -> Mapping[tuple[str, str], str]:
+        """T126's per-row sentences, or none. Never raises: a note is not worth a tab."""
+        read = self.services.module_notes
+        if read is None:
+            return {}
+        try:
+            return read()
+        except (OSError, ValueError) as exc:
+            logger.debug(f"could not read the module notes for {self.entry.id}: {exc}")
+            return {}
+
     def _session_state(self) -> SessionState:
         """What this session has learned, bundled for the row builder.
 
@@ -8379,6 +8449,8 @@ class ControllerView(QWidget):
             rebuild_owed=frozenset(self._rebuild_owed),
             sql_owed=dict(self._sql_owed),
             behind=dict(self._behind),
+            releases={k: v for k, v in self._behind_release.items() if k in self._behind},
+            updated=frozenset(k for k in self._behind_updated if k in self._behind),
         )
 
     def _module_actions_allowed(self) -> bool:
@@ -8520,6 +8592,7 @@ class ControllerView(QWidget):
                 unfinished=self._unfinished_clones(),
                 # T121, the same moment again: which recorded mods are in doubt.
                 unknown=self._unknown_modules(),
+                notes=self._module_notes(),
             )
         )
         if broken:
@@ -9190,11 +9263,20 @@ class ControllerView(QWidget):
         # chip, and `None` ("could not ask") is deliberately not a zero: a
         # checkout git could not answer for gets no chip rather than a
         # confident "up to date".
-        # Keyed `("module", key)`: `apply.module_updates()` enumerates ONE clone
-        # directory -- `CLONE_DIRS["module"]`, which is `modules/` -- so every
-        # key it returns is in that family by construction, and inventing a
-        # family here would be a guess where this is the answer.
-        self._behind = {("module", row.key): row.behind for row in result if (row.behind or 0) > 0}
+        # Keyed `(row.family, key)`: `apply.module_updates()` enumerates ONE
+        # clone directory and says which family it read, so the family is the
+        # seam's answer rather than a guess. It was the literal `"module"`
+        # until T126, when Tortoise began counting its `mod` clones (the two
+        # client addons in `sql_scripts/clones/`).
+        self._behind = {
+            (row.family, row.key): row.behind for row in result if (row.behind or 0) > 0
+        }
+        self._behind_release = {(row.family, row.key): row.release for row in result if row.release}
+        self._behind_updated = {
+            (row.family, row.key)
+            for row in result
+            if row.release and row.release == row.installed_release
+        }
         self.reload_modules()
 
     @Slot(object)
@@ -9426,6 +9508,39 @@ class ControllerView(QWidget):
         self.source_version_label.setText(said.line)
         self.source_version_label.setVisible(bool(said.line))
         self.return_to_pin_button.setVisible(said.past_the_pin)
+
+    def _refresh_upstream_news(self) -> None:
+        """Ask, off the GUI thread, how far upstream is past this server's build (T124).
+
+        Through `_run()` and never inline: a reading that is not in the day's
+        cache reads each source's HEAD through a container and asks GitHub, and
+        a tab that froze for that on opening would be the defect the job runner
+        exists to prevent. One in flight at a time -- a job finishing and a
+        Refresh landing together ask once.
+        """
+        route = self.services.update_to_latest
+        if route is None or route.upstream_news is None:
+            self.upstream_label.setVisible(False)
+            return
+        if self._upstream_pending:
+            return
+        self._upstream_pending = True
+        self._run(route.upstream_news, self._upstream_news_ready, self._upstream_news_failed)
+
+    @Slot(object)
+    def _upstream_news_ready(self, result: object) -> None:
+        self._upstream_pending = False
+        said = upstream.line(result) if isinstance(result, upstream.UpstreamNews) else ""
+        self.upstream_label.setText(said)
+        self.upstream_label.setVisible(bool(said))
+
+    @Slot(object)
+    def _upstream_news_failed(self, exc: object) -> None:
+        """Silent on the tab, logged: the line is news, and a failure to ask is not."""
+        self._upstream_pending = False
+        logger.debug(f"could not ask how far upstream is past {self.entry.id}: {exc}")
+        self.upstream_label.setText("")
+        self.upstream_label.setVisible(False)
 
     def _update_route_busy(self) -> bool:
         """The two gates both T64 presses share, put to the user and answered True when hit.

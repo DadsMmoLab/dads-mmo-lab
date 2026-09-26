@@ -30,6 +30,7 @@ from yulon.apply import (
     module_sql_report,
 )
 from yulon.apply import module_updates as apply_updates
+from yulon.catalog.upstream import github_slug
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import BehindReader, Git, RunnerGit
 
@@ -317,9 +318,16 @@ def module_updates(
 
     Costs one `git fetch` per installed checkout, so it belongs behind a control
     the user pressed rather than on the status poll.
+
+    WotLK's count, over `modules/`, uncached. Tortoise has its own since T126
+    (`controller_wow_tortoise.modules.module_updates()`): it counts the two
+    client addons in `sql_scripts/clones/` behind the same "Check for updates"
+    press, each against what its manifest follows, and keeps each row a day.
     """
     reader: BehindReader = git if git is not None else RunnerGit()
     branches: dict[str, str | None] = {}
+    # T126: the modules whose manifest follows its releases, by GitHub slug.
+    releases: dict[str, str] = {}
     try:
         # Since T46 a USER manifest that will not load is skipped by the store
         # and this loop continues past it, so the entries AFTER a bad custom file
@@ -327,9 +335,13 @@ def module_updates(
         # catalog and either index -- the cases that are app bugs, not user data.
         for manifest in store().load_all("module"):
             branches[manifest.id] = manifest.source.branch if manifest.source else None
+            if manifest.source is not None and manifest.source.follow == "releases":
+                slug = github_slug(manifest.source.repo)
+                if slug is not None:
+                    releases[manifest.id] = slug
     except Exception as exc:  # boundary: a broken manifest tree must not stop the count
         logger.warning(f"could not read the wow-wotlk manifests for their branches: {exc}")
-    return apply_updates(server_dir, git=reader, branches=branches)
+    return apply_updates(server_dir, git=reader, branches=branches, releases=releases)
 
 
 def apply_module(

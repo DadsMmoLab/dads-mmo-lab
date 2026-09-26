@@ -40,7 +40,7 @@ from yulon import (
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
-from yulon.catalog import composegen, native
+from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
@@ -61,7 +61,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.git import RunnerGit
+from yulon.git import RunnerGit, git_available
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
@@ -10779,6 +10779,135 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     assert view.update_to_latest_button.isEnabled() is False
 
 
+# -- T124: "Upstream has new code since this server was built" --------------
+
+
+def _upstream_news(*counts: int | None) -> upstream.UpstreamNews:
+    labels = ("server", "mod-playerbots", "third")
+    return upstream.UpstreamNews(
+        checked_unix=1_790_000_000,
+        sources=tuple(
+            upstream.SourceNews(repo=f"x/{label}", label=label, behind=count)
+            for label, count in zip(labels, counts, strict=False)
+        ),
+    )
+
+
+def test_the_upstream_line_says_what_is_new_on_the_server_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services, spy = _latest(ps, tmp_path)
+    services.update_to_latest = replace(spy.route(), upstream_news=lambda: _upstream_news(300, 50))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.upstream_label.isHidden()
+    assert view.upstream_label.text().startswith(
+        "Upstream has new code since this server was built: server 300 commits, "
+        "mod-playerbots 50 commits."
+    )
+    # On the SERVER tab, where a player looks at the server.
+    assert view._tabs.widget(0).isAncestorOf(view.upstream_label)
+
+
+@pytest.mark.parametrize("counts", [(0, 0), (None, None), (None, 0)])
+def test_the_upstream_line_is_hidden_when_nothing_is_new_or_nothing_answered(
+    qapp: object, ps: _Ps, tmp_path: Path, counts: tuple[int | None, ...]
+) -> None:
+    services, spy = _latest(ps, tmp_path)
+    services.update_to_latest = replace(spy.route(), upstream_news=lambda: _upstream_news(*counts))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.upstream_label.isHidden()
+    assert view.upstream_label.text() == ""
+
+
+def test_an_upstream_ask_that_raises_hides_the_line_and_takes_nothing_down(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services, spy = _latest(ps, tmp_path)
+
+    def broken() -> upstream.UpstreamNews:
+        raise OSError("network is unreachable")
+
+    services.update_to_latest = replace(spy.route(), upstream_news=broken)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.upstream_label.isHidden()
+    assert view.problem_label.text() == ""
+
+
+def test_the_upstream_count_is_handed_to_the_job_runner_and_never_run_inline(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No GUI-thread network: the tab hands the ask to its runner and asks once at a time."""
+    services, spy = _latest(ps, tmp_path)
+    asked: list[str] = []
+
+    def news() -> upstream.UpstreamNews:
+        asked.append(threading.current_thread().name)
+        return _upstream_news(300, 50)
+
+    services.update_to_latest = replace(spy.route(), upstream_news=news)
+    pending: list[tuple[Callable[[], object], Callable[[object], None]]] = []
+
+    def held(work: Callable[[], object], on_done: Any, on_error: Any) -> None:
+        pending.append((work, on_done))
+
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=held)
+    assert asked == [], "building the tab asked upstream on the GUI thread"
+    mine = [(work, done) for work, done in pending if work is news]
+    assert len(mine) == 1
+    view.recheck()
+    view.recheck()
+    assert len([w for w, _ in pending if w is news]) == 1, "a second ask while one is in flight"
+    work, done = mine[0]
+    done(work())
+    assert view.upstream_label.text().startswith("Upstream has new code")
+    view.recheck()
+    assert len([w for w, _ in pending if w is news]) == 2, "Refresh asks again once it is back"
+
+
+def test_the_upstream_count_runs_on_a_worker_thread_with_the_real_runner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.ui.widgets import job as job_module
+
+    monkeypatch.setattr(
+        controller_view_module, "threaded_job_runner", job_module.threaded_job_runner
+    )
+    services, spy = _latest(ps, tmp_path)
+    threads: list[threading.Thread] = []
+
+    def news() -> upstream.UpstreamNews:
+        threads.append(threading.current_thread())
+        return _upstream_news(3)
+
+    services.update_to_latest = replace(spy.route(), upstream_news=news)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view.upstream_label.isHidden(), "the upstream line")
+    assert threads and all(t is not threading.main_thread() for t in threads)
+    view._jobs.wait()  # type: ignore[attr-defined]
+
+
+def test_the_upstream_line_is_asked_again_when_a_job_finishes(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The update route drops the day's count; the tab has to re-read it after the press."""
+    services, spy = _latest(ps, tmp_path)
+    answers = iter([_upstream_news(300, 50), _upstream_news(0, 0)])
+    services.update_to_latest = replace(spy.route(), upstream_news=lambda: next(answers))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.upstream_label.isHidden()
+    view._set_busy(True)
+    view._set_busy(False)
+    assert view.upstream_label.isHidden()
+
+
+def test_no_route_means_no_upstream_line(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.services.update_to_latest is None or (
+        view.services.update_to_latest.upstream_news is None
+    )
+    assert view.upstream_label.isHidden()
+
+
 def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -16150,3 +16279,121 @@ def test_a_tuning_save_of_the_bot_card_moves_the_bots_tab_box(
     (tmp_path / BOT_CONF).write_text(BOT_CONF_TEXT.replace("= 500", "= 70"), encoding="utf-8")
     view.reload_tuning()
     assert view.bot_count_box.value() == 70
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_tortoise_addon_row_offers_the_new_release_and_update_takes_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T126 review: a Tortoise player can SEE a new addon release and TAKE it.
+
+    Real git throughout (a local origin standing in for GitHub's repository),
+    the real `Applier.update()` behind the row's Update chip, and Tortoise's own
+    count. Only GitHub's answer to "which release is newest" is a stand-in.
+    """
+    from tests.test_apply import (
+        _git,
+        _LocalOrigin,
+        _origin,
+        _origin_answers_as_the_manifest,
+        _publish,
+    )
+    from yulon.catalog import upstream
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    def run(cmd: list[str], *args: object, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        # git is real here; docker stays the `ps` fake every other test uses.
+        if cmd and cmd[0] == "git":
+            return _REAL_RUN(cmd, *args, **kwargs)
+        return ps(cmd, kwargs.get("cwd"), kwargs.get("timeout"))
+
+    monkeypatch.setattr(runner, "run", run)
+    files = {"TortoiseBotsManager.toc": "## Interface: 11200\nCore.lua\n", "Core.lua": "-- {v}\n"}
+    origin = _origin(tmp_path)
+    released = {"now": upstream.Release("v2026-09-24", _publish(origin, files, "v1"))}
+    manifest = tortoise_modules.store().load("mod", "tortoise-bots-manager")
+    client = tmp_path / "client"
+    (client / "Interface" / "AddOns").mkdir(parents=True)
+    server = tmp_path / "server"
+    applier = Applier(
+        server,
+        git=_LocalOrigin(origin),  # type: ignore[arg-type]
+        client_dir=client,
+        newest_release=lambda slug: released["now"],
+    )
+    _origin_answers_as_the_manifest(applier, manifest)
+    applier.install(manifest)
+    clone = applier.clone_dir(manifest)
+    assert apply_module.clone_release(clone, item_id=manifest.id) == "v2026-09-24"
+
+    released["now"] = upstream.Release("v2026-09-25", _publish(origin, files, "v2"))
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "store", tortoise_modules.store())
+    object.__setattr__(services, "applier", applier)
+    object.__setattr__(services, "installed_modules", lambda: apply_module.installed_clones(server))
+    object.__setattr__(
+        services,
+        "module_updates",
+        lambda: tortoise_modules.module_updates(
+            server, git=RunnerGit(), newest_release=lambda slug: released["now"]
+        ),
+    )
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+    view.check_module_updates()
+    assert "tortoise-bots-manager: new release v2026-09-25" in view.module_report.toPlainText()
+    labels = [b.text() for b in view.modules_panel.row(manifest.id).chip_buttons]
+    assert "Update available — new release v2026-09-25" in labels, labels
+
+    view.modules_panel.chip_action_pressed.emit(manifest.id, "update")
+
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    assert apply_module.clone_release(clone, item_id=manifest.id) == "v2026-09-25"
+    addon = client / "Interface" / "AddOns" / "TortoiseBotsManager" / "Core.lua"
+    assert addon.read_text(encoding="utf-8").strip().endswith("v2")
+    assert view.modules_panel.row(manifest.id).chip_buttons == (), "the chip outlived the update"
+
+
+def _rewritten_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ControllerView, Any, Path, str]:
+    """A WotLK tab whose bots follow releases, the newest on a history upstream rewrote."""
+    from tests.test_follow_releases import REWRITTEN, _diverged, _engine, _route
+    from yulon.catalog.installer import InstallOptions
+
+    rec, server_dir = _diverged(tmp_path)
+    _engine(rec).upstream_news(InstallOptions(server_dir=server_dir))
+    route = _route(rec, server_dir, monkeypatch)
+    services = _services(_Ps(), tmp_path, [])
+    services.update_to_latest = route
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    return view, rec, server_dir, REWRITTEN
+
+
+def test_a_rewritten_history_is_in_the_question_and_no_moves_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T126, Codex's final pass: the player is told BEFORE answering, and Cancel is nothing."""
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
+    view, rec, _server_dir, line = _rewritten_route(tmp_path, monkeypatch)
+    before = dict(rec.heads)
+
+    assert view.update_to_latest() is False
+    assert line in boxes[0].text()  # type: ignore[attr-defined]
+    assert rec.clones == [] and rec.heads == before
+
+
+def test_a_rewritten_history_moves_after_yes_and_the_log_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_follow_releases import REL, _bots_dest
+
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Save)
+    view, rec, server_dir, line = _rewritten_route(tmp_path, monkeypatch)
+
+    assert view.update_to_latest() is True
+    wait_for_panel(view.rebuild_log)
+    assert line in boxes[0].text()  # type: ignore[attr-defined]
+    assert rec.heads[_bots_dest(server_dir)] == REL
+    assert "Upstream rewrote its history" in view.rebuild_log.text()
