@@ -1024,6 +1024,26 @@ def argv_reaches_the_docker_cli(command: object) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def _no_unit_test_holds_a_real_distro_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that would spawn or end a real WSL hold (T132).
+
+    `wsl.hold()` starts a DETACHED `wsl.exe -d <distro> --exec ... sleep infinity`
+    that is built to outlive the process that made it. On a Windows machine with
+    WSL - a CI runner, a developer's box - a test that reached it through
+    `Controller.start()` would leave a real distro pinned open after the suite.
+    Tests that mean to exercise `hold()`/`release()` hand them their own
+    `popen=`/`run=`, which never reaches these.
+    """
+    from yulon import wsl
+
+    def refuse(argv: object, **kwargs: object) -> None:
+        pytest.fail(f"a test reached a real WSL hold or release: {argv!r}")
+
+    monkeypatch.setattr(wsl, "_spawn", refuse)
+    monkeypatch.setattr(wsl, "_run_release", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_unit_test_talks_to_a_real_docker_daemon(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:

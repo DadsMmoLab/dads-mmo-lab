@@ -525,6 +525,10 @@ def _wsl_exe(
 
 def _stop_recorder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     asked: list[str] = []
+    # The T132 hold's release follows a stop that took something down; these
+    # tests are about the stop, so it is answered here rather than refused by
+    # the suite's guard against touching a real distro.
+    monkeypatch.setattr(controller_module.wsl, "release", lambda distro, *keys: True)
     monkeypatch.setattr(
         docker, "stop_staged", lambda *a, **kw: asked.append("stop") or True  # type: ignore[func-returns-value]
     )
@@ -747,3 +751,290 @@ def test_a_controller_with_no_hook_stops_exactly_as_it_did_before(
     Controller(SPEC, SERVER_DIR, pre_stop=None).stop()
 
     assert fake_runner.calls == with_hook
+
+
+# -- T132: a WSL distro lives only while a wsl.exe session is attached --------------
+#
+# Measured on yulon-win11 (WSL 2.7.12, 2026-09-26): a distro stops 15-25 s after
+# the last wsl.exe exits, with systemd, dockerd and running containers inside it.
+# Start is one short `wsl -d ... docker compose up -d`, so a WSL server lived
+# only while something kept calling into the distro -- in practice the Server
+# tab's five-second poll -- and was killed hard when the app closed.
+
+
+class _HoldRecorder:
+    """Stands in for `wsl.hold`/`wsl.release`, recording the order of events."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
+        self.events = events
+        monkeypatch.setattr(controller_module.wsl, "hold", self.hold)
+        monkeypatch.setattr(controller_module.wsl, "release", self.release)
+
+    def hold(self, distro: str, key: str) -> controller_module.wsl.Hold:
+        self.events.append(f"hold {distro} {key}")
+        return controller_module.wsl.Hold(held=True)
+
+    def release(self, distro: str, *keys: str) -> bool:
+        self.events.append(f"release {distro} {' '.join(keys)}")
+        return True
+
+
+def _no_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(docker, "port_conflicts_for", lambda spec, **kw: [])
+
+
+def test_starting_a_wsl_server_holds_its_distro_open_after_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start ends with a held session, and only AFTER the containers were asked up."""
+    events: list[str] = []
+    _HoldRecorder(monkeypatch, events)
+    _no_conflicts(monkeypatch)
+    monkeypatch.setattr(
+        docker,
+        "start_staged",
+        lambda spec, sd, **kw: events.append(f"start {kw.get('wsl_distro')}"),
+    )
+    Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch").start()
+    assert events == ["start dml-arch", f"hold dml-arch {SPEC.world}"]
+
+
+def test_a_start_that_failed_holds_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A held session for a server that never came up would pin the distro for nothing."""
+    events: list[str] = []
+    _HoldRecorder(monkeypatch, events)
+    _no_conflicts(monkeypatch)
+
+    def refuse(spec: docker.ContainerSpec, sd: Path, **kw: object) -> None:
+        raise docker.DockerCommandError("compose up failed")
+
+    monkeypatch.setattr(docker, "start_staged", refuse)
+    with pytest.raises(docker.DockerCommandError):
+        Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch").start()
+    assert events == []
+
+
+def test_a_local_server_never_holds_or_releases_anything(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    _HoldRecorder(monkeypatch, events)
+    _no_conflicts(monkeypatch)
+    monkeypatch.setattr(docker, "start_staged", lambda spec, sd, **kw: None)
+    monkeypatch.setattr(docker, "stop_staged", lambda spec, sd, **kw: True)
+    monkeypatch.setattr(docker, "remove_staged", lambda spec, sd, **kw: True)
+    ctl = Controller(SPEC, SERVER_DIR)
+    ctl.start()
+    ctl.stop()
+    ctl.remove()
+    assert events == []
+
+
+@pytest.mark.parametrize("action", ["stop", "remove"])
+def test_stopping_a_wsl_server_releases_the_hold_after_the_containers_are_down(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    events: list[str] = []
+    _HoldRecorder(monkeypatch, events)
+    monkeypatch.setattr(
+        docker, f"{action}_staged", lambda spec, sd, **kw: events.append(action) or True
+    )
+    assert getattr(Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch"), action)() is True
+    assert events == [action, f"release dml-arch {SPEC.world}"]
+
+
+@pytest.mark.parametrize("action", ["stop", "remove"])
+def test_a_stop_that_found_nothing_of_ours_leaves_the_hold_alone(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """Nothing of THIS install was up, so a hold under these names is not ours to end.
+
+    Two installs of one game share container names; the one that IS running
+    owns the hold, and pressing Stop on the other tab must not let its distro go.
+    """
+    events: list[str] = []
+    _HoldRecorder(monkeypatch, events)
+    monkeypatch.setattr(docker, f"{action}_staged", lambda spec, sd, **kw: False)
+    assert getattr(Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch"), action)() is False
+    assert events == []
+
+
+# -- T132 review: a world running without a Start, and the conflict path ------------
+
+
+class _Distro:
+    """One distro's holds as the scripts keep them: a set of keys, and whether it is up."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, running: bool = True) -> None:
+        self.running = running
+        self.holds: set[str] = set()
+        self.spawned = 0
+        self.alive = True
+        wsl = controller_module.wsl
+        monkeypatch.setattr(wsl, "is_running", lambda distro: self.running)
+        monkeypatch.setattr(wsl, "hold", self.hold)
+        monkeypatch.setattr(wsl, "release", self.release)
+
+    def hold(self, distro: str, key: str) -> controller_module.wsl.Hold:
+        assert self.running, "a hold was asked of a stopped distro"
+        self.spawned += 1
+        self.holds.add(key)
+        distro_ = self
+
+        class _Proc:
+            def poll(self) -> int | None:
+                return None if distro_.alive else 1
+
+        return controller_module.wsl.Hold(held=True, proc=_Proc())
+
+    def release(self, distro: str, *keys: str) -> bool:
+        self.holds -= set(keys)
+        return True
+
+
+def _docker_ps(monkeypatch: pytest.MonkeyPatch, names: list[str]) -> list[list[str]]:
+    asked: list[list[str]] = []
+
+    def status(**kw: object) -> list[str]:
+        asked.append(["ps"])
+        return list(names)
+
+    monkeypatch.setattr(docker, "status", status)
+    return asked
+
+
+def test_a_world_already_running_when_the_app_opens_is_held_without_a_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Up before Yu'lon opened, nobody pressed Start: the poll that sees it holds it."""
+    distro = _Distro(monkeypatch)
+    _docker_ps(monkeypatch, [SPEC.db, SPEC.auth, SPEC.world])
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert ctl.status().world
+    assert distro.holds == {SPEC.world}
+    for _ in range(3):
+        ctl.status()
+    assert distro.spawned == 1, "the poll held again while the first hold was alive"
+
+
+def test_a_hold_that_went_away_is_made_again_by_the_next_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    distro = _Distro(monkeypatch)
+    _docker_ps(monkeypatch, [SPEC.world])
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    ctl.status()
+    distro.alive = False
+    ctl.status()
+    assert distro.spawned == 2
+
+
+def test_a_stopped_distro_is_never_held_or_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    distro = _Distro(monkeypatch, running=False)
+    asked = _docker_ps(monkeypatch, [SPEC.world])
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert not ctl.status().any_running
+    assert asked == [] and distro.spawned == 0
+
+
+def test_a_world_seen_down_is_not_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    distro = _Distro(monkeypatch)
+    _docker_ps(monkeypatch, [SPEC.db])
+    Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch").status()
+    assert distro.spawned == 0
+
+
+def test_a_hold_that_never_took_is_not_retried_every_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No flock in the distro: one failing spawn, not one per five-second poll."""
+    spawned: list[str] = []
+    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: True)
+    monkeypatch.setattr(
+        controller_module.wsl,
+        "hold",
+        lambda distro, key: spawned.append(key) or controller_module.wsl.Hold(held=False),
+    )
+    names = [SPEC.world]
+    _docker_ps(monkeypatch, names)
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    ctl.status()
+    ctl.status()
+    assert spawned == [SPEC.world]
+    names.clear()
+    ctl.status()
+    names.append(SPEC.world)
+    ctl.status()
+    assert spawned == [SPEC.world, SPEC.world], "a world seen down and up again is asked again"
+
+
+def test_a_local_install_is_never_held_by_its_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    distro = _Distro(monkeypatch)
+    _docker_ps(monkeypatch, [SPEC.world])
+    Controller(SPEC, SERVER_DIR).status()
+    assert distro.spawned == 0
+
+
+def test_switching_servers_through_the_conflict_path_leaves_no_hold_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start A, start B over it (A stopped by the conflict path), stop B: nothing held.
+
+    `stop_conflicting()` stops the OTHER install's containers by name and
+    never went through that install's `stop()`, so its hold stayed and pinned
+    the distro for good (review, Codex).
+    """
+    distro = _Distro(monkeypatch)
+    a = docker.ContainerSpec(db="a-db", auth="a-auth", world="a-world", ports=(1111, 2222))
+    running: set[str] = set()
+    monkeypatch.setattr(
+        docker,
+        "start_staged",
+        lambda spec, sd, **kw: running.update({spec.db, spec.auth, spec.world}),
+    )
+    monkeypatch.setattr(
+        docker,
+        "port_conflicts_for",
+        lambda spec, **kw: sorted(running - {spec.db, spec.auth, spec.world}),
+    )
+    monkeypatch.setattr(docker, "container_project", lambda name, **kw: "a-project")
+    monkeypatch.setattr(
+        docker, "project_containers", lambda project, **kw: ["a-db", "a-auth", "a-world"]
+    )
+    monkeypatch.setattr(
+        docker, "stop_containers", lambda names, **kw: running.difference_update(names)
+    )
+
+    def stop_b(spec: docker.ContainerSpec, sd: Path, **kw: object) -> bool:
+        had = bool(running & {spec.db, spec.auth, spec.world})
+        running.difference_update({spec.db, spec.auth, spec.world})
+        return had
+
+    monkeypatch.setattr(docker, "stop_staged", stop_b)
+
+    Controller(a, Path("/tmp/a"), wsl_distro="dml-arch").start()
+    assert distro.holds == {"a-world"}
+    b = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert b.stop_conflicting_and_start() == ["a-db", "a-auth", "a-world"]
+    assert distro.holds == {SPEC.world}
+    assert b.stop() is True
+    assert distro.holds == set()
+
+
+def test_a_release_that_failed_is_retried_by_the_next_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop said the server went down but the distro refused the release: the next Stop
+    or Remove tries again, even though it finds nothing of this install running."""
+    released: list[str] = []
+    answers = [False, True]
+    monkeypatch.setattr(
+        controller_module.wsl,
+        "release",
+        lambda distro, *keys: released.append(",".join(keys)) or answers.pop(0),
+    )
+    downs = [True, False, False]
+    monkeypatch.setattr(docker, "stop_staged", lambda spec, sd, **kw: downs.pop(0))
+    monkeypatch.setattr(docker, "remove_staged", lambda spec, sd, **kw: downs.pop(0))
+    monkeypatch.setattr(controller_module.wsl, "known_stopped", lambda distro: False)
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert ctl.stop() is True
+    assert released == [SPEC.world]
+    assert ctl.remove() is False
+    assert released == [SPEC.world, SPEC.world], "the owed release was not retried"
+    assert ctl.stop() is False
+    assert released == [SPEC.world, SPEC.world], "a release that worked was repeated"

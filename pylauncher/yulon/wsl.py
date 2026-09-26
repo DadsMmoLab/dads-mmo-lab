@@ -19,9 +19,14 @@ exception for the ordinary case of there being nothing.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from yulon import platform, runner
 from yulon.log import get_logger
@@ -327,3 +332,266 @@ def find_servers(include: tuple[str, ...] = ()) -> tuple[FoundServer, ...]:
             continue
         found.extend(parse_compose_ls(distro.name, stdout))
     return tuple(found)
+
+
+# -- holding a distro open while its server runs (T132) -----------------------------
+
+HOLD_DIR = "/dev/shm/yulon-$(id -u)"
+"""Where a hold keeps its lock and pid file, as the distro's shell spells it.
+
+`/dev/shm` because it is tmpfs, emptied whenever the distro starts: a pid file that
+survived a restart would name whatever process got that number next. A directory
+of the user's own, mode 0700, because `/dev/shm` itself is world-writable and a
+pid file another account could plant is a pid `release()` would be asked to end.
+The scripts refuse a directory that is a symlink or is not owned by the caller.
+"""
+
+HOLD_ALREADY_HELD = 75
+"""flock's exit code for "somebody holds this lock", chosen here with `-E`.
+
+A second hold of a server that is already held must not stack a second
+session, and must not read as a failure either: the distro IS held.
+"""
+
+HOLD_DIR_REFUSED = 76
+"""The scripts' exit code for a hold directory that is not the caller's own."""
+
+HOLD_SETTLE_SECONDS = 2.0
+"""How long `hold()` waits before believing the session stayed up."""
+
+CREATE_NO_WINDOW = 0x08000000
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+"""Win32 process-creation flags, spelled as numbers so this module type-checks off Windows."""
+
+_HOLD_TIMEOUT = 30
+
+Popen = Callable[..., Any]
+Run = Callable[[list[str]], object]
+
+
+def _run_release(argv: list[str]) -> object:
+    """The real run behind `release()`; a module attribute so the suite can refuse it."""
+    return subprocess.run(
+        argv, capture_output=True, timeout=_HOLD_TIMEOUT, creationflags=runner.creationflags()
+    )
+
+
+_spawn: Popen = subprocess.Popen
+"""The real spawn behind `hold()`, looked up per call so the suite can refuse it
+(`tests/conftest.py`): a unit test on a Windows box would otherwise hold a real
+distro open for as long as that box runs."""
+
+
+def _hold_name(key: str) -> str:
+    """`key` as a file name the scripts can carry without quoting: nothing but [A-Za-z0-9_.-]."""
+    return "yulon-hold-" + re.sub(r"[^A-Za-z0-9_.-]", "_", key)
+
+
+_OWN_DIR = (
+    f'd={HOLD_DIR}; mkdir -p -m 700 "$d" 2>/dev/null; '
+    f'{{ [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && chmod 700 "$d" '
+    f'&& [ "$(stat -c %a "$d")" = 700 ]; }} || exit {HOLD_DIR_REFUSED}; '
+)
+"""The prefix both scripts share: make the private directory, close it, refuse one that is not ours.
+
+`mkdir -m 700` sets the mode only of a directory it creates, so one that was
+already there -- the same owner, left at 0777 -- has to be closed here, and the
+mode is read back rather than trusted (Codex, final pass). The symlink and
+owner tests come first, so `chmod` only ever touches a directory of the
+caller's own; `/dev/shm` is sticky, so another account cannot swap it after.
+"""
+
+
+def hold_script(key: str) -> str:
+    """The shell text that holds one session open: a `sleep` under an exclusive lock.
+
+    `flock -n` makes a second hold for the same key exit at once with
+    `HOLD_ALREADY_HELD` instead of stacking. The inner `sh` records its own pid
+    AND that process's start time (field 22 of `/proc/<pid>/stat`, which `exec`
+    keeps) and then becomes the `sleep`, so `release()` can tell the sleep it
+    made from a later process that happened to get the same number.
+    """
+    name = _hold_name(key)
+    return (
+        _OWN_DIR + f'exec flock -n -E {HOLD_ALREADY_HELD} "$d/{name}.lock" '
+        f'sh -c \'echo $$ $(cut -d" " -f22 /proc/$$/stat) > "$1/{name}.pid"; '
+        'exec sleep infinity\' sh "$d"'
+    )
+
+
+def release_script(*keys: str) -> str:
+    """The shell text that ends the holds for `keys`, each only if it is still the sleep it made.
+
+    A pid is killed only when it is a `sleep` AND its start time is the one
+    recorded with it: a recycled pid has another start time. The `sleep` holds
+    the lock, so it is free again the moment the kill lands.
+    """
+    names = " ".join(_hold_name(key) for key in keys)
+    return _OWN_DIR + (
+        f"rc=0; for n in {names}; do "
+        'f="$d/$n.pid"; set -- $(cat "$f" 2>/dev/null); '
+        'if [ -n "$1" ] && [ "$(cat /proc/$1/comm 2>/dev/null)" = sleep ] '
+        '&& [ "$(cut -d" " -f22 /proc/$1/stat 2>/dev/null)" = "$2" ]; then '
+        'if kill "$1"; then rm -f "$f"; else rc=1; fi; '
+        'else rm -f "$f"; fi; done; exit $rc'
+    )
+
+
+def _exec_argv(distro: str, script: str) -> list[str] | None:
+    """`wsl -d <distro> --exec sh -c <script>`, or None without wsl.exe.
+
+    `--exec` and not the `--` of `platform.wsl_prefix()`: after `--` wsl.exe
+    hands the joined command line to the distro's login shell, which would
+    expand the script's `$$` and `$(...)` for itself before `sh` ever saw them.
+    """
+    launcher = platform._which(platform.WSL_PROGRAM)
+    if launcher is None:
+        return None
+    return [launcher, "-d", distro, "--exec", "sh", "-c", script]
+
+
+def _detached_flags() -> int:
+    """Creation flags for a child that must outlive this app: none off Windows."""
+    if sys.platform != "win32":
+        return 0
+    return CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
+
+
+@dataclass
+class Hold:
+    """What `hold()` made: whether the distro is held, and the session if THIS call spawned it.
+
+    `alive()` is how a caller learns a hold went away without asking the
+    distro anything. Only the session this process spawned can be watched; a
+    hold that was already there (a previous launch's, found by its lock)
+    counts as alive, because nothing here can see it without a `wsl -d`.
+    """
+
+    held: bool
+    proc: Any = None
+
+    def alive(self) -> bool:
+        if not self.held:
+            return False
+        return self.proc is None or self.proc.poll() is None
+
+
+def hold(
+    distro: str,
+    key: str,
+    *,
+    popen: Popen | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Hold:
+    """Keep `distro` running after this app exits, until `release(distro, key)`.
+
+    **Why this exists (T132, measured on yulon-win11, WSL 2.7.12):** a distro
+    stops 15-25 s after the last wsl.exe session attached to it exits. Neither
+    systemd, nor a running dockerd, nor running containers keep it up, and
+    Docker Desktop running beside it changes nothing; `vmIdleTimeout` is about
+    the VM, not the distro. Start is one short `wsl -d ... compose up -d`, so a
+    WSL-resident server lived only while the Server tab's five-second poll kept
+    calling in, and was killed (not stopped) 15-25 s after the app closed.
+    One held `wsl.exe -d <distro> -- sleep` kept the distro up indefinitely.
+
+    So the hold is exactly that: one `wsl.exe` running `sleep infinity`,
+    spawned detached so it outlives this process, found again by its pid file
+    INSIDE the distro rather than by this process's memory, which is what lets
+    the next launch's Stop end the hold the previous launch made.
+
+    Idempotent through the lock, so a caller that is not sure may ask again:
+    a second hold for the same key exits at once and counts as held.
+
+    Never raises: a server that runs is not failed by its hold. `held` False
+    means the distro may stop 15-25 s after the last Yu'lon call into it, which
+    is how every WSL server behaved before this, and the log says why.
+    """
+    argv = _exec_argv(distro, hold_script(key))
+    if argv is None:
+        logger.debug(f"no {platform.WSL_PROGRAM}; nothing can hold {distro} open")
+        return Hold(held=False)
+    common: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    flags = _detached_flags()
+    spawn = popen if popen is not None else _spawn
+    try:
+        try:
+            proc = spawn(argv, creationflags=flags, **common)
+        except OSError:
+            if not flags & CREATE_BREAKAWAY_FROM_JOB:
+                raise
+            # A job that does not allow breakaway refuses the flag outright.
+            # Without it the hold still outlives the app unless that job also
+            # kills its members on close, which is the launcher's choice.
+            # Not exercised live: no launcher Yu'lon ships in runs it in such a job.
+            proc = spawn(argv, creationflags=flags & ~CREATE_BREAKAWAY_FROM_JOB, **common)
+    except OSError as exc:
+        logger.warning(f"could not hold {distro} open for {key}: {exc}")
+        return Hold(held=False)
+    sleep(HOLD_SETTLE_SECONDS)
+    code = proc.poll()
+    if code is None:
+        logger.info(f"holding {distro} open while {key} runs")
+        return Hold(held=True, proc=proc)
+    if code == HOLD_ALREADY_HELD:
+        logger.info(f"{distro} was already held open for {key}")
+        return Hold(held=True)
+    logger.warning(
+        f"the session holding {distro} open for {key} exited at once ({code}); the distro "
+        "may stop 15-25 s after Yu'lon's last call into it, taking the server with it"
+    )
+    return Hold(held=False)
+
+
+def release(distro: str, *keys: str, run: Run | None = None) -> bool:
+    """End the holds `hold(distro, key)` made for `keys`, if the distro is up. Never raises.
+
+    True when nothing is left holding the distro for `keys`: the script ended
+    them, there was nothing to end, or the distro is stopped (a stopped distro
+    holds nothing). False when the release could not be run or the script
+    exited non-zero -- a directory it refused, a kill that failed -- and then
+    the caller still owes it (`Controller._let_the_distro_go()` tries again).
+
+    Several keys in one call because a Stop of ANOTHER install's server (the
+    port-conflict path) knows the containers it stopped but not which of them
+    that install keyed its hold by; releasing a key nobody held is a no-op.
+
+    A stopped distro holds nothing, and asking it anything would start it
+    (`pyplan/wsl-resident-servers.md` §2), so it is left alone -- but only when
+    WSL SAID it is down (`known_stopped()`, T95's fail-closed reading): the
+    caller has just stopped containers in this distro, and a listing that did
+    not answer is no reason to leave the distro pinned open.
+    """
+    if not keys or known_stopped(distro):
+        return True
+    named = ", ".join(keys)
+    argv = _exec_argv(distro, release_script(*keys))
+    if argv is None:
+        logger.warning(
+            f"no {platform.WSL_PROGRAM}; could not release the hold on {distro} for {named}"
+        )
+        return False
+    try:
+        done = (run if run is not None else _run_release)(argv)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"could not release the hold on {distro} for {named}: {exc}")
+        return False
+    code = getattr(done, "returncode", None)
+    if code != 0:
+        said = " ".join(
+            str(part).strip()
+            for part in (getattr(done, "stdout", ""), getattr(done, "stderr", ""))
+            if part
+        )
+        why = "its folder is not the user's own" if code == HOLD_DIR_REFUSED else f"exit {code}"
+        logger.warning(
+            f"the hold on {distro} for {named} was not released ({why}): {said or 'no output'}"
+        )
+        return False
+    logger.info(f"released the hold on {distro} for {named}")
+    return True

@@ -160,6 +160,41 @@ convenient. Start still starts it, because that is something the user asked for.
 is in a stopped distro can still reach it in one click; a user who does not is
 not made to wait for distros they do not care about.
 
+### A distro lives only while a session is attached (T132)
+
+Measured on `yulon-win11` (WSL 2.7.12, 2026-09-26): a distro stops **15-25 s after the
+last `wsl.exe` attached to it exits**. Neither systemd, nor a running `dockerd`, nor running
+containers keep it up, and Docker Desktop running beside it (its own distro, same VM)
+changes nothing. `[wsl2] vmIdleTimeout` is about the VM, not the distro; `[general]
+instanceIdleTimeout=-1` does keep a distro up, but for every distro of that user, and only
+after a `wsl --shutdown`.
+
+Start is one short `wsl -d … docker compose up -d`, so before T132 a WSL server lived only
+while the Server tab's five-second poll kept calling in, and closing the app killed the world
+and the database 25 s later. Now `wsl.hold()` keeps one detached `wsl.exe -d <distro> --exec
+sh -c "… exec flock -n … sleep infinity"` alive, keyed by the world container's name. Its lock
+and pid file live in `/dev/shm/yulon-<uid>/` (tmpfs, mode 0700, refused if it is a symlink or
+not the caller's), so the next launch finds it without remembering it. Three things make a hold:
+
+* `Controller.start()`, after the containers are up;
+* `Controller.status()`, the first time a poll that already found the distro running sees
+  the world up (a world started by hand, before Yu'lon opened, or by `unless-stopped`) and
+  again if the hold it made has exited; a hold that never took is not retried per poll;
+* the flock makes every repeat a no-op (exit 75).
+
+`stop()`/`remove()` end it with `wsl.release()` when something of this install went down, and
+`stop_conflicting()` releases every container name it stopped, since the other install's
+key is one of them. `release()` kills the recorded pid only if it is still a `sleep` with
+the start time recorded beside it (`/proc/<pid>/stat` field 22), so a recycled pid is left
+alone, and it never asks a distro WSL says is stopped. A world stopped outside Yu'lon keeps
+its hold until the next Stop/Remove, `wsl --shutdown` or sign-out.
+
+Still open, measured the same night: **reading anything under `\\wsl.localhost\<distro>`
+from the user's desktop session starts that distro** (1.35 s, then running). The Server
+tab reads the install's files at open, so opening the app boots an adopted server's distro,
+which is exactly what the poll rule above exists to prevent. A killed (not stopped) server's
+containers then come back on their own through `restart: unless-stopped`.
+
 ---
 
 ## 4a. Accepting a parameter is not passing one
