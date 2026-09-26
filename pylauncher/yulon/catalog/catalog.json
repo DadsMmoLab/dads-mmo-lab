@@ -156,17 +156,17 @@
           {
             "repo": "cmangos/mangos-tbc",
             "dest": "src/mangos-tbc",
-            "rev": "f82e7d679c283b66bc2adc1b751aa1275e655673"
+            "rev": "75f9ae68edd5ea94dda5f7f0ddf140f1acd94a6f"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "993f18091e67565986cf55c4d9b8e6eae11223f9"
+            "rev": "bc67a2ebde1f339eff2000dadec13d453ebf2cee"
           },
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "5078439a44d208732a903bca2d7df51941fb373a"
+            "rev": "ba4755dee3d7375cfec9da036d903c7bbabf081b"
           }
         ]
       },
@@ -570,12 +570,12 @@
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "993f18091e67565986cf55c4d9b8e6eae11223f9"
+            "rev": "bc67a2ebde1f339eff2000dadec13d453ebf2cee"
           },
           {
             "repo": "cmangos/classic-db",
             "dest": "src/classic-db",
-            "rev": "22b51464f1625f6ef6275771de1f5466c6f5d19e"
+            "rev": "ec4f596146be6467ea93c57397858e329e2db852"
           }
         ]
       },
@@ -967,13 +967,13 @@
             "repo": "tortoise-wow/tortoise-wow",
             "branch": "1181dev",
             "dest": "src/tortoise-wow",
-            "rev": "010cdb6d513ae3c29ab685e2ff708fb18d8295c8"
+            "rev": "187af788177aa2f9f0e61eb8c5b9653d8f4f7199"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "c591bbb1f6921fdfa53f47e7387e3154b7362bff",
+            "rev": "f858f9c97758d73469423162d0692cd72fe82687",
             "follow": "releases"
           }
         ]

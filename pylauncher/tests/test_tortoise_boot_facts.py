@@ -348,23 +348,28 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "010cdb6d513ae3c29ab685e2ff708fb18d8295c8", (
+    assert core.rev == "187af788177aa2f9f0e61eb8c5b9653d8f4f7199", (
         f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
         "Shyalya fork, 9980181c on `tortoise-wow/tortoise-wow` branch `bot-helpers` since T30 "
         "(every measurement in this file taken against it on `yulon-arch` 2026-09-11, "
         ".notes/gates/t30-measure-yulon-arch-2026-09-11/), and since T86 010cdb6d on branch "
         "`1181dev`: main plus PR #491 (SOAP) and its docs, bot-helpers fully merged in -- the "
         "same tree with the SOAP subsystem added, built, booted and pressed on `yulon-arch` "
-        "2026-09-17 (.notes/gates/t86-*). Moving it again means taking them again"
+        "2026-09-17 (.notes/gates/t86-*); since T136 187af788, the same branch two commits on "
+        "(PR #525: a creature whose max health a rate truncates to 0 gets 1 HP, Creature.cpp "
+        "only), installed fresh and pressed on `yulon-ubuntu` 2026-09-26 "
+        "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "c591bbb1f6921fdfa53f47e7387e3154b7362bff", (
+    assert module.rev == "f858f9c97758d73469423162d0692cd72fe82687", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
         "(T30, 2026-09-11) until upstream rewrote its history and left that commit on no "
-        "branch; since T120 it is c591bbb1, `main` on 2026-09-24, installed fresh and booted "
-        "with its bots online on a test box (.notes/gates/t120-tortoisebots-pin/)"
+        "branch; T120 moved it to c591bbb1, `main` on 2026-09-24, and since T136 it is "
+        "f858f9c9, the commit release v2026-09-25 names (the source follows releases since "
+        "T126), installed fresh and booted with its bots online on `yulon-ubuntu` 2026-09-26 "
+        "(.notes/gates/t136-tortoise-pins/)"
     )
     for source in sources:
         assert re.fullmatch(
@@ -766,6 +771,8 @@ def test_the_fatal_pattern_catches_the_shape_this_core_dies_in() -> None:
         "World server is up and running! Loading time: 1 minutes 13 seconds",
         "[DB Auto-Updater] Found 5 possible migrations for character.",
         "TortoiseBots: native module loaded (AI enabled)",
+        # The same line since T136's module pin: it names the release build instead.
+        "TortoiseBots 2026-09-25-v31 (AI enabled)",
     ):
         assert not re.search(
             ready.fatal, healthy
