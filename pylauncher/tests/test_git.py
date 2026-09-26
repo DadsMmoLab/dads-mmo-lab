@@ -686,8 +686,17 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "ContainerGit"
     ]
-    assert len(calls) == len(made), "native.py grew a ContainerGit site this test does not drive"
-    assert all(not c.args and not c.keywords for c in calls)
+    # `Seams.in_wsl()` (T125) is the one site that is not bare, by design and
+    # with nothing but the distro: a WSL ContainerGit answers SELinux itself
+    # (False -- the WSL kernel runs none), so the late lookup this test is about
+    # is never reached through it.
+    distro_sites = [
+        c for c in calls if not c.args and [k.arg for k in c.keywords] == ["wsl_distro"]
+    ]
+    assert len(distro_sites) == 1, "Seams.in_wsl() should build exactly one distro ContainerGit"
+    bare = [c for c in calls if c not in distro_sites]
+    assert len(bare) == len(made), "native.py grew a ContainerGit site this test does not drive"
+    assert all(not c.args and not c.keywords for c in bare)
 
 
 def test_docker_desktop_never_gets_a_user_flag(

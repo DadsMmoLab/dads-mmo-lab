@@ -1276,6 +1276,51 @@ def wsl_linux_path(path: Path) -> str | None:
     return None
 
 
+def wsl_location(path: Path) -> tuple[str, str] | None:
+    """`(distro, linux path)` of a `\\\\wsl.localhost\\<distro>\\...` path, or None.
+
+    `wsl_linux_path()` with the distro KEPT (T125): that one drops the distro
+    component, so a server remembered with a stale or wrong distro name would
+    have its folder's Linux path run in the wrong distro -- the same path
+    exists in a cloned distro, and in any two Ubuntus. Every docker and git
+    call that translates a WSL folder goes through `wsl_linux_path_in()`,
+    which compares the two.
+    """
+    text = str(path).replace("/", "\\")
+    for prefix in _WSL_SHARE_PREFIXES:
+        if not text.lower().startswith(prefix.lower()):
+            continue
+        distro, _, inside = text[len(prefix) :].partition("\\")
+        if not distro:
+            return None
+        return distro, "/" + inside.replace("\\", "/").strip("/")
+    return None
+
+
+class WslDistroMismatch(ValueError):
+    """A WSL folder named one distro and the install another; nothing may run on either."""
+
+
+def wsl_linux_path_in(path: Path, distro: str) -> str | None:
+    """The Linux path of `path` inside `distro`; None if `path` is not a WSL folder at all.
+
+    Raises `WslDistroMismatch` when `path` lives in ANOTHER distro (compared
+    case-insensitively, as wsl.exe does). Checked before anything runs, so a
+    mismatch reads no file and starts no command.
+    """
+    found = wsl_location(path)
+    if found is None:
+        return None
+    named, inside = found
+    if named.lower() != distro.lower():
+        raise WslDistroMismatch(
+            f"{path} is inside the WSL distro {named}, but this server is remembered as living "
+            f"in {distro}. Nothing was run in either. Adopt the server again from the distro "
+            f"it is in."
+        )
+    return inside
+
+
 def wsl_unc_path(distro: str, inside: str) -> Path | None:
     """The Windows spelling of `inside` within `distro`, or None if it is not absolute.
 

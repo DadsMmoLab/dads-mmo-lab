@@ -193,7 +193,9 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
         update={"install": ENTRY.install.model_copy(update={"native": unflagged})}
     )
     assert update_to_latest_for_app(off, Path("/srv/x")) is None
-    assert update_to_latest_for_app(ENTRY, Path("/srv/x"), wsl_distro="Ubuntu") is None
+    # A server inside a WSL distro is offered it too since T125: the route runs
+    # there, on the distro's own Docker (`tests/test_wsl_update_route.py`).
+    assert update_to_latest_for_app(ENTRY, Path("/srv/x"), wsl_distro="Ubuntu") is not None
 
 
 def test_a_db_source_is_never_fetched_even_though_the_others_are(tmp_path: Path) -> None:

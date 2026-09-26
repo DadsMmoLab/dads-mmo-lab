@@ -14,13 +14,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "413bea61a85e20d9caef7d66fc601a661fdddd9d"
+            "rev": "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "b949b50bfcdd4fab937781bac2d7765e39330e4b"
+            "rev": "7bae1b5c58c76a0aa20381155edc08096d1485b2"
           }
         ]
       },
