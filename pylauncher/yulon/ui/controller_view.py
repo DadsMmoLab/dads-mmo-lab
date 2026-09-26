@@ -317,19 +317,23 @@ class BotDashboardSeam(Protocol):
 class BotPoolRebuildSeam(Protocol):
     """The Bots tab's "Rebuild random bots…" (T144), on Tortoise only.
 
-    `rebuild` is a line source for the tab's log panel (worker thread);
-    `take_module_moved` is a flag read on the GUI thread after an update press
-    has finished, and answers once.
+    `rebuild` and `restart_owed_now` are line sources for the tab's log panel
+    (worker thread); `take_module_moved` is read on the GUI thread after an
+    update press has finished, and answers once: None when the press did not
+    move the module, else whether T123's enrolment is waiting on a restart.
     """
 
-    def take_module_moved(self) -> bool: ...
+    def take_module_moved(self) -> tortoise_botpool.Move | None: ...
 
     def rebuild(
         self,
         *,
         backup: Callable[[], object] | None = None,
         cancel: threading.Event | None = None,
+        restart_owed: bool = False,
     ) -> Iterator[str]: ...
+
+    def restart_owed_now(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
 
 
 class ChannelSetup(Protocol):
@@ -2469,9 +2473,8 @@ def _for_tortoise(
     # T144. "Rebuild random bots…" on the Bots tab, and the flag T123's wrap
     # sets when an update press moved the module, for the offer after it. The
     # rebuild enrols over the same channels T123 uses, restarts the same way,
-    # and reads THIS run's world log (`docker._logs(this_run_only=True)`, the
-    # reach `native._world_output()` makes for the same reason: there is no
-    # public buffered reader).
+    # and reads THIS run's world log (`docker.current_run_log`, which says when
+    # it could not scope the read to this run, so the reader fails closed).
     module_moved = tortoise_botpool.ModuleMoved()
     pool_rebuild = tortoise_poolreset.for_entry(
         entry,
@@ -2479,7 +2482,7 @@ def _for_tortoise(
         world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
         channels=adoption_channels,
         restart=lambda: tortoise_botpool.restart_world(lifecycle),
-        world_log=lambda: docker._logs(spec.world, this_run_only=True, wsl_distro=wsl_distro),
+        world_log=lambda: docker.current_run_log(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
     )
     return replace(
@@ -4101,7 +4104,8 @@ REBUILD_BOTS_TEXT = (
     "pinned bot names, guilds made only of bots, and the bots' auctions (anyone who bid is "
     "refunded).\n\n"
     "What stays: the bot accounts. Your own characters are never touched.\n\n"
-    "The server restarts, and anyone playing is disconnected. The bots module refuses, and "
+    "The server restarts (or starts, if it is stopped), and anyone playing is disconnected. "
+    "The bots module refuses, and "
     "deletes nothing, if someone is playing one of the bots or a guild led by a bot has a real "
     "player in it."
 )
@@ -4112,6 +4116,12 @@ REBUILD_BOTS_AFTER_UPDATE = (
     "level and gear; their accounts stay."
 )
 """T144's offer after an update or a return to the pin that moved TortoiseBots. No by default."""
+
+RESTART_OWED_LEFT = (
+    "The bots enrolled during the update come online at the server's next start. Restart the "
+    "server from the Server tab when nothing else is running."
+)
+"""T144: the restart T123's enrolment is owed, when this tab could not make it itself."""
 
 BOT_COUNT_LABEL = "Random bots:"
 BOT_COUNT_APPLY = "Apply…"
@@ -7451,27 +7461,40 @@ class ControllerView(QWidget):
         if self.bot_rebuild_button is not None:
             self.bot_rebuild_button.setEnabled(not self._busy)
 
+    def _bot_rebuild_refusal(self) -> str | None:
+        """Why the rebuild (or its owed restart) may not start now, or None.
+
+        `forget_refusal()` is this view's one answer to "is anything running
+        on this server": a restore, a backup, the bot-count write, a Tuning
+        reset, a Modules job, a network apply, the rebuild panel, any Server
+        action -- every one of which either writes `etc/aiplayerbot.conf` or
+        would have the world restarted under it. Plus this group's own panel.
+        """
+        log = self.bot_rebuild_log
+        if log is not None and log.running:
+            return "The random bots are already being rebuilt. Wait for it to finish."
+        reason = self.forget_refusal()
+        if reason is None:
+            return None
+        return reason.replace("Nothing was removed.", "Nothing was changed.")
+
     @Slot()
-    def rebuild_random_bots(self) -> bool:
+    def rebuild_random_bots(self, restart_owed: bool = False) -> bool:
         """Ask the one question, then run the rebuild in this group's log. False if not run (T144).
 
         The same three answers as the update's (`ask_backup_choice()`), Cancel
         the default and the Escape button. The backup, when asked for, is the
         first step OF the job -- `_backup_with_the_database()`, which starts
         the database alone if the server is down -- and a failed one stops it
-        before anything is written.
+        before anything is written. `restart_owed`: see `_offer_bot_rebuild_after_update`.
         """
         seam = self.services.bot_pool_rebuild
         log = self.bot_rebuild_log
         if seam is None or log is None:
             return False
-        if log.running or self.rebuild_log.running or self._busy or self._backup_before_update:
-            QMessageBox.information(
-                self,
-                "Something else is running",
-                "This server is busy with another action. Wait for it to finish, then press "
-                "Rebuild random bots again. Nothing was changed.",
-            )
+        refusal = self._bot_rebuild_refusal()
+        if refusal is not None:
+            QMessageBox.information(self, "Something else is running", refusal)
             return False
         choice = ask_backup_choice(
             self,
@@ -7492,7 +7515,7 @@ class ControllerView(QWidget):
         if self.bot_rebuild_report is not None:
             self.bot_rebuild_report.setText("")
         return log.run(
-            lambda: seam.rebuild(backup=backup, cancel=cancel),
+            lambda: seam.rebuild(backup=backup, cancel=cancel, restart_owed=restart_owed),
             title=f"Rebuilding {self.entry.name}'s random bots",
             cancel=cancel,
             record_as=f"rebuild-bots-{self.entry.id}-"
@@ -7520,18 +7543,47 @@ class ControllerView(QWidget):
             "Stopped. The log below says how far it got." if cancelled else ""
         )
 
-    def _offer_bot_rebuild_after_update(self) -> None:
+    def _offer_bot_rebuild_after_update(self, move: tortoise_botpool.Move) -> None:
         """T144: the update just moved TortoiseBots. Ask, No by default; Yes is the button's press.
 
         The press's own three-way dialog follows a Yes, and that is on
         purpose: it is the one that says everything the rebuild loses, and it
         offers a backup taken NOW -- the update's own backup, if one was taken,
         predates the new server's first start and T123's enrolment.
+
+        **One restart on the update path** (approved design point 3). When
+        T123 enrolled accounts it left the restart that loads them OWED: a
+        rebuild's own restart covers it, and every other answer -- No, Escape,
+        Cancel on the rebuild dialog, a press refused -- runs the owed restart
+        on its own, once.
         """
         if not self._confirm(REBUILD_BOTS_TITLE, REBUILD_BOTS_AFTER_UPDATE):
             logger.info(f"rebuilding {self.entry.id}'s random bots declined after the update")
+            if move.restart_owed:
+                self._run_owed_restart()
             return
-        self.rebuild_random_bots()
+        if not self.rebuild_random_bots(restart_owed=move.restart_owed) and move.restart_owed:
+            self._run_owed_restart()
+
+    def _run_owed_restart(self) -> None:
+        """T123's restart, made now in this group's log -- or said, when it cannot start here."""
+        seam = self.services.bot_pool_rebuild
+        log = self.bot_rebuild_log
+        if seam is None or log is None or self._bot_rebuild_refusal() is not None:
+            self._say_restart_owed()
+            return
+        cancel = threading.Event()
+        log.run(
+            lambda: seam.restart_owed_now(cancel),
+            title=f"Restarting {self.entry.name} for the enrolled bots",
+            cancel=cancel,
+        )
+
+    def _say_restart_owed(self) -> None:
+        """The owed restart could not be made: never dropped silently."""
+        QMessageBox.information(self, "Restart the server", RESTART_OWED_LEFT)
+        if self.bot_rebuild_report is not None:
+            self.bot_rebuild_report.setText(RESTART_OWED_LEFT)
 
     def _set_bot_count_controls(self) -> None:
         """Live with a readable count, nothing of ours running, and no read or write in flight."""
@@ -10200,9 +10252,15 @@ class ControllerView(QWidget):
         # later job; offered only after a press that succeeded and was not
         # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).
         rebuild = self.services.bot_pool_rebuild
-        moved = rebuild is not None and rebuild.take_module_moved()
-        if moved and ok and not self.rebuild_log.cancelled:
-            self._offer_bot_rebuild_after_update()
+        move = rebuild.take_module_moved() if rebuild is not None else None
+        if move is None:
+            return
+        if ok and not self.rebuild_log.cancelled:
+            self._offer_bot_rebuild_after_update(move)
+        elif move.restart_owed:
+            # A Stop that landed after T123 owed its restart: T123's own cancel
+            # rule is "do not restart, say so", and that is kept.
+            self._say_restart_owed()
 
     def log_panels(self) -> tuple[LogPanel, ...]:
         """Every streaming panel this view owns, for the exit path to join.

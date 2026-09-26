@@ -25,7 +25,7 @@ import pytest
 from PySide6.QtWidgets import QMessageBox
 
 from tests.conftest import pump_until
-from yulon import tuning
+from yulon import docker, tuning
 from yulon.catalog.catalog import load_catalog
 from yulon.channel import Answer
 from yulon.controller_wow_tortoise import botpool, poolreset
@@ -121,6 +121,15 @@ REFUSALS = {
 }
 
 
+OFF_LINE = "TortoiseBots: random pool reset off; 50 managed accounts, 500 characters"
+SESSION_MID = (
+    "TortoiseBots: random pool reset failed: pool character Aldren (812) gained a network "
+    "session during the reset; human sessions are never deleted"
+)
+NOT_PART_WAY = sorted(set(REFUSALS) - {"failed"})
+"""Every refusal the module logs before a deletion: each one sets the key back to off."""
+
+
 def stamped(*lines: str) -> str:
     """What `docker logs` hands back: the core's own time prefix in front of each line."""
     return "".join(f"2026-09-26 10:16:{i:02d} {line}\n" for i, line in enumerate(lines))
@@ -213,11 +222,44 @@ def test_another_tokens_lines_are_not_this_rebuild() -> None:
     assert watch.final is None and watch.seen == ()
 
 
-@pytest.mark.parametrize("why", sorted(REFUSALS))
+@pytest.mark.parametrize("why", NOT_PART_WAY)
 def test_every_refusal_the_module_logs_ends_the_watch_in_plain_words(why: str) -> None:
     watch = poolreset.read_log(stamped(REFUSALS[why]), TOKEN)
     assert watch.final == "refused", why
     assert "TortoiseBots:" not in watch.said, "said in plain words, not the raw line"
+
+
+def test_a_failure_after_the_reset_started_is_part_way_not_a_refusal() -> None:
+    watch = poolreset.read_log(stamped(scheduled(), progress(25), REFUSALS["failed"]), TOKEN)
+    assert watch.final == "part-way"
+    assert "25 of 500" in watch.said
+    assert "Nothing was deleted" not in watch.said
+
+
+@pytest.mark.parametrize("before", [(), (progress(25),)], ids=["no-progress", "progress"])
+def test_a_session_that_logged_in_mid_reset_is_part_way_never_nothing_deleted(
+    before: tuple[str, ...],
+) -> None:
+    """RandomBotPoolReset.cpp:445 and :609 log it as `reset failed: ... gained a network
+    session during the reset`, and by then the module may have deleted characters."""
+    watch = poolreset.read_log(stamped(scheduled(), *before, SESSION_MID), TOKEN)
+    assert watch.final == "part-way"
+    assert "Nothing was deleted" not in watch.said
+    assert "Aldren" in watch.said
+    assert "next start" in watch.said
+    if before:
+        assert "25 of 500" in watch.said
+
+
+def test_a_log_not_scoped_to_this_run_ends_only_on_this_tokens_own_lines() -> None:
+    """No start time -> the whole history: an older run's token-less lines prove nothing."""
+    old = stamped(REFUSALS["guild"], progress(3), OFF_LINE, REFUSALS["failed"])
+    watch = poolreset.read_log(old, TOKEN, this_run_only=False)
+    assert watch.final is None and watch.seen == ()
+    done = poolreset.read_log(old + stamped(scheduled(), applied()), TOKEN, this_run_only=False)
+    assert done.final == "applied"
+    refused = poolreset.read_log(old + stamped(REFUSALS["autocreate"]), TOKEN, this_run_only=False)
+    assert refused.final == "refused", "the AutoCreate refusal names this token"
 
 
 def test_the_two_refusals_the_dialog_names_say_who() -> None:
@@ -228,8 +270,7 @@ def test_the_two_refusals_the_dialog_names_say_who() -> None:
 
 
 def test_a_reset_that_reads_off_says_the_server_did_not_see_the_request() -> None:
-    line = "TortoiseBots: random pool reset off; 50 managed accounts, 500 characters"
-    watch = poolreset.read_log(stamped(line), TOKEN)
+    watch = poolreset.read_log(stamped(OFF_LINE), TOKEN)
     assert watch.final == "not-read"
 
 
@@ -263,6 +304,8 @@ class World:
     restarts: int = 0
     now: datetime = T0
     backup_fails: bool = False
+    scoped: bool = True
+    restart_fails: bool = False
 
     def channel(self) -> object:
         world = self
@@ -277,13 +320,19 @@ class World:
     def channels(self) -> Sequence[object]:
         return [self.channel()]
 
-    def restart(self) -> None:
+    def key(self) -> str:
         conf = (self.tmp / CONF).read_text()
-        self.events.append("restart:" + conf.split("RandomBotPoolReset = ")[1].split()[0])
+        return conf.split("RandomBotPoolReset = ")[1].split()[0]
+
+    def restart(self) -> None:
+        if self.restart_fails:
+            raise RuntimeError("docker said no")
+        self.events.append("restart:" + self.key())
         self.restarts += 1
 
-    def world_log(self) -> str:
-        return stamped(*self.log_after_restart) if self.restarts else "old run\n"
+    def world_log(self) -> docker.RunLog:
+        text = stamped(*self.log_after_restart) if self.restarts else "old run\n"
+        return docker.RunLog(text, this_run_only=self.scoped)
 
     def clock(self) -> datetime:
         return self.now
@@ -304,7 +353,6 @@ class World:
             channels=self.channels,  # type: ignore[arg-type]
             restart=self.restart,
             world_log=self.world_log,
-            module_moved=botpool.ModuleMoved(),
             clock=self.clock,
             pause=lambda _s, _c=None: None,
             **kw,  # type: ignore[arg-type]
@@ -313,7 +361,11 @@ class World:
     def run(self, **kw: object) -> list[str]:
         backup = kw.pop("backup", None)
         cancel = kw.pop("cancel", None)
-        return list(self.rebuild(**kw).rebuild(backup=backup, cancel=cancel))  # type: ignore[arg-type]
+        owed = bool(kw.pop("restart_owed", False))
+        job = self.rebuild(**kw)
+        return list(
+            job.rebuild(backup=backup, cancel=cancel, restart_owed=owed)  # type: ignore[arg-type]
+        )
 
 
 def test_adopt_then_write_then_one_restart_then_the_log_says_done(tmp_path: Path) -> None:
@@ -377,14 +429,43 @@ def test_two_presses_write_two_different_tokens(tmp_path: Path) -> None:
     assert len(tuning.backups_of(path)) == 2
 
 
-@pytest.mark.parametrize("why", ["guild", "session", "autocreate"])
-def test_a_refusal_after_the_restart_fails_the_job_in_plain_words(tmp_path: Path, why: str) -> None:
-    _conf(tmp_path)
-    world = World(tmp_path, log_after_restart=[REFUSALS[why]])
+TAKEN_BACK = "nothing will happen at the next restart"
+
+
+@pytest.mark.parametrize("why", [*NOT_PART_WAY, "off"])
+def test_every_refusal_sets_the_key_back_to_off_so_no_later_restart_rebuilds(
+    tmp_path: Path, why: str
+) -> None:
+    """Owner, 2026-09-26: a later ordinary restart must never rebuild the bots by surprise."""
+    path = _conf(tmp_path)
+    world = World(tmp_path, log_after_restart=[OFF_LINE if why == "off" else REFUSALS[why]])
     with pytest.raises(poolreset.PoolResetError) as caught:
         world.run()
     assert "TortoiseBots:" not in str(caught.value)
+    assert TAKEN_BACK in str(caught.value) and "Rebuild random bots" in str(caught.value)
     assert world.restarts == 1
+    assert world.key() == "off"
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8"), "only the value moved, and back"
+    assert len(tuning.backups_of(path)) == 2, "the take-back is backed up like the write"
+
+
+def test_a_part_way_failure_keeps_the_request_so_the_module_finishes_it(tmp_path: Path) -> None:
+    """Off would stop the resume (`PlanAtStartup` returns on Off) and strand half a pool."""
+    _conf(tmp_path)
+    world = World(tmp_path, log_after_restart=[scheduled(), progress(25), REFUSALS["failed"]])
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        world.run()
+    assert world.key() == f"once:{TOKEN}"
+    assert "next start" in str(caught.value) and TAKEN_BACK not in str(caught.value)
+
+
+def test_a_restart_that_fails_takes_the_request_back(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, restart_fails=True)
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        world.run()
+    assert "docker said no" in str(caught.value) and TAKEN_BACK in str(caught.value)
+    assert world.key() == "off"
 
 
 def test_a_watch_that_runs_out_says_where_to_look_and_is_not_a_failure(tmp_path: Path) -> None:
@@ -394,7 +475,9 @@ def test_a_watch_that_runs_out_says_where_to_look_and_is_not_a_failure(tmp_path:
     lines = world.run(monotonic=lambda: float(next(ticks)), timeout_s=60.0)
     assert any("25/500" in line for line in lines)
     assert "Console tab" in lines[-1] and "not seen" in lines[-1].lower()
+    assert "may still be running" in lines[-1]
     assert sum("25/500" in line for line in lines) == 1, "a progress line is said once"
+    assert world.key() == f"once:{TOKEN}", "a rebuild that may be running is not taken back"
 
 
 def test_a_cancel_before_the_write_writes_and_restarts_nothing(tmp_path: Path) -> None:
@@ -415,6 +498,82 @@ def test_a_cancel_before_the_write_writes_and_restarts_nothing(tmp_path: Path) -
     assert path.read_bytes() == CONF_TEXT.encode("utf-8")
 
 
+def test_a_cancel_after_the_write_takes_the_request_back_and_does_not_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _conf(tmp_path)
+    cancel = threading.Event()
+    world = World(tmp_path)
+    real = poolreset.write_key
+
+    def write_then_cancel(*args: object) -> poolreset.KeyWritten:
+        written = real(*args)  # type: ignore[arg-type]
+        cancel.set()
+        return written
+
+    monkeypatch.setattr(poolreset, "write_key", write_then_cancel)
+    lines = world.run(cancel=cancel)
+    assert world.restarts == 0
+    assert world.key() == "off"
+    assert TAKEN_BACK in lines[-1]
+
+
+def test_an_owed_restart_still_runs_when_the_backup_fails(tmp_path: Path) -> None:
+    """After an update T123 left the enrolment's restart to this job; a failure keeps it."""
+    _conf(tmp_path)
+    world = World(tmp_path, backup_fails=True)
+    with pytest.raises(poolreset.PoolResetError):
+        world.run(backup=world.backup, restart_owed=True)
+    assert world.events == ["backup", "restart:off"]
+
+
+def test_an_owed_restart_is_the_rebuilds_own_one_restart(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path)
+    world.run(restart_owed=True)
+    assert world.events == ["preview", "confirm", f"restart:once:{TOKEN}"]
+
+
+def test_the_owed_restart_on_its_own_is_one_restart(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path)
+    lines = list(world.rebuild().restart_owed_now())
+    assert world.events == ["restart:off"]
+    assert lines
+
+
+def test_an_unscoped_log_with_an_old_refusal_does_not_end_the_watch(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, scoped=False, log_after_restart=[REFUSALS["guild"], applied()])
+    lines = world.run()
+    assert "made again" in lines[-1]
+    assert world.key() == f"once:{TOKEN}"
+
+
+# ------------------------------------------------------------------ this run's log
+
+
+def test_the_run_log_is_scoped_by_the_containers_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    argvs: list[list[str]] = []
+
+    def fake(argv: list[str], *a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        argvs.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "line\n", "")
+
+    monkeypatch.setattr(docker, "_docker", fake)
+    monkeypatch.setattr(docker, "started_at", lambda _c, **_kw: "2026-09-26T10:00:00.5Z")
+    log = docker.current_run_log("tortoise-world", wsl_distro="d")
+    assert log == docker.RunLog("line\n", this_run_only=True)
+    assert argvs[-1] == ["logs", "--since", "2026-09-26T10:00:00.5Z", "tortoise-world"]
+
+    monkeypatch.setattr(docker, "started_at", lambda _c, **_kw: "")
+    log = docker.current_run_log("tortoise-world", wsl_distro="d")
+    assert log.this_run_only is False
+    assert argvs[-1] == ["logs", "tortoise-world"]
+
+
 # ------------------------------------------------------------------ the update's flag
 
 
@@ -422,7 +581,23 @@ OLD = "a" * 40
 NEW = "b" * 40
 
 
-def _after(heads: list[str | None], moved: botpool.ModuleMoved, fail: bool = False) -> None:
+PREVIEW_ALL_MANAGED = "Every matching account is already managed."
+
+
+def _after(
+    heads: list[str | None],
+    moved: botpool.ModuleMoved,
+    fail: bool = False,
+    answers: tuple[str, ...] = (),
+) -> list[str]:
+    """T123's `after_update` with the flag; returns what it restarted."""
+    restarts: list[str] = []
+    replies = list(answers)
+
+    class _Channel:
+        def send(self, command: str) -> Answer:
+            return Answer("yes", replies.pop(0))
+
     def update(_cancel: object) -> Iterator[str]:
         yield "updated"
         if fail:
@@ -433,8 +608,8 @@ def _after(heads: list[str | None], moved: botpool.ModuleMoved, fail: bool = Fal
         None,
         module_dir=Path("mod"),
         head=lambda _d: heads.pop(0),
-        channels=lambda: [],
-        restart=lambda: None,
+        channels=lambda: [_Channel()] if answers else [],
+        restart=lambda: restarts.append("restart"),
         pause=lambda _s: None,
         moved=moved,
     )
@@ -443,21 +618,36 @@ def _after(heads: list[str | None], moved: botpool.ModuleMoved, fail: bool = Fal
             list(run)
     else:
         list(run)
+    return restarts
 
 
 def test_an_update_that_moved_the_module_leaves_the_flag_for_one_reader() -> None:
     moved = botpool.ModuleMoved()
     _after([OLD, NEW], moved)
-    assert moved.take() is True
-    assert moved.take() is False, "taken once"
+    assert moved.take() == botpool.Move(restart_owed=False)
+    assert moved.take() is None, "taken once"
+
+
+def test_an_enrolment_after_a_move_owes_the_restart_instead_of_making_it() -> None:
+    """Approved design point 3: the view asks first, so the update path restarts once."""
+    moved = botpool.ModuleMoved()
+    restarts = _after([OLD, NEW], moved, answers=(PREVIEW_PENDING, CONFIRMED))
+    assert restarts == []
+    assert moved.take() == botpool.Move(restart_owed=True)
+
+
+def test_nothing_enrolled_owes_no_restart() -> None:
+    moved = botpool.ModuleMoved()
+    restarts = _after([OLD, NEW], moved, answers=(PREVIEW_ALL_MANAGED,))
+    assert restarts == [] and moved.take() == botpool.Move(restart_owed=False)
 
 
 def test_an_update_that_did_not_move_the_module_or_failed_leaves_no_flag() -> None:
     moved = botpool.ModuleMoved()
     _after([OLD, OLD], moved)
-    assert moved.take() is False
+    assert moved.take() is None
     _after([OLD, NEW], moved, fail=True)
-    assert moved.take() is False
+    assert moved.take() is None
 
 
 # ------------------------------------------------------------------ the wiring
@@ -488,9 +678,9 @@ def test_only_tortoise_is_wired_and_its_update_route_carries_the_flag(
     assert isinstance(seam, poolreset.PoolRebuild)
     route = services.update_to_latest
     assert route is not None
-    assert seam.take_module_moved() is False
+    assert seam.take_module_moved() is None
     list(route.press(None))
-    assert seam.take_module_moved() is True
+    assert seam.take_module_moved() == botpool.Move(restart_owed=False)
 
     for other in ("wow-wotlk", "wow-tbc", "wow-vanilla"):
         other_services = ControllerServices.for_entry(CATALOG.get(other), tmp_path)
@@ -503,28 +693,34 @@ def test_only_tortoise_is_wired_and_its_update_route_carries_the_flag(
 class _Seam:
     """The Bots tab's seam, recording what the view asked of it."""
 
-    def __init__(self, moved: bool = False) -> None:
-        self.moved = moved
+    def __init__(self, release: threading.Event | None = None) -> None:
         self.calls: list[str] = []
         self.backups: list[object] = []
         self.threads: list[threading.Thread] = []
+        self.release = release
 
-    def take_module_moved(self) -> bool:
-        was, self.moved = self.moved, False
-        return was
+    def take_module_moved(self) -> botpool.Move | None:
+        return None
 
     def rebuild(
         self,
         *,
         backup: Callable[[], object] | None = None,
         cancel: threading.Event | None = None,
+        restart_owed: bool = False,
     ) -> Iterator[str]:
         self.calls.append("rebuild")
         self.threads.append(threading.current_thread())
         self.backups.append(backup)
+        if self.release is not None:
+            self.release.wait(10)
         if backup is not None:
             backup()
         yield "rebuilt"
+
+    def restart_owed_now(self, cancel: threading.Event | None = None) -> Iterator[str]:
+        self.calls.append("owed-restart")
+        yield "restarted"
 
 
 class _NoBots:
@@ -554,6 +750,12 @@ def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[QMessageBox]
 
     monkeypatch.setattr(QMessageBox, "exec", exec_)
     return boxes
+
+
+def _answers(monkeypatch: pytest.MonkeyPatch, *which: object) -> None:
+    """Answer the three-way dialogs in order: the update's, then the rebuild's."""
+    queue = list(which)
+    monkeypatch.setattr(QMessageBox, "exec", lambda _self: queue.pop(0))
 
 
 def _wait(view: controller_view_module.ControllerView) -> None:
@@ -613,7 +815,7 @@ def test_the_dialog_says_what_is_lost_and_what_stays_and_defaults_to_cancel(
         "refunded",
         "accounts",
         "never touched",
-        "restarts",
+        "restarts (or starts, if it is stopped)",
         "disconnected",
         "refuses",
     ):
@@ -664,6 +866,44 @@ def test_a_refusal_is_put_where_the_player_is_looking(
     assert failures and "Bot Friends" in failures[0]
 
 
+@pytest.mark.parametrize("flag", ["_restore_running", "_bot_count_writing", "_reset_running"])
+def test_the_press_is_refused_while_another_job_writes_this_server(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    """The view's one "is anything running here" answer (`forget_refusal`), not a copy of it."""
+    boxes = _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    seam = _Seam()
+    view = _view(tmp_path, seam)
+    setattr(view, flag, True)
+    assert view.rebuild_random_bots() is False
+    assert seam.calls == [] and boxes == [], "refused before the question"
+
+
+def test_the_bot_count_and_the_tuning_reset_are_refused_while_a_rebuild_runs(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import bot_population
+
+    path = _conf(tmp_path)
+    release = threading.Event()
+    seam = _Seam(release)
+    view = _view(tmp_path, seam, bot_population=bot_population.bot_count_route(TORTOISE, tmp_path))
+    assert view.bot_count_box.value() == 500
+    _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    asked = _questions(monkeypatch, QMessageBox.StandardButton.Yes)
+    try:
+        assert view.rebuild_random_bots() is True
+        pump_until(lambda: seam.calls == ["rebuild"], "the rebuild job started")
+        view.bot_count_box.setValue(50)
+        view.apply_bot_count()
+        view.reset_to_default([CONF])
+        assert asked == [], "neither asked its question while the rebuild ran"
+        assert path.read_bytes() == CONF_TEXT.encode("utf-8")
+    finally:
+        release.set()
+    _wait(view)
+
+
 # -- after an update -------------------------------------------------------------------------
 
 
@@ -698,6 +938,36 @@ def _updating_view(
     seam.take_module_moved = moved.take  # type: ignore[method-assign]
     view = _view(tmp_path, seam, update_to_latest=route)
     return view, seam, moved
+
+
+def _real_updating_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: World
+) -> controller_view_module.ControllerView:
+    """T123's real wrapper AND the real rebuild, sharing one world: one restart counter."""
+    from yulon.catalog import native
+
+    def press(cancel: object = None) -> Iterator[str]:
+        yield "moved"
+
+    base = native.LatestRoute(
+        confirmation=lambda: "Update?",
+        press=press,
+        pin_confirmation=lambda: "Back?",
+        to_pin=press,
+        source_version=lambda: native.SourceVersion(line="", past_the_pin=False),
+    )
+    heads = [OLD, NEW]
+    monkeypatch.setattr(botpool, "head_sha", lambda _dest, **_kw: heads.pop(0))
+    moved = botpool.ModuleMoved()
+    route = botpool.wrap_route(
+        base,
+        TORTOISE,
+        tmp_path,
+        channels=world.channels,  # type: ignore[arg-type]
+        restart=world.restart,
+        moved=moved,
+    )
+    return _view(tmp_path, world.rebuild(module_moved=moved), update_to_latest=route)
 
 
 def _questions(monkeypatch: pytest.MonkeyPatch, answer: object) -> list[str]:
@@ -777,4 +1047,68 @@ def test_a_cancelled_update_asks_nothing_and_the_flag_does_not_outlive_it(
     _update_without_backup(view)
     assert not any(OFFER in text for text in asked)
     assert seam.calls == []
-    assert moved.take() is False, "the finish consumed the flag"
+    assert moved.take() is None, "the finish consumed the flag"
+
+
+def test_moved_enrolled_and_yes_is_exactly_one_restart_with_the_key_written_before_it(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, answers=[PREVIEW_PENDING, CONFIRMED, PREVIEW_ALL_MANAGED])
+    view = _real_updating_view(tmp_path, monkeypatch, world)
+    _questions(monkeypatch, QMessageBox.StandardButton.Yes)
+    _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    _update_without_backup(view)
+    _wait(view)
+    assert world.events == ["preview", "confirm", "preview", f"restart:once:{TOKEN}"]
+    assert world.restarts == 1
+
+
+@pytest.mark.parametrize("how", ["No to the offer", "Cancel on the rebuild dialog"])
+def test_moved_enrolled_and_no_is_exactly_one_restart_the_enrolments(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, answers=[PREVIEW_PENDING, CONFIRMED])
+    view = _real_updating_view(tmp_path, monkeypatch, world)
+    yes = how != "No to the offer"
+    _questions(
+        monkeypatch, QMessageBox.StandardButton.Yes if yes else QMessageBox.StandardButton.No
+    )
+    _answers(monkeypatch, QMessageBox.StandardButton.Save, QMessageBox.StandardButton.Cancel)
+    _update_without_backup(view)
+    _wait(view)
+    assert world.events == ["preview", "confirm", "restart:off"]
+    assert world.restarts == 1
+
+
+def test_moved_nothing_enrolled_and_no_is_no_restart(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, answers=[PREVIEW_ALL_MANAGED])
+    view = _real_updating_view(tmp_path, monkeypatch, world)
+    asked = _questions(monkeypatch, QMessageBox.StandardButton.No)
+    _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    _update_without_backup(view)
+    _wait(view)
+    assert any(OFFER in text for text in asked)
+    assert world.events == ["preview"]
+    assert world.restarts == 0
+
+
+def test_an_owed_restart_the_view_cannot_run_is_said_not_dropped(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop landing after T123 owed the restart: nothing is asked, and the player is told."""
+    _conf(tmp_path)
+    world = World(tmp_path, answers=[PREVIEW_PENDING, CONFIRMED])
+    view = _real_updating_view(tmp_path, monkeypatch, world)
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda _p, _t, text, *a: told.append(text))
+    _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    monkeypatch.setattr(type(view.rebuild_log), "cancelled", property(lambda _self: True))
+    _update_without_backup(view)
+    assert world.events == ["preview", "confirm"]
+    assert world.restarts == 0
+    assert told and "Server tab" in told[-1]

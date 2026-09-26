@@ -203,6 +203,13 @@ def adopt(
 
 CANCELLED = "the job was cancelled"
 
+RESTART_OWED = (
+    "The server restarts next, once you have answered whether to rebuild the random bots, so "
+    "the enrolled bots log in with one restart. If this window closes before that, restart "
+    "the server from the Server tab: the enrolment is saved, and any later start loads them."
+)
+"""What the update's log says when the enrolment's restart is owed to the view (T144)."""
+
 
 def _cancelled(cancel: threading.Event | None) -> bool:
     return cancel is not None and cancel.is_set()
@@ -236,6 +243,13 @@ def adopt_over(
     return Unreached("; ".join(reasons)) if reasons else outcome
 
 
+@dataclass(frozen=True)
+class Move:
+    """An update press moved the bots module (T144). `restart_owed`: see `ModuleMoved`."""
+
+    restart_owed: bool
+
+
 class ModuleMoved:
     """Carries "the last update press moved the bots module" from the job to the view (T144).
 
@@ -243,18 +257,30 @@ class ModuleMoved:
     job has finished. `take()` answers and clears in one call, so one move is
     offered once, and a later press that fails or does not move the module
     cannot find a stale one (`after_update()` also clears it as it starts).
+
+    **And the restart the enrolment needs, owed rather than made.** With this
+    flag wired, `after_update()` enrols but does not restart: the view asks
+    whether to rebuild the random bots first, and a Yes writes the rebuild
+    request so that ONE restart does both (approved design point 3). A No, or a
+    rebuild that stops before its own restart, runs the owed restart instead.
     """
 
     def __init__(self) -> None:
-        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._move: Move | None = None
 
     def set(self) -> None:
-        self._event.set()
+        with self._lock:
+            self._move = Move(restart_owed=False)
 
-    def take(self) -> bool:
-        was = self._event.is_set()
-        self._event.clear()
-        return was
+    def owe_restart(self) -> None:
+        with self._lock:
+            self._move = Move(restart_owed=True)
+
+    def take(self) -> Move | None:
+        with self._lock:
+            move, self._move = self._move, None
+        return move
 
 
 def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
@@ -304,7 +330,9 @@ def after_update(
     `moved` is set once the update has succeeded AND moved the module, before
     anything is asked of the server (T144): the view reads it after the job has
     finished, to offer rebuilding the random bots. A modal cannot be put up from
-    inside this generator, which runs on the log panel's worker thread.
+    inside this generator, which runs on the log panel's worker thread. With it
+    wired, an enrolment's restart is OWED to the view (`ModuleMoved`) and not
+    made here, so the update path restarts the world once.
 
     A failed update raises out of here before anything is asked: its own
     handler has put the sources back, so the module did not move.
@@ -333,16 +361,17 @@ def after_update(
     if isinstance(outcome, Adopted) and outcome.count == 0:
         yield "Every bot account was already enrolled; nothing to do."
         return
+    restarting = "Restarting the server" if moved is None else "The server will restart"
     if isinstance(outcome, Unconfirmed):
         yield (
             f"The enrol command was sent but its answer never came ({outcome.why}), so it may "
-            "well have run. Restarting the server so any bots it enrolled log in again. If the "
+            f"well have run. {restarting} so any bots it enrolled log in again. If the "
             f"older bots are still missing afterwards, type `{PREVIEW}` at the server console "
             "(the Console tab), then the `bot pool adopt confirm …` line it prints, then restart."
         )
     else:
         yield (
-            f"Enrolled {outcome.count} bot account(s). Restarting the server so their "
+            f"Enrolled {outcome.count} bot account(s). {restarting} so their "
             "characters log in again…"
         )
     if _cancelled(cancel):
@@ -350,6 +379,10 @@ def after_update(
             "The restart was not started because the job was cancelled. Restart the server "
             f"from the Server tab to bring the older bots online. {AFTER_A_STOP}"
         )
+        return
+    if moved is not None:
+        moved.owe_restart()
+        yield RESTART_OWED
         return
     try:
         restart()

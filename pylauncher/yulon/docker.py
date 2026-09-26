@@ -2840,6 +2840,31 @@ def _logs(
     return proc.stdout
 
 
+@dataclass(frozen=True)
+class RunLog:
+    """A container's log, and whether it is only its CURRENT run's (T144).
+
+    `this_run_only` is False when the run's start time could not be read, and
+    then `text` is every run the container has had: a reader deciding what
+    THIS run did must not take an older run's line for it.
+    """
+
+    text: str
+    this_run_only: bool
+
+
+def current_run_log(container: str, *, wsl_distro: str | None = None) -> RunLog:
+    """The current run's log (`docker logs --since <started_at>`), said as such, or all of it.
+
+    `_logs(this_run_only=True)` falls back to the whole history, silently,
+    when `started_at()` answers `""`; this says which one it was, so the
+    caller can fail closed. `""` text when the log could not be read at all.
+    """
+    since = started_at(container, wsl_distro=wsl_distro)
+    text = _logs(container, this_run_only=bool(since), since=since, wsl_distro=wsl_distro)
+    return RunLog(text, this_run_only=bool(since))
+
+
 _CLI_MISSING_GRACE_SECONDS = 30.0
 """How long a poll keeps going with no docker CLI before it gives up.
 
