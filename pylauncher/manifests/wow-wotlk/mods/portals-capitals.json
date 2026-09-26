@@ -11,31 +11,15 @@
   "sql": [
     {
       "db": "world",
-      "path": "portals-in-all-capitals.up.sql",
-      "note": "'SET @GO_TEMPLATE = N' / 'SET @GO_SPAWN = N' are replaced with {go_template}/{go_spawn} first"
+      "path": "portals-in-all-capitals.up.sql"
     },
     {
       "db": "world",
       "path": "portals-in-all-capitals.down.sql",
-      "when": "remove",
-      "note": "same id substitution"
-    }
-  ],
-  "prompts": [
-    {
-      "key": "go_template",
-      "question": "gameobject_template base id",
-      "kind": "int",
-      "default": "500000"
-    },
-    {
-      "key": "go_spawn",
-      "question": "gameobject spawn base guid",
-      "kind": "int",
-      "default": "2000000"
+      "when": "remove"
     }
   ],
   "notes": [
-    "Adjust the base ids if another mod adds gameobjects in the same range."
+    "Uses gameobject_template entries 500000-500007 and gameobject guids 2000000-2000023, as upstream ships them. Upstream's only way to move them is editing its SQL file by hand; Yu'lon applies the file as shipped (T104)."
   ]
 }

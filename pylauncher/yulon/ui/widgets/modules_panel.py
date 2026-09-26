@@ -127,6 +127,23 @@ T43's probe produced on a real install, and it is the half-installed reading
 T41 was reported for -- a module that is "there" and does nothing.
 """
 
+BADGE_STATE_UNKNOWN = "State unknown"
+"""A sourceless mod whose last press stopped while its SQL was being sent (T121).
+
+The mob multipliers' record carries a `pending` mark from just before the
+statement until it has committed (T115). A mark left behind means the database
+may hold the old values or the new ones, so the row claims neither Installed
+nor Not installed. It offers Remove, which asks for the values -- the one press
+T115 lets through over a mark -- and it still locks the mod's alternatives.
+"""
+
+STATE_UNKNOWN_DETAIL = (
+    "An earlier press on this stopped while its SQL was being sent, so Yu'lon cannot tell "
+    "whether the database holds it. Press Remove: it asks which values are in the database "
+    "and divides them out, and then it can be installed again."
+)
+"""The unknown badge's tooltip, the sentence behind `BADGE_STATE_UNKNOWN`."""
+
 # There is deliberately NO `Not for this game` badge. T44's item 5 asked for one
 # (round 2) and T46 item 4 carried the ask forward; the owner DECLINED it on
 # 2026-09-15, and the reason is the store's shape rather than the store's
@@ -148,13 +165,16 @@ T41 was reported for -- a module that is "there" and does nothing.
 # cannot quietly stop being true.
 
 
-def _badge_for(installed: bool, sql_owed: bool) -> str:
+def _badge_for(installed: bool, sql_owed: bool, unknown: bool = False) -> str:
     """The one word the badge column says, decided here and never in a widget.
 
     An installed module whose SQL has not run is not simply `Installed`: the
     clone is on disk and the worldserver will compile it, and the rows it needs
-    are not in the database.
+    are not in the database. A recorded mod whose press stopped mid-statement
+    is `State unknown` (T121).
     """
+    if installed and unknown:
+        return BADGE_STATE_UNKNOWN
     if installed and sql_owed:
         return BADGE_SQL_NOT_APPLIED
     return BADGE_INSTALLED if installed else BADGE_NOT_INSTALLED
@@ -198,8 +218,14 @@ the app's own convention: that press opens a dialog first.
 """
 
 
-def chip_update_label(behind: int) -> str:
-    """The update chip's own label, so the view and the tests cannot spell it apart."""
+def chip_update_label(behind: int, release: str = "", updated: bool = False) -> str:
+    """The update chip's own label, so the view and the tests cannot spell it apart.
+
+    A module that follows its releases (T126) is offered the RELEASE, not a
+    count of the commits between it and the branch tip.
+    """
+    if release:
+        return f"Update available — {'updated' if updated else 'new'} release {release}"
     plural = "" if behind == 1 else "s"
     return f"Update available — {behind} commit{plural} behind"
 
@@ -305,6 +331,17 @@ class ModuleRow:
     install_reason: str | None = None
     """The sentence behind `installable=False`, or `None` when Install is open."""
 
+    state_detail: str | None = None
+    """The sentence behind a `State unknown` badge, shown as its tooltip (T121), else None."""
+
+    note: str | None = None
+    """One plain extra line under the description, or `None` for none (T126).
+
+    Drawn wrapped and in full, not elided like the description: it is a
+    sentence about THIS install (which release is on it and whether that
+    matches the server's), and a clipped one would drop the half that matters.
+    """
+
     install_incomplete: bool = False
     """This clone is on disk and its install never finished, so the row keeps Install (T68).
 
@@ -354,6 +391,15 @@ class SessionState:
     clone directory, so every key it returns is in the `module` family by
     construction.
     """
+    releases: Mapping[tuple[str, str], str] = field(default_factory=dict)
+    """T126: the newest release's tag for a row in `behind` that follows its releases.
+
+    Keyed like `behind` and read only for a key `behind` has, so a count that
+    goes (an update, a removal) takes its release with it.
+    """
+    updated: frozenset[tuple[str, str]] = frozenset()
+    """The `releases` rows whose installed release has the SAME name as the newest:
+    the tag was moved to newer commits since, which the chip says as "updated"."""
 
 
 def _clone_dir_of(kind: str) -> str:
@@ -452,6 +498,7 @@ def _chips_for(
     dependants: Sequence[str],
     blocked_by: str | None = None,
     needs: str | None = None,
+    blocked_why: str | None = None,
 ) -> tuple[Chip, ...]:
     """The eight chips a row may carry, and nothing beyond them.
 
@@ -506,13 +553,20 @@ def _chips_for(
             )
         )
     behind = session.behind.get(key, 0)
+    release = session.releases.get(key, "")
     if behind > 0:
+        said = (
+            f"{item_id}: {release} is its newest published release, and this checkout is not "
+            f"on it. Update fetches and RESETS the clone to that release, "
+            if release
+            else f"{item_id}: its upstream has {behind} commit(s) this checkout does not. "
+            "Update fetches and RESETS the clone to the upstream tip, "
+        )
         chips.append(
             Chip(
                 "owed",
-                chip_update_label(behind),
-                f"{item_id}: its upstream has {behind} commit(s) this checkout does not. "
-                "Update fetches and RESETS the clone to the upstream tip, then re-deploys "
+                chip_update_label(behind, release, key in session.updated),
+                said + "then re-deploys "
                 "and re-applies everything the manifest declares — and it may ask this "
                 "module's install questions again. It REFUSES rather than reset if the "
                 "folder is a different repository, has uncommitted changes in it, or "
@@ -540,7 +594,7 @@ def _chips_for(
             Chip(
                 "lock",
                 chip_conflicts_with_label(blocked_by),
-                conflict_reason(blocked_by),
+                blocked_why or conflict_reason(blocked_by),
             )
         )
     if needs is not None:
@@ -555,7 +609,7 @@ def _chips_for(
         asked = [
             prompt
             for prompt in apply_module.required_prompts(manifest, "install")
-            if apply_module.must_ask(prompt)
+            if apply_module.must_ask(prompt, "install")
         ]
         if asked:
             chips.append(
@@ -602,6 +656,8 @@ def build_module_rows(
     client_dir: Path | None,
     versions: Mapping[tuple[str, str], str] | None = None,
     unfinished: Mapping[str, frozenset[str]] | None = None,
+    unknown: Mapping[str, Mapping[str, apply_module.Doubt]] | None = None,
+    notes: Mapping[tuple[str, str], str] | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
 
@@ -620,13 +676,25 @@ def build_module_rows(
     walk the clone directories -- and it is passed separately rather than folded
     in because the two facts are different questions with different remedies,
     and every reader of `installed` today means "the folder is there".
+
+    Since T121 `installed` is `apply.installed_modules()`: the folders, plus the
+    sourceless mob multipliers whose answers-file record says they are in the
+    database. `unknown` is `apply.unknown_modules()`, the ones nobody can say are
+    in the database or not -- a press stopped on mid-statement, or an answers
+    file that cannot be read -- with why; such a row reads `State unknown` and
+    offers Remove, and an alternative locked by it says the doubt, not "is
+    installed here" (fix wave).
     """
     catalog: list[Manifest] = list(manifests)
+    in_doubt = unknown or {}
     half_installed = unfinished or {}
     # What is ALREADY known, keyed the way the rows are. Handed in rather than
     # read here: this function is pure and stays pure, and the reading is the
     # one part of the version line that costs a subprocess (`VersionCache`).
     seen_versions = versions or {}
+    # T126's per-row sentence, keyed like the versions and handed in for the
+    # same reason: this function reads nothing.
+    row_notes = notes or {}
     # Keyed by (FAMILY, id) and collected as a LIST, and both halves are the
     # round-2 fix. Nothing makes a manifest id unique across families -- the
     # store loads `manifests/<game>/<family>/` one directory at a time and no
@@ -658,15 +726,18 @@ def build_module_rows(
             dependants.setdefault(needed, []).append(manifest.name)
     names = {(manifest.type, manifest.id): manifest.name for manifest in catalog}
 
-    def _blocked_by(manifest: Manifest) -> str | None:
+    def _blocked_by(manifest: Manifest) -> tuple[str, str | None] | None:
         # The applier's own reading (T55), so the tab and the refusal cannot
         # disagree about WHAT conflicts. Only in the applier's favour can they
         # differ -- see `conflicting_installed()` on an empty leftover folder.
+        # With the sentence for a sibling in doubt (T121 fix wave), else None.
         found = apply_module.conflicting_installed(manifest, installed)
         if not found:
             return None
         other, kind = found[0]
-        return names.get((kind, other), other)
+        name = names.get((kind, other), other)
+        doubt = in_doubt.get(kind, {}).get(other)
+        return name, (doubt.lock_reason(name) if doubt is not None else None)
 
     # `Manifest.requires` names an id and never a family, so the display name is
     # looked up across every family rather than under the requirer's own. Where
@@ -702,8 +773,10 @@ def build_module_rows(
         # (`_conflict_refusal()`, `_requires_refusal()`) -- the exact invariant
         # T55 and T69 exist to keep.
         offers_install = not here or halfway
+        own_doubt = in_doubt.get(manifest.type, {}).get(manifest.id)
         needed_by = dependants.get(manifest.id, [])
-        blocked_by = _blocked_by(manifest) if offers_install else None
+        blocked = _blocked_by(manifest) if offers_install else None
+        blocked_by, blocked_why = blocked if blocked is not None else (None, None)
         # One lock and one reason. A conflict is about what is HERE and a
         # missing requirement about what is not, and a row told both at once
         # would have the user remove one module in order to be told to install
@@ -711,7 +784,7 @@ def build_module_rows(
         # whose remedy is on this machine already.
         needs = _needs(manifest) if offers_install and blocked_by is None else None
         lock_reason = (
-            conflict_reason(blocked_by)
+            (blocked_why or conflict_reason(blocked_by))
             if blocked_by is not None
             else (
                 apply_module.requirement_refusal(manifest.id, needs) if needs is not None else None
@@ -736,6 +809,7 @@ def build_module_rows(
                 needed_by,
                 blocked_by,
                 needs,
+                blocked_why,
             ),
             removable=not (here and needed_by),
             remove_reason=(
@@ -743,7 +817,20 @@ def build_module_rows(
                 if here and needed_by
                 else None
             ),
-            badge=_badge_for(here, bool(session.sql_owed.get((manifest.type, manifest.id)))),
+            badge=_badge_for(
+                here,
+                bool(session.sql_owed.get((manifest.type, manifest.id))),
+                unknown=own_doubt is not None,
+            ),
+            state_detail=(
+                None
+                if own_doubt is None or not here
+                else (
+                    STATE_UNKNOWN_DETAIL
+                    if own_doubt.kind == "pending"
+                    else apply_module.unreadable_record(own_doubt.detail)
+                )
+            ),
             # Installed rows only. A catalog row that is not on disk has no
             # clone to read, and looking one up for all 41 would be 20 reads
             # of folders that are not there.
@@ -751,6 +838,7 @@ def build_module_rows(
             installable=lock_reason is None,
             install_reason=lock_reason,
             install_incomplete=halfway,
+            note=row_notes.get((manifest.type, manifest.id)),
         )
 
     # T41's per-FOLDER accounting, moved here from `reload_modules()`. `ale` and
@@ -1330,22 +1418,30 @@ class RowWidget(QFrame):
         self.description_label = _ElidedLabel(data.description, self)
         self.description_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         left.addWidget(self.description_label)
+        # T126's plain extra line, only where there is one to say.
+        self.note_label: QLabel | None = None
+        if data.note:
+            self.note_label = QLabel(data.note, self)
+            self.note_label.setWordWrap(True)
+            left.addWidget(self.note_label)
         box.addLayout(left, 1)
 
         middle = QHBoxLayout()
         middle.setSpacing(CHIP_SPACING)
         self.badge_label = QLabel(data.badge, self)
-        # Three tones for four badges, and the pairing is by what the badge
-        # ASKS OF THE READER rather than by its text: green for a module that
-        # is here and working, amber for one that is here and not finished,
-        # muted for the two that ask nothing.
-        if data.badge == BADGE_SQL_NOT_APPLIED:
+        # Three tones, and the pairing is by what the badge ASKS OF THE READER
+        # rather than by its text: green for a module that is here and working,
+        # amber for one that is here and not finished or whose state nobody can
+        # say (T121: its Remove is owed), muted for the ones that ask nothing.
+        if data.badge in (BADGE_SQL_NOT_APPLIED, BADGE_STATE_UNKNOWN):
             badge_colour = COLOR_TEXT_WARNING
         elif data.installed:
             badge_colour = COLOR_UNCOMMON
         else:
             badge_colour = COLOR_TEXT_MUTED
         self.badge_label.setStyleSheet(f"color: {badge_colour}; font-weight: bold;")
+        if data.state_detail:
+            self.badge_label.setToolTip(data.state_detail)
         middle.addWidget(self.badge_label)
         buttons: list[QPushButton] = []
         for chip in data.chips:

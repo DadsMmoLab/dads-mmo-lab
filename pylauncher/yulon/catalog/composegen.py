@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from yulon import platform, tuning
+from yulon.catalog import bot_dashboard
 from yulon.catalog.catalog import CatalogEntry, NativeInstall
 from yulon.log import get_logger
 
@@ -186,6 +187,61 @@ def world_env(entry: CatalogEntry, override: Mapping[str, str] | None = None) ->
 _world_env = world_env
 """A private alias, so the generator can call this while its own parameter of
 that name is in scope. One function, two spellings of the reference."""
+
+
+CHANNEL_BACKUP_SUFFIX = ".before-channel"
+"""The override as it was before the command channel's first press, kept beside it.
+
+`channel_setup.BACKUP_SUFFIX` is this constant. It lives here because the
+channel's state is read by every writer of the override, and the install
+stages in `native.py` cannot import `channel_setup`.
+"""
+
+CHANNEL_PORT_VAR = "DOCKER_SOAP_EXTERNAL_PORT"
+"""The `.env` key the channel claims its host port under (`channel_setup.HOST_PORT_VAR`)."""
+
+CHANNEL_PORT_RELEASED = "127.0.0.1:0"
+"""What a rollback writes there, on both of its arms (`channel_setup.RELEASED_HOST_PORT`)."""
+
+
+def channel_is_on(server_dir: Path) -> bool:
+    """Whether this install's command-channel press is live.
+
+    Two records, both the channel's own. `channel_setup.enable()` writes
+    `<override>.before-channel` on the FIRST press and only a complete
+    `roll_back()` deletes it, so the file is the record that a press stands.
+    But a rollback that finds the override edited since the press releases the
+    port and KEEPS that file (and one interrupted before its last step keeps
+    it too), and both arms write the released claim first. So a released claim
+    is a rollback the user pressed, and the backup beside it is not a live
+    press. Measured on yulon-ubuntu 2026-09-24 (T101): without this, the next
+    Repair would have switched the channel's environment back on.
+    """
+    if not (server_dir / f"{OVERRIDE_FILE}{CHANNEL_BACKUP_SUFFIX}").is_file():
+        return False
+    return dotenv_value(server_dir, CHANNEL_PORT_VAR) != CHANNEL_PORT_RELEASED
+
+
+def channel_world_env(entry: CatalogEntry, server_dir: Path) -> dict[str, str] | None:
+    """The environment a REGENERATED override carries: `None` unless a channel press is live.
+
+    `None` is `render()`'s own default, the install's environment. While the
+    press is live it is that environment plus the channel's Enable
+    (`operations.enable_env`), merged as `channel_setup.enable()` merges it, so
+    the file is the one the press wrote. Every writer that regenerates the
+    override asks this: the install's `generate-compose` stage (a first
+    install, a Repair, and Update to latest's put-back) and the T94 reset. Until
+    T101 the stage rendered without it, so a Repair on WotLK wrote the
+    pre-channel override back and its own `up` brought the world up with SOAP
+    off (yulon-ubuntu, 2026-09-24).
+
+    A channel switched on through `enable_conf` (the CMaNGOS trees) has nothing
+    here: its keys are in `mangosd.conf`, which no regeneration rewrites.
+    """
+    operations = entry.operations
+    if operations is None or not operations.enable_env or not channel_is_on(server_dir):
+        return None
+    return {**world_env(entry), **operations.enable_env}
 
 
 def shadowed_by_env(text: str, env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
@@ -485,6 +541,12 @@ def render(
             **entry_tokens(entry),
         },
     )
+    # T127: the bot dashboard's block is the player's switch, not the template's,
+    # so a render that replaces the base file carries it over from the file it
+    # replaces -- T117's rule for the bot count. Nothing is carried when there is
+    # no file or no block in it, which is every render but one made over an
+    # install whose dashboard is on.
+    base = bot_dashboard.carry(base, _read_if_there(server_dir / BASE_FILE))
     override = fill(
         texts["override.yml.tmpl"],
         {
@@ -512,6 +574,14 @@ def render(
         },
     )
     return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
+
+
+def _read_if_there(path: Path) -> str | None:
+    """The file's text, or None if it is absent or unreadable (then nothing is carried)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _read_template(path: Path) -> str:
@@ -905,6 +975,97 @@ def is_ours(path: Path) -> bool:
         return False
 
 
+_NAME_LINE = re.compile(r"^name:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+
+
+def project_of(text: str) -> str | None:
+    """The compose project a base file names on its top-level `name:` line, or None (T106).
+
+    The project is where the install's character volume lives (`project_name()`), so
+    this is the one line a repair must never change: a folder moved after install
+    renders a different name, and writing it would start the server under a new
+    project with an empty database volume beside the old one.
+    """
+    found = _NAME_LINE.search(text)
+    return found.group(1) if found else None
+
+
+class MixedBindLabels(ComposeGenError):
+    """A compose file whose host binds disagree about `:z`: no install renders that (T106)."""
+
+
+def bind_label_of(text: str) -> str | None:
+    """The SELinux label a rendered compose file's host binds carry: `":z"`, `""` or None (T106).
+
+    `":z"` when every `- ./` bind carries `z` in its options (`:z`, or a list such
+    as `:ro,z`), `""` when none does, None when the text has no host bind at all.
+    The one reader of this rule: `bot_dashboard.bind_label()` asks it too.
+
+    This is the install's own decision, read back
+    off what it wrote, and a re-render must use it rather than ask the host again:
+    asked while `getenforce` fails or the host is briefly permissive, the host
+    says "no label", and a file written from that answer strips `:z` from an
+    install whose containers then cannot read `./etc` once enforcing is back.
+
+    The same rule as T102's `channel_setup._label_on_disk()` (branch
+    `fix/t102-channel-selinux`, not merged when this was written), over text
+    rather than a path; the two are meant to be folded into one.
+
+    Raises:
+        MixedBindLabels: some binds carry `:z` and some do not.
+    """
+    binds = [
+        line.strip()[1:].strip().strip("\"'")
+        for line in text.splitlines()
+        if line.strip().startswith("- ./")
+    ]
+    if not binds:
+        return None
+    labelled = [_carries_z(bind) for bind in binds]
+    if all(labelled):
+        return ":z"
+    if not any(labelled):
+        return ""
+    raise MixedBindLabels(
+        "some of its host folders are labelled for SELinux (`:z`) and some are not, which is "
+        "not how Yu'lon writes it"
+    )
+
+
+def _carries_z(bind: str) -> bool:
+    """Does `./host:/target[:options]` carry the shared SELinux label `z`? (T127)
+
+    The options are a comma list, so `./etc:/etc:z` and `./data/dbc:/dbc:ro,z`
+    are both labelled. Counting only a trailing `:z` read the bot dashboard's
+    read-only bind as unlabelled, so an enforcing install with the dashboard on
+    read as MIXED and T106's Repair refused it.
+    """
+    parts = bind.split(":")
+    return len(parts) >= 3 and "z" in (option.strip() for option in parts[-1].split(","))
+
+
+def _meaningful_lines(text: str) -> list[str]:
+    return [
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def same_compose(a: str, b: str) -> bool:
+    """Do two compose texts say the same thing, whole-line comments and blank lines aside? (T106)
+
+    The templates carry long comments that get reworded (T98's own review
+    corrected two), and a reworded comment is no reason to ask a player to
+    recreate a running server. Only whole-line comments are set aside: a trailing
+    `# …` after a value is compared as written, which errs towards offering.
+    A `#` line inside a block scalar is script text, not a YAML comment; the one
+    such block the templates carry (T98's shell wrapper) has none, and a comment
+    in a shell script would change nothing the script does either.
+    """
+    return _meaningful_lines(a) == _meaningful_lines(b)
+
+
 def write_plan(
     plan: ComposePlan, server_dir: Path, *, replaceable: Sequence[str] = ()
 ) -> tuple[Path, ...]:
@@ -985,6 +1146,30 @@ def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def dotenv_value(server_dir: Path, key: str) -> str | None:
+    """What `<server_dir>/.env` sets `key` to, or `None` when it does not set it.
+
+    The LAST assignment, because that is the one compose takes; read with the
+    same rules `merge_dotenv()` writes by (`export ` prefix, spaces around the
+    key). A missing or unreadable file sets nothing.
+    """
+    try:
+        text = (server_dir / DOTENV_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    found: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].lstrip()
+        if "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        if name.strip() == key:
+            found = value.strip()
+    return found
+
+
 def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:
     """Merge `additions` into `<server_dir>/.env`, atomically.
 
@@ -996,11 +1181,6 @@ def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:
     path = server_dir / DOTENV_FILE
     existing = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
     merged = merge_dotenv(existing, additions)
-    tmp = path.with_name(path.name + ".yulon-new")
-    try:
-        tmp.write_text(merged, encoding="utf-8", newline="\n")
-        os.replace(tmp, path)  # atomic on POSIX and on Windows
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+    # T127: never wider than 0600 -- this file holds the root password.
+    platform.write_private_atomically(path, merged.encode("utf-8"))
     return path

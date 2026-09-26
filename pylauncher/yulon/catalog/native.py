@@ -52,25 +52,30 @@ which are measured on yulon-ubuntu (Linux), and which are merely written.
 
 from __future__ import annotations
 
+import difflib
 import io
 import json
 import math
 import os
 import queue
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
-from typing import ClassVar, Protocol
+from typing import ClassVar, Literal, Protocol
 
-from yulon import dbsecret, docker, git, networking, platform, resources, runner
-from yulon.catalog import composegen, preflight
+from yulon import dbsecret, docker, git, module_answers, networking, platform, resources, runner
+from yulon.catalog import bot_count, composegen, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -91,6 +96,7 @@ from yulon.catalog.installer import (
     provision_lines,
     unsupported_platform_message,
 )
+from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
 from yulon.ownership import Ownership as Ownership
 from yulon.ui import lines
@@ -100,7 +106,7 @@ logger = get_logger(__name__)
 STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
 
-OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE)
+OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
 """Every file this app writes into a server directory as its OWN bookkeeping.
 
 The set `_listing()` is asked to look past when the question is "is this folder
@@ -115,7 +121,8 @@ created by this app (.yulon-network.json)` from
 `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why`,
 which is a folder this app had written every byte of being refused by its own
 guard. A tuple with a name, so the next file this app learns to write is added
-in one place rather than in the five call sites that ask the question.
+in one place rather than in the five call sites that ask the question. The third
+is T104's record of the answers a player gave a module's questions.
 """
 
 OPENING_NOTE = (
@@ -543,9 +550,138 @@ class LatestRoute:
     "non-empty" -- which is true after a return as well as after an update, so
     the control stayed offered on a server that was already on the pin.
     """
+    upstream_news: Callable[[], upstream.UpstreamNews] | None = None
+    """How far upstream is past what this server was built from (T124), or None.
+
+    NOT affordable on the GUI thread, unlike `source_version`: a reading that is
+    not in the day's cache reads each source's HEAD through a container and asks
+    GitHub over the network. The tab runs it through its job runner and draws
+    `upstream.line()` of the answer. It never raises. `None` where the wiring
+    offers no count -- a spy that predates it, or a route T125 has not given one.
+    """
 
 
-def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:
+ComposeState = Literal["current", "stale", "foreign", "moved", "mixed", "missing", "error"]
+
+
+@dataclass(frozen=True)
+class ComposeCheck:
+    """This install's `docker-compose.yml` beside what this version of Yu'lon renders (T106).
+
+    `stale` is the one state the Server tab offers "Repair server files…" on.
+    Every other state but `current` carries `why`, the sentence a refused
+    repair says: a file that is not Yu'lon's (`foreign`), one that names
+    another folder's project (`moved`), one whose host binds disagree about
+    SELinux's `:z` (`mixed`), no file at all (`missing`), or a render or read
+    that failed (`error`).
+
+    `added`/`removed` count the lines a repair would add and take away, for the
+    confirmation; both are 0 on anything but `stale`.
+    """
+
+    state: ComposeState
+    why: str = ""
+    added: int = 0
+    removed: int = 0
+
+
+@dataclass(frozen=True)
+class ComposeRepaired:
+    """What a repair did: the file, and its backup -- `None` when nothing needed writing."""
+
+    path: Path
+    backup: Path | None
+
+
+@dataclass(frozen=True)
+class ComposeRepairRoute:
+    """The two halves of T106's control, wired for one install so they cannot arrive apart.
+
+    `check` is a READING, asked off the GUI thread when the tab opens and on
+    Refresh; it never raises. `repair` asks again at press time and writes only
+    on `stale`, refusing everything else with the check's own sentence.
+    """
+
+    check: Callable[[], ComposeCheck]
+    repair: Callable[[], ComposeRepaired]
+
+
+REPAIR_BACKUP_SUFFIX = ".repair.bak"
+"""`docker-compose.yml.<stamp>.repair.bak`: the file as it was before a repair replaced it."""
+
+
+def _backup_beside(path: Path, when: datetime) -> Path:
+    """Copy `path` to a stamped `.repair.bak` beside it that did not exist, and return it.
+
+    Microseconds in a fixed-width stamp so two presses are two files, and the next
+    free microsecond on a clash rather than a counter suffix -- `tuning.backup()`'s
+    rule, for its reason: a later copy must never land on an earlier one.
+    """
+    for _ in range(1000):
+        target = path.with_name(f"{path.name}.{when:%Y%m%d-%H%M%S-%f}{REPAIR_BACKUP_SUFFIX}")
+        if not target.exists():
+            shutil.copy2(path, target)
+            return target
+        when += timedelta(microseconds=1)
+    raise OSError(f"no free name for a backup of {path.name}")
+
+
+class ComposeChangedError(OSError):
+    """The file changed between the press's check and its write; it was left as it is."""
+
+
+def _replace_if_unchanged(path: Path, text: str, expected: str) -> None:
+    """Put `text` at `path` in one step, with `path`'s mode -- only if it still says `expected`.
+
+    `expected` is the text the press checked and backed up. The target is read
+    again as the last thing before the rename, and anything else there (an editor
+    saving, a second press) aborts the write with the file left as it is: what
+    the press validated is not what it would be replacing. A small window stays
+    between that read and the rename; two Yu'lon processes on one install are out
+    of scope (no interprocess lock), and this closes the one a person can hit.
+
+    The temp file is `tempfile.mkstemp`'s own, in the same folder, so a leftover
+    of another attempt is never clobbered; it is fsynced, chmodded to the old mode
+    BEFORE the rename (no moment at the umask default), and removed on every
+    failure. `newline="\\n"`, as `composegen.write_plan()` writes every compose file.
+
+    Raises:
+        ComposeChangedError: the file no longer says `expected`.
+        OSError: the temp file could not be written or renamed.
+    """
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".yulon-new", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        if path.read_text(encoding="utf-8") != expected:
+            raise ComposeChangedError(f"{path.name} changed after it was checked")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _lines_changed(old: str, new: str) -> tuple[int, int]:
+    """How many lines going from `old` to `new` adds and removes, for the confirmation."""
+    added = removed = 0
+    for line in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0):
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def update_to_latest_confirmation(
+    entry: CatalogEntry, server_dir: Path, repo: str, rewritten: Sequence[str] = ()
+) -> str:
     """The one question asked before an update to latest. The approved design's own words.
 
     Three facts and no fourth, and every one of them is a fact rather than a
@@ -565,6 +701,11 @@ def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: s
       covers the checkout, and neither of them covers a schema migration a
       worldserver ran at boot.
 
+    `rewritten` are `rewritten_line()`s (T126): one per source whose newest
+    release sits on history upstream rewrote. They are the only part of this
+    question that is not always the same, and the press moves such a source
+    only if its line was here.
+
     It names the repository being fetched from, because "the newest code" is not
     a thing a user can look at and the repository is: the sha in the log
     afterwards belongs to that repo, and so does the issue they will file.
@@ -573,13 +714,14 @@ def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: s
     sentence in this module does -- `ui/` may not author copy that has to be
     tested, and this has assertions on it that run without Qt.
     """
+    said = "".join(f"\n\n{line}" for line in rewritten)
     return (
         f"Update {entry.name} in {server_dir} to the newest {repo} code?\n\n"
         f"This builds code nobody has tested with this app. It takes as long as your first "
         f"build ({MEASURED_BUILD_TIMES}) and it can fail — a module may no longer compile, or "
         f"the new server may refuse your database. If the build fails, the build you have now "
         f"is put back. Anything the new server writes into your database on first start is not "
-        f"put back — that is what the backup is for."
+        f"put back — that is what the backup is for.{said}"
     )
 
 
@@ -635,6 +777,10 @@ def commits_past_pin(rev: SourceRev) -> str:
     """
     said = rev.built.split(git.VERSION_SEPARATOR)
     head = f"built from {said[0]} ({said[1]})" if len(said) == 2 else f"built from {rev.built}"
+    if rev.release:
+        # T126: a source that follows releases is named by the release it is
+        # on, which is the name a player reads on the project's page.
+        head = f"{rev.repo.rsplit('/', 1)[-1]} {rev.release}, {head}"
     if not rev.pin:
         return head
     short = rev.pin[:_SHORT_SHA]
@@ -746,7 +892,12 @@ def source_revs_line(state: InstallState | None) -> str:
         # with a capital in it reaches this line they would not.
         said = commits_past_pin(state.source_revs[0])
         return said[0].upper() + said[1:]
-    return "\n".join(f"{rev.repo}: {commits_past_pin(rev)}" for rev in state.source_revs)
+    # A row that names its release names its source as well ("TortoiseBots
+    # v2026-09-25, built from ..."), so the repo prefix would say it twice.
+    return "\n".join(
+        commits_past_pin(rev) if rev.release else f"{rev.repo}: {commits_past_pin(rev)}"
+        for rev in state.source_revs
+    )
 
 
 @dataclass(frozen=True)
@@ -1255,6 +1406,51 @@ def _by_repo(rev: SourceRev) -> str:
     return rev.repo
 
 
+def _commits(count: int) -> str:
+    return f"{count} commit" if count == 1 else f"{count} commits"
+
+
+def rewritten_line(repo: str, tag: str, count: int) -> str:
+    """The extra line the update question carries for a release on rewritten history (T126).
+
+    The lead's words, with the repository in front so a two-source question
+    says which one. Said in the confirmation BEFORE the answer and again in the
+    press's output, which is the record that it happened.
+    """
+    return (
+        f"{repo}: Upstream rewrote its history: the release {tag} does not contain "
+        f"{_commits(count)} this server was built from. Updating moves the server onto the "
+        f"release as upstream publishes it."
+    )
+
+
+class RewrittenHistory(InstallerError):
+    """A release on rewritten history that the answered question did not describe (T126).
+
+    Carries the line, so the route can put it in front of the player the next
+    time it asks. Raised before any source moves.
+    """
+
+    def __init__(self, repo: str, line: str) -> None:
+        super().__init__(
+            f"{line} The question you answered did not say so, so nothing was changed. "
+            f"Press \u201cUpdate the server to latest\u2026\u201d again: it will ask with "
+            f"that line in it."
+        )
+        self.repo = repo
+        self.line = line
+
+
+@dataclass(frozen=True)
+class ReleaseTarget:
+    """Where an update moves a source that follows its releases, and what it says (T126)."""
+
+    tag: str
+    rev: str
+    """The release's commit, or the checkout's own HEAD when that already contains it."""
+    line: str
+
+
 @dataclass(frozen=True)
 class SourceRev:
     """Where ONE source of this install stands against the commit the gates ran on (T64).
@@ -1287,6 +1483,13 @@ class SourceRev:
     built: str
     pin: str = ""
     ahead: int | None = None
+    release: str = ""
+    """The release tag this source was moved to, for a source that follows releases (T126).
+
+    Empty for every branch-following source and for a return to the pin: the
+    pin is a commit the gates ran on, not a release, and naming the release
+    the pin happens to sit near would be a guess.
+    """
 
 
 @dataclass(frozen=True)
@@ -1554,6 +1757,7 @@ def _parse_source_revs(raw: object, path: Path) -> tuple[SourceRev, ...]:
             continue
         pin = record.get("pin")
         ahead = record.get("ahead")
+        release = record.get("release")
         found.append(
             SourceRev(
                 repo=repo,
@@ -1563,9 +1767,18 @@ def _parse_source_revs(raw: object, path: Path) -> tuple[SourceRev, ...]:
                 # commit past the pin -- a number on somebody's screen with
                 # nothing behind it.
                 ahead=ahead if isinstance(ahead, int) and not isinstance(ahead, bool) else None,
+                release=release if isinstance(release, str) else "",
             )
         )
     return tuple(sorted(found, key=lambda rev: rev.repo))
+
+
+def _rev_record(rev: SourceRev) -> dict[str, object]:
+    """One `source_revs` row as the file holds it. `release` only when there is one (T126)."""
+    record: dict[str, object] = {"built": rev.built, "pin": rev.pin, "ahead": rev.ahead}
+    if rev.release:
+        record["release"] = rev.release
+    return record
 
 
 def write_state(server_dir: Path, state: InstallState) -> None:
@@ -1599,10 +1812,7 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         # for byte what it was before T64: an empty mapping in every state file
         # in existence would be a change to a file other things read, made for a
         # feature most installs will never press.
-        payload["source_revs"] = {
-            rev.repo: {"built": rev.built, "pin": rev.pin, "ahead": rev.ahead}
-            for rev in state.source_revs
-        }
+        payload["source_revs"] = {rev.repo: _rev_record(rev) for rev in state.source_revs}
     tmp = path.with_name(path.name + ".new")
     try:
         server_dir.mkdir(parents=True, exist_ok=True)
@@ -1837,6 +2047,23 @@ def _git_head_version(dest: Path) -> str | None:
 def _git_commits_since(dest: Path, rev: str) -> int | None:
     """How many commits this checkout carries past `rev`, containerised."""
     return git.ContainerGit().commits_since(dest, rev)
+
+
+def _installed_release(state: InstallState | None, repo: str) -> str:
+    """The release tag the install record says `repo` was moved to, or `""` (T126)."""
+    rev = state.rev_for(repo) if state is not None else None
+    return rev.release if rev is not None else ""
+
+
+def _upstream_get(url: str, accept: str) -> bytes:
+    """`upstream.https_get`, looked up at CALL time.
+
+    Not `= upstream.https_get` bound into `Seams` at import, for the reason
+    `Seams.selinux_enforcing` records: a default bound at class definition is a
+    function object no later patch of the module can reach, so the suite's
+    guard against real GitHub calls (`conftest`) could not see it (T124 review).
+    """
+    return upstream.https_get(url, accept)
 
 
 def _git_restore_rev(dest: Path, rev: str) -> None:
@@ -2686,6 +2913,13 @@ class Seams:
     head_sha: Callable[[Path], str | None] = _git_head_sha
     head_version: Callable[[Path], str | None] = _git_head_version
     commits_since: Callable[[Path, str], int | None] = _git_commits_since
+    upstream_get: upstream.HttpGet = _upstream_get
+    """The one network read T124's line makes: GitHub's compare API, per source.
+
+    A seam for the reason every network call here is one: a test that could
+    not count the GETs could not show the line is asked at most once a day, and
+    one that could not make them fail could not show "no network" says nothing.
+    """
     restore_rev: Callable[[Path, str], None] = _git_restore_rev
     """Put one source back on the commit it was on before this press moved it.
 
@@ -4169,6 +4403,86 @@ class StagedInstaller:
 
     # ------------------------------------------------------- update to latest (T64)
 
+    def upstream_news(
+        self, options: InstallOptions | None = None, *, now: int | None = None
+    ) -> upstream.UpstreamNews:
+        """How far upstream is past what each moving source was built from (T124). Never raises.
+
+        Each source's cached row while it is fresh (`upstream.read_cached()`),
+        which is what keeps a tab opened ten times a day -- or a Refresh pressed
+        ten times -- to one set of requests. A source with no fresh row is read
+        for its HEAD through the read-only container, and GitHub is asked how
+        far its branch is past that HEAD; the answers are kept beside the
+        install record.
+
+        Only the sources `sources_that_move()` names. A `*-db` repository stays
+        on its pin through "Update the server to latest…", so counting its new
+        commits would advertise code that button does not bring in.
+
+        HEAD, not the catalog pin, because the pin is what THIS build of the app
+        would install, and an install made before a pin moved (T120 moved
+        TortoiseBots') is still on the old one.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        moving = self.sources_that_move()
+        clock = upstream.now_unix() if now is None else now
+        keys = [(source.repo, source.follow) for source in moving]
+        fresh = upstream.read_cached(server_dir, keys, clock)
+        found: list[upstream.SourceNews] = []
+        asked = False
+        record = read_state(server_dir, valid=())
+        for index, source in enumerate(moving):
+            kept = fresh.get(source.repo)
+            if kept is not None:
+                found.append(kept)
+                continue
+            asked = True
+            label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
+            stands, release = self._behind(server_dir, source)
+            found.append(
+                upstream.SourceNews(
+                    repo=source.repo,
+                    label=label,
+                    behind=None if stands is None else stands.ahead,
+                    rewritten=stands.behind if stands is not None and stands.diverged else 0,
+                    checked_unix=clock,
+                    follow=source.follow,
+                    release=release,
+                    installed=_installed_release(record, source.repo),
+                )
+            )
+        taken = clock if asked or not found else min(row.checked_unix for row in found)
+        news = upstream.UpstreamNews(checked_unix=taken, sources=tuple(found))
+        if asked and (server_dir / STATE_FILE).is_file():
+            upstream.write_cached(server_dir, news)
+        return news
+
+    def _behind(
+        self, server_dir: Path, source: EmulatorSource
+    ) -> tuple[upstream.Comparison | None, str]:
+        """How upstream stands to one source and, for a releases source, the newest release.
+
+        `(None, "")` when its HEAD or GitHub could not be asked. A source that
+        follows releases is compared with the newest release's commit rather
+        than the branch tip, so a checkout already on (or past) that release
+        answers 0 however far the branch has moved on. The WHOLE comparison is
+        returned, because a history upstream rewrote is ahead and behind at once.
+        """
+        slug = upstream.github_slug(source.repo)
+        if slug is None:
+            return None, ""
+        head = self._seams.head_sha(server_dir / source.dest)
+        if head is None:
+            return None, ""
+        get = self._seams.upstream_get
+        if source.follow == "releases":
+            release = upstream.newest_release(slug, get=get)
+            if release is None:
+                return None, ""
+            return upstream.compare(slug, head, release.sha, get=get), release.tag
+        return upstream.compare(slug, head, source.branch or "HEAD", get=get), ""
+
     def sources_that_move(self) -> tuple[EmulatorSource, ...]:
         """Which of this entry's sources an update to latest moves. The `*-db` ones do not.
 
@@ -4304,8 +4618,12 @@ class StagedInstaller:
         *,
         to_pin: bool = False,
         cancel: threading.Event | None = None,
+        rewritten_ok: Collection[str] = (),
     ) -> Iterator[str]:
         """Move this install's sources and rebuild on them. Yields output live (T64).
+
+        `rewritten_ok` names the sources whose rewritten history the player's
+        confirmation already described (T126); see `_release_targets()`.
 
         The owner's ask of 2026-09-15, in one route for all four families: "a
         update server to latest, with a warning and recommendation to take a
@@ -4373,66 +4691,177 @@ class StagedInstaller:
                 "tested commit to return to. Nothing was started."
             )
         plan = self._refuse_unless_updatable(server_dir, moving)
+        # T124: the count on the Server tab was taken against the HEADs this
+        # press is about to move. Dropped here, before the first fetch, so a
+        # count asked while the press runs is asked again rather than served
+        # the pre-press figure; and dropped again in the `finally` below, for
+        # a count cached while the press ran.
+        upstream.forget(server_dir)
+        # T126: where a source follows its releases, "latest" is the newest
+        # release's commit. Resolved for every such source BEFORE the first
+        # fetch, for `_refuse_unless_updatable()`'s reason: a press that moved
+        # the core and then could not say which release the bots are on would
+        # leave the folder half a version ahead of the image.
+        targets = {} if to_pin else self._release_targets(plan, rewritten_ok)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
         yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
         yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
+        for said in targets.values():
+            yield said.line
         self._check_cancel(cancel)
-        moved: list[tuple[EmulatorSource, Path, str]] = []
         try:
-            for source, dest, old in plan:
+            moved: list[tuple[EmulatorSource, Path, str]] = []
+            try:
+                for source, dest, old in plan:
+                    self._check_cancel(cancel)
+                    yield f"Fetching {source.repo} into {source.dest}."
+                    # `rev=None` is what makes this an update rather than a re-pin:
+                    # `git.RunnerGit.clone()` sees an existing `.git`, runs
+                    # `_update()` -- fetch, then `reset --hard FETCH_HEAD` -- and
+                    # `_pin()` then returns immediately. With `rev=source.rev` the
+                    # same two calls run and the pin is re-applied on top, which is
+                    # the way back. One seam, two directions, no second fetch path.
+                    #
+                    # APPENDED BEFORE the call and not after: `clone_lines()` can
+                    # fail half way through, after the reset has already landed, and
+                    # a source that is not in `moved` is a source nothing puts back.
+                    moved.append((source, dest, old))
+                    yield from self._clone_lines(
+                        git.CloneSpec(
+                            url=source.url,
+                            dest=dest,
+                            branch=source.branch,
+                            sparse_path=source.sparse_path,
+                            depth=source.depth,
+                            rev=source.rev if to_pin else self._latest_rev(source, targets),
+                        ),
+                        UPDATE_SOURCES_STAGE,
+                    )
+                    yield self._moved_line(source, dest, old)
                 self._check_cancel(cancel)
-                yield f"Fetching {source.repo} into {source.dest}."
-                # `rev=None` is what makes this an update rather than a re-pin:
-                # `git.RunnerGit.clone()` sees an existing `.git`, runs
-                # `_update()` -- fetch, then `reset --hard FETCH_HEAD` -- and
-                # `_pin()` then returns immediately. With `rev=source.rev` the
-                # same two calls run and the pin is re-applied on top, which is
-                # the way back. One seam, two directions, no second fetch path.
-                #
-                # APPENDED BEFORE the call and not after: `clone_lines()` can
-                # fail half way through, after the reset has already landed, and
-                # a source that is not in `moved` is a source nothing puts back.
-                moved.append((source, dest, old))
-                yield from self._clone_lines(
-                    git.CloneSpec(
-                        url=source.url,
-                        dest=dest,
-                        branch=source.branch,
-                        sparse_path=source.sparse_path,
-                        depth=source.depth,
-                        rev=source.rev if to_pin else None,
-                    ),
-                    UPDATE_SOURCES_STAGE,
+                yield from self.check_carried_patches(server_dir)
+                yield from self._rewrite_what_we_own(server_dir, opts, state)
+                yield from self.apply_carried_patches(server_dir)
+            except (InstallerError, OSError) as exc:
+                # `OSError` as well, and not for symmetry: everything between the
+                # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
+                # renders three compose files, `apply_carried_patches()` writes into
+                # the checkout -- and a full disk or a read-only mount surfaces as a
+                # bare `OSError` that no `InstallerError` wraps. Skipping the
+                # restore on it would leave the folder ahead of the image for the
+                # one failure most likely to happen twice in a row (cold review
+                # round 2, 2026-09-16).
+                yield from self._restore_the_folder(moved, server_dir, opts, state)
+                raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+            try:
+                yield from self.rebuild(opts, cancel=cancel)
+            except InstallerError as exc:
+                # AFTER `rebuild()` has done its own rollback, never instead of it.
+                # It puts the IMAGE back; this puts the SOURCE back; and it is the
+                # pair that makes the folder and the running container agree again.
+                yield from self._restore_the_folder(moved, server_dir, opts, state)
+                raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+            self._record_source_revs(
+                server_dir,
+                state,
+                moved,
+                {repo: said.tag for repo, said in targets.items() if said.tag},
+            )
+            landed = (
+                "the commit this app was tested against" if to_pin else "the newest upstream code"
+            )
+            yield f"{self.entry.name} is running on {landed}."
+        finally:
+            # T124's second drop, and the one that covers EVERY way out: a
+            # success, a failure after the sources went back, a Cancel, and a
+            # generator closed half way (GeneratorExit is none of the handled
+            # exceptions). It exists for a count asked WHILE the press ran,
+            # which cached the moved -- or about-to-be-restored -- HEADs.
+            upstream.forget(server_dir)
+
+    def _release_targets(
+        self,
+        plan: Sequence[tuple[EmulatorSource, Path, str]],
+        rewritten_ok: Collection[str] = (),
+    ) -> dict[str, ReleaseTarget]:
+        """The commit "latest" means for each source that follows its releases (T126).
+
+        Asked of GitHub's releases API, per source, now: `upstream.newest_release()`
+        holds why a tag is resolved at the moment of asking rather than by name.
+        A source whose checkout already CONTAINS that release -- a return to a
+        pin newer than the newest release, say -- stays where it is: moving it
+        onto the release would be a step backwards dressed as an update.
+
+        Raises `InstallerError` when GitHub cannot say, because the other answer
+        -- the branch tip -- is exactly the in-between commit this source was
+        marked to avoid.
+
+        **A DIVERGED release -- upstream rewrote its history -- moves, but only
+        if the question the player answered said so** (`rewritten_ok`, the repos
+        whose `rewritten_line()` the confirmation carried). The lead's ruling
+        (Codex's final pass): refusing would lock an install built on the
+        rewritten-away history (TortoiseBots' old pin `fd7ec9ec`, T120) out of
+        updates for good, and moving silently would drop commits the server was
+        built from without a word. Not acknowledged, it raises `RewrittenHistory`
+        before anything moves, and the route asks again with the line in it.
+        """
+        found: dict[str, ReleaseTarget] = {}
+        for source, dest, old in plan:
+            if source.follow != "releases":
+                continue
+            slug = upstream.github_slug(source.repo)
+            release = (
+                None
+                if slug is None
+                else upstream.newest_release(slug, get=self._seams.upstream_get)
+            )
+            if slug is None or release is None:
+                raise InstallerError(
+                    f"{source.repo} follows its published releases, and Yu'lon could not ask "
+                    f"GitHub which release is the newest. Nothing in that folder was changed; "
+                    f"try again when GitHub can be reached."
                 )
-                yield self._moved_line(source, dest, old)
-            self._check_cancel(cancel)
-            yield from self.check_carried_patches(server_dir)
-            yield from self._rewrite_what_we_own(server_dir, opts, state)
-            yield from self.apply_carried_patches(server_dir)
-        except (InstallerError, OSError) as exc:
-            # `OSError` as well, and not for symmetry: everything between the
-            # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
-            # renders three compose files, `apply_carried_patches()` writes into
-            # the checkout -- and a full disk or a read-only mount surfaces as a
-            # bare `OSError` that no `InstallerError` wraps. Skipping the
-            # restore on it would leave the folder ahead of the image for the
-            # one failure most likely to happen twice in a row (cold review
-            # round 2, 2026-09-16).
-            yield from self._restore_the_folder(moved, server_dir, opts, state)
-            raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
-        try:
-            yield from self.rebuild(opts, cancel=cancel)
-        except InstallerError as exc:
-            # AFTER `rebuild()` has done its own rollback, never instead of it.
-            # It puts the IMAGE back; this puts the SOURCE back; and it is the
-            # pair that makes the folder and the running container agree again.
-            yield from self._restore_the_folder(moved, server_dir, opts, state)
-            raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
-        self._record_source_revs(server_dir, state, moved)
-        yield (
-            f"{self.entry.name} is running on "
-            f"{'the commit this app was tested against' if to_pin else 'the newest upstream code'}."
-        )
+            stands = upstream.compare(slug, old, release.sha, get=self._seams.upstream_get)
+            if stands is None:
+                # Refused, not guessed (T126 review, Codex high): without the
+                # comparison nobody knows whether the release is ahead of this
+                # checkout or behind it, and moving onto it could be a step back.
+                raise InstallerError(
+                    f"{source.repo} follows its published releases, and GitHub did not answer "
+                    f"whether {release.tag} is ahead of what {dest} is on. Nothing in that "
+                    f"folder was changed; try again later."
+                )
+            if stands.ahead == 0 and old != release.sha:
+                # No tag recorded: the checkout is PAST the release, and a
+                # version line naming the release would name a commit it is not on.
+                past = _commits(stands.behind)
+                found[source.repo] = ReleaseTarget(
+                    tag="",
+                    rev=old,
+                    line=(
+                        f"{source.repo} follows its releases; the newest, {release.tag} "
+                        f"({release.sha[:7]}), is already in {old[:7]}, which is {past} past "
+                        f"it, so it stays there."
+                    ),
+                )
+                continue
+            said = (
+                f"{source.repo} follows its releases; the newest is {release.tag} "
+                f"({release.sha[:7]})."
+            )
+            if stands.diverged:
+                warning = rewritten_line(source.repo, release.tag, stands.behind)
+                if source.repo not in rewritten_ok:
+                    raise RewrittenHistory(source.repo, warning)
+                said = f"{said}\n{warning}"
+            found[source.repo] = ReleaseTarget(tag=release.tag, rev=release.sha, line=said)
+        return found
+
+    @staticmethod
+    def _latest_rev(source: EmulatorSource, targets: Mapping[str, ReleaseTarget]) -> str | None:
+        """What an update checks out for `source`: its release's commit, or `None` for the tip."""
+        said = targets.get(source.repo)
+        return said.rev if said is not None else None
 
     def _refuse_unless_updatable(
         self, server_dir: Path, moving: Sequence[EmulatorSource]
@@ -4623,6 +5052,7 @@ class StagedInstaller:
         server_dir: Path,
         state: InstallState,
         moved: Sequence[tuple[EmulatorSource, Path, str]],
+        releases: Mapping[str, str] | None = None,
     ) -> None:
         """Write where each moved source ended up into the install record.
 
@@ -4663,6 +5093,7 @@ class StagedInstaller:
                     built=built,
                     pin=pin,
                     ahead=self._seams.commits_since(dest, pin) if pin else None,
+                    release=(releases or {}).get(source.repo, ""),
                 )
             )
         if not found:
@@ -5379,13 +5810,14 @@ class StagedInstaller:
         # provisioning that sentence is false of the machine. The state file, the
         # ownership checks and the emptiness check are filesystem reads that no
         # daemon can help with, so a user whose folder was never usable is now
-        # told so before being asked for a root password. The answer is thrown
-        # away here: `_guard()` asks again for the state it returns.
+        # told so before being asked for a root password. `run()` does not reuse the
+        # state this returns: `_guard()` reads it again, fresh. Here it answers
+        # one question, what the free-space rows may leave out (T112, `_spent()`).
         #
         # `_refuse_foreign_containers()` deliberately does NOT move up. It asks
         # which compose project owns a container wearing this entry's names, and
         # there is no answer to that without a daemon.
-        self._claim_folder(server_dir)
+        state = self._claim_folder(server_dir)
         yield "Checking Docker."
         if not self._seams.docker_ready():
             # Provisioning prints nothing of its own and can be a Docker
@@ -5438,12 +5870,33 @@ class StagedInstaller:
                 f"Docker answered once and then would not answer again, so nothing was started: "
                 f"{exc}"
             ) from exc
-        report_checks = preflight.evaluate(self.entry, server_dir, facts)
+        spent = self._spent(state, server_dir) if facts.docker_ready else preflight.NOTHING_SPENT
+        report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
             raise InstallerError(
                 "This machine cannot install the server yet:\n" + report_checks.message()
             )
+
+    def _spent(self, state: InstallState, server_dir: Path) -> Spent:
+        """What an earlier run of this install already spent, for the free-space rows (T112).
+
+        The T95 gate on m910q (2026-09-24) was refused "21 GB free, and the
+        install needs 40 GB" reinstalling WoW TBC into a folder whose build was
+        done: preflight judged the disk before anything asked what the press
+        would skip. The answer is `build_would_be_skipped()`'s rule, asked
+        without a stage context: the record AND the daemon's images, because a
+        record alone is a hint (`InstallState.has()`), and a recorded build
+        whose images were pruned compiles again and needs the whole floor.
+
+        The daemon is asked only when the record already says `build`, so a
+        fresh install and an early resume ask nothing they did not ask before.
+        """
+        if not state.has("build"):
+            return preflight.NOTHING_SPENT
+        if self._seams.images_built(self.image_refs_at(server_dir)) is not True:
+            return preflight.NOTHING_SPENT
+        return preflight.Spent(build=True)
 
     # -- the guard -------------------------------------------------------
 
@@ -5905,9 +6358,7 @@ class StagedInstaller:
         # nothing, and preflight says "unchecked" so the user sees that the
         # question went unanswered). Collapsing it here to a bool would make
         # the two indistinguishable everywhere downstream.
-        label = platform.bind_label(
-            enforcing=self._seams.ask_selinux(), fs_type=self._seams.ask_fs(ctx.server_dir)
-        )
+        label = self._bind_label(ctx.server_dir)
         # `render()` INSIDE a `try`, not beside one. It was called bare until
         # 2026-09-02, and `ComposeGenError` is not an `InstallerError` - both
         # subclass `RuntimeError` independently, so neither `except` clause can
@@ -5921,15 +6372,21 @@ class StagedInstaller:
         # exception was `write_plan()`'s, below, which was already translated.
         # This body is bound by EVERY family (`azerothcore.py`'s stage tuple and
         # `cmangos.py`'s both name this method), so it was never one game's bug.
+        #
+        # `world_env` keeps a live command channel on (T101). A Repair and
+        # Update to latest's put-back run this same body over a finished
+        # install, and without it the override went back to the pre-channel
+        # file: measured on yulon-ubuntu 2026-09-24, the Repair's own `up`
+        # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
+        # channel's port. `None` on a first install (no press yet), which is
+        # `render()`'s own default.
+        #
+        # And the player's bot count rides over it (T117): the Bots box writes
+        # Min/Max into this same file, and rendering the catalog's 500 again put
+        # it back on every Repair and Update. Read off the file being replaced,
+        # never probed; no usable pair in it leaves the catalog's number.
         try:
-            plan = composegen.render(
-                self.entry,
-                ctx.server_dir,
-                templates_root=self.installers_root,
-                db_password=ctx.secrets.db_password,
-                bind_label=label,
-                platform_id=self._seams.platform_id,
-            )
+            plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
         replaceable = self._replaceable_compose(ctx.server_dir)
@@ -5965,6 +6422,214 @@ class StagedInstaller:
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
 
+    def _bind_label(self, server_dir: Path) -> str:
+        """`:z` or nothing, for this folder on this host; see `stage_generate_compose`."""
+        return platform.bind_label(
+            enforcing=self._seams.ask_selinux(), fs_type=self._seams.ask_fs(server_dir)
+        )
+
+    def _render_compose(
+        self, server_dir: Path, secrets: Secrets, label: str
+    ) -> composegen.ComposePlan:
+        """The three compose files for this install: the ONE render the install and T106 share.
+
+        Split out of `stage_generate_compose` so the repair cannot render a file the
+        install would not: same entry, same templates, same password plan, same bind
+        label, same platform seam.
+
+        Raises:
+            composegen.ComposeGenError: whatever `composegen.render()` refuses.
+        """
+        return composegen.render(
+            self.entry,
+            server_dir,
+            templates_root=self.installers_root,
+            # A live channel press is kept by every regeneration (T101), and so is
+            # the player's bot count off the override on disk (T117). A CMaNGOS
+            # tree keeps both in its .conf files, so this is None there.
+            world_env=bot_count.world_env(
+                self.entry, server_dir, composegen.channel_world_env(self.entry, server_dir)
+            ),
+            db_password=secrets.db_password,
+            bind_label=label,
+            platform_id=self._seams.platform_id,
+        )
+
+    def _base_compose_facts(self, server_dir: Path) -> tuple[ComposeCheck, str | None, str | None]:
+        """What the base file is now, and what this version renders for it (T106).
+
+        Only `docker-compose.yml`. The override and the build file are left to the
+        routes that already own them, and `.env` holds the password.
+
+        `resolve_secrets()` is asked for the password because `render()` requires
+        one. For a CMaNGOS entry the plan is `generated`, so the value reaches only
+        the plan's `dotenv` -- never the base text, which spells
+        `${DB_ROOT_PASSWORD:?…}` -- and this method never writes the dotenv. Even
+        the value it mints when the password file is gone is therefore harmless here.
+
+        **The SELinux label comes from the file, not from the host** (review,
+        2026-09-24). The install decided `:z` once, from the host as it was then,
+        and wrote it on every host bind. Asking the host again at press time --
+        while `getenforce` fails, or with the host briefly permissive -- answers "no
+        label", which read an enforcing install as stale and let a repair strip the
+        label its containers need. So the label is `composegen.bind_label_of()` of
+        the file on disk, and the host is asked only when there is no Yu'lon file to
+        read one from. A file whose binds disagree is refused (`mixed`).
+
+        Returns the check, the fresh render (None when it could not be made) and
+        the text on disk (None when there is none): the snapshot a repair backs up
+        and must find unchanged before it writes.
+        """
+        path = server_dir / composegen.BASE_FILE
+        name = composegen.BASE_FILE
+        try:
+            text: str | None = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = None
+        except (OSError, UnicodeDecodeError) as exc:
+            return (
+                ComposeCheck("error", f"{path} could not be read ({exc}). Nothing was written."),
+                None,
+                None,
+            )
+        ours = text is not None and composegen.is_marker_line(text)
+        label: str | None = None
+        if text is not None and ours:
+            try:
+                label = composegen.bind_label_of(text)
+            except composegen.MixedBindLabels as exc:
+                return (
+                    ComposeCheck(
+                        "mixed",
+                        f"{path}: {exc}, so Yu'lon cannot tell which way this install was made "
+                        "and does not rewrite it. Nothing was written. Give every `- ./` line "
+                        "the same ending (`:z` on all of them, or on none) and check again.",
+                    ),
+                    None,
+                    text,
+                )
+        if label is None:
+            label = self._bind_label(server_dir)
+        try:
+            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
+        except (composegen.ComposeGenError, InstallerError) as exc:
+            return (
+                ComposeCheck(
+                    "error",
+                    f"Yu'lon could not work out what {name} should say for this install: {exc} "
+                    "Nothing was written.",
+                ),
+                None,
+                text,
+            )
+        if text is None:
+            return (
+                ComposeCheck(
+                    "missing",
+                    f"{path} is not there, so there is nothing to repair. Nothing was written.",
+                ),
+                fresh,
+                None,
+            )
+        if not ours:
+            return (
+                ComposeCheck(
+                    "foreign",
+                    f"{path} does not start with Yu'lon's own first line, so it is somebody's "
+                    "own file now and Yu'lon does not rewrite it. Nothing was written.",
+                ),
+                fresh,
+                text,
+            )
+        has, wants = composegen.project_of(text), composegen.project_of(fresh)
+        if has != wants:
+            return (
+                ComposeCheck(
+                    "moved",
+                    f"{path} runs the server as the compose project {has}, and a file written "
+                    f"for this folder would name {wants}: the install was moved or copied here "
+                    "after it was made. A repair would start the server as a new project, away "
+                    "from its characters' database volume, so nothing was written.",
+                ),
+                fresh,
+                text,
+            )
+        if composegen.same_compose(text, fresh):
+            return ComposeCheck("current"), fresh, text
+        added, removed = _lines_changed(text, fresh)
+        return ComposeCheck("stale", added=added, removed=removed), fresh, text
+
+    def base_compose_check(self, options: InstallOptions | None = None) -> ComposeCheck:
+        """Is this install's `docker-compose.yml` what this version of Yu'lon writes? (T106)
+
+        A reading: it never raises and never writes. See `ComposeCheck` for the states.
+        """
+        check, _fresh, _text = self._base_compose_facts(
+            self.server_dir(options or InstallOptions())
+        )
+        return check
+
+    def repair_base_compose(
+        self, options: InstallOptions | None = None, *, now: datetime | None = None
+    ) -> ComposeRepaired:
+        """Re-render this install's `docker-compose.yml` from the current template (T106).
+
+        The press behind "Repair server files…". The owner's decision (2026-09-24):
+        the player chooses when, the file is backed up first, and nothing else is
+        touched -- not the override, not the build file, not `.env`, not a
+        container. The running containers keep the file they were created from
+        until they are recreated, which the Server tab then offers.
+
+        Asked again here rather than trusting the tab's earlier reading, because the
+        folder can change between the two. Writes only on `stale`: `current` writes
+        nothing and says so with `backup=None`; every other state refuses.
+
+        The write: a stamped `.repair.bak` copy first (`copy2`, so it keeps the old
+        mode and mtime), checked to hold exactly the text that was validated; then
+        `_replace_if_unchanged()` -- a unique fsynced temp file with the target's
+        mode, `os.replace`d onto the target only if the target still says what was
+        checked (Codex, 2026-09-24: the check-to-write race). Atomic on POSIX and
+        Windows, so a full disk leaves the old file whole and the backup beside it.
+
+        Raises:
+            InstallerError: the check's refusal, a render or read that failed, or a
+                backup or write that failed. Each says that nothing was written, or
+                that the old file is still in place.
+        """
+        server_dir = self.server_dir(options or InstallOptions())
+        path = server_dir / composegen.BASE_FILE
+        check, fresh, text = self._base_compose_facts(server_dir)
+        if check.state == "current":
+            return ComposeRepaired(path, None)
+        if check.state != "stale" or fresh is None or text is None:
+            raise InstallerError(check.why)
+        changed = (
+            f"{path} changed while it was being repaired, so it was not replaced and is "
+            "left as it is now. Check again (Refresh) and press Repair once more."
+        )
+        try:
+            backup = _backup_beside(path, now or datetime.now())
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} could not be backed up ({exc}), so it was not repaired. "
+                "Nothing was written."
+            ) from exc
+        if backup.read_text(encoding="utf-8") != text:
+            # The copy is not of the file that was checked: it changed in between.
+            backup.unlink(missing_ok=True)
+            raise InstallerError(changed)
+        try:
+            _replace_if_unchanged(path, fresh, text)
+        except ComposeChangedError as exc:
+            raise InstallerError(f"{changed} Its backup from before is {backup.name}.") from exc
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} could not be written ({exc}). The old file is still in place, and its "
+                f"backup is {backup.name}."
+            ) from exc
+        logger.info(f"repaired {path}; the old file is {backup.name}")
+        return ComposeRepaired(path, backup)
+
     def built_image_refs(self, ctx: StageContext) -> tuple[str, ...]:
         """The image references this install's build produces, fully qualified.
 
@@ -5975,8 +6640,18 @@ class StagedInstaller:
         `docker image rm` on the wrong tag either does nothing or removes
         somebody else's build -- neither of which says which happened.
         """
+        return self.image_refs_at(ctx.server_dir)
+
+    def image_refs_at(self, server_dir: Path) -> tuple[str, ...]:
+        """`built_image_refs()` for a caller with a folder and no stage context.
+
+        The ONE spelling of `composegen.built_image_refs(...)` in this class.
+        Preflight asks it before any stage context exists (T112, `_spent()`), and
+        lowering the free-space floor on a tag the build stage would not check
+        is the two-spellings defect above, pointed at a disk.
+        """
         return composegen.built_image_refs(
-            self.entry, ctx.server_dir, platform_id=self._seams.platform_id
+            self.entry, server_dir, platform_id=self._seams.platform_id
         )
 
     def built_images(self, ctx: StageContext) -> bool | None:
@@ -6203,6 +6878,12 @@ class StagedInstaller:
                     "import was not run. Nothing was changed."
                 )
             yield f"Cleared {', '.join(dropped)}."
+        # T121: HERE, and only here -- the old databases are gone (`absent`, or
+        # `partial` with `reset()` having dropped them just above), so no mob
+        # multiplier is applied to what is about to be imported. Not before the
+        # reset (Codex final pass): a reset that raises or drops nothing leaves
+        # the old schemas, and the record describing them must stay.
+        yield from self._forget_old_database_records(ctx)
         if service is None:
             return
         yield f"Importing the databases ({service}). This takes several minutes."
@@ -6220,6 +6901,32 @@ class StagedInstaller:
         except docker.DockerCommandError as exc:
             raise InstallerError(str(exc)) from exc
         yield f"The databases now read as {after.state}."
+
+    def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:
+        """Drop the answers file's `applied`/`pending` maps once the old databases are gone (T121).
+
+        The file is one of `OUR_OWN_FILES`, so it outlives the databases it
+        describes: left there, it read Baby Mobs as installed on stock creatures,
+        and the Remove it offered would divide them. The saved answers stay.
+
+        A clear that cannot be written FAILS the stage (Codex final pass): it was
+        a warning, and the import went on to leave a readable stale record. The
+        stage is not recorded, so the next Install press tries again -- and finds
+        the databases `absent`, which is this same branch.
+        """
+        forgot, problem = module_answers.forget_database_records(ctx.server_dir)
+        if problem:
+            raise InstallerError(
+                f"Yu'lon could not update {module_answers.ANSWERS_FILE} in {ctx.server_dir} "
+                f"({problem}). That file still says which mob multipliers were applied to the "
+                "old databases, and these are new, so nothing was imported. Fix its permissions "
+                "(or, if it is damaged, move it aside) and press Install again."
+            )
+        if forgot:
+            yield (
+                "Cleared Yu'lon's record of the mob multipliers applied to the old databases: "
+                "these are new."
+            )
 
     def stage_up(self, ctx: StageContext) -> Iterator[str]:
         """Start the three long-running services, and only those.

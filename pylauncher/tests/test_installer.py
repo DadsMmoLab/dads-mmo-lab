@@ -200,6 +200,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     "Path",
     "PurePosixPath",
     "Protocol",
+    # Added deliberately 2026-09-24 with T106: `native` is imported under it for
+    # the Protocol's two compose-repair annotations only (native imports this
+    # module, so a runtime import would be a cycle). Typing, not machinery.
+    "TYPE_CHECKING",
     "composegen",
     "docker",
     "platform",
@@ -210,6 +214,11 @@ MODULE_SURFACE_AFTER_7_2 = {
     # Protocol the app drives has to be able to name it — added deliberately,
     # which is what the docstring below asks for.
     "EmulatorSource",
+    # T124. `InstallEngine.upstream_news()` answers in this type -- added
+    # deliberately, for the reason `EmulatorSource` was.
+    "UpstreamNews",
+    # T126. `InstallEngine.update_to_latest(rewritten_ok=...)` is typed with it.
+    "Collection",
     "get_logger",
 }
 

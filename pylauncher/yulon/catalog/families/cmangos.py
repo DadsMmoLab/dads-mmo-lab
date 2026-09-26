@@ -72,8 +72,14 @@ from pathlib import Path
 from typing import ClassVar, cast
 
 from yulon import dbsecret, docker, platform
-from yulon.catalog import composegen
-from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch, SqlPlan
+from yulon.catalog import bot_count, bot_dashboard, composegen
+from yulon.catalog.catalog import (
+    CmangosData,
+    ConfPatchTable,
+    NativeInstall,
+    SourcePatch,
+    SqlPlan,
+)
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
@@ -1166,6 +1172,11 @@ class CmangosInstaller(StagedInstaller):
         data = self._data()
         etc_dir = ctx.server_dir / ETC_DIR
         image_ref = self._image_ref(ctx, data.extract.image)
+        # The player's bot count (T117), read BEFORE `materialise()` and only
+        # once this stage has finished before: until then a Min/Max in the file
+        # is the image template's, copied by a run that stopped short of the
+        # patch, not a number anybody chose. No usable pair keeps the table's.
+        table = bot_count.conf_table(data.conf, etc_dir) if ctx.state.has("conf") else data.conf
         try:
             copied = conf.materialise(
                 data.conf,
@@ -1186,7 +1197,12 @@ class CmangosInstaller(StagedInstaller):
         for path in copied:
             yield f"Copied {path.name} out of the server image."
         try:
-            changed = conf.apply_table(data.conf, etc_dir, self._secret_tokens(ctx))
+            # T127: while the bot dashboard is switched on, its three keys are laid
+            # over the table's `AiPlayerbot.Observability = 0` -- the switch is
+            # carried over, as T117 carries the bot count, rather than undone by a
+            # resume.
+            table = bot_dashboard.overlay(table, self.entry, ctx.server_dir)
+            changed = conf.apply_table(table, etc_dir, self._secret_tokens(ctx))
         except InstallerError:
             # MUST stay ahead of the broad clause: every refusal `apply_table()`
             # raises is already the sentence a user reads, and naming a file it
@@ -2073,8 +2089,19 @@ class CmangosInstaller(StagedInstaller):
         `composegen.entry_tokens()`. No catalog file can reach either, so the
         catalog tail sent a reader somewhere there was nothing to find.
         """
-        public = self._public_tokens(ctx.server_dir)
-        secret = secret_token_map(ctx.secrets)
+        return self.conf_tokens(ctx.server_dir, ctx.secrets)
+
+    def conf_tokens(self, server_dir: Path, secrets: Secrets) -> dict[str, str]:
+        """`_secret_tokens()` for a caller that has no `StageContext`: T94's reset.
+
+        The SAME body, moved here rather than copied, so the conf stage and the
+        reset cannot fill one table two ways -- a reset whose tokens drifted from
+        the install's would write a conf the install never wrote, which is the
+        one thing "reset to default" must not do. Opt-in by name exactly as
+        `_secret_tokens()` is: a caller asks for this method, never for a flag.
+        """
+        public = self._public_tokens(server_dir)
+        secret = secret_token_map(secrets)
         shadowed = sorted(set(public) & set(secret))
         if shadowed:
             raise InstallerError(
@@ -2092,9 +2119,13 @@ class CmangosInstaller(StagedInstaller):
         once; the data block names it by service key, and the reference is the
         same string `stage_build` asked the daemon about.
         """
+        return self._image_ref_for(ctx.server_dir, service)
+
+    def _image_ref_for(self, server_dir: Path, service: str) -> str:
+        """`_image_ref()`'s body, keyed on the folder alone (T94)."""
         prefix = self._native().image_prefix
         refs = composegen.built_image_refs(
-            self.entry, ctx.server_dir, platform_id=self._seams.platform_id
+            self.entry, server_dir, platform_id=self._seams.platform_id
         )
         for ref in refs:
             if ref.startswith(f"{prefix}{service}:"):
@@ -2103,6 +2134,18 @@ class CmangosInstaller(StagedInstaller):
             f"{service} is not one of the images this install builds "
             f"({', '.join(self._native().images)}). {CATALOG_ERROR_TAIL}"
         )
+
+    def conf_table(self) -> ConfPatchTable:
+        """The table the conf stage patches with -- which files, which keys (T94)."""
+        return self._data().conf
+
+    def conf_image_ref(self, server_dir: Path) -> str:
+        """The image the conf stage copies its templates out of (T94).
+
+        `data.extract.image`, exactly what `_conf()` passes to `_image_ref()`:
+        the one CMaNGOS image is extractor, conf source and runtime at once.
+        """
+        return self._image_ref_for(server_dir, self._data().extract.image)
 
     def _user_args(self) -> tuple[str, ...]:
         """`--user uid:gid` on Linux, nothing on Docker Desktop — one policy, `platform.py`'s.

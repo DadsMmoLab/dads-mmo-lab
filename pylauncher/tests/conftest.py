@@ -24,13 +24,14 @@ import weakref
 from collections.abc import Callable, Iterator, Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
 from yulon import apply as apply_module
 from yulon import log as log_module
 from yulon import platform
+from yulon.catalog import upstream
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -744,6 +745,26 @@ def spelled_bounds(test_file: str) -> set[str]:
 
 
 @pytest.fixture(autouse=True)
+def _no_forced_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`main._hard_exit` is `os._exit`; reached in-process it would end pytest itself (T113).
+
+    `main()` leaves through it when a background job outlives the exit join.
+    Replaced here so a test that reaches it by accident FAILS, naming the seam,
+    instead of the run vanishing mid-file with no report. A test that means to
+    reach it patches it again; the real one is proved in a child process.
+    """
+    import main
+
+    def _refuse(code: int) -> NoReturn:
+        raise AssertionError(
+            f"main._hard_exit({code}) was reached in-process: a background job outlived "
+            "the exit join. Patch main._hard_exit in the test if that is the point."
+        )
+
+    monkeypatch.setattr(main, "_hard_exit", _refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a test block on a modal dialog.
 
@@ -917,6 +938,47 @@ def _widgets_a_module_leaves_behind_are_destroyed() -> Iterator[None]:
     yield from destroying_what_is_left_behind()
 
 
+UNGUARDED_HTTPS_GET = upstream.https_get
+"""The real GET, kept for the one test that proves it is verified and capped."""
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any test that would reach GitHub through `upstream.https_get` fails, loudly (T124).
+
+    Every network read T124/T126 add goes through that one function: the
+    `Seams.upstream_get` default looks it up at call time for exactly this
+    reason. AssertionError, not OSError, because every caller turns an OSError
+    into "no network" -- which would let a forgotten double pass as a quiet
+    "nothing new".
+    """
+
+    def refuse(url: str, accept: str) -> bytes:
+        raise AssertionError(f"a test asked GitHub for {url}; give it a double")
+
+    monkeypatch.setattr(upstream, "https_get", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_asks_github_for_a_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An `Applier` built without a `newest_release` seam asks GitHub; no test may (T126).
+
+    Found by the suite itself: the addon install tests built a bare `Applier`
+    for `tortoise-bots-manager`, which follows its releases since T126, and
+    passed -- having resolved the REAL newest release over the network. One of
+    them then failed only because the real commit was not in its local origin.
+    A test that needs a release passes the seam; one that forgot fails here,
+    loudly, instead of depending on GitHub.
+    """
+
+    def refuse(slug: str) -> None:
+        raise AssertionError(
+            f"a test asked GitHub for the newest release of {slug}; pass `newest_release=`"
+        )
+
+    monkeypatch.setattr(apply_module, "_github_newest_release", refuse)
+
+
 @pytest.fixture(autouse=True)
 def _classic_mysql_client_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer the client probe without touching the seam the tests assert on.
@@ -959,6 +1021,26 @@ def argv_reaches_the_docker_cli(command: object) -> bool:
     # actually runs on. Windows flavour splits on both `/` and `\`, so it is
     # right for either shape.
     return PureWindowsPath(str(command[0])).name.lower() in DOCKER_ARGV0S
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_holds_a_real_distro_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that would spawn or end a real WSL hold (T132).
+
+    `wsl.hold()` starts a DETACHED `wsl.exe -d <distro> --exec ... sleep infinity`
+    that is built to outlive the process that made it. On a Windows machine with
+    WSL - a CI runner, a developer's box - a test that reached it through
+    `Controller.start()` would leave a real distro pinned open after the suite.
+    Tests that mean to exercise `hold()`/`release()` hand them their own
+    `popen=`/`run=`, which never reaches these.
+    """
+    from yulon import wsl
+
+    def refuse(argv: object, **kwargs: object) -> None:
+        pytest.fail(f"a test reached a real WSL hold or release: {argv!r}")
+
+    monkeypatch.setattr(wsl, "_spawn", refuse)
+    monkeypatch.setattr(wsl, "_run_release", refuse)
 
 
 @pytest.fixture(autouse=True)

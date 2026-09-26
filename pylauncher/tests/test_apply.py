@@ -23,8 +23,9 @@ from typing import Any, NoReturn
 import pytest
 
 from yulon import apply as apply_module
+from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
-from yulon.catalog import composegen, native
+from yulon.catalog import composegen, native, upstream
 from yulon.git import CloneSpec, RunnerGit, git_available
 from yulon.manifest import Manifest, parse_manifest
 from yulon.manifest_store import ManifestStore
@@ -351,9 +352,15 @@ def test_ale_install_deploys_runs_its_first_configure_and_removes(tmp_path: Path
     assert report.skipped == ()
     assert any(step.startswith("patch ") for step in report.done)
 
-    # configure re-applies: default when no value is given; an explicit value wins.
+    # configure re-applies: an explicit value wins, and is remembered (T104).
     applier.configure(m, {"duration": "45"})
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    # No value given: the answer this install remembers beats the default --
+    # defaults < remembered < caller, the lead's ruling on the T92/T104 merge.
+    applier.configure(m)
+    assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    # An install with no remembered answer (one made before T104) gets the default.
+    (tmp_path / module_answers.ANSWERS_FILE).unlink()
     applier.configure(m)
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"
 
@@ -3712,7 +3719,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
 
     The brief for the press called `mod-arac` *the only shipped manifest with a
     direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
-    (`manifest.py:136`), so every step that names no route is one: 44 steps
+    (`manifest.py:136`), so every step that names no route is one: 45 steps
     across 19 manifests in all four games. `mod-arac` and `mod-city-bots` are
     the only `module`-type ones, which is the narrower true statement.
 
@@ -3731,6 +3738,10 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     upstream's reset and then the chosen file as ONE `then` step (one
     transaction), and its remove became that reset file instead of an inline
     `spell_dbc` statement -- two steps before, two after, all into `world`.
+
+    45 after T104: `npc-teleporter` writes the Onyxia-level answer into the one
+    `conditions` row upstream builds from `@ONY_LEVEL`, as an inline `world`
+    step after the file, so the question it always asked finally does something.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -3751,7 +3762,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        44,
+        45,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
@@ -4367,7 +4378,16 @@ def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
     applier.install(manifest)
 
 
-_UNPINNED_PARAMS = sorted(_UNPINNED)
+_RELEASE_FOLLOWERS = {"tortoise-bots-manager"}
+"""The unpinned items whose manifest says `follow: releases` (T126).
+
+They are not branch-tip items any more -- an install takes the newest
+published release's commit -- so the two branch-tip tests below leave them out
+and `test_a_client_addon_reinstall_lands_the_new_files` drives the addon
+through its release instead.
+"""
+
+_UNPINNED_PARAMS = sorted(set(_UNPINNED) - _RELEASE_FOLLOWERS)
 
 
 def _origin(tmp_path: Path) -> Path:
@@ -4478,9 +4498,11 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
     item_id = "tortoise-bots-manager"
     _family, _game, files, lands = _UNPINNED[item_id]
     origin = _origin(tmp_path)
-    _publish(origin, files, "v1")
+    released = {"release": upstream.Release("v1", _publish(origin, files, "v1"))}
     manifest = _unpinned_shipped(item_id)
-    applier, _git_seam = _unpinned_applier(tmp_path, origin, manifest)
+    applier, git_seam = _unpinned_applier(tmp_path, origin, manifest)
+    # T126: this addon follows its releases, so the newest RELEASE is what lands.
+    applier._newest_release = lambda slug: released["release"]
     _origin_answers_as_the_manifest(applier, manifest)
 
     applier.install(manifest)
@@ -4494,11 +4516,18 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
     assert (addon / "TortoiseBotsManager.toc").is_file(), "and the addon itself did not land"
     assert (applier.clone_dir(manifest) / ".git").is_dir(), "the history belongs in the clone"
 
-    _publish(origin, files, "v2")
+    released["release"] = upstream.Release("v2", _publish(origin, files, "v2"))
+    # An in-between commit after the release: the reinstall must NOT take it.
+    _publish(origin, files, "v3-unreleased")
     applier.install(manifest)
 
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
     assert not (addon / ".git").exists()
+    assert [spec.rev for spec in git_seam.specs] == [
+        _git(origin, "rev-parse", "HEAD~2"),
+        _git(origin, "rev-parse", "HEAD~1"),
+    ]
+    assert apply_module.clone_release(applier.clone_dir(manifest), item_id=item_id) == "v2"
 
 
 # --------------------------------------------------------------------------

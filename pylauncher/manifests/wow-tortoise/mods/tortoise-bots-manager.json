@@ -6,7 +6,8 @@
   "game": "wow-tortoise",
   "description": "The in-game panel for the bots this server compiles in: /tbm opens it, and it drives the same .bot commands from a window instead of the chat box. Client-side only - it is copied into your WoW client's Interface/AddOns, nothing is written to the server.",
   "source": {
-    "repo": "Sagiroth/TortoiseBotsManager"
+    "repo": "Sagiroth/TortoiseBotsManager",
+    "follow": "releases"
   },
   "build": {
     "rebuild": false,
@@ -20,6 +21,10 @@
     }
   ],
   "notes": [
+    "FOLLOWS RELEASES (T126): Install and Update take the newest published release's commit",
+    "(dated tags, v2026-09-25), not the branch tip. The addon publishes in lockstep with the",
+    "server module Sagiroth/TortoiseBots, which the wow-tortoise catalog entry also follows by",
+    "release, and its README says it degrades gracefully against an older server (TBM:CAPS).",
     "REQUIRES THE SERVER-SIDE MODULE, and this entry's server already has it: TortoiseBots is",
     "compiled into the image (`-DMODULE_TORTOISEBOTS=static`), so there is nothing to install",
     "for it and nothing to put in `requires`, which names installable items. The addon's own",

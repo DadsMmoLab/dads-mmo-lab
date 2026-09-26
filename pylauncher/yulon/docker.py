@@ -420,12 +420,10 @@ def pin_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> str 
         "# Pinned by Yu'lon so this install keeps working if the folder is moved.\n"
         f"{PROJECT_NAME_VAR}={name}\n"
     ).encode()
-    tmp = env_path.with_name(env_path.name + ".yulon-new")
     try:
-        tmp.write_bytes(existing + addition)
-        os.replace(tmp, env_path)  # atomic on POSIX and on Windows
+        # T127: never wider than 0600 -- `.env` holds the root password.
+        platform.write_private_atomically(env_path, existing + addition)
     except OSError as exc:
-        tmp.unlink(missing_ok=True)
         logger.warning(f"could not write {env_path}; not pinning: {exc}")
         return None
     logger.info(f"pinned {PROJECT_NAME_VAR}={name} in {env_path}")
@@ -2266,6 +2264,17 @@ def apply_module_sql(
     return run
 
 
+_NO_SUCH_CONTAINER = re.compile(r"\bno such (?:object|container)\b", re.IGNORECASE)
+"""The two answers docker gives for a name it does not know (T95, wordings measured).
+No unreachable-daemon wording contains either; "no such file or directory" is not one.
+`container_state()` reads it as `missing`."""
+
+_STOP_SAYS_GONE = "No such container"
+"""What `docker stop` says for a container that is already gone; `_run_docker_stop()`
+takes it as done. The stricter, older reading of `_NO_SUCH_CONTAINER`'s answer, kept
+exactly as it was; a test pins that the regex matches it, so the two cannot drift (T95)."""
+
+
 def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
     """`docker stop <container>`, blocking until that one container has exited.
 
@@ -2294,7 +2303,7 @@ def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
     proc = _docker(["stop", "-t", str(STOP_GRACE_SECONDS), container], wsl_distro=wsl_distro)
     if proc.returncode == 0:
         return
-    if "No such container" in proc.stderr:
+    if _STOP_SAYS_GONE in proc.stderr:
         logger.debug(f"docker stop {container}: already gone")
         return
     raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
@@ -2673,6 +2682,15 @@ class ContainerState:
     status: str = ""
     started_at: str = ""
     restart_count: int = 0
+    missing: bool = False
+    """Docker ANSWERED, and said there is no container by this name (T95).
+
+    `status` stays `""` either way, because every other reader takes `""` to
+    mean "could not be read" and must keep doing so. Only the dashboard tells
+    the two apart. Asked of the wrong daemon (a WSL install asked of the
+    host), a live container also reads as missing (`native.py:2170-2175`),
+    so every caller that means it must pass `wsl_distro`.
+    """
 
     @property
     def settled(self) -> bool:
@@ -2707,7 +2725,8 @@ def container_state(container: str, *, wsl_distro: str | None = None) -> Contain
     proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
-        return ContainerState()
+        missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
+        return ContainerState(missing=missing)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     status, started, count = (fields + ["", "", ""])[:3]
     return ContainerState(status, started, int(count) if count.isdigit() else 0)
@@ -3899,6 +3918,81 @@ def build_staged(
     return run_attached(
         argv, server_dir, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
     )
+
+
+def build_image(
+    context: Path,
+    tag: str,
+    *,
+    wsl_distro: str | None = None,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """`docker build -t <tag> .` in `context`, streamed; the run is returned, never raised (T127).
+
+    For an image that is NOT one of the install's compose builds: the bots
+    module's own dashboard, built from the Dockerfile it ships
+    (`tools/observability`). The install's images keep `build_staged()`, which
+    is the only builder allowed to name the compose files.
+
+    No `--progress`: BuildKit picks plain output by itself when stdout is not a
+    terminal, and the flag is refused by a daemon still on the classic builder.
+    """
+    argv = ["build", "-t", tag, "."]
+    logger.info(f"build_image(): `docker {' '.join(argv)}` in {context}")
+    return run_attached(
+        argv, context, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
+    )
+
+
+def compose_up_service(
+    server_dir: Path,
+    service: str,
+    *,
+    force_recreate: bool = False,
+    timeout: float | None = None,
+    wsl_distro: str | None = None,
+) -> None:
+    """Start ONE service of this install's project, and nothing it depends on (T127).
+
+    `--no-deps` for `staged_up_argv()`'s reason: the caller decides what else
+    runs. Raises `DockerCommandError` with compose's own words, which for a
+    taken port name the port. `timeout` bounds the wait (a timed-out run is a
+    non-zero result from `runner.run()`, so it raises here like any failure).
+    """
+    argv = ["compose", "up", "-d", "--no-deps"]
+    if force_recreate:
+        argv.append("--force-recreate")
+    _run([*argv, service], cwd=server_dir, timeout=timeout, wsl_distro=wsl_distro)
+
+
+def compose_remove_service(
+    server_dir: Path, service: str, *, wsl_distro: str | None = None
+) -> None:
+    """Stop and remove ONE service's container (`compose rm --stop --force`). No volumes (T127).
+
+    Meant to be idempotent: compose v2 treats a service that has no container as
+    nothing to remove and exits 0, which the bot dashboard's switch-off relies on
+    when a second press repeats this step. Expected from compose, not measured in
+    this repository; a non-zero exit still raises, and then the switch stays On.
+    """
+    _run(["compose", "rm", "--stop", "--force", service], cwd=server_dir, wsl_distro=wsl_distro)
+
+
+def container_ip(container: str, *, wsl_distro: str | None = None) -> str | None:
+    """The container's address on its compose network, or None if Docker would not say (T127).
+
+    Asked because a peer that resolved this container's NAME once keeps the
+    address it got: recreating the container can hand it a new one.
+    """
+    proc = _docker(
+        ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", container],
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        return None
+    found = proc.stdout.split()
+    return found[0] if found else None
 
 
 def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool | None:

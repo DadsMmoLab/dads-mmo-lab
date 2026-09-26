@@ -28,15 +28,22 @@ other one.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from yulon import docker, platform, resources, runner
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource
+from yulon.catalog.upstream import UpstreamNews
 from yulon.log import get_logger
+
+if TYPE_CHECKING:
+    # `native` imports this module for `InstallOptions` and the error types
+    # (see `installer_for()`), so it is named here for the Protocol's
+    # annotations only.
+    from yulon.catalog import native
 
 logger = get_logger(__name__)
 
@@ -846,12 +853,17 @@ class InstallEngine(Protocol):
 
     def sources_that_move(self) -> tuple[EmulatorSource, ...]: ...
 
+    def upstream_news(
+        self, options: InstallOptions | None = None, *, now: int | None = None
+    ) -> UpstreamNews: ...
+
     def update_to_latest(
         self,
         options: InstallOptions | None = None,
         *,
         to_pin: bool = False,
         cancel: threading.Event | None = None,
+        rewritten_ok: Collection[str] = (),
     ) -> Iterator[str]: ...
 
     """Move this install's sources to upstream's tip (or back to their pins) and rebuild (T64).
@@ -863,6 +875,18 @@ class InstallEngine(Protocol):
     and the one that would be forgotten when a family gained a fourth source.
 
     No `ask`, for `rebuild`'s reason: this route provisions nothing.
+    """
+
+    def base_compose_check(self, options: InstallOptions | None = None) -> native.ComposeCheck: ...
+
+    def repair_base_compose(
+        self, options: InstallOptions | None = None
+    ) -> native.ComposeRepaired: ...
+
+    """Re-render an existing install's `docker-compose.yml` from this version's template (T106).
+
+    The reading and the press behind the Server tab's "Repair server files…";
+    `install_wiring.repair_compose_for_app()` decides which installs are offered them.
     """
 
     def adopt_state(self, options: InstallOptions | None = None) -> docker.ImportState: ...

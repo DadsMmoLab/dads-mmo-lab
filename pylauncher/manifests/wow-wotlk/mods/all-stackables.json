@@ -12,20 +12,12 @@
     {
       "db": "world",
       "path": "All_Stackables_200_Up.sql",
-      "note": "wow-manage.sh seds stackable=/maxcount= to {stack_size} before applying"
+      "note": "upstream ships one size, 200, and its undo"
     },
     {
       "db": "world",
       "path": "All_Stackables_200_Down.sql",
       "when": "remove"
-    }
-  ],
-  "prompts": [
-    {
-      "key": "stack_size",
-      "question": "Max stack size",
-      "kind": "int",
-      "default": "200"
     }
   ],
   "notes": [
