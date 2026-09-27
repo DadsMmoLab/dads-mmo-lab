@@ -80,6 +80,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -546,7 +547,13 @@ def _replace_if_unchanged(
     """Put `data` in place of `target` atomically, if `target` still holds `before`. Round 5.
 
     `data` goes to an owner-only sibling first (`tuning.private_copy`'s rule:
-    the conf holds the database password). `like` given: that file's mode and
+    the conf holds the database password), one made for THIS call by
+    `tempfile.mkstemp` (round 6, Codex): a fixed name that every call unlinked
+    and re-created let a second put-back remove the first one's temp and stage
+    its own there, and the first then renamed the second's bytes into place.
+    Only this call's own temp is ever removed. Its name starts with a dot and
+    ends `.yulon-tmp`, so `tuning.backups_of()` (`<name>.<stamp>....bak`) never
+    lists it. `like` given: that file's mode and
     times (`shutil.copystat`, only its metadata is read again), which is what
     the routes' copies of a whole backup gave. None: the file's own mode, as
     `conf.replace_file` keeps it, owner-writable.
@@ -562,14 +569,16 @@ def _replace_if_unchanged(
     Raises:
         OSError: nothing was written.
     """
-    tmp = target.with_name(f"{target.name}{PUT_BACK_TEMP_SUFFIX}")
     try:
         mode: int | None = stat.S_IMODE(target.stat().st_mode)
     except OSError:
         mode = None
+    # 0600 and O_EXCL: `mkstemp`'s own guarantees, the ones `private_copy` asks for.
+    fd, name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=PUT_BACK_TEMP_SUFFIX
+    )
+    tmp = Path(name)
     try:
-        tmp.unlink(missing_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, tuning.PRIVATE_MODE)
         with os.fdopen(fd, "wb") as out:
             out.write(data)
         if like is not None:
@@ -584,8 +593,8 @@ def _replace_if_unchanged(
         raise
 
 
-PUT_BACK_TEMP_SUFFIX = ".yulon-putback-tmp"
-"""What a Tuning backup being put back is called until the rename lands (round 5)."""
+PUT_BACK_TEMP_SUFFIX = ".yulon-tmp"
+"""How a Tuning backup being put back ends its (per-call) name until the rename lands."""
 
 CHANGED_WHILE_PUTTING_BACK = (
     "{file} changed on disk while the copy was being put back, so nothing was written; press "

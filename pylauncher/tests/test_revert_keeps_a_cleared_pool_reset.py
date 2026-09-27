@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -787,3 +788,205 @@ def test_a_rewritten_backup_keeps_the_files_own_mode(tmp_path: Path) -> None:
     os.chmod(path, 0o644)
     assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is not None
     assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+# ------------------------------------------------------ round 6: one temp per put-back
+#
+# Codex on round 5: every put-back staged into the same sibling name and unlinked
+# it first, so a second put-back could remove the first one's temp and stage its
+# own there -- and the first then renamed the second's bytes into place.
+
+
+def test_two_interleaved_put_backs_never_publish_each_others_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stages its backup; B stages its own; A checks the file and renames; B checks.
+    Held in that order by events at each one's second read of the file (the check before
+    the rename). A must write A's bytes, and B must refuse, the file having moved."""
+    backup_a = MAIN + OFF_KEY_LINE + "X = A\n"
+    backup_b = MAIN + OFF_KEY_LINE + "X = B\n"
+    path = _conf(tmp_path, backup_a)
+    made_a = tuning.backup(path)
+    _conf(tmp_path, backup_b)
+    made_b = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = now\n")
+    job = World(tmp_path).rebuild()
+
+    a_staged, b_staged, a_done = threading.Event(), threading.Event(), threading.Event()
+    reads: dict[str, int] = {}
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        name = threading.current_thread().name
+        if self == path and name in ("A", "B"):
+            reads[name] = reads.get(name, 0) + 1
+            if reads[name] == 2:  # the check just before the rename
+                if name == "A":
+                    a_staged.set()
+                    assert b_staged.wait(10)
+                else:
+                    b_staged.set()
+                    assert a_done.wait(10)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    outcome: dict[str, object] = {}
+
+    def run(name: str, made: Path) -> None:
+        try:
+            outcome[name] = job.put_back_file(made, path, tuning.restore)
+        except OSError as exc:
+            outcome[name] = exc
+        finally:
+            if name == "A":
+                a_done.set()
+
+    a = threading.Thread(target=run, args=("A", made_a), name="A")
+    b = threading.Thread(target=lambda: (a_staged.wait(10), run("B", made_b)), name="B")
+    a.start()
+    b.start()
+    a.join(20)
+    b.join(20)
+    assert not a.is_alive() and not b.is_alive()
+    assert outcome["A"] is None, outcome["A"]
+    assert path.read_text() == backup_a, "A wrote its own inspected bytes"
+    assert isinstance(outcome["B"], OSError) and CHANGED in str(outcome["B"])
+    assert not [p for p in path.parent.iterdir() if "tmp" in p.name], "each removed its own temp"
+
+
+def test_a_put_back_temp_is_never_a_backup_revert_would_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen while it exists: `backups_of()` does not list it."""
+    path = _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 1\n")
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
+    seen: list[tuple[Path, ...]] = []
+    temps: list[list[str]] = []
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self == path:
+            seen.append(tuning.backups_of(path))
+            temps.append([p.name for p in path.parent.iterdir() if p not in (path, made)])
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
+    assert temps[-1], "the check before the rename runs while the temp exists"
+    assert seen[-1] == (made,)
+
+
+# ------------------------------------------------------ round 6: no put-back while a restore runs
+#
+# The rebuild job holds `_busy`, which greys the Tuning tab; a Maintenance restore
+# does not, and it sets a pending request off (`before_restore`) on its worker. So
+# the three put-back presses refuse while a restore runs (Tortoise, where that
+# write exists), and the two Reverts check `_busy` themselves instead of trusting
+# a greyed button.
+
+RESTORING = "a restore is running on the Maintenance tab"
+BUSY = "another action is running on this server"
+
+
+def _press_during_a_restore(
+    tmp_path: Path, press: Callable[[controller_view_module.ControllerView], None]
+) -> tuple[controller_view_module.ControllerView, Path, bytes]:
+    """Run a real restore whose seam makes `press` while it runs; the view, file, bytes then."""
+    path = _conf(tmp_path)
+    bot_population.write(TORTOISE, tmp_path, 400)
+    view, made = _card_view(tmp_path, World(tmp_path).rebuild())
+    during: list[bytes] = []
+    inner = made.do_restore
+
+    def restoring(plan: object) -> object:
+        press(view)
+        during.append(path.read_bytes())
+        return inner(plan)
+
+    view.services = replace(view.services, restore=restoring)
+    before = path.read_bytes()
+    _plan_and_restore(view, tmp_path)
+    assert during == [before], "the press changed nothing while the restore ran"
+    return view, path, before
+
+
+def test_the_cards_revert_is_refused_while_a_restore_runs(qapp: object, tmp_path: Path) -> None:
+    said: list[str] = []
+
+    def press(view: controller_view_module.ControllerView) -> None:
+        view.revert_tuning(*bot_population.CARD)
+        said.append(view.tuning_report.toPlainText())
+
+    view, path, _ = _press_during_a_restore(tmp_path, press)
+    assert RESTORING in said[0]
+    view.revert_tuning(*bot_population.CARD)  # afterwards it runs as ever
+    assert b"MaxRandomBots = 500" in path.read_bytes()
+
+
+def test_the_raw_editors_revert_is_refused_while_a_restore_runs(
+    qapp: object, tmp_path: Path
+) -> None:
+    said: list[str] = []
+
+    def press(view: controller_view_module.ControllerView) -> None:
+        view.tuning_panel.set_files((CONF,))
+        view.revert_tuning_file()
+        said.append(view.tuning_report.toPlainText())
+
+    _press_during_a_restore(tmp_path, press)
+    assert RESTORING in said[0]
+
+
+def test_undo_the_last_reset_is_refused_while_a_restore_runs(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    said: list[str] = []
+
+    def press(view: controller_view_module.ControllerView) -> None:
+        path = tmp_path / CONF
+        kept = reset_defaults.reset_backup(path, reset_defaults.new_press())
+        path.write_bytes(path.read_bytes().replace(b"MaxRandomBots = 400", b"MaxRandomBots = 9"))
+        monkeypatch.setattr(view, "_confirm", lambda *_a: True)
+        view._look_up_reset_undo()
+        assert view._reset_undo_items(), "there is a reset to undo"
+        view.undo_last_reset()
+        said.append(view.tuning_report.toPlainText())
+        path.write_bytes(kept.read_bytes())  # as the restore found it
+
+    _press_during_a_restore(tmp_path, press)
+    assert RESTORING in said[0]
+
+
+@pytest.mark.parametrize("which", ["card", "raw"])
+def test_the_reverts_check_busy_themselves(qapp: object, tmp_path: Path, which: str) -> None:
+    """Called while an action of ours runs -- not through the greyed button -- nothing moves."""
+    path = _conf(tmp_path)
+    bot_population.write(TORTOISE, tmp_path, 400)
+    view, _ = _card_view(tmp_path, World(tmp_path).rebuild())
+    view.tuning_panel.set_files((CONF,))
+    before = path.read_bytes()
+    view._set_busy(True)
+    if which == "card":
+        view.revert_tuning(*bot_population.CARD)
+    else:
+        view.revert_tuning_file()
+    assert path.read_bytes() == before
+    assert BUSY in view.tuning_report.toPlainText()
+
+
+def test_another_games_revert_is_not_held_by_its_restore(qapp: object, tmp_path: Path) -> None:
+    """Only Tortoise's restore writes aiplayerbot.conf; TBC's Revert is as it was."""
+    tbc = CATALOG.get("wow-tbc")
+    path = _conf(tmp_path)
+    bot_population.write(tbc, tmp_path, 400)
+    view, made = _card_view(tmp_path, None, entry=tbc)
+    inner = made.do_restore
+
+    def restoring(plan: object) -> object:
+        view.revert_tuning(*bot_population.CARD)
+        return inner(plan)
+
+    view.services = replace(view.services, restore=restoring)
+    _plan_and_restore(view, tmp_path)
+    assert b"MaxRandomBots = 500" in path.read_bytes()

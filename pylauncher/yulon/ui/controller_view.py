@@ -3916,6 +3916,18 @@ who fixes one field and a user who wonders what state their conf is in.
 
 TUNING_REVERTED = "{module}: put {file} back from {backup}.\n{rule}"
 
+TUNING_PUT_BACK_DURING_RESTORE = (
+    "{press}: a restore is running on the Maintenance tab, so nothing was put back. Press it "
+    "again once the restore has finished."
+)
+"""T145: Tortoise's restore sets aiplayerbot.conf's rebuild request off as it starts, on its
+worker, and a put-back at the same moment would race that write."""
+
+TUNING_PUT_BACK_WHILE_BUSY = (
+    "{press}: another action is running on this server, so nothing was put back. Press it "
+    "again once it has finished."
+)
+
 TUNING_NO_BACKUP = (
     "{module}: there is no backup of {file} to revert to. Yu'lon takes one every time it "
     "saves, so the first save is what creates it."
@@ -11206,6 +11218,8 @@ class ControllerView(QWidget):
         """Copy back what the last reset replaced, after one Yes/No, off the GUI thread."""
         if self._busy:
             return
+        if self._put_back_refused(TUNING_RESET_UNDO):
+            return
         items = self._reset_undo_items()
         if not items:
             self.tuning_reset_undo_action.setEnabled(False)
@@ -11374,6 +11388,8 @@ class ControllerView(QWidget):
     @Slot(str, str)
     def revert_tuning(self, family: str, module_id: str) -> None:
         """Put this card's files back from the newest backup Yu'lon took of each."""
+        if self._put_back_refused("Revert"):
+            return
         try:
             card = self.tuning_panel.card((family, module_id))
         except KeyError:
@@ -11404,6 +11420,24 @@ class ControllerView(QWidget):
                 said.append(note)
         self.tuning_report.setPlainText("\n".join(said))
         self.reload_tuning()
+
+    def _put_back_refused(self, press: str) -> bool:
+        """Refuse a put-back of a Tuning backup now, saying why. True if refused (T145 round 6).
+
+        `_busy` is checked HERE, not only through the greyed buttons that
+        `_set_busy` leaves: a slot is also reachable without its button. And a
+        Maintenance restore, which does not hold `_busy`, holds these three on
+        Tortoise: it sets a pending random-bot rebuild request in
+        aiplayerbot.conf off on its worker (`_restore_with_the_bot_request`),
+        the very file a put-back writes. Other games' restores write no conf.
+        """
+        if self._busy:
+            self.tuning_report.setPlainText(TUNING_PUT_BACK_WHILE_BUSY.format(press=press))
+            return True
+        if self._restore_running and self.services.bot_pool_rebuild is not None:
+            self.tuning_report.setPlainText(TUNING_PUT_BACK_DURING_RESTORE.format(press=press))
+            return True
+        return False
 
     def _put_back(self, backup: Path, target: Path) -> str | None:
         """`tuning.restore()`, through Tortoise's rebuild-request rule where there is one (T145).
@@ -11469,6 +11503,8 @@ class ControllerView(QWidget):
         very change the user is trying to undo. `tuning.restore()` copies
         rather than moves, so a second Revert still has something to restore.
         """
+        if self._put_back_refused("Revert"):
+            return
         file = self.tuning_panel.current_file()
         if not file or file in TUNING_CORE_FILES:
             return
