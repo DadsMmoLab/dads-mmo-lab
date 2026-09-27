@@ -60,13 +60,27 @@ the conf would then delete the restored bots at the next start.
 Repair and Update leave it where it is (a used token is a no-op), and Reset to
 default drops it, which is harmless for the same reason.
 
+**A Tuning backup never brings a request back** (T145). A backup taken while a
+request was pending holds it, and the Playerbots card's Revert, the raw
+editor's Revert and Undo the last reset put a backup back whole -- after a
+restore, that re-armed a request the restored databases had no record of. They
+all go through `put_back_file`: a backup that asks for a rebuild anywhere goes
+back with the file's own key lines in place of its own. The key is read the way the
+module reads it (`_assigned`: indented and quoted lines too, the last one in a
+section wins; across sections any request counts, `value_in`) and written into
+every section so the module reads what was written (`_with_value`).
+
 Nothing here imports Qt. `PoolRebuild.rebuild()` is a line source for the Bots
 tab's log panel and runs on that panel's worker thread.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import stat
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -159,7 +173,8 @@ def take_back(entry: CatalogEntry, server_dir: Path) -> Path:
     so Revert after a take-back would arm the request again and the next
     restart would rebuild the bots by surprise. Without one, the newest is the
     backup `write_key` made a moment earlier: the file as it was before the
-    request, key off.
+    request, key off. (An OLDER save's backup can still hold a request;
+    `put_back_file` keeps it out, T145.)
 
     Raises:
         PoolResetError: nothing was written.
@@ -175,26 +190,16 @@ def _write_value(
     """Set the key to `value` in the install's `aiplayerbot.conf`; the file and its backup.
 
     The bot count's writer (`bot_population.write`) in miniature: a fresh read,
-    `conf.patch` (every other byte kept; the key replaced where it stands, or
+    `_with_value` (every other byte kept; the key replaced where it stands, or
     appended), `tuning.backup` beside it so the Tuning tab's Revert on the
     Playerbots card finds it (unless `backup` is False: `take_back`), and an
     atomic replace.
     """
     path = server_dir / bot_population.CONF_FILE
-    native_block = entry.install.native
-    cmangos = native_block.cmangos if native_block is not None else None
-    table = cmangos.conf.files.get(bot_population.CONF_NAME) if cmangos is not None else None
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             before = handle.read()
-        text = conf.patch(
-            before,
-            ConfPatch(
-                keys={KEY: value},
-                match_commented=table.match_commented if table is not None else False,
-            ),
-            {},
-        )
+        text = _with_value(entry, before, value)
         made = tuning.backup(path) if backup else None
     except (OSError, UnicodeDecodeError, InstallerError, tuning.TuningError) as exc:
         raise PoolResetError(f"could not write {path.name}: {exc}") from exc
@@ -207,19 +212,177 @@ def _write_value(
     return path, made
 
 
-_ACTIVE = re.compile(rf"^{re.escape(KEY)}\s*=\s*(?P<value>.*?)\s*$")
+_SPACE = " \t\n\v\f\r"
+"""`ace_isspace` in the C locale: what ACE's `squish` trims off a line, a name and a value."""
+
+
+def _assigned(line: str) -> str | None:
+    """The value the module reads from `line` when it assigns the key; None when it does not.
+
+    The module reads `aiplayerbot.conf` through the core's `Config::SetSource`
+    (tortoise-wow `src/shared/Config/Config.cpp`, `Reload`), which is ACE's ini
+    importer, `ACE_Ini_ImpExp::import_config` (ACE 7.1.2, the `libace-dev` of
+    the Ubuntu 24.04 image; T145): the line is trimmed, so an INDENTED line is
+    live; one that then starts with `;` or `#` is a comment, `[` a section;
+    the name is everything before the first `=`, trimmed; the value is the
+    rest, trimmed, with ONE pair of surrounding double quotes taken off when
+    both ends are `"`. Nothing wider: a trailing `# ...` is part of the value.
+
+    The comment and section rules need no code of their own here: such a
+    line's trimmed name starts with `;`, `#` or `[`, so it never equals the
+    key, and the exact name comparison carries them (a mutation that skipped
+    them survived for that reason).
+    """
+    name, equals, value = line.partition("=")
+    if not equals or name.strip(_SPACE) != KEY:
+        return None
+    value = value.strip(_SPACE)
+    if value[:1] == '"' and value[-1:] == '"':
+        value = value[1:-1]
+    return value
+
+
+Mode = Literal["off", "always", "once", "invalid"]
+
+
+@dataclass(frozen=True)
+class Request:
+    """What one value of the key means to the module: its mode and, for `once`, the token."""
+
+    mode: Mode
+    token: str = ""
+
+
+_MODULE_TRIM = " \t\r\n"
+"""What `ParsePoolResetSetting` trims off the whole value (`PoolResetPolicy.h:63-65`)."""
+_TOKEN_TRIM = " \t"
+"""What it trims off the token after `once:` (`PoolResetPolicy.h:83-85`)."""
+
+
+def parse(value: str) -> Request:
+    """`value` classified exactly as TortoiseBots' `ParsePoolResetSetting` does. Pure.
+
+    TortoiseBots 632e1b63, `runtime/PoolResetPolicy.h:58-108`, called on the
+    raw config string by `RandomBotPoolReset::PlanAtStartup`
+    (`runtime/RandomBotPoolReset.cpp:311`) and `RandomBotService.cpp:250` (T145
+    round 3). `value` is what ACE hands the module (`_assigned`: squished,
+    one pair of quotes off), so padding INSIDE quotes is still there:
+
+    1. trim `" \t\r\n"` off both ends (:63-65) -- not `\v` or `\f`;
+    2. lower-case a copy (:67-69); empty or `off` is Off (:71), `always` is
+       Always (:74);
+    3. a lower-cased copy starting `once:` (:80): the token is the ORIGINAL
+       text after those five characters, case kept (:82), trimmed of `" \t"`
+       (:83-85); empty, or failing `IsValidPoolResetToken` (1-128 characters,
+       each 0x21-0x7e, :44-56), is Invalid (:87-99); else Once with it;
+    4. anything else is Invalid (:105-107).
+
+    Invalid schedules nothing (`ShouldResetForGeneration`, :113-124), and the
+    token is compared with the applied generation case-sensitively.
+    """
+    trimmed = value.strip(_MODULE_TRIM)
+    # `std::tolower` in the C locale folds A-Z only, `str.lower()` far more; the
+    # two agree on these three words, because the only characters `str.lower()`
+    # turns into ASCII are U+0130 (to "i" + a combining dot) and U+212A (to "k").
+    lowered = trimmed.lower()
+    if lowered in ("", "off"):
+        return Request("off")
+    if lowered == "always":
+        return Request("always")
+    if lowered.startswith("once:"):
+        token = trimmed[5:].strip(_TOKEN_TRIM)
+        return Request("once", token) if is_valid_token(token) else Request("invalid")
+    return Request("invalid")
+
+
+def _lines_by_section(text: str) -> list[tuple[str, str, bool]]:
+    """`text` split at `\n` (`fgets`), each line with its section and whether it is a header.
+
+    A header's own section is the one it opens. A section header met again, in
+    any case, reopens the same section (`ACE_Configuration_ExtId::operator==`
+    is `strcasecmp`), and lines before any header are the section "". Every
+    line keeps its bytes, the `\r` of a CRLF file included.
+    """
+    found: list[tuple[str, str, bool]] = []
+    section = ""
+    for line in text.split("\n"):
+        body = line.strip(_SPACE)
+        header = body[:1] == "["
+        if header:
+            # `import_config`: the name runs to the LAST `]`. A header without
+            # one fails the whole import, so no value would be read at all;
+            # read on as if it were one, the safe direction for a gate.
+            end = body.rfind("]")
+            section = (body[1:end] if end > 0 else body[1:]).casefold()
+        found.append((section, line, header))
+    return found
+
+
+def _by_section(text: str) -> dict[str, str]:
+    """Each section that sets the key, and the value the module reads there (last wins)."""
+    found: dict[str, str] = {}
+    for section, line, header in _lines_by_section(text):
+        value = None if header else _assigned(line)
+        if value is not None:
+            found[section] = value
+    return found
+
+
+def values_in(text: str) -> tuple[str, ...]:
+    """What each `[section]` of `text` sets the key to, as the module reads it, in file order.
+
+    Inside one section the LAST assignment wins: ACE's `set_string_value`
+    replaces a name the section already holds. Sections are
+    `_lines_by_section`'s; the `\r` of a CRLF file is trimmed like any other
+    space. A section that never sets the key is not listed.
+    """
+    return tuple(_by_section(text).values())
+
+
+def value_in(text: str) -> str:
+    """What `text` asks of the module: `off` when it never says. Fails safe across sections.
+
+    One section (the shipped file's `[AiPlayerbotConf]`): its last assignment.
+    More than one that set the key: the module's `GetValueHelper` returns the
+    FIRST section that has it in the order `enumerate_sections` walks ACE's
+    hash map -- not a file order anyone can predict (T145 round 2, Codex). So
+    the answer is the value that asks the most of the module:
+
+    * the first `once:<token>` in file order, when any section has one. It is
+      what the restore gate clears (`before_restore`), and the take-back then
+      writes `off` into EVERY section, an `always` beside it included, since
+      the module may have read either; and it is the value a failed restore
+      puts back (`put_back`), the direction that lets a part-way rebuild
+      finish rather than strand half a pool;
+    * else `always`, when any section has it: `restore_warning` names it;
+    * else the first value that is not off: sections that disagree never read
+      as off;
+    * else the first (every section is off in some spelling).
+
+    Each value is classified by `parse`, the module's own rule, and returned
+    as written (`_assigned`'s answer), so a token goes back exactly.
+    """
+    values = values_in(text)
+    if not values:
+        return "off"
+    modes = [parse(v).mode for v in values]
+    once = [v for v, mode in zip(values, modes, strict=True) if mode == "once"]
+    always = [v for v, mode in zip(values, modes, strict=True) if mode == "always"]
+    not_off = [v for v, mode in zip(values, modes, strict=True) if mode != "off"]
+    return (once or always or not_off or list(values))[0]
 
 
 def setting(server_dir: Path) -> str:
-    """What the install's `aiplayerbot.conf` asks of the module, as written: `off` if unset.
+    """What the install's `aiplayerbot.conf` asks of the module (`value_in`): `off` if unset.
 
-    The case is kept, because a `once:` token is compared case-sensitively by
-    the module and may have to be written back exactly; compare the keyword
-    with `.lower()`.
+    As written, case and padding kept, because a `once:` token is compared
+    case-sensitively by the module and may have to be written back exactly;
+    classify it with `parse`, never by comparing strings.
 
-    Read the way `conf.patch` writes: active lines at column 0. A `once:` on
-    ANY of them counts (the patch moves every copy at once). A missing file is
-    `off`: nothing is asked of a module that has no config.
+    Read the way the module reads it (T145), not the way `conf.patch` writes:
+    an indented or quoted `once:` a person typed is a request the module acts
+    on, and the restore gate must see it. A missing file is `off`: nothing is
+    asked of a module that has no config.
 
     Raises:
         OSError, UnicodeDecodeError: the file is there and could not be read.
@@ -230,11 +393,258 @@ def setting(server_dir: Path) -> str:
             text = handle.read()
     except FileNotFoundError:
         return "off"
-    values = [m["value"] for line in text.splitlines() if (m := _ACTIVE.match(line.rstrip()))]
-    for value in values:
-        if value.lower().startswith("once:"):
-            return value
-    return values[-1] if values else "off"
+    return value_in(text)
+
+
+def _with_value(entry: CatalogEntry, text: str, value: str) -> str:
+    """`text` with the key set to `value` in EVERY section that sets it. Pure.
+
+    What is kept: every line that does not assign the key, byte for byte, and
+    each key line's own line ending. What is not: a line that assigns the key
+    is rewritten whole, as `conf.patch` writes it -- `KEY = value` at column 0,
+    so its indentation, its spacing around `=` and any quotes go. A file that
+    never sets the key gets it appended at the end.
+
+    `conf.patch` is the writer, and it matches column-0 lines only; the module
+    also obeys an indented one (`_assigned`), in whichever section it sits.
+    So every line the module reads as the key is first moved to column 0,
+    where `conf.patch` rewrites it with the rest -- otherwise an indented copy,
+    or a copy in another section (`value_in`), would stay in force (T145).
+    Then every section is read back the module's way, and a text the module
+    would read otherwise (`conf.patch` also splits at a form feed, which
+    `fgets` does not) is refused rather than written.
+
+    Raises:
+        InstallerError: `conf.patch`'s own refusals.
+        PoolResetError: the module would not read `value` from the result.
+    """
+    native_block = entry.install.native
+    cmangos = native_block.cmangos if native_block is not None else None
+    table = cmangos.conf.files.get(bot_population.CONF_NAME) if cmangos is not None else None
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if _assigned(line) is not None:
+            lines[index] = line.lstrip(_SPACE)
+    patched = conf.patch(
+        "\n".join(lines),
+        ConfPatch(
+            keys={KEY: value},
+            match_commented=table.match_commented if table is not None else False,
+        ),
+        {},
+    )
+    # By meaning (`parse`), not by spelling: a value written back as it was
+    # read -- `" once:T "` from inside quotes -- is written unquoted, and ACE
+    # then trims the padding the module would have trimmed anyway.
+    if {parse(v) for v in values_in(patched)} != {parse(value)}:
+        raise PoolResetError(
+            f"{bot_population.CONF_NAME} has a line Yu'lon cannot rewrite so that the bots "
+            f"module reads {KEY} = {value}; set it by hand"
+        )
+    return patched
+
+
+def asks_for_a_rebuild(value: str) -> bool:
+    """Is `value` a rebuild request to the module (`parse`): a valid `once:<token>`, or `always`?"""
+    return parse(value).mode in ("once", "always")
+
+
+def put_back_file(
+    entry: CatalogEntry,
+    server_dir: Path,
+    backup: Path,
+    target: Path,
+    put: Callable[[Path, Path], None],
+) -> str | None:
+    """Put a Tuning backup back over `target` with `put`, never arming a rebuild (T145).
+
+    Every route that writes a backup's content back comes through here on
+    Tortoise: the Playerbots card's Revert, the raw editor's Revert
+    (`tuning.restore`) and Undo the last reset (`reset_defaults.restore`). A
+    backup is a copy of the file as it was when it was taken, `once:<token>`
+    included when a request was pending then; the Maintenance restore since
+    may have set the key to off (`before_restore`) and loaded databases with no
+    record of that rebuild. Putting the backup back whole re-armed it, and the
+    next start deleted the restored bots.
+
+    So a backup that asks for a rebuild in ANY section (`parse`: a valid
+    `once:<token>`, or `always`) never supplies the key (round 4). It goes back
+    with every one of its key lines replaced by the CURRENT file's, section by
+    section, byte for byte (`_with_key_lines_of`): a section the file does not
+    set the key in gets no key line, and a file that sets it nowhere leaves
+    none -- off. No value stands for the file as a whole: its sections may
+    disagree, and the module may be reading any of them (`value_in`), so any
+    choice of one could swap the request it acts on for another (Codex, round
+    3). A backup with no request anywhere is `put` whole, as before, and so is
+    one whose key lines are the file's own. Only `aiplayerbot.conf` is the
+    module's bot config; any other file is `put` untouched. A current file
+    that cannot be read has no key lines to keep.
+
+    Returns the report's sentence when the key was kept, else None.
+
+    `put` is used for any other file only. `aiplayerbot.conf` is written from
+    the bytes read here, by `_replace_if_unchanged`, whichever the route: an
+    atomic replace, where the card's and the raw editor's `tuning.restore` was
+    a `copy2` straight onto the file; the backup's mode and times on a whole
+    copy, as `copy2` and `reset_defaults.restore` gave; the file's own mode
+    and a fresh time on a rewritten one, as `conf.replace_file` gave.
+
+    Raises:
+        OSError: nothing was written -- a backup or file that could not be
+            read, one that asks for a rebuild and cannot be rewritten (not
+            UTF-8 text), a file that changed while this ran
+            (`CHANGED_WHILE_PUTTING_BACK`), or the write's own failure.
+    """
+    if target != server_dir / bot_population.CONF_FILE:
+        put(backup, target)
+        return None
+    # One read of each, and those bytes decide AND are written (round 5): a
+    # backup opened twice could say one thing to the question and another to
+    # the copy, and a file whose key lines were read must still be that file
+    # when the result replaces it (`_replace_if_unchanged`).
+    raw = backup.read_bytes()
+    before = _read_if_there(target)
+    # Replacement characters only for the question; the answer that writes decodes strictly.
+    requests = [
+        v for v in values_in(raw.decode("utf-8", errors="replace")) if asks_for_a_rebuild(v)
+    ]
+    if not requests:
+        _replace_if_unchanged(target, raw, before, like=backup)
+        return None
+    restored = requests[0]
+    try:
+        backup_text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError(
+            f"{backup.name} is not UTF-8 text, and it asks the bots module to rebuild the "
+            f"random bots ({KEY} = {restored}), so Yu'lon will not put it back: {exc}"
+        ) from exc
+    try:
+        current = (before or b"").decode("utf-8")
+    except UnicodeDecodeError as exc:
+        logger.warning(f"could not read {target} before putting a backup back: {exc}")
+        current = ""
+    text = _with_key_lines_of(current, backup_text)
+    if text == backup_text:
+        _replace_if_unchanged(target, raw, before, like=backup)
+        return None
+    _replace_if_unchanged(target, text.encode("utf-8"), before, like=None)
+    logger.info(f"put {backup.name} back over {target} with its {KEY} lines kept as they were")
+    return REQUEST_NOT_PUT_BACK.format(file=target.name, restored=restored)
+
+
+def _read_if_there(path: Path) -> bytes | None:
+    """The file's bytes, or None when there is no file. Raises any other `OSError`."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _replace_if_unchanged(
+    target: Path, data: bytes, before: bytes | None, *, like: Path | None
+) -> None:
+    """Put `data` in place of `target` atomically, if `target` still holds `before`. Round 5.
+
+    `data` goes to an owner-only sibling first (`tuning.private_copy`'s rule:
+    the conf holds the database password), one made for THIS call by
+    `tempfile.mkstemp` (round 6, Codex): a fixed name that every call unlinked
+    and re-created let a second put-back remove the first one's temp and stage
+    its own there, and the first then renamed the second's bytes into place.
+    Only this call's own temp is ever removed. Its name starts with a dot and
+    ends `.yulon-tmp`, so `tuning.backups_of()` (`<name>.<stamp>....bak`) never
+    lists it. `like` given: that file's mode and
+    times (`shutil.copystat`, only its metadata is read again), which is what
+    the routes' copies of a whole backup gave. None: the file's own mode, as
+    `conf.replace_file` keeps it, owner-writable.
+
+    Then `target` is read again and compared with `before`, the bytes its key
+    lines were taken from; changed -- another press, a restore clearing the
+    request, a hand edit -- the temp is removed and nothing is written. That
+    shrinks the window to one read and one rename; without a lock every writer
+    honours it cannot be closed, and no such lock exists across the app, the
+    server and an editor. Refusing rather than retrying: what to put back over
+    a file that moved is the person's call.
+
+    Raises:
+        OSError: nothing was written.
+    """
+    try:
+        mode: int | None = stat.S_IMODE(target.stat().st_mode)
+    except OSError:
+        mode = None
+    # 0600 and O_EXCL: `mkstemp`'s own guarantees, the ones `private_copy` asks for.
+    fd, name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=PUT_BACK_TEMP_SUFFIX
+    )
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        if like is not None:
+            shutil.copystat(like, tmp)
+        elif mode is not None:
+            os.chmod(tmp, mode | stat.S_IWUSR)
+        if _read_if_there(target) != before:
+            raise OSError(CHANGED_WHILE_PUTTING_BACK.format(file=target.name))
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+PUT_BACK_TEMP_SUFFIX = ".yulon-tmp"
+"""How a Tuning backup being put back ends its (per-call) name until the rename lands."""
+
+CHANGED_WHILE_PUTTING_BACK = (
+    "{file} changed on disk while the copy was being put back, so nothing was written; press "
+    "the button again to put it back over the file as it is now"
+)
+"""`_replace_if_unchanged`'s refusal: the routes put it in their own report line."""
+
+
+def _with_key_lines_of(current: str, backup: str) -> str:
+    """`backup` with its key lines swapped for `current`'s, section by section. Pure.
+
+    Every other line of `backup` is kept byte for byte. In each section, the
+    current file's key lines take the place of the backup's first one; a
+    section the backup has without the key gets them under its first header;
+    the current file's lines before any header go first; a section only the
+    current file has is appended, its header with it.
+    """
+    mine: dict[str, list[str]] = {}
+    headers: dict[str, str] = {}
+    for section, line, header in _lines_by_section(current):
+        if header:
+            headers.setdefault(section, line)
+        elif _assigned(line) is not None:
+            mine.setdefault(section, []).append(line)
+    lines = _lines_by_section(backup)
+    trailing = bool(lines) and lines[-1][1] == ""
+    if trailing:
+        lines.pop()
+    keyed = {s for s, line, header in lines if not header and _assigned(line) is not None}
+    out: list[str] = []
+    placed: set[str] = set()
+    for section, line, header in lines:
+        if not header and _assigned(line) is not None:
+            if section not in placed:
+                out += mine.get(section, [])
+                placed.add(section)
+            continue
+        out.append(line)
+        if header and section not in keyed and section not in placed:
+            out += mine.get(section, [])
+            placed.add(section)
+    if "" not in placed:
+        out = mine.get("", []) + out
+        placed.add("")
+    for section, kept in mine.items():
+        if section not in placed:
+            out += [headers[section], *kept]
+    if trailing:
+        out.append("")
+    return "\n".join(out)
 
 
 @dataclass(frozen=True)
@@ -277,7 +687,7 @@ def before_restore(entry: CatalogEntry, server_dir: Path) -> TakenBack | None:
         value = setting(server_dir)
     except (OSError, UnicodeDecodeError) as exc:
         raise PoolResetError(_restore_refused(exc)) from exc
-    if not value.lower().startswith("once:"):
+    if parse(value).mode != "once":
         return None
     try:
         take_back(entry, server_dir)
@@ -325,7 +735,7 @@ def after_a_failed_restore(
 def restore_warning(server_dir: Path) -> str | None:
     """The plan's warning when the conf says `always`, which a restore does not change."""
     try:
-        return ALWAYS_BEFORE_RESTORE if setting(server_dir).lower() == "always" else None
+        return ALWAYS_BEFORE_RESTORE if parse(setting(server_dir)).mode == "always" else None
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -422,6 +832,14 @@ RESTORE_CLEARED = (
     "ones."
 )
 """The restore report's line when `before_restore()` took a `once:` back (round 4)."""
+REQUEST_NOT_PUT_BACK = (
+    "{file}: the copy put back asked the bots module to rebuild the random bots "
+    f"({KEY} = {{restored}}), so that one setting was not put back and stays as the file had "
+    "it: a rebuild request brought back from an older copy would delete bots a restore brought "
+    "back, at the next start. Every other setting is the copy's. To rebuild them, press "
+    "Rebuild random bots… on the Bots tab."
+)
+"""The report's line when `put_back_file` kept the key (T145)."""
 ALWAYS_BEFORE_RESTORE = (
     f"aiplayerbot.conf says {KEY} = always, so the next start after this restore deletes and "
     "rebuilds every random bot, the restored ones included. Yu'lon leaves that setting alone; "
@@ -648,6 +1066,12 @@ class PoolRebuild:
     def restore_warning(self) -> str | None:
         """`restore_warning()` for this install; runs on the plan's worker."""
         return restore_warning(self.server_dir)
+
+    def put_back_file(
+        self, backup: Path, target: Path, put: Callable[[Path, Path], None]
+    ) -> str | None:
+        """`put_back_file()` for this install: a Tuning backup back, never arming a rebuild."""
+        return put_back_file(self.entry, self.server_dir, backup, target, put)
 
     def restart_owed_now(self, cancel: threading.Event | None = None) -> Iterator[str]:
         """The restart T123's enrolment is owed, on its own: the offer was declined (T144)."""
