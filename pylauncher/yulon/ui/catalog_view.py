@@ -1015,7 +1015,12 @@ class CatalogView(QWidget):
         Escape and the window's close button both return `NoButton`, and only
         an explicit Yes may throw away a running application.
         """
-        if platform.docker_group_reexec() is None:
+        # Asked ONCE, here, and the answer is what the restart execs (T152). It
+        # can run `id -nG` for up to five seconds, and the restart gives the
+        # single-instance lock up around its exec: asked again in there, those
+        # seconds were a window in which another launch could take the lock.
+        argv = platform.docker_group_reexec()
+        if argv is None:
             return False
         if said_yes(
             QMessageBox.question(
@@ -1035,8 +1040,19 @@ class CatalogView(QWidget):
             # that closed and did nothing. The single-instance lock is handed
             # over around it: the exec keeps this PID, and the restarted app
             # would otherwise find its own lock held and refuse to open (T152).
-            with single_instance.handed_over():
-                platform.restart_under_docker_group()
+            with single_instance.handed_over() as handover:
+                platform.restart_under_docker_group(reexec=lambda: argv)
+            if handover.lost:
+                # Another Yu'lon took the lock in the moment it was free. Two
+                # copies running is what the lock exists to prevent, so this
+                # one goes, rather than carrying on unguarded beside it.
+                QMessageBox.warning(
+                    self,
+                    single_instance.LOST_TITLE,
+                    f"{message}\n\n{single_instance.LOST_TEXT}",
+                )
+                self.window().close()
+                return True
             QMessageBox.warning(self, "Install failed", message)
         return True
 

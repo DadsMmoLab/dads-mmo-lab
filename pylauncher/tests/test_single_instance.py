@@ -96,6 +96,11 @@ def restart_under_the_docker_group(window):
 
 
 def build_window():
+    if role == "slow":
+        # A cold start: the lock is taken and the socket is listening, but the
+        # event loop that answers it does not run until this returns.
+        print("T152 building", flush=True)
+        time.sleep(float(os.environ["YULON_T152_SLOW_S"]))
     if role == "exec":
         window = real_build_window()
         QTimer.singleShot(0, lambda: restart_under_the_docker_group(window))
@@ -124,9 +129,16 @@ raise SystemExit(code)
 HUNG_FIRST_SECONDS = 40.0
 """How long the hung first copy blocks its event loop: well past the second's whole wait.
 
-The second gives up after `REPLY_MS` of silence on a connected socket; the test
-kills the hung one as soon as the second has spoken, so this is a ceiling, not
-a cost.
+The second gives up when `CLAIM_WAIT_MS` runs out on a connected socket that
+never answered; the test kills the hung one as soon as the second has spoken,
+so this is a ceiling, not a cost.
+"""
+
+SLOW_START_SECONDS = 8.0
+"""How long the slow first copy spends in `build_window()` before its event loop runs.
+
+Past the five seconds round 1 gave a connected first copy to answer, and well
+inside `CLAIM_WAIT_MS`, so the old code shows the box and the new one waits.
 """
 
 SECOND_WINDOW_LIFETIME_MS = "3000"
@@ -154,6 +166,10 @@ def _env(tmp_path: Path, role: str, **extra: str) -> dict[str, str]:
     home.mkdir(exist_ok=True)
     scratch_temp = tmp_path / "temp"
     scratch_temp.mkdir(exist_ok=True)
+    # The children's own runtime dir, private as the spec says one is, so the
+    # socket's place does not depend on whether this box's variable is real.
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700, exist_ok=True)
     env = dict(os.environ)
     env.update(
         {
@@ -164,6 +180,7 @@ def _env(tmp_path: Path, role: str, **extra: str) -> dict[str, str]:
             "TMPDIR": str(scratch_temp),
             "TEMP": str(scratch_temp),
             "TMP": str(scratch_temp),
+            "XDG_RUNTIME_DIR": str(runtime),
             "YULON_T152_ROLE": role,
             "YULON_T152_SCRIPT": _LAUNCH,
             "PYTHONPATH": str(Path(main.__file__).parent),
@@ -241,6 +258,9 @@ def test_a_second_launch_brings_the_first_window_forward_and_exits_0(
     """
     first, first_out = _start(tmp_path, launches, "first", "window", YULON_T152_MINIMIZE="1")
     _wait_for(first_out, first, "T152 ready")
+    if sys.platform.startswith("linux"):
+        # Where the two meet: this user's runtime dir, not a guessable name in /tmp.
+        assert list((tmp_path / "run").glob("yulon-*")), "the socket is not in XDG_RUNTIME_DIR"
 
     second = _run(
         tmp_path,
@@ -273,11 +293,18 @@ def test_a_temp_dir_too_long_for_a_socket_path_still_lets_the_second_launch_thro
     """
     deep = tmp_path / "temp" / ("t" * 120)
     deep.mkdir(parents=True)
-    first, first_out = _start(tmp_path, launches, "first", "window", TMPDIR=str(deep))
+    # No runtime dir, so the socket goes where Qt puts it: under the long TMPDIR.
+    first, first_out = _start(
+        tmp_path, launches, "first", "window", TMPDIR=str(deep), XDG_RUNTIME_DIR=""
+    )
     _wait_for(first_out, first, "T152 ready")
 
     second = _run(
-        tmp_path, "window", TMPDIR=str(deep), YULON_T152_LIFETIME_MS=SECOND_WINDOW_LIFETIME_MS
+        tmp_path,
+        "window",
+        TMPDIR=str(deep),
+        XDG_RUNTIME_DIR="",
+        YULON_T152_LIFETIME_MS=SECOND_WINDOW_LIFETIME_MS,
     )
 
     assert "T152 ready" not in second.stdout, f"the second launch opened a window:\n{second.stdout}"
@@ -339,6 +366,30 @@ def test_a_first_copy_that_does_not_answer_is_named_in_a_box_not_waited_on(
     assert took < HUNG_FIRST_SECONDS, f"the second waited out the whole hang ({took:.1f}s)"
 
 
+def test_a_second_launch_during_the_first_ones_slow_start_waits_for_it_and_raises_it(
+    tmp_path: Path, launches: list[subprocess.Popen[bytes]]
+) -> None:
+    """A first copy still in `build_window()` has the lock and a socket, and cannot answer yet.
+
+    Round 1 gave it five seconds and then showed the "already open, may be
+    stuck" box - after which the first window came forward anyway, answering a
+    launch that had already given up (cold review, reproduced with a 15 s
+    `build_window`; a frozen Windows build under a virus scanner is that).
+    """
+    first, first_out = _start(
+        tmp_path, launches, "first", "slow", YULON_T152_SLOW_S=str(SLOW_START_SECONDS)
+    )
+    _wait_for(first_out, first, "T152 building")
+
+    second = _run(tmp_path, "window", YULON_T152_LIFETIME_MS=SECOND_WINDOW_LIFETIME_MS)
+
+    assert "T152 box" not in second.stdout, second.stdout
+    assert "T152 ready" not in second.stdout, f"the second launch opened a window:\n{second.stdout}"
+    assert second.returncode == 0, second.stdout
+    assert first.wait(timeout=HANG_BOUND) == 0, _said(first_out)
+    assert "T152 brought" in _said(first_out), _said(first_out)
+
+
 def test_closing_yulon_lets_the_next_launch_open(
     tmp_path: Path, launches: list[subprocess.Popen[bytes]]
 ) -> None:
@@ -381,6 +432,128 @@ def test_the_docker_group_restart_hands_the_lock_to_the_process_it_becomes(
 
 
 # ------------------------------------------------------------ in-process halves
+
+
+def _held(lock_path: Path) -> bool:
+    """Whether somebody holds `lock_path`, asked by trying it and letting go at once."""
+    from PySide6.QtCore import QLockFile
+
+    probe = QLockFile(str(lock_path))
+    if probe.tryLock(0):
+        probe.unlock()
+        return False
+    return True
+
+
+@pytest.mark.parametrize("competitor", [True, False], ids=["a-launch-took-the-gap", "nobody-came"])
+def test_a_failed_docker_group_restart_closes_this_copy_if_another_took_the_lock(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, competitor: bool
+) -> None:
+    """The exec gap, driven through the real view method and the real `restart_under_docker_group`.
+
+    Two things round 1 got wrong (Codex, high). The argv was worked out INSIDE
+    the gap - `docker_group_reexec()` can run `id -nG` for five seconds - so
+    every call to it must find the lock still held. And when the exec fails
+    after another launch has taken the lock, this copy carried on unguarded
+    beside it; it must say so and close. Only `os.execv` is replaced: it lets
+    the competitor in (or not), then fails the way a missing `sg` does.
+    """
+    from PySide6.QtCore import QLockFile
+    from PySide6.QtWidgets import QMainWindow, QMessageBox
+
+    from yulon import platform
+    from yulon.catalog.catalog import load_catalog
+    from yulon.ui import single_instance
+    from yulon.ui.catalog_view import CatalogView
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    config = tmp_path / "config"
+    lock_path = config / single_instance.LOCK_NAME
+    guard = single_instance.InstanceGuard(config)
+    rival = QLockFile(str(lock_path))
+    asked_while_held: list[bool] = []
+    exec_found_it_free: list[bool] = []
+
+    def reexec() -> list[str]:
+        asked_while_held.append(_held(lock_path))
+        return ["/nonexistent/sg", "docker", "-c", "yulon"]
+
+    def execv(_path: str, _argv: list[str]) -> None:
+        exec_found_it_free.append(not _held(lock_path))
+        if competitor:
+            assert rival.tryLock(0), "the competitor could not take the free lock"
+        raise OSError("sg: not found")
+
+    monkeypatch.setattr(platform, "docker_group_reexec", reexec)
+    monkeypatch.setattr(platform.os, "execv", execv)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    boxes: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _p, title, *_a, **_k: boxes.append(title))
+    window = QMainWindow()
+    view = CatalogView(load_catalog(), lambda e: None, LogPanel(), pick_dir=lambda *_: tmp_path)
+    window.setCentralWidget(view)
+    try:
+        assert guard.claim() == "first"
+        window.show()
+
+        assert view._offer_a_restart_instead("the install could not reach Docker") is True
+
+        assert asked_while_held and all(asked_while_held), asked_while_held
+        assert exec_found_it_free == [True], "the lock was not free for the exec"
+        if competitor:
+            assert boxes == [single_instance.LOST_TITLE], boxes
+            assert not window.isVisible(), "this copy kept running beside the one that won"
+        else:
+            assert boxes == ["Install failed"], boxes
+            assert window.isVisible()
+            assert _held(lock_path), "the exec failed and the lock was not taken back"
+    finally:
+        window.close()
+        guard.release()
+        if rival.isLocked():
+            rival.unlock()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="XDG_RUNTIME_DIR is Linux's")
+@pytest.mark.parametrize(
+    "case",
+    ["private", "unset", "missing", "shared-mode", "someone-elses", "too-long"],
+)
+def test_the_socket_goes_in_the_runtime_dir_only_when_it_is_this_users_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A guessable name in `/tmp` can be created first by another local user (cold review).
+
+    Every case but `private` breaks exactly one of the things that make a
+    runtime dir private, and each must fall back to Qt's temp dir.
+    """
+    from yulon.ui import single_instance
+
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    if case == "unset":
+        monkeypatch.delenv("XDG_RUNTIME_DIR")
+    elif case == "missing":
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "not-there"))
+    elif case == "shared-mode":
+        runtime.chmod(0o755)
+    elif case == "someone-elses":
+        someone_else = os.getuid() + 1
+        monkeypatch.setattr(single_instance.os, "getuid", lambda: someone_else)
+    elif case == "too-long":
+        runtime = tmp_path / ("r" * 100)
+        runtime.mkdir(mode=0o700)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+
+    name = single_instance.server_name_for(tmp_path / "config" / single_instance.LOCK_NAME)
+
+    if case == "private":
+        assert Path(name).parent == runtime, name
+    else:
+        assert not name.startswith(str(runtime)), name
+        assert "/" not in name or name.startswith("/tmp/"), name
 
 
 def test_the_first_copy_answers_a_raise_and_refuses_anything_else(
