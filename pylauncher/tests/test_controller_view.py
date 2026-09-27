@@ -61,7 +61,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.git import RunnerGit, git_available
+from yulon.git import Behind, RunnerGit, git_available
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
@@ -9171,6 +9171,27 @@ def test_an_update_check_puts_the_count_on_the_row_it_counted(
     assert view.modules_panel.row("mod-aoe-loot").chip_buttons == ()
 
 
+def test_an_update_check_that_cannot_count_still_offers_the_update(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T147: a shallow checkout behind by a number it cannot prove keeps its chip.
+
+    The report prints the row's own sentence and no figure; the chip is the
+    update chip with no count on it.
+
+    Mutation: filter the counted rows on `(row.behind or 0) > 0` again and the
+    uncounted row loses its chip -- a module with an update available shows
+    none.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    row = apply_module.ModuleUpdate("mod-transmog", tmp_path, True, Behind.UNCOUNTED)
+    view._module_updates_done((row,))
+
+    assert view.module_report.toPlainText() == row.line
+    labels = [b.text() for b in view.modules_panel.row("mod-transmog").chip_buttons]
+    assert modules_panel.chip_update_label(Behind.UNCOUNTED) in labels, labels
+
+
 def test_busy_greys_every_row_button_and_gives_them_back(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -10949,7 +10970,12 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
 
 
 def _server_cloned_view(
-    ps: _Ps, tmp_path: Path, *, route: bool = True, reads: list[Path] | None = None
+    ps: _Ps,
+    tmp_path: Path,
+    *,
+    route: bool = True,
+    reads: list[Path] | None = None,
+    playerbots: int | Behind = 4,
 ) -> tuple[ControllerView, _LatestSpy]:
     """A WotLK tab with mod-playerbots (server-cloned) and mod-transmog (catalogued) behind.
 
@@ -10971,7 +10997,7 @@ def _server_cloned_view(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     view._module_updates_done(
         (
-            apply_module.ModuleUpdate("mod-playerbots", tmp_path, True, 4),
+            apply_module.ModuleUpdate("mod-playerbots", tmp_path, True, playerbots),
             apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 3),
         )
     )
@@ -11057,6 +11083,36 @@ def test_a_finished_server_update_drops_the_server_cloned_count_and_version(
     assert view._behind.get(("module", "mod-transmog")) == 3
     pump_until(lambda: reads.count(playerbots) == 2, "the moved checkout's version was re-read")
     assert reads.count(tmp_path / "modules" / "mod-transmog") == 1
+
+
+def test_an_uncounted_server_cloned_row_offers_the_server_update_and_a_finish_drops_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T146 and T147 together, on the live shape: mod-playerbots cannot count (T147).
+
+    The count arrives through the real `_module_updates_done()` as
+    `Behind.UNCOUNTED`, the chip is still T146's server update with no number
+    on it, and a finished update drops that answer like any count -- a
+    checkout that has moved is no longer "behind, how far unknown" either.
+
+    Mutation: filter `_module_updates_done()`'s rows on `> 0` again and the
+    row has no chip to press.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, spy = _server_cloned_view(ps, tmp_path, playerbots=Behind.UNCOUNTED)
+
+    labels = [b.text() for b in view.modules_panel.row("mod-playerbots").chip_buttons]
+    assert modules_panel.chip_update_label(Behind.UNCOUNTED) in labels, labels
+    assert view._behind[("module", "mod-playerbots")] is Behind.UNCOUNTED
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update finished")
+
+    assert len(spy.presses) == 1
+    assert ("module", "mod-playerbots") not in view._behind
+    assert view.modules_panel.row("mod-playerbots").chip_buttons == ()
+    assert view._behind.get(("module", "mod-transmog")) == 3
 
 
 def test_a_finished_return_to_the_pin_drops_the_server_cloned_count_too(

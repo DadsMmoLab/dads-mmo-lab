@@ -1507,6 +1507,9 @@ def test_a_source_pinned_on_a_named_branch_clones_the_branch_and_still_pins_by_h
 # --------------------------------------------------------------------------
 
 
+HEAD_SHA = "d" * 40
+
+
 @pytest.mark.parametrize(
     "impl",
     [
@@ -1544,17 +1547,38 @@ def test_commits_behind_counts_what_the_update_would_bring_in(
 
     monkeypatch.setattr(runner, "run", fake_run)
 
-    answers += [_completed(), _completed(stdout="7\n")]
+    full = _completed(stdout=f"false\n{HEAD_SHA}\n")
+    answers += [_completed(), full, _completed(stdout="7\n")]
     assert impl.commits_behind(dest, "wotlk") == 7
-    assert seen_argv[-2][-3:] == ["fetch", "origin", "wotlk"]
+    assert seen_argv[-3][-3:] == ["fetch", "origin", "wotlk"]
+    # T147: which commit HEAD is and whether the checkout is shallow, in one
+    # question, asked AFTER the fetch -- a full checkout is counted as before.
+    assert seen_argv[-2][-3:] == ["rev-parse", "--is-shallow-repository", "HEAD"]
     assert seen_argv[-1][-3:] == ["rev-list", "--count", "HEAD..FETCH_HEAD"]
-    assert not [arg for arg in seen_argv[-2] if arg.startswith("--depth")]
+    assert not [arg for arg in seen_argv[-3] if arg.startswith("--depth")]
 
     # Up to date is 0, and 0 is a real answer — never None, which means "could
     # not ask" and is what a caller has to print differently.
-    answers += [_completed(), _completed(stdout="0\n")]
+    answers += [_completed(), full, _completed(stdout="0\n")]
     assert impl.commits_behind(dest, None) == 0
-    assert seen_argv[-2][-3:] == ["fetch", "origin", "HEAD"]
+    assert seen_argv[-3][-3:] == ["fetch", "origin", "HEAD"]
+
+    # A SHALLOW checkout is walked instead, and both back-ends read the walk
+    # the same way: straight on top of HEAD is counted; a walk that stopped
+    # anywhere else is behind by a number nobody can prove.
+    shallow = _completed(stdout=f"true\n{HEAD_SHA}\n")
+    straight = f"{'b' * 40} {'a' * 40}\n{'a' * 40} {HEAD_SHA}\n-{HEAD_SHA}\n"
+    answers += [_completed(), shallow, _completed(stdout=straight)]
+    assert impl.commits_behind(dest, None) == 2
+    assert seen_argv[-1][-4:] == ["rev-list", "--parents", "--boundary", "HEAD..FETCH_HEAD"]
+    elsewhere = f"{'a' * 40} {'c' * 40}\n-{'c' * 40}\n"
+    answers += [_completed(), shallow, _completed(stdout=elsewhere)]
+    assert impl.commits_behind(dest, None) is git.Behind.UNCOUNTED
+    parentless = f"{'a' * 40}\n"
+    answers += [_completed(), shallow, _completed(stdout=parentless)]
+    assert impl.commits_behind(dest, None) is git.Behind.UNCOUNTED
+    answers += [_completed(), shallow, _completed(stdout="")]
+    assert impl.commits_behind(dest, None) == 0
 
     # A fetch that cannot reach the remote asks nothing further.
     answers.append(_completed(returncode=128, stderr="Could not resolve host"))
@@ -1563,8 +1587,15 @@ def test_commits_behind_counts_what_the_update_would_bring_in(
     assert len(seen_argv) == before + 1, "a failed fetch must not be followed by a count"
 
     # A count that will not parse is None too: a figure a user checks against
-    # `git rev-list` by hand must never be invented.
-    answers += [_completed(), _completed(stdout="not a number\n")]
+    # `git rev-list` by hand must never be invented. So is a shape question
+    # that did not answer as asked, and a git that refused either one.
+    answers += [_completed(), full, _completed(stdout="not a number\n")]
+    assert impl.commits_behind(dest, None) is None
+    answers += [_completed(), _completed(stdout="true\n")]
+    assert impl.commits_behind(dest, None) is None
+    answers += [_completed(), _completed(returncode=128, stderr="broken")]
+    assert impl.commits_behind(dest, None) is None
+    answers += [_completed(), shallow, _completed(returncode=128, stderr="broken")]
     assert impl.commits_behind(dest, None) is None
     assert impl.commits_behind(tmp_path / "not-a-checkout", None) is None
 
@@ -1608,6 +1639,241 @@ def test_the_behind_figure_equals_the_same_range_run_by_hand(tmp_path: Path) -> 
     # And the guard's question still answers its own: nothing of the user's is
     # in the way of an update that is two commits ahead of this checkout.
     assert impl.no_local_commits(dest, "main") is True
+
+
+# -- T147: the figure on a SHALLOW checkout -----------------------------------
+#
+# Every module clone is depth 1 (`CloneSpec.depth` defaults to it), and on a
+# depth-1 checkout `HEAD..FETCH_HEAD` is not the distance: measured 2775 for a
+# real 50 on mod-playerbots. These run the app's own `RunnerGit` against real
+# repositories -- a work tree standing in for upstream, published as a bare
+# repo and cloned over `file://`, because `--depth` over a plain path is
+# ignored and would quietly test a FULL clone. The true distance is always read
+# off the upstream work tree, which has the whole history.
+
+
+class _Upstream:
+    """A repository with history, published as a bare repo a clone can reach by `file://`."""
+
+    def __init__(self, root: Path) -> None:
+        self.work = root / "work"
+        self.bare = root / "upstream.git"
+        self.work.mkdir()
+        self.git("init", "-q", "-b", "main", ".")
+
+    def git(self, *argv: str, cwd: Path | None = None) -> str:
+        done = subprocess.run(
+            ["git", "-c", "user.email=t@example", "-c", "user.name=t", *argv],
+            cwd=cwd or self.work,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return done.stdout.strip()
+
+    def commit(self, name: str) -> str:
+        (self.work / name).write_text(f"{name}\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", name)
+        return self.git("rev-parse", "HEAD")
+
+    def commits(self, prefix: str, count: int) -> list[str]:
+        return [self.commit(f"{prefix}{i}") for i in range(count)]
+
+    def merge_branch_from(self, base: str, name: str, count: int) -> None:
+        """A branch of `count` commits forked at `base`, merged into main with a merge commit."""
+        self.git("checkout", "-q", "-b", name, base)
+        self.commits(f"{name}-", count)
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", name, "-m", f"merge {name}")
+
+    def publish(self) -> str:
+        """Push main to the bare repo a clone fetches from; return main's commit."""
+        if not self.bare.exists():
+            self.git("init", "-q", "--bare", "-b", "main", str(self.bare))
+        self.git("push", "-q", "--force", str(self.bare), "main")
+        return self.git("rev-parse", "HEAD")
+
+    @property
+    def url(self) -> str:
+        return self.bare.as_uri()
+
+    def distance(self, old: str, new: str) -> int:
+        """The TRUE `old..new`, from the work tree that has every commit."""
+        return int(self.git("rev-list", "--count", f"{old}..{new}"))
+
+
+def _by_hand(dest: Path) -> int:
+    """`git rev-list --count HEAD..FETCH_HEAD` as a person would type it in the checkout."""
+    done = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD..FETCH_HEAD"],
+        cwd=dest,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return int(done.stdout)
+
+
+def _counted_have_parents(dest: Path) -> bool:
+    """Does every commit `HEAD..FETCH_HEAD` walks still have a parent in this checkout?"""
+    done = subprocess.run(
+        ["git", "rev-list", "--parents", "HEAD..FETCH_HEAD"],
+        cwd=dest,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return all(len(line.split()) > 1 for line in done.stdout.splitlines())
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_shallow_checkout_behind_a_merge_is_not_counted_as_the_whole_history(
+    tmp_path: Path,
+) -> None:
+    """The measured 2775, in miniature: a branch merged since, forked before HEAD.
+
+    The fetch hands that branch's history down to the root, and the commits
+    under HEAD's graft -- the ones that would exclude it -- never arrive. So
+    the plain range counts upstream's whole past as new. The only honest answer
+    is "behind, how far this checkout cannot say".
+
+    The fixture breaks one rule of the proof and only one: a counted commit
+    with no parent (the root). Every other commit the walk stops at is HEAD.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    installed = up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    assert spec.depth == 1
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    grafts = (spec.dest / ".git" / "shallow").read_text(encoding="utf-8")
+
+    up.merge_branch_from(history[10], "side", 3)
+    up.commit("after")
+    tip = up.publish()
+
+    said = impl.commits_behind(spec.dest, None)
+    # The shape is the one measured: the plain range says far more than the truth.
+    assert up.distance(installed, tip) == 5
+    assert _by_hand(spec.dest) == 16
+    assert not _counted_have_parents(spec.dest)
+    assert said is git.Behind.UNCOUNTED, said
+    # And the question did not deepen the clone to answer itself.
+    assert (spec.dest / ".git" / "shallow").read_text(encoding="utf-8") == grafts
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_shallow_checkout_whose_tip_is_already_a_graft_is_not_one_commit_behind(
+    tmp_path: Path,
+) -> None:
+    """The other wrong answer, T146's live evidence: "1" for any distance.
+
+    A pinned source clones the tip at depth 1 and then fetches the pin at
+    depth 1 (`_pin()`), so the tip the count fetches is already here -- as a
+    graft. The walk from it stops at once and counts the tip alone.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    pin = history[-6]
+    tip = up.publish()
+    dest = tmp_path / "mod-example"
+    impl = git.RunnerGit()
+    impl.clone(git.CloneSpec(url=up.url, dest=dest, rev=pin))
+
+    said = impl.commits_behind(dest, None)
+    assert up.distance(pin, tip) == 5
+    assert _by_hand(dest) == 1
+    assert said is git.Behind.UNCOUNTED, said
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_merge_forked_under_the_graft_is_not_counted_after_an_update(tmp_path: Path) -> None:
+    """Every counted commit has its parents, and the count is still wrong.
+
+    After one host-git update (fetch without depth, reset) HEAD is no longer a
+    graft, and an earlier merge brought history in beside the graft. A branch
+    forked from a commit UNDER the graft then lands as five "new" commits whose
+    parents are all here, so a no-parentless-commits rule alone passes it.
+    What gives it away is where the walk stopped: at a commit that is not HEAD.
+    This fixture breaks that rule and only that one.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    up.merge_branch_from(history[10], "side", 3)
+    up.commit("after")
+    up.publish()
+    impl.clone(spec)  # the existing clone, so `_update()`: fetch + reset --hard FETCH_HEAD
+    updated = impl.head_sha(spec.dest)
+    assert updated is not None
+
+    up.commits("more", 2)
+    up.merge_branch_from(history[15], "late", 2)
+    tip = up.publish()
+
+    said = impl.commits_behind(spec.dest, None)
+    assert up.distance(updated, tip) == 5
+    assert _by_hand(spec.dest) == 10
+    assert _counted_have_parents(spec.dest), "not the shape this test is about"
+    assert said is git.Behind.UNCOUNTED, said
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_shallow_checkout_on_straight_history_keeps_its_exact_count(tmp_path: Path) -> None:
+    """What the uncounted answer must not swallow: a count the checkout CAN prove.
+
+    Straight history on top of HEAD, the shape of a module that squash-merges
+    or rebases: every commit the walk counts has its parent, and the walk stops
+    at HEAD and nowhere else, so the figure is exact on a depth-1 checkout too.
+    Up to date is still 0, never uncounted.
+    """
+    up = _Upstream(tmp_path)
+    up.commits("c", 20)
+    installed = up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    assert impl.commits_behind(spec.dest, None) == 0
+
+    up.commits("new", 5)
+    tip = up.publish()
+    assert impl.commits_behind(spec.dest, None) == up.distance(installed, tip) == 5
+
+    # Once updated the checkout is no longer a graft at HEAD, and it still counts.
+    impl.clone(spec)
+    updated = impl.head_sha(spec.dest)
+    assert updated is not None
+    up.commits("next", 3)
+    tip = up.publish()
+    assert impl.commits_behind(spec.dest, None) == up.distance(updated, tip) == 3
+    assert (spec.dest / ".git" / "shallow").is_file(), "the clone must still be shallow"
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_full_checkout_counts_through_merges_exactly(tmp_path: Path) -> None:
+    """The shallow rule is for shallow checkouts: a full clone's range is the truth as it is.
+
+    The same merged-in branch the shallow tests refuse to count stops this
+    walk at a commit that is not HEAD too -- which in a full clone proves
+    nothing is wrong. Applying the shallow rule here would hide an exact number.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    installed = up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example", depth=None)
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    assert not (spec.dest / ".git" / "shallow").exists()
+
+    up.merge_branch_from(history[10], "side", 3)
+    up.commit("after")
+    tip = up.publish()
+    assert impl.commits_behind(spec.dest, None) == up.distance(installed, tip) == 5
 
 
 # ---------------------------------------------------------------------------

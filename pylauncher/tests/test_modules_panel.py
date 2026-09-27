@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 
 from yulon.catalog import native
 from yulon.catalog.catalog import EmulatorSource, load_catalog
+from yulon.git import Behind
 from yulon.manifest import ClientFile, Manifest, ManifestType, Patch, Prompt, Source
 from yulon.ui.widgets import modules_panel as mp
 
@@ -1370,6 +1371,33 @@ def test_a_server_cloned_folder_that_is_behind_offers_the_server_update() -> Non
     assert "part of the server" in chip.detail
 
 
+def test_a_server_cloned_folder_that_cannot_count_offers_the_server_update_with_no_number() -> None:
+    """T146's chip and T147's answer together: the live shape of mod-playerbots.
+
+    The server install's own clone of mod-playerbots is two depth-1 grafts
+    (the tip, then `_pin()`'s commit), which is exactly the checkout that
+    cannot prove its count -- it said "1 commit behind" before T147. The row
+    keeps T146's `server_update` press and says there is an update, with no
+    figure on the chip or in its sentence.
+
+    Mutation: merge T146's chip sentence as it was ("its upstream has {behind}
+    commit(s)") and the detail reads "Behind.UNCOUNTED commit(s)"; gate it on
+    `behind > 0` and the comparison raises.
+    """
+    session = mp.SessionState(behind={("module", "mod-playerbots"): Behind.UNCOUNTED})
+    rows = _rows(
+        [], {"module": frozenset({"mod-playerbots"})}, session, server_updated=WOTLK_SERVER_DESTS
+    )
+
+    chip = next(c for c in _row(rows, "mod-playerbots").chips if c.kind == "owed")
+    assert chip.label == "Update available"
+    assert chip.action == "server_update"
+    assert "part of the server" in chip.detail
+    assert "cannot count" in chip.detail
+    assert "UNCOUNTED" not in chip.detail and "uncounted" not in chip.detail
+    assert not any(ch.isdigit() for ch in chip.detail), chip.detail
+
+
 def test_a_server_cloned_folder_has_no_update_chip_where_there_is_no_server_update() -> None:
     """No route on this install (a WSL server, an unflagged entry): nothing to press.
 
@@ -1764,3 +1792,23 @@ def test_a_conflict_and_a_missing_requirement_do_not_both_speak(tmp_path: Path) 
     assert locked.install_reason == mp.conflict_reason("Mod Ah Bot")
     assert mp.chip_conflicts_with_label("Mod Ah Bot") in _labels(locked)
     assert not [label for label in _labels(locked) if label.startswith("needs ")]
+
+
+def test_an_uncounted_update_gets_the_chip_and_no_number() -> None:
+    """T147: behind by a number a shallow checkout cannot prove is still an update.
+
+    The chip is offered, with its Update press, and nothing on it or in its
+    detail is a figure -- the figure it used to carry was measured at 2775 for
+    a real 50.
+
+    Mutation: gate the chip on `behind > 0` again and the uncounted row has no
+    chip (or the type check refuses the comparison first).
+    """
+    session = mp.SessionState(behind={("module", "mod-a"): Behind.UNCOUNTED})
+    rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+
+    chip = next(c for c in _row(rows, "mod-a").chips if c.kind == "owed")
+    assert chip.label == mp.chip_update_label(Behind.UNCOUNTED) == "Update available"
+    assert chip.action == "update"
+    assert "cannot count" in chip.detail
+    assert not any(ch.isdigit() for ch in chip.label + chip.detail), chip.detail

@@ -119,7 +119,7 @@ from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
-from yulon.git import RunnerGit
+from yulon.git import Behind, RunnerGit, is_behind
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
@@ -4524,7 +4524,7 @@ class ControllerView(QWidget):
         # `_update_route_busy()` for what a second press did.
         self._backup_before_update = False
         self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
-        self._behind: dict[tuple[str, str], int] = {}
+        self._behind: dict[tuple[str, str], int | Behind] = {}
         # T126: the newest release's tag for a counted row that follows its
         # releases. Read only for a key `_behind` still has.
         self._behind_release: dict[tuple[str, str], str] = {}
@@ -9681,6 +9681,8 @@ class ControllerView(QWidget):
         formats its own row. The definition of done for this clause is that the
         figure equals `git rev-list --count HEAD..FETCH_HEAD` run by hand, and
         a number the view re-formatted would be a second place for it to change.
+        Where a shallow checkout makes that range wrong (T147) the row carries
+        no figure, only that an update is there.
         """
         route = self.services.module_updates
         if route is None:
@@ -9709,8 +9711,10 @@ class ControllerView(QWidget):
         # seam's answer rather than a guess. It was the literal `"module"`
         # until T126, when Tortoise began counting its `mod` clones (the two
         # client addons in `sql_scripts/clones/`).
+        # `Behind.UNCOUNTED` is kept (T147): a shallow checkout that is behind
+        # by a number it cannot prove still has an update to offer.
         self._behind = {
-            (row.family, row.key): row.behind for row in result if (row.behind or 0) > 0
+            (row.family, row.key): row.behind for row in result if is_behind(row.behind)
         }
         self._behind_release = {(row.family, row.key): row.release for row in result if row.release}
         self._behind_updated = {

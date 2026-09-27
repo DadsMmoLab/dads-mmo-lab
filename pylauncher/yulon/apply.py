@@ -41,6 +41,8 @@ from yulon.catalog import composegen, upstream
 from yulon.dbreads import SqlReader
 from yulon.git import (
     CLONE_MARKER,
+    Behind,
+    BehindCount,
     BehindReader,
     CloneSpec,
     ContainerGit,
@@ -51,6 +53,7 @@ from yulon.git import (
     RunnerGit,
     TreeReader,
     git_available,
+    is_behind,
     same_repo,
 )
 from yulon.log import get_logger
@@ -4566,10 +4569,12 @@ class ModuleUpdate:
     by hand with no `.git` in it. Both are still listed — a folder the importer
     will be handed is worth showing — but neither can be asked."""
 
-    behind: int | None
+    behind: BehindCount
     """Commits the upstream has that this checkout does not. `None` is "could not
     ask": no `.git`, an offline machine, a repository that has gone private.
-    Never collapsed into `0` — see `git.BehindReader`."""
+    Never collapsed into `0` — see `git.BehindReader`. `Behind.UNCOUNTED` is
+    "behind, by a number this shallow checkout cannot prove" (T147), and is
+    never shown as a figure."""
 
     family: str = "module"
     """Which manifest family's clone folder this row was read from (T126).
@@ -4604,16 +4609,24 @@ class ModuleUpdate:
         READ in, and the one thing 8.7a's definition of done is about is that
         this number equals the same range run by hand. A view that formatted it
         itself could round, pluralise or default it without a test noticing.
+
+        On a shallow checkout that range is itself wrong unless the walk proves
+        it (T147, `git._behind_after_fetch()`), so a row git could not prove
+        says there is an update and prints no number at all.
         """
         if not self.is_checkout:
             return f"{self.key}: not a git checkout — nothing to compare"
         if self.behind is None:
             return f"{self.key}: could not ask (no answer from git)"
         if self.release:
-            if self.behind:
+            if is_behind(self.behind):
                 word = upstream.release_word(self.release, self.installed_release)
                 return f"{self.key}: {word} {self.release}"
             return f"{self.key}: on the newest release, {self.release}"
+        if self.behind is Behind.UNCOUNTED:
+            return (
+                f"{self.key}: update available (a shallow checkout cannot count how many commits)"
+            )
         plural = "" if self.behind == 1 else "s"
         return f"{self.key}: {self.behind} commit{plural} behind"
 
@@ -4795,7 +4808,7 @@ def _write_module_updates(
                 "family": row.family,
                 "key": row.key,
                 "head": row.head,
-                "behind": row.behind,
+                "behind": _behind_to_json(row.behind),
                 "release": row.release,
                 "installed_release": row.installed_release,
                 "checked_unix": row.checked_unix,
@@ -4811,6 +4824,27 @@ def _write_module_updates(
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         logger.warning(f"could not keep the module-update reading in {path}: {exc}")
+
+
+def _behind_to_json(behind: BehindCount) -> int | str | None:
+    """A row's figure as the cache file spells it: `Behind.UNCOUNTED` by its value (T147)."""
+    return behind.value if isinstance(behind, Behind) else behind
+
+
+def _behind_from_json(said: object) -> BehindCount:
+    """`_behind_to_json()` read back. Anything else raises, and the whole file is then unread.
+
+    A cache written before T147 holds only numbers and `null`, so it reads as
+    it did; one written after it and read by an older build fails that build's
+    `int()` and is simply counted again.
+    """
+    if said is None:
+        return None
+    if said == Behind.UNCOUNTED.value:
+        return Behind.UNCOUNTED
+    if isinstance(said, bool) or not isinstance(said, int | str):
+        raise TypeError(f"not a count: {said!r}")
+    return int(said)
 
 
 def cached_module_update(server_dir: Path, family: str, key: str) -> ModuleUpdate | None:
@@ -4832,7 +4866,7 @@ def _read_module_updates_any_age(server_dir: Path) -> dict[tuple[str, str], Modu
                 key=str(row["key"]),
                 path=server_dir,
                 is_checkout=True,
-                behind=None if row["behind"] is None else int(row["behind"]),
+                behind=_behind_from_json(row["behind"]),
                 family=str(row["family"]),
                 release=str(row.get("release", "")),
                 installed_release=str(row.get("installed_release", "")),
