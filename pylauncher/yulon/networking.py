@@ -2533,6 +2533,14 @@ class LockoutQuestion:
     needed it; before T140 a running daemon's plan always had its reload, so
     "a reload is in the list" was the only way the ports came to be in effect.
     """
+    admissions: tuple[PortAdmission, ...] = ()
+    """What firewalld answered for each game-port pair BEFORE the plan wrote anything (T142).
+
+    Read by the zone-breadth note only, never by the verdict: it decides which
+    pairs the note may offer a `--remove-port` for. Empty when nobody asked (a
+    stopped daemon, unread zones), which the note reads as unknown for every
+    pair.
+    """
 
 
 @dataclass(frozen=True)
@@ -2685,7 +2693,10 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
     this feature exists for. A port opened in one zone too many is one line to
     take back; a game port in no zone at all is a feature that does not work and
     says nothing. What was wrong was not the breadth, it was that the breadth
-    was silent — so the zones are named here, with the command that removes one.
+    was silent — so the zones are named here, with the command that removes one
+    where removing it undoes what the plan wrote, and not where the zone already
+    admitted the port by its own range: removing it there splits the range
+    (T142, `_take_back()`).
 
     What round 6 got wrong is the GATE. It warned on `len(zones) > 1`, and
     Docker — required by every Yu'lon Linux install — creates a `docker` zone
@@ -2720,6 +2731,8 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
     enable withheld — and round 6 still said the ports "are allowed in `dmz`,
     `public`, `trusted`, `wanzone`". Nothing was: the rules load when firewalld
     starts. The same wording stood on every refusal that strips the reload.
+    Since T140 a pair firewalld's saved configuration already admitted is not
+    written at all, so the lead says so for those (T142).
     """
     zones = question.zones
     if question.backend != "firewalld" or not zones:
@@ -2735,30 +2748,55 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
         and (question.reloads or question.in_effect_already)
         and question.firewalld_daemon == "running"
     )
-    lead = (
-        f"firewalld: the game ports ({said}) are allowed in {where}"
-        if in_effect
-        else (
+    saved, written, unsure = _before_the_plan(question, exposed)
+    if in_effect:
+        lead = f"firewalld: the game ports ({said}) are allowed in {where}"
+    elif not saved:
+        lead = (
             f"firewalld: the game ports ({said}) have been WRITTEN to {where} — and are not in "
             "effect until firewalld loads them"
         )
-    )
+    elif not (written or unsure):
+        lead = (
+            f"firewalld: the game ports ({said}) were already in firewalld's saved "
+            f"configuration for {where} — and are not in effect until firewalld loads it"
+        )
+    else:
+        lead = (
+            f"firewalld: the game ports ({said}) have been WRITTEN to, or were already in "
+            f"firewalld's saved configuration for, {where} — and are not in effect until "
+            "firewalld loads them"
+        )
     parts = [
         f"{lead} — every zone this machine binds that it did not make for its own "
         "containers, including any of them that faces the internet. Nothing here can tell "
         "which zone is which, and writing the ports anywhere narrower was measured to break "
         "the feature in silence: on a box whose interface was bound to `internal`, ports "
         "written to the default zone alone left the game unreachable and the plan said "
-        "nothing (firewalld 2.2.3, fedora:41, 2026-09-04). Take one back with `sudo "
-        "firewall-cmd --permanent --zone=<zone> --remove-port=<port>/tcp`, then `sudo "
-        "firewall-cmd --reload`."
+        "nothing (firewalld 2.2.3, fedora:41, 2026-09-04)."
     ]
+    parts.extend(_take_back(saved, written, unsure, stopped=question.firewalld_daemon == "stopped"))
     if machine_made:
-        also = ", ".join(f"`{zone}`" for zone in machine_made)
+        # "Got the ports" only for a zone the plan wrote to: Docker's zone
+        # admits every port by its ACCEPT target, and where firewalld's saved
+        # configuration said so, nothing was written there (T142).
+        _, written_m, unsure_m = _before_the_plan(question, machine_made)
+        got = {zone for zone, _ in written_m + unsure_m}
+        wrote = ", ".join(f"`{zone}`" for zone in machine_made if zone in got)
+        had = ", ".join(f"`{zone}`" for zone in machine_made if zone not in got)
+        head = (
+            f"{wrote} got the ports too and {had} already let the game ports in; neither is"
+            if wrote and had
+            else (
+                f"{wrote} got the ports too and is"
+                if wrote
+                else f"{had} already let the game ports in and is"
+            )
+        )
         parts.append(
-            f"{also} got the ports too and is not counted above: every interface it binds is "
-            "one this machine created for its own containers (docker0, br-*, veth*), so it "
-            "faces nothing the machine did not already reach."
+            f"{head} not counted above: every interface it binds is one this machine created "
+            "for its own containers (docker0, br-*, veth*), so it faces nothing the machine did "
+            "not already reach."
         )
     if allowed and question.route.ports:
         said_ssh = ", ".join(str(port) for port in question.route.ports)
@@ -2768,6 +2806,109 @@ def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | Non
             "session."
         )
     return " ".join(parts)
+
+
+_TAKE_BACK = (
+    "take one back with `sudo firewall-cmd --permanent --zone=<zone> "
+    "--remove-port=<port>/tcp`, then `sudo firewall-cmd --reload`."
+)
+
+_TAKE_BACK_OFFLINE = (
+    "take one back with `sudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp`; "
+    "firewalld loads the change when it starts."
+)
+"""The take-back for a stopped daemon, spelled the way its writes were (`_offline_firewalld()`).
+
+`firewall-cmd --permanent` and `--reload` both refuse while firewalld is down.
+"""
+
+_A_RANGE_SPLITS = (
+    "removing a port a range lets in splits the range and closes the port for everything "
+    "else the range let in (measured on firewalld 2.4.0, in the running firewall and in its "
+    "saved configuration)"
+)
+
+
+def _before_the_plan(
+    question: LockoutQuestion, zones: tuple[str, ...]
+) -> tuple[list[PortAdmission], list[tuple[str, str]], list[tuple[str, str]]]:
+    """Each `(zone, "port/tcp")` by firewalld's SAVED answer before the plan wrote (T142).
+
+    Returns `(saved, written, unsure)`: the pairs whose permanent answer was a
+    plain yes (their answers, so the note can say which came from an ACCEPT
+    target), a plain no, and anything else. Only the permanent answer counts,
+    because the take-back is a `--permanent --remove-port` and a reload, and
+    the reload installs the saved configuration whatever ran before it — a
+    runtime-only yes is lost to it, and the plan wrote that pair anyway.
+
+    The three groups line up with what the plan wrote because
+    `_already_admitted()` drops a write exactly when the permanent answer was
+    yes: a "saved" pair was not written, a "written" one was written into a
+    zone that did not admit it, and an "unsure" one was written into a zone
+    nobody could read.
+    """
+    said = {(a.zone, a.port): a for a in question.admissions}
+    pairs = [(zone, f"{port}/tcp") for zone in zones for port in question.ports]
+    saved = [said[p] for p in pairs if p in said and said[p].permanent is True]
+    written = [p for p in pairs if p in said and said[p].permanent is False]
+    unsure = [p for p in pairs if p not in said or said[p].permanent is None]
+    return saved, written, unsure
+
+
+def _take_back(
+    saved: list[PortAdmission],
+    written: list[tuple[str, str]],
+    unsure: list[tuple[str, str]],
+    *,
+    stopped: bool,
+) -> list[str]:
+    """The breadth note's take-back: a `--remove-port` only where it undoes the plan (T142).
+
+    Measured on Fedora with firewalld 2.4.0, both sides. At runtime
+    (2026-09-26, T140's live gate): in a zone listing `1025-65535/tcp`,
+    `--add-port=3724/tcp` answered `success` and left no entry of its own, and
+    `--remove-port=3724/tcp` then left `1025-3723/tcp 3725-65535/tcp` — a hole
+    in the user's own range. In the saved configuration (2026-09-27,
+    throwaway permanent zones): the same range answered `--permanent
+    --add-port=3724/tcp` with "Warning: ALREADY_ENABLED" and rc 0, the list
+    unchanged, and `--permanent --remove-port=3724/tcp` split it the same way;
+    an empty zone answered no, listed `3724/tcp` after the add and nothing after
+    the remove. That matches firewalld's source (`config_zone.py` `addPort()` /
+    `removePort()` and `breakPortRange()`, main, read 2026-09-27).
+
+    So the take-back is offered only for a pair firewalld answered NO for
+    before the plan: removing it then puts back exactly what was there. A pair
+    answered YES was not written and needs nothing. A pair nobody could ask
+    about gets NO command (Codex, round 1): the zone may already have held
+    the user's own exact `3724/tcp`, and nothing the user can read after the
+    write tells that entry from the plan's, so any remove offered there could
+    take the user's own rule. A stopped daemon's writes were
+    `firewall-offline-cmd`, so its take-back is spelled that way too.
+    """
+    parts: list[str] = []
+    if saved:
+        by_target = [a.zone for a in saved if a.permanent_by_target]
+        none = "did not write it" if len(saved) == 1 else "wrote none of them"
+        parts.append(
+            "firewalld's saved configuration already allowed "
+            f"{_said_pairs((a.zone, a.port) for a in saved)}{_accepting(by_target)} before "
+            f"this plan, so this plan {none} and there is nothing to take back: "
+            f"{_A_RANGE_SPLITS}."
+        )
+    if written:
+        parts.append(
+            f"This plan wrote {_said_pairs(written)}, which firewalld did not allow before: "
+            + (_TAKE_BACK_OFFLINE if stopped else _TAKE_BACK)
+        )
+    if unsure:
+        them = "it" if len(unsure) == 1 else "them"
+        parts.append(
+            f"Yu'lon could not tell whether firewalld already allowed {_said_pairs(unsure)} "
+            f"before this plan wrote {them}, so it gives no command to take {them} back: "
+            "before removing one, check that zone's saved ports yourself — "
+            f"{_A_RANGE_SPLITS}."
+        )
+    return parts
 
 
 def _guard_the_way_back_in(
@@ -2781,6 +2922,7 @@ def _guard_the_way_back_in(
     zones: tuple[str, ...] | None = None,
     zoning: FirewalldZoning | None = None,
     in_effect_already: bool = False,
+    admissions: tuple[PortAdmission, ...] = (),
 ) -> tuple[list[list[str]], tuple[int, ...], list[str], list[str]]:
     """Make `commands` safe to run on a box whose only route in is SSH.
 
@@ -2907,6 +3049,7 @@ def _guard_the_way_back_in(
         zones=zones,
         zoning=zoning,
         in_effect_already=in_effect_already,
+        admissions=admissions,
     )
     verdict = decide_lockout(question)
     warnings.extend(verdict.notes)
@@ -3685,6 +3828,7 @@ def plan(
     firewalld_zones: tuple[str, ...] | None = None
     zoning: FirewalldZoning | None = None
     in_effect_already = False
+    admissions: tuple[PortAdmission, ...] = ()
     if wants_firewall and backend == "firewalld":
         firewalld_daemon = ask_firewalld()
         zoning = ask_zones(firewalld_daemon)
@@ -3706,9 +3850,10 @@ def plan(
                 dict.fromkeys(pair for pair in (_permanent_port_write(c) for c in fw_cmds) if pair)
             )
             if pairs:
-                fw_cmds, admitted_note, in_effect_already = _already_admitted(
-                    fw_cmds, ask_admission(pairs)
-                )
+                # Kept for the zone-breadth note as well (T142): it may offer a
+                # `--remove-port` only for a pair firewalld said NO for here.
+                admissions = tuple(ask_admission(pairs))
+                fw_cmds, admitted_note, in_effect_already = _already_admitted(fw_cmds, admissions)
         # What the two notes below may say the ports are: "written" only while
         # this plan still writes them all. T140 can drop a write for a pair
         # firewalld already admits, and "written to both" next to "nothing to
@@ -3821,6 +3966,7 @@ def plan(
             zones=firewalld_zones,
             zoning=zoning,
             in_effect_already=in_effect_already,
+            admissions=admissions,
         )
         refusals.extend(guard_refusals)
         warnings.extend(guard_warnings)
