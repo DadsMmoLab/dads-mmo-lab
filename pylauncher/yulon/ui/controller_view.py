@@ -344,6 +344,10 @@ class BotPoolRebuildSeam(Protocol):
 
     def restore_warning(self) -> str | None: ...
 
+    def put_back_file(
+        self, backup: Path, target: Path, put: Callable[[Path, Path], None]
+    ) -> str | None: ...
+
 
 @dataclass(frozen=True)
 class _PlanWithWarning:
@@ -3912,6 +3916,24 @@ who fixes one field and a user who wonders what state their conf is in.
 
 TUNING_REVERTED = "{module}: put {file} back from {backup}.\n{rule}"
 
+TUNING_PUT_BACK_DURING_RESTORE = (
+    "{press}: a restore is running on the Maintenance tab, so nothing was put back. Press it "
+    "again once the restore has finished."
+)
+"""T145: Tortoise's restore sets aiplayerbot.conf's rebuild request off as it starts, on its
+worker, and a put-back at the same moment would race that write."""
+
+RESTORE_DURING_PUT_BACK = (
+    "Nothing was restored: a backup is being put back on the Tuning tab, and it writes "
+    "aiplayerbot.conf, which a restore also changes. Press Restore again once it has finished."
+)
+"""T145 round 7: the other order of `TUNING_PUT_BACK_DURING_RESTORE`."""
+
+TUNING_PUT_BACK_WHILE_BUSY = (
+    "{press}: another action is running on this server, so nothing was put back. Press it "
+    "again once it has finished."
+)
+
 TUNING_NO_BACKUP = (
     "{module}: there is no backup of {file} to revert to. Yu'lon takes one every time it "
     "saves, so the first save is what creates it."
@@ -4075,14 +4097,27 @@ def _read_press_facts(
 
 
 def _undo_still_undoable(
-    server_dir: Path, items: tuple[reset_defaults.FileResult, ...]
+    server_dir: Path,
+    items: tuple[reset_defaults.FileResult, ...],
+    rebuild: BotPoolRebuildSeam | None = None,
 ) -> reset_defaults.ResetReport:
     """The Undo press's job: re-check each item NOW, then undo what still needs it.
 
     The items come from the last lookup, which may be older than the files: a
     file put back by hand since must not be backed up and copied over again.
+    `rebuild` (Tortoise, T145): each backup goes back through its
+    `put_back_file`, so a reset's backup never re-arms a random-bot rebuild.
     """
-    return reset_defaults.undo(server_dir, reset_defaults.still_undoable(server_dir, items))
+    undoable = reset_defaults.still_undoable(server_dir, items)
+    if rebuild is None:
+        return reset_defaults.undo(server_dir, undoable)
+    return reset_defaults.undo(
+        server_dir,
+        undoable,
+        restore=lambda backup, target: rebuild.put_back_file(
+            backup, target, reset_defaults.restore
+        ),
+    )
 
 
 def _look_up_undo(
@@ -4469,6 +4504,9 @@ class ControllerView(QWidget):
         # holds, "Remove from Yu'lon…" is highlighted: it is the way out of the
         # dead end in Andood's video.
         self._nothing_to_remove = False
+        # T145 round 7: a Tuning backup is being put back (Revert, raw Revert,
+        # Undo the last reset); `run_restore()` refuses while it is, on Tortoise.
+        self._put_back_running = False
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
         self._status_asked_busy = False
@@ -8493,6 +8531,12 @@ class ControllerView(QWidget):
             return
         if self._refused_during_bot_rebuild():
             return
+        if self._put_back_running and self.services.bot_pool_rebuild is not None:
+            # Not `_busy`: Back up and Restore have never been gated on it (see
+            # `_refused_during_bot_rebuild`); only a put-back writes the file the
+            # restore's take-back writes (`_put_back_refused`, the other order).
+            self.maintenance_report.setPlainText(RESTORE_DURING_PUT_BACK)
+            return
         self.restore_button.setEnabled(False)
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
@@ -11131,6 +11175,7 @@ class ControllerView(QWidget):
     def _reset_failed(self, exc: object) -> None:
         """Only a bug reaches here: `reset()` and `undo()` report every failure they expect."""
         self._reset_running = False
+        self._put_back_running = False
         self._set_busy(False)
         self.tuning_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
@@ -11189,6 +11234,8 @@ class ControllerView(QWidget):
         """Copy back what the last reset replaced, after one Yes/No, off the GUI thread."""
         if self._busy:
             return
+        if self._put_back_refused(TUNING_RESET_UNDO):
+            return
         items = self._reset_undo_items()
         if not items:
             self.tuning_reset_undo_action.setEnabled(False)
@@ -11201,10 +11248,16 @@ class ControllerView(QWidget):
         if not self._confirm(TUNING_RESET_UNDO, TUNING_RESET_UNDO_CONFIRM.format(files=names)):
             return
         self._reset_running = True
+        self._put_back_running = True
         self._set_busy(True)
         self.tuning_report.setPlainText("putting back what the last reset replaced…")
         self._run(
-            partial(_undo_still_undoable, self.services.controller.server_dir, items),
+            partial(
+                _undo_still_undoable,
+                self.services.controller.server_dir,
+                items,
+                self.services.bot_pool_rebuild,
+            ),
             self._undo_done,
             self._reset_failed,
         )
@@ -11212,6 +11265,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _undo_done(self, result: object) -> None:
         self._reset_running = False
+        self._put_back_running = False
         self._set_busy(False)
         if not isinstance(result, reset_defaults.ResetReport):
             return
@@ -11352,6 +11406,8 @@ class ControllerView(QWidget):
     @Slot(str, str)
     def revert_tuning(self, family: str, module_id: str) -> None:
         """Put this card's files back from the newest backup Yu'lon took of each."""
+        if self._put_back_refused("Revert"):
+            return
         try:
             card = self.tuning_panel.card((family, module_id))
         except KeyError:
@@ -11365,7 +11421,7 @@ class ControllerView(QWidget):
                 said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
                 continue
             try:
-                tuning.restore(backups[-1], path)
+                note = self._put_back(backups[-1], path)
             except OSError as exc:
                 said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                 continue
@@ -11378,8 +11434,51 @@ class ControllerView(QWidget):
                     rule=tuning.apply_sentence(tuning.file_rule(file)),
                 )
             )
+            if note:
+                said.append(note)
         self.tuning_report.setPlainText("\n".join(said))
         self.reload_tuning()
+
+    def _put_back_refused(self, press: str) -> bool:
+        """Refuse a put-back of a Tuning backup now, saying why. True if refused (T145 round 6).
+
+        `_busy` is checked HERE, not only through the greyed buttons that
+        `_set_busy` leaves: a slot is also reachable without its button. And a
+        Maintenance restore, which does not hold `_busy`, holds these three on
+        Tortoise: it sets a pending random-bot rebuild request in
+        aiplayerbot.conf off on its worker (`_restore_with_the_bot_request`),
+        the very file a put-back writes. Other games' restores write no conf.
+        """
+        if self._busy:
+            self.tuning_report.setPlainText(TUNING_PUT_BACK_WHILE_BUSY.format(press=press))
+            return True
+        if self._restore_running and self.services.bot_pool_rebuild is not None:
+            self.tuning_report.setPlainText(TUNING_PUT_BACK_DURING_RESTORE.format(press=press))
+            return True
+        return False
+
+    def _put_back(self, backup: Path, target: Path) -> str | None:
+        """`tuning.restore()`, through Tortoise's rebuild-request rule where there is one (T145).
+
+        A backup is the file as it was, so one taken while a random-bot rebuild
+        request was pending holds it, and after a Maintenance restore set it
+        off a Revert put it back whole: the next start deleted the restored
+        bots. `put_back_file` keeps the file's own key lines whenever the backup
+        asks for a rebuild anywhere; the sentence it returns goes in the report.
+        """
+        seam = self.services.bot_pool_rebuild
+        if seam is None:
+            tuning.restore(backup, target)
+            return None
+        # Held for the put-back's length (round 7); the two Reverts run here on
+        # the GUI thread, so a Restore press cannot land inside them today, but
+        # the flag says what is running rather than how it happens to be run.
+        was = self._put_back_running
+        self._put_back_running = True
+        try:
+            return seam.put_back_file(backup, target, tuning.restore)
+        finally:
+            self._put_back_running = was
 
     @Slot(str)
     def open_tuning_file(self, file: str) -> None:
@@ -11430,6 +11529,8 @@ class ControllerView(QWidget):
         very change the user is trying to undo. `tuning.restore()` copies
         rather than moves, so a second Revert still has something to restore.
         """
+        if self._put_back_refused("Revert"):
+            return
         file = self.tuning_panel.current_file()
         if not file or file in TUNING_CORE_FILES:
             return
@@ -11439,18 +11540,17 @@ class ControllerView(QWidget):
             self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
             return
         try:
-            tuning.restore(backups[-1], path)
+            note = self._put_back(backups[-1], path)
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))
             return
-        self.tuning_report.setPlainText(
-            TUNING_REVERTED_FILE.format(
-                file=file,
-                backup=backups[-1].name,
-                rule=tuning.apply_sentence(tuning.file_rule(file)),
-            )
+        said = TUNING_REVERTED_FILE.format(
+            file=file,
+            backup=backups[-1].name,
+            rule=tuning.apply_sentence(tuning.file_rule(file)),
         )
+        self.tuning_report.setPlainText(f"{said}\n{note}" if note else said)
         self._note_tuning_owed(file)
         self.open_tuning_file(file)
         self.reload_tuning()

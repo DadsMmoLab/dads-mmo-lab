@@ -517,6 +517,8 @@ class FileResult:
     reason: str = ""
     before: Path | None = None
     """An undo's own backup of the file as it found it (`undo_backup()`), for a "restored"."""
+    note: str = ""
+    """What the undo's `restore` said about a "restored" file (T145: a rebuild request kept out)."""
 
     def line(self) -> str:
         name = label(self.file)
@@ -542,7 +544,8 @@ class FileResult:
                 f" The file as it was is kept beside it as {self.before.name}."
                 if self.before is not None
                 else ""
-            ),
+            )
+            + (f" {self.note}" if self.note else ""),
         }[self.outcome]
 
 
@@ -1023,7 +1026,7 @@ def undo(
     server_dir: Path,
     written: Sequence[FileResult],
     *,
-    restore: Callable[[Path, Path], None] = restore,
+    restore: Callable[[Path, Path], str | None] = restore,
     backup: Callable[[Path, str], Path] = undo_backup,
 ) -> ResetReport:
     """Copy back, from the backups a reset made, every file that reset wrote.
@@ -1032,7 +1035,9 @@ def undo(
     press id), so whatever was tuned into it after the reset is kept beside it,
     named in the report; a file that cannot be backed up is left as it is. Then
     a copy (`restore()`, atomic), so the reset's backup survives and a copy
-    that fails leaves the file whole.
+    that fails leaves the file whole. A sentence `restore` returns goes into
+    that file's line (T145: Tortoise's view passes one that keeps a rebuild
+    request out of `aiplayerbot.conf`).
     """
     results: list[FileResult] = []
     for item in written:
@@ -1047,7 +1052,7 @@ def undo(
             )
             continue
         try:
-            restore(item.backup, server_dir / item.file)
+            note = restore(item.backup, server_dir / item.file)
         except OSError as exc:
             # The file was not changed, so the backup just taken equals it and
             # records nothing; left behind, it would read as "this reset was
@@ -1066,7 +1071,9 @@ def undo(
             )
         else:
             logger.info(f"put {item.file} back from {item.backup.name}; kept {before.name}")
-            results.append(FileResult(item.file, "restored", item.backup, before=before))
+            results.append(
+                FileResult(item.file, "restored", item.backup, before=before, note=note or "")
+            )
     return ResetReport(tuple(results), undo=True)
 
 
