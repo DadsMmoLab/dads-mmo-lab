@@ -11411,8 +11411,8 @@ class ControllerView(QWidget):
         A backup is the file as it was, so one taken while a random-bot rebuild
         request was pending holds it, and after a Maintenance restore set it
         off a Revert put it back whole: the next start deleted the restored
-        bots. `put_back_file` keeps the key as the file has it now whenever the
-        backup would arm a rebuild; the sentence it returns goes in the report.
+        bots. `put_back_file` keeps the file's own key lines whenever the backup
+        asks for a rebuild anywhere; the sentence it returns goes in the report.
         """
         seam = self.services.bot_pool_rebuild
         if seam is None:

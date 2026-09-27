@@ -64,8 +64,8 @@ default drops it, which is harmless for the same reason.
 request was pending holds it, and the Playerbots card's Revert, the raw
 editor's Revert and Undo the last reset put a backup back whole -- after a
 restore, that re-armed a request the restored databases had no record of. They
-all go through `put_back_file`, which keeps the key as the file has it now
-whenever the backup's value would arm a rebuild. The key is read the way the
+all go through `put_back_file`: a backup that asks for a rebuild anywhere goes
+back with the file's own key lines in place of its own. The key is read the way the
 module reads it (`_assigned`: indented and quoted lines too, the last one in a
 section wins; across sections any request counts, `value_in`) and written into
 every section so the module reads what was written (`_with_value`).
@@ -291,31 +291,48 @@ def parse(value: str) -> Request:
     return Request("invalid")
 
 
-def values_in(text: str) -> tuple[str, ...]:
-    """What each `[section]` of `text` sets the key to, as the module reads it, in file order.
+def _lines_by_section(text: str) -> list[tuple[str, str, bool]]:
+    """`text` split at `\n` (`fgets`), each line with its section and whether it is a header.
 
-    Inside one section the LAST assignment wins: ACE's `set_string_value`
-    replaces a name the section already holds. A section header met again,
-    in any case, reopens the same section (`ACE_Configuration_ExtId::operator==`
-    is `strcasecmp`), and lines before any header count as a section of their
-    own. Lines end at `\n` alone (`fgets`); the `\r` of a CRLF file is trimmed
-    like any other space. A section that never sets the key is not listed.
+    A header's own section is the one it opens. A section header met again, in
+    any case, reopens the same section (`ACE_Configuration_ExtId::operator==`
+    is `strcasecmp`), and lines before any header are the section "". Every
+    line keeps its bytes, the `\r` of a CRLF file included.
     """
-    found: dict[str, str] = {}
+    found: list[tuple[str, str, bool]] = []
     section = ""
     for line in text.split("\n"):
         body = line.strip(_SPACE)
-        if body[:1] == "[":
+        header = body[:1] == "["
+        if header:
             # `import_config`: the name runs to the LAST `]`. A header without
             # one fails the whole import, so no value would be read at all;
             # read on as if it were one, the safe direction for a gate.
             end = body.rfind("]")
             section = (body[1:end] if end > 0 else body[1:]).casefold()
-            continue
-        value = _assigned(line)
+        found.append((section, line, header))
+    return found
+
+
+def _by_section(text: str) -> dict[str, str]:
+    """Each section that sets the key, and the value the module reads there (last wins)."""
+    found: dict[str, str] = {}
+    for section, line, header in _lines_by_section(text):
+        value = None if header else _assigned(line)
         if value is not None:
             found[section] = value
-    return tuple(found.values())
+    return found
+
+
+def values_in(text: str) -> tuple[str, ...]:
+    """What each `[section]` of `text` sets the key to, as the module reads it, in file order.
+
+    Inside one section the LAST assignment wins: ACE's `set_string_value`
+    replaces a name the section already holds. Sections are
+    `_lines_by_section`'s; the `\r` of a CRLF file is trimmed like any other
+    space. A section that never sets the key is not listed.
+    """
+    return tuple(_by_section(text).values())
 
 
 def value_in(text: str) -> str:
@@ -446,62 +463,105 @@ def put_back_file(
     record of that rebuild. Putting the backup back whole re-armed it, and the
     next start deleted the restored bots.
 
-    So: when any section of the backup sets a value that asks for a rebuild
-    (`asks_for_a_rebuild`) and is not the request the file on disk makes now
-    (`value_in`, which fails safe across sections; compared by `parse`, so
-    `ONCE:T` is `once:T` and `once:t` is not), the backup goes back with
-    the key set to the file's CURRENT value in every section -- a restore can
-    clear a request, never arm one, and never swap one token for another.
-    Every line that does not assign the key is the backup's (`_with_value`).
-    Otherwise `put` copies it back exactly as before. Only
-    `aiplayerbot.conf` is the module's bot config; any other file is `put`
-    untouched. A current file that cannot be read counts as `off`.
+    So a backup that asks for a rebuild in ANY section (`parse`: a valid
+    `once:<token>`, or `always`) never supplies the key (round 4). It goes back
+    with every one of its key lines replaced by the CURRENT file's, section by
+    section, byte for byte (`_with_key_lines_of`): a section the file does not
+    set the key in gets no key line, and a file that sets it nowhere leaves
+    none -- off. No value stands for the file as a whole: its sections may
+    disagree, and the module may be reading any of them (`value_in`), so any
+    choice of one could swap the request it acts on for another (Codex, round
+    3). A backup with no request anywhere is `put` whole, as before, and so is
+    one whose key lines are the file's own. Only `aiplayerbot.conf` is the
+    module's bot config; any other file is `put` untouched. A current file
+    that cannot be read has no key lines to keep.
 
     Returns the report's sentence when the key was kept, else None.
 
     Raises:
         OSError: nothing was written -- `put`'s own failure, a backup that could
             not be read, or one that asks for a rebuild and cannot be rewritten
-            (not UTF-8 text, or a line the writer refuses).
+            (not UTF-8 text).
     """
     if target != server_dir / bot_population.CONF_FILE:
         put(backup, target)
         return None
-    try:
-        current = setting(server_dir)
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning(f"could not read {target} before putting a backup back: {exc}")
-        current = "off"
     raw = backup.read_bytes()
     # Replacement characters only for the question; the answer that writes decodes strictly.
-    sections = values_in(raw.decode("utf-8", errors="replace"))
-    # Any section, not only the one `value_in` reports: the module may read any
-    # of them (round 2), so a backup whose second section adds a request the
-    # file does not have is not put back whole either.
-    now = parse(current)
-    arming = [v for v in sections if asks_for_a_rebuild(v) and parse(v) != now]
-    if not arming:
+    requests = [
+        v for v in values_in(raw.decode("utf-8", errors="replace")) if asks_for_a_rebuild(v)
+    ]
+    if not requests:
         put(backup, target)
         return None
-    restored = arming[0]
+    restored = requests[0]
     try:
-        text = _with_value(entry, raw.decode("utf-8"), current)
+        backup_text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise OSError(
             f"{backup.name} is not UTF-8 text, and it asks the bots module to rebuild the "
             f"random bots ({KEY} = {restored}), so Yu'lon will not put it back: {exc}"
         ) from exc
-    except (InstallerError, PoolResetError) as exc:
-        raise OSError(f"{backup.name} was not put back: {exc}") from exc
+    try:
+        with target.open(encoding="utf-8", newline="") as handle:
+            current = handle.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(f"could not read {target} before putting a backup back: {exc}")
+        current = ""
+    text = _with_key_lines_of(current, backup_text)
+    if text == backup_text:
+        put(backup, target)
+        return None
     try:
         conf.replace_file(target, text)
     except InstallerError as exc:
         raise OSError(str(exc)) from exc
-    logger.info(
-        f"put {backup.name} back over {target} with {KEY} kept at {current} "
-        f"(the backup said {restored})"
-    )
-    return REQUEST_NOT_PUT_BACK.format(file=target.name, restored=restored, current=current)
+    logger.info(f"put {backup.name} back over {target} with its {KEY} lines kept as they were")
+    return REQUEST_NOT_PUT_BACK.format(file=target.name, restored=restored)
+
+
+def _with_key_lines_of(current: str, backup: str) -> str:
+    """`backup` with its key lines swapped for `current`'s, section by section. Pure.
+
+    Every other line of `backup` is kept byte for byte. In each section, the
+    current file's key lines take the place of the backup's first one; a
+    section the backup has without the key gets them under its first header;
+    the current file's lines before any header go first; a section only the
+    current file has is appended, its header with it.
+    """
+    mine: dict[str, list[str]] = {}
+    headers: dict[str, str] = {}
+    for section, line, header in _lines_by_section(current):
+        if header:
+            headers.setdefault(section, line)
+        elif _assigned(line) is not None:
+            mine.setdefault(section, []).append(line)
+    lines = _lines_by_section(backup)
+    trailing = bool(lines) and lines[-1][1] == ""
+    if trailing:
+        lines.pop()
+    keyed = {s for s, line, header in lines if not header and _assigned(line) is not None}
+    out: list[str] = []
+    placed: set[str] = set()
+    for section, line, header in lines:
+        if not header and _assigned(line) is not None:
+            if section not in placed:
+                out += mine.get(section, [])
+                placed.add(section)
+            continue
+        out.append(line)
+        if header and section not in keyed and section not in placed:
+            out += mine.get(section, [])
+            placed.add(section)
+    if "" not in placed:
+        out = mine.get("", []) + out
+        placed.add("")
+    for section, kept in mine.items():
+        if section not in placed:
+            out += [headers[section], *kept]
+    if trailing:
+        out.append("")
+    return "\n".join(out)
 
 
 @dataclass(frozen=True)
@@ -691,10 +751,10 @@ RESTORE_CLEARED = (
 """The restore report's line when `before_restore()` took a `once:` back (round 4)."""
 REQUEST_NOT_PUT_BACK = (
     "{file}: the copy put back asked the bots module to rebuild the random bots "
-    f"({KEY} = {{restored}}), which the file did not ask for, so that one setting was not put "
-    "back and stays {current}: a rebuild request brought back from an older copy would delete "
-    "bots a restore brought back, at the next start. Every other setting is the copy's. To "
-    "rebuild them, press Rebuild random bots… on the Bots tab."
+    f"({KEY} = {{restored}}), so that one setting was not put back and stays as the file had "
+    "it: a rebuild request brought back from an older copy would delete bots a restore brought "
+    "back, at the next start. Every other setting is the copy's. To rebuild them, press "
+    "Rebuild random bots… on the Bots tab."
 )
 """The report's line when `put_back_file` kept the key (T145)."""
 ALWAYS_BEFORE_RESTORE = (

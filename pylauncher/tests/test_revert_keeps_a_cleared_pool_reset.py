@@ -332,13 +332,15 @@ def test_a_write_the_module_would_read_differently_is_refused(tmp_path: Path) ->
 
 
 def test_a_file_that_cannot_be_read_now_counts_as_off(tmp_path: Path) -> None:
-    """Nothing says what the file asks for now, so the backup's request is not brought back."""
+    """Nothing says what the file asks for now: it has no key lines to keep, so the backup
+    goes back without any, which the module reads as off."""
     path = _conf(tmp_path, CONF_TEXT.replace("= off", f"= once:{TOKEN}"))
     made = tuning.backup(path)
     path.write_bytes(b"# \xff not text\n")
     note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
     assert note is not None and NOT_PUT_BACK in note
-    assert path.read_bytes() == CONF_TEXT.encode("utf-8")
+    assert path.read_bytes() == CONF_TEXT.replace(f"{KEY} = off\r\n", "").encode("utf-8")
+    assert poolreset.setting(tmp_path) == "off"
 
 
 # ------------------------------------------------------------------ round 2: sections (Codex)
@@ -433,28 +435,30 @@ def test_a_write_a_second_section_would_read_differently_is_refused(tmp_path: Pa
     assert path.read_bytes() == text.encode("utf-8")
 
 
-def test_a_backup_armed_in_any_section_is_put_back_with_every_section_kept_off(
+def test_a_backup_armed_in_any_section_goes_back_with_the_files_own_key_lines(
     tmp_path: Path,
 ) -> None:
+    """Round 4: the key lines are the current file's, section by section; the backup's
+    `[Extra]` section, which the file lacks, gets none."""
     path = _conf(tmp_path, MAIN + ARMED_LINE + "X = 1\n" + OTHER + OFF_KEY_LINE)
     made = tuning.backup(path)
     _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
     note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
     assert note is not None and NOT_PUT_BACK in note
-    assert path.read_text() == MAIN + OFF_KEY_LINE + "X = 1\n" + OTHER + OFF_KEY_LINE
+    assert path.read_text() == MAIN + OFF_KEY_LINE + "X = 1\n" + OTHER
 
 
 def test_a_backup_whose_other_section_would_add_always_is_not_put_back_whole(
     tmp_path: Path,
 ) -> None:
-    """The backup's reported value equals the file's, but its second section asks for a
-    rebuild the file does not: that section is kept at the file's value too."""
+    """The backup's first section matches the file's, but its second asks for a rebuild the
+    file does not: the file's key lines stand, and the second section gets none."""
     path = _conf(tmp_path, MAIN + ARMED_LINE + OTHER + f"{KEY} = always\n")
     made = tuning.backup(path)
     _conf(tmp_path, MAIN + ARMED_LINE)
     note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
     assert note is not None
-    assert path.read_text() == MAIN + ARMED_LINE + OTHER + ARMED_LINE
+    assert path.read_text() == MAIN + ARMED_LINE + OTHER
 
 
 # ------------------------------------------------------------------ round 3: the module's own parse
@@ -511,14 +515,14 @@ def test_a_padded_request_in_a_backup_is_not_put_back_over_off(
     assert set(poolreset.values_in(path.read_text())) == {"off"}
 
 
-def test_the_same_request_spelt_otherwise_goes_back_whole(tmp_path: Path) -> None:
-    """`ONCE:<token>` is the module's `once:<token>`: the same request, so nothing is armed
-    that is not armed already, and the backup goes back byte for byte."""
+def test_the_same_request_spelt_otherwise_keeps_the_files_spelling(tmp_path: Path) -> None:
+    """Round 4: a backup that asks for a rebuild never supplies the key, however it spells
+    it; the file's own line stays, and the rest is the backup's."""
     path = _conf(tmp_path, MAIN + f"{KEY} = ONCE:{TOKEN}\nX = 1\n")
     made = tuning.backup(path)
     _conf(tmp_path, MAIN + ARMED_LINE + "X = 2\n")
-    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is None
-    assert path.read_bytes() == made.read_bytes()
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is not None
+    assert path.read_text() == MAIN + ARMED_LINE + "X = 1\n"
 
 
 def test_a_token_differing_only_in_case_is_another_request(tmp_path: Path) -> None:
@@ -570,3 +574,89 @@ def test_a_padded_once_beside_always_is_the_one_the_restore_gate_clears(tmp_path
 def test_an_invalid_once_beside_always_does_not_hide_the_always(tmp_path: Path) -> None:
     _conf(tmp_path, MAIN + f"{KEY} = once:a b\n" + OTHER + f"{KEY} = always\n")
     assert poolreset.restore_warning(tmp_path) == poolreset.ALWAYS_BEFORE_RESTORE
+
+
+# ------------------------------------------------------ round 4: the file's own key lines
+#
+# Codex on round 3: comparing the backup with ONE value standing for the file
+# is unsafe when the file's sections disagree -- the module may be reading any
+# of them. So a backup that asks for a rebuild anywhere never supplies the key:
+# the file's key lines stand, section by section, as they are.
+
+ONCE_A = f"{KEY} = once:yulon-A\n"
+ONCE_B = f"{KEY} = once:yulon-B\n"
+
+
+def _revert(tmp_path: Path, backup_text: str, current_text: str) -> tuple[Path, Path, str | None]:
+    path = _conf(tmp_path, backup_text)
+    made = tuning.backup(path)
+    _conf(tmp_path, current_text)
+    return path, made, World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
+
+
+def test_two_current_requests_both_stand_when_the_backup_holds_one_of_them(
+    tmp_path: Path,
+) -> None:
+    """Codex's case: the file asks `once:A` in one section and `once:B` in another; the backup
+    holds only `once:A`. Put back whole, B would be gone -- and if B is the one the module
+    reads and has recorded, A is new and the next start rebuilds."""
+    path, _, note = _revert(tmp_path, MAIN + ONCE_A + "X = 1\n", MAIN + ONCE_A + OTHER + ONCE_B)
+    assert note is not None and "once:yulon-A" in note
+    assert path.read_text() == MAIN + ONCE_A + "X = 1\n" + OTHER + ONCE_B
+    assert poolreset.values_in(path.read_text()) == ("once:yulon-A", "once:yulon-B")
+
+
+def test_a_request_in_the_backups_second_section_is_dropped_over_a_file_that_is_off(
+    tmp_path: Path,
+) -> None:
+    path, _, note = _revert(
+        tmp_path, MAIN + OFF_KEY_LINE + "X = 1\n" + OTHER + ARMED_LINE, MAIN + OFF_KEY_LINE
+    )
+    assert note is not None
+    assert path.read_text() == MAIN + OFF_KEY_LINE + "X = 1\n" + OTHER
+
+
+def test_always_in_the_file_stands_over_a_backups_once(tmp_path: Path) -> None:
+    path, _, note = _revert(tmp_path, MAIN + ARMED_LINE + "X = 1\n", MAIN + f"{KEY} = always\n")
+    assert note is not None
+    assert path.read_text() == MAIN + f"{KEY} = always\n" + "X = 1\n"
+
+
+def test_a_section_the_backup_lacks_keeps_the_files_key_line(tmp_path: Path) -> None:
+    """The file's key lines before any header go first; a section only the file has is
+    carried over with its header."""
+    path, _, _ = _revert(tmp_path, MAIN + ARMED_LINE, ONCE_B + MAIN + OFF_KEY_LINE + OTHER + ONCE_A)
+    assert path.read_text() == ONCE_B + MAIN + OFF_KEY_LINE + OTHER + ONCE_A
+
+
+def test_a_section_the_backup_has_without_the_key_gets_the_files_line_under_its_header(
+    tmp_path: Path,
+) -> None:
+    path, _, _ = _revert(
+        tmp_path, MAIN + ARMED_LINE + OTHER + "Y = 1\n", MAIN + OFF_KEY_LINE + OTHER + ONCE_B
+    )
+    assert path.read_text() == MAIN + OFF_KEY_LINE + OTHER + ONCE_B + "Y = 1\n"
+
+
+def test_matching_key_lines_go_back_byte_for_byte_through_the_routes_own_copy(
+    tmp_path: Path,
+) -> None:
+    """The backup's key lines are the file's own, two disagreeing sections included: nothing
+    changes about the request, so the route's copy puts the backup back exactly."""
+    copied: list[Path] = []
+
+    def put(backup: Path, target: Path) -> None:
+        copied.append(backup)
+        tuning.restore(backup, target)
+
+    path = _conf(tmp_path, MAIN + ONCE_A + "X = 1\n" + OTHER + ONCE_B)
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + ONCE_A + "X = 2\n" + OTHER + ONCE_B)
+    assert World(tmp_path).rebuild().put_back_file(made, path, put) is None
+    assert copied == [made]
+    assert path.read_bytes() == made.read_bytes()
+
+
+def test_the_files_key_line_takes_the_place_of_the_backups(tmp_path: Path) -> None:
+    path, _, _ = _revert(tmp_path, MAIN + "X = 1\n" + ARMED_LINE + "Y = 1\n", MAIN + ONCE_B)
+    assert path.read_text() == MAIN + "X = 1\n" + ONCE_B + "Y = 1\n"
