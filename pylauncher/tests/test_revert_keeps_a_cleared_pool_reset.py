@@ -990,3 +990,58 @@ def test_another_games_revert_is_not_held_by_its_restore(qapp: object, tmp_path:
     view.services = replace(view.services, restore=restoring)
     _plan_and_restore(view, tmp_path)
     assert b"MaxRandomBots = 500" in path.read_bytes()
+
+
+# ------------------------------------------------------ round 7: no restore during a put-back
+#
+# Codex on round 6: the other order. Undo starts first (its put-back runs on the
+# job runner), then Restore is pressed while the put-back sits between its last
+# look at the file and the rename; the restore's take-back and the put-back would
+# race. Restore now refuses while a put-back runs, on Tortoise.
+
+PUTTING_BACK = "a backup is being put back on the Tuning tab"
+
+
+def test_restore_is_refused_while_undo_is_putting_a_backup_back(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _conf(tmp_path)
+    bot_population.write(TORTOISE, tmp_path, 400)
+    reset_defaults.reset_backup(path, reset_defaults.new_press())
+    path.write_bytes(path.read_bytes().replace(b"MaxRandomBots = 400", b"MaxRandomBots = 9"))
+    view, made = _card_view(tmp_path, World(tmp_path).rebuild())
+    backups = tmp_path / "sql_scripts" / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / "tw_char-20260927.sql").write_text("-- dump\n")
+    view.refresh_backups()
+    view.backup_list.setCurrentRow(0)
+    view.show_restore_plan()
+    monkeypatch.setattr(view, "_confirm", lambda *_a: True)
+    view._look_up_reset_undo()
+    assert view._reset_undo_items()
+
+    said: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        # The put-back's last look at the file: its own temp is staged beside it.
+        if (
+            self == path
+            and not said
+            and any(p.name.endswith(poolreset.PUT_BACK_TEMP_SUFFIX) for p in path.parent.iterdir())
+        ):
+            said.append("")
+            view.run_restore()
+            said[0] = view.maintenance_report.toPlainText()
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    view.undo_last_reset()
+    monkeypatch.undo()
+    assert said and PUTTING_BACK in said[0], said
+    assert made.keys_at_restore == [], "the restore seam never ran"
+    assert b"MaxRandomBots = 9" not in path.read_bytes(), "the undo finished"
+
+    view.show_restore_plan()
+    view.run_restore()
+    assert len(made.keys_at_restore) == 1, "a restore runs once the put-back is done"

@@ -3923,6 +3923,12 @@ TUNING_PUT_BACK_DURING_RESTORE = (
 """T145: Tortoise's restore sets aiplayerbot.conf's rebuild request off as it starts, on its
 worker, and a put-back at the same moment would race that write."""
 
+RESTORE_DURING_PUT_BACK = (
+    "Nothing was restored: a backup is being put back on the Tuning tab, and it writes "
+    "aiplayerbot.conf, which a restore also changes. Press Restore again once it has finished."
+)
+"""T145 round 7: the other order of `TUNING_PUT_BACK_DURING_RESTORE`."""
+
 TUNING_PUT_BACK_WHILE_BUSY = (
     "{press}: another action is running on this server, so nothing was put back. Press it "
     "again once it has finished."
@@ -4498,6 +4504,9 @@ class ControllerView(QWidget):
         # holds, "Remove from Yu'lon…" is highlighted: it is the way out of the
         # dead end in Andood's video.
         self._nothing_to_remove = False
+        # T145 round 7: a Tuning backup is being put back (Revert, raw Revert,
+        # Undo the last reset); `run_restore()` refuses while it is, on Tortoise.
+        self._put_back_running = False
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
         self._status_asked_busy = False
@@ -8522,6 +8531,12 @@ class ControllerView(QWidget):
             return
         if self._refused_during_bot_rebuild():
             return
+        if self._put_back_running and self.services.bot_pool_rebuild is not None:
+            # Not `_busy`: Back up and Restore have never been gated on it (see
+            # `_refused_during_bot_rebuild`); only a put-back writes the file the
+            # restore's take-back writes (`_put_back_refused`, the other order).
+            self.maintenance_report.setPlainText(RESTORE_DURING_PUT_BACK)
+            return
         self.restore_button.setEnabled(False)
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
@@ -11160,6 +11175,7 @@ class ControllerView(QWidget):
     def _reset_failed(self, exc: object) -> None:
         """Only a bug reaches here: `reset()` and `undo()` report every failure they expect."""
         self._reset_running = False
+        self._put_back_running = False
         self._set_busy(False)
         self.tuning_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
@@ -11232,6 +11248,7 @@ class ControllerView(QWidget):
         if not self._confirm(TUNING_RESET_UNDO, TUNING_RESET_UNDO_CONFIRM.format(files=names)):
             return
         self._reset_running = True
+        self._put_back_running = True
         self._set_busy(True)
         self.tuning_report.setPlainText("putting back what the last reset replaced…")
         self._run(
@@ -11248,6 +11265,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _undo_done(self, result: object) -> None:
         self._reset_running = False
+        self._put_back_running = False
         self._set_busy(False)
         if not isinstance(result, reset_defaults.ResetReport):
             return
@@ -11452,7 +11470,15 @@ class ControllerView(QWidget):
         if seam is None:
             tuning.restore(backup, target)
             return None
-        return seam.put_back_file(backup, target, tuning.restore)
+        # Held for the put-back's length (round 7); the two Reverts run here on
+        # the GUI thread, so a Restore press cannot land inside them today, but
+        # the flag says what is running rather than how it happens to be run.
+        was = self._put_back_running
+        self._put_back_running = True
+        try:
+            return seam.put_back_file(backup, target, tuning.restore)
+        finally:
+            self._put_back_running = was
 
     @Slot(str)
     def open_tuning_file(self, file: str) -> None:
