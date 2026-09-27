@@ -4,7 +4,8 @@ Two kinds of knowledge, applied in this order, because each catches what the
 other cannot:
 
 * **Known values** -- every password this machine can tell us about: the kept
-  copies in `db-secrets/`, the channel credentials in `credentials/`, each
+  copies in `db-secrets/`, the channel credentials in `credentials/` (and
+  in `credentials/pending/` before they are proved, T138), each
   generated install's `.db_password`, and the fourth field of every
   `*DatabaseInfo` line in each install's confs. Longest first, so a password
   that contains another is masked whole rather than leaving its tail behind.

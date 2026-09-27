@@ -81,6 +81,49 @@ def test_known_values_come_from_every_store_and_skip_the_public_default(tmp_path
     assert known.missing == ()
 
 
+def test_a_channel_account_not_yet_proved_is_masked_too(tmp_path: Path) -> None:
+    """T138 keeps a pending channel password in `credentials/pending/` before it is proved.
+
+    It is the same password the verified file holds a minute later, and it is
+    what a log from that minute would carry if anything ever printed it.
+    """
+    from yulon import channel_setup
+
+    config = platform.config_dir()
+    pending = "Pend" + secrets.token_hex(6)
+    channel_setup.save_pending(
+        channel_setup.Pending(account="YULON_0BADC0DE", password=pending),
+        game="wow-tbc",
+        install_id="0badc0de",
+        config_dir=config,
+    )
+    known = gather_known(Sources(config_dir=config, app_log=None, installs=()))
+    assert known.values == {pending}
+    assert known.missing == ()
+
+
+def test_a_half_written_credential_is_neither_read_nor_reported(tmp_path: Path) -> None:
+    """The atomic writer's temporary files are not credentials (T138).
+
+    One left behind by a write that died -- in either folder -- must not be
+    read as one, nor named as a credential that "could not be read".
+    """
+    from yulon import channel_setup
+
+    config = platform.config_dir()
+    for path in (
+        channel_setup.credential_path("wow-tbc", "0badc0de", config_dir=config),
+        channel_setup.pending_path("wow-tbc", "0badc0de", config_dir=config),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # The name the writer itself would give its temporary file: a leftover
+        # is what a write killed between its open and its rename leaves.
+        channel_setup._temporary_path(path).write_text("{ half", encoding="utf-8")
+    known = gather_known(Sources(config_dir=config, app_log=None, installs=()))
+    assert known.values == frozenset()
+    assert known.missing == ()
+
+
 def test_known_values_are_stripped_and_a_blank_one_is_not_a_password(tmp_path: Path) -> None:
     """`Redactor.build` keeps any 4+ char value as given: a newline or a blank must not reach it."""
     config = platform.config_dir()

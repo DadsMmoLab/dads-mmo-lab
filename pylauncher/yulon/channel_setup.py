@@ -39,6 +39,13 @@ And only `Verified` can produce credentials. The architecture's rule for this
 module — never persist before a round trip has answered — is expressed in the
 types rather than in a comment: the earlier states have no such method, so a
 caller cannot write a credential file it has not proved.
+
+The one thing kept before that is the `Pending` record (T138), in a file of its
+own that nothing but this setup reads: the account row and the password it was
+created with, so a launch after the app closed mid-settle re-verifies the row
+it made instead of minting a password the row will never have. It is not a
+credential -- `live_channel()` and every feature still see only the verified
+file -- and `save_credential()` removes it the moment one is written.
 """
 
 from __future__ import annotations
@@ -47,6 +54,7 @@ import json
 import os
 import re
 import secrets
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -141,7 +149,7 @@ class Pending:
                 account=self.account,
                 reason=(
                     f"the account {self.account} exists but three round trips did not prove it, "
-                    "so nothing was saved and it is over to you"
+                    "so it is not in use and it is over to you"
                 ),
             )
         return Pending(account=self.account, password=self.password, tries=tries)
@@ -654,7 +662,30 @@ A chmod afterwards is a second step, and the window before it is exactly when
 the file is world-readable. On Windows the mode argument is ignored, which is
 why the test asserts the flags the file was CREATED with rather than reading the
 mode back — a read-back test would pass there for the wrong reason.
+
+**So "owner-only" is a POSIX fact, not a Windows one.** There the file takes the
+ACL it inherits from `%APPDATA%` in the user's profile -- by default the user,
+SYSTEM and Administrators -- and nothing here narrows it. That holds for the
+verified credential since 8.2a and for the pending record since T138; an
+owner-only DACL on the whole `credentials/` folder is T151.
 """
+
+_ON_WINDOWS = os.name == "nt"
+"""Where a rename can be refused for a reader, and a folder cannot be fsync'd (T138)."""
+
+REPLACE_TRIES = 5
+"""How many times a refused rename onto a credential is tried, on Windows only (T138).
+
+Windows refuses `os.replace` onto a file another handle holds open without
+delete-sharing -- a check reading the credential while a settle promotes it, or
+a virus scanner looking at a file that was just written. That lasts
+milliseconds, so a few short tries clear it, and a bound keeps a file that is
+really locked from hanging the settle. POSIX renames over a reader, so there a
+refusal is real and is not tried again.
+"""
+
+REPLACE_PAUSE = 0.05
+"""Seconds between those tries: 0.2 s at most before the refusal is reported."""
 
 
 def credential_path(game: str, install_id: str, *, config_dir: Path | None = None) -> Path:
@@ -688,7 +719,6 @@ def save_credential(
     round trip answered" is enforced: the earlier states cannot be passed here.
     """
     path = credential_path(game, install_id, config_dir=config_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         {
             "account": verified.account,
@@ -700,14 +730,183 @@ def save_credential(
         },
         indent=2,
     )
-    # `O_TRUNC` rather than `O_EXCL`: a rotated password has to be able to land
+    # Replaced rather than refused: a rotated password has to be able to land
     # on top of the old one, and refusing that would strand an install whose
     # credential changed.
-    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CREDENTIAL_MODE)
-    with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(payload + "\n")
+    _write_private(path, payload + "\n")
     logger.info(f"saved the command-channel credential for {game} to {path}")
+    # Proved now, so the record of the row before it was proved is spent. Both
+    # `ensure()` and `repair()` come through here, which is what makes a
+    # repaired channel drop it too (T138).
+    forget_pending(game, install_id, config_dir=config_dir)
     return path
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Put `text` at `path` whole or not at all, owner-only on POSIX (T138).
+
+    Owner-only by the creation flags on POSIX, for `CREDENTIAL_MODE`'s reason;
+    on Windows the file keeps the profile's inherited ACL (see there). Whole by
+    writing a sibling, forcing it to disk, renaming it over `path` and then
+    forcing the rename itself to disk: a power cut part-way leaves the file
+    that was there, never a truncated one that reads as no credential and sends
+    the next launch to mint a password.
+
+    **The sibling's name is this write's own.** It was one shared `<name>.tmp`
+    removed before every write, and a check and a settle writing at once -- or
+    two app windows -- then removed each other's file in the middle of a write
+    (Codex review of T138). Now each write makes a fresh name `O_EXCL`, removes
+    only that name if it fails, and never touches another writer's. The name
+    ends `.tmp`, so nothing that lists `*.json` in these folders reads a
+    leftover as a credential.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = _temporary_path(path)
+    handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, CREDENTIAL_MODE)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        _replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    _sync_folder(path.parent)
+
+
+def _temporary_path(path: Path) -> Path:
+    """A name beside `path` that no other write will pick: hidden, random, `.tmp`."""
+    return path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+
+
+def _replace(temp: Path, path: Path) -> None:
+    """`os.replace`, tried again a few times where Windows refuses it for a reader."""
+    _tried_again_on_windows(lambda: os.replace(temp, path))
+
+
+def _tried_again_on_windows(action: Callable[[], object]) -> None:
+    """Run `action`; on Windows, try a refused one again up to `REPLACE_TRIES` times.
+
+    Only `PermissionError`, which is how Windows refuses a rename or a delete of
+    a file another handle holds; every other failure, and the last refusal,
+    reaches the caller.
+    """
+    tries = REPLACE_TRIES if _ON_WINDOWS else 1
+    for attempt in range(1, tries + 1):
+        try:
+            action()
+            return
+        except PermissionError:
+            if attempt == tries:
+                raise
+            time.sleep(REPLACE_PAUSE)
+
+
+def _sync_folder(folder: Path) -> None:
+    """Make a rename in `folder` survive a power cut, where the OS lets this app ask.
+
+    A rename is an entry in the folder, and on POSIX the entry is not durable
+    until the folder itself is fsync'd. Windows is skipped: `os.open` cannot
+    open a directory there (that needs `FILE_FLAG_BACKUP_SEMANTICS`), and NTFS
+    journals the rename's metadata itself. A folder that cannot be synced
+    costs durability, not the write, so it is said and not raised.
+    """
+    if _ON_WINDOWS:
+        return
+    try:
+        handle = os.open(folder, os.O_RDONLY)
+    except OSError as exc:
+        logger.info(f"could not open {folder} to sync it: {type(exc).__name__}")
+        return
+    try:
+        os.fsync(handle)
+    except OSError as exc:
+        logger.info(f"could not sync {folder}: {type(exc).__name__}")
+    finally:
+        os.close(handle)
+
+
+def pending_path(game: str, install_id: str, *, config_dir: Path | None = None) -> Path:
+    """Where this install's un-proved channel account is recorded (T138).
+
+    A folder of its own under `credentials/`, not a second name beside the
+    verified file: everything that lists `credentials/*.json` reads each one as
+    a credential, and this is not one.
+    """
+    folder = credential_path(game, install_id, config_dir=config_dir).parent / "pending"
+    return folder / f"{game}-{install_id}.json"
+
+
+def save_pending(
+    pending: Pending, *, game: str, install_id: str, config_dir: Path | None = None
+) -> Path:
+    """Record a row that exists and has not answered yet, for a later launch (T138).
+
+    Takes a `Pending` and nothing else: only `create` returning makes one, so a
+    record on disk means the row is there with this password. That is what lets
+    a later launch re-verify it instead of creating -- the latch, across a
+    close. Written with the verified credential's care, because it is the same
+    password a minute earlier: through `_write_private()`, owner-only on POSIX
+    and under the profile's ACL on Windows, exactly as that file is.
+    """
+    path = pending_path(game, install_id, config_dir=config_dir)
+    payload = json.dumps({"account": pending.account, "password": pending.password}, indent=2)
+    _write_private(path, payload + "\n")
+    logger.info(f"kept the un-proved command-channel account for {game} in {path}")
+    return path
+
+
+def load_pending(game: str, install_id: str, *, config_dir: Path | None = None) -> Pending | None:
+    """The row an earlier run created and did not prove, or `None`. Never raises.
+
+    Its `tries` start again at nought: they count this run's round trips, and a
+    launch is a new run.
+    """
+    path = pending_path(game, install_id, config_dir=config_dir)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return Pending(account=str(raw["account"]), password=str(raw["password"]))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.debug(f"no pending channel account at {path}: {type(exc).__name__}")
+        return None
+
+
+def forget_pending(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Drop the un-proved record once a verified credential stands. Never raises.
+
+    The lenient half of `remove_pending()`, for the promotion. A record that
+    outlives this -- a locked file on Windows, a crash between the two writes
+    -- is harmless there: `InstallChannel` reads the verified file first, and
+    the next save removes it.
+    """
+    try:
+        remove_pending(game, install_id, config_dir=config_dir)
+    except OSError as exc:
+        path = pending_path(game, install_id, config_dir=config_dir)
+        logger.info(f"could not remove {path}: {type(exc).__name__}")
+
+
+def remove_pending(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Remove the un-proved record for good, or raise saying why it is still there.
+
+    The strict half, for a purge that has just removed the database the record
+    names a row in (T138). There a record left behind is not harmless: a
+    reinstall to the same folder reads it, trusts a row that is gone, and is
+    refused for good. So nothing is swallowed. No record is the ordinary case
+    and is fine; a Windows refusal gets the same few tries a rename does; any
+    other failure reaches the caller, which says it. On POSIX the folder is
+    synced after the removal, for the reason `_sync_folder()` gives: a
+    removal is an entry in the folder, and a power cut can bring back an
+    unsynced one.
+    """
+    path = pending_path(game, install_id, config_dir=config_dir)
+    try:
+        # A call, not `path.unlink` handed over, so the write ledger's walk sees it.
+        _tried_again_on_windows(lambda: path.unlink())
+    except FileNotFoundError:
+        return
+    _sync_folder(path.parent)
 
 
 def load_credential(
@@ -765,6 +964,11 @@ def ensure(
 
     `create` is the install's own account seam (the SRP6 row path this app
     already has), and it is called only from `Idle`.
+
+    One app per machine is assumed. Two Yu'lon windows settling the same
+    install at once can each mint a password from `Idle`, and the second
+    pending record then overwrites the first; the app has no single-instance
+    guard yet, which is T152.
     """
     current = state if state is not None else Idle()
     # `Refused` is here for the same reason `Verified` and `GaveUp` are, and for
@@ -776,6 +980,21 @@ def ensure(
     if isinstance(current, Idle):
         create(account, password, gm_level)
         current = current.created(account, password)
+        # After `create` and not before it: a record on disk says the row is
+        # there, which is what lets a later launch re-verify rather than
+        # create (T138). Until then the password lived only in this run, and
+        # closing the app inside the ~40 s the world takes to answer SOAP lost
+        # it -- the next launch minted another, `create` kept the row's first,
+        # and every round trip was a 401. A record that cannot be written costs
+        # only that later launch; this run still holds the password, so it is
+        # said and not raised.
+        try:
+            save_pending(current, game=game, install_id=install_id, config_dir=config_dir)
+        except OSError as exc:
+            logger.warning(
+                f"could not keep the un-proved command-channel account for {game} "
+                f"({type(exc).__name__}); closing Yu'lon before it is proved will need a repair"
+            )
 
     answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
     if getattr(answer, "denied", False):
@@ -804,15 +1023,28 @@ def ensure(
         return current.verify_failed()
 
     verified = current.verified()
-    save_credential(
-        verified,
-        game=game,
-        install_id=install_id,
-        host=host,
-        port=port,
-        namespace=namespace,
-        config_dir=config_dir,
-    )
+    try:
+        save_credential(
+            verified,
+            game=game,
+            install_id=install_id,
+            host=host,
+            port=port,
+            namespace=namespace,
+            config_dir=config_dir,
+        )
+    except OSError as exc:
+        # Proved, and the file would not land -- on Windows a reader holding
+        # it past `REPLACE_TRIES`, anywhere a full disk. Failing the settle
+        # would throw the answer away with nothing said; staying `Pending`
+        # keeps the password in this run and its record on disk, so the next
+        # ask or the next launch promotes it. No try is spent: the server
+        # answered (T138).
+        logger.warning(
+            f"the command channel for {game} answered, but its credential could not save "
+            f"({type(exc).__name__}); it stays pending and is saved at the next ask"
+        )
+        return current
     return verified
 
 
@@ -914,11 +1146,14 @@ class InstallChannel:
     Two questions belong together here: pressing enable, and asking where the
     setup has got to. They are the same state machine from two sides.
 
-    The state survives an app restart through the credential file and nothing
-    else. A saved credential means a round trip answered — that is the only way
-    one gets written — so finding one is `Verified` and finding none is `Idle`.
-    Nothing is inferred from a conf file: a written setting is not a working
-    channel, which is the distinction this whole box exists to keep.
+    The state survives an app restart through the credential file and the
+    pending record, and nothing else. A saved credential means a round trip
+    answered — that is the only way one gets written — so finding one is
+    `Verified`. Without one, a pending record means an earlier run created the
+    row and closed before it was proved, so that is `Pending` with the row's
+    own password (T138); finding neither is `Idle`. Nothing is inferred from a
+    conf file: a written setting is not a working channel, which is the
+    distinction this whole box exists to keep.
     """
 
     def __init__(
@@ -948,7 +1183,10 @@ class InstallChannel:
     def _from_disk(self) -> State:
         saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
         if saved is None:
-            return Idle()
+            # The verified file first: a crash between writing it and removing
+            # the pending record leaves both, and the proved one is the answer.
+            pending = load_pending(self.entry.id, self.install_id, config_dir=self._config_dir)
+            return pending if pending is not None else Idle()
         return Verified(
             account=saved.account,
             password=saved.password,
@@ -987,8 +1225,24 @@ class InstallChannel:
         `unknown` with `indeterminate` false, so opening the tab against a
         stopped server read as "your password is wrong" and offered to rotate a
         GM account's password to fix a container that was not running.
+
+        A `Pending` state is proved here too (T138). It is how a launch finds a
+        row an earlier run created and closed before proving, and the server
+        was usually left running -- so the check the tab makes on opening is
+        the only thing that will ask. `prove()` from `Pending` is `ensure()`'s
+        re-verify arm: one round trip, and never a create, so opening a tab
+        still writes nothing to the user's auth database. A check that gets no
+        answer costs the state none of its tries: it is a look, and the three
+        belong to the settles a Start and an install make -- spending them on
+        reopens of the app would leave the Start that follows given up.
         """
         state = self._state
+        if isinstance(state, Pending):
+            after = self.prove()
+            if isinstance(after, Verified | Refused):
+                return after
+            self._state = state
+            return state
         if not isinstance(state, Verified):
             return state
         channel = self._channel_for(self._endpoint(state.account, state.password))

@@ -998,3 +998,155 @@ def test_the_kept_copy_is_created_owner_only_and_a_damaged_one_is_ignored(
     assert dbsecret.recall(GENERATED_GAME, "deadbeef") is None
     path.write_text('{"volume": "v_db-data", "password": ""}', encoding="utf-8")
     assert dbsecret.recall(GENERATED_GAME, "deadbeef") is None
+
+
+# -- T138: the un-proved channel account goes with the database it lives in ----
+
+
+def _pending_record(server_dir: Path) -> Path:
+    from yulon import channel_setup
+
+    install_id = composegen.install_id(server_dir)
+    return channel_setup.save_pending(
+        channel_setup.Pending(
+            account=channel_setup.account_name(install_id), password="pending-password"
+        ),
+        game=GAME,
+        install_id=install_id,
+    )
+
+
+def test_an_unticked_purge_removes_the_pending_channel_account_with_its_database(
+    tmp_path: Path,
+) -> None:
+    """The record says a row exists; the row went with the database.
+
+    Left behind, a reinstall into the same folder -- same install id -- reads
+    `Pending`, never creates the account, and is refused for good: Repair
+    rewrites a row, and there is none.
+    """
+    from yulon import channel_setup
+
+    rec = _recorder(tmp_path)
+    record = _pending_record(rec.server_dir)
+
+    rec.uninstaller().run(keep_characters=False)
+
+    assert f"{rec._project}_db-data" in rec.removed_volumes
+    assert not record.exists()
+    install_id = composegen.install_id(rec.server_dir)
+    assert channel_setup.load_pending(GAME, install_id) is None
+
+
+def test_a_ticked_purge_keeps_the_pending_channel_account_with_the_database_it_kept(
+    tmp_path: Path,
+) -> None:
+    """The row survives in the kept volume, so the record that names its password does too."""
+    rec = _recorder(tmp_path)
+    record = _pending_record(rec.server_dir)
+
+    rec.uninstaller().run(keep_characters=True)
+
+    assert record.is_file()
+
+
+def test_a_purge_refused_before_anything_changes_keeps_the_pending_record(
+    tmp_path: Path,
+) -> None:
+    """Nothing was removed, so the row is still there and so is its record."""
+    rec = _recorder(tmp_path, running=docker.Running(ours=("ac-worldserver",)))
+    record = _pending_record(rec.server_dir)
+
+    with pytest.raises(purge.PurgeError):
+        rec.uninstaller().run(keep_characters=False)
+
+    assert record.is_file()
+
+
+def _removal_seen(monkeypatch: pytest.MonkeyPatch, record: Path, *, refuse: int = 0) -> list[str]:
+    """What happens to the record and its folder, in order; `refuse` unlinks fail first."""
+    from yulon import channel_setup
+
+    events: list[str] = []
+    real_unlink, real_fsync = os.unlink, os.fsync
+
+    def unlink(path: object, *args: object, **kwargs: object) -> None:
+        if Path(str(path)) == record:
+            events.append("unlink")
+            if events.count("unlink") <= refuse:
+                raise PermissionError(13, "The process cannot access the file")
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    def fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and os.path.samestat(
+            os.fstat(fd), os.stat(record.parent)
+        ):
+            events.append("fsync-folder")
+        real_fsync(fd)
+
+    monkeypatch.setattr(channel_setup.os, "unlink", unlink)
+    monkeypatch.setattr(channel_setup.os, "fsync", fsync)
+    return events
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a folder cannot be fsync'd through os.open on Windows")
+def test_the_purge_makes_the_records_removal_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removal is an entry in the folder: synced after it, or a power cut can bring it back."""
+    rec = _recorder(tmp_path)
+    record = _pending_record(rec.server_dir)
+    events = _removal_seen(monkeypatch, record)
+
+    rec.uninstaller().run(keep_characters=False)
+
+    assert not record.exists()
+    assert events == ["unlink", "fsync-folder"], events
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="a folder's write bit stops no unlink on Windows, nor for root",
+)
+def test_a_record_the_purge_cannot_remove_is_named_in_its_report(tmp_path: Path) -> None:
+    """Silent success here is the reinstall that is refused for good. Say which file it is."""
+    rec = _recorder(tmp_path)
+    record = _pending_record(rec.server_dir)
+    record.parent.chmod(0o500)
+    try:
+        report = rec.uninstaller().run(keep_characters=False)
+    finally:
+        record.parent.chmod(0o700)
+
+    assert record.is_file(), "the fixture did not stop the removal"
+    lines = [w for w in report.warnings if str(record) in w]
+    assert len(lines) == 1, report.warnings
+    assert "delete" in lines[0]
+    assert report.folder_removed and report.record_forgotten, "the rest of the purge still ran"
+
+
+def test_on_windows_a_removal_refused_once_is_tried_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import channel_setup
+
+    monkeypatch.setattr(channel_setup, "_ON_WINDOWS", True)
+    monkeypatch.setattr(channel_setup, "REPLACE_PAUSE", 0.0)
+    rec = _recorder(tmp_path)
+    record = _pending_record(rec.server_dir)
+    events = _removal_seen(monkeypatch, record, refuse=1)
+
+    report = rec.uninstaller().run(keep_characters=False)
+
+    assert events == ["unlink", "unlink"], events
+    assert not record.exists()
+    assert report.warnings == ()
+
+
+def test_an_unticked_purge_with_no_pending_record_says_nothing_about_one(tmp_path: Path) -> None:
+    """Most installs never had one: a missing record is the ordinary case, not a failure."""
+    rec = _recorder(tmp_path)
+
+    report = rec.uninstaller().run(keep_characters=False)
+
+    assert report.warnings == ()

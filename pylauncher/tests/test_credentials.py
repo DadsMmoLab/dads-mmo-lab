@@ -109,8 +109,11 @@ def test_the_file_is_created_private_by_its_open_flags_not_by_a_later_chmod(
         config_dir=tmp_path,
     )
 
-    assert seen, "the file was not created through os.open, so its mode is not in its creation"
-    flags, mode = seen[-1]
+    # The creating open: since T138 the writer also opens the folder read-only
+    # to sync the rename, and that open creates nothing.
+    created = [(flags, mode) for flags, mode in seen if flags & os.O_CREAT]
+    assert created, "the file was not created through os.open, so its mode is not in its creation"
+    flags, mode = created[-1]
     assert mode == 0o600, f"created with mode {oct(mode)}"
     assert flags & os.O_CREAT
     assert flags & os.O_WRONLY or flags & os.O_RDWR
