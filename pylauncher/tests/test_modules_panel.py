@@ -1371,6 +1371,33 @@ def test_a_server_cloned_folder_that_is_behind_offers_the_server_update() -> Non
     assert "part of the server" in chip.detail
 
 
+def test_a_server_cloned_folder_that_cannot_count_offers_the_server_update_with_no_number() -> None:
+    """T146's chip and T147's answer together: the live shape of mod-playerbots.
+
+    The server install's own clone of mod-playerbots is two depth-1 grafts
+    (the tip, then `_pin()`'s commit), which is exactly the checkout that
+    cannot prove its count -- it said "1 commit behind" before T147. The row
+    keeps T146's `server_update` press and says there is an update, with no
+    figure on the chip or in its sentence.
+
+    Mutation: merge T146's chip sentence as it was ("its upstream has {behind}
+    commit(s)") and the detail reads "Behind.UNCOUNTED commit(s)"; gate it on
+    `behind > 0` and the comparison raises.
+    """
+    session = mp.SessionState(behind={("module", "mod-playerbots"): Behind.UNCOUNTED})
+    rows = _rows(
+        [], {"module": frozenset({"mod-playerbots"})}, session, server_updated=WOTLK_SERVER_DESTS
+    )
+
+    chip = next(c for c in _row(rows, "mod-playerbots").chips if c.kind == "owed")
+    assert chip.label == "Update available"
+    assert chip.action == "server_update"
+    assert "part of the server" in chip.detail
+    assert "cannot count" in chip.detail
+    assert "UNCOUNTED" not in chip.detail and "uncounted" not in chip.detail
+    assert not any(ch.isdigit() for ch in chip.detail), chip.detail
+
+
 def test_a_server_cloned_folder_has_no_update_chip_where_there_is_no_server_update() -> None:
     """No route on this install (a WSL server, an unflagged entry): nothing to press.
 
