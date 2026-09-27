@@ -277,6 +277,18 @@ _TYPING_KEYS = frozenset(
         int(Qt.Key.Key_Right),
     }
 )
+# The mapped ACTION keys an open `QMenu` reads for itself (T89): choose and close.
+# The arrows reach it too, because no action is mapped to them, and so does every
+# unmapped key; the other action keys stay the navigator's while a menu is open.
+# Return must be here and not routed: `Navigator` chooses by sending the menu a
+# Return, which would come back through this filter.
+_MENU_KEYS = frozenset(
+    {
+        int(Qt.Key.Key_Return),
+        int(Qt.Key.Key_Enter),
+        int(Qt.Key.Key_Escape),
+    }
+)
 # Discrete actions must not auto-repeat (holding A must not spam clicks); held
 # *direction* keys DO repeat so a user can fast-scroll a list.
 _NON_REPEATING_ACTIONS = frozenset(_KEY_TO_ACTION.values())
@@ -349,7 +361,7 @@ def _press_into(menu: QMenu, key: Qt.Key) -> bool:
 
     Sent, not posted, so the menu has moved (or chosen, and closed) before the
     pad's next event is resolved. It passes `KeyboardSource`'s filter on the way,
-    which lets it through because a menu is open.
+    which lets it through because it is one of the menu's own keys (`_MENU_KEYS`).
     """
     for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
         QApplication.sendEvent(menu, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
@@ -654,13 +666,20 @@ class KeyboardSource(QObject):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
-            if _open_menu() is not None:
-                # T89: every key goes to an open menu, which walks, chooses and
-                # closes on its own keys (`_open_menu()`). Eaten here, Down did
-                # nothing and Return chose nothing, so a menu opened from the
-                # pad could only be closed again.
-                return False
             key = int(event.key())
+            if _open_menu() is not None:
+                # T89: an open menu walks, chooses and closes on its OWN keys
+                # (`_open_menu()`); eaten here, Down did nothing and Return
+                # chose nothing, so a menu opened from the pad could only be
+                # closed again. Only those keys, though: the menu ignores
+                # Backspace and Space, which are B and A under Steam Input's
+                # keyboard emulation, so every other mapped key keeps its pad
+                # meaning through the navigator -- which closes the menu on B,
+                # chooses on A and does nothing on a bumper.
+                if key in _KEY_TO_ACTION and key not in _MENU_KEYS:
+                    self._navigator.perform(_KEY_TO_ACTION[key])
+                    return True
+                return False
 
             if key in _KEY_TO_DIRECTION:
                 # Horizontal arrows double as typing keys: they move a caret in

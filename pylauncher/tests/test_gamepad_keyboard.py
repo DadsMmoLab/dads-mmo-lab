@@ -312,3 +312,41 @@ def test_back_closes_an_open_menu_and_a_bumper_does_not_switch_tab_under_it(
     # And once it is closed the bumper is the tab switch again.
     nav.perform(Action.CYCLE_NEXT)
     assert menu_window.tabs.currentIndex() == 1
+
+
+def test_backspace_closes_an_open_menu_as_b_does(menu_window: _MenuWindow) -> None:
+    """Backspace is the pad's B under Steam Input's keyboard emulation (T89 round 2).
+
+    A `QMenu` closes on Escape and ignores Backspace, so handing an open menu
+    EVERY key left B dead inside one: the menu stayed open over nothing chosen.
+    """
+    menu_window.button.setFocus()
+    process_events()
+    _press(menu_window.win, Qt.Key.Key_Return)
+    assert menu_window.open_popup() is menu_window.menu
+    _press(menu_window.win, Qt.Key.Key_Down)
+
+    _press(menu_window.win, Qt.Key.Key_Backspace)
+
+    assert menu_window.open_popup() is None, "Backspace did not close the menu"
+    assert menu_window.fired == []
+
+
+def test_the_bumper_and_confirm_keys_keep_their_pad_meaning_in_an_open_menu(
+    menu_window: _MenuWindow,
+) -> None:
+    """R and L switch nothing under an open menu; Space is A and chooses (T89 round 2)."""
+    menu_window.button.setFocus()
+    process_events()
+    _press(menu_window.win, Qt.Key.Key_Return)
+    _press(menu_window.win, Qt.Key.Key_Down)
+    for key in (Qt.Key.Key_R, Qt.Key.Key_L):
+        _press(menu_window.win, key)
+        assert menu_window.open_popup() is menu_window.menu, f"{key} closed the menu"
+        assert menu_window.tabs.currentIndex() == 0, f"{key} switched tab under the menu"
+    assert menu_window.fired == []
+
+    _press(menu_window.win, Qt.Key.Key_Space)
+
+    assert menu_window.fired == ["one"]
+    assert menu_window.open_popup() is None

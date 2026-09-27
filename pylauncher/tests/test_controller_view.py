@@ -10777,7 +10777,7 @@ def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[object]:
     return boxes
 
 
-def test_the_update_button_sits_beside_rebuild_and_is_hidden_where_there_is_no_route(
+def test_update_to_latest_is_in_the_server_build_menu_and_hidden_where_there_is_no_route(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Hidden rather than greyed, which is this tab's one exception to its own rule.
@@ -10790,6 +10790,9 @@ def test_the_update_button_sits_beside_rebuild_and_is_hidden_where_there_is_no_r
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     assert view.update_to_latest_action.text() == UPDATE_TO_LATEST_BUTTON_LABEL
     assert view.update_to_latest_action.isVisible()
+    # T89: in the one menu, straight after Rebuild, where the button sat right of it.
+    entries = view.server_build_menu.actions()
+    assert entries.index(view.update_to_latest_action) == entries.index(view.rebuild_action) + 1
 
     bare = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     assert bare.services.update_to_latest is None
@@ -15395,24 +15398,25 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
             )
 
 
-THE_WRAPPED_WIDTHS = tuple(range(960, 1070, 10))
-"""Widths at the minimum window's height where the action bar takes two lines.
+THE_WRAPPED_WIDTHS = tuple(range(960, 1120, 10))
+"""The widths at the minimum window's height where the action bar can take two lines.
 
-960 is `main.MINIMUM_WINDOW_SIZE`'s width and about 1080 is where the bar goes
-back to one line (1120 until T89 folded three buttons into "Server build ▾");
-between them the theme's font grows with the width while the bar still wraps, so
-the tab wants MORE height as the window gets wider. Swept rather than asked at
-960 because the worst case is not at the narrow end: with the rebuild banner up,
-the smallest height at which nothing is cut is 635 at 960 and 636 from 1040 on
-(measured 2026-09-27; 637 at 1090 before T89), and a test that asked only at the
+960 is `main.MINIMUM_WINDOW_SIZE`'s width and 1120 is where the bar went back to
+one line before T89 folded three buttons into "Server build ▾"; since then it
+does so at 1080. Between the two ends the theme's font grows with the width
+while the bar still wraps, so the tab wants MORE height as the window gets wider.
+Swept rather than asked at 960 because the worst case is not at the narrow end:
+with the rebuild banner up, the smallest height at which nothing is cut grows
+from 960 to the last width that wraps (T85), and a test that asked only at the
 minimum width would pass on a height that clips the custom-module card further
-along (T85).
+along.
 
-It stops at 1060, a step short of the edge, because the edge itself is not one
-width: on both CI interpreters the bar was one line at 1080 run alone and in the
-full suite, and still wrapped at 1080 in one narrower selection on 3.13 -- it
-moves with what ran earlier in the process. A sweep that ends on the edge fails
-on "the bar is one line", which is not what it is about.
+The whole range is swept, and no width in it is required to wrap: the edge moves
+whenever a label on the bar does -- T89 moved it twice in one day, once for the
+shorter label and once for the menu indicator the theme then took away -- and a
+sweep that ended on the edge failed on "the bar is one line", which is not what
+it is about. The test asks instead that SOME width wrapped, so it cannot pass by
+measuring only one-line bars.
 
 Every ten pixels rather than every twenty, so that no width where the bar still
 wraps is stepped over -- a twenty-pixel step once stepped over the worst one.
@@ -15473,7 +15477,8 @@ def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild
     48px short, so `MINIMUM_WINDOW_SIZE` went from 600 to 640.
 
     Swept across `THE_WRAPPED_WIDTHS` rather than asked at the minimum, because
-    the worst case is at the wide end and not at 960: see that constant.
+    the worst case is at the wide end of where the bar wraps and not at 960: see
+    that constant.
 
     After a job AND with a report in the box, which is the state that puts every
     rung of the ladder under load at once.
@@ -15487,18 +15492,21 @@ def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild
     _a_rebuild_is_owed(view)
     assert view.module_report.toPlainText() != "", "the report box is empty, so a rung is unloaded"
 
+    wrapped: list[int] = []
     for width in THE_WRAPPED_WIDTHS:
         _at(window, (width, main.MINIMUM_WINDOW_SIZE[1]))
         assert (
             view.rebuild_banner.isHidden() is False
         ), f"the banner left the screen at {width}px, so this is not the case under test"
-        assert (
-            len({b.y() for b in _module_toolbar_buttons(view)}) > 1
-        ), f"the action bar is one line at {width}px, so the hard case is not being measured"
+        if len({b.y() for b in _module_toolbar_buttons(view)}) > 1:
+            wrapped.append(width)
         assert _cut_on_the_modules_tab(view, tab) == [], (
             f"something on the Modules tab is cut at {width}x{main.MINIMUM_WINDOW_SIZE[1]} with a "
             f"rebuild owed: {_cut_on_the_modules_tab(view, tab)}"
         )
+    # Not at any one width (see `THE_WRAPPED_WIDTHS`), but somewhere: a sweep of
+    # nothing but one-line bars never measured the hard case at all.
+    assert wrapped, f"the action bar was one line at every width in {THE_WRAPPED_WIDTHS}"
 
 
 def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
