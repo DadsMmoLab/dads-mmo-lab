@@ -3672,6 +3672,7 @@ from yulon import log, update
 
 kind = os.environ["YULON_TEST_JOB"]
 never = threading.Event()
+entered = threading.Event()
 
 
 def an_update_check_that_never_returns(*_a, **_k) -> None:
@@ -3699,6 +3700,7 @@ def a_job_that_returns() -> None:
 
 
 def a_log_source_that_never_ends():
+    entered.set()
     never.wait()
     yield "never reached"
 
@@ -3723,6 +3725,15 @@ def build_window():
             # The first panel is the catalog's install log, and `LogPanel.run`
             # is the real entry: the same call an install makes.
             window.yulon_log_panels[0].run(a_log_source_that_never_ends, title="following")
+            # Closed only once the source is ENTERED (T156). The exit's
+            # `panel.stop()` reaching a worker the OS has not scheduled yet is
+            # the "stopped before it started" path: the worker returns without
+            # touching the source, nothing is stuck, and `main()` returns 0.
+            # Six busy loops on three cores made that 19 runs in 40, and a
+            # one-second delay before the worker's first line made it every run.
+            # Blocking here is safe: the worker is started on its own thread,
+            # not through this one's queue.
+            print(f"T113 source entered {entered.wait(60)}", flush=True)
         elif kind != "stuck-update":
             runner(work, ignore.outcome, ignore.outcome)
         print(f"T113 log {log.file_path()}", flush=True)
@@ -3835,10 +3846,19 @@ def test_a_stuck_log_panel_or_update_check_reaches_the_forced_exit_by_name(
     already exited 0, because `in_flight()` holds these threads too and its
     `wait_all` caught them, but the log said `_StreamWorker` and
     `_UpdateWorker`.
+
+    The panel is only stuck once its worker has entered the source: closed
+    before the OS schedules that thread, the exit's stop is honoured before the
+    source is touched and `main()` returns 0 - correct, and not this test's
+    case. The child waits for the source before it closes, and says so (T156).
+    The update check needs no such wait: its thread counts as running from
+    `start()`, and its worker has no stop to honour before the check.
     """
     done, closed_at, ended, log_text = _close_the_real_window_with(job, tmp_path)
 
     report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    if job == "stuck-panel":
+        assert "T113 source entered True" in done.stdout, report
     assert "QThread: Destroyed" not in done.stderr, report
     assert done.returncode == 0, report
     assert "T113 main returned" not in done.stdout, report
