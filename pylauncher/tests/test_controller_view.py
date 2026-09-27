@@ -11105,6 +11105,79 @@ def test_a_failed_server_update_keeps_the_server_cloned_count(
     assert view._behind.get(("module", "mod-playerbots")) == 4
 
 
+def test_a_plain_rebuild_keeps_the_server_cloned_count_and_version(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rebuild server… compiles the same checkouts without moving them (T146 review).
+
+    It shares `rebuild_log` and `_rebuild_finished()` with the two T64 presses
+    and finishes `ok` as a compile, so the one thing telling it apart is
+    `_rebuild_moves_sources`. The count and the version are still true.
+
+    Mutation: drop `moved and` from `_rebuild_finished()`'s clearing condition
+    and a rebuild tells the player mod-playerbots is up to date.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    reads: list[Path] = []
+    view, spy = _server_cloned_view(ps, tmp_path, reads=reads)
+    playerbots = tmp_path / "modules" / "mod-playerbots"
+    pump_until(lambda: playerbots in reads, "the row's version was read")
+
+    def works(cancel: object = None) -> Iterator[str]:
+        yield "built"
+
+    view.services.rebuild = works
+
+    assert view.rebuild_server() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the rebuild finished")
+    process_events(200)
+
+    assert spy.presses == [] and spy.pin_presses == [], "the rebuild was not a T64 press"
+    assert view._behind.get(("module", "mod-playerbots")) == 4
+    assert reads.count(playerbots) == 1, "a checkout nothing moved was read again"
+
+
+def test_a_stopped_server_update_keeps_the_server_cloned_count(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop reaches `_rebuild_finished()` as `ok=True`, and it is not a finished update.
+
+    `LogPanel` reports a stopped job as ok on purpose, so `cancelled` is the one
+    fact saying the press did not finish (T146 review).
+
+    Mutation: drop `and not self.rebuild_log.cancelled` from the clearing
+    condition and a stopped update drops a count that is still true.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, _ = _server_cloned_view(ps, tmp_path)
+    route = view.services.update_to_latest
+    assert route is not None
+    reached = threading.Event()
+    release = threading.Event()
+
+    def blocks(cancel: object = None) -> Iterator[str]:
+        yield "--- update-sources"
+        reached.set()
+        release.wait(HANG_BOUND)
+        yield "never gets here"
+
+    view.services.update_to_latest = replace(route, press=blocks)
+
+    assert view.update_to_latest() is True
+    pump_until(reached.is_set, "the update reached its first line")
+    view.rebuild_log.stop()
+    release.set()
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update stopped")
+
+    assert view.rebuild_log.cancelled is True, "the ground for the assertion below"
+    assert view._behind.get(("module", "mod-playerbots")) == 4
+
+
 # -- T124: "Upstream has new code since this server was built" --------------
 
 
