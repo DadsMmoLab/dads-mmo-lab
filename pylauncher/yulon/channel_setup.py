@@ -39,6 +39,13 @@ And only `Verified` can produce credentials. The architecture's rule for this
 module — never persist before a round trip has answered — is expressed in the
 types rather than in a comment: the earlier states have no such method, so a
 caller cannot write a credential file it has not proved.
+
+The one thing kept before that is the `Pending` record (T138), in a file of its
+own that nothing but this setup reads: the account row and the password it was
+created with, so a launch after the app closed mid-settle re-verifies the row
+it made instead of minting a password the row will never have. It is not a
+credential -- `live_channel()` and every feature still see only the verified
+file -- and `save_credential()` removes it the moment one is written.
 """
 
 from __future__ import annotations
@@ -141,7 +148,7 @@ class Pending:
                 account=self.account,
                 reason=(
                     f"the account {self.account} exists but three round trips did not prove it, "
-                    "so nothing was saved and it is over to you"
+                    "so it is not in use and it is over to you"
                 ),
             )
         return Pending(account=self.account, password=self.password, tries=tries)
@@ -688,7 +695,6 @@ def save_credential(
     round trip answered" is enforced: the earlier states cannot be passed here.
     """
     path = credential_path(game, install_id, config_dir=config_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         {
             "account": verified.account,
@@ -700,14 +706,99 @@ def save_credential(
         },
         indent=2,
     )
-    # `O_TRUNC` rather than `O_EXCL`: a rotated password has to be able to land
+    # Replaced rather than refused: a rotated password has to be able to land
     # on top of the old one, and refusing that would strand an install whose
     # credential changed.
-    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CREDENTIAL_MODE)
-    with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(payload + "\n")
+    _write_private(path, payload + "\n")
     logger.info(f"saved the command-channel credential for {game} to {path}")
+    # Proved now, so the record of the row before it was proved is spent. Both
+    # `ensure()` and `repair()` come through here, which is what makes a
+    # repaired channel drop it too (T138).
+    forget_pending(game, install_id, config_dir=config_dir)
     return path
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Put `text` at `path` owner-only, and whole or not at all (T138).
+
+    Owner-only by the creation flags, for `CREDENTIAL_MODE`'s reason. Whole by
+    writing a sibling, forcing it to disk and renaming it over `path`: a
+    power cut part-way leaves the file that was there, never a truncated one
+    that reads as no credential and sends the next launch to mint a password.
+    The sibling is created `O_EXCL` after any leftover is removed, so a stale
+    one with a wider mode is never written into.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.unlink(missing_ok=True)
+    handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, CREDENTIAL_MODE)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+def pending_path(game: str, install_id: str, *, config_dir: Path | None = None) -> Path:
+    """Where this install's un-proved channel account is recorded (T138).
+
+    A folder of its own under `credentials/`, not a second name beside the
+    verified file: everything that lists `credentials/*.json` reads each one as
+    a credential, and this is not one.
+    """
+    folder = credential_path(game, install_id, config_dir=config_dir).parent / "pending"
+    return folder / f"{game}-{install_id}.json"
+
+
+def save_pending(
+    pending: Pending, *, game: str, install_id: str, config_dir: Path | None = None
+) -> Path:
+    """Record a row that exists and has not answered yet, for a later launch (T138).
+
+    Takes a `Pending` and nothing else: only `create` returning makes one, so a
+    record on disk means the row is there with this password. That is what lets
+    a later launch re-verify it instead of creating -- the latch, across a
+    close. Written with the verified credential's care, because it is the same
+    password a minute earlier.
+    """
+    path = pending_path(game, install_id, config_dir=config_dir)
+    payload = json.dumps({"account": pending.account, "password": pending.password}, indent=2)
+    _write_private(path, payload + "\n")
+    logger.info(f"kept the un-proved command-channel account for {game} in {path}")
+    return path
+
+
+def load_pending(game: str, install_id: str, *, config_dir: Path | None = None) -> Pending | None:
+    """The row an earlier run created and did not prove, or `None`. Never raises.
+
+    Its `tries` start again at nought: they count this run's round trips, and a
+    launch is a new run.
+    """
+    path = pending_path(game, install_id, config_dir=config_dir)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return Pending(account=str(raw["account"]), password=str(raw["password"]))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.debug(f"no pending channel account at {path}: {type(exc).__name__}")
+        return None
+
+
+def forget_pending(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Drop the un-proved record once a verified credential stands. Never raises.
+
+    A record that outlives this -- a locked file on Windows, a crash between
+    the two writes -- is harmless: `InstallChannel` reads the verified file
+    first, and the next save removes it.
+    """
+    path = pending_path(game, install_id, config_dir=config_dir)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.info(f"could not remove {path}: {type(exc).__name__}")
 
 
 def load_credential(
@@ -776,6 +867,21 @@ def ensure(
     if isinstance(current, Idle):
         create(account, password, gm_level)
         current = current.created(account, password)
+        # After `create` and not before it: a record on disk says the row is
+        # there, which is what lets a later launch re-verify rather than
+        # create (T138). Until then the password lived only in this run, and
+        # closing the app inside the ~40 s the world takes to answer SOAP lost
+        # it -- the next launch minted another, `create` kept the row's first,
+        # and every round trip was a 401. A record that cannot be written costs
+        # only that later launch; this run still holds the password, so it is
+        # said and not raised.
+        try:
+            save_pending(current, game=game, install_id=install_id, config_dir=config_dir)
+        except OSError as exc:
+            logger.warning(
+                f"could not keep the un-proved command-channel account for {game} "
+                f"({type(exc).__name__}); closing Yu'lon before it is proved will need a repair"
+            )
 
     answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
     if getattr(answer, "denied", False):
@@ -914,11 +1020,14 @@ class InstallChannel:
     Two questions belong together here: pressing enable, and asking where the
     setup has got to. They are the same state machine from two sides.
 
-    The state survives an app restart through the credential file and nothing
-    else. A saved credential means a round trip answered — that is the only way
-    one gets written — so finding one is `Verified` and finding none is `Idle`.
-    Nothing is inferred from a conf file: a written setting is not a working
-    channel, which is the distinction this whole box exists to keep.
+    The state survives an app restart through the credential file and the
+    pending record, and nothing else. A saved credential means a round trip
+    answered — that is the only way one gets written — so finding one is
+    `Verified`. Without one, a pending record means an earlier run created the
+    row and closed before it was proved, so that is `Pending` with the row's
+    own password (T138); finding neither is `Idle`. Nothing is inferred from a
+    conf file: a written setting is not a working channel, which is the
+    distinction this whole box exists to keep.
     """
 
     def __init__(
@@ -948,7 +1057,10 @@ class InstallChannel:
     def _from_disk(self) -> State:
         saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
         if saved is None:
-            return Idle()
+            # The verified file first: a crash between writing it and removing
+            # the pending record leaves both, and the proved one is the answer.
+            pending = load_pending(self.entry.id, self.install_id, config_dir=self._config_dir)
+            return pending if pending is not None else Idle()
         return Verified(
             account=saved.account,
             password=saved.password,
@@ -987,8 +1099,24 @@ class InstallChannel:
         `unknown` with `indeterminate` false, so opening the tab against a
         stopped server read as "your password is wrong" and offered to rotate a
         GM account's password to fix a container that was not running.
+
+        A `Pending` state is proved here too (T138). It is how a launch finds a
+        row an earlier run created and closed before proving, and the server
+        was usually left running -- so the check the tab makes on opening is
+        the only thing that will ask. `prove()` from `Pending` is `ensure()`'s
+        re-verify arm: one round trip, and never a create, so opening a tab
+        still writes nothing to the user's auth database. A check that gets no
+        answer costs the state none of its tries: it is a look, and the three
+        belong to the settles a Start and an install make -- spending them on
+        reopens of the app would leave the Start that follows given up.
         """
         state = self._state
+        if isinstance(state, Pending):
+            after = self.prove()
+            if isinstance(after, Verified | Refused):
+                return after
+            self._state = state
+            return state
         if not isinstance(state, Verified):
             return state
         channel = self._channel_for(self._endpoint(state.account, state.password))

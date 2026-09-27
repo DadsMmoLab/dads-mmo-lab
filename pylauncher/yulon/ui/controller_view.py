@@ -4354,6 +4354,9 @@ def _size_text(size: int) -> str:
 _POST_INSTALL_RESETTLE_MS = 60_000
 """How long after an install's first `settle()` the tab asks once more if still `Pending`.
 
+The same wait follows a tab that opens on a `Pending` channel an earlier run
+left un-proved (T138): its first ask can land in the same slow half minute.
+
 Measured on the T86 gate: a SOAP request 8 s after `World server is up` hit the
 20 s timeout while the world logged in its bots; 40 s after it answered at once.
 """
@@ -4574,9 +4577,9 @@ class ControllerView(QWidget):
         self.check_server_files()
 
         # What the channel says needs no daemon, no database and no network:
-        # it is read from the credential file, so it is shown whether or not
-        # this tab polls. Asking the SERVER about it is the part that is gated
-        # on polling, just below.
+        # it is read from the credential file (or the pending record, T138), so
+        # it is shown whether or not this tab polls. Asking the SERVER about it
+        # is the part that is gated on polling, just below.
         self.refresh_channel()
 
         self._timer = QTimer(self)
@@ -4598,7 +4601,20 @@ class ControllerView(QWidget):
             # And ask the channel once, for the same reason: a credential the
             # server has stopped accepting reads as verified straight off the
             # disk, and until something asks, the repair is never offered.
+            #
+            # A channel found `Pending` is a row an earlier run created and
+            # closed before proving (T138). The server was usually left up, so
+            # no Start is coming to settle it, and this check may itself land
+            # inside the ~40 s the world takes to answer SOAP -- so it gets the
+            # one later ask an install gets. Read before the check, which may
+            # run inline and move the state on.
+            setup = self.services.channel_setup
+            found_pending = setup is not None and isinstance(
+                setup.setup_state(), channel_setup.Pending
+            )
             self._check_the_channel()
+            if found_pending:
+                QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
 
     # ------------------------------------------------------------- sub-tabs
 
@@ -5708,7 +5724,9 @@ class ControllerView(QWidget):
     def _resettle_if_pending(self) -> None:
         # A minute is long enough for the tab to have been torn down (install,
         # then uninstall): `shutdown()` sets `_closed`, and a job started after
-        # it would connect its `done` to a slot of a deleted widget.
+        # it would connect its `done` to a slot of a deleted widget. `settle()`
+        # on `Pending` re-verifies and never creates, which is why the tab-open
+        # path may schedule this too (T138).
         if getattr(self, "_closed", False):
             return
         setup = self.services.channel_setup
