@@ -1045,13 +1045,27 @@ class CatalogView(QWidget):
             if handover.lost:
                 # Another Yu'lon took the lock in the moment it was free. Two
                 # copies running is what the lock exists to prevent, so this
-                # one goes, rather than carrying on unguarded beside it.
-                QMessageBox.warning(
-                    self,
-                    single_instance.LOST_TITLE,
-                    f"{message}\n\n{single_instance.LOST_TEXT}",
-                )
-                self.window().close()
+                # one goes, rather than carrying on unguarded beside it - and
+                # it goes FIRST, before anything that waits on the player: a
+                # modal box here kept this window and its jobs running beside
+                # the winner until someone pressed OK (review, round 3).
+                logger.warning(f"docker-group restart failed and the lock was lost: {message}")
+                window = self.window()
+                if not window.close():
+                    # Refused, because something that cannot be stopped is
+                    # running (the database import): force-quitting would
+                    # leave it half-written, so the window stays until it ends,
+                    # and says why without blocking the work it is waiting for.
+                    box = QMessageBox(
+                        QMessageBox.Icon.Warning,
+                        single_instance.LOST_TITLE,
+                        f"{message}\n\n{single_instance.LOST_TEXT}",
+                        QMessageBox.StandardButton.Ok,
+                        window,
+                    )
+                    box.setWindowModality(Qt.WindowModality.NonModal)
+                    box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                    box.show()
                 return True
             QMessageBox.warning(self, "Install failed", message)
         return True

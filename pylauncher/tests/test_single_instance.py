@@ -445,9 +445,11 @@ def _held(lock_path: Path) -> bool:
     return True
 
 
-@pytest.mark.parametrize("competitor", [True, False], ids=["a-launch-took-the-gap", "nobody-came"])
+@pytest.mark.parametrize(
+    "case", ["a-launch-took-the-gap", "took-the-gap-while-busy", "nobody-came"]
+)
 def test_a_failed_docker_group_restart_closes_this_copy_if_another_took_the_lock(
-    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, competitor: bool
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     """The exec gap, driven through the real view method and the real `restart_under_docker_group`.
 
@@ -455,9 +457,30 @@ def test_a_failed_docker_group_restart_closes_this_copy_if_another_took_the_lock
     the gap - `docker_group_reexec()` can run `id -nG` for five seconds - so
     every call to it must find the lock still held. And when the exec fails
     after another launch has taken the lock, this copy carried on unguarded
-    beside it; it must say so and close. Only `os.execv` is replaced: it lets
-    the competitor in (or not), then fails the way a missing `sg` does.
+    beside it; it must close. Only `os.execv` is replaced: it lets the
+    competitor in (or not), then fails the way a missing `sg` does.
+
+    Round 3 (Codex, high): the close must not wait on the player. Round 2 put a
+    MODAL box up first and closed only once it was dismissed, so the losing
+    copy and its jobs ran on beside the winner for as long as nobody pressed
+    OK. The warning here stands in for a modal nobody answers: it never
+    returns. When the close is refused (a database import running, which must
+    not be force-quit), the explanation is a box that does not block.
     """
+    from PySide6.QtCore import QEvent, QObject, Qt
+
+    competitor = case != "nobody-came"
+
+    class _NeverAnswered(Exception):
+        pass
+
+    class _RefuseClose(QObject):
+        def eventFilter(self, _watched: QObject, event: QEvent) -> bool:  # noqa: N802
+            if event.type() is QEvent.Type.Close:
+                event.ignore()
+                return True
+            return False
+
     from PySide6.QtCore import QLockFile
     from PySide6.QtWidgets import QMainWindow, QMessageBox
 
@@ -488,26 +511,49 @@ def test_a_failed_docker_group_restart_closes_this_copy_if_another_took_the_lock
     monkeypatch.setattr(platform.os, "execv", execv)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     boxes: list[str] = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda _p, title, *_a, **_k: boxes.append(title))
+
+    def warning(_parent: object, title: str, *_a: object, **_k: object) -> object:
+        boxes.append(title)
+        if competitor:
+            raise _NeverAnswered(
+                f"a modal {title!r} while the window was visible: {window.isVisible()}"
+            )
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", warning)
     window = QMainWindow()
+    refuse = _RefuseClose(window)
     view = CatalogView(load_catalog(), lambda e: None, LogPanel(), pick_dir=lambda *_: tmp_path)
     window.setCentralWidget(view)
     try:
         assert guard.claim() == "first"
         window.show()
+        if case == "took-the-gap-while-busy":
+            window.installEventFilter(refuse)
 
         assert view._offer_a_restart_instead("the install could not reach Docker") is True
 
         assert asked_while_held and all(asked_while_held), asked_while_held
         assert exec_found_it_free == [True], "the lock was not free for the exec"
-        if competitor:
-            assert boxes == [single_instance.LOST_TITLE], boxes
+        lost_boxes = [
+            box
+            for box in window.findChildren(QMessageBox)
+            if box.isVisible() and box.windowTitle() == single_instance.LOST_TITLE
+        ]
+        if case == "a-launch-took-the-gap":
+            assert boxes == [], boxes
             assert not window.isVisible(), "this copy kept running beside the one that won"
+        elif case == "took-the-gap-while-busy":
+            assert boxes == [], boxes
+            assert window.isVisible(), "a refused close was forced"
+            assert len(lost_boxes) == 1, "the refused close was not explained"
+            assert lost_boxes[0].windowModality() is Qt.WindowModality.NonModal
         else:
             assert boxes == ["Install failed"], boxes
             assert window.isVisible()
             assert _held(lock_path), "the exec failed and the lock was not taken back"
     finally:
+        window.removeEventFilter(refuse)
         window.close()
         guard.release()
         if rival.isLocked():
