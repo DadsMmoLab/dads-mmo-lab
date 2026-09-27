@@ -2163,7 +2163,9 @@ def test_a_real_static_ints_yes_still_offers_and_takes_the_restart(
     monkeypatch.setattr(catalog_view.platform, "docker_group_reexec", lambda: ["yulon"])
     restarted: list[bool] = []
     monkeypatch.setattr(
-        catalog_view.platform, "restart_under_docker_group", lambda: restarted.append(True)
+        catalog_view.platform,
+        "restart_under_docker_group",
+        lambda *_a, **_k: restarted.append(True),
     )
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())

@@ -43,6 +43,7 @@ from yulon.catalog.installer import (
     unsupported_platform_message,
 )
 from yulon.log import get_logger
+from yulon.ui import single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import COLOR_TEXT_GOLD
@@ -1014,7 +1015,12 @@ class CatalogView(QWidget):
         Escape and the window's close button both return `NoButton`, and only
         an explicit Yes may throw away a running application.
         """
-        if platform.docker_group_reexec() is None:
+        # Asked ONCE, here, and the answer is what the restart execs (T152). It
+        # can run `id -nG` for up to five seconds, and the restart gives the
+        # single-instance lock up around its exec: asked again in there, those
+        # seconds were a window in which another launch could take the lock.
+        argv = platform.docker_group_reexec()
+        if argv is None:
             return False
         if said_yes(
             QMessageBox.question(
@@ -1031,8 +1037,36 @@ class CatalogView(QWidget):
         ):
             # Only returns if the exec failed, and then the user is told what
             # actually went wrong rather than being left looking at a dialog
-            # that closed and did nothing.
-            platform.restart_under_docker_group()
+            # that closed and did nothing. The single-instance lock is handed
+            # over around it: the exec keeps this PID, and the restarted app
+            # would otherwise find its own lock held and refuse to open (T152).
+            with single_instance.handed_over() as handover:
+                platform.restart_under_docker_group(reexec=lambda: argv)
+            if handover.lost:
+                # Another Yu'lon took the lock in the moment it was free. Two
+                # copies running is what the lock exists to prevent, so this
+                # one goes, rather than carrying on unguarded beside it - and
+                # it goes FIRST, before anything that waits on the player: a
+                # modal box here kept this window and its jobs running beside
+                # the winner until someone pressed OK (review, round 3).
+                logger.warning(f"docker-group restart failed and the lock was lost: {message}")
+                window = self.window()
+                if not window.close():
+                    # Refused, because something that cannot be stopped is
+                    # running (the database import): force-quitting would
+                    # leave it half-written, so the window stays until it ends,
+                    # and says why without blocking the work it is waiting for.
+                    box = QMessageBox(
+                        QMessageBox.Icon.Warning,
+                        single_instance.LOST_TITLE,
+                        f"{message}\n\n{single_instance.LOST_TEXT}",
+                        QMessageBox.StandardButton.Ok,
+                        window,
+                    )
+                    box.setWindowModality(Qt.WindowModality.NonModal)
+                    box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                    box.show()
+                return True
             QMessageBox.warning(self, "Install failed", message)
         return True
 
