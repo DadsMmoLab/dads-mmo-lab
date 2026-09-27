@@ -557,3 +557,27 @@ def test_a_proved_channel_whose_credential_cannot_be_written_stays_pending(
     monkeypatch.undo()
     assert isinstance(first.settle(), setup.Verified)
     assert world.creates == [ACCOUNT]
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="a folder's write bit stops no unlink on Windows, nor for root",
+)
+def test_a_promotion_whose_pending_record_will_not_go_is_still_verified(tmp_path: Path) -> None:
+    """The verified file landed; a record that outlives it is read second and is harmless.
+
+    Only the purge needs the strict removal. Here a failure to remove it must
+    not turn a proved channel back into a pending one.
+    """
+    world = _World()
+    first = _enabled_and_started(tmp_path, world)
+    world.loading = False
+    folder = setup.pending_path(WOTLK.id, INSTALL, config_dir=tmp_path / "config").parent
+    folder.chmod(0o500)
+    try:
+        state = first.settle()
+    finally:
+        folder.chmod(0o700)
+
+    assert isinstance(state, setup.Verified), state
+    assert isinstance(_launch(tmp_path, world).setup_state(), setup.Verified)

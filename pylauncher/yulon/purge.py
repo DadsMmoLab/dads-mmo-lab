@@ -156,6 +156,8 @@ to the same folder read it, trusted a row that was gone, never created the
 account, and was refused for good -- Repair rewrites a row and there was none
 (review of T138). Unlike the verified credential it is not a login anyone uses;
 it is this app's own unfinished step, and the step's database is what went.
+A record that cannot be removed does not stop the purge; its report names the
+file for the user to delete.
 
 The kept database password (`dbsecret`) is the third thing under that directory
 and the only one this action WRITES. It is named in the same line rather than a
@@ -373,10 +375,16 @@ class Uninstaller:
         )
 
     def _real_forget_pending(self) -> None:
-        """Drop the un-proved channel account's record, keyed as the channel keys it (T138)."""
+        """Remove the un-proved channel account's record, or raise saying why not (T138)."""
         from yulon import channel_setup
 
-        channel_setup.forget_pending(self.game, composegen.install_id(self.server_dir))
+        channel_setup.remove_pending(self.game, composegen.install_id(self.server_dir))
+
+    def _pending_record(self) -> Path:
+        """Where that record is, keyed as the channel keys it, for a sentence that names it."""
+        from yulon import channel_setup
+
+        return channel_setup.pending_path(self.game, composegen.install_id(self.server_dir))
 
     def _real_snapshot(self) -> logsnap.Snapshot:
         logs = self._logs_dir if self._logs_dir is not None else platform.config_dir() / "logs"
@@ -522,6 +530,7 @@ class Uninstaller:
 
         kept: list[str] = []
         removed_volumes: list[str] = []
+        warnings: list[str] = []
         for name in targets.volumes:
             if keep_characters and name in (targets.character_volume, targets.client_volume):
                 kept.append(name)
@@ -533,9 +542,20 @@ class Uninstaller:
             # among them, so the row the pending record names is gone (T138;
             # `LEFT_BEHIND`'s docstring has why). Ticked keeps that database,
             # and the record with it.
-            self._forget_pending()
+            #
+            # A record that could not be removed does not stop the purge -- the
+            # database is already gone, and the order here is the owner's -- but
+            # it is said, with the file named: a reinstall to this folder would
+            # read it and be refused for good (Codex review of T138).
+            try:
+                self._forget_pending()
+            except OSError as exc:
+                warnings.append(
+                    f"the command channel's un-proved account record {self._pending_record()} "
+                    f"could not be removed ({exc}); delete that file before installing into "
+                    f"this folder again, or the new server's command channel will be refused."
+                )
 
-        warnings: list[str] = []
         removed_images: list[str] = []
         for ref in self.image_refs:
             problem = self._remove_image(ref)

@@ -782,10 +782,20 @@ def _temporary_path(path: Path) -> Path:
 
 def _replace(temp: Path, path: Path) -> None:
     """`os.replace`, tried again a few times where Windows refuses it for a reader."""
+    _tried_again_on_windows(lambda: os.replace(temp, path))
+
+
+def _tried_again_on_windows(action: Callable[[], object]) -> None:
+    """Run `action`; on Windows, try a refused one again up to `REPLACE_TRIES` times.
+
+    Only `PermissionError`, which is how Windows refuses a rename or a delete of
+    a file another handle holds; every other failure, and the last refusal,
+    reaches the caller.
+    """
     tries = REPLACE_TRIES if _ON_WINDOWS else 1
     for attempt in range(1, tries + 1):
         try:
-            os.replace(temp, path)
+            action()
             return
         except PermissionError:
             if attempt == tries:
@@ -865,15 +875,38 @@ def load_pending(game: str, install_id: str, *, config_dir: Path | None = None) 
 def forget_pending(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
     """Drop the un-proved record once a verified credential stands. Never raises.
 
-    A record that outlives this -- a locked file on Windows, a crash between
-    the two writes -- is harmless: `InstallChannel` reads the verified file
-    first, and the next save removes it.
+    The lenient half of `remove_pending()`, for the promotion. A record that
+    outlives this -- a locked file on Windows, a crash between the two writes
+    -- is harmless there: `InstallChannel` reads the verified file first, and
+    the next save removes it.
+    """
+    try:
+        remove_pending(game, install_id, config_dir=config_dir)
+    except OSError as exc:
+        path = pending_path(game, install_id, config_dir=config_dir)
+        logger.info(f"could not remove {path}: {type(exc).__name__}")
+
+
+def remove_pending(game: str, install_id: str, *, config_dir: Path | None = None) -> None:
+    """Remove the un-proved record for good, or raise saying why it is still there.
+
+    The strict half, for a purge that has just removed the database the record
+    names a row in (T138). There a record left behind is not harmless: a
+    reinstall to the same folder reads it, trusts a row that is gone, and is
+    refused for good. So nothing is swallowed. No record is the ordinary case
+    and is fine; a Windows refusal gets the same few tries a rename does; any
+    other failure reaches the caller, which says it. On POSIX the folder is
+    synced after the removal, for the reason `_sync_folder()` gives: a
+    removal is an entry in the folder, and a power cut can bring back an
+    unsynced one.
     """
     path = pending_path(game, install_id, config_dir=config_dir)
     try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        logger.info(f"could not remove {path}: {type(exc).__name__}")
+        # A call, not `path.unlink` handed over, so the write ledger's walk sees it.
+        _tried_again_on_windows(lambda: path.unlink())
+    except FileNotFoundError:
+        return
+    _sync_folder(path.parent)
 
 
 def load_credential(
@@ -931,6 +964,11 @@ def ensure(
 
     `create` is the install's own account seam (the SRP6 row path this app
     already has), and it is called only from `Idle`.
+
+    One app per machine is assumed. Two Yu'lon windows settling the same
+    install at once can each mint a password from `Idle`, and the second
+    pending record then overwrites the first; the app has no single-instance
+    guard yet, which is T152.
     """
     current = state if state is not None else Idle()
     # `Refused` is here for the same reason `Verified` and `GaveUp` are, and for
