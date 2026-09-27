@@ -128,6 +128,7 @@ from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
+from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
@@ -652,7 +653,7 @@ def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
     Cancel (T33). Cancel is the default and the escape button, so Enter, Escape
     and the close button all install nothing.
     """
-    box = QMessageBox(
+    box = FittedMessageBox(
         QMessageBox.Icon.Information,
         f"{manifest.name} needs your game client",
         client_notice(manifest),
@@ -2789,7 +2790,7 @@ def ask_backup_choice(
     on it is what the user reads. `Cancel` carries `RejectRole`, which is what
     makes Escape land on it.
     """
-    box = QMessageBox(
+    box = FittedMessageBox(
         QMessageBox.Icon.Warning,
         title,
         text,

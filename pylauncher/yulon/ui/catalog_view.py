@@ -46,6 +46,7 @@ from yulon.log import get_logger
 from yulon.ui import single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.icons import dadcraft_icon
+from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import COLOR_TEXT_GOLD
 from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 from yulon.ui.widgets.log_panel import LogPanel
@@ -132,7 +133,7 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
     one it is wrong for - a second install of the same game - is a folder the
     user is already thinking about.
     """
-    box = QMessageBox(
+    box = FittedMessageBox(
         QMessageBox.Icon.Question,
         f"Install {game}",
         f"Install {game} into this new folder?\n\n{suggested}\n\n"
@@ -1056,7 +1057,7 @@ class CatalogView(QWidget):
                     # running (the database import): force-quitting would
                     # leave it half-written, so the window stays until it ends,
                     # and says why without blocking the work it is waiting for.
-                    box = QMessageBox(
+                    box = FittedMessageBox(
                         QMessageBox.Icon.Warning,
                         single_instance.LOST_TITLE,
                         f"{message}\n\n{single_instance.LOST_TEXT}",
