@@ -1997,11 +1997,23 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
     from yulon.ui.icons import get_app_icon
+    from yulon.ui.single_instance import UNANSWERED_TEXT, UNANSWERED_TITLE, InstanceGuard
     from yulon.ui.theme import apply_dadcraft_theme
 
     app = QApplication(sys.argv)
     app.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(app)
+    # One Yu'lon per user (T152), claimed BEFORE the window: `build_window()`
+    # reads state.json and starts the update check, and a second copy doing
+    # either beside the first is the race this exists to stop. After the theme,
+    # so the one box a second launch can show looks like the app.
+    instance = InstanceGuard(platform.config_dir())
+    claim = instance.claim()
+    if claim == "raised":
+        return 0
+    if claim == "unanswered":
+        QMessageBox.warning(None, UNANSWERED_TITLE, UNANSWERED_TEXT)
+        return 1
     # THIS thread runs the event loop, so it is the one thread that must never
     # hold the Windows keep-awake assertion: every install is handed to a
     # `QThread` (`ui/widgets/log_panel.py`), and `SetThreadExecutionState` is
@@ -2012,6 +2024,8 @@ def main() -> int:
     platform.declare_gui_thread()
     window = build_window()
     assert isinstance(window, QMainWindow)
+    # Looked up at each call, not bound here, so a test can wrap it.
+    instance.raise_requested.connect(lambda token: _bring_to_front(window, token))
     # What `main()` returns, kept outside the `try` for the forced exit below,
     # which has to leave with the same answer the return would have given.
     code = 0
@@ -2070,7 +2084,13 @@ def main() -> int:
         code = int(app.exec())
         return code
     finally:
+        # The window is closed and nothing will pump the socket again; the lock
+        # is kept until the jobs are joined, so a relaunch waits for them (T152).
+        instance.stop_answering()
         stuck = _stop_background_threads(window)
+        # Before the forced exit as well: `os._exit` would leave the file to the
+        # dead-pid check, which works, but a clean release costs nothing.
+        instance.release()
         if stuck:
             # A job is still running and nothing can stop it (T113). Returning
             # from here hands its QThread to interpreter teardown, and Qt aborts
@@ -2082,6 +2102,41 @@ def main() -> int:
                 logger.error("the launcher ended on an exception", exc_info=failure)
                 code = 1
             _leave_with_jobs_still_running(code, stuck)
+
+
+def _bring_to_front(window: Any, token: str = "") -> None:
+    """Answer a second launch: the window comes forward, un-minimized (T152).
+
+    Each call is a request the desktop may refuse, and none of them failing is
+    an error. Windows lets the foreground change hands only when the process
+    the user started allows it, which the second launch does before asking
+    (`single_instance._let_the_first_take_the_foreground`). GNOME on Wayland
+    ignored `activateWindow()` without an activation token (T89's live check),
+    so the token the desktop gave the SECOND launch is handed to Qt here, where
+    the Wayland plugin reads it from the environment on activation and unsets
+    it. `alert()` is what is left when all of that is refused: the taskbar or
+    dock entry asks for attention instead of nothing happening.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtWidgets import QApplication
+
+    wayland = QGuiApplication.platformName() == "wayland"
+    if token and wayland:
+        os.environ["XDG_ACTIVATION_TOKEN"] = token
+    try:
+        # Minimized off, everything else kept: a maximized window comes back maximized.
+        window.setWindowState(
+            (window.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive
+        )
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        QApplication.alert(window)
+    finally:
+        # Unspent (not Wayland, or refused), it would reach every process this
+        # app starts - a game client included - as if it were theirs.
+        os.environ.pop("XDG_ACTIVATION_TOKEN", None)
 
 
 def _stop_background_threads(window: object) -> list[str]:
