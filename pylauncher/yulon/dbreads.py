@@ -143,9 +143,10 @@ def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
         text = conf.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         # Absent is not the same as unreadable, and this half was measured on
-        # yulon-ubuntu on 2026-09-06 rather than reasoned about. A normal
-        # AzerothCore install ships `playerbots.conf.dist` and no
-        # `playerbots.conf`, and the worldserver says so itself:
+        # yulon-ubuntu on 2026-09-06 rather than reasoned about. An AzerothCore
+        # install made before T137 has `playerbots.conf.dist` and no
+        # `playerbots.conf` (the install writes one since, and Repair server
+        # files offers it to the older ones), and the worldserver says so itself:
         #
         #     > Config::LoadFile: Failed open file
         #       '/azerothcore/env/dist/etc/modules/playerbots.conf'

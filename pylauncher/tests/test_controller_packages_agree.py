@@ -25,6 +25,7 @@ import pytest
 
 from yulon import party
 from yulon.catalog import bot_dashboard, native
+from yulon.catalog.families import azerothcore
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -534,6 +535,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             else {"repair_compose"}
         )
 
+        # T137's conf repair, decided by the CATALOG: only an entry whose
+        # `confs_from_dist` names a module conf the install writes from its
+        # `.dist` has one to offer -- WotLK's `playerbots.conf`, the reference.
+        # Read through the function the wiring reads, so a game that gains the
+        # list fails this until its tab offers the press.
+        unconfed = set() if azerothcore.confs_from_dist(entry) else {"repair_confs"}
+
         # T126's `module_notes`: one extra sentence on a Modules row, which only
         # Tortoise has to say -- its TortoiseBots Manager addon and its
         # TortoiseBots server module publish releases in lockstep, and the row
@@ -546,6 +554,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         unrebuilt = set() if game == "wow-tortoise" else {"bot_pool_rebuild"}
         allowed = (
             unrepaired
+            | unconfed
             | unstocked
             | unmeasured
             | unwired

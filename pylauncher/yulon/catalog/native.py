@@ -607,6 +607,38 @@ class ComposeRepairRoute:
     repair: Callable[[], ComposeRepaired]
 
 
+@dataclass(frozen=True)
+class ConfCheck:
+    """The module confs this install lacks and could have written from their `.dist` (T137).
+
+    `missing` is every conf the catalog's `confs_from_dist` names that is not on
+    disk while its `.dist` is: the one state the Server tab offers "Repair server
+    files…" on for it. Empty is "nothing to offer" -- the confs are there, or there
+    is no `.dist` to make one from.
+    """
+
+    missing: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConfRepaired:
+    """The confs a press wrote, relative to the server dir; empty when none needed writing."""
+
+    written: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConfRepairRoute:
+    """T137's half of "Repair server files…", wired for one install: a reading and a press.
+
+    `check` reads the disk and never raises. `repair` asks again at press time and
+    writes only a conf that is still absent, never over one that is there.
+    """
+
+    check: Callable[[], ConfCheck]
+    repair: Callable[[], ConfRepaired]
+
+
 REPAIR_BACKUP_SUFFIX = ".repair.bak"
 """`docker-compose.yml.<stamp>.repair.bak`: the file as it was before a repair replaced it."""
 

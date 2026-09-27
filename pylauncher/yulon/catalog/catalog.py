@@ -190,7 +190,33 @@ class ReadyMarkers(_Strict):
 
 
 class AzerothCoreData(_Strict):
-    """The AzerothCore family's own install data — only the worldserver env block (A2)."""
+    """The AzerothCore family's own install data: the worldserver env block (A2), and the
+    module confs the install writes from their `.dist` (T137)."""
+
+    confs_from_dist: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Module confs the install writes as a copy of the `.dist` beside them, relative to "
+            "the server dir, when the conf is not there yet; never over one that is. The "
+            "image's entrypoint copies `env/ref/etc/*` into the bound-out etc folder and makes "
+            "a `.conf` only for its own component, so a module's conf stays a `.dist`, the world "
+            "log carries a 'Missing property' line per key and the module runs on compiled "
+            "defaults (T137, measured on a fresh install 2026-09-26). The keys Yu'lon sets "
+            "for such a module stay in `world_env`, which wins over the file."
+        ),
+    )
+
+    @field_validator("confs_from_dist")
+    @classmethod
+    def _confs_are_conf_paths_inside_the_server_dir(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for file in value:
+            path = PurePosixPath(file)
+            if "\\" in file or path.is_absolute() or ".." in path.parts or file.endswith(".dist"):
+                raise ValueError(
+                    "confs_from_dist names the conf itself, as a relative POSIX path inside the "
+                    f"server dir (its `.dist` is found beside it), got {file!r}"
+                )
+        return value
 
     world_env: dict[str, str] = Field(
         default_factory=dict,

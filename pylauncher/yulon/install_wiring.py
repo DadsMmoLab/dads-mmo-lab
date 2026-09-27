@@ -36,6 +36,7 @@ from yulon.catalog import upstream
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
 from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.families import azerothcore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
     SUDO_PROMPT_PREFIX,
@@ -47,6 +48,8 @@ from yulon.catalog.installer import (
 from yulon.catalog.native import (
     WSL_DISTRO_STOPPED_NOTE,
     ComposeRepairRoute,
+    ConfCheck,
+    ConfRepairRoute,
     LatestRoute,
     RewrittenHistory,
     Seams,
@@ -407,7 +410,9 @@ def repair_compose_for_app(
     `dest` is the server dir (`app_written_paths()`), which is WotLK's alone. So
     WotLK is not offered it -- its base file already follows the app on Update,
     and its override is the Tuning tab's (T94/T101) -- and a family added later
-    is not offered it until somebody decides it should be.
+    is not offered it until somebody decides it should be. WotLK's Server tab
+    does show the same button for a missing module conf: that is
+    `repair_confs_for_app()` (T137), a different press.
 
     None as well for a server inside a WSL distro, for `rebuild_for_app()`'s
     reason: the engine's seams address this host, so the folder it would render
@@ -424,6 +429,39 @@ def repair_compose_for_app(
     return ComposeRepairRoute(
         check=lambda: installer_for_app(entry).base_compose_check(options),
         repair=lambda: installer_for_app(entry).repair_base_compose(options),
+    )
+
+
+def repair_confs_for_app(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> ConfRepairRoute | None:
+    """T137's half of "Repair server files…" for this install, or None when it has none.
+
+    Offered wherever the catalog names `confs_from_dist` -- WotLK's
+    `playerbots.conf` today -- and nowhere else, read off the entry rather than
+    an id. A server inside a WSL distro is served too, unlike T106's: this reads
+    and writes two files in the server folder and asks no daemon, which is the
+    reason the Bots tab's count and T94's WotLK reset serve it.
+
+    But the CHECK waits for such a distro to run (review, round 2). The tab asks
+    it when it is built, and reading `\\wsl.localhost\\<distro>\\…` starts a
+    stopped distro (T133), so while WSL says the distro is down (`wsl.known_stopped`,
+    the fail-closed reading: a listing that did not answer reads the disk) the
+    check answers "nothing to offer" and the next Refresh asks again. The press
+    is not gated: it is only offered after a check that read the disk, and it
+    is the person asking for the write.
+    """
+    if not azerothcore.confs_from_dist(entry):
+        return None
+
+    def check() -> ConfCheck:
+        if wsl_distro is not None and wsl.known_stopped(wsl_distro):
+            return ConfCheck()
+        return azerothcore.conf_check(entry, server_dir)
+
+    return ConfRepairRoute(
+        check=check,
+        repair=lambda: azerothcore.repair_confs(entry, server_dir),
     )
 
 
