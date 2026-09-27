@@ -59,7 +59,10 @@
             "world_env": {
               "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
               "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"
-            }
+            },
+            "confs_from_dist": [
+              "env/dist/etc/modules/playerbots.conf"
+            ]
           }
         }
       },
