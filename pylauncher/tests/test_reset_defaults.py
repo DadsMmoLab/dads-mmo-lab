@@ -28,7 +28,7 @@ import pytest
 from yulon import channel_setup, dbsecret, platform, reset_defaults, resources, tuning
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
-from yulon.catalog.families import conf
+from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError
@@ -632,15 +632,47 @@ def test_a_file_already_at_default_is_left_alone_with_no_backup(tmp_path: Path) 
     assert {f: (server / f).stat().st_mtime_ns for f in installed} == mtimes
 
 
-def test_a_file_not_on_disk_is_reported_and_never_created(tmp_path: Path) -> None:
-    """Spec correction 8: WotLK normally has no playerbots.conf, and must not get one."""
+def test_a_missing_playerbots_conf_is_made_again_as_the_install_now_makes_it(
+    tmp_path: Path,
+) -> None:
+    """T137 reverses spec correction 8: the install writes playerbots.conf from its `.dist`.
+
+    So its default is that copy -- the same bytes and the same mode as the
+    install's own writer (`azerothcore.write_from_dist`), not `conf.CONF_MODE`.
+    """
     _dist_install(tmp_path)
-    (tmp_path / "env/dist/etc/modules/playerbots.conf").unlink()
+    bots = tmp_path / "env/dist/etc/modules/playerbots.conf"
+    bots.unlink()
+    os.chmod(bots.with_name("playerbots.conf.dist"), 0o640)
+    installed = tmp_path / "fresh"
+    shutil.copytree(tmp_path / "env", installed / "env")
+    assert azerothcore.write_from_dist(installed, "env/dist/etc/modules/playerbots.conf")
+
     report = reset_defaults.reset(
         WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES, seams=_seams()
     )
-    assert [r.outcome for r in report.results] == ["reset", "reset", "absent"]
-    assert not (tmp_path / "env/dist/etc/modules/playerbots.conf").exists()
+    assert [r.outcome for r in report.results] == ["reset", "reset", "recreated"]
+    assert bots.read_bytes() == (installed / "env/dist/etc/modules/playerbots.conf").read_bytes()
+    if sys.platform != "win32":
+        assert _mode(bots) == 0o640, "not the .dist's mode, which the install gives it"
+
+
+def test_a_missing_playerbots_conf_with_no_dist_refuses_the_press_naming_it(
+    tmp_path: Path,
+) -> None:
+    """Nothing to make it from: all or nothing, so nothing is written, and the sentence says why."""
+    _dist_install(tmp_path)
+    bots = tmp_path / "env/dist/etc/modules/playerbots.conf"
+    bots.unlink()
+    bots.with_name("playerbots.conf.dist").unlink()
+    before = {f: (tmp_path / f).read_bytes() for f in reset_defaults.AZEROTHCORE_CORE_FILES[:2]}
+    report = reset_defaults.reset(
+        WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES, seams=_seams()
+    )
+    assert report.refused and report.written == ()
+    assert any("no playerbots.conf.dist beside it" in line for line in report.lines())
+    assert not bots.exists()
+    assert {f: (tmp_path / f).read_bytes() for f in before} == before
 
 
 def test_module_confs_and_scripts_are_never_touched(tmp_path: Path) -> None:
@@ -1497,7 +1529,9 @@ def test_a_missing_override_is_made_again_with_the_mode_the_install_gives_it(
 def test_a_missing_wotlk_conf_stays_absent_because_the_install_never_writes_one(
     tmp_path: Path,
 ) -> None:
-    """Plan correction 8: the worldserver does not load a `.dist`, so making one would change it."""
+    """Plan correction 8, which still holds for the two core confs: the install does not write
+    `worldserver.conf` or `authserver.conf` (the image's entrypoint makes each from its `.dist`
+    when its container starts), so a reset does not either."""
     _dist_install(tmp_path)
     (tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]).unlink()
     report = reset_defaults.reset(
@@ -1687,24 +1721,28 @@ def test_a_rollback_that_could_not_restore_keeps_every_backup_of_its_press(
 
 
 def test_the_question_says_a_file_the_install_never_writes_stays_as_it_is() -> None:
-    """Re-review: WotLK's Reset all lists playerbots.conf, which stays absent."""
-    bots = reset_defaults.AZEROTHCORE_CORE_FILES[2]
-    facts = reset_defaults.PressFacts(absent=(bots,), missing=("etc/realmd.conf",))
-    said = reset_defaults.question([bots, "etc/realmd.conf"], [], facts=facts)
+    """Re-review: WotLK's Reset all lists worldserver.conf, which stays absent when deleted."""
+    world = reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    facts = reset_defaults.PressFacts(absent=(world,), missing=("etc/realmd.conf",))
+    said = reset_defaults.question([world, "etc/realmd.conf"], [], facts=facts)
     assert (
-        "modules/playerbots.conf is not on disk and a fresh install does not write it, "
+        "worldserver.conf is not on disk and a fresh install does not write it, "
         "so it stays as it is." in said
     )
     assert "A backup of each file that is on disk is made first" in said
-    assert reset_defaults.PressFacts(absent=(bots,)).among(["x"]) == reset_defaults.PressFacts()
+    assert reset_defaults.PressFacts(absent=(world,)).among(["x"]) == reset_defaults.PressFacts()
 
 
 def test_press_facts_sorts_every_core_file_into_its_case(tmp_path: Path) -> None:
+    """playerbots.conf is written by the install since T137, so a deleted one is `missing`."""
     _dist_install(tmp_path)
-    (tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[2]).unlink()
+    world, _auth, bots = reset_defaults.AZEROTHCORE_CORE_FILES
+    (tmp_path / world).unlink()
+    (tmp_path / bots).unlink()
     facts = reset_defaults.press_facts(WOTLK, tmp_path, reset_defaults.core_files(WOTLK))
-    assert facts.absent == (reset_defaults.AZEROTHCORE_CORE_FILES[2],)
-    assert facts.foreign == (OVERRIDE,) and facts.missing == ()
+    assert facts.absent == (world,)
+    assert facts.missing == (bots,)
+    assert facts.foreign == (OVERRIDE,)
 
 
 # -- Codex final pass: the facts the player confirmed, checked again before writing --------

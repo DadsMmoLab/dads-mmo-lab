@@ -1,0 +1,80 @@
+# T137 test fixture: lines 1-4, 80-106, 130-136, 150-161, 685-686 and 1782-1805 of
+# mod-playerbots conf/playerbots.conf.dist at 7bae1b5c (the catalog pin), unchanged.
+##################################################
+# PLAYERBOTS CONFIGURATION FILE                  #
+##################################################
+
+####################################################################################################
+
+# Enable or disable Playerbots module
+AiPlayerbot.Enabled = 1
+
+# Enable randombot system
+AiPlayerbot.RandomBotAutologin = 1
+
+# Randombot count
+AiPlayerbot.MinRandomBots = 500
+AiPlayerbot.MaxRandomBots = 500
+
+# Randombot accounts
+# Set to 0 to automatically calculate needed accounts based on MaxRandomBots, EnablePeriodicOnlineOffline
+# and its ratio, and AddClassAccountPoolSize. Set manually if you want to create more accounts than needed.
+# If the manual value is less than the required, the system will override it with the required value.
+# Default: 0 (automatic)
+AiPlayerbot.RandomBotAccountCount = 0
+
+# Addclass accounts
+# Number of accounts created for bots reserved for the addclass command. As with randombots, each account has
+# 10 bots (or 9 if WotLK is disabled), one bot for each class.
+AiPlayerbot.AddClassAccountPoolSize = 50
+
+# Prefix for created bot accounts (of any type).
+# Do not change this prefix while there are existing bot accounts.
+AiPlayerbot.RandomBotAccountPrefix = "rndbot"
+
+####################################################################################################
+# GENERAL
+#
+
+# The maximum number of bots that a player can control simultaneously
+AiPlayerbot.MaxAddedBots = 40
+
+# Auto-login all player alts as altbots on player login
+AiPlayerbot.BotAutologin = 0
+
+# Allow/deny inviting altbots from the player's account
+AiPlayerbot.AllowAccountBots = 1
+
+# Allow/deny inviting altbots in the player's guild
+AiPlayerbot.AllowGuildBots = 1
+
+# Allow linking accounts for shared altbot control
+AiPlayerbot.AllowTrustedAccountBots = 1
+
+# Extra small randomness added to each gap so launches don’t look robotic (ms)
+AiPlayerbot.BotTaxiGapJitterMs = 100
+
+####################################################################################################
+# WARRIOR
+#
+
+AiPlayerbot.PremadeSpecName.1.0 = arms pve
+AiPlayerbot.PremadeSpecGlyph.1.0 = 43418,43395,43423,43399,43397,43421
+AiPlayerbot.PremadeSpecLink.1.0.60 = 3022032023335100002012211231241
+AiPlayerbot.PremadeSpecLink.1.0.80 = 3022032023335100102012213231251-305-2033
+AiPlayerbot.PremadeSpecName.1.1 = fury pve
+AiPlayerbot.PremadeSpecGlyph.1.1 = 43418,43395,43414,43396,49084,43432
+AiPlayerbot.PremadeSpecLink.1.1.60 = -305053000500310053120501351
+AiPlayerbot.PremadeSpecLink.1.1.80 = 32002300233-305053000500310153120511351
+AiPlayerbot.PremadeSpecName.1.2 = prot pve
+AiPlayerbot.PremadeSpecGlyph.1.2 = 43429,43397,43425,43399,49084,45797
+AiPlayerbot.PremadeSpecLink.1.2.60 = --053351225000210521030113321
+AiPlayerbot.PremadeSpecLink.1.2.80 = 3500030023-301-053351225000210521030113321
+AiPlayerbot.PremadeSpecName.1.3 = arms pvp
+AiPlayerbot.PremadeSpecGlyph.1.3 = 43417,43397,43423,43396,49084,43421
+AiPlayerbot.PremadeSpecLink.1.3.60 = 0320232023331100032212012221251
+AiPlayerbot.PremadeSpecLink.1.3.80 = 0320332023335100232212013231251-3250001
+AiPlayerbot.PremadeSpecName.1.4 = fury pvp
+AiPlayerbot.PremadeSpecGlyph.1.4 = 43432,43397,43417,43395,43396,43418
+AiPlayerbot.PremadeSpecLink.1.4.60 = -325000131500212250120511351
+AiPlayerbot.PremadeSpecLink.1.4.80 = 03220300233-325000131500212250122511351

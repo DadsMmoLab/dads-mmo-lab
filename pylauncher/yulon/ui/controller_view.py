@@ -93,7 +93,7 @@ from yulon.apply import (
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, upstream
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.families import clientdir
+from yulon.catalog.families import azerothcore, clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_tbc import accounts as tbc_accounts
@@ -982,6 +982,13 @@ class ControllerServices:
     and never a server inside a WSL distro. `None` means no banner and no check.
     """
 
+    repair_confs: native.ConfRepairRoute | None = None
+    """T137's half of the same button: write a module conf from its `.dist`; None where not offered.
+
+    `install_wiring.repair_confs_for_app()` answers: wherever the catalog names
+    `confs_from_dist` (WotLK's `playerbots.conf`). `None` means no check.
+    """
+
     update_to_latest: native.LatestRoute | None = None
     """Move this install's sources to upstream's newest code and rebuild; None when it cannot.
 
@@ -1443,6 +1450,9 @@ def _assemble(
         repair_compose=install_wiring.repair_compose_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
+        # T137. Here for T106's reason: which installs are offered it is a fact
+        # of `catalog.json` (`confs_from_dist`), answered in `install_wiring`.
+        repair_confs=install_wiring.repair_confs_for_app(entry, server_dir),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(entry, server_dir),
@@ -3997,7 +4007,8 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
 
 REPAIR_FILES_LABEL = "Repair server files…"
-"""T106's press: re-render this install's docker-compose.yml from the current template."""
+"""T106's press: re-render this install's docker-compose.yml from the current template.
+T137's, on the same button: write a module conf the install writes from its `.dist`."""
 
 REPAIR_FILES_OWED = composegen.BASE_FILE
 """What a repair adds to the tab's owed-a-recreate set, and the banner looks for."""
@@ -4025,6 +4036,38 @@ REPAIR_FILES_DONE = (
     "the old file until they are recreated: press Recreate containers… (the server goes down "
     "and comes back up; your characters are kept)."
 )
+
+REPAIR_CONFS_BANNER = (
+    "This server has no {files}, only the {dists} it is made from, so the bots run on their "
+    "built-in settings and My Party, the bot prefix and the Tuning tab have no file to read. "
+    "Repair server files… writes {files} as a copy of {dists}, as a fresh install now does. "
+    "Nothing changes until you press it."
+)
+"""T137's banner, for an install from before the install wrote the module conf."""
+
+REPAIR_CONFS_CONFIRM = (
+    "Repair this server's files now?\n\nYu'lon writes {files} as an exact copy of {dists}, the "
+    "settings file the module ships, which is what a fresh install now does. No file that is "
+    "there is changed. The bot population and the command channel stay as they are: Yu'lon "
+    "sets those in docker-compose.override.yml, which wins over this file.\n\nThe world "
+    "server reads {files} when it starts, so it takes effect after a restart, which Yu'lon "
+    "offers next."
+)
+
+REPAIR_CONFS_DONE = (
+    "{files} was written from {dists}. The world server reads it when it starts: press Restart "
+    "server… (anybody playing is disconnected)."
+)
+
+
+def _conf_names(files: Sequence[str]) -> dict[str, str]:
+    """`files` and their `.dist`s as the T137 sentences name them: base names, joined."""
+    names = [Path(file).name for file in files]
+    return {
+        "files": " and ".join(names),
+        "dists": " and ".join(f"{name}{azerothcore.DIST_SUFFIX}" for name in names),
+    }
+
 
 TUNING_REVERTED_FILE = "Put {file} back from {backup}.\n{rule}"
 
@@ -4600,6 +4643,12 @@ class ControllerView(QWidget):
         self._compose_check: native.ComposeCheck | None = None
         self._compose_backup: Path | None = None
         self._compose_pending = False
+        # T137: the module confs the last check found missing, the ones the
+        # last repair wrote (until the restart that loads them), and whether a
+        # check is out.
+        self._confs_missing: tuple[str, ...] = ()
+        self._confs_written: tuple[str, ...] = ()
+        self._confs_pending = False
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -10841,16 +10890,34 @@ class ControllerView(QWidget):
 
     @Slot()
     def check_server_files(self) -> None:
-        """Ask, off the GUI thread, whether docker-compose.yml is what this version writes.
+        """Ask, off the GUI thread, whether docker-compose.yml is what this version writes,
+        and (T137) whether a module conf the install writes is missing.
 
-        Only where the route is wired (the CMaNGOS family). Never queued behind
-        itself: a check already out answers for this one too.
+        Each only where its route is wired (the CMaNGOS family; WotLK). Neither is
+        queued behind itself: a check already out answers for this one too.
         """
+        confs = self.services.repair_confs
+        if confs is not None and not self._confs_pending:
+            self._confs_pending = True
+            self._run(confs.check, self._server_confs_checked, self._server_confs_check_failed)
         route = self.services.repair_compose
         if route is None or self._compose_pending:
             return
         self._compose_pending = True
         self._run(route.check, self._server_files_checked, self._server_files_check_failed)
+
+    @Slot(object)
+    def _server_confs_checked(self, result: object) -> None:
+        self._confs_pending = False
+        if isinstance(result, native.ConfCheck):
+            self._confs_missing = result.missing
+        self._refresh_compose_banner()
+
+    @Slot(object)
+    def _server_confs_check_failed(self, exc: object) -> None:
+        """`check` never raises by contract; if it does, the banner stays as it was."""
+        self._confs_pending = False
+        logger.warning(f"{self.entry.id}: the module conf check failed: {exc}")
 
     @Slot(object)
     def _server_files_checked(self, result: object) -> None:
@@ -10872,18 +10939,34 @@ class ControllerView(QWidget):
         logger.warning(f"{self.entry.id}: the compose check failed: {exc}")
 
     def _refresh_compose_banner(self) -> None:
-        """Draw T106's banner from the two facts it answers: a recreate owed, or a stale file.
+        """Draw T106's banner from what it answers: a job owed, a stale file, a missing conf.
 
-        A recreate owed for the repaired file comes first: the file on disk is then
-        current, and what is left to do is apply it.
+        A job owed for a repaired file comes first: the file on disk is then
+        current, and what is left to do is apply it -- a recreate for the compose
+        file, a restart for a module conf (T137), which the world reads when it
+        starts. The stale compose file and the missing conf are offered by the
+        same button; no game is offered both today (the CMaNGOS family has no
+        `confs_from_dist`, WotLK no compose repair), and the compose file would
+        go first.
         """
+        restart_owed = self._tuning_owed.get("restart", set())
+        written = [file for file in self._confs_written if file in restart_owed]
         if REPAIR_FILES_OWED in self._tuning_owed.get("recreate", set()):
             backup = self._compose_backup.name if self._compose_backup else "a .repair.bak"
             self.compose_banner_label.setText(REPAIR_FILES_DONE.format(backup=backup))
             self.compose_banner_button.setText(TUNING_RECREATE_LABEL)
             self.compose_banner.setVisible(True)
+        elif written:
+            self.compose_banner_label.setText(REPAIR_CONFS_DONE.format(**_conf_names(written)))
+            self.compose_banner_button.setText(TUNING_RESTART_LABEL)
+            self.compose_banner.setVisible(True)
         elif self._compose_state == "stale":
             self.compose_banner_label.setText(REPAIR_FILES_BANNER)
+            self.compose_banner_button.setText(REPAIR_FILES_LABEL)
+            self.compose_banner.setVisible(True)
+        elif self._confs_missing:
+            names = _conf_names(self._confs_missing)
+            self.compose_banner_label.setText(REPAIR_CONFS_BANNER.format(**names))
             self.compose_banner_button.setText(REPAIR_FILES_LABEL)
             self.compose_banner.setVisible(True)
         else:
@@ -10891,9 +10974,11 @@ class ControllerView(QWidget):
 
     @Slot()
     def _compose_banner_pressed(self) -> None:
-        """The banner's press: Repair, or -- once repaired -- the Tuning tab's own Recreate."""
+        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart."""
         if self.compose_banner_button.text() == TUNING_RECREATE_LABEL:
             self.recreate_containers()
+        elif self.compose_banner_button.text() == TUNING_RESTART_LABEL:
+            self.restart_server()
         else:
             self.repair_server_files()
 
@@ -10903,10 +10988,16 @@ class ControllerView(QWidget):
 
         The owner's decision: the player chooses when, and nothing changes behind
         their back. The dialog says what is written, what is kept and that the
-        recreate comes next.
+        recreate comes next. With no stale compose file and a module conf
+        missing, the same press is T137's instead (`_repair_confs()`).
         """
+        if self._busy:
+            return
+        if self._compose_state != "stale" and self._confs_missing:
+            self._repair_confs()
+            return
         route = self.services.repair_compose
-        if route is None or self._busy:
+        if route is None:
             return
         backup = f"{composegen.BASE_FILE}.<date>{native.REPAIR_BACKUP_SUFFIX}"
         last = self._compose_check
@@ -10941,6 +11032,45 @@ class ControllerView(QWidget):
     def _server_files_repair_failed(self, exc: object) -> None:
         self.problem_label.setText(f"The server files were not repaired: {exc}")
         self._set_busy(False)
+
+    def _repair_confs(self) -> None:
+        """Ask, then write the missing module confs from their `.dist` in a job (T137).
+
+        The same rule as the compose repair: the player chooses when, and the
+        dialog says what is written, that nothing on disk is changed, and that a
+        restart comes next.
+        """
+        route = self.services.repair_confs
+        if route is None:
+            return
+        question = REPAIR_CONFS_CONFIRM.format(**_conf_names(self._confs_missing))
+        if not self._confirm(REPAIR_FILES_LABEL, question):
+            return
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self._run(route.repair, self._server_confs_repaired, self._server_confs_repair_failed)
+
+    @Slot(object)
+    def _server_confs_repaired(self, result: object) -> None:
+        if isinstance(result, native.ConfRepaired):
+            self._confs_missing = ()
+            self._confs_written = result.written
+            for file in result.written:
+                # A conf in the bound etc folder: `file_rule()` prices it a
+                # restart, which is what the banner then offers.
+                self._note_tuning_owed(file)
+            if not result.written:
+                self.problem_label.setText(
+                    "The files were already there; nothing was written, and nothing was changed."
+                )
+        self._set_busy(False)
+        self.check_server_files()
+
+    @Slot(object)
+    def _server_confs_repair_failed(self, exc: object) -> None:
+        self.problem_label.setText(f"The server files were not repaired: {exc}")
+        self._set_busy(False)
+        self.check_server_files()
 
     def _note_tuning_owed_recreate(self, name: str) -> None:
         """Record `name` as owed a recreate, in the Tuning tab's own set, so both banners agree."""

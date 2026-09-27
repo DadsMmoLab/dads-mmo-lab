@@ -11,7 +11,9 @@ image's template, patched by that same table with that same install's tokens,
 through the same `conf.patch()` the install stage uses.
 
 WotLK is the other case. Its install writes no conf keys, so each conf's
-`.dist` sibling IS the as-installed default; its real settings -- the bot
+`.dist` sibling IS the as-installed default -- and since T137 the install
+writes `modules/playerbots.conf` as exactly that copy, so a deleted one is
+made again from it; its real settings -- the bot
 population, and SOAP once the channel is switched on -- are container
 environment in `docker-compose.override.yml`, which wins over the conf. That
 file's default is what the install's compose stage renders (owner decision 4,
@@ -45,7 +47,7 @@ from typing import Literal
 from yulon import dbsecret, docker, platform, resources, tuning
 from yulon.catalog import bot_dashboard, composegen
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.families import conf
+from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
 from yulon.catalog.native import Secrets
@@ -719,13 +721,21 @@ def install_writes(entry: CatalogEntry, file: str) -> bool:
     """Whether a fresh Yu'lon install writes `file` -- so a missing one is made again.
 
     A CMaNGOS game's conf table is exactly what its install writes into
-    `etc/`, and WotLK's install writes the compose override. WotLK's confs are
-    NOT written by the install: a normal install has `playerbots.conf.dist` and
-    no `playerbots.conf`, and the worldserver does not load the `.dist`
-    (measured, `dbreads.py`, `party.py`), so making one from it would change the
-    server rather than put it back (plan correction 8). Such a file stays absent.
+    `etc/`, and WotLK's install writes the compose override and, since T137,
+    the module confs its catalog names in `confs_from_dist` (`playerbots.conf`,
+    a copy of its `.dist`). WotLK's `worldserver.conf` and `authserver.conf`
+    are NOT written by the install -- the image's entrypoint makes each from its
+    `.dist` when its container starts -- so a deleted one stays absent.
+
+    Plan correction 8 said the same of `playerbots.conf`: a normal install had
+    only the `.dist`, the worldserver does not load a `.dist` (measured,
+    `dbreads.py`, `party.py`), so making one would change the server rather
+    than put it back. The owner's decision of 2026-09-27 (T137) made that copy
+    part of the install, and so of what "as installed" means here.
     """
     if file == composegen.OVERRIDE_FILE:
+        return True
+    if file in azerothcore.confs_from_dist(entry):
         return True
     native_block = entry.install.native
     return (
@@ -733,13 +743,21 @@ def install_writes(entry: CatalogEntry, file: str) -> bool:
     )
 
 
-def _install_mode(server_dir: Path, file: str) -> int:
+def _install_mode(entry: CatalogEntry, server_dir: Path, file: str) -> int:
     """The mode the install gives `file` when it makes it (for a recreated one).
 
     A CMaNGOS conf: `conf.CONF_MODE`, as `conf.materialise` sets it. The
     override: the mode of the base `docker-compose.yml` the same install call
-    (`composegen.write_plan`, a plain `write_text`) wrote beside it.
+    (`composegen.write_plan`, a plain `write_text`) wrote beside it. A WotLK
+    module conf (T137): its `.dist`'s, as `azerothcore.write_from_dist` gives it
+    -- 0600 would lock out the image's `acore` user wherever the host user is
+    not uid 1000.
     """
+    if file in azerothcore.confs_from_dist(entry):
+        try:
+            return stat.S_IMODE(azerothcore.dist_of(server_dir, file).stat().st_mode)
+        except OSError:
+            return conf.CONF_MODE
     if file == composegen.OVERRIDE_FILE:
         try:
             return stat.S_IMODE((server_dir / composegen.BASE_FILE).stat().st_mode)
@@ -754,7 +772,8 @@ class PressFacts:
 
     `foreign`: another tool's override, left alone. `missing`: not on disk and
     made again as the install makes it. `absent`: not on disk and never written
-    by the install (a WotLK conf), so it stays as it is.
+    by the install (WotLK's `worldserver.conf` or `authserver.conf`), so it
+    stays as it is.
     """
 
     foreign: tuple[str, ...] = ()
@@ -922,7 +941,7 @@ def reset(
                 # `modules/tortoise_bots.conf` may have lost its folder too;
                 # `materialise` makes the same one.
                 path.parent.mkdir(parents=True, exist_ok=True)
-                seams.write(path, texts[file], mode=_install_mode(server_dir, file))
+                seams.write(path, texts[file], mode=_install_mode(entry, server_dir, file))
             except (OSError, InstallerError) as exc:
                 return _rolled_back(files, skipped, done, file, exc, server_dir, seams)
             logger.info(f"recreated {path} as {entry.id} installs it")
