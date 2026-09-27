@@ -1057,7 +1057,7 @@ class CatalogView(QWidget):
                     # running (the database import): force-quitting would
                     # leave it half-written, so the window stays until it ends,
                     # and says why without blocking the work it is waiting for.
-                    box = QMessageBox(
+                    box = FittedMessageBox(
                         QMessageBox.Icon.Warning,
                         single_instance.LOST_TITLE,
                         f"{message}\n\n{single_instance.LOST_TEXT}",
