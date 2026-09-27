@@ -368,7 +368,12 @@ def test_the_tortoise_tab_update_press_runs_the_adoption_after_the_update(
 
     assert lines[0] == "engine: updated"
     assert typed == [botpool.PREVIEW, CONFIRM]
-    assert lifecycle == ["stop", "start"]
+    # T144: the restart the enrolment needs is OWED to the view, which asks
+    # about rebuilding the random bots first, so the update path restarts once.
+    assert lifecycle == []
+    rebuild = services.bot_pool_rebuild
+    assert rebuild is not None
+    assert rebuild.take_module_moved() == botpool.Move(restart_owed=True)
 
 
 # ------------------------------------------------------------------ review round 1

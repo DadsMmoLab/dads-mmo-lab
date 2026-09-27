@@ -540,6 +540,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # names both. No other game pairs a client addon with a server module,
         # so the seam is absent there by design, the reference included.
         unpaired = set() if game == "wow-tortoise" else {"module_notes"}
+        # T144's "Rebuild random bots…": the setting it writes is TortoiseBots'
+        # own (`AiPlayerbot.RandomBotPoolReset`), which no other game's bot
+        # module reads, so the seam is Tortoise's alone, the reference included.
+        unrebuilt = set() if game == "wow-tortoise" else {"bot_pool_rebuild"}
         allowed = (
             unrepaired
             | unstocked
@@ -557,6 +561,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unwindowed
             | undashboarded
             | unpaired
+            | unrebuilt
         )
         if game == "wow-wotlk":
             reference = (
@@ -567,6 +572,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | undashboarded
                 | unrepaired
                 | unpaired
+                | unrebuilt
             )
             assert (
                 set(absent) == reference

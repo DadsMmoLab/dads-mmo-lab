@@ -203,6 +203,13 @@ def adopt(
 
 CANCELLED = "the job was cancelled"
 
+RESTART_OWED = (
+    "The server restarts next, once you have answered whether to rebuild the random bots, so "
+    "the enrolled bots log in with one restart. If this window closes before that, restart "
+    "the server from the Server tab: the enrolment is saved, and any later start loads them."
+)
+"""What the update's log says when the enrolment's restart is owed to the view (T144)."""
+
 
 def _cancelled(cancel: threading.Event | None) -> bool:
     return cancel is not None and cancel.is_set()
@@ -210,6 +217,70 @@ def _cancelled(cancel: threading.Event | None) -> bool:
 
 def _first_line(answer: Answer) -> str:
     return next((line.strip() for line in answer.text.splitlines() if line.strip()), "")
+
+
+def adopt_over(
+    channels: Sequence[Channel],
+    *,
+    pause: Callable[[float], None] = time.sleep,
+    cancel: threading.Event | None = None,
+) -> Outcome:
+    """`adopt()` over each channel in turn until one reaches the command; the reasons joined.
+
+    Adopted, or a confirm that went out unanswered: either way no other channel
+    is asked anything, and never a second confirm. Shared by `after_update()`
+    and T144's rebuild, so the two cannot enrol by different rules.
+    """
+    reasons: list[str] = []
+    outcome: Outcome = Unreached("no command channel is set up for this server")
+    for channel in channels:
+        outcome = adopt(channel, pause=pause, cancel=cancel)
+        if not isinstance(outcome, Unreached):
+            return outcome
+        reasons.append(outcome.why)
+        if outcome.why == CANCELLED:
+            break
+    return Unreached("; ".join(reasons)) if reasons else outcome
+
+
+@dataclass(frozen=True)
+class Move:
+    """An update press moved the bots module (T144). `restart_owed`: see `ModuleMoved`."""
+
+    restart_owed: bool
+
+
+class ModuleMoved:
+    """Carries "the last update press moved the bots module" from the job to the view (T144).
+
+    Set by `after_update()` on the worker thread, taken by the view once the
+    job has finished. `take()` answers and clears in one call, so one move is
+    offered once, and a later press that fails or does not move the module
+    cannot find a stale one (`after_update()` also clears it as it starts).
+
+    **And the restart the enrolment needs, owed rather than made.** With this
+    flag wired, `after_update()` enrols but does not restart: the view asks
+    whether to rebuild the random bots first, and a Yes writes the rebuild
+    request so that ONE restart does both (approved design point 3). A No, or a
+    rebuild that stops before its own restart, runs the owed restart instead.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._move: Move | None = None
+
+    def set(self) -> None:
+        with self._lock:
+            self._move = Move(restart_owed=False)
+
+    def owe_restart(self) -> None:
+        with self._lock:
+            self._move = Move(restart_owed=True)
+
+    def take(self) -> Move | None:
+        with self._lock:
+            move, self._move = self._move, None
+        return move
 
 
 def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
@@ -226,12 +297,27 @@ def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
     return server_dir / inside[-1].dest if inside else None
 
 
+class StopFailed(Exception):
+    """`restart_world()`'s STOP raised: the world that may still be up is the OLD run (T144).
+
+    Its own type, so a caller can tell it from a start that raised -- after
+    which the world may be the NEW run, already reading its config. The
+    message is the stop's own.
+    """
+
+
 def restart_world(controller: Controller) -> None:
     """Stop, then start: the Server tab's own restart (`_do_restart`), for the module to reload.
 
     The controller already knows which daemon it means, so nothing here names one.
+
+    Raises:
+        StopFailed: the stop raised; nothing was started.
     """
-    controller.stop()
+    try:
+        controller.stop()
+    except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
+        raise StopFailed(str(exc)) from exc
     controller.start()
 
 
@@ -252,8 +338,16 @@ def after_update(
     channels: Callable[[], Sequence[Channel]],
     restart: Callable[[], object],
     pause: Callable[[float], None] = time.sleep,
+    moved: ModuleMoved | None = None,
 ) -> Iterator[str]:
     """Run the update, then enrol the older bots if the module moved, then restart.
+
+    `moved` is set once the update has succeeded AND moved the module, before
+    anything is asked of the server (T144): the view reads it after the job has
+    finished, to offer rebuilding the random bots. A modal cannot be put up from
+    inside this generator, which runs on the log panel's worker thread. With it
+    wired, an enrolment's restart is OWED to the view (`ModuleMoved`) and not
+    made here, so the update path restarts the world once.
 
     A failed update raises out of here before anything is asked: its own
     handler has put the sources back, so the module did not move.
@@ -262,42 +356,37 @@ def after_update(
     preview, which is a read, and it answers "nothing to adopt" on a server
     that has nothing -- so the cost of not knowing is one question.
     """
+    if moved is not None:
+        moved.take()
     before = head(module_dir)
     yield from update(cancel)
     after = head(module_dir)
     if before is not None and before == after:
         return
+    if moved is not None:
+        moved.set()
     yield (
         "The bots module changed, and it now only runs bot accounts it has enrolled. "
         "Enrolling the ones this server already had…"
     )
-    reasons: list[str] = []
-    outcome: Outcome = Unreached("no command channel is set up for this server")
-    for channel in channels():
-        outcome = adopt(channel, pause=pause, cancel=cancel)
-        if not isinstance(outcome, Unreached):
-            # Adopted, or a confirm that went out unanswered: either way no
-            # other channel is asked anything, and never a second confirm.
-            break
-        reasons.append(outcome.why)
-        if outcome.why == CANCELLED:
-            break
+    outcome = adopt_over(channels(), pause=pause, cancel=cancel)
     if isinstance(outcome, Unreached):
-        yield console_steps("; ".join(reasons) or outcome.why)
+        yield console_steps(outcome.why)
         return
     if isinstance(outcome, Adopted) and outcome.count == 0:
         yield "Every bot account was already enrolled; nothing to do."
         return
+    restarting = "Restarting the server" if moved is None else "The server will restart"
     if isinstance(outcome, Unconfirmed):
         yield (
             f"The enrol command was sent but its answer never came ({outcome.why}), so it may "
-            "well have run. Restarting the server so any bots it enrolled log in again. If the "
+            f"well have run. {restarting} so any bots it enrolled log in again. If the "
             f"older bots are still missing afterwards, type `{PREVIEW}` at the server console "
             "(the Console tab), then the `bot pool adopt confirm …` line it prints, then restart."
         )
     else:
         yield (
-            f"Enrolled {outcome.count} bot account(s). Restarting the server so their "
+            f"Enrolled {outcome.count} bot account(s). {restarting} so their "
             "characters log in again…"
         )
     if _cancelled(cancel):
@@ -305,6 +394,10 @@ def after_update(
             "The restart was not started because the job was cancelled. Restart the server "
             f"from the Server tab to bring the older bots online. {AFTER_A_STOP}"
         )
+        return
+    if moved is not None:
+        moved.owe_restart()
+        yield RESTART_OWED
         return
     try:
         restart()
@@ -326,6 +419,7 @@ def wrap_route(
     channels: Callable[[], Sequence[Channel]],
     restart: Callable[[], object],
     wsl_distro: str | None = None,
+    moved: ModuleMoved | None = None,
 ) -> LatestRoute | None:
     """The update route with `after_update()` around both presses; unchanged when it cannot be.
 
@@ -334,6 +428,7 @@ def wrap_route(
 
     Both directions: "Return to the tested pin" moves the module as well.
     `head_sha` is looked up per press, so a test can replace it on this module.
+    `moved` is handed to both presses (T144).
     """
     dest = module_dir(entry, server_dir)
     if route is None or dest is None:
@@ -348,6 +443,7 @@ def wrap_route(
                 head=lambda d: head_sha(d, wsl_distro=wsl_distro),
                 channels=channels,
                 restart=restart,
+                moved=moved,
             )
 
         return run

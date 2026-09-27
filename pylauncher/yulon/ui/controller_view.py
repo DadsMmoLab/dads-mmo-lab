@@ -109,6 +109,7 @@ from yulon.controller_wow_tortoise import console as tortoise_console
 from yulon.controller_wow_tortoise import controller as tortoise_controller
 from yulon.controller_wow_tortoise import maintenance as tortoise_maintenance
 from yulon.controller_wow_tortoise import modules as tortoise_modules
+from yulon.controller_wow_tortoise import poolreset as tortoise_poolreset
 from yulon.controller_wow_vanilla import accounts as vanilla_accounts
 from yulon.controller_wow_vanilla import console as vanilla_console
 from yulon.controller_wow_vanilla import controller as vanilla_controller
@@ -311,6 +312,57 @@ class BotDashboardSeam(Protocol):
     def switch_off(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
 
     def restart_world(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
+
+
+class BotPoolRebuildSeam(Protocol):
+    """The Bots tab's "Rebuild random bots…" (T144), on Tortoise only.
+
+    `rebuild` and `restart_owed_now` are line sources for the tab's log panel
+    (worker thread); `take_module_moved` is read on the GUI thread after an
+    update press has finished, and answers once: None when the press did not
+    move the module, else whether T123's enrolment is waiting on a restart.
+    """
+
+    def take_module_moved(self) -> tortoise_botpool.Move | None: ...
+
+    def rebuild(
+        self,
+        *,
+        backup: Callable[[], object] | None = None,
+        cancel: threading.Event | None = None,
+        restart_owed: bool = False,
+    ) -> Iterator[str]: ...
+
+    def restart_owed_now(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
+
+    def before_restore(self) -> tortoise_poolreset.TakenBack | None: ...
+
+    def after_a_failed_restore(
+        self, taken: tortoise_poolreset.TakenBack, *, loaded: bool | None
+    ) -> str: ...
+
+    def restore_warning(self) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class _PlanWithWarning:
+    """A restore plan, and T144's warning about the bot request that the restore leaves alone."""
+
+    plan: wotlk_maintenance.RestorePlan
+    warning: str | None
+
+
+def _unreadable(marker: object) -> bool:
+    """A restore marker that was there but could not be parsed (`InterruptedRestore.readable`)."""
+    return marker is not None and not getattr(marker, "readable", True)
+
+
+@dataclass(frozen=True)
+class _RestoredWithNote:
+    """A restore's report, and T144's line when a pending bot rebuild was taken back first."""
+
+    report: wotlk_maintenance.RestoreReport
+    note: str | None
 
 
 class ChannelSetup(Protocol):
@@ -720,6 +772,12 @@ class ControllerServices:
 
     `None` for a game whose catalog conf table carries no telemetry key, which
     hides the whole group rather than showing a switch that cannot work.
+    """
+    bot_pool_rebuild: BotPoolRebuildSeam | None = None
+    """T144's "Rebuild random bots…", on Tortoise only (`poolreset.for_entry`).
+
+    `None` everywhere else, which leaves the button absent: the setting it
+    writes is TortoiseBots', and the other games' bot modules do not read it.
     """
     steam: steam_module.SteamShortcuts | None = None
     """8.8's two Steam library entries, on Linux and the Steam Deck only.
@@ -2441,9 +2499,26 @@ def _for_tortoise(
     dashboard_switch = tortoise_botdash.for_entry(
         entry, server_dir, lifecycle, wsl_distro=wsl_distro
     )
+    # T144. "Rebuild random bots…" on the Bots tab, and the flag T123's wrap
+    # sets when an update press moved the module, for the offer after it. The
+    # rebuild enrols over the same channels T123 uses, restarts the same way,
+    # and reads THIS run's world log (`docker.current_run_log`, which says when
+    # it could not scope the read to this run, so the reader fails closed).
+    module_moved = tortoise_botpool.ModuleMoved()
+    pool_rebuild = tortoise_poolreset.for_entry(
+        entry,
+        server_dir,
+        world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+        channels=adoption_channels,
+        restart=lambda: tortoise_botpool.restart_world(lifecycle),
+        world_log=lambda: docker.current_run_log(spec.world, wsl_distro=wsl_distro),
+        world_started=lambda: docker.started_at(spec.world, wsl_distro=wsl_distro),
+        module_moved=module_moved,
+    )
     return replace(
         services,
         bot_dashboard=dashboard_switch,
+        bot_pool_rebuild=pool_rebuild,
         update_to_latest=tortoise_botpool.wrap_route(
             tortoise_botdash.wrap_route(services.update_to_latest, dashboard_switch),
             entry,
@@ -2451,6 +2526,7 @@ def _for_tortoise(
             channels=adoption_channels,
             restart=lambda: tortoise_botpool.restart_world(lifecycle),
             wsl_distro=wsl_distro,
+            moved=module_moved,
         ),
     )
 
@@ -2644,7 +2720,23 @@ class UpdateChoice(enum.Enum):
 
 
 def ask_update_choice(parent: QWidget | None, title: str, text: str) -> UpdateChoice:
-    """Put T64's three-way question, defaulting to Cancel. Never raises.
+    """T64's three-way question in its own words: `ask_backup_choice()` with the update's labels."""
+    return ask_backup_choice(
+        parent,
+        title,
+        text,
+        back_up_first="Back up first, then update",
+        without_backup="Update without a backup",
+    )
+
+
+def ask_backup_choice(
+    parent: QWidget | None, title: str, text: str, *, back_up_first: str, without_backup: str
+) -> UpdateChoice:
+    """Put a three-way "back up first / go without / Cancel" question, defaulting to Cancel.
+
+    Never raises. T64's update and T144's bot rebuild both ask it, each with
+    its own two labels.
 
     **The three buttons are STANDARD buttons with their labels replaced**, which
     is `catalog_view._qt_suggestion_asker()`'s shape and is chosen for the same
@@ -2679,8 +2771,8 @@ def ask_update_choice(parent: QWidget | None, title: str, text: str) -> UpdateCh
         | QMessageBox.StandardButton.Cancel,
         parent,
     )
-    _relabel(box, QMessageBox.StandardButton.Yes, "Back up first, then update")
-    _relabel(box, QMessageBox.StandardButton.Save, "Update without a backup")
+    _relabel(box, QMessageBox.StandardButton.Yes, back_up_first)
+    _relabel(box, QMessageBox.StandardButton.Save, without_backup)
     _relabel(box, QMessageBox.StandardButton.Cancel, "Cancel")
     box.setDefaultButton(QMessageBox.StandardButton.Cancel)
     # And the ESCAPE button by name. `setDefaultButton` decides what Enter does;
@@ -4033,6 +4125,39 @@ Named (in `reset_defaults`, since T94) and not discovered by a glob of
 the point of the list is that these three are the ones this tab deliberately
 will not write.
 """
+
+REBUILD_BOTS_LABEL = "Rebuild random bots…"
+REBUILD_BOTS_TITLE = "Rebuild the random bots?"
+REBUILD_BOTS_TEXT = (
+    "Every random bot is deleted and made again from scratch, so the bots lose their level, "
+    "gear, bags, bank, quests and professions. Also lost: companions you hired from the bots, "
+    "pinned bot names, guilds made only of bots, and the bots' auctions (anyone who bid is "
+    "refunded).\n\n"
+    "What stays: the bot accounts. Your own characters are never touched.\n\n"
+    "The server restarts (or starts, if it is stopped), and anyone playing is disconnected. "
+    "The bots module refuses, and "
+    "deletes nothing, if someone is playing one of the bots or a guild led by a bot has a real "
+    "player in it."
+)
+"""T144's one dialog. Its three buttons are `ask_backup_choice()`'s, relabelled."""
+
+REBUILD_BOTS_AFTER_UPDATE = (
+    "TortoiseBots changed. Rebuild the random bots so they get the new behaviour? They lose "
+    "level and gear; their accounts stay."
+)
+"""T144's offer after an update or a return to the pin that moved TortoiseBots. No by default."""
+
+BOT_REBUILD_RUNNING = (
+    "The random bots are being rebuilt on the Bots tab, and that restarts the server. Wait for "
+    "it to finish, then try again. Nothing was changed."
+)
+"""T144: why Back up and Restore refuse while the rebuild runs."""
+
+RESTART_OWED_LEFT = (
+    "The bots enrolled during the update come online at the server's next start. Restart the "
+    "server from the Server tab when nothing else is running."
+)
+"""T144: the restart T123's enrolment is owed, when this tab could not make it itself."""
 
 BOT_COUNT_LABEL = "Random bots:"
 BOT_COUNT_APPLY = "Apply…"
@@ -7279,6 +7404,7 @@ class ControllerView(QWidget):
         box.addLayout(columns, 1)
         if self.services.bot_dashboard is not None:
             box.addWidget(self._build_bot_dashboard_group(tab))
+        self._bots_tab: QWidget | None = tab
         self._add_panel_tab(tab, "bots", "Bots")
 
     def _build_bot_count_group(self) -> None:
@@ -7326,6 +7452,191 @@ class ControllerView(QWidget):
         inside.addLayout(row)
         inside.addWidget(self.bot_count_note)
         inside.addWidget(self.bot_count_report)
+        self._build_bot_rebuild(inside)
+
+    def _build_bot_rebuild(self, inside: QVBoxLayout) -> None:
+        """T144: "Rebuild random bots…", its report line and its own log, under the count.
+
+        Absent -- not greyed -- without the seam, which is every game but
+        Tortoise: nothing would ever enable it there. Its own log panel rather
+        than the Modules tab's, because the press is made on this tab and the
+        job runs for minutes; the panel's start and finish lock and unlock the
+        Server tab through `_set_busy`, like every long job of ours.
+        """
+        self.bot_rebuild_button: QPushButton | None = None
+        self.bot_rebuild_report: QLabel | None = None
+        self.bot_rebuild_log: _IdleLogPanel | None = None
+        self._bots_tab = None
+        if self.services.bot_pool_rebuild is None:
+            return
+        group = self.bot_count_group
+        row = QHBoxLayout()
+        self.bot_rebuild_button = QPushButton(REBUILD_BOTS_LABEL, group)
+        self.bot_rebuild_button.setToolTip(
+            "Delete every random bot and let the bots module make them again, so they get the "
+            "module's newest behaviour. Asks first, offers a backup, and restarts the server."
+        )
+        self.bot_rebuild_button.clicked.connect(self.rebuild_random_bots)
+        row.addWidget(self.bot_rebuild_button)
+        row.addStretch(1)
+        self.bot_rebuild_report = QLabel("", group)
+        self.bot_rebuild_report.setWordWrap(True)
+        self.bot_rebuild_report.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        log = _IdleLogPanel(group)
+        log.run_started.connect(self._bot_rebuild_started)
+        log.run_finished.connect(self._bot_rebuild_finished)
+        self.bot_rebuild_log = log
+        inside.addLayout(row)
+        inside.addWidget(self.bot_rebuild_report)
+        inside.addWidget(log)
+
+    def _set_bot_rebuild_button(self) -> None:
+        """Live whenever nothing of ours is running: the press itself asks everything else."""
+        if self.bot_rebuild_button is not None:
+            self.bot_rebuild_button.setEnabled(not self._busy)
+
+    def _bot_rebuild_refusal(self) -> str | None:
+        """Why the rebuild (or its owed restart) may not start now, or None.
+
+        `forget_refusal()` is this view's one answer to "is anything running
+        on this server": a restore, a backup, the bot-count write, a Tuning
+        reset, a Modules job, a network apply, the rebuild panel, any Server
+        action -- every one of which either writes `etc/aiplayerbot.conf` or
+        would have the world restarted under it. Plus this group's own panel.
+        """
+        log = self.bot_rebuild_log
+        if log is not None and log.running:
+            return "The random bots are already being rebuilt. Wait for it to finish."
+        reason = self.forget_refusal()
+        if reason is None:
+            return None
+        return reason.replace("Nothing was removed.", "Nothing was changed.")
+
+    @Slot()
+    def rebuild_random_bots(self, restart_owed: bool = False) -> bool:
+        """Ask the one question, then run the rebuild in this group's log. False if not run (T144).
+
+        The same three answers as the update's (`ask_backup_choice()`), Cancel
+        the default and the Escape button. The backup, when asked for, is the
+        first step OF the job -- `_backup_with_the_database()`, which starts
+        the database alone if the server is down -- and a failed one stops it
+        before anything is written. `restart_owed`: see `_offer_bot_rebuild_after_update`.
+        """
+        seam = self.services.bot_pool_rebuild
+        log = self.bot_rebuild_log
+        if seam is None or log is None:
+            return False
+        refusal = self._bot_rebuild_refusal()
+        if refusal is not None:
+            QMessageBox.information(self, "Something else is running", refusal)
+            return False
+        choice = ask_backup_choice(
+            self,
+            REBUILD_BOTS_TITLE,
+            REBUILD_BOTS_TEXT,
+            back_up_first="Back up first, then rebuild",
+            without_backup="Rebuild without a backup",
+        )
+        if choice is UpdateChoice.CANCEL:
+            logger.info(f"rebuilding {self.entry.id}'s random bots declined at the confirmation")
+            return False
+        backup = self._backup_with_the_database if choice is UpdateChoice.BACK_UP_FIRST else None
+        cancel = threading.Event()
+        if self._bots_tab is not None:
+            # The offer after an update is answered on the Modules tab; the
+            # job's lines are here.
+            self._tabs.setCurrentWidget(self._bots_tab)
+        if self.bot_rebuild_report is not None:
+            self.bot_rebuild_report.setText("")
+        return log.run(
+            lambda: seam.rebuild(backup=backup, cancel=cancel, restart_owed=restart_owed),
+            title=f"Rebuilding {self.entry.name}'s random bots",
+            cancel=cancel,
+            record_as=f"rebuild-bots-{self.entry.id}-"
+            f"{composegen.install_id(self.services.controller.server_dir)}",
+        )
+
+    @Slot()
+    def _bot_rebuild_started(self) -> None:
+        self._set_busy(True)
+        self._set_bot_rebuild_button()
+
+    @Slot(bool, str)
+    def _bot_rebuild_finished(self, ok: bool, message: str) -> None:
+        """Unlock; a refusal goes on the report line and to the app log, where a user looks."""
+        self._set_busy(False)
+        self._set_bot_rebuild_button()
+        if self.bot_rebuild_report is None:
+            return
+        if not ok:
+            self.bot_rebuild_report.setText(message)
+            self.action_failed.emit(message)
+            return
+        cancelled = self.bot_rebuild_log is not None and self.bot_rebuild_log.cancelled
+        self.bot_rebuild_report.setText(
+            "Stopped. The log below says how far it got." if cancelled else ""
+        )
+
+    def _refused_during_bot_rebuild(self) -> bool:
+        """Back up and Restore, refused while the random bots are rebuilt (T144). True if refused.
+
+        Gated on the rebuild's panel ONLY, and deliberately narrower than
+        `forget_refusal()`: those two presses have never been gated on `_busy`
+        or the other jobs, and widening that is a change to every game's
+        Maintenance tab that this ticket does not own. The rebuild is the one
+        job that restarts the world under a dump or a restore on purpose, and
+        its request lives in the characters database a restore overwrites.
+        """
+        log = self.bot_rebuild_log
+        if log is None or not log.running:
+            return False
+        QMessageBox.information(self, "Something else is running", BOT_REBUILD_RUNNING)
+        self.maintenance_report.setPlainText(BOT_REBUILD_RUNNING)
+        return True
+
+    def _offer_bot_rebuild_after_update(self, move: tortoise_botpool.Move) -> None:
+        """T144: the update just moved TortoiseBots. Ask, No by default; Yes is the button's press.
+
+        The press's own three-way dialog follows a Yes, and that is on
+        purpose: it is the one that says everything the rebuild loses, and it
+        offers a backup taken NOW -- the update's own backup, if one was taken,
+        predates the new server's first start and T123's enrolment.
+
+        **One restart on the update path** (approved design point 3). When
+        T123 enrolled accounts it left the restart that loads them OWED: a
+        rebuild's own restart covers it, and every other answer -- No, Escape,
+        Cancel on the rebuild dialog, a press refused -- runs the owed restart
+        on its own, once.
+        """
+        if not self._confirm(REBUILD_BOTS_TITLE, REBUILD_BOTS_AFTER_UPDATE):
+            logger.info(f"rebuilding {self.entry.id}'s random bots declined after the update")
+            if move.restart_owed:
+                self._run_owed_restart()
+            return
+        if not self.rebuild_random_bots(restart_owed=move.restart_owed) and move.restart_owed:
+            self._run_owed_restart()
+
+    def _run_owed_restart(self) -> None:
+        """T123's restart, made now in this group's log -- or said, when it cannot start here."""
+        seam = self.services.bot_pool_rebuild
+        log = self.bot_rebuild_log
+        if seam is None or log is None or self._bot_rebuild_refusal() is not None:
+            self._say_restart_owed()
+            return
+        cancel = threading.Event()
+        log.run(
+            lambda: seam.restart_owed_now(cancel),
+            title=f"Restarting {self.entry.name} for the enrolled bots",
+            cancel=cancel,
+        )
+
+    def _say_restart_owed(self) -> None:
+        """The owed restart could not be made: never dropped silently."""
+        QMessageBox.information(self, "Restart the server", RESTART_OWED_LEFT)
+        if self.bot_rebuild_report is not None:
+            self.bot_rebuild_report.setText(RESTART_OWED_LEFT)
 
     def _set_bot_count_controls(self) -> None:
         """Live with a readable count, nothing of ours running, and no read or write in flight."""
@@ -7340,6 +7651,7 @@ class ControllerView(QWidget):
         )
         self.bot_count_box.setEnabled(live)
         self.bot_count_apply_button.setEnabled(live)
+        self._set_bot_rebuild_button()
 
     def _look_up_bot_count(self) -> None:
         """Read the bot count (and the Tuning tab's bot rows) off the GUI thread."""
@@ -7977,6 +8289,8 @@ class ControllerView(QWidget):
 
     @Slot()
     def back_up(self) -> None:
+        if self._refused_during_bot_rebuild():
+            return
         self.backup_button.setEnabled(False)
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
         self._backup_running = True  # T95: `forget_refusal()` reads it
@@ -8017,13 +8331,85 @@ class ControllerView(QWidget):
         self._restore_plan = None
         self.restore_button.setEnabled(False)
         self._run(
-            lambda: self.services.plan_restore(path),
+            lambda: self._plan_with_the_bot_request(path),
             self._restore_plan_ready,
             self._maintenance_failed,
         )
 
+    def _plan_with_the_bot_request(self, path: Path) -> object:
+        """The plan, plus T144's `always` warning where this game has the bot request (worker)."""
+        plan = self.services.plan_restore(path)
+        seam = self.services.bot_pool_rebuild
+        if seam is None:
+            return plan
+        return _PlanWithWarning(plan, seam.restore_warning())
+
+    def _restore_with_the_bot_request(self, plan: wotlk_maintenance.RestorePlan) -> object:
+        """T144: take a pending `once:` bot rebuild back, THEN restore (worker thread).
+
+        A restore replaces the characters database, the module's record of its
+        last rebuild included, so a request left in `aiplayerbot.conf` would be
+        new again afterwards and the next start would delete the restored bots.
+        Before and not after: a restore is followed by a start the user makes,
+        and a failed write refuses the restore rather than running it armed.
+
+        The plan is asked again first and refused in `maintenance.restore()`'s
+        own words, so a restore that would refuse does not touch the conf.
+
+        **A restore that raises anyway** (round 5): `maintenance.restore()`
+        (controller_wow_wotlk/maintenance.py:949) runs "re-census, safety dump,
+        marker, load, marker removed". Everything before `_write_marker()` -- the
+        confirmation, the re-census, `_safety_backup()`, the marker write itself
+        ("nothing was restored") -- raises with nothing loaded; from the marker
+        on, the load may have begun ("failed part-way", marker left behind on
+        purpose). So "did it load" is read off the marker: a record that is not
+        the one there before this press means the load was reached, and the
+        request stays off; an unchanged one means nothing loaded, and it is put
+        back as it was. A marker that cannot be read counts as "could not tell"
+        and keeps it off.
+        """
+        seam = self.services.bot_pool_rebuild
+        if seam is None:
+            return self.services.restore(plan)
+        fresh = self.services.plan_restore(plan.backup)
+        if fresh.refusals:
+            raise wotlk_maintenance.MaintenanceError(f"restore refused: {' '.join(fresh.refusals)}")
+        if fresh.token != plan.token:
+            raise wotlk_maintenance.MaintenanceError(
+                f"{plan.backup.name} is not the file that was checked — it changed in between. "
+                "Nothing was restored; look at it again."
+            )
+        marker_before = self.services.interrupted_restore()
+        taken = seam.before_restore()
+        try:
+            report = self.services.restore(plan)
+        except Exception as exc:
+            if taken is None:
+                raise
+            loaded: bool | None
+            try:
+                marker_after = self.services.interrupted_restore()
+            except Exception as check:  # noqa: BLE001 - "could not tell" is its own answer
+                logger.warning(f"could not read the restore marker after a failed restore: {check}")
+                loaded = None
+            else:
+                # Every unreadable marker reads back as the same record, so two of them
+                # compare equal whatever happened in between: unreadable on either side
+                # is "could not tell", never "nothing loaded" (T144 review round 5).
+                if _unreadable(marker_before) or _unreadable(marker_after):
+                    loaded = None
+                else:
+                    loaded = marker_after != marker_before
+            said = seam.after_a_failed_restore(taken, loaded=loaded)
+            raise wotlk_maintenance.MaintenanceError(f"{exc} {said}") from exc
+        return _RestoredWithNote(report, taken.note if taken is not None else None)
+
     @Slot(object)
     def _restore_plan_ready(self, result: object) -> None:
+        warning = None
+        if isinstance(result, _PlanWithWarning):
+            warning = result.warning
+            result = result.plan
         if not isinstance(result, wotlk_maintenance.RestorePlan):
             return
         lines = [
@@ -8058,6 +8444,9 @@ class ControllerView(QWidget):
                 "into the databases it names rather than returning them to the state the backup "
                 "was taken from. Press Restore to go ahead."
             )
+            if warning:
+                lines.append("")
+                lines.append(warning)
         self.maintenance_report.setPlainText("\n".join(lines))
         # Only a plan that is allowed arms the button, and only for this file.
         self._restore_plan = result if result.allowed else None
@@ -8071,10 +8460,16 @@ class ControllerView(QWidget):
             # restore is not something to leave to a widget's enabled state.
             self.maintenance_report.setPlainText("Show the restore plan first.")
             return
+        if self._refused_during_bot_rebuild():
+            return
         self.restore_button.setEnabled(False)
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
-        self._run(lambda: self.services.restore(plan), self._restore_done, self._restore_failed)
+        self._run(
+            lambda: self._restore_with_the_bot_request(plan),
+            self._restore_done,
+            self._restore_failed,
+        )
 
     @Slot(object)
     def _restore_failed(self, exc: object) -> None:
@@ -8085,6 +8480,10 @@ class ControllerView(QWidget):
     def _restore_done(self, result: object) -> None:
         self._restore_running = False
         self._restore_plan = None
+        note = None
+        if isinstance(result, _RestoredWithNote):
+            note = result.note
+            result = result.report
         if not isinstance(result, wotlk_maintenance.RestoreReport):
             return
         safety = ", ".join(str(p) for p in result.safety_backup) or "none"
@@ -8094,7 +8493,7 @@ class ControllerView(QWidget):
         self.refresh_backups()
         self.maintenance_report.setPlainText(
             f"Restored {', '.join(result.databases)} from {result.backup}.\n"
-            f"The copy taken beforehand: {safety}"
+            f"The copy taken beforehand: {safety}" + (f"\n{note}" if note else "")
         )
 
     @Slot(object)
@@ -9989,6 +10388,19 @@ class ControllerView(QWidget):
             self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
+        # T144. Taken on EVERY finish, so a move is offered once and never by a
+        # later job; offered only after a press that succeeded and was not
+        # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).
+        rebuild = self.services.bot_pool_rebuild
+        move = rebuild.take_module_moved() if rebuild is not None else None
+        if move is None:
+            return
+        if ok and not self.rebuild_log.cancelled:
+            self._offer_bot_rebuild_after_update(move)
+        elif move.restart_owed:
+            # A Stop that landed after T123 owed its restart: T123's own cancel
+            # rule is "do not restart, say so", and that is kept.
+            self._say_restart_owed()
 
     def log_panels(self) -> tuple[LogPanel, ...]:
         """Every streaming panel this view owns, for the exit path to join.
@@ -10001,7 +10413,7 @@ class ControllerView(QWidget):
         the registration was in two files at the time — a third panel added
         later is picked up by code that already exists.
         """
-        extra = () if self.dashboard_log is None else (self.dashboard_log,)
+        extra = tuple(log for log in (self.dashboard_log, self.bot_rebuild_log) if log is not None)
         return (self.console_log, self.rebuild_log, *extra)
 
     # -------------------------------------------------------- networking tab
