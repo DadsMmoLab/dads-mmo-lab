@@ -1635,7 +1635,7 @@ PLANNED_OTHER = stamped(scheduled(OTHER_TOKEN))
 BOOTING = stamped("World initialized", "TortoiseBots: loading bot templates")
 
 
-@pytest.mark.parametrize("planned", [PLANNED_OFF, PLANNED_OTHER], ids=["reset-off", "other-token"])
+@pytest.mark.parametrize("planned", [PLANNED_OFF], ids=["reset-off"])
 def test_a_failed_stop_on_a_run_that_planned_before_the_write_calls_the_rebuild_off(
     tmp_path: Path, planned: str
 ) -> None:
@@ -1686,7 +1686,16 @@ def test_a_booting_run_that_then_reads_our_token_is_watched_to_the_end(tmp_path:
     assert world.key() == "off", "applied, so taken back as ever"
 
 
-@pytest.mark.parametrize("planned", [OFF_LINE, scheduled(OTHER_TOKEN)], ids=["off", "other"])
+def _bounded(job: poolreset.PoolRebuild) -> poolreset.PoolRebuild:
+    """A clock that moves 100 s per read under a 3600 s watch: a regression that never ends the
+    watch fails after 36 polls instead of hanging the suite (round-9 review)."""
+    ticks = iter(range(0, 10**9, 100))
+    job.monotonic = lambda: float(next(ticks))
+    job.timeout_s = 3600.0
+    return job
+
+
+@pytest.mark.parametrize("planned", [OFF_LINE], ids=["off"])
 def test_a_booting_run_that_then_plans_without_our_token_is_called_off(
     tmp_path: Path, planned: str
 ) -> None:
@@ -1694,8 +1703,7 @@ def test_a_booting_run_that_then_plans_without_our_token_is_called_off(
     started without reading the request, and the message says what did happen."""
     path = _conf(tmp_path)
     world = World(tmp_path, running_after_failed_restart=True)
-    job = _stop_fails_job(world, started=SAME, log=[BOOTING, BOOTING + stamped(planned)])
-    job.timeout_s = 3600.0
+    job = _bounded(_stop_fails_job(world, started=SAME, log=[BOOTING, BOOTING + stamped(planned)]))
     with pytest.raises(poolreset.PoolResetError) as caught:
         list(job.rebuild(restart_owed=True))
     said = str(caught.value)
@@ -1703,6 +1711,50 @@ def test_a_booting_run_that_then_plans_without_our_token_is_called_off(
     assert CALLED_OFF in said and "started without reading" not in said
     assert poolreset.OWED_AFTER_A_STOP in said
     assert world.key() == "off" and path.read_bytes() == CONF_TEXT.encode("utf-8")
+
+
+@pytest.mark.parametrize("booting", [True, False], ids=["booting-watch", "same-run"])
+def test_a_run_rebuilding_for_an_earlier_request_keeps_ours(tmp_path: Path, booting: bool) -> None:
+    """Round-9 review: a pending `once:OLD` (part-way, timeout, Stop) and a Rebuild pressed while
+    the restarted server boots. The run schedules OLD -- it is deleting bots right now -- so ours
+    must stay armed: `off` would also stop OLD's resume if it stops part-way."""
+    _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    earlier = stamped(scheduled(OTHER_TOKEN))
+    log = [BOOTING, BOOTING + earlier] if booting else earlier
+    job = _bounded(_stop_fails_job(world, started=SAME, log=log))
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        list(job.rebuild(restart_owed=True))
+    said = str(caught.value)
+    assert world.key() == f"once:{TOKEN}", "kept armed"
+    assert CALLED_OFF not in said and "earlier request" in said
+    assert poolreset.OWED_KEY_OFF_FIRST in said
+
+
+def test_a_stop_while_the_booting_run_has_not_planned_says_it_may_still_read_it(
+    tmp_path: Path,
+) -> None:
+    """Round-9 review: "the rebuild carries on inside the server" is false before the booting
+    run has planned; it may finish starting without the request."""
+    _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    job = _bounded(_stop_fails_job(world, started=SAME, log=BOOTING))
+    cancel = threading.Event()
+    read = job.world_log
+    reads: list[int] = []
+
+    def read_then_stop() -> docker.RunLog:
+        # The failed-stop check reads once; the booting watch's first read is the second.
+        reads.append(1)
+        if len(reads) >= 2:
+            cancel.set()
+        return read()
+
+    job.world_log = read_then_stop
+    lines = list(job.rebuild(cancel=cancel))
+    assert "carries on inside the server" not in lines[-1]
+    assert "may read the request as it finishes starting" in lines[-1]
+    assert world.key() == f"once:{TOKEN}"
 
 
 def test_the_same_run_with_an_unscoped_log_is_never_called_off(tmp_path: Path) -> None:

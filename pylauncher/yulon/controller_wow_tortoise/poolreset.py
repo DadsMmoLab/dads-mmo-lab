@@ -529,21 +529,29 @@ _PLANNING = (
 """Every line `PlanAtStartup` (and the service's start right after it) ends its plan with."""
 
 
-def _planned(text: str, token: str) -> Literal["ours", "other"] | None:
+def _planned(text: str, token: str) -> Literal["ours", "earlier", "other"] | None:
     """Has this run planned its pool reset, and was it about `token`? Pure.
 
-    "ours": some module line names the token (it read the request). "other":
-    a planning outcome that does not name it (the run planned without it and
-    never reads the key again). None: no planning line yet.
+    "ours": some module line names the token (it read the request). "earlier":
+    it scheduled a reset for a DIFFERENT token -- an earlier request left armed
+    (part-way, timeout, Stop) that this run is carrying out right now, so ours
+    must stay armed: `off` would also stop that reset's resume if it stops
+    part-way (T144 review round 9). "other": any other planning outcome without
+    it (the run planned without the request and never reads the key again).
+    None: no planning line yet.
     """
-    other = False
+    earlier = other = False
     for line in text.splitlines():
         if "TortoiseBots:" not in line:
             continue
         if token in line:
             return "ours"
-        if any(pattern.search(line) for pattern in _PLANNING):
+        if _SCHEDULED.search(line):
+            earlier = True
+        elif any(pattern.search(line) for pattern in _PLANNING):
             other = True
+    if earlier:
+        return "earlier"
     return "other" if other else None
 
 
@@ -833,6 +841,11 @@ class PoolRebuild:
                 f"rebuild off before then, set {KEY} to off.{self._owed(restart_owed)}"
             ) from exc
         scoped = log is not None and log.this_run_only
+        if seen == "earlier" and same_run and scoped:
+            raise PoolResetError(
+                f"The server could not be stopped ({exc}). {EARLIER_RUNNING}"
+                f"{self._owed(restart_owed, taken=False)}"
+            ) from exc
         if seen == "other" and same_run and scoped:
             said, taken = self._called_off(f"The server could not be stopped ({exc})")
             raise PoolResetError(f"{said}{self._owed(restart_owed, taken=taken)}") from exc
@@ -959,6 +972,10 @@ class PoolRebuild:
             log = self.world_log()
             if booting and log.this_run_only:
                 seen = _planned(log.text, token)
+                if seen == "earlier":
+                    raise PoolResetError(
+                        f"{EARLIER_RUNNING}{self._owed(restart_owed, taken=False)}"
+                    )
                 if seen == "other":
                     text, taken = self._called_off(BOOTED_WITHOUT_IT)
                     raise PoolResetError(f"{text}{self._owed(restart_owed, taken=taken)}")
@@ -976,6 +993,13 @@ class PoolRebuild:
             if watch.final is not None:
                 raise PoolResetError(f"{watch.said} {self._take_back()}")
             if _cancelled(cancel):
+                if booting:
+                    yield (
+                        "Stopped watching. The server has not read its rebuild setting yet: it "
+                        "may read the request as it finishes starting, or at its next start; "
+                        f"the {TORTOISE_CONSOLE_TAB} shows its lines. {STILL_RUNNING}"
+                    )
+                    return
                 yield (
                     "Stopped watching. The rebuild carries on inside the server; the "
                     f"{TORTOISE_CONSOLE_TAB} shows its lines. {STILL_RUNNING}"
@@ -990,6 +1014,15 @@ class PoolRebuild:
                 return
             self.pause(self.poll_s, cancel)
 
+
+EARLIER_RUNNING = (
+    "The running server is rebuilding the random bots for an earlier request right now, so this "
+    "request stays in aiplayerbot.conf: once that rebuild has finished, the next start rebuilds "
+    f"them once more for this one. Do not set {KEY} to off while the earlier rebuild is running, "
+    "or it cannot finish if it stops part of the way through; after it has finished you can set "
+    "it to off to skip the second rebuild."
+)
+"""A run that scheduled a different token: ours stays armed (T144 review round 9)."""
 
 BOOTED_WITHOUT_IT = (
     "The running server finished starting without the request: it read aiplayerbot.conf before "
