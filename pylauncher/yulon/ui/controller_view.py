@@ -344,6 +344,10 @@ class BotPoolRebuildSeam(Protocol):
 
     def restore_warning(self) -> str | None: ...
 
+    def put_back_file(
+        self, backup: Path, target: Path, put: Callable[[Path, Path], None]
+    ) -> str | None: ...
+
 
 @dataclass(frozen=True)
 class _PlanWithWarning:
@@ -4075,14 +4079,27 @@ def _read_press_facts(
 
 
 def _undo_still_undoable(
-    server_dir: Path, items: tuple[reset_defaults.FileResult, ...]
+    server_dir: Path,
+    items: tuple[reset_defaults.FileResult, ...],
+    rebuild: BotPoolRebuildSeam | None = None,
 ) -> reset_defaults.ResetReport:
     """The Undo press's job: re-check each item NOW, then undo what still needs it.
 
     The items come from the last lookup, which may be older than the files: a
     file put back by hand since must not be backed up and copied over again.
+    `rebuild` (Tortoise, T145): each backup goes back through its
+    `put_back_file`, so a reset's backup never re-arms a random-bot rebuild.
     """
-    return reset_defaults.undo(server_dir, reset_defaults.still_undoable(server_dir, items))
+    undoable = reset_defaults.still_undoable(server_dir, items)
+    if rebuild is None:
+        return reset_defaults.undo(server_dir, undoable)
+    return reset_defaults.undo(
+        server_dir,
+        undoable,
+        restore=lambda backup, target: rebuild.put_back_file(
+            backup, target, reset_defaults.restore
+        ),
+    )
 
 
 def _look_up_undo(
@@ -11204,7 +11221,12 @@ class ControllerView(QWidget):
         self._set_busy(True)
         self.tuning_report.setPlainText("putting back what the last reset replaced…")
         self._run(
-            partial(_undo_still_undoable, self.services.controller.server_dir, items),
+            partial(
+                _undo_still_undoable,
+                self.services.controller.server_dir,
+                items,
+                self.services.bot_pool_rebuild,
+            ),
             self._undo_done,
             self._reset_failed,
         )
@@ -11365,7 +11387,7 @@ class ControllerView(QWidget):
                 said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
                 continue
             try:
-                tuning.restore(backups[-1], path)
+                note = self._put_back(backups[-1], path)
             except OSError as exc:
                 said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                 continue
@@ -11378,8 +11400,25 @@ class ControllerView(QWidget):
                     rule=tuning.apply_sentence(tuning.file_rule(file)),
                 )
             )
+            if note:
+                said.append(note)
         self.tuning_report.setPlainText("\n".join(said))
         self.reload_tuning()
+
+    def _put_back(self, backup: Path, target: Path) -> str | None:
+        """`tuning.restore()`, through Tortoise's rebuild-request rule where there is one (T145).
+
+        A backup is the file as it was, so one taken while a random-bot rebuild
+        request was pending holds it, and after a Maintenance restore set it
+        off a Revert put it back whole: the next start deleted the restored
+        bots. `put_back_file` keeps the key as the file has it now whenever the
+        backup would arm a rebuild; the sentence it returns goes in the report.
+        """
+        seam = self.services.bot_pool_rebuild
+        if seam is None:
+            tuning.restore(backup, target)
+            return None
+        return seam.put_back_file(backup, target, tuning.restore)
 
     @Slot(str)
     def open_tuning_file(self, file: str) -> None:
@@ -11439,18 +11478,17 @@ class ControllerView(QWidget):
             self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
             return
         try:
-            tuning.restore(backups[-1], path)
+            note = self._put_back(backups[-1], path)
         except OSError as exc:
             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
             self.action_failed.emit(str(exc))
             return
-        self.tuning_report.setPlainText(
-            TUNING_REVERTED_FILE.format(
-                file=file,
-                backup=backups[-1].name,
-                rule=tuning.apply_sentence(tuning.file_rule(file)),
-            )
+        said = TUNING_REVERTED_FILE.format(
+            file=file,
+            backup=backups[-1].name,
+            rule=tuning.apply_sentence(tuning.file_rule(file)),
         )
+        self.tuning_report.setPlainText(f"{said}\n{note}" if note else said)
         self._note_tuning_owed(file)
         self.open_tuning_file(file)
         self.reload_tuning()
