@@ -10945,6 +10945,166 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     assert view.update_to_latest_button.isEnabled() is False
 
 
+# -- T146: the update chip on a folder the SERVER install cloned ---------------
+
+
+def _server_cloned_view(
+    ps: _Ps, tmp_path: Path, *, route: bool = True, reads: list[Path] | None = None
+) -> tuple[ControllerView, _LatestSpy]:
+    """A WotLK tab with mod-playerbots (server-cloned) and mod-transmog (catalogued) behind.
+
+    `route=False` is an install whose `services.update_to_latest` is None. The
+    counts arrive through the real `_module_updates_done()`, so the chips are
+    the ones a Check for updates press draws.
+    """
+    services, spy = _latest(ps, tmp_path)
+    if not route:
+        services.update_to_latest = None
+    if reads is not None:
+
+        def read(path: Path) -> str:
+            reads.append(path)
+            return "7bae1b5 · 2026-09-20"
+
+        services.module_version = read
+    services.installed_modules = lambda: {"module": frozenset({"mod-playerbots", "mod-transmog"})}
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view._module_updates_done(
+        (
+            apply_module.ModuleUpdate("mod-playerbots", tmp_path, True, 4),
+            apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 3),
+        )
+    )
+    return view, spy
+
+
+def test_the_server_cloned_rows_update_chip_runs_the_server_update(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The player's press, end to end: chip, subpanel button, the T64 slot and its dialog.
+
+    Driven through the row's own widgets, so the signal reaches the real
+    `_chip_action_pressed()`. The dialog is the REAL three-way one (`_answer`
+    patches `exec`), which is the proof the press went through
+    `update_to_latest()` and not around it.
+
+    Mutation: route `server_update` to `_module_action("update")` and the report
+    is `UNCATALOGUED_PRESS` with the route never pressed -- the defect T146 filed.
+    """
+    from yulon.ui.controller_view import UNCATALOGUED_PRESS
+
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Save)
+    view, spy = _server_cloned_view(ps, tmp_path)
+    per_module: list[str] = []
+    monkeypatch.setattr(view, "_module_action", per_module.append)
+    row = view.modules_panel.row("mod-playerbots")
+    row.show()
+
+    row.chip_buttons[0].click()
+    assert row.detail_button is not None
+    assert row.detail_button.text() == UPDATE_TO_LATEST_BUTTON_LABEL
+    row.detail_button.click()
+    pump_until(lambda: len(spy.presses) == 1, "the chip started the server update")
+    row.hide()
+
+    assert len(boxes) == 1, "the update started without its confirmation"
+    assert per_module == [], "the chip reached the per-module applier"
+    assert view.module_report.toPlainText() != UNCATALOGUED_PRESS
+
+
+def test_a_server_cloned_row_has_no_update_chip_where_there_is_no_server_update(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No route on this install: nothing on the row to press, and the report is unchanged.
+
+    Mutation: build the server chip without asking `services.update_to_latest`
+    and the row offers a press whose slot returns at its first line.
+    """
+    view, _ = _server_cloned_view(ps, tmp_path, route=False)
+
+    assert view.modules_panel.row("mod-playerbots").chip_buttons == ()
+    assert "mod-playerbots: 4 commits behind" in view.module_report.toPlainText()
+    labels = [b.text() for b in view.modules_panel.row("mod-transmog").chip_buttons]
+    assert labels == [modules_panel.chip_update_label(3)], labels
+
+
+def test_a_finished_server_update_drops_the_server_cloned_count_and_version(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count was about a commit the checkout has moved off, so it goes (T146).
+
+    Exactly the server-cloned key: mod-transmog is a module clone of its own
+    that the server update does not move, so its count stays true and stays.
+    The version the row showed is dropped for the same reason and read again.
+
+    Mutation: leave `_behind` alone in `_rebuild_finished()` and the row reads
+    "4 commits behind" over a checkout that is now on upstream's tip.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    reads: list[Path] = []
+    view, spy = _server_cloned_view(ps, tmp_path, reads=reads)
+    playerbots = tmp_path / "modules" / "mod-playerbots"
+    pump_until(lambda: playerbots in reads, "the row's version was read")
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update finished")
+
+    assert len(spy.presses) == 1
+    assert ("module", "mod-playerbots") not in view._behind
+    assert view.modules_panel.row("mod-playerbots").chip_buttons == ()
+    assert view._behind.get(("module", "mod-transmog")) == 3
+    pump_until(lambda: reads.count(playerbots) == 2, "the moved checkout's version was re-read")
+    assert reads.count(tmp_path / "modules" / "mod-transmog") == 1
+
+
+def test_a_finished_return_to_the_pin_drops_the_server_cloned_count_too(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other T64 press moves the same checkouts and ends in the same slot.
+
+    Mutation: clear only after `_start_update_to_latest()` and the count
+    survives a return to the pin, about a commit the checkout has left.
+    """
+    qmb = controller_view_module.QMessageBox
+    monkeypatch.setattr(qmb, "question", lambda *a, **k: qmb.StandardButton.Yes)
+    view, spy = _server_cloned_view(ps, tmp_path)
+
+    assert view.return_to_the_tested_pin() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the return finished")
+
+    assert len(spy.pin_presses) == 1
+    assert ("module", "mod-playerbots") not in view._behind
+    assert view._behind.get(("module", "mod-transmog")) == 3
+
+
+def test_a_failed_server_update_keeps_the_server_cloned_count(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A press that failed put the sources back, so the count it had is still the count.
+
+    Mutation: clear on every finish rather than on a successful one and a
+    refused update tells the player mod-playerbots is up to date.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, _ = _server_cloned_view(ps, tmp_path)
+    route = view.services.update_to_latest
+    assert route is not None
+
+    def refused(cancel: object = None) -> Iterator[str]:
+        yield "--- update-sources"
+        raise InstallerError("upstream could not be reached")
+
+    view.services.update_to_latest = replace(route, press=refused)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update failed")
+
+    assert view._behind.get(("module", "mod-playerbots")) == 4
+
+
 # -- T124: "Upstream has new code since this server was built" --------------
 
 

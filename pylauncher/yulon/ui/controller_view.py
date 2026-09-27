@@ -28,7 +28,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol, cast
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -144,6 +144,7 @@ from yulon.ui.widgets.modules_panel import (
     SessionState,
     VersionCache,
     build_module_rows,
+    moved_by_server_update,
 )
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
@@ -2987,6 +2988,12 @@ module with no manifest. Saying so is the difference between a control that is
 inert and one that looks broken. Since T42 the row carries no Install or Remove
 button at all and this sentence is reached through its context menu, which is
 the only press such a row still answers.
+
+Its update chip reached this sentence too until T146: Check for updates counts
+every folder, so `mod-playerbots` -- cloned by the SERVER install, no manifest
+-- carried an Update whose only outcome was "Nothing was changed". Such a row
+now gets no update chip, except a folder the server's own update moves, whose
+chip runs "Update the server to latest…" instead (`_chip_action_pressed()`).
 """
 
 WHY_UNCATALOGUED = "Why is there no Install or Remove?"
@@ -4506,6 +4513,11 @@ class ControllerView(QWidget):
         # the panel's success alone would tell a user their module was live
         # because an unrelated SQL run went through.
         self._rebuild_is_compile = False
+        # T146: whether that run is one of the two T64 presses, which MOVE the
+        # server's checkouts as well as compiling them. A plain rebuild compiles
+        # the same folders without moving them, so its finish must not drop a
+        # count of how far behind they are.
+        self._rebuild_moves_sources = False
         # T64: a `mysqldump` is running off the GUI thread, chained in front of
         # an update. `_busy` is the LOG PANEL's flag and a backup is not a job in
         # that panel, so without this nothing on the tab knows -- see
@@ -9002,6 +9014,7 @@ class ControllerView(QWidget):
                 # T121, the same moment again: which recorded mods are in doubt.
                 unknown=self._unknown_modules(),
                 notes=self._module_notes(),
+                server_updated=self._server_updated(),
             )
         )
         if broken:
@@ -9181,6 +9194,25 @@ class ControllerView(QWidget):
             # working tree, and what HEAD carries. A `reset --hard` over work
             # nobody looked at is what the ticket forbids in so many words.
             self._module_action("update")
+        elif action == "server_update":
+            # T146. A folder the SERVER install cloned (`mod-playerbots` on
+            # WotLK) has no manifest and so no per-module steps; the button
+            # that moves it is the T64 one, and this is that button's own slot
+            # -- its dialog, backup offer, busy gates and refusals included.
+            self.update_to_latest()
+
+    def _server_updated(self) -> frozenset[PurePosixPath]:
+        """Where "Update the server to latest…" moves a checkout here; empty with no route (T146).
+
+        Two facts the view already holds, joined here rather than carried as a
+        new service: the route is `services.update_to_latest`, and where it
+        moves things is this entry's catalog data (`native.server_update_dests()`).
+        An install with no route gets an empty set, so no row offers a press
+        whose slot would return at its first line.
+        """
+        if self.services.update_to_latest is None:
+            return frozenset()
+        return native.server_update_dests(self.entry)
 
     def _selected_row_is_uncatalogued(self) -> bool:
         """Is the selected row one of T41's "installed here, not in the catalog" rows?"""
@@ -9857,6 +9889,7 @@ class ControllerView(QWidget):
         # reader of them.
         cancel = threading.Event()
         self._rebuild_is_compile = True
+        self._rebuild_moves_sources = False
         return self.rebuild_log.run(
             lambda: source(cancel),
             title=f"Rebuilding {self.entry.name}",
@@ -10140,6 +10173,7 @@ class ControllerView(QWidget):
             return False
         cancel = threading.Event()
         self._rebuild_is_compile = True
+        self._rebuild_moves_sources = True
         return self.rebuild_log.run(
             lambda: route.press(cancel),
             title=f"Updating {self.entry.name} to the newest code",
@@ -10180,6 +10214,7 @@ class ControllerView(QWidget):
             return False
         cancel = threading.Event()
         self._rebuild_is_compile = True
+        self._rebuild_moves_sources = True
         return self.rebuild_log.run(
             lambda: route.to_pin(cancel),
             title=f"Returning {self.entry.name} to the tested commit",
@@ -10252,6 +10287,7 @@ class ControllerView(QWidget):
             return False
         cancel = threading.Event()
         self._rebuild_is_compile = False
+        self._rebuild_moves_sources = False
         return self.rebuild_log.run(
             lambda: route.press(cancel),
             title=f"Applying database updates to {self.entry.name}",
@@ -10320,6 +10356,7 @@ class ControllerView(QWidget):
             return False
         cancel = threading.Event()
         self._rebuild_is_compile = False
+        self._rebuild_moves_sources = False
         return self.rebuild_log.run(
             lambda: route.press(cancel),
             title=f"Adopting {self.entry.name}'s databases as a finished import",
@@ -10336,6 +10373,27 @@ class ControllerView(QWidget):
         """
         server_dir = self.services.controller.server_dir
         return f"rebuild-{self.entry.id}-{composegen.install_id(server_dir)}"
+
+    def _forget_what_the_server_update_moved(self) -> None:
+        """Drop the count and the version of every row a finished T64 press moved (T146).
+
+        `_note_session_facts()`'s rule for a per-module update, applied to the
+        server's: the checkout is on a different commit now, so "N commits
+        behind" is a figure about one it has moved off and the version the row
+        showed is a sha it is no longer on. Dropped rather than recounted, for
+        the same reason -- a recount is a network round trip, and a stale
+        number is a wrong one.
+
+        Exactly the rows `moved_by_server_update()` names, which is the
+        predicate the row builder offered their chip by: a module clone of its
+        own (`mod-transmog`) is not moved by this press and keeps its count.
+        """
+        moved = self._server_updated()
+        for widget in self.modules_panel.rows():
+            row = widget.data
+            if moved_by_server_update(row.family, row.id, moved):
+                self._behind.pop((row.family, row.id), None)
+                self._versions.forget(row.id)
 
     @Slot()
     def _rebuild_started(self) -> None:
@@ -10363,6 +10421,13 @@ class ControllerView(QWidget):
         self._import_asked = False
         self._forget_the_adopt_reading()
         compiled, self._rebuild_is_compile = self._rebuild_is_compile, False
+        moved, self._rebuild_moves_sources = self._rebuild_moves_sources, False
+        if ok and moved and not self.rebuild_log.cancelled:
+            # T146, on `_rebuild_owed`'s terms below: only a press that finished
+            # and was not stopped. A failed one puts every source back on the
+            # commit it was on (`StagedInstaller._put_sources_back()`), so its
+            # counts are still the counts.
+            self._forget_what_the_server_update_moved()
         # THREE questions, not one, and every one of them has bitten this clause.
         #
         # `ok` alone is not "the server was compiled": `LogPanel` reports a

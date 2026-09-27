@@ -29,9 +29,9 @@ the decorations modules: upstream `Yulon` carries Baerthe's passes on those and
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from PySide6.QtCore import QPoint, QSize, Qt, Signal, Slot
@@ -112,8 +112,10 @@ NOT_IN_CATALOG = "installed here — not in this game's catalog"
 
 It is still installed: the server compiles it and the importer is handed its
 SQL. What Yu'lon does not have is a manifest, so it has no steps to install or
-remove it -- which is why such a row gets no buttons and says so when the
-context menu is pressed on it (`controller_view.UNCATALOGUED_PRESS`).
+remove it -- which is why such a row gets no Install or Remove button and says
+so when the context menu is pressed on it (`controller_view.UNCATALOGUED_PRESS`).
+The one press such a row can carry is the server's own update, on a folder the
+SERVER install cloned (T146, `_chips_for()`).
 """
 
 BADGE_INSTALLED = "Installed"
@@ -196,25 +198,29 @@ lock is still a fact in the sense the row draws (no press behind it, the
 sentence in its tooltip); it is the one fact `_ChipStrip` refuses to hide.
 """
 
-ChipAction = Literal["rebuild", "sql", "update"]
+ChipAction = Literal["rebuild", "sql", "update", "server_update"]
 """The job an owed chip's subpanel offers one press for (T44 item 4).
 
 A KEY and not a label. The view routes on it -- `rebuild` is the tab's own
-Rebuild server…, `sql` is Apply module SQL, `update` is the per-module pull --
-and routing on the button's TEXT would break the day one of these is reworded.
+Rebuild server…, `sql` is Apply module SQL, `update` is the per-module pull,
+`server_update` is Update the server to latest… for a folder the SERVER install
+cloned (T146) -- and routing on the button's TEXT would break the day one of
+these is reworded.
 """
 
 CHIP_ACTION_LABELS: dict[ChipAction, str] = {
     "rebuild": "Rebuild server…",
     "sql": "Apply module SQL",
     "update": "Update",
+    "server_update": "Update the server to latest…",
 }
 """What each action's button says, spelled HERE rather than imported.
 
-The two of them that also exist on the action bar are worded the same way on
+The three of them that also exist on the action bar are worded the same way on
 purpose, and cannot be imported from `controller_view` -- this module deliberately
-imports nothing from it (module docstring). The ellipsis on the rebuild carries
-the app's own convention: that press opens a dialog first.
+imports nothing from it (module docstring). The ellipsis on the rebuild and on
+the server update carries the app's own convention: that press opens a dialog
+first.
 """
 
 
@@ -417,6 +423,20 @@ def _clone_dir_of(kind: str) -> str:
     return kind
 
 
+def moved_by_server_update(
+    family: str, item_id: str, server_updated: Collection[PurePosixPath]
+) -> bool:
+    """Is this family's folder `item_id` one that "Update the server to latest…" moves? (T146)
+
+    `server_updated` is `native.server_update_dests()` for an install that offers
+    the route, and empty for one that does not. One predicate for the two
+    readers -- the row builder deciding the chip, and the view deciding which
+    counts a finished server update has made stale -- so the two cannot
+    disagree about which rows the button moved.
+    """
+    return PurePosixPath(_clone_dir_of(family)) / item_id in server_updated
+
+
 class VersionCache:
     """What each installed clone is AT, read once per clone and then remembered.
 
@@ -499,6 +519,7 @@ def _chips_for(
     blocked_by: str | None = None,
     needs: str | None = None,
     blocked_why: str | None = None,
+    server_update: bool = False,
 ) -> tuple[Chip, ...]:
     """The eight chips a row may carry, and nothing beyond them.
 
@@ -523,10 +544,16 @@ def _chips_for(
     mark, so the one sentence saying why the button is dead was in a tooltip a
     touch user cannot open. A lock is the last fact to go.
 
-    Eight and not nine: an "Update" chip that could be PRESSED to pull is not
-    here because no per-module pull exists below this tab --
-    `apply.module_updates()` counts and nothing else -- and a button that
-    reports a number is not the same control as a button that fetches.
+    **The update chip is offered only where a press can run it (T146).** A
+    catalogued row's is `Applier.update()`, the per-module pull. A row with no
+    manifest has no steps for the applier, and its chip used to carry the same
+    `update` anyway: on WotLK that was `mod-playerbots`, which the SERVER install
+    clones, and a player who pressed it was told "Nothing was changed"
+    (`controller_view.UNCATALOGUED_PRESS`). Now `server_update` says the caller
+    found the folder among the checkouts "Update the server to latest…" moves,
+    and the chip names that press and runs it; any other uncatalogued row gets
+    no update chip at all. Check for updates still counts every folder and its
+    report still prints them -- only the promise of a press is withdrawn.
     """
     chips: list[Chip] = []
     key = (family, item_id)
@@ -554,7 +581,20 @@ def _chips_for(
         )
     behind = session.behind.get(key, 0)
     release = session.releases.get(key, "")
-    if behind > 0:
+    if behind > 0 and manifest is None and server_update:
+        chips.append(
+            Chip(
+                "owed",
+                chip_update_label(behind),
+                f"{item_id}: its upstream has {behind} commit(s) this checkout does not. It is "
+                "part of the server: the server install cloned it, no module manifest covers "
+                "it, and it is updated with the server. This press is "
+                f"{CHIP_ACTION_LABELS['server_update']}, which asks first and then moves the "
+                f"server's code and {item_id} together to upstream's newest and rebuilds.",
+                "server_update",
+            )
+        )
+    elif behind > 0 and manifest is not None:
         said = (
             f"{item_id}: {release} is its newest published release, and this checkout is not "
             f"on it. Update fetches and RESETS the clone to that release, "
@@ -658,6 +698,7 @@ def build_module_rows(
     unfinished: Mapping[str, frozenset[str]] | None = None,
     unknown: Mapping[str, Mapping[str, apply_module.Doubt]] | None = None,
     notes: Mapping[tuple[str, str], str] | None = None,
+    server_updated: Collection[PurePosixPath] | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
 
@@ -684,8 +725,15 @@ def build_module_rows(
     file that cannot be read -- with why; such a row reads `State unknown` and
     offers Remove, and an alternative locked by it says the doubt, not "is
     installed here" (fix wave).
+
+    `server_updated` is where "Update the server to latest…" moves a checkout on
+    this install, as `native.server_update_dests()` answers it, and empty or
+    `None` where the install offers no such route (T146). It decides one thing:
+    whether a folder no manifest names gets an update chip, and which one --
+    see `_chips_for()`.
     """
     catalog: list[Manifest] = list(manifests)
+    moved_by_server = server_updated or frozenset()
     in_doubt = unknown or {}
     half_installed = unfinished or {}
     # What is ALREADY known, keyed the way the rows are. Handed in rather than
@@ -870,7 +918,14 @@ def build_module_rows(
                     catalogued=False,
                     paths=(),
                     chips=_chips_for(
-                        None, kind, name, True, session, client_dir, dependants.get(name, [])
+                        None,
+                        kind,
+                        name,
+                        True,
+                        session,
+                        client_dir,
+                        dependants.get(name, []),
+                        server_update=moved_by_server_update(kind, name, moved_by_server),
                     ),
                     removable=False,
                     remove_reason=None,

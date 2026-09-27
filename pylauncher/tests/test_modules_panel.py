@@ -9,8 +9,10 @@ tests take no `qapp` fixture on purpose -- a row list that needs a
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from yulon.catalog import native
+from yulon.catalog.catalog import EmulatorSource, load_catalog
 from yulon.manifest import ClientFile, Manifest, ManifestType, Patch, Prompt, Source
 from yulon.ui.widgets import modules_panel as mp
 
@@ -51,12 +53,14 @@ def _rows(
     installed: dict[str, frozenset[str]] | None = None,
     session: mp.SessionState | None = None,
     client_dir: Path | None = None,
+    server_updated: frozenset[PurePosixPath] | None = None,
 ) -> tuple[mp.ModuleRow, ...]:
     return mp.build_module_rows(
         manifests,
         installed or {},
         session or mp.SessionState(),
         client_dir,
+        server_updated=server_updated,
     )
 
 
@@ -1009,7 +1013,7 @@ def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none()
 
 def test_every_chip_action_has_a_button_label() -> None:
     """A key with no label is a button that renders empty. Mutation: drop one key."""
-    assert set(mp.CHIP_ACTION_LABELS) == {"rebuild", "sql", "update"}
+    assert set(mp.CHIP_ACTION_LABELS) == {"rebuild", "sql", "update", "server_update"}
     assert mp.CHIP_ACTION_LABELS["sql"] == "Apply module SQL"
 
 
@@ -1330,6 +1334,120 @@ def test_the_update_chip_offers_the_pull_and_names_the_press() -> None:
     assert chip.label == mp.chip_update_label(3)
     assert chip.action == "update"
     assert "no per-module pull" not in chip.detail
+
+
+# ---------------------------------------- a folder the SERVER install cloned (T146)
+
+WOTLK_SERVER_DESTS = native.server_update_dests(load_catalog().get("wow-wotlk"))
+"""What the view hands the builder on a WotLK install that offers the server update.
+
+Derived from the shipped catalog rather than spelled, so these tests are about
+the folder `catalog.json` really clones and not a name typed here.
+"""
+
+
+def test_a_server_cloned_folder_that_is_behind_offers_the_server_update() -> None:
+    """The report that filed T146: mod-playerbots' Update could only refuse.
+
+    The server install clones it and no manifest names it, so the applier has
+    no steps for it; "Update the server to latest…" is the press that moves it.
+    The chip keeps its count and says whose update it is.
+
+    Mutation: leave the server-cloned row on the manifest chip and its action
+    is `update`, whose press ends in `UNCATALOGUED_PRESS`.
+    """
+    session = mp.SessionState(behind={("module", "mod-playerbots"): 4})
+    rows = _rows(
+        [], {"module": frozenset({"mod-playerbots"})}, session, server_updated=WOTLK_SERVER_DESTS
+    )
+
+    row = _row(rows, "mod-playerbots")
+    assert row.catalogued is False
+    chip = next(c for c in row.chips if c.kind == "owed")
+    assert chip.label == mp.chip_update_label(4)
+    assert chip.action == "server_update"
+    assert mp.CHIP_ACTION_LABELS["server_update"] in chip.detail
+    assert "part of the server" in chip.detail
+
+
+def test_a_server_cloned_folder_has_no_update_chip_where_there_is_no_server_update() -> None:
+    """No route on this install (a WSL server, an unflagged entry): nothing to press.
+
+    The one rule this input breaks is the route: the folder is mod-playerbots
+    and it is behind, and the view hands an empty set when
+    `services.update_to_latest` is None.
+
+    Mutation: build the server chip from the catalog alone and this row offers
+    a press whose slot returns at its first line.
+    """
+    session = mp.SessionState(behind={("module", "mod-playerbots"): 4})
+    rows = _rows([], {"module": frozenset({"mod-playerbots"})}, session, server_updated=frozenset())
+
+    assert _row(rows, "mod-playerbots").chips == ()
+
+
+def test_any_other_uncatalogued_folder_that_is_behind_gets_no_update_chip() -> None:
+    """Nothing can run an update on a folder no manifest and no server source names (T146).
+
+    The route IS offered here -- the WotLK set is handed in -- so the one rule
+    this input breaks is that the server install did not clone `mod-homemade`.
+    Check for updates still counts it and its report still says so; the row
+    just stops advertising a press whose only outcome is a refusal.
+
+    Mutation: gate the chip on `manifest is not None or behind` and the
+    homemade folder carries `update` again.
+    """
+    session = mp.SessionState(behind={("module", "mod-homemade"): 2})
+    rows = _rows(
+        [], {"module": frozenset({"mod-homemade"})}, session, server_updated=WOTLK_SERVER_DESTS
+    )
+
+    assert _row(rows, "mod-homemade").chips == ()
+
+
+def test_a_db_source_in_a_clone_folder_is_not_offered_the_server_update() -> None:
+    """The `*-db` rule, carried to the row: the server update holds it at its pin (T146).
+
+    No shipped entry puts one in a clone folder (`test_update_to_latest` pins
+    that); this entry adds one, so the one rule broken is `held_at_its_pin`.
+
+    Mutation: collect every source's dest in `server_update_dests()` and
+    `foo-db` is offered an update the route would never make.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    held = EmulatorSource(repo="acme/foo-db", branch="master", dest="modules/foo-db")
+    widened = entry.model_copy(
+        update={
+            "emulator": entry.emulator.model_copy(
+                update={"sources": (*entry.emulator.sources, held)}
+            )
+        }
+    )
+    session = mp.SessionState(behind={("module", "foo-db"): 2})
+    rows = _rows(
+        [],
+        {"module": frozenset({"foo-db"})},
+        session,
+        server_updated=native.server_update_dests(widened),
+    )
+
+    assert _row(rows, "foo-db").chips == ()
+
+
+def test_a_catalogued_behind_module_keeps_its_own_update_chip_beside_a_server_update() -> None:
+    """Regression guard: the server set changes only rows with no manifest (T146).
+
+    Mutation: route every behind row in a server-updated install to
+    `server_update` and a catalogued module loses its own per-module pull.
+    """
+    session = mp.SessionState(behind={("module", "mod-a"): 3})
+    without = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+    beside = _rows(
+        [_m("mod-a")], {"module": frozenset({"mod-a"})}, session, server_updated=WOTLK_SERVER_DESTS
+    )
+
+    assert _row(beside, "mod-a").chips == _row(without, "mod-a").chips
+    assert [c.action for c in _row(beside, "mod-a").chips] == ["update"]
 
 
 def test_one_familys_pending_sql_does_not_badge_another_familys_row() -> None:
