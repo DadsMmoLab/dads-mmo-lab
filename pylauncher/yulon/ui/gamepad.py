@@ -188,6 +188,7 @@ def _assert_sdl_parity() -> bool:
     _parity_result = True
     return True
 
+
 # The raw SDL ceiling `SDL_GameControllerAxis` can reach (Sint16 magnitude),
 # used to express the deadzone as a fraction of the full range.
 AXIS_MAX = 32768

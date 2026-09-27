@@ -7,6 +7,7 @@ import importlib
 
 _FALLBACK_VERSION = "0.8.90-Public"
 
+
 def _stamped_version() -> str | None:
     try:
         module = importlib.import_module("yulon._build_version")
