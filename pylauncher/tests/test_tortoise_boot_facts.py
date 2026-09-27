@@ -361,7 +361,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "632e1b636328cba92f49871db5614bc75e03b4da", (
+    assert module.rev == "ad9d71fb3ede4794e65789d9f2283ab2bcde1721", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -369,9 +369,12 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "branch; T120 moved it to c591bbb1, `main` on 2026-09-24; T136 moved it to "
         "f858f9c9, the commit release v2026-09-25 names (the source follows releases since "
         "T126), installed fresh and booted with its bots online on `yulon-ubuntu` 2026-09-26 "
-        "(.notes/gates/t136-tortoise-pins/); and since T143 it is 632e1b63, the commit "
+        "(.notes/gates/t136-tortoise-pins/); T143 moved it to 632e1b63, the commit "
         "release v2026-09-26 names: 11 commits, no conf key, SQL or build change, LFT fill "
-        "and BG auto-queue on by default"
+        "and BG auto-queue on by default; and since T161 it is ad9d71fb, the commit release "
+        "v2026-09-27 names: 62 commits, seven new default-on AI keys the install does not "
+        "write, `HireRequiresResting` renamed `HireAnywhere` (off: hire at a recruiter), and "
+        "the recruiter spawn migration rewritten with explicit guids"
     )
     for source in sources:
         assert re.fullmatch(
@@ -779,6 +782,14 @@ def test_the_fatal_pattern_catches_the_shape_this_core_dies_in() -> None:
         "TortoiseBots 2026-09-26-v1 (AI enabled)",
         "TortoiseBots by Sagiroth - https://github.com/Sagiroth/TortoiseBots "
         "(AGPL-3.0, source available)",
+        # T161's pin: the same start-up line on the v2026-09-27 build.
+        "TortoiseBots 2026-09-27-v15 (AI enabled)",
+        # T161's pin rewrote a world migration an older install has already applied. The
+        # core's updater keys migrations by module and file hash, so an updated install
+        # applies the file again and says this, at info level, about the old hash.
+        "[DB Auto-Updater] Migration 20260918120000_world with hash "
+        "0123456789abcdef0123456789abcdef01234567 for module TortoiseBots exists in DB but "
+        "not as file, old migration?",
     ):
         assert not re.search(
             ready.fatal, healthy
