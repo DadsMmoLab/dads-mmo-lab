@@ -4574,7 +4574,9 @@ class ModuleUpdate:
     ask": no `.git`, an offline machine, a repository that has gone private.
     Never collapsed into `0` — see `git.BehindReader`. `Behind.UNCOUNTED` is
     "behind, by a number this shallow checkout cannot prove" (T147), and is
-    never shown as a figure."""
+    never shown as a figure. The three `Behind` members about a release (T150)
+    are a release row's "not behind, and not on it either": each is its own
+    sentence in `line` and none of them is an update."""
 
     family: str = "module"
     """Which manifest family's clone folder this row was read from (T126).
@@ -4599,6 +4601,9 @@ class ModuleUpdate:
     Its `behind` is then counted against that release's commit rather than the
     branch tip, and the row says "new release vX" instead of a commit count --
     a count of in-between commits is not what an update of such a module brings.
+    A checkout that is not under that commit says so instead, and is offered
+    nothing: the update resets to the release, which from there is a downgrade
+    (T150).
     """
 
     @property
@@ -4612,12 +4617,17 @@ class ModuleUpdate:
 
         On a shallow checkout that range is itself wrong unless the walk proves
         it (T147, `git._behind_after_fetch()`), so a row git could not prove
-        says there is an update and prints no number at all.
+        says there is an update and prints no number at all. A release row
+        whose checkout is not under the release says where it is instead, and
+        that there is no update (T150, `_NOT_UNDER_RELEASE`).
         """
         if not self.is_checkout:
             return f"{self.key}: not a git checkout — nothing to compare"
         if self.behind is None:
             return f"{self.key}: could not ask (no answer from git)"
+        placed = _NOT_UNDER_RELEASE.get(self.behind) if isinstance(self.behind, Behind) else None
+        if placed is not None:
+            return f"{self.key}: {placed.format(release=self.release or 'the release it follows')}"
         if self.release:
             if is_behind(self.behind):
                 word = upstream.release_word(self.release, self.installed_release)
@@ -4629,6 +4639,30 @@ class ModuleUpdate:
             )
         plural = "" if self.behind == 1 else "s"
         return f"{self.key}: {self.behind} commit{plural} behind"
+
+
+_NOT_UNDER_RELEASE: dict[Behind, str] = {
+    Behind.AHEAD_OF_RELEASE: (
+        "ahead of the newest release, {release} — this checkout already has it and commits "
+        "newer than it, so there is no update to offer"
+    ),
+    Behind.OFF_RELEASE: (
+        "not on the newest release, {release} — this checkout and the release each have "
+        "commits the other does not, and updating would drop this checkout's, so no update is "
+        "offered"
+    ),
+    Behind.NOT_IN_RELEASE: (
+        "not on the newest release, {release} — the release does not contain this checkout's "
+        "commit, and a shallow checkout cannot show whether that commit is newer or on another "
+        "line, so no update is offered"
+    ),
+}
+"""A release row that is not under its release, in the words its line says it in (T150).
+
+Here rather than in the view for `line`'s own reason. Every sentence ends on
+"no update", because the update resets the clone to the release, and from any
+of these three that is a step back or sideways the person did not ask for.
+"""
 
 
 def module_updates(
@@ -4662,7 +4696,9 @@ def module_updates(
     `releases` maps a module key to the GitHub repository of a manifest that
     says `follow: releases` (T126). Such a checkout is counted against its
     newest release's commit -- the fetch names that commit instead of a branch
-    -- and its row carries the release's tag.
+    -- and its row carries the release's tag. It is asked AS a release, so a
+    checkout newer than that commit, or off its line, is not counted as behind
+    it (T150, `git._behind_after_fetch()`).
     """
     root = server_dir / CLONE_DIRS[kind]
     branch_of = branches or {}
@@ -4709,7 +4745,9 @@ def _module_update(
         key=path.name,
         path=path,
         is_checkout=True,
-        behind=git.commits_behind(path, release.sha) if release is not None else None,
+        behind=(
+            git.commits_behind(path, release.sha, release=True) if release is not None else None
+        ),
         family=kind,
         release=release.tag if release is not None else "",
         installed_release=clone_release(path, item_id=path.name),
@@ -4826,6 +4864,10 @@ def _write_module_updates(
         logger.warning(f"could not keep the module-update reading in {path}: {exc}")
 
 
+_BEHIND_BY_VALUE = {member.value: member for member in Behind}
+"""Every `Behind` member by the value the cache file spells it with (T147, T150)."""
+
+
 def _behind_to_json(behind: BehindCount) -> int | str | None:
     """A row's figure as the cache file spells it: `Behind.UNCOUNTED` by its value (T147)."""
     return behind.value if isinstance(behind, Behind) else behind
@@ -4836,12 +4878,14 @@ def _behind_from_json(said: object) -> BehindCount:
 
     A cache written before T147 holds only numbers and `null`, so it reads as
     it did; one written after it and read by an older build fails that build's
-    `int()` and is simply counted again.
+    `int()` and is simply counted again. The same holds for T150's three
+    answers: a T147 build knows only `uncounted` by name, so it reaches `int()`
+    with `ahead-of-release` and counts again -- it never reads one as a number.
     """
     if said is None:
         return None
-    if said == Behind.UNCOUNTED.value:
-        return Behind.UNCOUNTED
+    if isinstance(said, str) and said in _BEHIND_BY_VALUE:
+        return _BEHIND_BY_VALUE[said]
     if isinstance(said, bool) or not isinstance(said, int | str):
         raise TypeError(f"not a count: {said!r}")
     return int(said)

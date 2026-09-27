@@ -9478,6 +9478,27 @@ def test_an_update_check_that_cannot_count_still_offers_the_update(
     assert modules_panel.chip_update_label(Behind.UNCOUNTED) in labels, labels
 
 
+def test_an_update_check_that_finds_a_checkout_ahead_of_its_release_offers_no_update(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T150: a release row past its release prints where it is and gets no update chip.
+
+    The chip's press resets the clone to the release, which from there is a
+    downgrade. Mutation: make `is_behind()` true for the release answers and
+    this row grows an "Update available" chip whose press moves it back.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    row = apply_module.ModuleUpdate(
+        "mod-transmog", tmp_path, True, Behind.AHEAD_OF_RELEASE, release="v1.0"
+    )
+    view._module_updates_done((row,))
+
+    assert view.module_report.toPlainText() == row.line
+    assert "ahead of the newest release, v1.0" in row.line
+    labels = [b.text() for b in view.modules_panel.row("mod-transmog").chip_buttons]
+    assert not [label for label in labels if label.startswith("Update available")], labels
+
+
 def test_busy_greys_every_row_button_and_gives_them_back(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

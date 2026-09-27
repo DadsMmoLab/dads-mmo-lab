@@ -26,7 +26,7 @@ from yulon import apply as apply_module
 from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
-from yulon.git import Behind, BehindCount, CloneSpec, RunnerGit, git_available
+from yulon.git import Behind, BehindCount, CloneSpec, RunnerGit, git_available, is_behind
 from yulon.manifest import Manifest, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.ownership import Ownership
@@ -2500,7 +2500,9 @@ class _FakeBehind:
         self.answers = answers
         self.asked: list[tuple[str, str | None]] = []
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> int | None:
         self.asked.append((dest.name, branch))
         return self.answers.get(dest.name)
 
@@ -2578,9 +2580,11 @@ class _CountedGit:
         self.real = RunnerGit()
         self.counted = 0
 
-    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> BehindCount:
         self.counted += 1
-        return self.real.commits_behind(dest, branch)
+        return self.real.commits_behind(dest, branch, release=release)
 
     def head_sha(self, dest: Path) -> str | None:
         return self.real.head_sha(dest)
@@ -2627,6 +2631,92 @@ def test_a_shallow_module_that_cannot_prove_its_count_says_update_available_and_
     assert first[0].behind is Behind.UNCOUNTED
     assert later[0].behind is Behind.UNCOUNTED
     assert later[0].line == rows[0].line
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_depth_1_module_newer_than_its_release_is_not_offered_a_downgrade(
+    tmp_path: Path,
+) -> None:
+    """T150 on the real path: installed from the branch, now following an OLDER release.
+
+    `module_updates()` is what the Check button runs, and it must ask the
+    release AS a release -- the same commit asked as a branch is T147's
+    uncounted "Update available", whose press resets the clone back to the
+    release. The row says where the checkout is and no chip is earned
+    (`is_behind()`); the day's cache keeps that answer and reads it back as
+    itself, and a T147 build reading the same file cannot take it for a count.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    shas = [_publish(origin, {"a.txt": "{v}\n"}, f"v{i}") for i in range(12)]
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-example"
+    RunnerGit().clone(CloneSpec(url=origin.as_uri(), dest=clone))
+    assert (clone / ".git" / "shallow").is_file(), "not the depth-1 shape modules install as"
+    release = upstream.Release("v1.0", shas[8])
+
+    rows = apply_module.module_updates(
+        server,
+        git=RunnerGit(),
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: release,
+    )
+    assert rows[0].behind is Behind.NOT_IN_RELEASE, rows[0].behind
+    assert not is_behind(rows[0].behind)
+    assert rows[0].line == (
+        "mod-example: not on the newest release, v1.0 — the release does not contain this "
+        "checkout's commit, and a shallow checkout cannot show whether that commit is newer "
+        "or on another line, so no update is offered"
+    )
+
+    git = _CountedGit()
+    first = apply_module.cached_module_updates(
+        server,
+        kind="module",
+        git=git,
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: release,
+        now=1_000,
+    )
+    later = apply_module.cached_module_updates(
+        server,
+        kind="module",
+        git=git,
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: release,
+        now=1_000 + upstream.RETRY_SECONDS + 1,
+    )
+    assert git.counted == 1, "an answer was treated as 'could not ask' and asked again"
+    assert first[0].behind is later[0].behind is Behind.NOT_IN_RELEASE
+    assert later[0].line == rows[0].line
+    said = json.loads((server / apply_module.MODULE_UPDATES_FILE).read_text(encoding="utf-8"))
+    with pytest.raises(ValueError):
+        int(said["rows"][0]["behind"])  # what a T147 build does with any name but "uncounted"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_full_module_clone_ahead_of_its_release_says_so(tmp_path: Path) -> None:
+    """T150: a full clone past its release is ahead of it, where it read "on the newest release"."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    shas = [_publish(origin, {"a.txt": "{v}\n"}, f"v{i}") for i in range(6)]
+    server = tmp_path / "server"
+    (server / "modules").mkdir(parents=True)
+    _git(server / "modules", "clone", "-q", origin.as_uri(), "mod-example")
+
+    rows = apply_module.module_updates(
+        server,
+        git=RunnerGit(),
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: upstream.Release("v1.0", shas[3]),
+    )
+    assert rows[0].behind is Behind.AHEAD_OF_RELEASE, rows[0].behind
+    assert rows[0].line == (
+        "mod-example: ahead of the newest release, v1.0 — this checkout already has it and "
+        "commits newer than it, so there is no update to offer"
+    )
 
 
 def test_module_updates_on_a_server_with_no_modules_folder_is_empty(tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.controller_wow_tortoise import modules as tortoise_modules
-from yulon.git import Behind, BehindCount, CloneSpec
+from yulon.git import Behind, BehindCount, CloneSpec, is_behind
 from yulon.manifest import Source, parse_manifest
 from yulon.resources import manifests_dir
 from yulon.ui.widgets import modules_panel
@@ -378,10 +378,12 @@ def test_a_branch_module_never_asks_for_a_release(tmp_path: Path) -> None:
 class _Behind:
     def __init__(self, answer: int | None) -> None:
         self.answer = answer
-        self.asked: list[tuple[str, str | None]] = []
+        self.asked: list[tuple[str, str | None, bool]] = []
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
-        self.asked.append((dest.name, branch))
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> int | None:
+        self.asked.append((dest.name, branch, release))
         return self.answer
 
 
@@ -394,7 +396,9 @@ def test_the_module_count_for_a_releases_module_is_against_the_release(tmp_path:
         releases={"mod-x": "o/mod-x"},
         newest_release=lambda slug: upstream.Release(TAG, REL),
     )
-    assert git.asked == [("mod-x", REL)]
+    # T150: asked AS a release, which is what lets git say "ahead of it" --
+    # the same commit asked as a branch would be counted the T147 way.
+    assert git.asked == [("mod-x", REL, True)]
     assert rows[0].line == f"mod-x: new release {TAG}"
     git.answer = 0
     rows = apply_module.module_updates(
@@ -576,7 +580,9 @@ def test_equal_release_names_are_not_in_step_when_one_side_is_an_older_build(
     (clone / ".git").mkdir()
 
     class _G:
-        def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+        def commits_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> int | None:
             return 2
 
         def head_sha(self, dest: Path) -> str | None:
@@ -599,10 +605,12 @@ class _CountGit:
     def __init__(self, behind: dict[str, int | None], heads: dict[str, str]) -> None:
         self.behind = behind
         self.heads = heads
-        self.asked: list[tuple[str, str | None]] = []
+        self.asked: list[tuple[str, str | None, bool]] = []
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
-        self.asked.append((dest.name, branch))
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> int | None:
+        self.asked.append((dest.name, branch, release))
         return self.behind.get(dest.name)
 
     def head_sha(self, dest: Path) -> str | None:
@@ -627,7 +635,12 @@ def test_tortoise_counts_its_addons_each_against_what_it_follows(tmp_path: Path)
         ("mod", "tortoise-bots-manager", f"tortoise-bots-manager: new release {TAG}"),
         ("mod", "tortoise-gm-manager", "tortoise-gm-manager: 2 commits behind"),
     ]
-    assert git.asked == [("tortoise-bots-manager", REL), ("tortoise-gm-manager", None)]
+    # T150: the addon that follows its releases is asked as one; the branch
+    # module is not, so its figure is T147's and nothing about it changed.
+    assert git.asked == [
+        ("tortoise-bots-manager", REL, True),
+        ("tortoise-gm-manager", None, False),
+    ]
 
 
 def test_the_tortoise_count_is_kept_for_a_day_and_recounted_when_the_clone_moves(
@@ -834,7 +847,9 @@ def test_an_uncounted_addon_count_still_says_the_release_moved(tmp_path: Path) -
     (clone / ".git").mkdir()
 
     class _G:
-        def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
+        def commits_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> BehindCount:
             return Behind.UNCOUNTED
 
         def head_sha(self, dest: Path) -> str | None:
@@ -845,3 +860,65 @@ def test_an_uncounted_addon_count_still_says_the_release_moved(tmp_path: Path) -
     )
     note = tortoise_modules.release_notes(tmp_path)[("mod", "tortoise-bots-manager")]
     assert f"an updated release {TAG} has come out since the addon was installed" in note, note
+
+
+# -- T150: a checkout that is not under its release ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("placed", "said", "why"),
+    [
+        (
+            Behind.AHEAD_OF_RELEASE,
+            f"tbm: ahead of the newest release, {TAG}",
+            "already has it and commits newer than it",
+        ),
+        (
+            Behind.OFF_RELEASE,
+            f"tbm: not on the newest release, {TAG}",
+            "each have commits the other does not",
+        ),
+        (
+            Behind.NOT_IN_RELEASE,
+            f"tbm: not on the newest release, {TAG}",
+            "a shallow checkout cannot show whether that commit is newer",
+        ),
+    ],
+)
+def test_a_release_row_not_under_its_release_says_where_it_is_and_offers_nothing(
+    placed: Behind, said: str, why: str
+) -> None:
+    """Each answer is its own sentence and none is an update: the press would be a downgrade.
+
+    Before T150 all three were either "on the newest release" or an update
+    whose Reset moved the clone back to the release.
+    """
+    row = apply_module.ModuleUpdate("tbm", Path("/x"), True, placed, family="mod", release=TAG)
+    assert row.line.startswith(said), row.line
+    assert why in row.line and "no update" in row.line, row.line
+    assert not is_behind(placed)
+
+
+def test_an_addon_ahead_of_its_release_is_not_an_updated_release(tmp_path: Path) -> None:
+    """The Tortoise note reads the cached row too: a checkout past the release has not "moved"."""
+    _addon_installed(tmp_path, TAG)
+    _server_on(tmp_path, TAG)
+    clone = tmp_path / apply_module.CLONE_DIRS["mod"] / tortoise_modules.ADDON_ID
+    (clone / ".git").mkdir()
+
+    class _G:
+        def commits_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> BehindCount:
+            return Behind.AHEAD_OF_RELEASE if release else 0
+
+        def head_sha(self, dest: Path) -> str | None:
+            return OLD
+
+    tortoise_modules.module_updates(
+        tmp_path, git=_G(), newest_release=lambda slug: upstream.Release(TAG, REL), now=T0
+    )
+    row = apply_module.cached_module_update(tmp_path, "mod", tortoise_modules.ADDON_ID)
+    assert row is not None and row.behind is Behind.AHEAD_OF_RELEASE
+    note = tortoise_modules.release_notes(tmp_path)[("mod", "tortoise-bots-manager")]
+    assert "has come out since" not in note, note

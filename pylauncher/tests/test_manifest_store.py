@@ -404,7 +404,9 @@ class _AskedBehind:
     def __init__(self) -> None:
         self.asked: list[tuple[str, str | None]] = []
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> int | None:
         self.asked.append((dest.name, branch))
         return 0
 

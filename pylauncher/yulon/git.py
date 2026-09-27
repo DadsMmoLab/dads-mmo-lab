@@ -551,9 +551,28 @@ class Behind(enum.Enum):
     `None`, which is "could not ask" and carries no chip at all. The one thing
     it does say is true: the fetched commit is not one this checkout can show
     it already has.
+
+    **Three more answers, for a release only (T150).** A module that follows
+    its releases (T126) is counted against the newest release's commit, and
+    its update resets the clone to that commit -- so a checkout NEWER than the
+    release, or on another line, was offered an update that is a downgrade.
+    Each of the three is "not behind" (`is_behind()` says no, so no chip), and
+    each is its own sentence on the row, because each is a different thing to
+    know; the members say which.
     """
 
     UNCOUNTED = "uncounted"
+    AHEAD_OF_RELEASE = "ahead-of-release"
+    """HEAD descends from the release: it already has it, and commits past it."""
+    OFF_RELEASE = "off-release"
+    """A FULL checkout on another line: HEAD and the release each lack commits the other has."""
+    NOT_IN_RELEASE = "not-in-release"
+    """A SHALLOW checkout the release does not contain, newer or on another line.
+
+    The release's history arrived whole with its fetch and HEAD is not in it:
+    that much is proved. Which of the two it is, the graft under HEAD hides --
+    and neither is an update.
+    """
 
 
 BehindCount = int | Behind | None
@@ -566,7 +585,8 @@ def is_behind(count: BehindCount) -> bool:
     Spelled once because every reader of the figure has to make the same
     three-way decision, and `(behind or 0) > 0` -- what they each wrote before
     the uncounted answer existed -- is a type error on it rather than a silent
-    "no".
+    "no". T150's three release answers are "no" by this same line: each says
+    the checkout is not under its release, and an update there goes backwards.
     """
     return count is Behind.UNCOUNTED or (isinstance(count, int) and count > 0)
 
@@ -593,7 +613,9 @@ class BehindReader(Protocol):
     instead.
     """
 
-    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount: ...
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> BehindCount: ...
 
 
 class VersionReader(Protocol):
@@ -685,6 +707,14 @@ _SHALLOW_AND_HEAD = ["rev-parse", "--is-shallow-repository", "HEAD"]
 _BEHIND_COUNT = ["rev-list", "--count", "HEAD..FETCH_HEAD"]
 """The figure for a FULL checkout, where the range is the truth as it stands."""
 
+_RELEASE_SIDES = ["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"]
+"""What HEAD has that the release does not, and the other way round -- asked for a release (T150).
+
+On a shallow checkout a zero on either side is still proof: a graft only ever
+CUTS an edge, so what the walk from one end reaches is really below it. It is a
+count that is not zero that a graft can make up.
+"""
+
 _BEHIND_WALK = ["rev-list", "--parents", "--boundary", "HEAD..FETCH_HEAD"]
 """The same range for a SHALLOW checkout, listed so the count can be proved first (T147).
 
@@ -693,7 +723,7 @@ graft -- and, prefixed `-`, every commit the walk stopped at.
 """
 
 
-def _behind_after_fetch(ask: Callable[[list[str]], str]) -> BehindCount:
+def _behind_after_fetch(ask: Callable[[list[str]], str], *, release: bool = False) -> BehindCount:
     """`commits_behind()` once its fetch has landed: `ask` runs one read-only git argv.
 
     One body for both implementations, because a caller narrowing to
@@ -728,15 +758,43 @@ def _behind_after_fetch(ask: Callable[[list[str]], str]) -> BehindCount:
     which is 0 on any shape. What does not is `Behind.UNCOUNTED`, never a
     guess. Nothing is fetched to decide it: deepening would change the shape of
     a clone this app promised to leave the shape it was made (`_update()`).
+
+    **`release` asks first whether HEAD is under the fetched commit at all
+    (T150).** A branch's tip is where an update goes and HEAD past it is
+    commits of somebody's own, which the update's own guard
+    (`no_local_commits()`) refuses; so a branch row is counted exactly as
+    above. A release is a fixed commit, the update resets to it and that guard
+    asks against the BRANCH -- so a HEAD past the release, which the guard
+    lets through, would be reset back to it. `_RELEASE_SIDES` answers it: no
+    commit of HEAD's missing from the release is "under it", and counted as
+    above; none of the release's missing from HEAD is `AHEAD_OF_RELEASE`;
+    both, on a full checkout, is `OFF_RELEASE`. On a shallow one "both" can be
+    a graft's doing, and `_release_lacks_head()` decides it.
     """
     said = ask(_SHALLOW_AND_HEAD).split()
     if len(said) != 2 or said[0] not in ("true", "false"):
         logger.debug(f"git rev-parse did not say whether this is shallow and where HEAD is: {said}")
         return None
     shallow, head = said[0] == "true", said[1]
+    mine = 0
+    if release:
+        sides = [_parse_count(side) for side in ask(_RELEASE_SIDES).split()]
+        counts = [side for side in sides if side is not None]
+        if len(sides) != 2 or len(counts) != 2:
+            logger.debug(f"git rev-list --left-right did not answer with two counts: {sides}")
+            return None
+        mine, theirs = counts
+        if mine and not theirs:
+            return Behind.AHEAD_OF_RELEASE
+        if mine and not shallow:
+            return Behind.OFF_RELEASE
+        if not mine and not shallow:
+            return theirs
     if not shallow:
         return _parse_count(ask(_BEHIND_COUNT))
     counted = 0
+    parentless: list[str] = []
+    stopped_elsewhere = False
     for line in ask(_BEHIND_WALK).splitlines():
         ids = line.split()
         if not ids:
@@ -744,13 +802,57 @@ def _behind_after_fetch(ask: Callable[[list[str]], str]) -> BehindCount:
         if ids[0].startswith("-"):
             if ids[0][1:] != head:
                 logger.debug(f"the walk from FETCH_HEAD stopped at {ids[0][1:]}, not at HEAD")
-                return Behind.UNCOUNTED
+                stopped_elsewhere = True
             continue
         if len(ids) == 1:
             logger.debug(f"{ids[0]} has no parent in this shallow checkout; not counting")
-            return Behind.UNCOUNTED
+            parentless.append(ids[0])
+            continue
         counted += 1
+    if mine:
+        return _release_lacks_head(ask, parentless)
+    if parentless or stopped_elsewhere:
+        return Behind.UNCOUNTED
     return counted
+
+
+def _release_lacks_head(ask: Callable[[list[str]], str], parentless: list[str]) -> BehindCount:
+    """A SHALLOW checkout whose HEAD the walk from the release did not reach (T150).
+
+    That walk is `HEAD..FETCH_HEAD`: everything under the release that is not
+    under HEAD as far as this checkout can see. HEAD was not in it -- and a
+    graft is the one thing that could have hidden it there, so the answer turns
+    on the commits the walk found with no parent:
+
+    - **None of them is a graft** -- each is a real root, or there were none --
+      so the release's whole history is here and HEAD is not in it. The
+      release does not contain HEAD: `NOT_IN_RELEASE`. Whether HEAD is newer
+      or on another line, the graft under HEAD hides, and neither is an update.
+      Measured: a depth-1 clone of a tip asked about an older release on the
+      same line gets that release's history down to the root.
+    - **One of them is a graft** -- the commit git says has no parent has a
+      `parent` line in its own object -- so history under the release is cut
+      and HEAD could be below the cut. That is `_pin()`'s own shape, the
+      ordinary T126 update: the tip cloned at install stays behind as a graft,
+      and a newer release built on it is walked down to it and no further. It
+      is left as T147 answers it -- behind, uncounted -- because taking the chip
+      off it would take it off every release update this app installed. A
+      checkout NEWER than its release with such a graft in the way gets the
+      same answer; the proof cannot reach it without deepening, which this does
+      not do (`_behind_after_fetch()`).
+
+    `git cat-file commit` and not `.git/shallow`, because it is the object's own
+    word, read through `ask` like every other question here, and a checkout
+    whose `shallow` file could not be read would otherwise count every graft as
+    a root and take the chip off the ordinary update.
+    """
+    for commit in parentless:
+        body = ask(["cat-file", "commit", commit])
+        header = body.split("\n\n", 1)[0]
+        if any(line.startswith("parent ") for line in header.splitlines()):
+            logger.debug(f"{commit} is a graft; the release's history under it is not here")
+            return Behind.UNCOUNTED
+    return Behind.NOT_IN_RELEASE
 
 
 def _fetch_ref(branch: str | None) -> str:
@@ -1174,7 +1276,9 @@ class RunnerGit:
         """
         _run_git(["git", *_LINE_ENDING_ARGS, "checkout", "--detach", "--force", rev], cwd=dest)
 
-    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> BehindCount:
         """How many commits an update would bring into `dest`. None = cannot ask.
 
         `no_local_commits()`'s fetch and `no_local_commits()`'s target, with the
@@ -1199,6 +1303,12 @@ class RunnerGit:
         fetch still carries no depth, for `no_local_commits()`'s reason, and
         nothing is deepened to make a count provable.
 
+        **`release` says `branch` is a release's commit, not a branch (T150)**,
+        and adds the three answers that are not behind it -- ahead of it, off
+        its line, or not contained in it -- because an update to a release
+        resets to it and would otherwise be offered as a downgrade.
+        `_behind_after_fetch()` carries why a branch is not asked the same.
+
         Read-only in the sense that matters: nothing outside `.git` is touched
         and no working tree is changed. It does cost a network round trip, so it
         belongs behind a control the user pressed and not on a timer.
@@ -1217,7 +1327,9 @@ class RunnerGit:
             )
             return None
         try:
-            return _behind_after_fetch(lambda argv: _run_git(["git", *argv], cwd=dest).stdout)
+            return _behind_after_fetch(
+                lambda argv: _run_git(["git", *argv], cwd=dest).stdout, release=release
+            )
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
             return None
@@ -1790,7 +1902,9 @@ class ContainerGit:
             return None
         return _only_grafts(proc.stdout, dest)
 
-    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> BehindCount:
         """How many commits an update would bring into `dest`. None = cannot ask.
 
         `RunnerGit.commits_behind()` carries the reasoning; both implementations
@@ -1816,7 +1930,9 @@ class ContainerGit:
             )
             return None
         try:
-            return _behind_after_fetch(lambda argv: self._capture(dest, argv, writes=False).stdout)
+            return _behind_after_fetch(
+                lambda argv: self._capture(dest, argv, writes=False).stdout, release=release
+            )
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
             return None
