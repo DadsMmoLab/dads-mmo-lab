@@ -542,6 +542,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # list fails this until its tab offers the press.
         unconfed = set() if azerothcore.confs_from_dist(entry) else {"repair_confs"}
 
+        # T129's corrections press, decided by the install PLAN like T14's: only a
+        # plan that marks a step `reapply_when_changed` has anything the press
+        # could ever apply. Read through the function the wiring reads, so the day
+        # another entry's plan marks one this fails until its tab offers it.
+        # Absent on the reference, which carries no phase list at all.
+        uncorrectable = set() if native.correction_phases(entry) else {"corrections"}
+
         # T126's `module_notes`: one extra sentence on a Modules row, which only
         # Tortoise has to say -- its TortoiseBots Manager addon and its
         # TortoiseBots server module publish releases in lockstep, and the row
@@ -571,6 +578,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | undashboarded
             | unpaired
             | unrebuilt
+            | uncorrectable
         )
         if game == "wow-wotlk":
             reference = (
@@ -582,6 +590,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | unrepaired
                 | unpaired
                 | unrebuilt
+                | uncorrectable
             )
             assert (
                 set(absent) == reference

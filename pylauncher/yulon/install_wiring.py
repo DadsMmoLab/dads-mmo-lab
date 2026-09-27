@@ -50,10 +50,12 @@ from yulon.catalog.native import (
     ComposeRepairRoute,
     ConfCheck,
     ConfRepairRoute,
+    CorrectionRoute,
     LatestRoute,
     RewrittenHistory,
     Seams,
     SourceVersion,
+    correction_phases,
     read_state,
     return_to_pin_confirmation,
     rewritten_line,
@@ -462,6 +464,35 @@ def repair_confs_for_app(
     return ConfRepairRoute(
         check=check,
         repair=lambda: azerothcore.repair_confs(entry, server_dir),
+    )
+
+
+def corrections_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> CorrectionRoute | None:
+    """T129's "Apply database corrections…" for this install, or None when it has none.
+
+    Offered where the entry's plan marks at least one step `reapply_when_changed`
+    (`native.correction_phases()`, read off the catalog: TBC and Vanilla today),
+    because nothing could ever be offered anywhere else. None as well for a
+    server inside a WSL distro, `repair_compose_for_app()`'s reason: these seams
+    address this host's Docker, not the distro's.
+
+    The engine is built per call, for `rebuild_for_app()`'s reason -- the check
+    asks the database, and is taken once each time the tab sees it come up.
+    """
+    if wsl_distro is not None or not correction_phases(entry):
+        return None
+    options = InstallOptions(server_dir=server_dir)
+    return CorrectionRoute(
+        check=lambda: installer_for_app(entry).correction_check(options),
+        confirmation=lambda check: installer_for_app(entry).correction_confirmation(check, options),
+        press=lambda check, cancel: installer_for_app(entry).apply_corrections(
+            check, options, cancel=cancel
+        ),
     )
 
 

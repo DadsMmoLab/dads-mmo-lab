@@ -562,6 +562,75 @@ class LatestRoute:
     """
 
 
+CORRECTIONS_BUTTON_LABEL = "Apply database corrections…"
+"""T129's press, here for `UPDATES_BUTTON_LABEL`'s reason: the engine's refusals name it."""
+
+CORRECTIONS_OPENING_NOTE = (
+    "You can stop this at any time. This does two things and nothing else: it starts this "
+    "install's database on its own if it is down, and it applies the install-plan steps this "
+    "version of Yu'lon has corrected since these databases were imported — only the ones "
+    "marked safe to apply to a server that already has data -- recording each one that lands. "
+    "It does not start the world server, compile, fetch, or re-run the rest of the install, and "
+    "the completion marker is left as it is. If these databases do not carry that marker, this "
+    "stops and says so rather than importing them."
+)
+"""What a corrections press costs, said before the first stage; `UPDATES_OPENING_NOTE`'s rule."""
+
+CORRECTIONS_CANCEL_NOTE = (
+    "A stop here leaves the statements that already ran in place and clears nothing; a step that "
+    "did not finish is not recorded, so it is offered again."
+)
+"""`RERUN_CANCEL_NOTE`'s counterpart for T129's press: the gate already reads a finished import."""
+
+CorrectionState = Literal["current", "stale", "held", "unknown", "unmarked", "unreadable"]
+
+
+@dataclass(frozen=True)
+class CorrectionCheck:
+    """This install's SQL phases beside the ones this version of Yu'lon ships (T129).
+
+    `stale` is the one state the Server tab offers "Apply database corrections…"
+    on: at least one phase changed or added since the import, and declared
+    `reapply_when_changed`. `held` is the same with nothing offerable -- every
+    changed phase is withheld, which is logged and not bannered, because a
+    banner with nothing to press would sit there for the life of the install.
+    `unknown` is a marker from a plan no release shipped (so nothing is known
+    about its phases), `unmarked` databases with no marker at all, and
+    `unreadable` a question nobody answered. Each but `current` carries `why`.
+    """
+
+    state: CorrectionState
+    offered: tuple[str, ...] = ()
+    withheld: tuple[str, ...] = ()
+    why: str = ""
+    marker: str = ""
+    """The marker's plan hash when this was read: the import the offer is a correction to."""
+    baseline: tuple[tuple[str, str | None], ...] = ()
+    """Each offered phase's recorded version when this was read (None: the install lacked it).
+
+    `marker` and `baseline` are the provenance the person confirmed. The press
+    reads the databases again and refuses whole unless both still say exactly
+    this: an offer is agreement to change THIS record, not whatever is there by
+    the time the press runs (Codex, T129 round 1)."""
+
+
+@dataclass(frozen=True)
+class CorrectionRoute:
+    """The three parts of T129's control, wired for one install so they cannot arrive apart.
+
+    `check` is a READING -- it asks the database, so the tab takes it once each
+    time the database comes up, never on the poll -- and never raises.
+    `confirmation` composes the dialog for the check the tab holds (it expands
+    the folder, and can refuse with `InstallerError`). `press` is handed that
+    same check -- what the person agreed to, provenance and all -- and refuses
+    unless the databases still read the way it says.
+    """
+
+    check: Callable[[], CorrectionCheck]
+    confirmation: Callable[[CorrectionCheck], str]
+    press: Callable[[CorrectionCheck, threading.Event | None], Iterator[str]]
+
+
 ComposeState = Literal["current", "stale", "foreign", "moved", "mixed", "missing", "error"]
 
 
@@ -1029,6 +1098,77 @@ def update_phases(entry: CatalogEntry) -> tuple[SqlPhase, ...]:
     return rerunnable_phases(block.sql)
 
 
+def correctable_phases(plan: SqlPlan) -> tuple[SqlPhase, ...]:
+    """The phases of one plan a corrections press may apply: `reapply_when_changed` (T129).
+
+    The ONE filter, `rerunnable_phases()`'s rule: the wiring that offers the
+    control and `sqlplan.phase_drift()` that decides what is offered read the
+    same flag, and this is where the spine reads it.
+    """
+    return tuple(phase for phase in plan.phases if phase.reapply_when_changed)
+
+
+def correction_phases(entry: CatalogEntry) -> tuple[SqlPhase, ...]:
+    """`correctable_phases()` for an entry; empty means the control is not offered at all.
+
+    Read off the catalog, `update_phases()`'s way: today `wow-tbc` and
+    `wow-vanilla` answer `spell_template hotfix` and the other two answer
+    nothing, and a test enumerates the catalog so that stays a fact about data.
+    """
+    native_block = entry.install.native
+    block = native_block.cmangos if native_block is not None else None
+    if block is None:
+        return ()
+    return correctable_phases(block.sql)
+
+
+def corrections_confirmation(
+    entry: CatalogEntry,
+    server_dir: Path,
+    offered: Sequence[str],
+    files: Sequence[str],
+    withheld: Sequence[str],
+) -> str:
+    """What the user agrees to before a corrections press (T129). Pure, for Qt-free assertions.
+
+    The step list is the `expand()` output the press streams, named as the
+    run's own log names each step, for `updates_confirmation()`'s reason. The
+    withheld phases are named too: the person is told what this version changed
+    that a press will NOT put on their server, and why, rather than finding out
+    from a log.
+    """
+    listing = "\n".join(f"    {name}" for name in files)
+    held = (
+        f"Also changed since then, and NOT applied by this: {', '.join(withheld)}. Applying those "
+        f"again over a server that already has data is not known to be safe — they drop, "
+        f"re-create or overwrite -- so only a new install gets them.\n\n"
+        if withheld
+        else ""
+    )
+    return (
+        f"Apply the corrected install-plan steps to {entry.name}?\n\n"
+        f"Folder: {server_dir}\n\n"
+        f"This version of Yu'lon has corrected {', '.join(offered)} since these databases were "
+        f"imported. This applies {len(files)} SQL step(s), the whole of "
+        f"{'that step' if len(offered) == 1 else 'those steps'}, into this install's "
+        f"databases:\n\n"
+        f"{listing}\n\n"
+        f"Each is marked in the install plan as safe to apply again to a server that already has "
+        f"data, and nothing else in the plan is re-run. Your databases keep their completion "
+        f"marker; what is written besides the steps is the record of which version of each step "
+        f"they now have, so a step is not offered again once it has landed. Your characters, "
+        f"accounts and world are not otherwise written.\n\n"
+        f"{held}"
+        f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
+        f"until this has finished. A running world server holds these tables in memory and "
+        f"writes back over whatever it finds in them, so this press refuses while it is up. The "
+        f"database alone is started if it is down; the world server is never started by this.\n\n"
+        f"If a step is refused, a step whose plan says to stop on errors stops the press there; "
+        f"one whose plan says to warn and carry on does so. Either way a step that did not land "
+        f"whole is not recorded, and is offered again."
+    )
+
+
 def updates_confirmation(
     entry: CatalogEntry,
     server_dir: Path,
@@ -1126,7 +1266,9 @@ def adopt_confirmation(entry: CatalogEntry, server_dir: Path, row: MarkerRow) ->
         f"if it is not already there — goes a row recording that this install plan "
         f"({row.plan_hash}) finished. Nothing is imported, nothing is dropped, no user is "
         f"created, no SQL file is streamed, and your characters, accounts and world are read "
-        f"only to learn which state they are in.\n\n"
+        f"only to learn which state they are in. Nothing records which version of each step of "
+        f"the install plan these databases have, because nothing here can know it, so an adopted "
+        f"server is never offered a corrected install-plan step later (T129).\n\n"
         f"{ADOPT_CONSEQUENCE}\n\n"
         f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
         f"until this has finished. A running world server holds these tables in memory and "
@@ -1990,6 +2132,16 @@ class StageContext:
     Tortoise install that had failed at that very stage, mint the app user's
     password in memory and persist it nowhere — `db-password` is not in the
     updates tuple.
+    """
+    corrections: CorrectionCheck | None = None
+    """The press was a CORRECTIONS press (T129): the check the person agreed to, else None.
+
+    `updates_only`'s promise, for the same reason and read at the same point:
+    the family branches on it before `stage_import()` is called, so neither the
+    full import nor the `partial` arm's `DROP DATABASE` is reachable on this
+    route. The press also keeps `updates_only` set, so a family that never
+    learned to read this field still takes the older route, which refuses
+    anything that does not read as a finished import (cold review, round 1).
     """
 
 
@@ -3902,6 +4054,113 @@ class StagedInstaller:
             f"on its own for it, and the world server stays down."
         )
 
+    # -- corrected install-plan steps for an install already imported (T129) ---
+
+    def correction_check(self, options: InstallOptions | None = None) -> CorrectionCheck:
+        """Which of this install's SQL phases this version has corrected. NEVER raises.
+
+        The reading behind the Server tab's banner. Every way of not knowing is
+        a state rather than an exception, for `adopt_state()`'s reason: it is
+        asked from a status path, and the one outcome that must never follow
+        from a question nobody answered is a control that writes appearing.
+        """
+        server_dir = self.server_dir(options or InstallOptions())
+        try:
+            return self._correction_check(self._update_context(server_dir, None))
+        except Exception as exc:  # noqa: BLE001 - a status path has nowhere to put one
+            logger.warning(f"could not compare {server_dir}'s install plan with this app's: {exc}")
+            return CorrectionCheck(
+                "unreadable",
+                why=f"this install's databases could not be asked ({type(exc).__name__}: {exc})",
+            )
+
+    def _correction_check(self, ctx: StageContext) -> CorrectionCheck:
+        """The family's reading. The spine keeps no per-phase record, so it knows nothing."""
+        return CorrectionCheck(
+            "unmarked", why=f"{self.entry.name} keeps no record of its install-plan steps"
+        )
+
+    def correction_files(self, ctx: StageContext, phases: Sequence[str]) -> tuple[str, ...]:
+        """The steps `phases` would stream into this install, named as the run's log names them.
+
+        Empty on the spine, `update_files()`'s reason; the CMaNGOS family expands
+        its plan the same way its press does.
+        """
+        return ()
+
+    def correction_confirmation(
+        self, check: CorrectionCheck, options: InstallOptions | None = None
+    ) -> str:
+        """The dialog's text for `check` on this install, with the steps read off the folder.
+
+        Raises:
+            InstallerError: the phases could not be expanded against this
+                folder; raised rather than listed as nothing, for
+                `update_confirmation()`'s reason.
+        """
+        server_dir = self.server_dir(options or InstallOptions())
+        files = self.correction_files(self._update_context(server_dir, None), check.offered)
+        return corrections_confirmation(
+            self.entry, server_dir, check.offered, files, check.withheld
+        )
+
+    def apply_corrections(
+        self,
+        check: CorrectionCheck,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Apply the corrected phases `check` offered, to an install already imported (T129).
+
+        `check` is the reading the person confirmed; the family refuses the
+        whole press unless the databases still read that way.
+
+        `update_databases()`'s route with a different consent: the database
+        started alone, then `import` with `ctx.corrections` set, which the family
+        reads before `stage_import()` so neither import arm is reachable. The
+        world is read before anything and again right before the import stage,
+        and both readings refuse on anything but an explicit `False` (owner
+        answer 7). No marker is written; the family records each phase that
+        landed.
+
+        Raises:
+            InstallerError: the entry's plan offers no phase this could apply,
+                the world is up or unreadable, the databases carry no marker, a
+                step failed, or the press was stopped.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        if not correction_phases(self.entry):
+            raise InstallerError(
+                f"{self.entry.name}'s install plan marks no step as safe to apply again to a "
+                f"server that already has data, so there is nothing for this to apply. Nothing "
+                f"was started. That is a fact about this game's plan, not about your install."
+            )
+        yield f"Applying corrected install-plan steps for {self.entry.name} in {server_dir}"
+        yield CORRECTIONS_OPENING_NOTE
+        # FIRST, before the database is started: `update_databases()`'s order,
+        # for its reason -- a refused press leaves the stack as it found it.
+        self._refuse_writes_into_a_running_world(CORRECTIONS_BUTTON_LABEL)
+        self._check_cancel(cancel)
+        stages = tuple(
+            (
+                replace(
+                    stage,
+                    recorded=False,
+                    cancel_note=CORRECTIONS_CANCEL_NOTE,
+                    run=self._guard_then(stage, CORRECTIONS_BUTTON_LABEL),
+                )
+                if stage.name == "import"
+                else stage
+            )
+            for stage in (self.stage_named("start-db"), self.stage_named("import"))
+        )
+        # `updates_only` is left as `_update_context()` sets it, True: see
+        # `StageContext.corrections` for the family that ignores this field.
+        ctx = replace(self._update_context(server_dir, cancel), corrections=check)
+        yield from self._staged(stages, ctx)
+
     # -- adopting an install this app did not make (T19) ----------------------
 
     def adopt_gate(self, ctx: StageContext) -> ImportGate | None:
@@ -3928,8 +4187,13 @@ class StagedInstaller:
         """
         return None
 
-    def write_import_marker(self, ctx: StageContext) -> None:
+    def write_import_marker(
+        self, ctx: StageContext, landed: Sequence[SqlPhase] | None = None
+    ) -> None:
         """Write the completion marker for this install, through the family's own writer.
+
+        `landed` is what an import applied whole, recorded beside the marker
+        (T129); the adopt press passes nothing, and no phase record is written.
 
         The spine cannot: the row is `sqlplan.write_marker()`'s, and this module
         may not import that one. The refusal here is what a family that never
