@@ -122,8 +122,9 @@ MARKER_TABLE = "yulon_install"
 PHASE_TABLE = "yulon_install_phase"
 """Beside the marker: which version (`SqlPhase.digest()`) of each phase this install has (T129).
 
-One row per phase name. `write_marker()` writes every phase's row just before the
-marker row, and `record_phases()` replaces a row when a correction is applied.
+One row per phase name. `write_marker()` writes a row for every phase the import
+applied whole, just before the marker row (the adopt press writes none), and
+`record_phases()` replaces a row when a correction is applied.
 `applied_unix` 0 marks a row carried over from `RELEASED_PHASE_DIGESTS` rather
 than written when its phase ran.
 """
@@ -1041,6 +1042,7 @@ def verify(
 def write_marker(
     plan: SqlPlan,
     *,
+    landed: Sequence[SqlPhase] | None,
     container: str,
     client: str,
     password: str,
@@ -1055,13 +1057,16 @@ def write_marker(
     reason to re-import (see the probe's table: a mismatched hash is a
     finished import from an older plan).
 
-    **Every phase's version goes in first, in `PHASE_TABLE`** (T129): the row
-    a later app compares the phase it ships against, to offer a corrected one.
-    First and in the same script, because the client stops at the first
-    statement that fails: a marker whose phase rows were refused would read as
-    an install from before T129 and be judged by the release table instead,
-    while phase rows with no marker are `partial`, which the next press clears
-    and imports again.
+    **The version of each phase in `landed` goes in first, in `PHASE_TABLE`**
+    (T129): the row a later app compares the phase it ships against, to offer a
+    corrected one. `landed` is what the import applied WHOLE -- a `warn` phase
+    with a refused step is left out, the rule the corrections press records by
+    -- and `None` writes no record at all: the adopt press ran no phase and
+    cannot say which version of any is there, so its install reads as knowing
+    nothing and is offered nothing (Codex, round 1). First and in the same
+    script, because the client stops at the first statement that fails: phase
+    rows with no marker are `partial`, which the next press clears and imports
+    again, never a marker over a record that was refused.
 
     Written to the daemon that holds `container`, like everything else here: a
     marker on the wrong daemon is a probe that reads `partial` forever and an
@@ -1071,7 +1076,13 @@ def write_marker(
     text = (
         f"CREATE TABLE IF NOT EXISTS `{plan.marker_db}`.`{MARKER_TABLE}` "
         "(plan_hash CHAR(16) NOT NULL, finished_unix BIGINT NOT NULL);\n"
-        + _phase_rows(plan.marker_db, {phase.name: (phase.digest(), now) for phase in plan.phases})
+        + (
+            ""
+            if landed is None
+            else _phase_rows(
+                plan.marker_db, {phase.name: (phase.digest(), now) for phase in landed}
+            )
+        )
         + f"INSERT INTO `{plan.marker_db}`.`{MARKER_TABLE}` (plan_hash, finished_unix) "
         f"VALUES ('{plan.plan_hash()}', {now});\n"
     )

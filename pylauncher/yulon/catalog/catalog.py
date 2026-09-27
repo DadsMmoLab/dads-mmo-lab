@@ -503,7 +503,17 @@ class SqlPhase(_Strict):
     Statements take the `{{TOKEN}}` grammar and are filled by `sqlplan.expand()` (A10).
     """
 
-    name: str = Field(min_length=1)
+    name: str = Field(
+        min_length=1,
+        max_length=191,
+        description=(
+            "The phase's key in the install's `yulon_install_phase` record (T129): at most 191 "
+            "characters (that column's `VARCHAR(191)`), no quote, backslash or control character "
+            "(it is written into `'...'` unescaped). Refused here, when the catalog loads, and "
+            "not by the writer, which runs only after a whole import and would fail it the same "
+            "way on every press."
+        ),
+    )
     into: str | None = None
     into_each: dict[str, str] | None = None
     files: tuple[str, ...] = ()
@@ -592,6 +602,19 @@ class SqlPhase(_Strict):
         }
         canonical = json.dumps(applied, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    @field_validator("name")
+    @classmethod
+    def _name_fits_the_record(cls, value: str) -> str:
+        bad = sorted(
+            {char for char in value if char in "'\\" or ord(char) < 0x20 or char == "\x7f"}
+        )
+        if bad:
+            raise ValueError(
+                f"phase name {value!r} carries {' '.join(repr(char) for char in bad)}, which the "
+                "install's phase record cannot hold"
+            )
+        return value
 
     @model_validator(mode="after")
     def _one_source_one_target(self) -> SqlPhase:

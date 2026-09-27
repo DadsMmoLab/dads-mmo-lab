@@ -490,8 +490,8 @@ def corrections_for_app(
     return CorrectionRoute(
         check=lambda: installer_for_app(entry).correction_check(options),
         confirmation=lambda check: installer_for_app(entry).correction_confirmation(check, options),
-        press=lambda phases, cancel: installer_for_app(entry).apply_corrections(
-            phases, options, cancel=cancel
+        press=lambda check, cancel: installer_for_app(entry).apply_corrections(
+            check, options, cancel=cancel
         ),
     )
 

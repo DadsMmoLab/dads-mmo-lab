@@ -10596,10 +10596,11 @@ class ControllerView(QWidget):
             logger.info(f"database corrections for {self.entry.id} declined at the confirmation")
             return False
         cancel = threading.Event()
-        phases = check.offered
         self._rebuild_is_compile = False
+        # The check itself, not its names: the press is bound to the reading the
+        # dialog was composed from, and refuses if the databases moved since.
         started = self.rebuild_log.run(
-            lambda: route.press(phases, cancel),
+            lambda: route.press(check, cancel),
             title=f"Applying database corrections to {self.entry.name}",
             cancel=cancel,
             record_as=self._run_record_kind(),

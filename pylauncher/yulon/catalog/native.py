@@ -413,11 +413,10 @@ trailing-off rather than as a name.
 ADOPT_OPENING_NOTE = (
     "You can stop this at any time. This does three things and nothing else: it starts this "
     "install's database on its own if it is down, it writes one row saying this install plan "
-    "finished (with the record of its steps beside it), and it puts the database back down "
-    "again if this press was what started it. It imports nothing, drops nothing, streams no "
-    "file, creates no user, and never starts the world server. If these databases already "
-    "carry that row, or do not hold the schemas and tables this plan names, this stops and "
-    "says so rather than writing it."
+    "finished, and it puts the database back down again if this press was what started it. It "
+    "imports nothing, drops nothing, streams no file, creates no user, and never starts the "
+    "world server. If these databases already carry that row, or do not hold the schemas and "
+    "tables this plan names, this stops and says so rather than writing it."
 )
 """What an adopt press costs and what it leaves alone, said before the first stage.
 
@@ -453,8 +452,6 @@ class MarkerRow:
     """This plan's hash, exactly as the import would have written it."""
     databases: tuple[str, ...]
     """Every schema this plan names, for the dialog to list."""
-    phase_table: str
-    """`sqlplan.PHASE_TABLE`: the writer puts one row per phase there, before the marker (T129)."""
 
 
 @dataclass(frozen=True)
@@ -606,6 +603,15 @@ class CorrectionCheck:
     offered: tuple[str, ...] = ()
     withheld: tuple[str, ...] = ()
     why: str = ""
+    marker: str = ""
+    """The marker's plan hash when this was read: the import the offer is a correction to."""
+    baseline: tuple[tuple[str, str | None], ...] = ()
+    """Each offered phase's recorded version when this was read (None: the install lacked it).
+
+    `marker` and `baseline` are the provenance the person confirmed. The press
+    reads the databases again and refuses whole unless both still say exactly
+    this: an offer is agreement to change THIS record, not whatever is there by
+    the time the press runs (Codex, T129 round 1)."""
 
 
 @dataclass(frozen=True)
@@ -615,14 +621,14 @@ class CorrectionRoute:
     `check` is a READING -- it asks the database, so the tab takes it once each
     time the database comes up, never on the poll -- and never raises.
     `confirmation` composes the dialog for the check the tab holds (it expands
-    the folder, and can refuse with `InstallerError`). `press` is handed the
-    phases the person agreed to and applies those of them that are STILL
-    offered when it reads again.
+    the folder, and can refuse with `InstallerError`). `press` is handed that
+    same check -- what the person agreed to, provenance and all -- and refuses
+    unless the databases still read the way it says.
     """
 
     check: Callable[[], CorrectionCheck]
     confirmation: Callable[[CorrectionCheck], str]
-    press: Callable[[tuple[str, ...], threading.Event | None], Iterator[str]]
+    press: Callable[[CorrectionCheck, threading.Event | None], Iterator[str]]
 
 
 ComposeState = Literal["current", "stale", "foreign", "moved", "mixed", "missing", "error"]
@@ -1255,15 +1261,14 @@ def adopt_confirmation(entry: CatalogEntry, server_dir: Path, row: MarkerRow) ->
         f"Adopt {entry.name}'s databases as a finished import?\n\n"
         f"Folder: {server_dir}\n\n"
         f"These databases: {listing}\n\n"
-        f"This writes ONE row saying the plan finished, and the record it stands for. Into "
-        f"`{row.schema}`.`{row.table}` — the table this app's own import creates and writes at "
-        f"the end of a successful one, created here if it is not already there — goes a row "
-        f"recording that this install plan ({row.plan_hash}) finished; beside it, in "
-        f"`{row.schema}`.`{row.phase_table}`, one row per step of the plan naming the version of "
-        f"it this app ships, which is what a later version compares a corrected step against. "
-        f"Nothing is imported, nothing is dropped, no user is "
+        f"This writes ONE row and nothing else. Into `{row.schema}`.`{row.table}` — the table "
+        f"this app's own import creates and writes at the end of a successful one, created here "
+        f"if it is not already there — goes a row recording that this install plan "
+        f"({row.plan_hash}) finished. Nothing is imported, nothing is dropped, no user is "
         f"created, no SQL file is streamed, and your characters, accounts and world are read "
-        f"only to learn which state they are in.\n\n"
+        f"only to learn which state they are in. Nothing records which version of each step of "
+        f"the install plan these databases have, because nothing here can know it, so an adopted "
+        f"server is never offered a corrected install-plan step later (T129).\n\n"
         f"{ADOPT_CONSEQUENCE}\n\n"
         f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
         f"until this has finished. A running world server holds these tables in memory and "
@@ -2128,15 +2133,15 @@ class StageContext:
     password in memory and persist it nowhere — `db-password` is not in the
     updates tuple.
     """
-    corrections: tuple[str, ...] | None = None
-    """The press was a CORRECTIONS press (T129): the phases the person agreed to, else None.
+    corrections: CorrectionCheck | None = None
+    """The press was a CORRECTIONS press (T129): the check the person agreed to, else None.
 
     `updates_only`'s promise, for the same reason and read at the same point:
     the family branches on it before `stage_import()` is called, so neither the
     full import nor the `partial` arm's `DROP DATABASE` is reachable on this
-    route. The import stage applies those of these phases that are still stale
-    and declared `reapply_when_changed` when it reads the record again, and
-    nothing else.
+    route. The press also keeps `updates_only` set, so a family that never
+    learned to read this field still takes the older route, which refuses
+    anything that does not read as a finished import (cold review, round 1).
     """
 
 
@@ -4101,12 +4106,15 @@ class StagedInstaller:
 
     def apply_corrections(
         self,
-        phases: tuple[str, ...],
+        check: CorrectionCheck,
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
     ) -> Iterator[str]:
-        """Apply the corrected phases the person agreed to, to an install already imported (T129).
+        """Apply the corrected phases `check` offered, to an install already imported (T129).
+
+        `check` is the reading the person confirmed; the family refuses the
+        whole press unless the databases still read that way.
 
         `update_databases()`'s route with a different consent: the database
         started alone, then `import` with `ctx.corrections` set, which the family
@@ -4148,9 +4156,9 @@ class StagedInstaller:
             )
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
-        ctx = replace(
-            self._update_context(server_dir, cancel), updates_only=False, corrections=phases
-        )
+        # `updates_only` is left as `_update_context()` sets it, True: see
+        # `StageContext.corrections` for the family that ignores this field.
+        ctx = replace(self._update_context(server_dir, cancel), corrections=check)
         yield from self._staged(stages, ctx)
 
     # -- adopting an install this app did not make (T19) ----------------------
@@ -4179,8 +4187,13 @@ class StagedInstaller:
         """
         return None
 
-    def write_import_marker(self, ctx: StageContext) -> None:
+    def write_import_marker(
+        self, ctx: StageContext, landed: Sequence[SqlPhase] | None = None
+    ) -> None:
         """Write the completion marker for this install, through the family's own writer.
+
+        `landed` is what an import applied whole, recorded beside the marker
+        (T129); the adopt press passes nothing, and no phase record is written.
 
         The spine cannot: the row is `sqlplan.write_marker()`'s, and this module
         may not import that one. The refusal here is what a family that never
@@ -4310,8 +4323,7 @@ class StagedInstaller:
             )
         yield (
             f"Writing one row into `{row.schema}`.`{row.table}`: this install plan "
-            f"({row.plan_hash}) is recorded as finished, with the version of each of its steps "
-            f"beside it in `{row.phase_table}`. Nothing else is run."
+            f"({row.plan_hash}) is recorded as finished. Nothing else is run."
         )
         # The reading that counts is the one immediately before the write: the
         # two the wrapper took are older than the probe, the gap queries and the

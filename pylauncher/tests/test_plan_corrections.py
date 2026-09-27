@@ -64,7 +64,9 @@ class _Mariadb:
     script stops at its first failing statement with the ones before it kept,
     which is what the client does in batch mode. `refuse` names a substring whose
     script the client rejects before running it; `down` makes every call raise
-    the way a stopped container does.
+    the way a stopped container does. A schema a script names that does not
+    exist yet is created for it: this fake cannot run a plan's `create` step,
+    and the one test that imports from nothing needs the schemas to appear.
     """
 
     def __init__(self, root: Path, schemas: Sequence[str] = SCHEMAS) -> None:
@@ -101,6 +103,8 @@ class _Mariadb:
         text = source.read().decode("utf-8")
         schema = argv[3] if len(argv) > 3 else None
         self.scripts.append((schema, text))
+        if schema is not None and schema not in self.schemas:
+            self.schemas.append(schema)
         if self.down:
             raise docker.DockerCommandError(f"No such container: {container}")
         if self.refuse is not None and self.refuse in text:
@@ -220,7 +224,12 @@ def imported_with(db: _Mariadb, the_plan: SqlPlan, tmp_path: Path) -> None:
         )
     )
     sqlplan.write_marker(
-        the_plan, container="tbc-db", client="mariadb", password=SECRET, exec_stdin=db.exec_stdin
+        the_plan,
+        landed=the_plan.phases,
+        container="tbc-db",
+        client="mariadb",
+        password=SECRET,
+        exec_stdin=db.exec_stdin,
     )
 
 
@@ -377,58 +386,46 @@ def test_the_release_table_covers_every_plan_a_public_release_marked_an_install_
     assert set(released_plans.RELEASED_PHASE_DIGESTS) == set(RELEASED.values())
 
 
-def hash_before_t129(the_plan: SqlPlan) -> str:
-    """`plan_hash()` as the model before T129 computed it: the same dump without the new field.
+EXPECTED_FOR_RELEASED_INSTALLS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "wow-tbc": ((), ()),
+    "wow-vanilla": ((), ()),
+    "wow-tortoise": ((), ()),
+}
+"""(offered, withheld) for an install any public release made, against the plan shipped now.
 
-    Adding `reapply_when_changed` moved every plan's hash by itself -- a model
-    field with a default is in `model_dump()` -- which is the whole-plan hash's
-    flaw in one line. Taking it back out gives the string the released apps
-    wrote, so the table below can be checked against the catalog it came from.
-    """
-    import hashlib
-    import json
-
-    dumped = the_plan.model_dump(mode="json")
-    for phase in dumped["phases"]:
-        del phase["reapply_when_changed"]
-    canonical = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+Empty today: nothing has been corrected since the releases, so no such install
+sees a banner. This is the table to change -- deliberately, in the same change
+-- when a shipped phase is corrected.
+"""
 
 
 @pytest.mark.parametrize("game", sorted(RELEASED))
-def test_the_release_table_says_what_the_plan_with_that_hash_applies(game: str) -> None:
-    """For a plan the catalog still ships unchanged, the table IS that plan's digests.
+def test_what_an_install_from_a_public_release_is_offered_is_what_this_file_expects(
+    game: str,
+) -> None:
+    """The release table read against the shipped plan, through the comparison the tab uses.
 
-    True today for all three -- the shipped plans' pre-T129 hashes are exactly
-    the released ones -- which is what proves the table was generated from the
-    right plans. Once a phase changes, its hash moves and the old entry stays as
-    the record of what those installs have.
+    Today both lists are empty, which also proves the table was generated from
+    the plans it names: one digest over the wrong fields, or from the wrong
+    plan, would put that phase in one of them. There is no skip: the day a
+    shipped phase is corrected this fails, and the message says what to do.
 
-    Catches a table generated with the digest over the wrong fields, or from a
-    different plan.
+    Catches a table entry that disagrees with its plan, and a correction to a
+    shipped phase that nobody noticed reaches every released install.
     """
     entry = CATALOG.get(game)
     assert entry.install.native is not None and entry.install.native.cmangos is not None
-    the_plan = entry.install.native.cmangos.sql
-    if hash_before_t129(the_plan) != RELEASED[game]:
-        pytest.skip(f"{game}'s plan has moved on since the release table was written")
-    assert released_plans.RELEASED_PHASE_DIGESTS[RELEASED[game]] == {
-        phase.name: phase.digest() for phase in the_plan.phases
-    }
-
-
-def test_every_shipped_plan_is_still_one_a_release_marked_installs_with() -> None:
-    """Today, and until a phase is corrected: no install is stale on the day this ships.
-
-    The measurement behind the ticket's report, kept as a fact the suite states
-    rather than a line in a note. It is expected to go red the day somebody
-    corrects a shipped phase, and the answer then is to delete this test, not
-    the table -- the table is what lets those installs be offered the correction.
-    """
-    for game, released in RELEASED.items():
-        entry = CATALOG.get(game)
-        assert entry.install.native is not None and entry.install.native.cmangos is not None
-        assert hash_before_t129(entry.install.native.cmangos.sql) == released, game
+    drift = sqlplan.phase_drift(
+        entry.install.native.cmangos.sql, released_plans.RELEASED_PHASE_DIGESTS[RELEASED[game]]
+    )
+    assert (drift.offered, drift.withheld) == EXPECTED_FOR_RELEASED_INSTALLS[game], (
+        f"{game}: installs from a public release will now be OFFERED {drift.offered} and have "
+        f"{drift.withheld} WITHHELD. If that correction is intended, put these two tuples in "
+        "EXPECTED_FOR_RELEASED_INSTALLS and say in the CHANGELOG what those players will see; "
+        "an offered phase must be `reapply_when_changed` for a reason its text shows. If it is "
+        "not intended, the edit changed what a shipped phase applies. Never edit "
+        "released_plans.py to make this pass: it is the record of what those installs have."
+    )
 
 
 # -- the record: written with the marker, read back through the gate ----------
@@ -473,6 +470,7 @@ def test_the_marker_row_is_the_last_thing_the_script_writes(tmp_path: Path) -> N
     with pytest.raises(InstallerError):
         sqlplan.write_marker(
             OLD,
+            landed=OLD.phases,
             container="tbc-db",
             client="mariadb",
             password=SECRET,
@@ -583,6 +581,7 @@ def an_engine(the_plan: SqlPlan, db: _Mariadb, *, world: bool | None = False) ->
             exec_stdin=db.exec_stdin,
             sql_query=db.query,
             world_running=lambda container: world,
+            db_running=lambda container: True,
         ),
     )
 
@@ -591,6 +590,22 @@ def folder(tmp_path: Path) -> InstallOptions:
     server_dir = tmp_path / "srv"
     server_dir.mkdir(exist_ok=True)
     return InstallOptions(server_dir=server_dir)
+
+
+def pressed(
+    engine: CmangosInstaller, tmp_path: Path, check: native.CorrectionCheck | None = None
+) -> list[str]:
+    """A press of what the engine offers now -- the dialog's check -- or of `check` when given."""
+    options = folder(tmp_path)
+    return list(engine.apply_corrections(check or engine.correction_check(options), options))
+
+
+def forged(marker: str = "0123456789abcdef", *offered: str) -> native.CorrectionCheck:
+    """A check no reading produced: what a press handed stale or made-up provenance gets."""
+    names = offered or ("hotfix",)
+    return native.CorrectionCheck(
+        "stale", offered=names, marker=marker, baseline=tuple((name, None) for name in names)
+    )
 
 
 def marker_rows(db: _Mariadb) -> list[tuple[object, ...]]:
@@ -633,7 +648,7 @@ def test_the_press_applies_the_correction_records_it_and_the_offer_goes_away(
     before = marker_rows(db)
     sent_before = len(db.scripts)
     engine = an_engine(CORRECTED, db)
-    said = list(engine.apply_corrections(("hotfix",), folder(tmp_path)))
+    said = pressed(engine, tmp_path)
     assert "hotfix_v2" in db.tables("mangos"), said
     sent = [text for _, text in db.scripts[sent_before:]]
     assert not [text for text in sent if BASE_STEP in text], "a phase that did not change ran"
@@ -662,7 +677,14 @@ def test_a_changed_phase_that_is_not_safe_to_apply_again_is_named_and_never_appl
     assert (check.offered, check.withheld) == (("hotfix",), ("world base",))
     text = engine.correction_confirmation(check, folder(tmp_path))
     assert "world base" in text and "not applied" in text.lower(), text
-    list(engine.apply_corrections(("hotfix", "world base"), folder(tmp_path)))
+    both = native.CorrectionCheck(
+        "stale",
+        offered=("hotfix", "world base"),
+        marker=check.marker,
+        baseline=(*check.baseline, ("world base", BASE.digest())),
+    )
+    said = pressed(engine, tmp_path, both)
+    assert any("world base is not applied" in line for line in said), said
     assert "hotfix_v2" in db.tables("mangos")
     assert "base_rows_corrected" not in db.tables("mangos"), "a withheld phase was applied"
     assert engine.correction_check(folder(tmp_path)).withheld == ("world base",)
@@ -693,7 +715,7 @@ def test_a_press_while_the_world_is_up_or_unreadable_sends_nothing(
     imported_with(db, OLD, tmp_path)
     sent_before = len(db.scripts)
     with pytest.raises(InstallerError, match="Press Stop|could not tell"):
-        list(an_engine(CORRECTED, db, world=world).apply_corrections(("hotfix",), folder(tmp_path)))
+        pressed(an_engine(CORRECTED, db, world=world), tmp_path)
     assert db.scripts[sent_before:] == []
     assert "hotfix_v2" not in db.tables("mangos")
 
@@ -710,7 +732,7 @@ def test_databases_with_no_marker_are_offered_nothing_and_a_press_touches_nothin
     engine = an_engine(CORRECTED, db)
     assert engine.correction_check(folder(tmp_path)).state == "unmarked"
     with pytest.raises(InstallerError, match="Nothing was applied"):
-        list(engine.apply_corrections(("hotfix",), folder(tmp_path)))
+        pressed(engine, tmp_path, forged())
     assert db.scripts == []
 
 
@@ -770,7 +792,7 @@ def test_a_press_on_an_install_from_before_t129_keeps_what_the_release_table_sai
     marked_before_t129(db, released)
     engine = an_engine(CORRECTED, db)
     assert engine.correction_check(folder(tmp_path)).offered == ("hotfix",)
-    list(engine.apply_corrections(("hotfix",), folder(tmp_path)))
+    pressed(engine, tmp_path)
     monkeypatch.delitem(released_plans.RELEASED_PHASE_DIGESTS, released)  # type: ignore[arg-type]
     assert engine.correction_check(folder(tmp_path)).state == "current"
 
@@ -790,7 +812,7 @@ def test_a_warn_phase_whose_file_failed_is_applied_but_not_recorded(tmp_path: Pa
         update={"statements": (HOTFIX_V2, "BROKEN STATEMENT"), "on_error": "warn"}
     )
     engine = an_engine(plan(BASE, warned), db)
-    said = list(engine.apply_corrections(("hotfix",), folder(tmp_path)))
+    said = pressed(engine, tmp_path)
     assert "hotfix_v2" in db.tables("mangos"), "warn stopped at the refused step"
     assert any("not recorded" in line for line in said), said
     assert engine.correction_check(folder(tmp_path)).offered == ("hotfix",)
@@ -802,20 +824,24 @@ def test_a_fail_phase_that_is_refused_stops_the_press_and_records_nothing(tmp_pa
     failing = HOTFIX.model_copy(update={"statements": ("BROKEN STATEMENT",)})
     engine = an_engine(plan(BASE, failing), db)
     with pytest.raises(InstallerError, match="statement 1"):
-        list(engine.apply_corrections(("hotfix",), folder(tmp_path)))
+        pressed(engine, tmp_path)
     assert engine.correction_check(folder(tmp_path)).offered == ("hotfix",)
 
 
-def test_a_second_press_finds_nothing_left_and_sends_no_phase(tmp_path: Path) -> None:
-    """The press re-reads; what the dialog listed but is now current is not applied again."""
+def test_a_second_press_of_the_same_dialog_is_refused_and_sends_nothing(tmp_path: Path) -> None:
+    """The press re-reads; the dialog's reading no longer describes these databases.
+
+    Catches the press applying by name whatever the record says now.
+    """
     db = _Mariadb(tmp_path)
     imported_with(db, OLD, tmp_path)
     engine = an_engine(CORRECTED, db)
-    list(engine.apply_corrections(("hotfix",), folder(tmp_path)))
+    check = engine.correction_check(folder(tmp_path))
+    pressed(engine, tmp_path, check)
     sent_before = len(db.scripts)
-    said = list(engine.apply_corrections(("hotfix",), folder(tmp_path)))
-    assert not [text for _, text in db.scripts[sent_before:] if HOTFIX_V2 in text]
-    assert any("nothing" in line.lower() for line in said), said
+    with pytest.raises(InstallerError, match="changed since"):
+        pressed(engine, tmp_path, check)
+    assert db.scripts[sent_before:] == []
 
 
 def test_a_game_whose_plan_declares_no_reappliable_phase_refuses_the_press(tmp_path: Path) -> None:
@@ -827,7 +853,7 @@ def test_a_game_whose_plan_declares_no_reappliable_phase_refuses_the_press(tmp_p
         from yulon.catalog.installer import installer_for
 
         with pytest.raises(InstallerError, match="nothing for this to apply"):
-            list(installer_for(CATALOG.get(game)).apply_corrections(("x",), folder(tmp_path)))
+            list(installer_for(CATALOG.get(game)).apply_corrections(forged(), folder(tmp_path)))
 
 
 # -- the wiring ----------------------------------------------------------------
@@ -880,7 +906,7 @@ def test_the_wired_route_reads_and_presses_the_install_it_was_built_for(
     check = route.check()
     assert check.offered == ("hotfix",)
     assert str(server_dir) in route.confirmation(check)
-    list(route.press(check.offered, None))
+    list(route.press(check, None))
     assert route.check().state == "current"
 
 
@@ -895,7 +921,7 @@ class _Route:
         self.angry = angry
         self.checks = 0
         self.confirmed: list[native.CorrectionCheck] = []
-        self.pressed: list[tuple[tuple[str, ...], object]] = []
+        self.pressed: list[tuple[native.CorrectionCheck, object]] = []
         self.refuse_dialog: str | None = None
 
     def check(self) -> native.CorrectionCheck:
@@ -912,8 +938,8 @@ class _Route:
             raise InstallerError(self.refuse_dialog)
         return "apply spell_template hotfix?"
 
-    def press(self, phases: tuple[str, ...], cancel: threading.Event | None) -> Iterator[str]:
-        self.pressed.append((phases, cancel))
+    def press(self, check: native.CorrectionCheck, cancel: threading.Event | None) -> Iterator[str]:
+        self.pressed.append((check, cancel))
         yield "spell_template hotfix: applied and recorded."
 
     def route(self) -> native.CorrectionRoute:
@@ -1056,8 +1082,8 @@ def test_yes_presses_the_offered_steps_into_the_panel_and_the_reading_is_taken_a
         "the corrections press's output reached the panel",
     )
     assert len(route.pressed) == 1
-    phases, cancel = route.pressed[0]
-    assert phases == ("spell_template hotfix",)
+    agreed, cancel = route.pressed[0]
+    assert agreed is route.confirmed[0], "the press was not bound to the reading the dialog showed"
     assert cancel is not None
     view._rebuild_finished(True, "")  # type: ignore[attr-defined]
     assert view.corrections_banner.isHidden()  # type: ignore[attr-defined]
@@ -1100,17 +1126,228 @@ def test_an_install_whose_only_changes_are_withheld_gets_no_offer(tmp_path: Path
     assert "world base" in check.why
 
 
-def test_the_adopt_dialog_names_the_phase_record_its_row_now_comes_with(tmp_path: Path) -> None:
-    """T19's adopt press writes its row through `write_marker()`, which now writes the record too.
+def test_the_adopt_dialog_says_a_corrected_step_will_not_be_offered_to_what_it_adopts(
+    tmp_path: Path,
+) -> None:
+    """The adopt press writes the marker and no step record, and its dialog says what that costs.
 
-    A dialog still saying "ONE row and nothing else" would be a promise about a
-    different write. The row it names comes out of the family, as before.
-
-    Catches `phase_table` dropped from `MarkerRow` or from the dialog.
+    Catches the dialog left promising nothing about corrections, or claiming a
+    record the press does not write.
     """
     engine = CmangosInstaller(CATALOG.get("wow-tbc"), installers_root=resources.installers_dir())
-    row = engine.marker_row()
-    assert row.phase_table == sqlplan.PHASE_TABLE
-    text = native.adopt_confirmation(CATALOG.get("wow-tbc"), tmp_path, row)
-    assert f"`{row.schema}`.`{sqlplan.PHASE_TABLE}`" in text
-    assert "ONE row and nothing else" not in text
+    text = native.adopt_confirmation(CATALOG.get("wow-tbc"), tmp_path, engine.marker_row())
+    assert "This writes ONE row and nothing else." in text
+    assert "never offered a corrected install-plan step" in text
+    assert sqlplan.PHASE_TABLE not in text
+
+
+# -- round 2 (Codex and the cold review) ---------------------------------------
+
+
+def adoptable(the_plan: SqlPlan) -> SqlPlan:
+    """`the_plan` as the adopt press accepts it: a player table, and a phase run on every press.
+
+    The player table makes databases holding a character read `populated`; the
+    `rerun_on_marked` phase is what the adopt press exists to unlock, and it is
+    refused for a plan without one (T19). No shipped plan has one today, so the
+    adopt route is offered nowhere yet -- which is why this is a fix to a route
+    and not to anything a player has pressed.
+    """
+    from yulon.catalog.catalog import PlayerData
+
+    every = SqlPhase(
+        name="every press",
+        into="mangos",
+        statements=("CREATE TABLE IF NOT EXISTS every_press (id INT)",),
+        rerun_on_marked=True,
+    )
+    return the_plan.model_copy(
+        update={
+            "phases": (*the_plan.phases, every),
+            "player_data": (PlayerData(db="characters", table="characters"),),
+        }
+    )
+
+
+def test_adopting_a_server_records_no_step_versions_so_nothing_is_claimed(tmp_path: Path) -> None:
+    """Adoption runs no phase, so it may not say which version of any phase is there.
+
+    The press writes its marker through the same writer the import does, and a
+    record stamped with this app's phases would read `current` for every one of
+    them -- a correction to one would never be offered. With no record, the
+    install reads `unknown`: nothing is claimed and nothing is offered.
+
+    Catches the adopt route writing the import's phase rows (Codex, T129 round 1).
+    """
+    db = _Mariadb(tmp_path)
+    db.exec_stdin(
+        "tbc-db",
+        ["mariadb", "-u", "root", "characters"],
+        _bytes("CREATE TABLE characters (guid INT); INSERT INTO characters VALUES (1);"),
+        env={"MYSQL_PWD": SECRET},
+    )
+    the_plan = adoptable(CORRECTED)
+    engine = an_engine(the_plan, db)
+    assert engine.adopt_state(folder(tmp_path)).state == "populated"
+    list(engine.adopt_as_imported(folder(tmp_path)))
+    assert gate(db, the_plan).probe().state == "imported"
+    assert "yulon_install_phase" not in db.tables("mangos")
+    assert engine.correction_check(folder(tmp_path)).state == "unknown"
+
+
+def test_a_press_on_an_install_whose_record_is_unknown_sends_nothing(tmp_path: Path) -> None:
+    """Fail closed at the press, not only at the banner: no record means nothing is stale.
+
+    Catches the press computing drift over an empty record, which reads every
+    re-appliable phase as added and runs it (Codex, T129 round 1).
+    """
+    db = _Mariadb(tmp_path)
+    marked_before_t129(db, "0123456789abcdef")
+    sent_before = len(db.scripts)
+    with pytest.raises(InstallerError, match="Nothing was applied"):
+        pressed(an_engine(CORRECTED, db), tmp_path, forged())
+    assert db.scripts[sent_before:] == []
+    assert "hotfix_v2" not in db.tables("mangos")
+
+
+def test_a_world_that_starts_after_the_first_reading_is_still_refused(tmp_path: Path) -> None:
+    """The second reading, right before the import stage: T14's pattern.
+
+    The first reading passes, the database is started, and a Start pressed in
+    that window puts a live world behind the tables this writes.
+
+    Catches the guard on the import stage deleted (cold review, T129 round 1).
+    """
+    db = _Mariadb(tmp_path)
+    imported_with(db, OLD, tmp_path)
+    answers = [False, True]
+    rec = Recorder()
+    rec.db_started = True
+    engine = CmangosInstaller(
+        entry_with_sql(CORRECTED),
+        installers_root=resources.installers_dir(),
+        seams=rec.seams(
+            platform_id=lambda: "linux",
+            exec_stdin=db.exec_stdin,
+            sql_query=db.query,
+            world_running=lambda container: answers.pop(0) if len(answers) > 1 else answers[0],
+        ),
+    )
+    sent_before = len(db.scripts)
+    check = engine.correction_check(folder(tmp_path))
+    with pytest.raises(InstallerError, match="Press Stop"):
+        pressed(engine, tmp_path, check)
+    assert db.scripts[sent_before:] == []
+
+
+def test_a_family_that_ignored_the_corrections_flag_could_still_not_drop_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The press's context keeps `updates_only`, so the import stage's table stays unreachable.
+
+    A family that did not read `ctx.corrections` would fall through to
+    `stage_import()`, whose `partial` arm drops every schema the plan names.
+    `updates_only` is the older promise that stops it: that route refuses
+    anything that does not read as a finished import.
+
+    Catches `apply_corrections()` clearing `updates_only` (cold review, T129 round 1).
+    """
+    from dataclasses import replace
+
+    original = CmangosInstaller._import
+
+    def ignoring(self: CmangosInstaller, ctx: native.StageContext) -> Iterator[str]:
+        return original(self, replace(ctx, corrections=None))
+
+    monkeypatch.setattr(CmangosInstaller, "_import", ignoring)
+    db = _Mariadb(tmp_path)
+    runs = sqlplan.expand(OLD, tmp_path, schemas(), {})
+    list(
+        sqlplan.apply(
+            runs,
+            container="tbc-db",
+            client="mariadb",
+            password=SECRET,
+            exec_stdin=db.exec_stdin,
+            sink=lambda line: None,
+            cancel=None,
+        )
+    )
+    assert gate(db, OLD).probe().state == "partial"
+    with pytest.raises(InstallerError):
+        pressed(an_engine(CORRECTED, db), tmp_path, forged(OLD.plan_hash()))
+    assert not [text for _, text in db.scripts if "DROP DATABASE" in text], db.scripts
+
+
+def test_the_import_records_no_version_for_a_warn_phase_whose_step_was_refused(
+    tmp_path: Path,
+) -> None:
+    """The install route records the way the press does: only what landed whole.
+
+    A `warn` phase carries on past a refused step, and the import still finishes
+    -- but a row naming that phase's version would say the step is there, and a
+    later correction of it would never be offered.
+
+    Catches `write_marker()` stamping every phase of the plan (cold review, T129
+    round 1).
+    """
+    db = _Mariadb(tmp_path, schemas=())
+    warned = HOTFIX.model_copy(update={"statements": ("BROKEN STATEMENT",), "on_error": "warn"})
+    the_plan = SqlPlan(create=(), phases=(BASE, warned), marker_db="mangos")
+    engine = an_engine(the_plan, db)
+    from dataclasses import replace
+
+    ctx = replace(
+        engine._update_context(folder(tmp_path).server_dir, None),  # type: ignore[arg-type]
+        updates_only=False,
+    )
+    said = list(engine._import(ctx))
+    assert any("imported and marked complete" in line for line in said), said
+    ledger = gate(db, the_plan).phase_ledger()
+    assert ledger is not None
+    assert ledger.recorded == {"world base": BASE.digest()}
+
+
+@pytest.mark.parametrize("name", ["x" * 192, "it's", "tab\there"])
+def test_a_phase_name_the_record_cannot_hold_is_refused_when_the_catalog_loads(name: str) -> None:
+    """Not at the end of an import, where the marker write would fail the same way every time.
+
+    The record's key is `VARCHAR(191)` and the name goes into `'...'` unescaped.
+    A name that breaks either would fail `write_marker()` after the whole import
+    had run, leave no marker, and the next press would import again, forever.
+
+    Catches the length or character check left to the writer alone.
+    """
+    with pytest.raises(ValueError):
+        SqlPhase(name=name, into="mangos", statements=("SELECT 1",))
+
+
+@pytest.mark.parametrize("what", ["the record", "the marker"])
+def test_a_press_whose_dialog_no_longer_describes_the_databases_sends_nothing(
+    tmp_path: Path, what: str
+) -> None:
+    """Bound to the confirmed provenance: the marker and each offered phase's recorded version.
+
+    Between the dialog and the press the databases can be imported again, or a
+    second app can apply the step. The press then refuses whole rather than
+    applying what the person agreed to over a record they were not shown.
+
+    Catches the press re-deriving the offer without comparing it to the check
+    it was handed (Codex, T129 round 1).
+    """
+    db = _Mariadb(tmp_path)
+    imported_with(db, OLD, tmp_path)
+    engine = an_engine(CORRECTED, db)
+    check = engine.correction_check(folder(tmp_path))
+    assert check.offered == ("hotfix",)
+    if what == "the record":
+        change = "UPDATE yulon_install_phase SET digest='aaaaaaaaaaaaaaaa' WHERE phase='hotfix'"
+    else:
+        change = "INSERT INTO yulon_install VALUES ('bbbbbbbbbbbbbbbb', 9999999999)"
+    db.exec_stdin("tbc-db", ["mariadb", "-u", "root", "mangos"], _bytes(change), env={})
+    assert engine.correction_check(folder(tmp_path)).offered == ("hotfix",), "still stale"
+    sent_before = len(db.scripts)
+    with pytest.raises(InstallerError, match="changed since"):
+        pressed(engine, tmp_path, check)
+    assert db.scripts[sent_before:] == []
+    assert "hotfix_v2" not in db.tables("mangos")

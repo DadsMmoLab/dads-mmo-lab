@@ -897,7 +897,7 @@ class InstallEngine(Protocol):
 
     def apply_corrections(
         self,
-        phases: tuple[str, ...],
+        check: native.CorrectionCheck,
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,

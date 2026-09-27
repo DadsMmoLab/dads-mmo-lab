@@ -1346,6 +1346,9 @@ class CmangosInstaller(StagedInstaller):
         except (RuntimeError, OSError) as exc:
             raise InstallerError(f"The database import could not be prepared: {exc}") from exc
         yield f"Importing {len(runs)} SQL steps over {len(plan.phases)} phases. This takes a while."
+        # T129: a `warn` phase with a refused step is not recorded as applied,
+        # so a later correction of it is still offered -- the press's own rule.
+        refused: set[str] = set()
         yield from self._stream(
             lambda sink: sqlplan.apply(
                 runs,
@@ -1355,6 +1358,7 @@ class CmangosInstaller(StagedInstaller):
                 exec_stdin=self._seams.exec_stdin,
                 sink=sink,
                 cancel=ctx.cancel,
+                on_refused=lambda run: refused.add(run.phase.name),
             ),
             cancel=ctx.cancel,
             stage="import",
@@ -1411,7 +1415,9 @@ class CmangosInstaller(StagedInstaller):
                 )
             )
         try:
-            self.write_import_marker(ctx)
+            self.write_import_marker(
+                ctx, landed=tuple(phase for phase in plan.phases if phase.name not in refused)
+            )
         except InstallerError:
             # `write_marker()` goes through `sqlplan._run_sql()`, which turns
             # both of its failures into an `InstallerError` already naming the
@@ -1703,7 +1709,13 @@ class CmangosInstaller(StagedInstaller):
             )
         drift = sqlplan.phase_drift(plan, ledger.known)
         if drift.offered:
-            return CorrectionCheck("stale", offered=drift.offered, withheld=drift.withheld)
+            return CorrectionCheck(
+                "stale",
+                offered=drift.offered,
+                withheld=drift.withheld,
+                marker=ledger.marker,
+                baseline=tuple((name, ledger.known.get(name)) for name in drift.offered),
+            )
         if drift.withheld:
             return CorrectionCheck(
                 "held",
@@ -1742,18 +1754,20 @@ class CmangosInstaller(StagedInstaller):
             raise InstallerError(f"The corrected steps could not be prepared: {exc}") from exc
 
     def _only_the_corrected_phases(
-        self, ctx: StageContext, plan: SqlPlan, agreed: Sequence[str]
+        self, ctx: StageContext, plan: SqlPlan, agreed: CorrectionCheck
     ) -> Iterator[str]:
         """The corrections press's whole import stage: read the record, apply, record (T129).
 
         `stage_import()` is never called, for `_only_the_rerunnable_phases()`'s
         reason: its `absent` arm imports the whole plan and its `partial` arm
         drops every schema the plan names, and this press consented to named
-        steps. The record is read AGAIN here rather than trusted from the
-        banner's reading: the phases applied are the ones the person agreed to
-        that are still offered now -- changed or added since the import, and
-        declared `reapply_when_changed`. A withheld phase is never applied,
-        whatever the press was handed.
+        steps. The record is read AGAIN here, and the press fails closed on it
+        (Codex, round 1): no marker, a record that knows nothing, or a record
+        that is not the one the person was shown -- another marker, or any
+        offered phase at another recorded version -- refuses the whole press
+        before a statement is sent. Then the phases applied are the agreed ones
+        that are still offered now; a withheld phase is never applied, whatever
+        the press was handed.
 
         Each phase's own `on_error` is kept: `fail` stops the press on a
         refused step and nothing is recorded; `warn` carries on as the import
@@ -1776,9 +1790,22 @@ class CmangosInstaller(StagedInstaller):
                 f"there is no import these steps could be corrections to. Nothing was applied, "
                 f"nothing was imported and nothing was cleared."
             )
+        if not ledger.known:
+            raise InstallerError(
+                f"{self.entry.name}'s databases do not say which version of each install-plan "
+                f"step they have, so no step can be called corrected. Nothing was applied."
+            )
+        shown = (agreed.marker, dict(agreed.baseline))
+        now = (ledger.marker, {name: ledger.known.get(name) for name in dict(agreed.baseline)})
+        if shown != now or set(dict(agreed.baseline)) != set(agreed.offered):
+            raise InstallerError(
+                f"{self.entry.name}'s databases have changed since the confirmation was shown -- "
+                f"they were imported again, or a step it named has been applied since. Nothing "
+                f"was applied. Press Refresh on the Server tab and look again."
+            )
         drift = sqlplan.phase_drift(plan, ledger.known)
-        chosen = self._named(plan, [name for name in drift.offered if name in agreed])
-        for name in agreed:
+        chosen = self._named(plan, [name for name in drift.offered if name in agreed.offered])
+        for name in agreed.offered:
             if name in drift.withheld:
                 yield (
                     f"{name} is not applied: it is not marked safe to apply again to a server "
@@ -1889,11 +1916,17 @@ class CmangosInstaller(StagedInstaller):
             table=sqlplan.MARKER_TABLE,
             plan_hash=plan.plan_hash(),
             databases=sqlplan.plan_schemas(plan, self._schemas()),
-            phase_table=sqlplan.PHASE_TABLE,
         )
 
-    def write_import_marker(self, ctx: StageContext) -> None:
+    def write_import_marker(
+        self, ctx: StageContext, landed: Sequence[SqlPhase] | None = None
+    ) -> None:
         """`sqlplan.write_marker()` for this install. The ONE spelling of the row.
+
+        `landed` differs between the two routes, and on purpose (T129): the
+        import hands the phases it applied whole, and the adopt press hands
+        nothing, because it ran none -- a record of this app's phase versions
+        written on its word would claim every future correction already there.
 
         Both routes that record a finished import come through here: the
         ordinary import, at the end of a successful one after `verify()` passed,
@@ -1915,6 +1948,7 @@ class CmangosInstaller(StagedInstaller):
         db = self._native().db
         sqlplan.write_marker(
             self._data().sql,
+            landed=landed,
             container=self.entry.container_spec().db,
             client=db.client,
             password=ctx.secrets.db_password,
