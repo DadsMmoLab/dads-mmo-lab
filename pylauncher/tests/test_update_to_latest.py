@@ -1611,3 +1611,14 @@ def test_the_two_confirmations_open_differently_and_neither_claims_an_undo() -> 
     # Neither offers the return as a fix for what the newer server wrote.
     assert "is not put back" in forwards
     assert "does NOT undo" in backwards
+
+
+def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
+    """T89 moved "Update the server to latest…" into the "Server build ▾" menu.
+
+    This refusal tells the player to press it again, so it names the menu as
+    well: the entry is not on the Modules toolbar itself any more.
+    """
+    said = str(native.RewrittenHistory("cmangos/x", "The release is on rewritten history."))
+    assert "“Update the server to latest…”" in said
+    assert "“Server build ▾”" in said, said

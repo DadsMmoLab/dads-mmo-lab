@@ -114,6 +114,14 @@ from the tab-bar tool-button touch floor.
 """
 
 
+SERVER_BUILD_BUTTON = "server-build"
+"""objectName of the Modules toolbar's "Server build ▾" menu button (T89).
+
+Its label carries the triangle, so its QSS rule takes away the menu indicator the
+style would otherwise draw -- and reserve width for -- beside it: two arrows.
+"""
+
+
 # --- Handheld geometry floors -------------------------------------------------
 # The launcher ships on the Steam Deck (1280x800, 7"), driven by controller and
 # touch. Every interactive widget gets a floor of at least `TOUCH_TARGET_PX` in
@@ -364,6 +372,13 @@ QPushButton:disabled {{
     background-color: #1C1C1C;
     color: #6A6A6A;
     border: 1px solid {COLOR_BRASS_DEEP};
+}}
+
+/* T89: "Server build ▾" says it opens a menu in its own label, so the style's
+   indicator would be a second arrow, and it reserves width for one too. */
+QPushButton#{SERVER_BUILD_BUTTON}::menu-indicator {{
+    image: none;
+    width: 0px;
 }}
 
 /* Primary / prominent actions (Install, Start): the one place the amber is
