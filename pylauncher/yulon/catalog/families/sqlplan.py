@@ -24,6 +24,11 @@ decides everything the later ones only carry out:
   returns no failing rule, because an import whose `warn` phases all failed would
   otherwise read `imported` forever.
 
+* `phase_drift()` + `record_phases()` — T129: which version of each phase an imported
+  install has (`PHASE_TABLE`, written beside the marker; `RELEASED_PHASE_DIGESTS` for a
+  marker from before it), what a later plan changed, and the record a corrections press
+  leaves. The marker rule below is unchanged: nothing here re-imports anything.
+
 * `MarkerGate` — the question asked BEFORE all of the above: is this database already
   imported, half-written, or somebody's? Five answers, and they are not symmetric.
   `partial` is the only one that leads anywhere destructive (`reset()` drops the plan's
@@ -96,7 +101,7 @@ import stat as stat_module
 import subprocess
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO, Protocol, cast
@@ -106,12 +111,23 @@ from yulon.catalog.catalog import SqlPhase, SqlPlan
 from yulon.catalog.composegen import ComposeGenError, fill
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import IMPORT_CANCEL_NOTE
+from yulon.catalog.released_plans import RELEASED_PHASE_DIGESTS
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
 MARKER_TABLE = "yulon_install"
 """The table `write_marker()` creates in `plan.marker_db`; its presence is the import record."""
+
+PHASE_TABLE = "yulon_install_phase"
+"""Beside the marker: which version (`SqlPhase.digest()`) of each phase this install has (T129).
+
+One row per phase name. `write_marker()` writes every phase's row just before the
+marker row, and `record_phases()` replaces a row when a correction is applied.
+`applied_unix` 0 marks a row carried over from `RELEASED_PHASE_DIGESTS` rather
+than written when its phase ran.
+"""
+
 
 _DIGITS = re.compile(r"([0-9]+)")
 """`c_isdigit`: ASCII only, like `_is_alpha`/`_is_alnum` below.
@@ -544,6 +560,7 @@ def apply(
     cancel: threading.Event | None,
     wsl_distro: str | None = None,
     cancel_note: str = IMPORT_CANCEL_NOTE,
+    on_refused: Callable[[PhaseRun], None] | None = None,
 ) -> Iterator[str]:
     """Run every `PhaseRun` in order, streaming each file on the client's stdin.
 
@@ -601,6 +618,10 @@ def apply(
     `wsl_distro` names the daemon holding `container`; see `ExecStdin`. It is forwarded on
     every call rather than only when set, so there is no untested road on which the choice
     quietly stops being made.
+
+    `on_refused` is told about each run a `warn` phase carried on past (T129): the
+    corrections press records a phase only when every one of its runs landed, and the
+    warning line is for a person, not for code to parse.
     """
     env = {"MYSQL_PWD": password}
     for run in runs:
@@ -637,6 +658,8 @@ def apply(
                 f"{run.schema or 'the server'} ({reason}). Nothing after it was applied."
             )
         logger.warning(f"SQL phase '{run.phase.name}': {run.rel} failed: {reason}")
+        if on_refused is not None:
+            on_refused(run)
         yield (
             f"warning: {run.rel} failed ({reason}); continuing because '{run.phase.name}' "
             "is on_error: warn"
@@ -1032,15 +1055,25 @@ def write_marker(
     reason to re-import (see the probe's table: a mismatched hash is a
     finished import from an older plan).
 
+    **Every phase's version goes in first, in `PHASE_TABLE`** (T129): the row
+    a later app compares the phase it ships against, to offer a corrected one.
+    First and in the same script, because the client stops at the first
+    statement that fails: a marker whose phase rows were refused would read as
+    an install from before T129 and be judged by the release table instead,
+    while phase rows with no marker are `partial`, which the next press clears
+    and imports again.
+
     Written to the daemon that holds `container`, like everything else here: a
     marker on the wrong daemon is a probe that reads `partial` forever and an
     install that repeats itself every time it is asked to run.
     """
+    now = int(time.time())
     text = (
         f"CREATE TABLE IF NOT EXISTS `{plan.marker_db}`.`{MARKER_TABLE}` "
         "(plan_hash CHAR(16) NOT NULL, finished_unix BIGINT NOT NULL);\n"
-        f"INSERT INTO `{plan.marker_db}`.`{MARKER_TABLE}` (plan_hash, finished_unix) "
-        f"VALUES ('{plan.plan_hash()}', {int(time.time())});\n"
+        + _phase_rows(plan.marker_db, {phase.name: (phase.digest(), now) for phase in plan.phases})
+        + f"INSERT INTO `{plan.marker_db}`.`{MARKER_TABLE}` (plan_hash, finished_unix) "
+        f"VALUES ('{plan.plan_hash()}', {now});\n"
     )
     _run_sql(
         text,
@@ -1049,6 +1082,117 @@ def write_marker(
         client=client,
         password=password,
         schema=plan.marker_db,
+        exec_stdin=exec_stdin,
+        wsl_distro=wsl_distro,
+    )
+
+
+def _phase_rows(marker_db: str, rows: Mapping[str, tuple[str, int]]) -> str:
+    """`PHASE_TABLE`'s `CREATE TABLE IF NOT EXISTS`, and one `REPLACE` of `rows` (name -> version).
+
+    `REPLACE` because the name is the key: a correction applied replaces the row
+    its phase had. The name goes into `'...'` with nothing around it, so it is
+    refused here if it could break out -- a catalog value, and a second lock on
+    a door the catalog should already keep shut.
+    """
+    text = (
+        f"CREATE TABLE IF NOT EXISTS `{marker_db}`.`{PHASE_TABLE}` "
+        "(phase VARCHAR(191) NOT NULL PRIMARY KEY, digest CHAR(16) NOT NULL, "
+        "applied_unix BIGINT NOT NULL);\n"
+    )
+    if not rows:
+        return text
+    for name in rows:
+        _refuse_unquotable(name, f"the SQL phase name {name!r}")
+    values = ", ".join(f"('{name}', '{digest}', {when})" for name, (digest, when) in rows.items())
+    return (
+        text
+        + f"REPLACE INTO `{marker_db}`.`{PHASE_TABLE}` (phase, digest, applied_unix) "
+        + f"VALUES {values};\n"
+    )
+
+
+@dataclass(frozen=True)
+class PhaseLedger:
+    """Which version of each phase an imported install has, and where that was read (T129).
+
+    `recorded` is `PHASE_TABLE`'s rows. `assumed` is what `RELEASED_PHASE_DIGESTS`
+    says the marker's plan applied, for every phase with no row of its own -- an
+    install marked before T129 has only those. Both empty is an install whose
+    marker names a plan nobody released: nothing is known, so nothing is stale.
+    """
+
+    marker: str
+    """The newest marker row's plan hash."""
+    recorded: Mapping[str, str]
+    assumed: Mapping[str, str]
+
+    @property
+    def known(self) -> dict[str, str]:
+        """Every phase's version this install is known to have; a row beats the table."""
+        return {**self.assumed, **self.recorded}
+
+
+@dataclass(frozen=True)
+class PhaseDrift:
+    """The phases a plan has that an install does not, by what may be done about each (T129)."""
+
+    offered: tuple[str, ...]
+    """Changed or added, and declared `reapply_when_changed`: the Server tab offers them."""
+    withheld: tuple[str, ...]
+    """Changed or added, and not declared safe to apply again: named, never applied."""
+
+
+def phase_drift(plan: SqlPlan, known: Mapping[str, str]) -> PhaseDrift:
+    """Compare the plan's phases with an install's `PhaseLedger.known`, in plan order. Pure.
+
+    A phase is stale when the install has no version of it (added since) or a
+    different one (corrected since). `rerun_on_marked` phases are left out:
+    T11's route applies them on every press already. A phase the install has
+    and the plan no longer does asks for nothing -- there is nothing to apply.
+    """
+    offered: list[str] = []
+    withheld: list[str] = []
+    for phase in plan.phases:
+        if phase.rerun_on_marked or known.get(phase.name) == phase.digest():
+            continue
+        (offered if phase.reapply_when_changed else withheld).append(phase.name)
+    return PhaseDrift(offered=tuple(offered), withheld=tuple(withheld))
+
+
+def record_phases(
+    ledger: PhaseLedger,
+    applied: Sequence[SqlPhase],
+    *,
+    marker_db: str,
+    container: str,
+    client: str,
+    password: str,
+    exec_stdin: ExecStdin,
+    wsl_distro: str | None = None,
+) -> None:
+    """Record that `applied` are now at this version on the install `ledger` was read from (T129).
+
+    Only after they ran, and only those whose runs all landed. The rows
+    `ledger.assumed` holds are written too, as they are (`applied_unix` 0): the
+    reader trusts rows over the release table, so an install from before T129
+    given ONE row would otherwise lose what the table said about every other
+    phase. The marker row is not touched -- it says the whole plan finished,
+    which this press is not.
+
+    Raises:
+        InstallerError: the client refused the script, or could not be reached.
+    """
+    now = int(time.time())
+    rows = {name: (digest, 0) for name, digest in ledger.assumed.items()}
+    rows.update({phase.name: (phase.digest(), now) for phase in applied})
+    _run_sql(
+        _phase_rows(marker_db, rows),
+        what="recording which version of each phase this install has",
+        container=container,
+        client=client,
+        password=password,
+        schema=marker_db,
         exec_stdin=exec_stdin,
         wsl_distro=wsl_distro,
     )
@@ -1345,6 +1489,45 @@ class MarkerGate:
             if schema in present and not self._table_exists(schema, data.table):
                 gaps.append(f"{schema}.{data.table} is not there")
         return tuple(gaps)
+
+    def phase_ledger(self) -> PhaseLedger | None:
+        """Which version of each phase these databases have; None when there is no marker (T129).
+
+        Read only for an install the probe would call `imported`: no marker row
+        is no finished import this app recorded, and there is nothing to
+        compare a phase against. The marker's hash picks the release table's
+        entry; `PHASE_TABLE`'s rows, when the table is there, are laid over it.
+
+        Unlike `probe()`, this MAY raise, for `adoption_gaps()`'s reason: an
+        empty ledger from a database that never answered would read as "this
+        install has none of the phases", and every re-appliable one would be
+        offered on the strength of a question nobody answered.
+
+        Raises:
+            docker.DockerCommandError: the databases could not be asked, or
+                answered in a shape that is not the one asked for.
+        """
+        present = [name for name in self._names if name in self._databases()]
+        marker = self._marker(present)
+        if marker is None:
+            return None
+        marker_db = self._schemas[self._plan.marker_db]
+        recorded: dict[str, str] = {}
+        if self._table_exists(marker_db, PHASE_TABLE):
+            answer = self._query(
+                marker_db, f"SELECT phase, digest FROM `{marker_db}`.`{PHASE_TABLE}`"
+            )
+            for line in answer.splitlines():
+                fields = line.split("\t")
+                if len(fields) != 2:
+                    raise docker.DockerCommandError(
+                        f"{marker_db}.{PHASE_TABLE} answered {line!r}, which is not a phase "
+                        "and its version"
+                    )
+                recorded[fields[0]] = fields[1].strip()
+        release = RELEASED_PHASE_DIGESTS.get(marker, {})
+        assumed = {name: digest for name, digest in release.items() if name not in recorded}
+        return PhaseLedger(marker=marker, recorded=recorded, assumed=assumed)
 
     def reset(self) -> tuple[str, ...]:
         """Drop the plan's schemas that exist — only from `partial`, only the plan's own.

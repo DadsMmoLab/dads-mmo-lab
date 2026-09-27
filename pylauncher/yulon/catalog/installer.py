@@ -889,6 +889,27 @@ class InstallEngine(Protocol):
     `install_wiring.repair_compose_for_app()` decides which installs are offered them.
     """
 
+    def correction_check(self, options: InstallOptions | None = None) -> native.CorrectionCheck: ...
+
+    def correction_confirmation(
+        self, check: native.CorrectionCheck, options: InstallOptions | None = None
+    ) -> str: ...
+
+    def apply_corrections(
+        self,
+        phases: tuple[str, ...],
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Offer and apply the install-plan steps this version corrected since the import (T129).
+
+    The reading, the dialog and the press behind the Server tab's "Apply
+    database corrections…"; `install_wiring.corrections_for_app()` decides
+    which installs are offered them.
+    """
+
     def adopt_state(self, options: InstallOptions | None = None) -> docker.ImportState: ...
 
     def adopt_confirmation(self, options: InstallOptions | None = None) -> str: ...

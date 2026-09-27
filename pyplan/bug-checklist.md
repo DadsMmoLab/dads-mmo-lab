@@ -2453,7 +2453,7 @@ And Vanilla — whose install finished three hours BEFORE the stage existed, so 
 either way — was resumed on 2026-09-03 and moved from `127.0.0.1` to `172.30.55.119`, read back
 out of `realmd.realmlist` rather than off the log. **All four entries are now driven**, and the
 UNVERIFIED note this section carried is spent.
-### 36. A shipped SQL-plan fix never reaches an install that already has a marker — 2026-09-03, OPEN
+### 36. A shipped SQL-plan fix never reaches an install that already has a marker — 2026-09-03, FIXED 2026-09-27 (T129)
 
 `MarkerGate` reads a marker row as `imported` **whatever the plan hash says** — `cmangos._import()`
 says so in as many words, and it is a deliberate decision with a good reason behind it: a marker is
@@ -2486,6 +2486,8 @@ migration notion) is the owner's rather than one to make quietly inside a phase.
 `yulon/catalog/families/sqlplan.py` (the marker and `verify`), and `native.stage_import`'s
 five-branch table. `SqlPlan.marker` already hashes the canonical plan, so the value needed to
 detect the change is stored — nothing reads it back.
+**Fixed (T129), in the migration shape this entry argued for, offered rather than applied.** The marker rule is unchanged. `write_marker()` now writes one row per phase beside the marker (`yulon_install_phase`: name and `SqlPhase.digest()`, a hash over only what the phase applies), and an install marked before that is read through `released_plans.RELEASED_PHASE_DIGESTS` -- the phase digests of the only plan hashes a public release ever wrote (measured per tag). A phase whose version differs, or that the install lacks, is offered on the Server tab (*Apply database corrections…*, T106's banner-and-confirm shape) only when the catalog declares it `reapply_when_changed`; every other changed phase is named and withheld. The press refuses under a running world, never reaches `stage_import()`, keeps each phase's `on_error`, and records only phases whose runs all landed. Armed on `spell_template hotfix` (TBC, Vanilla), the one shipped phase whose idempotence the JSON itself shows. Measured on the day: no released install is stale, and the Tortoise case above went with T30's core change.
+
 ### 37. The vmap retry recipe could not fire on the failure it names — 2026-09-03, FIXED
 
 `wow-vanilla`'s `ExtractPlan.retry` is `when_log_matches: "Segmentation fault|core dumped"` over

@@ -2072,10 +2072,13 @@ def test_write_marker_creates_the_table_and_records_the_plan_hash() -> None:
         "CREATE TABLE IF NOT EXISTS `mangos`.`yulon_install` "
         "(plan_hash CHAR(16) NOT NULL, finished_unix BIGINT NOT NULL);"
     )
+    # The marker row LAST, after T129's per-phase rows: a script the client
+    # stops part-way leaves no marker over phase rows it never wrote.
+    assert "`mangos`.`yulon_install_phase`" in lines[1]
     assert re.fullmatch(
         rf"INSERT INTO `mangos`\.`yulon_install` \(plan_hash, finished_unix\) VALUES "
         rf"\('{PLAN.plan_hash()}', \d+\);",
-        lines[1],
+        lines[-1],
     )
 
 

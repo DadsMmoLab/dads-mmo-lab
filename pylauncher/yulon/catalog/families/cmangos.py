@@ -78,16 +78,19 @@ from yulon.catalog.catalog import (
     ConfPatchTable,
     NativeInstall,
     SourcePatch,
+    SqlPhase,
     SqlPlan,
 )
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
+    CORRECTIONS_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
     RERUN_CANCEL_NOTE,
     UPDATES_BUTTON_LABEL,
+    CorrectionCheck,
     ImportGate,
     MarkerRow,
     Secrets,
@@ -1301,6 +1304,11 @@ class CmangosInstaller(StagedInstaller):
         fills statements only; a dump file is streamed as it lies on disk.
         """
         plan = self._data().sql
+        if ctx.corrections is not None:
+            # T129's press, branched here for `updates_only`'s reason below: a
+            # press that consented to named corrections never reaches the table.
+            yield from self._only_the_corrected_phases(ctx, plan, ctx.corrections)
+            return
         gate = _Remembering(self._gate(ctx))
         if ctx.updates_only:
             yield from self._only_the_rerunnable_phases(ctx, plan, gate)
@@ -1664,6 +1672,186 @@ class CmangosInstaller(StagedInstaller):
             return ()
         return tuple(run.rel for run in self._rerunnable_runs(plan, ctx))
 
+    # -- corrected install-plan steps (T129) -----------------------------------
+
+    def _correction_check(self, ctx: StageContext) -> CorrectionCheck:
+        """What this install's phase record says beside the plan this app ships.
+
+        One question to the databases -- `MarkerGate.phase_ledger()` -- and a
+        pure comparison. The spine's `correction_check()` turns anything raised
+        here into `unreadable`; the one raise that is expected, the database not
+        answering, is turned into it here with its own words.
+        """
+        plan = self._data().sql
+        try:
+            ledger = self._marker_gate(ctx).phase_ledger()
+        except docker.DockerCommandError as exc:
+            return CorrectionCheck(
+                "unreadable", why=f"the databases could not be asked which steps they have ({exc})"
+            )
+        if ledger is None:
+            return CorrectionCheck(
+                "unmarked", why="these databases carry no completion marker from this app"
+            )
+        if not ledger.known:
+            return CorrectionCheck(
+                "unknown",
+                why=(
+                    f"the completion marker names install plan {ledger.marker}, which no release "
+                    "of this app shipped, so which version of each step went in is not known"
+                ),
+            )
+        drift = sqlplan.phase_drift(plan, ledger.known)
+        if drift.offered:
+            return CorrectionCheck("stale", offered=drift.offered, withheld=drift.withheld)
+        if drift.withheld:
+            return CorrectionCheck(
+                "held",
+                withheld=drift.withheld,
+                why=(
+                    f"{', '.join(drift.withheld)} changed since the import, and none of them is "
+                    "marked safe to apply again to a server that already has data"
+                ),
+            )
+        return CorrectionCheck("current")
+
+    def correction_files(self, ctx: StageContext, phases: Sequence[str]) -> tuple[str, ...]:
+        """The confirmation's step list: the same `expand()` the press streams, by `rel`."""
+        plan = self._data().sql
+        return tuple(run.rel for run in self._runs_of(plan, ctx, self._named(plan, phases)))
+
+    @staticmethod
+    def _named(plan: SqlPlan, names: Sequence[str]) -> tuple[SqlPhase, ...]:
+        """`names`' phases, in PLAN order: a press applies them as the import would have."""
+        return tuple(phase for phase in plan.phases if phase.name in names)
+
+    def _runs_of(
+        self, plan: SqlPlan, ctx: StageContext, phases: Sequence[SqlPhase]
+    ) -> tuple[sqlplan.PhaseRun, ...]:
+        """`_rerunnable_runs()`'s expansion, for the subset of the plan's phases a press names."""
+        try:
+            return sqlplan.expand(
+                plan.model_copy(update={"phases": tuple(phases)}),
+                ctx.server_dir,
+                self._schemas(),
+                self._secret_tokens(ctx),
+            )
+        except InstallerError:
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(f"The corrected steps could not be prepared: {exc}") from exc
+
+    def _only_the_corrected_phases(
+        self, ctx: StageContext, plan: SqlPlan, agreed: Sequence[str]
+    ) -> Iterator[str]:
+        """The corrections press's whole import stage: read the record, apply, record (T129).
+
+        `stage_import()` is never called, for `_only_the_rerunnable_phases()`'s
+        reason: its `absent` arm imports the whole plan and its `partial` arm
+        drops every schema the plan names, and this press consented to named
+        steps. The record is read AGAIN here rather than trusted from the
+        banner's reading: the phases applied are the ones the person agreed to
+        that are still offered now -- changed or added since the import, and
+        declared `reapply_when_changed`. A withheld phase is never applied,
+        whatever the press was handed.
+
+        Each phase's own `on_error` is kept: `fail` stops the press on a
+        refused step and nothing is recorded; `warn` carries on as the import
+        does, and a phase with a refused step is not recorded, so it is offered
+        again rather than claimed. `assert_update_level` is asked for the runs,
+        `_rerun_on_marked()`'s reason. No marker is written and no `verify` rule
+        re-asked: the marker says the whole plan finished, and this is not that.
+        """
+        try:
+            ledger = self._marker_gate(ctx).phase_ledger()
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"{self.entry.name}'s databases could not be asked which install-plan steps they "
+                f"have ({exc}). Nothing was applied. Check that Docker is running and the "
+                f"database container is up."
+            ) from exc
+        if ledger is None:
+            raise InstallerError(
+                f"{self.entry.name}'s databases carry no completion marker from this app, so "
+                f"there is no import these steps could be corrections to. Nothing was applied, "
+                f"nothing was imported and nothing was cleared."
+            )
+        drift = sqlplan.phase_drift(plan, ledger.known)
+        chosen = self._named(plan, [name for name in drift.offered if name in agreed])
+        for name in agreed:
+            if name in drift.withheld:
+                yield (
+                    f"{name} is not applied: it is not marked safe to apply again to a server "
+                    "that already has data."
+                )
+            elif name not in drift.offered:
+                yield f"{name} is already at this version; it is not applied again."
+        if not chosen:
+            yield "There is nothing left to apply. Nothing was sent to the databases."
+            return
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        runs = self._runs_of(plan, ctx, chosen)
+        refused: set[str] = set()
+        yield f"Applying {len(runs)} SQL step(s) of {', '.join(p.name for p in chosen)}."
+        yield from self._stream(
+            lambda sink: sqlplan.apply(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                exec_stdin=self._seams.exec_stdin,
+                sink=sink,
+                cancel=ctx.cancel,
+                cancel_note=CORRECTIONS_CANCEL_NOTE,
+                on_refused=lambda run: refused.add(run.phase.name),
+            ),
+            cancel=ctx.cancel,
+            stage="correct-sql",
+        )
+        self._check_cancel(ctx.cancel)
+        try:
+            failing = sqlplan.check_update_levels(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                sql_query=self._query_seam(),
+            )
+        except InstallerError:
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The corrected steps ran but these databases could not be checked "
+                f"({type(exc).__name__}: {exc}). Nothing was recorded, so they are offered again."
+            ) from exc
+        if failing:
+            raise InstallerError(
+                f"The corrected steps ran and these databases are not at the level they leave "
+                f"behind: {', '.join(failing)}. Nothing was recorded, so they are offered again."
+            )
+        landed = tuple(phase for phase in chosen if phase.name not in refused)
+        if landed:
+            sqlplan.record_phases(
+                ledger,
+                landed,
+                marker_db=plan.marker_db,
+                container=container,
+                client=db.client,
+                password=password,
+                exec_stdin=self._seams.exec_stdin,
+            )
+            yield (
+                f"{', '.join(p.name for p in landed)}: applied and recorded. The import marker is "
+                "unchanged."
+            )
+        if refused:
+            yield (
+                f"{', '.join(sorted(refused))}: a step was refused (see the warning above), so it "
+                "is not recorded and is offered again."
+            )
+
     # -- adopting an install this app did not make (T19) ----------------------
 
     def adopt_gate(self, ctx: StageContext) -> ImportGate:
@@ -1701,6 +1889,7 @@ class CmangosInstaller(StagedInstaller):
             table=sqlplan.MARKER_TABLE,
             plan_hash=plan.plan_hash(),
             databases=sqlplan.plan_schemas(plan, self._schemas()),
+            phase_table=sqlplan.PHASE_TABLE,
         )
 
     def write_import_marker(self, ctx: StageContext) -> None:
@@ -1740,6 +1929,16 @@ class CmangosInstaller(StagedInstaller):
         is also the one seam this family's own tests replace, so the gate they
         drive and the gate an install drives are the same argument to
         `stage_import()`.
+        """
+        return self._marker_gate(ctx)
+
+    def _marker_gate(self, ctx: StageContext) -> sqlplan.MarkerGate:
+        """`_gate()`'s `MarkerGate`, typed as itself for the one question only it answers.
+
+        T129's phase record (`phase_ledger()`) is not part of `ImportGate`, and
+        the corrections route asks nothing else, so it builds the gate here
+        rather than through `_gate()` -- which is also the seam this family's
+        own tests replace with a probe/reset double that has no record to read.
         """
         db = self._native().db
         return sqlplan.MarkerGate(
