@@ -2512,6 +2512,7 @@ def _for_tortoise(
         channels=adoption_channels,
         restart=lambda: tortoise_botpool.restart_world(lifecycle),
         world_log=lambda: docker.current_run_log(spec.world, wsl_distro=wsl_distro),
+        world_started_at=lambda: docker.started_at_time(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
     )
     return replace(

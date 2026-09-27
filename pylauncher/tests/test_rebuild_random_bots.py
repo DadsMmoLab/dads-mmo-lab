@@ -1592,3 +1592,116 @@ def test_a_plan_refused_at_the_press_touches_neither_the_conf_nor_the_restore(
     assert made.keys_at_restore == [], "the restore seam was never called"
     assert path.read_bytes() == PENDING.encode("utf-8")
     assert failures and "the server is running" in failures[-1]
+
+
+# -- round 7: a stop that failed calls the rebuild off unless a world run could have read it --
+
+
+def _stop_fails_job(
+    world: World, *, started: datetime | None, reads: list[str] | None = None
+) -> poolreset.PoolRebuild:
+    def stop_fails() -> None:
+        world.restart_tried = True
+        raise botpool.StopFailed("compose stop said no")
+
+    job = world.rebuild(
+        timeout_s=0.0,
+        world_started_at=lambda: started,  # type: ignore[arg-type]
+    )
+    job.restart = stop_fails
+    if reads is not None:
+        real = job.world_log
+
+        def log() -> docker.RunLog:
+            reads.append("read")
+            return real()
+
+        job.world_log = log
+    return job
+
+
+CALLED_OFF = "so the rebuild was called off"
+
+
+def test_a_failed_stop_with_the_old_run_up_calls_the_rebuild_off(tmp_path: Path) -> None:
+    """The module reads the request only at world start, and the world that is up started
+    before it was written: nothing has read it, so it must not wait for a later start."""
+    path = _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    job = _stop_fails_job(world, started=T0 - timedelta(hours=3))
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        list(job.rebuild())
+    said = str(caught.value)
+    assert "compose stop said no" in said and CALLED_OFF in said
+    assert "nothing will happen at a later restart" in said
+    assert world.key() == "off"
+    assert path.read_bytes() == CONF_TEXT.encode("utf-8")
+    assert len(tuning.backups_of(path)) == 1, "write_key's only; the take-back makes none"
+
+
+def test_a_failed_stop_with_the_world_down_calls_the_rebuild_off(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=False)
+    job = _stop_fails_job(world, started=None)
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        list(job.rebuild())
+    assert CALLED_OFF in str(caught.value)
+    assert world.key() == "off"
+
+
+def test_a_failed_stop_with_a_world_started_after_the_write_is_watched(tmp_path: Path) -> None:
+    """A restart policy can bring a crashed world back: that run read the request."""
+    _conf(tmp_path)
+    world = World(
+        tmp_path, running_after_failed_restart=True, log_after_restart=[scheduled(), progress(25)]
+    )
+    world.restarts = 1  # the log `World` hands back is that newer run's
+    reads: list[str] = []
+    job = _stop_fails_job(world, started=T0 + timedelta(seconds=40), reads=reads)
+    lines = list(job.rebuild())
+    assert reads, "that run's log was watched"
+    assert any("25/500" in line for line in lines)
+    assert any("could not be stopped" in line and "started again" in line for line in lines)
+    assert world.key() == f"once:{TOKEN}"
+
+
+@pytest.mark.parametrize("started", [None, "window"], ids=["unknown", "too-close-to-call"])
+def test_a_failed_stop_with_the_start_time_unknown_keeps_the_request(
+    tmp_path: Path, started: object
+) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    at = T0 - timedelta(seconds=2) if started == "window" else None
+    job = _stop_fails_job(world, started=at)
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        list(job.rebuild())
+    assert world.key() == f"once:{TOKEN}"
+    assert CALLED_OFF not in str(caught.value)
+
+
+def test_a_failed_stop_with_a_restart_owed_says_it_is_still_owed(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    job = _stop_fails_job(world, started=T0 - timedelta(hours=3))
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        list(job.rebuild(restart_owed=True))
+    said = str(caught.value)
+    assert poolreset.OWED_AFTER_A_STOP in said and CALLED_OFF in said
+    assert world.key() == "off"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2026-09-26T10:00:05.123456789Z", datetime(2026, 9, 26, 10, 0, 5, 123456, tzinfo=UTC)),
+        ("2026-09-26T12:00:05+02:00", datetime(2026, 9, 26, 10, 0, 5, tzinfo=UTC)),
+        ("0001-01-01T00:00:00Z", None),
+        ("", None),
+        ("not a time", None),
+    ],
+)
+def test_the_world_start_time_is_read_off_dockers_stamp(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: datetime | None
+) -> None:
+    monkeypatch.setattr(docker, "started_at", lambda _c, **_kw: raw)
+    assert docker.started_at_time("tortoise-world", wsl_distro="d") == expected

@@ -71,9 +71,9 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 from yulon import bot_population, docker, tuning
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
@@ -100,6 +100,16 @@ stall limits (`RandomBotPoolReset.cpp:37-43`). A Tortoise world takes a few
 minutes to come up with 500 bots. Twenty minutes covers all of that with room;
 past it the job says where to look rather than holding the tab.
 """
+
+START_SKEW = timedelta(seconds=5)
+"""A world start this close before the request's write is too close to call (round 7).
+
+The write time is the app's clock and the start time the daemon's; on one
+machine they agree to well under this. Inside the window the request is kept,
+which is the safe direction for a run that may have read it.
+"""
+
+_T = TypeVar("_T")
 
 POLL_S = 10.0
 """Seconds between reads of the world log while watching: the module's own progress interval."""
@@ -583,6 +593,8 @@ class PoolRebuild:
     restart: Callable[[], object]
     world_log: Callable[[], docker.RunLog]
     module_moved: botpool.ModuleMoved = field(default_factory=botpool.ModuleMoved)
+    world_started_at: Callable[[], datetime | None] = lambda: None
+    """When the world's CURRENT run began (`docker.started_at_time`); None if unknown."""
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     pause: Callable[[float, threading.Event | None], None] = _wait
     monotonic: Callable[[], float] = time.monotonic
@@ -653,6 +665,7 @@ class PoolRebuild:
                 return
             token = new_token(self.clock())
             written = write_key(self.entry, self.server_dir, token)
+            written_at = self.clock()
         except PoolResetError as first:
             if restart_owed and not _cancelled(cancel):
                 try:
@@ -678,12 +691,16 @@ class PoolRebuild:
         try:
             self.restart()
         except Exception as exc:  # noqa: BLE001 - the request is written; say what is left
-            yield from self._after_a_failed_restart(exc)
+            yield from self._after_a_failed_restart(
+                exc, written_at=written_at, restart_owed=restart_owed
+            )
         else:
             yield "Restarted. Watching the server's log for the bots module's rebuild…"
         yield from self._watch(token, cancel)
 
-    def _after_a_failed_restart(self, exc: Exception) -> Iterator[str]:
+    def _after_a_failed_restart(
+        self, exc: Exception, *, written_at: datetime, restart_owed: bool = False
+    ) -> Iterator[str]:
         """A restart that raised may still have brought the world up, and the world reads the
         request as it starts -- so ask before taking it back.
 
@@ -698,13 +715,8 @@ class PoolRebuild:
         and raise saying it may run at the next start.
         """
         if isinstance(exc, botpool.StopFailed):
-            # The world that is up is the OLD run: nothing it logs is about this
-            # request, and nothing was started to read it.
-            raise PoolResetError(
-                f"The server could not be stopped ({exc}), so the rebuild runs at its next "
-                "start. The request stays in aiplayerbot.conf until the rebuild has finished. "
-                f"{WHO_CLEARS_IT} To call the rebuild off before then, set {KEY} to off."
-            ) from exc
+            yield from self._after_a_failed_stop(exc, written_at, restart_owed)
+            return
         try:
             up = self.world_running()
         except Exception as check:  # noqa: BLE001 - an unknown answer is its own branch
@@ -726,6 +738,62 @@ class PoolRebuild:
             f"at the next start of the server. {WHO_CLEARS_IT} To call the rebuild off before "
             f"then, set {KEY} to off."
         ) from exc
+
+    def _after_a_failed_stop(
+        self, exc: botpool.StopFailed, written_at: datetime, restart_owed: bool
+    ) -> Iterator[str]:
+        """The STOP raised, so nothing was started: decide by whether any world run began after
+        the request was written (round 7).
+
+        The module reads the request only at world start (`PlanAtStartup`).
+        So a world that is down, or up on a run that began before the write,
+        has not read it and no rebuild can have started: the request is called
+        off, or a later ordinary start (a nightly, an update, a Server-tab
+        Start) would delete the pool long after this job said it failed. A run
+        that began after the write -- a restart policy bringing a crashed
+        world back -- has read it: its log is watched as for a started world.
+        A start time that cannot be read, or one within `START_SKEW` of the
+        write, keeps the request: the safe direction for a possible resume.
+
+        An owed enrolment restart is said separately (`OWED_AFTER_A_STOP`); it
+        never keeps the destructive request armed.
+        """
+        owed = f" {OWED_AFTER_A_STOP}" if restart_owed else ""
+        up = self._ask(self.world_running)
+        started = self._ask(self.world_started_at) if up is True else None
+        if up is False or (started is not None and started <= written_at - START_SKEW):
+            raise PoolResetError(f"{self._called_off(exc)}{owed}") from exc
+        if up is True and started is not None and started > written_at:
+            yield (
+                f"The server could not be stopped ({exc}), but it has started again since the "
+                "request was written, so that run read it. Watching the server's log for the "
+                "bots module's rebuild…"
+            )
+            return
+        raise PoolResetError(
+            f"The server could not be stopped ({exc}), so the rebuild runs at its next "
+            "start. The request stays in aiplayerbot.conf until the rebuild has finished. "
+            f"{WHO_CLEARS_IT} To call the rebuild off before then, set {KEY} to off.{owed}"
+        ) from exc
+
+    def _called_off(self, exc: Exception) -> str:
+        said = self._take_back()
+        if said != TAKEN_BACK:
+            return f"The server could not be stopped ({exc}). {said}"
+        return (
+            f"The server could not be stopped ({exc}), so the rebuild was called off: {KEY} is "
+            "back to off and nothing will happen at a later restart; press Rebuild random bots… "
+            "again when ready."
+        )
+
+    @staticmethod
+    def _ask(question: Callable[[], _T]) -> _T | None:
+        """One docker reading, with a failure read as "unknown"."""
+        try:
+            return question()
+        except Exception as exc:  # noqa: BLE001 - an unknown answer is its own branch
+            logger.warning(f"a reading after a failed stop could not be taken: {exc}")
+            return None
 
     def _take_back(self, *, applied: bool = False) -> str:
         """Set the key back to off; the sentence that says so, or what to do by hand.
@@ -831,6 +899,7 @@ def for_entry(
     restart: Callable[[], object],
     world_log: Callable[[], docker.RunLog],
     module_moved: botpool.ModuleMoved,
+    world_started_at: Callable[[], datetime | None] = lambda: None,
 ) -> PoolRebuild | None:
     """The press for an install whose bots module is compiled in and whose bot conf is known.
 
@@ -851,4 +920,5 @@ def for_entry(
         restart=restart,
         world_log=world_log,
         module_moved=module_moved,
+        world_started_at=world_started_at,
     )
