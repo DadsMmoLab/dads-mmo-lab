@@ -503,7 +503,17 @@ class SqlPhase(_Strict):
     Statements take the `{{TOKEN}}` grammar and are filled by `sqlplan.expand()` (A10).
     """
 
-    name: str = Field(min_length=1)
+    name: str = Field(
+        min_length=1,
+        max_length=191,
+        description=(
+            "The phase's key in the install's `yulon_install_phase` record (T129): at most 191 "
+            "characters (that column's `VARCHAR(191)`), no quote, backslash or control character "
+            "(it is written into `'...'` unescaped). Refused here, when the catalog loads, and "
+            "not by the writer, which runs only after a whole import and would fail it the same "
+            "way on every press."
+        ),
+    )
     into: str | None = None
     into_each: dict[str, str] | None = None
     files: tuple[str, ...] = ()
@@ -556,9 +566,65 @@ class SqlPhase(_Strict):
             "covered a broken world. Both print the same transcript (2026-09-03)."
         ),
     )
+    reapply_when_changed: bool = Field(
+        default=False,
+        description=(
+            "Offer this phase again to an install already imported when a later version of "
+            "the app changes it (its `digest()` differs from the one recorded for that "
+            "install) or adds it -- on the Server tab, behind a confirmation, never on its "
+            "own (T129, bug-checklist §36). Only for a phase that is safe to apply over a "
+            "server that already has data: a dump drops and re-creates its tables, a chain of "
+            "updates re-runs work the world has moved past, and a statement that sets a value "
+            "overwrites whatever a person set since. Every changed phase without this flag is "
+            "named and withheld; a new install gets it. Not with `rerun_on_marked`, which "
+            "already applies the phase on every press."
+        ),
+    )
+
+    def digest(self) -> str:
+        """16 hex of sha256 over what this phase APPLIES, and nothing else (T129).
+
+        The fields that change what lands in the database: the target, the
+        sources, gzip and the order. Named one by one rather than taken from
+        `model_dump()`, and that is the point of it existing beside
+        `SqlPlan.plan_hash()`: that hash moves with a note, a policy, a flag
+        and every model field added later, so a marker holding it can say that
+        something about the plan moved and never that THIS phase did. The name
+        is not in it; it is the key the digest is recorded under.
+        """
+        applied = {
+            "into": self.into,
+            "into_each": self.into_each,
+            "files": list(self.files),
+            "statements": list(self.statements),
+            "gzip": self.gzip,
+            "sort": self.sort,
+        }
+        canonical = json.dumps(applied, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    @field_validator("name")
+    @classmethod
+    def _name_fits_the_record(cls, value: str) -> str:
+        bad = sorted(
+            {char for char in value if char in "'\\" or ord(char) < 0x20 or char == "\x7f"}
+        )
+        if bad:
+            raise ValueError(
+                f"phase name {value!r} carries {' '.join(repr(char) for char in bad)}, which the "
+                "install's phase record cannot hold"
+            )
+        return value
 
     @model_validator(mode="after")
     def _one_source_one_target(self) -> SqlPhase:
+        if self.reapply_when_changed and self.rerun_on_marked:
+            # The re-run route applies the phase on every press already, so the
+            # offer could never find it stale and the flag would be dead text.
+            raise ValueError(
+                f"phase {self.name!r}: `rerun_on_marked` already applies it on every press; "
+                "`reapply_when_changed` would never be asked"
+            )
         if self.assert_update_level and self.statements:
             # The check reads the LAST FILE this phase applied and turns its name
             # into a column. A literal statement has no name to read, so the flag

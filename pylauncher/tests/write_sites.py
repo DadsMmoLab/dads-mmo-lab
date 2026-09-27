@@ -26,6 +26,9 @@ call spellings here were chosen against a specific way of being wrong:
   write a user can now ask for by name. So the function is named, exactly as
   `docker volume rm` is named by its argv, and the rest of the seam stays
   recorded in the page's prose as open.
+* `record_phases` is the fifth, for the same reason (T129): one function, one
+  spelling, and a button on it -- the Server tab's corrections press records
+  which version of each install-plan step the databases now have.
 
 `os.open` counts without its flags being inspected. It is how a file gets a
 private mode at creation time, and over-inclusive is the safe direction for a
@@ -53,7 +56,7 @@ _PATH_METHODS = {
     "symlink_to",
     "chmod",
 }
-_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker"}
+_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker", "record_phases"}
 _QUALIFIED = {
     ("os", "open"),
     ("os", "write"),

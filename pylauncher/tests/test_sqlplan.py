@@ -2060,7 +2060,14 @@ def test_verify_over_a_plan_with_no_rules_asks_nothing_and_passes() -> None:
 
 def test_write_marker_creates_the_table_and_records_the_plan_hash() -> None:
     ex = _Exec()
-    sqlplan.write_marker(PLAN, container="tbc-db", client="mariadb", password="pw", exec_stdin=ex)
+    sqlplan.write_marker(
+        PLAN,
+        landed=PLAN.phases,
+        container="tbc-db",
+        client="mariadb",
+        password="pw",
+        exec_stdin=ex,
+    )
     container, argv, data, env = ex.calls[0]
     assert (container, argv, env) == (
         "tbc-db",
@@ -2072,10 +2079,13 @@ def test_write_marker_creates_the_table_and_records_the_plan_hash() -> None:
         "CREATE TABLE IF NOT EXISTS `mangos`.`yulon_install` "
         "(plan_hash CHAR(16) NOT NULL, finished_unix BIGINT NOT NULL);"
     )
+    # The marker row LAST, after T129's per-phase rows: a script the client
+    # stops part-way leaves no marker over phase rows it never wrote.
+    assert "`mangos`.`yulon_install_phase`" in lines[1]
     assert re.fullmatch(
         rf"INSERT INTO `mangos`\.`yulon_install` \(plan_hash, finished_unix\) VALUES "
         rf"\('{PLAN.plan_hash()}', \d+\);",
-        lines[1],
+        lines[-1],
     )
 
 
@@ -2084,6 +2094,7 @@ def test_write_marker_writes_to_the_daemon_that_holds_the_container() -> None:
     ex = _Exec()
     sqlplan.write_marker(
         PLAN,
+        landed=PLAN.phases,
         container="c",
         client="mysql",
         password="pw",
@@ -2096,14 +2107,16 @@ def test_write_marker_writes_to_the_daemon_that_holds_the_container() -> None:
 def test_write_marker_raises_when_the_client_fails() -> None:
     ex = _Exec(failing={"CREATE TABLE": "ERROR 1142 (42000): CREATE command denied\n"})
     with pytest.raises(InstallerError, match="CREATE command denied"):
-        sqlplan.write_marker(PLAN, container="c", client="mysql", password="pw", exec_stdin=ex)
+        sqlplan.write_marker(
+            PLAN, landed=(), container="c", client="mysql", password="pw", exec_stdin=ex
+        )
 
 
 def test_write_marker_says_the_import_stopped_when_no_daemon_can_be_reached() -> None:
     refusing = _Refusing(docker.DockerCommandError("No such container: c"))
     with pytest.raises(InstallerError, match="No such container"):
         sqlplan.write_marker(
-            PLAN, container="c", client="mysql", password="pw", exec_stdin=refusing
+            PLAN, landed=(), container="c", client="mysql", password="pw", exec_stdin=refusing
         )
 
 

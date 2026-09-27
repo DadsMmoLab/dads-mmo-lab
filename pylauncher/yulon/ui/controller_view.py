@@ -990,6 +990,14 @@ class ControllerServices:
     `confs_from_dist` (WotLK's `playerbots.conf`). `None` means no check.
     """
 
+    corrections: native.CorrectionRoute | None = None
+    """T129's "Apply database corrections…" for this install; None where it is not offered.
+
+    `install_wiring.corrections_for_app()` answers: an entry whose plan marks a
+    step `reapply_when_changed`, never a server inside a WSL distro. `None`
+    means no banner and no check.
+    """
+
     update_to_latest: native.LatestRoute | None = None
     """Move this install's sources to upstream's newest code and rebuild; None when it cannot.
 
@@ -1454,6 +1462,9 @@ def _assemble(
         # T137. Here for T106's reason: which installs are offered it is a fact
         # of `catalog.json` (`confs_from_dist`), answered in `install_wiring`.
         repair_confs=install_wiring.repair_confs_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T129. Here for the same reason: which steps may be offered again is a
+        # fact of `catalog.json`, and the distro one of the install.
+        corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(entry, server_dir),
@@ -4668,6 +4679,9 @@ class ControllerView(QWidget):
         self._confs_missing: tuple[str, ...] = ()
         self._confs_written: tuple[str, ...] = ()
         self._confs_pending = False
+        # T129: what the last corrections check said. Taken once each time the
+        # database comes up (`_ask_about_the_import`), dropped when it goes.
+        self._corrections: native.CorrectionCheck | None = None
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -4958,6 +4972,25 @@ class ControllerView(QWidget):
         )
         self.compose_banner.setVisible(False)
         box.addWidget(self.compose_banner)
+        # T129's banner, T106's shape: hidden until the check says this version
+        # corrected an install-plan step these databases were imported with.
+        self.corrections_banner = QWidget(tab)
+        corrections_box = QHBoxLayout(self.corrections_banner)
+        corrections_box.setContentsMargins(8, 6, 8, 6)
+        self.corrections_banner_label = QLabel("", self.corrections_banner)
+        self.corrections_banner_label.setWordWrap(True)
+        self.corrections_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.corrections_banner_button = QPushButton(
+            native.CORRECTIONS_BUTTON_LABEL, self.corrections_banner
+        )
+        self.corrections_banner_button.clicked.connect(self.apply_database_corrections)
+        corrections_box.addWidget(self.corrections_banner_label, 1)
+        corrections_box.addWidget(self.corrections_banner_button)
+        self.corrections_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.corrections_banner.setVisible(False)
+        box.addWidget(self.corrections_banner)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
         box.addWidget(self.upstream_label)
@@ -5430,6 +5463,7 @@ class ControllerView(QWidget):
             # taken from a database that is now down, and a control that writes
             # a marker row must not stay lit on a reading nothing can renew.
             self._forget_the_adopt_reading()
+            self._forget_the_corrections_reading()
             return
         if self._import_asked:
             return
@@ -5448,6 +5482,14 @@ class ControllerView(QWidget):
         # keeps and the same reason `_ask_about_the_import` is named for it.
         if self.services.adopt is not None:
             self._run(self.services.adopt.state, self._adopt_state_ready, self._adopt_state_failed)
+        # T129's reading, under the same once-per-database-start rule and for the
+        # same reason: it is `docker exec … mariadb` against the marker schema.
+        if self.services.corrections is not None:
+            self._run(
+                self.services.corrections.check,
+                self._corrections_checked,
+                self._corrections_check_failed,
+            )
 
     @Slot(object)
     def _import_state_ready(self, result: object) -> None:
@@ -10470,6 +10512,105 @@ class ControllerView(QWidget):
             record_as=self._run_record_kind(),
         )
 
+    # ------------------------------------ T129: corrected install-plan steps
+
+    @Slot(object)
+    def _corrections_checked(self, result: object) -> None:
+        if not isinstance(result, native.CorrectionCheck):
+            return
+        self._corrections = result
+        if result.state not in ("current", "stale"):
+            # Nothing to press, and nothing the player did: said in the log.
+            logger.info(f"{self.entry.id}: no database corrections offered: {result.why}")
+        self._refresh_corrections_banner()
+
+    @Slot(object)
+    def _corrections_check_failed(self, exc: object) -> None:
+        """`check` never raises by contract; if it does, nothing is offered on it."""
+        logger.warning(f"{self.entry.id}: the database corrections check failed: {exc}")
+        self._forget_the_corrections_reading()
+
+    def _forget_the_corrections_reading(self) -> None:
+        """Drop the reading and the banner with it: `_forget_the_adopt_reading()`'s rule."""
+        self._corrections = None
+        self._refresh_corrections_banner()
+
+    def _refresh_corrections_banner(self) -> None:
+        check = self._corrections
+        if check is None or check.state != "stale":
+            self.corrections_banner.setVisible(False)
+            return
+        held = (
+            f" ({', '.join(check.withheld)} also changed, and only a new install gets "
+            f"{'it' if len(check.withheld) == 1 else 'them'}.)"
+            if check.withheld
+            else ""
+        )
+        self.corrections_banner_label.setText(
+            f"This version of Yu'lon corrects {', '.join(check.offered)} in this server's install "
+            f"plan, and these databases were imported before that. "
+            f"{native.CORRECTIONS_BUTTON_LABEL} applies it — it asks first, names every step, "
+            f"and needs the server stopped. Nothing changes until you press it.{held}"
+        )
+        self.corrections_banner.setVisible(True)
+
+    def apply_database_corrections(self) -> bool:
+        """Ask, then apply the corrected steps the banner names (T129). False if not started.
+
+        The owner's rule for T106, which the lead chose for this: the player
+        chooses when, and nothing changes behind their back. Everything else is
+        `apply_database_updates()`'s: the dialog composed before it is shown
+        (composing it can refuse), Yes/No with No the default and `said_yes`,
+        and the same panel -- the lock that keeps a rebuild, an updates press and
+        this one from running at once. The panel lives on the Modules tab, so
+        the press brings it forward.
+        """
+        route = self.services.corrections
+        check = self._corrections
+        if route is None or check is None or check.state != "stale":
+            return False
+        if self.rebuild_log.running or self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        try:
+            text = route.confirmation(check)
+        except InstallerError as exc:
+            logger.info(f"database corrections for {self.entry.id} could not be described: {exc}")
+            self.action_failed.emit(str(exc))
+            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            return False
+        if not said_yes(
+            QMessageBox.question(
+                self,
+                f"Apply database corrections to {self.entry.name}?",
+                text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        ):
+            logger.info(f"database corrections for {self.entry.id} declined at the confirmation")
+            return False
+        cancel = threading.Event()
+        self._rebuild_is_compile = False
+        # The check itself, not its names: the press is bound to the reading the
+        # dialog was composed from, and refuses if the databases moved since.
+        started = self.rebuild_log.run(
+            lambda: route.press(check, cancel),
+            title=f"Applying database corrections to {self.entry.name}",
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+        if started:
+            panel = self.rebuild_log.parentWidget()
+            if panel is not None:
+                self._tabs.setCurrentWidget(panel)
+        return started
+
     def adopt_as_imported(self) -> bool:
         """Ask, then record these databases as a finished import. False if nothing started.
 
@@ -10595,6 +10736,7 @@ class ControllerView(QWidget):
         # has written the row it exists to write.
         self._import_asked = False
         self._forget_the_adopt_reading()
+        self._forget_the_corrections_reading()
         compiled, self._rebuild_is_compile = self._rebuild_is_compile, False
         moved, self._rebuild_moves_sources = self._rebuild_moves_sources, False
         if ok and moved and not self.rebuild_log.cancelled:
