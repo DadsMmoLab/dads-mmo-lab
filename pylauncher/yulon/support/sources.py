@@ -336,6 +336,11 @@ def gather_known(sources: Sources) -> Known:
                 add(password, f"{folder}/{path.name}")
             else:
                 missing.append(f"{folder}/{path.name} could not be read")
+    # A server inside a WSL distro is read here even while that distro is
+    # stopped, and reading its folder starts it (T133). Deliberately: this runs
+    # only when the Logs tab is shown or refreshed or a bundle is saved, which
+    # the player pressed for, and skipping a stopped install would let its
+    # passwords through unmasked -- which is never allowed (decided for T133).
     for install in sources.installs:
         entry = install.entry
         if entry is not None and entry.install.password.mode == "generated":

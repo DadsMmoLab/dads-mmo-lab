@@ -223,13 +223,15 @@ def _in_the_distro(server_dir: Path, wsl_distro: str | None) -> bool:
 
 
 def _distro_down(wsl_distro: str | None) -> bool:
-    """True when this install's distro is not running, so a READING must not touch it.
+    """True when this install's distro is stopped, so a READING must not touch it.
 
-    `wsl.is_running()` reads WSL's own listing, which starts nothing; asking the
-    folder (`\\\\wsl.localhost\\...`) or its Docker would boot the distro
-    (`pyplan/wsl-resident-servers.md` §2). A local install is never down here.
+    `wsl.reading_would_start()`, the tab's own gate (T133): WSL's listing,
+    which starts nothing, where asking the folder (`\\\\wsl.localhost\\...`)
+    or its Docker would boot the distro (`pyplan/wsl-resident-servers.md` §2).
+    Fail-closed since T133: a listing that did not answer reads, where the
+    `not wsl.is_running()` this was skipped. A local install is never down here.
     """
-    return wsl_distro is not None and not wsl.is_running(wsl_distro)
+    return wsl.reading_would_start(wsl_distro)
 
 
 RebuildSource = Callable[[threading.Event | None], Iterator[str]]

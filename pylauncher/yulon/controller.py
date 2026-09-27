@@ -82,6 +82,14 @@ class InstallStatus:
     db: bool
     auth: bool
     world: bool
+    distro_stopped: bool = False
+    """True when WSL SAID this install's distro is stopped (`wsl.reading_would_start()`).
+
+    Nothing is up then, and the tab reads nothing inside it until a later poll
+    says otherwise: reading the distro's folder starts it (T133). False for a
+    server on this host, for a running distro, and for a listing that did not
+    answer.
+    """
 
     @property
     def any_running(self) -> bool:
@@ -182,8 +190,15 @@ class Controller:
             # its distro simply by opening the app. Nothing is running when the
             # distro is down, so the empty answer is true rather than merely
             # convenient; Start still starts it, because that is asked for.
+            # Whether WSL SAID it is down is asked only here, off the running
+            # path: it is what tells the tab when its readings may go (T133).
             logger.debug(f"{self.wsl_distro} is not running; reporting nothing up")
-            return InstallStatus(db=False, auth=False, world=False)
+            return InstallStatus(
+                db=False,
+                auth=False,
+                world=False,
+                distro_stopped=wsl.reading_would_start(self.wsl_distro),
+            )
         running = set(docker.status(wsl_distro=self.wsl_distro))
         status = InstallStatus(
             db=self.spec.db in running,

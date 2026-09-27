@@ -994,7 +994,18 @@ def _probe_client(db_container: str, candidates: tuple[str, ...]) -> str | None:
     return found[0].rsplit("/", 1)[-1]
 
 
-def mysql_env(root_password: str, wsl_distro: str | None = None) -> dict[str, str]:
+RootPassword = str | Callable[[], str]
+"""A database root password, or how to read it the first time it is needed (T133).
+
+The callable is a server inside a WSL distro whose password is GENERATED into
+its folder (`.db_password`): reading that file while the distro is stopped
+starts it, and a tab is built for every remembered install when the app opens.
+Nothing needs the password until something talks to the database, which starts
+the distro anyway -- so it is read then. `mysql_env()` is where it is revealed.
+"""
+
+
+def mysql_env(root_password: RootPassword, wsl_distro: str | None = None) -> dict[str, str]:
     """This process's environment plus `MYSQL_PWD`, so the password never enters argv.
 
     `docker exec -e MYSQL_PWD` (no `=value`) forwards the variable from OUR
@@ -1008,7 +1019,10 @@ def mysql_env(root_password: str, wsl_distro: str | None = None) -> dict[str, st
     (style-guide §4). `wsl_distro` is part of that rule now: a variable set here
     does NOT reach a process inside a distro unless `WSLENV` names it, so both
     callers get the crossing right by using this rather than by remembering.
+    A `RootPassword` that is a reader is read here, at the first use (T133).
     """
+    if callable(root_password):
+        root_password = root_password()
     if wsl_distro is not None:
         # Crossing into a distro, the variable does not follow just because it
         # is set here - measured, it arrives EMPTY, and mysql then reports an
@@ -1096,7 +1110,7 @@ class DockerSql:
     """`SqlRunner` over `docker exec <db_container> mysql`, like wow-manage.sh does."""
 
     db_container: str
-    root_password: str = field(repr=False)
+    root_password: RootPassword = field(repr=False)
     """Kept out of the repr, like `maintenance.DockerMysql.root_password`.
 
     A frozen dataclass reprs every field by default, and this object is handed

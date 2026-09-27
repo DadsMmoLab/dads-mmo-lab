@@ -27,7 +27,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from functools import partial
+from functools import cache, partial
 from pathlib import Path, PurePosixPath
 from typing import Protocol, cast
 
@@ -77,6 +77,7 @@ from yulon import (
     resources,
     tuning,
     useraccounts,
+    wsl,
 )
 from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
@@ -1164,7 +1165,9 @@ def forget_record(game: str, server_dir: Path) -> Callable[[], None]:
     return forget
 
 
-def _db_password(entry: CatalogEntry, server_dir: Path) -> str:
+def _db_password(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> apply_module.RootPassword:
     """This install's database root password, with the last-resort default.
 
     The entry may carry the password, or name a file the installer generated it
@@ -1174,7 +1177,20 @@ def _db_password(entry: CatalogEntry, server_dir: Path) -> str:
     account and Backup. The default stays as a last resort so an install whose
     password file has gone missing still gets a tab that can start and stop,
     rather than no tab at all.
+
+    **A server inside a WSL distro gets a reader, not the value (T133).** Every
+    tab is built when the app opens, and reading `.db_password` under
+    `\\\\wsl.localhost\\` then started a stopped distro. Nothing needs the password
+    before something talks to the database, which starts the distro anyway, so
+    the file is read at that first use (`apply.mysql_env()`), once.
     """
+    if wsl_distro is not None:
+        return cache(partial(_read_db_password, entry, server_dir))
+    return _read_db_password(entry, server_dir)
+
+
+def _read_db_password(entry: CatalogEntry, server_dir: Path) -> str:
+    """`_db_password()`'s reading: the entry's password, or the default with a warning."""
     password = entry.install.db_password(server_dir)
     if password is not None:
         return password
@@ -1204,7 +1220,9 @@ def _db_client(entry: CatalogEntry) -> str | None:
     return native.db.client if native is not None else None
 
 
-def _sql_for(entry: CatalogEntry, password: str, *, wsl_distro: str | None) -> DockerSql:
+def _sql_for(
+    entry: CatalogEntry, password: apply_module.RootPassword, *, wsl_distro: str | None
+) -> DockerSql:
     """The read+write SQL seam every SQL-backed control on this tab goes through.
 
     Three per-install facts reach it here and nowhere else, because this is the
@@ -1229,7 +1247,7 @@ def _sql_for(entry: CatalogEntry, password: str, *, wsl_distro: str | None) -> D
 
 
 def _mysql_for(
-    entry: CatalogEntry, password: str, *, wsl_distro: str | None
+    entry: CatalogEntry, password: apply_module.RootPassword, *, wsl_distro: str | None
 ) -> wotlk_maintenance.DockerMysql:
     """The dump/load seam, bound to this entry's own db container.
 
@@ -1586,7 +1604,7 @@ def _for_wotlk(
     """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
-    password = _db_password(entry, server_dir)
+    password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
     # The probe pair is `(None, None)` for a game that names no one-shot import
@@ -1958,7 +1976,7 @@ def _for_tbc(
     `repairable`, so nothing is offered; `_show_repair()` gates on the same
     fact a second time.
     """
-    password = _db_password(entry, server_dir)
+    password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
     # 8.1b, and every fact under these two is this tree's own: `characters`,
@@ -2095,7 +2113,7 @@ def _for_vanilla(
     binding rather than a `del` a future manifest would have to come back and
     undo — the same call the TBC factory makes.
     """
-    password = _db_password(entry, server_dir)
+    password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
     # 8.1c. Measured on `~/vanilla-75b` before this block was written: this tree
@@ -2342,7 +2360,7 @@ def _for_tortoise(
     has no manifests that want it, but the Steam client entry is a path to that
     folder's own executable and there is nowhere else to get it.
     """
-    password = _db_password(entry, server_dir)
+    password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
     # 8.1d. This is NOT a CMaNGOS tree — `cmangos.md` says so in as many words —
@@ -4068,6 +4086,13 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
 
+DISTRO_STOPPED = (
+    "This server's WSL distro {distro} is stopped. Yu'lon reads nothing inside it while it is, "
+    "because reading it would start it: press Start to start it, and the other tabs fill in "
+    "once it is up."
+)
+"""The Server tab's line while the distro is stopped (T133, wsl-resident-servers §2)."""
+
 REPAIR_FILES_LABEL = "Repair server files…"
 """T106's press: re-render this install's docker-compose.yml from the current template.
 T137's, on the same button: write a module conf the install writes from its `.dist`."""
@@ -4573,6 +4598,15 @@ class ControllerView(QWidget):
         super().__init__(parent)
         self.entry = entry
         self.services = services
+        # T133: whether this server's WSL distro is stopped, asked of WSL's own
+        # listing BEFORE any tab is built -- every tab reads the install's
+        # files as it is built, and reading `\\wsl.localhost\<distro>` starts
+        # a stopped distro. Each status poll answers it again
+        # (`InstallStatus.distro_stopped`); what waited runs when it turns
+        # False (`_distro_answered()`). Keyed by what is waiting, in order, so a
+        # reading asked twice while stopped runs once.
+        self._distro_stopped = wsl.reading_would_start(services.controller.wsl_distro)
+        self._waiting_on_distro: dict[str, Callable[[], None]] = {}
         # How the Modules tab asks a manifest's own questions. A seam, so a test
         # can answer them without a modal dialog; the real one is the dialog.
         self._prompt_asker: PromptAsker = prompt_asker or ask_manifest_prompts
@@ -4854,6 +4888,11 @@ class ControllerView(QWidget):
         self.repair_channel_button.setVisible(False)
         self.repair_channel_button.clicked.connect(self.repair_channel)
         self.status_label = QLabel("status: unknown", tab)
+        # T133: said while this server's WSL distro is stopped and every tab's
+        # readings wait for it (`_waits_for_the_distro()`).
+        self.distro_label = QLabel("", tab)
+        self.distro_label.setWordWrap(True)
+        self._show_the_distro()
         # T124: what upstream has that this server was not built from. Hidden
         # until a reading says there is something -- and for no network, no
         # route, or nothing new, it stays hidden rather than saying so.
@@ -5081,6 +5120,7 @@ class ControllerView(QWidget):
         box.addWidget(self.corrections_banner)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
+        box.addWidget(self.distro_label)
         box.addWidget(self.upstream_label)
         box.addWidget(self.client_dir_label)
         if self.set_client_dir_button is not None:
@@ -5198,6 +5238,45 @@ class ControllerView(QWidget):
         bound slots - a plain callable would be delivered on the worker thread."""
         self._jobs(work, on_done, on_error)
 
+    # ------------------------------------------- a stopped WSL distro (T133)
+
+    def _waits_for_the_distro(self, key: str, reading: Callable[[], None]) -> bool:
+        """True, keeping `reading` for later, while this server's WSL distro is stopped.
+
+        Every reading this tab takes by itself -- building a sub-tab, a poll,
+        the reload after an action -- asks this first. From the desktop session
+        ANY read under `\\\\wsl.localhost\\<distro>` starts a stopped distro, and
+        so does any `wsl -d` (measured, T132 M7): opening the app booted it, and
+        a server killed earlier came back through `restart: unless-stopped`.
+        `reading` runs once a status poll finds the distro no longer stopped
+        (`_distro_answered()`); Start is what starts it, because Start is asked
+        for. One gate for every reading, so a new one cannot keep the rule by
+        spelling it differently -- or forget it that way.
+        """
+        if not self._distro_stopped:
+            return False
+        self._waiting_on_distro[key] = reading
+        return True
+
+    def _distro_answered(self, stopped: bool) -> None:
+        """A status poll's word on the distro: say it, and run what waited once it is up."""
+        if stopped == self._distro_stopped:
+            return
+        self._distro_stopped = stopped
+        self._show_the_distro()
+        if stopped:
+            return
+        waiting = list(self._waiting_on_distro.values())
+        self._waiting_on_distro.clear()
+        for reading in waiting:
+            reading()
+
+    def _show_the_distro(self) -> None:
+        """The Server tab's line about a stopped distro, shown only while it is."""
+        said = DISTRO_STOPPED.format(distro=self.services.controller.wsl_distro)
+        self.distro_label.setText(said if self._distro_stopped else "")
+        self.distro_label.setVisible(self._distro_stopped)
+
     @Slot()
     def _tick(self) -> None:
         """The five-second poll: ask, unless a poll is already out (T95 review, Task 2).
@@ -5242,6 +5321,8 @@ class ControllerView(QWidget):
         the interval must not queue up behind itself.
         """
         if self.services.dashboard is None or self._verdict_pending:
+            return
+        if self._waits_for_the_distro("verdict", self.refresh_verdict):
             return
         self._verdict_pending = True
         self._run(self.services.dashboard, self._verdict_ready, self._verdict_failed)
@@ -5443,6 +5524,9 @@ class ControllerView(QWidget):
         # T160: Docker answered, so there is nothing to reinstall.
         self.reinstall_docker_button.setVisible(False)
         self._update_client_dir_row()
+        # T133: every answer, stale or not -- whether the distro is stopped is
+        # not a fact an action of ours can make wrong the way "world down" is.
+        self._distro_answered(status.distro_stopped)
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
         self._ask_again_if_superseded(superseded)
@@ -5954,6 +6038,10 @@ class ControllerView(QWidget):
         setup = self.services.channel_setup
         if setup is None:
             return
+        # T133: a SOAP channel that is not answered asks the world's container
+        # why, through the distro's docker.
+        if self._waits_for_the_distro("channel", self._check_the_channel):
+            return
         self._run(setup.check, self._channel_settled, self._channel_settle_failed)
 
     def _settle_the_channel(self) -> None:
@@ -6005,6 +6093,10 @@ class ControllerView(QWidget):
             return
         setup = self.services.channel_setup
         if setup is None or not isinstance(setup.setup_state(), channel_setup.Pending):
+            return
+        # T133: scheduled by the tab opening, not by a press, and a settle that
+        # is not answered asks the world's container why, in the distro.
+        if self._waits_for_the_distro("channel resettle", self._resettle_if_pending):
             return
         self._settle_the_channel()
 
@@ -8117,7 +8209,7 @@ class ControllerView(QWidget):
     def _look_up_bot_count(self) -> None:
         """Read the bot count (and the Tuning tab's bot rows) off the GUI thread."""
         route = self.services.bot_population
-        if route is None:
+        if route is None or self._waits_for_the_distro("bot count", self._look_up_bot_count):
             return
         self._bot_count_generation += 1
         self._bot_count_pending = True
@@ -8254,7 +8346,10 @@ class ControllerView(QWidget):
             inside.addWidget(self.my_party_absent)
             return group
         self.my_party_absent.setVisible(False)
-        self.party_panel = PartyPanel(seam, jobs=self._run, parent=group)
+        # T133: its two readings open the install's conf, so they wait for a
+        # stopped distro like every other reading on this tab.
+        self.party_panel = PartyPanel(seam, jobs=self._run, read_now=False, parent=group)
+        self._read_party_facts()
         # The design's own cross-link (`b-users-surface.md:111`): a bot that just
         # joined a party is a row the Browse list above has not got yet.
         self.party_panel.party_changed.connect(self.refresh_bots)
@@ -8265,6 +8360,14 @@ class ControllerView(QWidget):
         scroll.setWidget(self.party_panel)
         inside.addWidget(scroll, 1)
         return group
+
+    def _read_party_facts(self) -> None:
+        """My Party's level cap and spec list, unless the distro is stopped (T133)."""
+        if self.party_panel is None:
+            return
+        if self._waits_for_the_distro("party facts", self._read_party_facts):
+            return
+        self.party_panel.read_install_facts()
 
     def _show_page_buttons(self) -> None:
         """Neither button offers a page that is not there."""
@@ -8411,7 +8514,7 @@ class ControllerView(QWidget):
     def refresh_bot_dashboard(self) -> None:
         """Read what this install's files say about the dashboard, off the GUI thread."""
         seam = self.services.bot_dashboard
-        if seam is None:
+        if seam is None or self._waits_for_the_distro("bot dashboard", self.refresh_bot_dashboard):
             return
         self._run(seam.state, self._dashboard_state_read, self._dashboard_state_failed)
 
@@ -8659,6 +8762,8 @@ class ControllerView(QWidget):
     @Slot()
     def refresh_backups(self) -> None:
         """Re-list the backups directory. Reading a directory, not doing any work."""
+        if self._waits_for_the_distro("backups", self.refresh_backups):
+            return
         self._restore_plan = None
         self.restore_button.setEnabled(False)
         self.backup_list.clear()
@@ -9487,6 +9592,11 @@ class ControllerView(QWidget):
             self.modules_panel.set_rows(())
             self._refresh_rebuild_banner()
             return
+        if self._waits_for_the_distro("modules", self.reload_modules):
+            # The rows stay as they were (none, on a tab just built): drawn
+            # from the catalog alone, every installed module would read
+            # "not installed" and offer Install.
+            return
         answered = self._installed_clones()
         installed = answered if answered is not None else {}
         manifests, broken = self._load_manifests()
@@ -9579,6 +9689,10 @@ class ControllerView(QWidget):
         nothing to catch here and nothing that can turn a reload into a
         failure.
         """
+        if self._waits_for_the_distro("modules", self.reload_modules):
+            # Stopped mid-walk: the reload that runs once it is up walks again.
+            self._filling_versions = False
+            return
         server_dir = self.services.controller.server_dir
         for widget in self.modules_panel.rows():
             row = widget.data
@@ -10496,6 +10610,8 @@ class ControllerView(QWidget):
             self.source_version_label.setVisible(False)
             self.return_to_pin_action.setVisible(False)
             return
+        if self._waits_for_the_distro("source version", self._refresh_source_version):
+            return
         try:
             said = route.source_version()
         except OSError as exc:
@@ -10519,6 +10635,8 @@ class ControllerView(QWidget):
             self.upstream_label.setVisible(False)
             return
         if self._upstream_pending:
+            return
+        if self._waits_for_the_distro("upstream news", self._refresh_upstream_news):
             return
         self._upstream_pending = True
         self._run(route.upstream_news, self._upstream_news_ready, self._upstream_news_failed)
@@ -11332,6 +11450,8 @@ class ControllerView(QWidget):
         Reads files and nothing else -- no git, no docker, no database -- so it
         is cheap enough to run after every install and every save.
         """
+        if self._waits_for_the_distro("tuning", self.reload_tuning):
+            return
         manifests, _broken = self._load_manifests()
         rows = tuning.rows_for(
             manifests,
@@ -11469,6 +11589,10 @@ class ControllerView(QWidget):
         Each only where its route is wired (the CMaNGOS family; WotLK). Neither is
         queued behind itself: a check already out answers for this one too.
         """
+        # T133 first: both checks read the install's folder, so on a stopped
+        # distro neither runs until it is up.
+        if self._waits_for_the_distro("server files", self.check_server_files):
+            return
         confs = self.services.repair_confs
         if confs is not None and not self._confs_pending:
             self._confs_pending = True
@@ -11899,6 +12023,8 @@ class ControllerView(QWidget):
 
     def _look_up_reset_undo(self) -> None:
         """Ask, off the GUI thread, what the Undo would put back; greyed until the answer lands."""
+        if self._waits_for_the_distro("reset undo", self._look_up_reset_undo):
+            return
         self._undo_generation += 1
         self._undo_items = ()
         self.tuning_reset_undo_action.setEnabled(False)

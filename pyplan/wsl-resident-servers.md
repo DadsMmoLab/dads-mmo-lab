@@ -189,11 +189,39 @@ the start time recorded beside it (`/proc/<pid>/stat` field 22), so a recycled p
 alone, and it never asks a distro WSL says is stopped. A world stopped outside Yu'lon keeps
 its hold until the next Stop/Remove, `wsl --shutdown` or sign-out.
 
-Still open, measured the same night: **reading anything under `\\wsl.localhost\<distro>`
-from the user's desktop session starts that distro** (1.35 s, then running). The Server
-tab reads the install's files at open, so opening the app boots an adopted server's distro,
-which is exactly what the poll rule above exists to prevent. A killed (not stopped) server's
-containers then come back on their own through `restart: unless-stopped`.
+Measured the same night: **reading anything under `\\wsl.localhost\<distro>` from the
+user's desktop session starts that distro** (1.35 s, then running). The Server tab read the
+install's files at open, so opening the app booted an adopted server's distro, which is
+exactly what the poll rule above exists to prevent, and a killed (not stopped) server's
+containers then came back on their own through `restart: unless-stopped`.
+
+### Readings wait for the distro (T133)
+
+Every reading a tab takes by itself asks one gate first, `ControllerView._waits_for_the_distro()`:
+while WSL says the distro is stopped (`wsl.reading_would_start()`, which is `known_stopped()`, the
+fail-closed reading) it keeps the reading and returns, and the Server tab says the distro is
+stopped and that Start starts it. The tab asks WSL once as it is built, before any sub-tab reads,
+and every status poll answers again (`InstallStatus.distro_stopped`, asked only when the distro
+is not running); the first answer that it is up runs what waited, once each. Gated that way:
+the Maintenance tab's backup list and interrupted-restore record, the Modules tab (clone
+folders, module answers, release notes, the version walk's `git`), the version line and the
+upstream line, the Tuning tab (its files, the reset Undo lookup, the bot count), My Party's
+level cap and spec list, the bot dashboard state, the compose check, the dashboard verdict on
+the poll and the command channel's opening check (an unanswered SOAP channel asks the world's
+container why). The generated database password of a TBC, Vanilla or Tortoise server in a
+distro is handed to the SQL seams as a reader (`apply.RootPassword`), read at the first
+database call, which starts the distro anyway. `install_wiring`'s own readings ask the same
+`wsl.reading_would_start()`.
+
+Presses are not gated: Start, Stop, Repair, the updates, and every other button may start
+the distro, because the player asked for them. **The Logs tab is a press too, by decision:**
+it reads only when it is shown or refreshed (or a bundle is saved), and it then reads every
+install's `.db_password` and conf folders for the passwords it masks, a stopped distro's
+included, which starts that distro. Skipping it would let that install's passwords through
+unmasked, and that is never allowed (`support.sources.gather_known()`). T138's settle of a
+`Pending` channel, which the tab schedules a minute after opening, is not a press and waits
+like the other readings. T129's corrections check is not offered for a WSL install at all,
+and runs only when the database is seen up.
 
 ---
 

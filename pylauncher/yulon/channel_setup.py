@@ -1167,7 +1167,7 @@ class InstallChannel:
         channel_for: Callable[[soap.Endpoint], object],
         reset: Callable[[str, str], object] | None = None,
         config_dir: Path | None = None,
-        db_password: str | None = None,
+        db_password: str | Callable[[], str] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
@@ -1177,8 +1177,16 @@ class InstallChannel:
         self._reset = reset
         self._channel_for = channel_for
         self._config_dir = config_dir
+        # A reader rather than the value for a server inside a WSL distro
+        # (T133, `apply.RootPassword`): its folder is read at the press that
+        # renders, not when the tab is built.
         self._db_password = db_password
         self._state: State = self._from_disk()
+
+    def _password(self) -> str | None:
+        """The install's database password, read now if it was handed over as a reader."""
+        given = self._db_password
+        return given() if callable(given) else given
 
     def _from_disk(self) -> State:
         saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
@@ -1383,7 +1391,7 @@ class InstallChannel:
                         self.server_dir,
                         templates_root=self.templates_root,
                         world_env=env,
-                        db_password=self._db_password,
+                        db_password=self._password(),
                         bind_label=each,
                     ).override
                     for each in (":z", "")
@@ -1403,7 +1411,7 @@ class InstallChannel:
             self.server_dir,
             templates_root=self.templates_root,
             world_running=world_running,
-            db_password=self._db_password,
+            db_password=self._password(),
         )
 
     def setup_state(self) -> State:

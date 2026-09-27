@@ -144,6 +144,25 @@ def known_stopped(distro: str) -> bool:
     return distro in listed and distro not in running
 
 
+def reading_would_start(distro: str | None) -> bool:
+    """True when touching `distro` -- a file under `\\\\wsl.localhost\\<distro>\\`, or any
+    `wsl -d` -- would START it, so a reading nobody pressed for must wait (T133).
+
+    Measured on Windows 11 (T132 M7): from the user's desktop session ANY read
+    under the distro's share starts a stopped distro (1.35 s), so a tab that
+    read its install's files on opening booted it, and a server killed earlier
+    came back through `restart: unless-stopped` (wsl-resident-servers §2).
+
+    `known_stopped()`, the fail-closed reading, and not `not is_running()`: a
+    listing that did not answer reads the disk as it always did, rather than
+    blanking a running server's tab. None -- a server on this host -- never waits.
+    The one question every automatic reading of a WSL install asks: the tab's
+    gate (`ControllerView._waits_for_the_distro()`), the status poll that tells
+    it when to stop waiting, and `install_wiring`'s own readings.
+    """
+    return distro is not None and known_stopped(distro)
+
+
 _DISTRO_NOT_FOUND_RETURNCODE = 0xFFFFFFFF
 """What `wsl.exe` exits with when it could not launch the command at all.
 

@@ -100,7 +100,7 @@ from pathlib import Path
 from typing import IO, Protocol
 
 from yulon import docker, platform, runner
-from yulon.apply import DB_NAMES, mysql_client, mysql_env
+from yulon.apply import DB_NAMES, RootPassword, mysql_client, mysql_env
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.log import get_logger
 
@@ -220,7 +220,7 @@ class DockerMysql:
     """
 
     db_container: str
-    root_password: str = field(repr=False)
+    root_password: RootPassword = field(repr=False)
     """Kept out of the generated `repr` because everything else here already
     keeps it out of argv, out of log lines and off disk, and a default `repr`
     would put it back — in a pytest assertion diff, a logged object, or a
