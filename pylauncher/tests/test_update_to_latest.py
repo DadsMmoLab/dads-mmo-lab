@@ -20,7 +20,7 @@ import json
 import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -36,8 +36,9 @@ from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
 from yulon import git, resources, rmtree, runner
+from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import EmulatorSource, load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.docker import AttachedRun
@@ -167,6 +168,54 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
     }, moving
+
+
+def test_the_server_update_dests_are_its_moving_sources_and_never_a_db_repo() -> None:
+    """T146: where the button moves a checkout, read off the same predicate it moves by.
+
+    The Modules tab offers "Update the server to latest…" on a folder the
+    SERVER install cloned, so which folders those are must be the route's own
+    answer. The `*-db` half is asserted on a synthetic source because no
+    shipped entry puts a database repository in a clone folder -- and a rule no
+    shipped data exercises is a rule nothing would notice breaking.
+
+    Mutation: build the set from every source, not just the moving ones, and
+    `modules/foo-db` is offered an update the route would never make.
+    """
+    entry = load_catalog().get("wow-wotlk")
+    assert native.server_update_dests(entry) == {
+        PurePosixPath("."),
+        PurePosixPath("modules/mod-playerbots"),
+    }
+    held = EmulatorSource(repo="acme/foo-db", branch="master", dest="modules/foo-db")
+    widened = entry.model_copy(
+        update={
+            "emulator": entry.emulator.model_copy(
+                update={"sources": (*entry.emulator.sources, held)}
+            )
+        }
+    )
+    assert native.held_at_its_pin(held)
+    assert PurePosixPath("modules/foo-db") not in native.server_update_dests(widened)
+    assert PurePosixPath("modules/mod-playerbots") in native.server_update_dests(widened)
+
+
+def test_only_wotlk_has_a_server_source_inside_a_folder_the_modules_tab_lists() -> None:
+    """T146's survey, as a test so it cannot quietly stop being true.
+
+    The Modules tab lists folders directly inside `apply.CLONE_DIRS`. Of every
+    source an update moves, only WotLK's `modules/mod-playerbots` lands there:
+    the CMaNGOS bots and Tortoise's TortoiseBots are nested under `src/`, which
+    no clone folder is. A new entry that puts a source in one lands here first.
+    """
+    folders = {PurePosixPath(folder) for folder in CLONE_DIRS.values()}
+    listed = {
+        (entry.id, str(dest))
+        for entry in load_catalog().games
+        for dest in native.server_update_dests(entry)
+        if dest.parent in folders
+    }
+    assert listed == {("wow-wotlk", "modules/mod-playerbots")}, listed
 
 
 def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id() -> None:
