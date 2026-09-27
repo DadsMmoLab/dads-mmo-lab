@@ -283,28 +283,69 @@ def test_the_widened_dialog_needs_no_more_than_a_steam_deck_screen_allows(
     assert too_wide == {}, f"wider than a 1280x800 screen lets a message box be: {needs}"
 
 
-def test_no_question_is_built_as_a_bare_qmessagebox() -> None:
-    """Every `QMessageBox(...)` the app constructs goes through `FittedMessageBox` (T157).
+def _bare_constructions(source: str) -> list[int]:
+    """The line of every `QMessageBox(...)` construction in `source`, under any name.
 
-    Read from the syntax tree, not grepped, so a spelling across lines or
-    through `QtWidgets.QMessageBox(...)` is caught too. The static calls
-    (`QMessageBox.question(...)`) carry only Qt's own short labels and are not
-    constructions, so they are not counted.
+    A call counts when its callee is the name `QMessageBox`, any attribute
+    spelled `QMessageBox` (`QtWidgets.QMessageBox(...)`), or a name this file
+    bound to `QMessageBox` with `from ... import QMessageBox as X`. Static calls
+    (`QMessageBox.question(...)`) are attributes OF it, not calls of it.
     """
     import ast
 
+    tree = ast.parse(source)
+    names = {"QMessageBox"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(a.asname for a in node.names if a.name == "QMessageBox" and a.asname)
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Name) and func.id in names) or (
+            isinstance(func, ast.Attribute) and func.attr == "QMessageBox"
+        ):
+            lines.append(node.lineno)
+    return lines
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "from PySide6.QtWidgets import QMessageBox\nQMessageBox()\n",
+        "from PySide6 import QtWidgets\nQtWidgets.QMessageBox()\n",
+        "from PySide6.QtWidgets import QMessageBox as Box\nBox()\n",
+    ],
+    ids=["plain", "attribute", "aliased"],
+)
+def test_the_guard_sees_a_construction_under_every_spelling(spelling: str) -> None:
+    assert _bare_constructions(spelling) == [2]
+
+
+def test_the_guard_does_not_count_the_static_calls() -> None:
+    source = "from PySide6.QtWidgets import QMessageBox as Box\nBox.question(None, 't', 'x')\n"
+    assert _bare_constructions(source) == []
+
+
+def test_no_question_is_built_as_a_bare_qmessagebox() -> None:
+    """Every `QMessageBox(...)` the app constructs goes through `FittedMessageBox` (T157).
+
+    Read from the syntax tree, not grepped (`_bare_constructions`), across
+    `yulon/` and `main.py`, which builds dialogs of its own. The static calls
+    (`QMessageBox.question(...)`) carry only Qt's own short labels and are not
+    constructions, so they are not counted.
+    """
     import yulon
 
-    root = Path(yulon.__file__).parent
+    package = Path(yulon.__file__).parent
+    root = package.parent
+    sources = [*sorted(package.rglob("*.py")), root / "main.py"]
+    assert (root / "main.py").is_file()
     bare: list[str] = []
-    for source in sorted(root.rglob("*.py")):
-        if source.name == "message_box.py":
+    for source in sources:
+        if source.name == "message_box.py" and source.parent == package / "ui":
             continue
-        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-            if name == "QMessageBox":
-                bare.append(f"{source.relative_to(root)}:{node.lineno}")
+        for line in _bare_constructions(source.read_text(encoding="utf-8")):
+            bare.append(f"{source.relative_to(root)}:{line}")
     assert bare == [], f"build these through FittedMessageBox: {bare}"
