@@ -69,7 +69,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -717,12 +717,13 @@ class PoolRebuild:
         try:
             self.restart()
         except Exception as exc:  # noqa: BLE001 - the request is written; say what is left
-            yield from self._after_a_failed_restart(
+            booting = yield from self._after_a_failed_restart(
                 exc, token=token, started_before=started_before, restart_owed=restart_owed
             )
         else:
+            booting = False
             yield "Restarted. Watching the server's log for the bots module's rebuild…"
-        yield from self._watch(token, cancel)
+        yield from self._watch(token, cancel, booting=booting, restart_owed=restart_owed)
 
     def _after_a_failed_restart(
         self,
@@ -731,7 +732,7 @@ class PoolRebuild:
         token: str,
         started_before: str,
         restart_owed: bool = False,
-    ) -> Iterator[str]:
+    ) -> Generator[str, None, bool]:
         """A restart that raised may still have brought the world up, and the world reads the
         request as it starts -- so ask before taking it back.
 
@@ -746,8 +747,7 @@ class PoolRebuild:
         and raise saying it may run at the next start.
         """
         if isinstance(exc, botpool.StopFailed):
-            yield from self._after_a_failed_stop(exc, token, started_before, restart_owed)
-            return
+            return (yield from self._after_a_failed_stop(exc, token, started_before, restart_owed))
         try:
             up = self.world_running()
         except Exception as check:  # noqa: BLE001 - an unknown answer is its own branch
@@ -758,7 +758,7 @@ class PoolRebuild:
                 f"The restart reported an error ({exc}), but the world came up. Watching the "
                 "server's log for the bots module's rebuild…"
             )
-            return
+            return False
         if up is False:
             raise PoolResetError(
                 f"The restart failed ({exc}) and the world is down. {self._take_back()}"
@@ -772,13 +772,15 @@ class PoolRebuild:
 
     def _after_a_failed_stop(
         self, exc: botpool.StopFailed, token: str, started_before: str, restart_owed: bool
-    ) -> Iterator[str]:
+    ) -> Generator[str, None, bool]:
         """The STOP raised, so nothing was started: decide by what the run itself logged.
 
-        The module reads the request once per run, late in world start-up
-        (`PlayerbotAIConfig::Initialize` -> `RandomBotService::Initialize` ->
-        `PlanAtStartup`, RandomBotService.cpp:237; ~80-90 s after the container
-        starts on the live gate). So a container start time proves nothing on
+        The module reads the request once per run, late in world start-up:
+        `BotHostAdapter::OnStartup` calls `sPlayerbotAIConfig.Initialize()` (which
+        reads the key) and then `RandomBotService::Initialize()` one after the
+        other (BotHostAdapter.cpp:85-86), and the service's `PlanAtStartup`
+        (RandomBotService.cpp:237) acts on it -- ~80-90 s after the container
+        starts on the live gate. So a container start time proves nothing on
         its own -- a run still booting reads a key written after its start --
         and this app's clock is never compared with the daemon's. Instead:
 
@@ -787,8 +789,10 @@ class PoolRebuild:
         * the same run (same `StartedAt`, up): its log decides. A line naming
           our token -> it read it, watched. A planning outcome without our
           token (`_planned`) -> it planned before the write and never reads
-          the key again: called off. No planning line yet, or no readable log
-          -> KEEP (it may still be booting towards reading it);
+          the key again: called off. No planning line yet in a log scoped to
+          this run -> it is still starting and may read the request as it
+          finishes: WATCHED (`_watch(booting=True)`), which ends as called off
+          if the run then plans without our token. No readable log -> KEEP;
         * down, or `StartedAt` unreadable: the last run's log, the same way --
           our token -> kept, and said; planning without it AND `StartedAt`
           unchanged -> called off; anything else -> kept.
@@ -811,7 +815,7 @@ class PoolRebuild:
                 "request was written, so that run read it. Watching the server's log for the "
                 "bots module's rebuild…"
             )
-            return
+            return False
         log = self._ask(self.world_log)
         seen = _planned(log.text, token) if log is not None else None
         if seen == "ours":
@@ -821,21 +825,34 @@ class PoolRebuild:
                     "request as it started. Watching the server's log for the bots module's "
                     "rebuild…"
                 )
-                return
+                return False
             raise PoolResetError(
                 f"The server could not be stopped ({exc}), and its last run read the request, "
                 "so the rebuild runs or resumes at its next start. The request stays in "
                 f"aiplayerbot.conf until the rebuild has finished. {WHO_CLEARS_IT} To call the "
                 f"rebuild off before then, set {KEY} to off.{self._owed(restart_owed)}"
             ) from exc
-        if seen == "other" and same_run and log is not None and log.this_run_only:
-            said, taken = self._called_off(exc)
+        scoped = log is not None and log.this_run_only
+        if seen == "other" and same_run and scoped:
+            said, taken = self._called_off(f"The server could not be stopped ({exc})")
             raise PoolResetError(f"{said}{self._owed(restart_owed, taken=taken)}") from exc
+        if seen is None and up is True and same_run and scoped:
+            yield (
+                f"The server could not be stopped ({exc}), and it is still starting up, so it may "
+                "read the request as it finishes. Watching the server's log for the bots "
+                "module's rebuild…"
+            )
+            return True
+        when = (
+            "so the rebuild runs at its next start"
+            if up is False
+            else "so the rebuild may start as the running server finishes starting, or at its "
+            "next start"
+        )
         raise PoolResetError(
-            f"The server could not be stopped ({exc}), so the rebuild runs at its next "
-            "start. The request stays in aiplayerbot.conf until the rebuild has finished. "
-            f"{WHO_CLEARS_IT} To call the rebuild off before then, set {KEY} to off."
-            f"{self._owed(restart_owed)}"
+            f"The server could not be stopped ({exc}), {when}. The request stays in "
+            f"aiplayerbot.conf until the rebuild has finished. {WHO_CLEARS_IT} To call the "
+            f"rebuild off before then, set {KEY} to off.{self._owed(restart_owed)}"
         ) from exc
 
     @staticmethod
@@ -847,15 +864,14 @@ class PoolRebuild:
             return f" {OWED_AFTER_A_STOP}"
         return f" {OWED_KEY_OFF_FIRST}"
 
-    def _called_off(self, exc: Exception) -> tuple[str, bool]:
-        """Take the request back after a failed stop; the sentence, and whether it was taken."""
+    def _called_off(self, why: str) -> tuple[str, bool]:
+        """Take the request back; `why` first. The sentence, and whether it was taken."""
         said = self._take_back()
         if said != TAKEN_BACK:
-            return f"The server could not be stopped ({exc}). {said}", False
+            return f"{why}. {said}", False
         return (
-            f"The server could not be stopped ({exc}), so the rebuild was called off: {KEY} is "
-            "back to off and nothing will happen at a later restart; press Rebuild random bots… "
-            "again when ready.",
+            f"{why}, so the rebuild was called off: {KEY} is back to off and nothing will happen "
+            "at a later restart; press Rebuild random bots… again when ready.",
             True,
         )
 
@@ -919,11 +935,34 @@ class PoolRebuild:
                 + " The rebuild goes on over the bots that are enrolled."
             )
 
-    def _watch(self, token: str, cancel: threading.Event | None) -> Iterator[str]:
+    def _watch(
+        self,
+        token: str,
+        cancel: threading.Event | None,
+        *,
+        booting: bool = False,
+        restart_owed: bool = False,
+    ) -> Iterator[str]:
+        """Read the run's log until the module says how the rebuild ended, or time runs out.
+
+        `booting`: a run that was up BEFORE the request was written and had not
+        planned yet (`_after_a_failed_stop`). Its first planning outcome decides
+        whether it read the request: one naming our token -> an ordinary
+        watch from there; one without it (e.g. "reset off") -> it read the file
+        before the write and never reads it again, so the request is called
+        off. Read before `read_log`, which would call "reset off" a server that
+        "started without reading this rebuild request" -- not what happened.
+        """
         deadline = self.monotonic() + self.timeout_s
         said: set[str] = set()
         while True:
             log = self.world_log()
+            if booting and log.this_run_only:
+                seen = _planned(log.text, token)
+                if seen == "other":
+                    text, taken = self._called_off(BOOTED_WITHOUT_IT)
+                    raise PoolResetError(f"{text}{self._owed(restart_owed, taken=taken)}")
+                booting = seen is None
             watch = read_log(log.text, token, this_run_only=log.this_run_only)
             for line in watch.seen:
                 if line not in said:
@@ -951,6 +990,12 @@ class PoolRebuild:
                 return
             self.pause(self.poll_s, cancel)
 
+
+BOOTED_WITHOUT_IT = (
+    "The running server finished starting without the request: it read aiplayerbot.conf before "
+    "the request was written"
+)
+"""A booting run that planned without our token (round 9); `_called_off` finishes it."""
 
 OWED_KEY_OFF_FIRST = (
     "The server was not restarted, so the bots enrolled during the update are not online yet: "

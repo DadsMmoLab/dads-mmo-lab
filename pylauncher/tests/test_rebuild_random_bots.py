@@ -1595,7 +1595,7 @@ def _stop_fails_job(
     world: World,
     *,
     started: tuple[str, str],
-    log: str | None,
+    log: str | list[str] | None,
     scoped: bool = True,
     reads: list[str] | None = None,
 ) -> poolreset.PoolRebuild:
@@ -1607,12 +1607,17 @@ def _stop_fails_job(
         world.restart_tried = True
         raise botpool.StopFailed("compose stop said no")
 
+    logs = list(log) if isinstance(log, list) else None
+
     def run_log() -> docker.RunLog:
         if reads is not None:
             reads.append("read")
         if log is None:
             raise RuntimeError("docker logs said no")
-        return docker.RunLog(log, this_run_only=scoped)
+        if logs is not None:
+            # One read per poll; the last one stays.
+            return docker.RunLog(logs.pop(0) if len(logs) > 1 else logs[0], this_run_only=scoped)
+        return docker.RunLog(log, this_run_only=scoped)  # type: ignore[arg-type]
 
     job = world.rebuild(
         timeout_s=0.0,
@@ -1649,16 +1654,68 @@ def test_a_failed_stop_on_a_run_that_planned_before_the_write_calls_the_rebuild_
     assert len(tuning.backups_of(path)) == 1, "write_key's only; the take-back makes none"
 
 
-def test_a_failed_stop_on_a_run_still_booting_keeps_the_request(tmp_path: Path) -> None:
+BOOTING_SAID = "and it is still starting up, so it may read the request as it finishes"
+
+
+def test_a_failed_stop_on_a_run_still_booting_is_watched_and_kept_on_timeout(
+    tmp_path: Path,
+) -> None:
     """Measured on the live gate: ~80-90 s from container start to the planning line. A run
-    that has not planned yet will read the key the user just wrote."""
+    that has not planned yet will read the key the user just wrote -- so it is WATCHED, and a
+    watch that runs out keeps the request."""
     _conf(tmp_path)
     world = World(tmp_path, running_after_failed_restart=True)
     job = _stop_fails_job(world, started=SAME, log=BOOTING)
+    lines = list(job.rebuild())
+    assert any(BOOTING_SAID in line for line in lines)
+    assert "may still be running" in lines[-1]
+    assert world.key() == f"once:{TOKEN}"
+    assert not any(CALLED_OFF in line for line in lines)
+
+
+def test_a_booting_run_that_then_reads_our_token_is_watched_to_the_end(tmp_path: Path) -> None:
+    _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    job = _stop_fails_job(
+        world, started=SAME, log=[BOOTING, BOOTING + stamped(scheduled(), progress(25), applied())]
+    )
+    job.timeout_s = 3600.0
+    lines = list(job.rebuild())
+    assert any(BOOTING_SAID in line for line in lines)
+    assert "made again" in lines[-1]
+    assert world.key() == "off", "applied, so taken back as ever"
+
+
+@pytest.mark.parametrize("planned", [OFF_LINE, scheduled(OTHER_TOKEN)], ids=["off", "other"])
+def test_a_booting_run_that_then_plans_without_our_token_is_called_off(
+    tmp_path: Path, planned: str
+) -> None:
+    """It read aiplayerbot.conf before the write: "reset off" here does not mean the server
+    started without reading the request, and the message says what did happen."""
+    path = _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    job = _stop_fails_job(world, started=SAME, log=[BOOTING, BOOTING + stamped(planned)])
+    job.timeout_s = 3600.0
+    with pytest.raises(poolreset.PoolResetError) as caught:
+        list(job.rebuild(restart_owed=True))
+    said = str(caught.value)
+    assert "read aiplayerbot.conf before the request was written" in said
+    assert CALLED_OFF in said and "started without reading" not in said
+    assert poolreset.OWED_AFTER_A_STOP in said
+    assert world.key() == "off" and path.read_bytes() == CONF_TEXT.encode("utf-8")
+
+
+def test_the_same_run_with_an_unscoped_log_is_never_called_off(tmp_path: Path) -> None:
+    """Without this run's start time the log is every run's: an older run's "reset off" says
+    nothing about this one."""
+    _conf(tmp_path)
+    world = World(tmp_path, running_after_failed_restart=True)
+    job = _stop_fails_job(world, started=SAME, log=PLANNED_OFF, scoped=False)
     with pytest.raises(poolreset.PoolResetError) as caught:
         list(job.rebuild())
-    assert world.key() == f"once:{TOKEN}"
-    assert CALLED_OFF not in str(caught.value)
+    said = str(caught.value)
+    assert world.key() == f"once:{TOKEN}" and CALLED_OFF not in said
+    assert "as the running server finishes starting, or at its next start" in said
 
 
 def test_a_failed_stop_on_a_run_whose_log_names_our_token_is_watched(tmp_path: Path) -> None:
