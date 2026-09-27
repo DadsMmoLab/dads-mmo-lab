@@ -339,3 +339,119 @@ def test_a_file_that_cannot_be_read_now_counts_as_off(tmp_path: Path) -> None:
     note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
     assert note is not None and NOT_PUT_BACK in note
     assert path.read_bytes() == CONF_TEXT.encode("utf-8")
+
+
+# ------------------------------------------------------------------ round 2: sections (Codex)
+#
+# ACE files each `[section]`'s names separately, and the module's `GetValueHelper`
+# returns the first section, in the order `enumerate_sections` walks its hash
+# map, that has the key -- not a file order anyone can predict. So across
+# sections Yu'lon fails safe: the file asks for a rebuild if ANY section's value
+# asks for one, and disagreeing sections never read as off. Inside one section
+# the last assignment still wins.
+
+MAIN = "[AiPlayerbotConf]\n"
+OTHER = "[Extra]\n"
+ARMED_LINE = f"{ARMED}\n"
+OFF_KEY_LINE = f"{KEY} = off\n"
+
+
+def test_armed_in_the_main_section_and_off_in_a_later_one_is_seen_and_cleared(
+    tmp_path: Path,
+) -> None:
+    path = _conf(tmp_path, MAIN + ARMED_LINE + OTHER + OFF_KEY_LINE)
+    assert poolreset.setting(tmp_path) == f"once:{TOKEN}"
+    taken = poolreset.before_restore(TORTOISE, tmp_path)
+    assert taken is not None and taken.previous == f"once:{TOKEN}"
+    assert path.read_text() == MAIN + OFF_KEY_LINE + OTHER + OFF_KEY_LINE
+
+
+def test_off_first_and_armed_in_a_later_section_is_seen_and_cleared(tmp_path: Path) -> None:
+    path = _conf(tmp_path, MAIN + OFF_KEY_LINE + OTHER + ARMED_LINE)
+    assert poolreset.setting(tmp_path) == f"once:{TOKEN}"
+    assert poolreset.before_restore(TORTOISE, tmp_path) is not None
+    assert path.read_text() == MAIN + OFF_KEY_LINE + OTHER + OFF_KEY_LINE
+
+
+def test_a_section_named_twice_is_one_section_and_its_last_assignment_wins(
+    tmp_path: Path,
+) -> None:
+    """ACE compares section names case-blind (`ACE_Configuration_ExtId::operator==`), so a
+    header met again reopens the same section: its later `off` replaces the `once:`."""
+    _conf(tmp_path, MAIN + ARMED_LINE + "[aiplayerbotconf]\n" + OFF_KEY_LINE)
+    assert poolreset.setting(tmp_path) == "off"
+
+
+def test_lines_before_any_section_count_as_a_section_of_their_own(tmp_path: Path) -> None:
+    _conf(tmp_path, ARMED_LINE + MAIN + OFF_KEY_LINE)
+    assert poolreset.setting(tmp_path) == f"once:{TOKEN}"
+
+
+@pytest.mark.parametrize("order", ["once-first", "always-first"])
+def test_a_once_anywhere_is_what_the_file_says_so_a_restore_clears_every_section(
+    tmp_path: Path, order: str
+) -> None:
+    """A `once:` beside an `always` is the value reported (the one the restore gate clears);
+    the take-back then writes off in every section, the `always` included -- the module
+    could have read either."""
+    lines = [ARMED_LINE, f"{KEY} = always\n"]
+    if order == "always-first":
+        lines.reverse()
+    path = _conf(tmp_path, MAIN + lines[0] + OTHER + lines[1])
+    assert poolreset.setting(tmp_path) == f"once:{TOKEN}"
+    assert poolreset.before_restore(TORTOISE, tmp_path) is not None
+    assert path.read_text() == MAIN + OFF_KEY_LINE + OTHER + OFF_KEY_LINE
+
+
+@pytest.mark.parametrize("beside", ["off", "banana"])
+def test_always_in_one_section_is_warned_about_before_a_restore(
+    tmp_path: Path, beside: str
+) -> None:
+    _conf(tmp_path, MAIN + f"{KEY} = {beside}\n" + OTHER + f"{KEY} = always\n")
+    assert poolreset.restore_warning(tmp_path) == poolreset.ALWAYS_BEFORE_RESTORE
+    _conf(tmp_path, MAIN + f"{KEY} = always\n" + OTHER + f"{KEY} = {beside}\n")
+    assert poolreset.restore_warning(tmp_path) == poolreset.ALWAYS_BEFORE_RESTORE
+
+
+@pytest.mark.parametrize("order", ["off-first", "off-last"])
+def test_disagreeing_sections_never_read_as_off(tmp_path: Path, order: str) -> None:
+    """Nothing asks for a rebuild here, but the sections disagree: the other value is shown."""
+    lines = [OFF_KEY_LINE, f"{KEY} = banana\n"]
+    if order == "off-last":
+        lines.reverse()
+    _conf(tmp_path, MAIN + lines[0] + OTHER + lines[1])
+    assert poolreset.setting(tmp_path) == "banana"
+
+
+def test_a_write_a_second_section_would_read_differently_is_refused(tmp_path: Path) -> None:
+    """Every section is read back, not only the value `value_in` reports: here the first
+    section reads the new token and the second reads it with a form feed and more."""
+    text = MAIN + OFF_KEY_LINE + OTHER + f"{KEY} = off\x0ctail\n"
+    path = _conf(tmp_path, text)
+    with pytest.raises(poolreset.PoolResetError):
+        poolreset.write_key(TORTOISE, tmp_path, TOKEN)
+    assert path.read_bytes() == text.encode("utf-8")
+
+
+def test_a_backup_armed_in_any_section_is_put_back_with_every_section_kept_off(
+    tmp_path: Path,
+) -> None:
+    path = _conf(tmp_path, MAIN + ARMED_LINE + "X = 1\n" + OTHER + OFF_KEY_LINE)
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
+    note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
+    assert note is not None and NOT_PUT_BACK in note
+    assert path.read_text() == MAIN + OFF_KEY_LINE + "X = 1\n" + OTHER + OFF_KEY_LINE
+
+
+def test_a_backup_whose_other_section_would_add_always_is_not_put_back_whole(
+    tmp_path: Path,
+) -> None:
+    """The backup's reported value equals the file's, but its second section asks for a
+    rebuild the file does not: that section is kept at the file's value too."""
+    path = _conf(tmp_path, MAIN + ARMED_LINE + OTHER + f"{KEY} = always\n")
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + ARMED_LINE)
+    note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
+    assert note is not None
+    assert path.read_text() == MAIN + ARMED_LINE + OTHER + ARMED_LINE

@@ -66,8 +66,9 @@ editor's Revert and Undo the last reset put a backup back whole -- after a
 restore, that re-armed a request the restored databases had no record of. They
 all go through `put_back_file`, which keeps the key as the file has it now
 whenever the backup's value would arm a rebuild. The key is read the way the
-module reads it (`_assigned`: indented and quoted lines too, the last one wins)
-and written so the module reads what was written (`_with_value`).
+module reads it (`_assigned`: indented and quoted lines too, the last one in a
+section wins; across sections any request counts, `value_in`) and written into
+every section so the module reads what was written (`_with_value`).
 
 Nothing here imports Qt. `PoolRebuild.rebuild()` is a line source for the Bots
 tab's log panel and runs on that panel's worker thread.
@@ -237,21 +238,65 @@ def _assigned(line: str) -> str | None:
     return value
 
 
-def value_in(text: str) -> str:
-    """What `text` asks of the module, as the module reads it: `off` when it never says.
+def values_in(text: str) -> tuple[str, ...]:
+    """What each `[section]` of `text` sets the key to, as the module reads it, in file order.
 
-    The LAST assignment wins: ACE's `set_string_value` replaces a name it has
-    already stored, and the module's `GetStringDefault(KEY, "off")` reads the
-    one left. `aiplayerbot.conf` has one section (`[AiPlayerbotConf]`), so the
-    section a line sits in is not read. Lines end at `\n` alone (`fgets`);
-    the `\r` of a CRLF file is trimmed like any other space.
+    Inside one section the LAST assignment wins: ACE's `set_string_value`
+    replaces a name the section already holds. A section header met again,
+    in any case, reopens the same section (`ACE_Configuration_ExtId::operator==`
+    is `strcasecmp`), and lines before any header count as a section of their
+    own. Lines end at `\n` alone (`fgets`); the `\r` of a CRLF file is trimmed
+    like any other space. A section that never sets the key is not listed.
     """
-    found = "off"
+    found: dict[str, str] = {}
+    section = ""
     for line in text.split("\n"):
+        body = line.strip(_SPACE)
+        if body[:1] == "[":
+            # `import_config`: the name runs to the LAST `]`. A header without
+            # one fails the whole import, so no value would be read at all;
+            # read on as if it were one, the safe direction for a gate.
+            end = body.rfind("]")
+            section = (body[1:end] if end > 0 else body[1:]).casefold()
+            continue
         value = _assigned(line)
         if value is not None:
-            found = value
-    return found
+            found[section] = value
+    return tuple(found.values())
+
+
+def _is_off(value: str) -> bool:
+    """`ParsePoolResetSetting`: empty or `off`, trimmed and case-blind, is Off."""
+    return value.strip(" \t\r\n").lower() in ("", "off")
+
+
+def value_in(text: str) -> str:
+    """What `text` asks of the module: `off` when it never says. Fails safe across sections.
+
+    One section (the shipped file's `[AiPlayerbotConf]`): its last assignment.
+    More than one that set the key: the module's `GetValueHelper` returns the
+    FIRST section that has it in the order `enumerate_sections` walks ACE's
+    hash map -- not a file order anyone can predict (T145 round 2, Codex). So
+    the answer is the value that asks the most of the module:
+
+    * the first `once:<token>` in file order, when any section has one. It is
+      what the restore gate clears (`before_restore`), and the take-back then
+      writes `off` into EVERY section, an `always` beside it included, since
+      the module may have read either; and it is the value a failed restore
+      puts back (`put_back`), the direction that lets a part-way rebuild
+      finish rather than strand half a pool;
+    * else `always`, when any section has it: `restore_warning` names it;
+    * else the first value that is not off: sections that disagree never read
+      as off;
+    * else the first (every section is off in some spelling).
+    """
+    values = values_in(text)
+    if not values:
+        return "off"
+    once = [v for v in values if v.lower().startswith("once:")]
+    always = [v for v in values if v.lower() == "always"]
+    not_off = [v for v in values if not _is_off(v)]
+    return (once or always or not_off or list(values))[0]
 
 
 def setting(server_dir: Path) -> str:
@@ -279,16 +324,22 @@ def setting(server_dir: Path) -> str:
 
 
 def _with_value(entry: CatalogEntry, text: str, value: str) -> str:
-    """`text` with the key set to `value` for the module, every other byte kept. Pure.
+    """`text` with the key set to `value` in EVERY section that sets it. Pure.
+
+    What is kept: every line that does not assign the key, byte for byte, and
+    each key line's own line ending. What is not: a line that assigns the key
+    is rewritten whole, as `conf.patch` writes it -- `KEY = value` at column 0,
+    so its indentation, its spacing around `=` and any quotes go. A file that
+    never sets the key gets it appended at the end.
 
     `conf.patch` is the writer, and it matches column-0 lines only; the module
-    also obeys an indented one (`_assigned`), and the LAST one it reads wins.
+    also obeys an indented one (`_assigned`), in whichever section it sits.
     So every line the module reads as the key is first moved to column 0,
-    where `conf.patch` rewrites it with the rest -- otherwise an indented copy
-    below the one rewritten would stay in force (T145). Then the result is
-    read back the module's way, and a text the module would read otherwise
-    (`conf.patch` also splits at a form feed, which `fgets` does not) is
-    refused rather than written.
+    where `conf.patch` rewrites it with the rest -- otherwise an indented copy,
+    or a copy in another section (`value_in`), would stay in force (T145).
+    Then every section is read back the module's way, and a text the module
+    would read otherwise (`conf.patch` also splits at a form feed, which
+    `fgets` does not) is refused rather than written.
 
     Raises:
         InstallerError: `conf.patch`'s own refusals.
@@ -309,7 +360,7 @@ def _with_value(entry: CatalogEntry, text: str, value: str) -> str:
         ),
         {},
     )
-    if value_in(patched) != value:
+    if set(values_in(patched)) != {value}:
         raise PoolResetError(
             f"{bot_population.CONF_NAME} has a line Yu'lon cannot rewrite so that the bots "
             f"module reads {KEY} = {value}; set it by hand"
@@ -341,11 +392,13 @@ def put_back_file(
     record of that rebuild. Putting the backup back whole re-armed it, and the
     next start deleted the restored bots.
 
-    So: when the backup's value asks for a rebuild (`asks_for_a_rebuild`) and
-    is not exactly what the file on disk says now, the backup goes back with
-    the key set to the file's CURRENT value -- a restore can clear a request,
-    never arm one, and never swap one token for another. Every other byte is
-    the backup's. Otherwise `put` copies it back exactly as before. Only
+    So: when any section of the backup sets a value that asks for a rebuild
+    (`asks_for_a_rebuild`) and is not exactly what the file on disk says now
+    (`value_in`, which fails safe across sections), the backup goes back with
+    the key set to the file's CURRENT value in every section -- a restore can
+    clear a request, never arm one, and never swap one token for another.
+    Every line that does not assign the key is the backup's (`_with_value`).
+    Otherwise `put` copies it back exactly as before. Only
     `aiplayerbot.conf` is the module's bot config; any other file is `put`
     untouched. A current file that cannot be read counts as `off`.
 
@@ -366,10 +419,14 @@ def put_back_file(
         current = "off"
     raw = backup.read_bytes()
     # Replacement characters only for the question; the answer that writes decodes strictly.
-    restored = value_in(raw.decode("utf-8", errors="replace"))
-    if not asks_for_a_rebuild(restored) or restored == current:
+    sections = values_in(raw.decode("utf-8", errors="replace"))
+    # Any section, not only the one `value_in` reports: the module may read any
+    # of them (round 2), so a backup whose second section adds a request the
+    # file does not have is not put back whole either.
+    if not any(asks_for_a_rebuild(v) and v != current for v in sections):
         put(backup, target)
         return None
+    restored = next(v for v in sections if asks_for_a_rebuild(v) and v != current)
     try:
         text = _with_value(entry, raw.decode("utf-8"), current)
     except UnicodeDecodeError as exc:
