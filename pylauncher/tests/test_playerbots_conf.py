@@ -335,7 +335,13 @@ def test_where_hard_links_are_refused_the_conf_is_created_exclusively(
 ) -> None:
     folder = put_dist(tmp_path, mode=0o640).parent
     asked = _no_hard_links(monkeypatch)
-    assert azerothcore.write_from_dist(tmp_path, CONF) is True
+    # A strict umask, so the mode `os.open` asks for is cut to 0600 and only the
+    # chmod on the new file's descriptor can make it readable by everyone.
+    before = os.umask(0o077)
+    try:
+        assert azerothcore.write_from_dist(tmp_path, CONF) is True
+    finally:
+        os.umask(before)
     assert asked == [tmp_path / CONF], "the link was never tried"
     assert (tmp_path / CONF).read_bytes() == SHIPPED
     assert stat.S_IMODE((tmp_path / CONF).stat().st_mode) == 0o644
@@ -372,6 +378,37 @@ def test_an_exclusive_create_that_fails_part_way_leaves_no_conf(
     with pytest.raises(OSError, match="No space left"):
         azerothcore.write_from_dist(tmp_path, CONF)
     assert [p.name for p in folder.iterdir()] == ["playerbots.conf.dist"]
+
+
+def test_a_failed_exclusive_create_never_removes_a_file_swapped_in_at_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex, round 3: the clean-up removed `target` BY NAME. Somebody who moves the half
+    file away and puts their own conf at that name before the failure lands would lose it.
+    Only the file this call created (its device and inode) is ever removed."""
+    folder = put_dist(tmp_path).parent
+    _no_hard_links(monkeypatch)
+    conf = tmp_path / CONF
+    real = os.fsync
+    calls: list[int] = []
+
+    def fsync(fd: int) -> None:
+        calls.append(fd)
+        if len(calls) == 2:  # the conf's own, after the temp file's
+            conf.rename(conf.with_name("moved-aside"))
+            conf.write_bytes(PERSONS)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    with pytest.raises(OSError, match="No space left"):
+        azerothcore.write_from_dist(tmp_path, CONF)
+    assert conf.read_bytes() == PERSONS
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "moved-aside",
+        "playerbots.conf",
+        "playerbots.conf.dist",
+    ]
 
 
 def test_a_folder_that_cannot_be_searched_is_offered_nothing_and_does_not_raise(

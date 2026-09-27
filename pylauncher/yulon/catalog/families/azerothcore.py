@@ -144,6 +144,13 @@ def write_from_dist(server_dir: Path, file: str) -> bool:
 def _create_exclusively(target: Path, data: bytes, mode: int) -> bool:
     """`write_from_dist()`'s publish where hard links are refused: create-if-absent, or False.
 
+    A failed write removes the file it created -- and only that file (Codex,
+    round 3). The name can change hands between the create and the failure (the
+    half file moved aside, a person's own conf put at the name), so the removal
+    is by IDENTITY: the device and inode `fstat` gave the new descriptor, matched
+    against a `stat` of the name that does not follow a symlink. Anything else at
+    the name is left, and so is the half file if its identity was never read.
+
     Raises:
         OSError: the write failed; the file it had created is removed.
     """
@@ -153,17 +160,35 @@ def _create_exclusively(target: Path, data: bytes, mode: int) -> bool:
         )
     except FileExistsError:
         return False
+    created: os.stat_result | None = None
     try:
         with os.fdopen(fd, "wb") as handle:
+            created = os.fstat(handle.fileno())
             handle.write(data)
             handle.flush()
+            # `os.open`'s mode passed through the umask; this is the whole of it,
+            # set on the descriptor so it lands on the file this call made.
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
-        # `os.open`'s mode passed through the umask; this is the whole of it.
-        os.chmod(target, mode)
+        if not hasattr(os, "fchmod"):
+            # Windows has no `fchmod`, and a POSIX mode is a no-op there anyway
+            # (measured, `conf._write`'s docstring); by name is the only spelling.
+            os.chmod(target, mode)
     except BaseException:
-        target.unlink(missing_ok=True)
+        if created is not None and _is_same_file(target, created):
+            target.unlink(missing_ok=True)
         raise
     return True
+
+
+def _is_same_file(path: Path, created: os.stat_result) -> bool:
+    """Is `path` itself (not a symlink's target) still the file `created` describes?"""
+    try:
+        now = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (now.st_dev, now.st_ino) == (created.st_dev, created.st_ino)
 
 
 def conf_check(entry: CatalogEntry, server_dir: Path) -> ConfCheck:
