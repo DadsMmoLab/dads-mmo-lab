@@ -48,6 +48,7 @@ from yulon.catalog.installer import (
 from yulon.catalog.native import (
     WSL_DISTRO_STOPPED_NOTE,
     ComposeRepairRoute,
+    ConfCheck,
     ConfRepairRoute,
     LatestRoute,
     RewrittenHistory,
@@ -431,7 +432,9 @@ def repair_compose_for_app(
     )
 
 
-def repair_confs_for_app(entry: CatalogEntry, server_dir: Path) -> ConfRepairRoute | None:
+def repair_confs_for_app(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> ConfRepairRoute | None:
     """T137's half of "Repair server files…" for this install, or None when it has none.
 
     Offered wherever the catalog names `confs_from_dist` -- WotLK's
@@ -439,11 +442,25 @@ def repair_confs_for_app(entry: CatalogEntry, server_dir: Path) -> ConfRepairRou
     an id. A server inside a WSL distro is served too, unlike T106's: this reads
     and writes two files in the server folder and asks no daemon, which is the
     reason the Bots tab's count and T94's WotLK reset serve it.
+
+    But the CHECK waits for such a distro to run (review, round 2). The tab asks
+    it when it is built, and reading `\\wsl.localhost\\<distro>\\…` starts a
+    stopped distro (T133), so while WSL says the distro is down (`wsl.known_stopped`,
+    the fail-closed reading: a listing that did not answer reads the disk) the
+    check answers "nothing to offer" and the next Refresh asks again. The press
+    is not gated: it is only offered after a check that read the disk, and it
+    is the person asking for the write.
     """
     if not azerothcore.confs_from_dist(entry):
         return None
+
+    def check() -> ConfCheck:
+        if wsl_distro is not None and wsl.known_stopped(wsl_distro):
+            return ConfCheck()
+        return azerothcore.conf_check(entry, server_dir)
+
     return ConfRepairRoute(
-        check=lambda: azerothcore.conf_check(entry, server_dir),
+        check=check,
         repair=lambda: azerothcore.repair_confs(entry, server_dir),
     )
 

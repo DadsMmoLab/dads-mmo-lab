@@ -60,27 +60,54 @@ def dist_of(server_dir: Path, file: str) -> Path:
     return path.with_name(path.name + DIST_SUFFIX)
 
 
+EVERYONE_READS = 0o444
+
+
+def conf_mode(dist: Path) -> int:
+    """The mode a conf made from `dist` gets: the `.dist`'s, readable by everyone.
+
+    Never `conf.CONF_MODE`'s 0600, and not the `.dist`'s alone either (Codex,
+    round 2): the world runs as the image's `acore` user (uid 1000), and a host
+    user that is not uid 1000 owns what Yu'lon writes, so only an "others" read
+    bit is sure to let the world open it. Safe to give because the file holds no
+    secret: this family's database logins are container environment, never in
+    the conf.
+    """
+    return stat.S_IMODE(dist.stat().st_mode) | EVERYONE_READS
+
+
 def write_from_dist(server_dir: Path, file: str) -> bool:
     """Write `file` as a byte-for-byte copy of its `.dist`, if it is not there. The ONE writer.
 
     The install's `up` stage and the Server tab's Repair both call this, so a
     repaired install ends with the same file a fresh one does (T137). Returns
-    False, touching nothing, when anything is already at `file`: a person's own
-    conf is never replaced, and a resume finds its own.
+    False, and changes nothing that was there, when anything is already at
+    `file`: a person's own conf is never replaced, and a resume finds its own.
 
     Bytes, not text: the shipped file has non-ASCII comments, and it is what the
-    module's authors wrote. The mode is the `.dist`'s, not `conf.CONF_MODE`'s
-    0600: the world runs as the image's `acore` user, which reads the `.dist` the
-    same container wrote, and a host user that is not uid 1000 would otherwise
-    hand it a file it cannot open. Nothing secret is in it: the database logins
-    are container environment on this family.
+    module's authors wrote. The mode is `conf_mode()`'s.
 
-    Through a temporary sibling renamed into place, so the world never reads half
-    a file; a failure removes the sibling. The existence check comes first, before
-    the `.dist` is even read, so a conf a person has is left alone whether or not
-    its `.dist` is still there; the check and the rename are two steps, so two
-    writers racing on one install is out of scope, as it is for T106's
-    `_replace_if_unchanged()`.
+    **Never over a file, even one that appears mid-write (Codex, round 2).** The
+    first check, before the `.dist` is even read, answers the ordinary case -- a
+    conf a person has is left alone whether or not its `.dist` is still there.
+    The copy is then written whole to a temporary sibling and PUBLISHED with a
+    primitive that refuses an existing target, so a file that appears after that
+    check is not replaced either:
+
+    * `os.link()` of the finished temp file to the conf's name, which is atomic
+      and fails with EEXIST when the name is taken. Local Linux filesystems and
+      NTFS support hard links, and this is the path they take; a reader sees no
+      file or the whole one.
+    * Where the filesystem refuses a link (any other `OSError` -- vfat says
+      EPERM; a 9p/drvfs share or a `\\wsl.localhost` path may refuse too, not
+      measured), an exclusive create (`O_CREAT | O_EXCL`), which also fails on
+      an existing name but is written in place: a reader at that instant could
+      see part of it. The world reads this file only when it starts, and neither
+      caller starts it during the write, so that is accepted; a write that fails
+      part-way removes what it created, or half a conf would read as a person's
+      own and never be offered again.
+
+    The temp file is removed on every path.
 
     Raises:
         FileNotFoundError: there is no `.dist` to copy.
@@ -91,7 +118,7 @@ def write_from_dist(server_dir: Path, file: str) -> bool:
         return False
     dist = dist_of(server_dir, file)
     data = dist.read_bytes()
-    mode = stat.S_IMODE(dist.stat().st_mode)
+    mode = conf_mode(dist)
     fd, name = tempfile.mkstemp(prefix=target.name + ".", suffix=".yulon-new", dir=target.parent)
     tmp = Path(name)
     try:
@@ -100,11 +127,42 @@ def write_from_dist(server_dir: Path, file: str) -> bool:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, mode)
-        os.replace(tmp, target)
-    except BaseException:
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            logger.info(f"no hard link for {target} ({exc}); creating it exclusively instead")
+            if not _create_exclusively(target, data, mode):
+                return False
+    finally:
         tmp.unlink(missing_ok=True)
-        raise
     logger.info(f"wrote {target} from {dist.name}")
+    return True
+
+
+def _create_exclusively(target: Path, data: bytes, mode: int) -> bool:
+    """`write_from_dist()`'s publish where hard links are refused: create-if-absent, or False.
+
+    Raises:
+        OSError: the write failed; the file it had created is removed.
+    """
+    try:
+        fd = os.open(
+            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), mode
+        )
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # `os.open`'s mode passed through the umask; this is the whole of it.
+        os.chmod(target, mode)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
     return True
 
 
@@ -117,6 +175,9 @@ def conf_check(entry: CatalogEntry, server_dir: Path) -> ConfCheck:
     """
     missing: list[str] = []
     for file in confs_from_dist(entry):
+        # Not decoration: `Path.exists()`, `is_file()` and `is_symlink()` RAISE
+        # PermissionError under a folder this user cannot search, measured on
+        # both CI legs (3.11 and 3.13) -- they swallow only "not there" errors.
         try:
             absent = not (server_dir / file).exists() and not (server_dir / file).is_symlink()
             if absent and dist_of(server_dir, file).is_file():

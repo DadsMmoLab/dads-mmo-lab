@@ -1452,7 +1452,7 @@ def _assemble(
         ),
         # T137. Here for T106's reason: which installs are offered it is a fact
         # of `catalog.json` (`confs_from_dist`), answered in `install_wiring`.
-        repair_confs=install_wiring.repair_confs_for_app(entry, server_dir),
+        repair_confs=install_wiring.repair_confs_for_app(entry, server_dir, wsl_distro=wsl_distro),
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(entry, server_dir),
@@ -11642,8 +11642,15 @@ class ControllerView(QWidget):
             # Which of THIS file's keys the running containers override (T44
             # item 16, round 2). Asked of `composegen`, which is the module
             # that writes those rows, so the tab warns about the environment
-            # this install really has rather than about every editable conf.
-            shadowed=composegen.shadowed_by_env(raw, composegen.world_env(self.entry)),
+            # this install really has rather than about every editable conf --
+            # the channel's rows included while its press is live
+            # (`channel_world_env`, T137 review), or a shipped
+            # `AiPlayerbot.CommandServerPort` went unflagged under its `=0` row.
+            shadowed=composegen.shadowed_by_env(
+                raw,
+                composegen.channel_world_env(self.entry, self.services.controller.server_dir)
+                or composegen.world_env(self.entry),
+            ),
         )
 
     @Slot()

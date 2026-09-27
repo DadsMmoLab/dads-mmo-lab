@@ -1,5 +1,5 @@
-# T137 test fixture: lines 1-4, 80-106, 130-136, 150-161, 685-686 and 1782-1805 of
-# mod-playerbots conf/playerbots.conf.dist at 7bae1b5c (the catalog pin), unchanged.
+# T137 test fixture: lines 1-4, 80-106, 130-136, 150-161, 685-686, 1782-1805 and 2524-2525
+# of mod-playerbots conf/playerbots.conf.dist at 7bae1b5c (the catalog pin), unchanged.
 ##################################################
 # PLAYERBOTS CONFIGURATION FILE                  #
 ##################################################
@@ -78,3 +78,6 @@ AiPlayerbot.PremadeSpecName.1.4 = fury pvp
 AiPlayerbot.PremadeSpecGlyph.1.4 = 43432,43397,43417,43395,43396,43418
 AiPlayerbot.PremadeSpecLink.1.4.60 = -325000131500212250120511351
 AiPlayerbot.PremadeSpecLink.1.4.80 = 03220300233-325000131500212250122511351
+
+# Command server port, 0 - disabled
+AiPlayerbot.CommandServerPort = 8888

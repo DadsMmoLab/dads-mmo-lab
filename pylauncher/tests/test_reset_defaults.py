@@ -654,7 +654,7 @@ def test_a_missing_playerbots_conf_is_made_again_as_the_install_now_makes_it(
     assert [r.outcome for r in report.results] == ["reset", "reset", "recreated"]
     assert bots.read_bytes() == (installed / "env/dist/etc/modules/playerbots.conf").read_bytes()
     if sys.platform != "win32":
-        assert _mode(bots) == 0o640, "not the .dist's mode, which the install gives it"
+        assert _mode(bots) == 0o644, "not the .dist's mode made world-readable, as the install"
 
 
 def test_a_missing_playerbots_conf_with_no_dist_refuses_the_press_naming_it(

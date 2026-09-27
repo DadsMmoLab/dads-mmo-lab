@@ -749,13 +749,13 @@ def _install_mode(entry: CatalogEntry, server_dir: Path, file: str) -> int:
     A CMaNGOS conf: `conf.CONF_MODE`, as `conf.materialise` sets it. The
     override: the mode of the base `docker-compose.yml` the same install call
     (`composegen.write_plan`, a plain `write_text`) wrote beside it. A WotLK
-    module conf (T137): its `.dist`'s, as `azerothcore.write_from_dist` gives it
-    -- 0600 would lock out the image's `acore` user wherever the host user is
-    not uid 1000.
+    module conf (T137): `azerothcore.conf_mode()`, the one the install's own
+    writer gives it -- the `.dist`'s, readable by everyone -- because 0600 would
+    lock out the image's `acore` user wherever the host user is not uid 1000.
     """
     if file in azerothcore.confs_from_dist(entry):
         try:
-            return stat.S_IMODE(azerothcore.dist_of(server_dir, file).stat().st_mode)
+            return azerothcore.conf_mode(azerothcore.dist_of(server_dir, file))
         except OSError:
             return conf.CONF_MODE
     if file == composegen.OVERRIDE_FILE:

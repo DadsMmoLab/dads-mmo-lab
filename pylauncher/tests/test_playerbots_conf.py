@@ -21,6 +21,7 @@ checked on bytes a text-mode copy would get wrong.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from collections.abc import Callable
@@ -30,7 +31,7 @@ import pytest
 
 from tests.support_native import ENTRY, IMPORTED, TBC, Recorder, install
 from tests.test_controller_view import _Ps, _services
-from yulon import dbreads, docker, party, runner
+from yulon import dbreads, docker, party, runner, wsl
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import azerothcore
@@ -96,9 +97,10 @@ def test_the_install_writes_playerbots_conf_from_its_dist_byte_for_byte(tmp_path
     lines = install(rec, server_dir, one_shot=importing(rec, mode=0o640))
     conf = server_dir / CONF
     assert conf.read_bytes() == SHIPPED
-    # The .dist's mode, not conf.CONF_MODE's 0600: the world runs as the image's
-    # `acore` user, which is not the host user everywhere.
-    assert stat.S_IMODE(conf.stat().st_mode) == 0o640
+    # The .dist's mode made readable by everyone, never conf.CONF_MODE's 0600:
+    # the world runs as the image's `acore` user, which is not the host user
+    # everywhere, and the file holds no secret.
+    assert stat.S_IMODE(conf.stat().st_mode) == 0o644
     assert any("playerbots.conf" in line and "written from" in line for line in lines), lines
 
 
@@ -234,7 +236,7 @@ def test_repair_writes_the_dist_copy_and_is_then_offered_nothing(tmp_path: Path)
     assert route is not None
     assert route.repair() == native.ConfRepaired(written=(CONF,))
     assert (tmp_path / CONF).read_bytes() == SHIPPED
-    assert stat.S_IMODE((tmp_path / CONF).stat().st_mode) == 0o640
+    assert stat.S_IMODE((tmp_path / CONF).stat().st_mode) == 0o644
     assert route.check() == native.ConfCheck()
 
 
@@ -275,16 +277,139 @@ def test_a_conf_that_is_there_is_left_alone_even_with_no_dist(tmp_path: Path) ->
 def test_a_failed_write_removes_its_temp_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rename fails after the temp is written: no temp, no conf, the `.dist` untouched."""
+    """The temp file's fsync fails: no temp, no conf, the `.dist` untouched."""
     folder = put_dist(tmp_path).parent
 
-    def no_rename(src: object, dst: object) -> None:
-        raise OSError(28, "No space left on device")
+    def full(fd: int) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(os, "replace", no_rename)
+    monkeypatch.setattr(os, "fsync", full)
     with pytest.raises(OSError, match="No space left"):
         azerothcore.write_from_dist(tmp_path, CONF)
     assert [p.name for p in folder.iterdir()] == ["playerbots.conf.dist"]
+
+
+PERSONS = b"AiPlayerbot.MaxAddedBots = 3\n"
+
+
+def _appears_before_publication(monkeypatch: pytest.MonkeyPatch, conf: Path) -> None:
+    """Somebody writes `conf` in the last step before the copy is published (Codex, round 2).
+
+    The hook is the chmod of the finished temp file, which is the last thing
+    before the publish: a check made before this moment cannot see the file.
+    """
+    real = os.chmod
+
+    def chmod(path: object, mode: int, *a: object, **k: object) -> None:
+        if str(path).endswith(".yulon-new") and not conf.exists():
+            conf.write_bytes(PERSONS)
+        real(path, mode, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "chmod", chmod)
+
+
+def test_a_conf_that_appears_just_before_publication_is_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = put_dist(tmp_path).parent
+    _appears_before_publication(monkeypatch, tmp_path / CONF)
+    assert azerothcore.write_from_dist(tmp_path, CONF) is False
+    assert (tmp_path / CONF).read_bytes() == PERSONS
+    assert sorted(p.name for p in folder.iterdir()) == ["playerbots.conf", "playerbots.conf.dist"]
+
+
+def _no_hard_links(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """A filesystem that refuses `link()`, as vfat does with EPERM."""
+    asked: list[object] = []
+
+    def link(src: object, dst: object, *a: object, **k: object) -> None:
+        asked.append(dst)
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", link)
+    return asked
+
+
+def test_where_hard_links_are_refused_the_conf_is_created_exclusively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = put_dist(tmp_path, mode=0o640).parent
+    asked = _no_hard_links(monkeypatch)
+    assert azerothcore.write_from_dist(tmp_path, CONF) is True
+    assert asked == [tmp_path / CONF], "the link was never tried"
+    assert (tmp_path / CONF).read_bytes() == SHIPPED
+    assert stat.S_IMODE((tmp_path / CONF).stat().st_mode) == 0o644
+    assert sorted(p.name for p in folder.iterdir()) == ["playerbots.conf", "playerbots.conf.dist"]
+
+
+def test_without_hard_links_a_conf_that_appears_first_is_still_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = put_dist(tmp_path).parent
+    _no_hard_links(monkeypatch)
+    _appears_before_publication(monkeypatch, tmp_path / CONF)
+    assert azerothcore.write_from_dist(tmp_path, CONF) is False
+    assert (tmp_path / CONF).read_bytes() == PERSONS
+    assert sorted(p.name for p in folder.iterdir()) == ["playerbots.conf", "playerbots.conf.dist"]
+
+
+def test_an_exclusive_create_that_fails_part_way_leaves_no_conf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Half a conf would read as the person's own and never be offered again: it is removed."""
+    folder = put_dist(tmp_path).parent
+    _no_hard_links(monkeypatch)
+    real = os.fsync
+    calls: list[int] = []
+
+    def fsync(fd: int) -> None:
+        calls.append(fd)
+        if len(calls) == 2:  # the conf's own, after the temp file's
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    with pytest.raises(OSError, match="No space left"):
+        azerothcore.write_from_dist(tmp_path, CONF)
+    assert [p.name for p in folder.iterdir()] == ["playerbots.conf.dist"]
+
+
+def test_a_folder_that_cannot_be_searched_is_offered_nothing_and_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """Measured: `Path.exists()` raises PermissionError here on both CI legs (3.11 and 3.13)."""
+    if os.geteuid() == 0:
+        pytest.skip("root searches any folder")
+    folder = put_dist(tmp_path).parent
+    os.chmod(folder, 0o000)
+    try:
+        assert azerothcore.conf_check(WOTLK, tmp_path) == native.ConfCheck()
+    finally:
+        os.chmod(folder, 0o755)
+
+
+def test_a_stopped_wsl_distro_is_not_read_and_gets_no_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading `\\wsl.localhost\\…` boots a stopped distro (T133), so the check waits for it.
+
+    Through the real services builder, so the tab's wiring passes the distro on.
+    """
+    put_dist(tmp_path)
+    asked: list[str] = []
+    stopped = [True]
+
+    def known_stopped(distro: str) -> bool:
+        asked.append(distro)
+        return stopped[0]
+
+    monkeypatch.setattr(wsl, "known_stopped", known_stopped)
+    route = ControllerServices.for_entry(WOTLK, tmp_path, wsl_distro="Ubuntu").repair_confs
+    assert route is not None
+    assert route.check() == native.ConfCheck()
+    assert asked == ["Ubuntu"]
+    stopped[0] = False
+    assert route.check() == native.ConfCheck(missing=(CONF,))
 
 
 # -- the Server tab ----------------------------------------------------------------
@@ -394,3 +519,25 @@ def test_the_app_wires_the_route_into_a_wotlk_tab(tmp_path: Path) -> None:
     assert wired.repair_confs is not None
     put_dist(tmp_path)
     assert wired.repair_confs.check() == native.ConfCheck(missing=(CONF,))
+
+
+@pytest.mark.parametrize("channel_on", [False, True], ids=["channel-off", "channel-on"])
+def test_the_tuning_tab_names_the_keys_the_channel_overrides_too(
+    qapp: object, ps: _Ps, tmp_path: Path, channel_on: bool
+) -> None:
+    """Review round 2: with the channel on, the override also sets
+    `AC_AI_PLAYERBOT_COMMAND_SERVER_PORT=0` (`operations.enable_env`), which the
+    shipped `AiPlayerbot.CommandServerPort = 8888` loses to. The warning is asked
+    of the environment the override really carries, `channel_world_env()`."""
+    put_dist(tmp_path)
+    (tmp_path / CONF).write_bytes(SHIPPED)
+    if channel_on:
+        # The channel's own record that its press stands (`composegen.channel_is_on`).
+        (tmp_path / (composegen.OVERRIDE_FILE + composegen.CHANNEL_BACKUP_SUFFIX)).write_text(
+            "services: {}\n", encoding="utf-8"
+        )
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.open_tuning_file(CONF)
+    said = view.tuning_panel.shadow_warning.text()
+    assert "AiPlayerbot.MaxRandomBots" in said
+    assert ("AiPlayerbot.CommandServerPort" in said) is channel_on, said
