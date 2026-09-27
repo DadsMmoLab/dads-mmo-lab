@@ -998,3 +998,66 @@ def test_the_kept_copy_is_created_owner_only_and_a_damaged_one_is_ignored(
     assert dbsecret.recall(GENERATED_GAME, "deadbeef") is None
     path.write_text('{"volume": "v_db-data", "password": ""}', encoding="utf-8")
     assert dbsecret.recall(GENERATED_GAME, "deadbeef") is None
+
+
+# -- T138: the un-proved channel account goes with the database it lives in ----
+
+
+def _pending_record(server_dir: Path) -> Path:
+    from yulon import channel_setup
+
+    install_id = composegen.install_id(server_dir)
+    return channel_setup.save_pending(
+        channel_setup.Pending(
+            account=channel_setup.account_name(install_id), password="pending-password"
+        ),
+        game=GAME,
+        install_id=install_id,
+    )
+
+
+def test_an_unticked_purge_removes_the_pending_channel_account_with_its_database(
+    tmp_path: Path,
+) -> None:
+    """The record says a row exists; the row went with the database.
+
+    Left behind, a reinstall into the same folder -- same install id -- reads
+    `Pending`, never creates the account, and is refused for good: Repair
+    rewrites a row, and there is none.
+    """
+    from yulon import channel_setup
+
+    rec = _recorder(tmp_path)
+    record = _pending_record(rec.server_dir)
+
+    rec.uninstaller().run(keep_characters=False)
+
+    assert f"{rec._project}_db-data" in rec.removed_volumes
+    assert not record.exists()
+    install_id = composegen.install_id(rec.server_dir)
+    assert channel_setup.load_pending(GAME, install_id) is None
+
+
+def test_a_ticked_purge_keeps_the_pending_channel_account_with_the_database_it_kept(
+    tmp_path: Path,
+) -> None:
+    """The row survives in the kept volume, so the record that names its password does too."""
+    rec = _recorder(tmp_path)
+    record = _pending_record(rec.server_dir)
+
+    rec.uninstaller().run(keep_characters=True)
+
+    assert record.is_file()
+
+
+def test_a_purge_refused_before_anything_changes_keeps_the_pending_record(
+    tmp_path: Path,
+) -> None:
+    """Nothing was removed, so the row is still there and so is its record."""
+    rec = _recorder(tmp_path, running=docker.Running(ours=("ac-worldserver",)))
+    record = _pending_record(rec.server_dir)
+
+    with pytest.raises(purge.PurgeError):
+        rec.uninstaller().run(keep_characters=False)
+
+    assert record.is_file()

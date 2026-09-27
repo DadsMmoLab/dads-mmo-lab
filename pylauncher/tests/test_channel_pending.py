@@ -305,9 +305,13 @@ def test_the_pending_record_is_created_private_by_its_open_flags(
     _enabled_and_started(tmp_path, _World())
 
     pending_dir = str(setup.pending_path(WOTLK.id, INSTALL, config_dir=tmp_path / "config").parent)
-    made = [(flags, mode) for path, flags, mode in seen if path.startswith(pending_dir)]
+    made = [
+        (flags, mode)
+        for path, flags, mode in seen
+        if path.startswith(pending_dir) and flags & os.O_CREAT
+    ]
     assert made, "the pending record was not created through os.open"
-    assert all(mode == setup.CREDENTIAL_MODE and flags & os.O_CREAT for flags, mode in made)
+    assert all(mode == setup.CREDENTIAL_MODE for _, mode in made)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes are not enforced on Windows")
@@ -391,3 +395,165 @@ def test_an_unreadable_pending_record_reads_as_nothing_rather_than_raising(
 
     assert setup.load_pending(WOTLK.id, INSTALL, config_dir=tmp_path / "config") is None
     assert isinstance(_launch(tmp_path, _World()).setup_state(), setup.Idle)
+
+
+# -- round 2: the writer under contention, and a promotion that cannot land ------
+
+
+def _pending(password: str) -> setup.Pending:
+    return setup.Pending(account=ACCOUNT, password=password)
+
+
+def test_two_writers_at_once_never_remove_each_others_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check and a settle, or two app windows, writing the same record together.
+
+    The second writer runs in full while the first is between its write and
+    its rename. With one shared temporary name the second removed the first's
+    file, and the first's rename then found nothing to rename.
+    """
+    config = tmp_path / "config"
+    real_fsync = os.fsync
+    inside: list[bool] = []
+
+    def second_writer_arrives(fd: int) -> None:
+        real_fsync(fd)
+        if not inside:
+            inside.append(True)
+            setup.save_pending(
+                _pending("second-writer-22"), game=WOTLK.id, install_id=INSTALL, config_dir=config
+            )
+
+    monkeypatch.setattr(setup.os, "fsync", second_writer_arrives)
+    setup.save_pending(
+        _pending("first-writer-111"), game=WOTLK.id, install_id=INSTALL, config_dir=config
+    )
+
+    kept = setup.load_pending(WOTLK.id, INSTALL, config_dir=config)
+    assert kept is not None and kept.password == "first-writer-111", "the last rename wins"
+    folder = setup.pending_path(WOTLK.id, INSTALL, config_dir=config).parent
+    assert [p.name for p in folder.iterdir()] == [f"{WOTLK.id}-{INSTALL}.json"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a folder cannot be fsync'd through os.open on Windows")
+def test_the_rename_is_made_durable_by_syncing_the_folder_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename lives in the folder's entry, and a power cut can lose an unsynced one."""
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        events.append("fsync-folder" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync-file")
+        real_fsync(fd)
+
+    def replace(src: object, dst: object) -> None:
+        events.append("replace")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(setup.os, "fsync", fsync)
+    monkeypatch.setattr(setup.os, "replace", replace)
+    setup.save_pending(
+        _pending("durable-password"), game=WOTLK.id, install_id=INSTALL, config_dir=tmp_path
+    )
+
+    assert events == ["fsync-file", "replace", "fsync-folder"], events
+
+
+def _refusing_replace(
+    monkeypatch: pytest.MonkeyPatch, *, times: int, only: Path | None = None
+) -> list[str]:
+    """`os.replace` refused as Windows refuses it while a reader holds the target."""
+    real_replace = os.replace
+    refused: list[str] = []
+
+    def replace(src: object, dst: object) -> None:
+        if (only is None or Path(str(dst)) == only) and len(refused) < times:
+            refused.append(str(dst))
+            raise PermissionError(13, "The process cannot access the file")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(setup.os, "replace", replace)
+    return refused
+
+
+def test_on_windows_a_rename_refused_once_is_tried_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(setup, "_ON_WINDOWS", True, raising=False)
+    monkeypatch.setattr(setup, "REPLACE_PAUSE", 0.0, raising=False)
+    refused = _refusing_replace(monkeypatch, times=1)
+
+    setup.save_pending(
+        _pending("second-try-works"), game=WOTLK.id, install_id=INSTALL, config_dir=tmp_path
+    )
+
+    assert len(refused) == 1
+    kept = setup.load_pending(WOTLK.id, INSTALL, config_dir=tmp_path)
+    assert kept is not None and kept.password == "second-try-works"
+
+
+def test_on_windows_a_rename_refused_every_time_gives_up_after_a_bounded_number_of_tries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(setup, "_ON_WINDOWS", True, raising=False)
+    monkeypatch.setattr(setup, "REPLACE_PAUSE", 0.0, raising=False)
+    refused = _refusing_replace(monkeypatch, times=1000)
+
+    with pytest.raises(PermissionError):
+        setup.save_pending(
+            _pending("never-lands-1234"), game=WOTLK.id, install_id=INSTALL, config_dir=tmp_path
+        )
+
+    assert len(refused) == setup.REPLACE_TRIES > 1
+    folder = setup.pending_path(WOTLK.id, INSTALL, config_dir=tmp_path).parent
+    assert list(folder.iterdir()) == [], "the failed write left its temporary file"
+
+
+def test_off_windows_a_refused_rename_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A POSIX rename is not refused for a reader holding the file; a refusal there is real."""
+    monkeypatch.setattr(setup, "_ON_WINDOWS", False, raising=False)
+    refused = _refusing_replace(monkeypatch, times=1000)
+
+    with pytest.raises(PermissionError):
+        setup.save_pending(
+            _pending("posix-refusal-12"), game=WOTLK.id, install_id=INSTALL, config_dir=tmp_path
+        )
+
+    assert len(refused) == 1
+
+
+def test_a_proved_channel_whose_credential_cannot_be_written_stays_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The round trip answered and the file would not land: the settle does not fail.
+
+    It stays `Pending` with its record intact, so the next ask -- or the next
+    launch -- promotes it with the password the row has.
+    """
+    world = _World()
+    first = _enabled_and_started(tmp_path, world)
+    world.loading = False
+    monkeypatch.setattr(setup, "_ON_WINDOWS", False, raising=False)
+    target = setup.credential_path(WOTLK.id, INSTALL, config_dir=tmp_path / "config")
+    refused = _refusing_replace(monkeypatch, times=1000, only=target)
+    before = first.setup_state()
+    assert isinstance(before, setup.Pending)
+
+    with caplog.at_level(logging.WARNING):
+        state = first.settle()
+
+    assert refused, "the promotion never tried to write"
+    assert isinstance(state, setup.Pending), state
+    assert state.tries == before.tries, "the server answered: no try is spent"
+    assert "could not save" in caplog.text
+    assert world.rows[ACCOUNT] not in caplog.text
+    kept = setup.load_pending(WOTLK.id, INSTALL, config_dir=tmp_path / "config")
+    assert kept is not None and kept.password == world.rows[ACCOUNT]
+
+    monkeypatch.undo()
+    assert isinstance(first.settle(), setup.Verified)
+    assert world.creates == [ACCOUNT]

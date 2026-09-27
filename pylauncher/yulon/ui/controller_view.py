@@ -5675,7 +5675,8 @@ class ControllerView(QWidget):
         `check()` and not `settle()`: settle creates an account on an install
         that has none, and opening a tab is not permission to write a row into
         the user's auth database. `check()` asks nothing at all unless there is
-        a credential to ask about.
+        a saved credential or an account an earlier run created and did not
+        prove (T138) to ask about, and it never creates one.
         """
         setup = self.services.channel_setup
         if setup is None:

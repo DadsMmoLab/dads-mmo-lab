@@ -54,6 +54,7 @@ import json
 import os
 import re
 import secrets
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -661,7 +662,30 @@ A chmod afterwards is a second step, and the window before it is exactly when
 the file is world-readable. On Windows the mode argument is ignored, which is
 why the test asserts the flags the file was CREATED with rather than reading the
 mode back — a read-back test would pass there for the wrong reason.
+
+**So "owner-only" is a POSIX fact, not a Windows one.** There the file takes the
+ACL it inherits from `%APPDATA%` in the user's profile -- by default the user,
+SYSTEM and Administrators -- and nothing here narrows it. That holds for the
+verified credential since 8.2a and for the pending record since T138; an
+owner-only DACL on the whole `credentials/` folder is T151.
 """
+
+_ON_WINDOWS = os.name == "nt"
+"""Where a rename can be refused for a reader, and a folder cannot be fsync'd (T138)."""
+
+REPLACE_TRIES = 5
+"""How many times a refused rename onto a credential is tried, on Windows only (T138).
+
+Windows refuses `os.replace` onto a file another handle holds open without
+delete-sharing -- a check reading the credential while a settle promotes it, or
+a virus scanner looking at a file that was just written. That lasts
+milliseconds, so a few short tries clear it, and a bound keeps a file that is
+really locked from hanging the settle. POSIX renames over a reader, so there a
+refusal is real and is not tried again.
+"""
+
+REPLACE_PAUSE = 0.05
+"""Seconds between those tries: 0.2 s at most before the refusal is reported."""
 
 
 def credential_path(game: str, install_id: str, *, config_dir: Path | None = None) -> Path:
@@ -719,28 +743,78 @@ def save_credential(
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Put `text` at `path` owner-only, and whole or not at all (T138).
+    """Put `text` at `path` whole or not at all, owner-only on POSIX (T138).
 
-    Owner-only by the creation flags, for `CREDENTIAL_MODE`'s reason. Whole by
-    writing a sibling, forcing it to disk and renaming it over `path`: a
-    power cut part-way leaves the file that was there, never a truncated one
-    that reads as no credential and sends the next launch to mint a password.
-    The sibling is created `O_EXCL` after any leftover is removed, so a stale
-    one with a wider mode is never written into.
+    Owner-only by the creation flags on POSIX, for `CREDENTIAL_MODE`'s reason;
+    on Windows the file keeps the profile's inherited ACL (see there). Whole by
+    writing a sibling, forcing it to disk, renaming it over `path` and then
+    forcing the rename itself to disk: a power cut part-way leaves the file
+    that was there, never a truncated one that reads as no credential and sends
+    the next launch to mint a password.
+
+    **The sibling's name is this write's own.** It was one shared `<name>.tmp`
+    removed before every write, and a check and a settle writing at once -- or
+    two app windows -- then removed each other's file in the middle of a write
+    (Codex review of T138). Now each write makes a fresh name `O_EXCL`, removes
+    only that name if it fails, and never touches another writer's. The name
+    ends `.tmp`, so nothing that lists `*.json` in these folders reads a
+    leftover as a credential.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    temp.unlink(missing_ok=True)
+    temp = _temporary_path(path)
     handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, CREDENTIAL_MODE)
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(temp, path)
+        _replace(temp, path)
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
+    _sync_folder(path.parent)
+
+
+def _temporary_path(path: Path) -> Path:
+    """A name beside `path` that no other write will pick: hidden, random, `.tmp`."""
+    return path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+
+
+def _replace(temp: Path, path: Path) -> None:
+    """`os.replace`, tried again a few times where Windows refuses it for a reader."""
+    tries = REPLACE_TRIES if _ON_WINDOWS else 1
+    for attempt in range(1, tries + 1):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if attempt == tries:
+                raise
+            time.sleep(REPLACE_PAUSE)
+
+
+def _sync_folder(folder: Path) -> None:
+    """Make a rename in `folder` survive a power cut, where the OS lets this app ask.
+
+    A rename is an entry in the folder, and on POSIX the entry is not durable
+    until the folder itself is fsync'd. Windows is skipped: `os.open` cannot
+    open a directory there (that needs `FILE_FLAG_BACKUP_SEMANTICS`), and NTFS
+    journals the rename's metadata itself. A folder that cannot be synced
+    costs durability, not the write, so it is said and not raised.
+    """
+    if _ON_WINDOWS:
+        return
+    try:
+        handle = os.open(folder, os.O_RDONLY)
+    except OSError as exc:
+        logger.info(f"could not open {folder} to sync it: {type(exc).__name__}")
+        return
+    try:
+        os.fsync(handle)
+    except OSError as exc:
+        logger.info(f"could not sync {folder}: {type(exc).__name__}")
+    finally:
+        os.close(handle)
 
 
 def pending_path(game: str, install_id: str, *, config_dir: Path | None = None) -> Path:
@@ -763,7 +837,8 @@ def save_pending(
     record on disk means the row is there with this password. That is what lets
     a later launch re-verify it instead of creating -- the latch, across a
     close. Written with the verified credential's care, because it is the same
-    password a minute earlier.
+    password a minute earlier: through `_write_private()`, owner-only on POSIX
+    and under the profile's ACL on Windows, exactly as that file is.
     """
     path = pending_path(game, install_id, config_dir=config_dir)
     payload = json.dumps({"account": pending.account, "password": pending.password}, indent=2)
@@ -910,15 +985,28 @@ def ensure(
         return current.verify_failed()
 
     verified = current.verified()
-    save_credential(
-        verified,
-        game=game,
-        install_id=install_id,
-        host=host,
-        port=port,
-        namespace=namespace,
-        config_dir=config_dir,
-    )
+    try:
+        save_credential(
+            verified,
+            game=game,
+            install_id=install_id,
+            host=host,
+            port=port,
+            namespace=namespace,
+            config_dir=config_dir,
+        )
+    except OSError as exc:
+        # Proved, and the file would not land -- on Windows a reader holding
+        # it past `REPLACE_TRIES`, anywhere a full disk. Failing the settle
+        # would throw the answer away with nothing said; staying `Pending`
+        # keeps the password in this run and its record on disk, so the next
+        # ask or the next launch promotes it. No try is spent: the server
+        # answered (T138).
+        logger.warning(
+            f"the command channel for {game} answered, but its credential could not save "
+            f"({type(exc).__name__}); it stays pending and is saved at the next ask"
+        )
+        return current
     return verified
 
 
