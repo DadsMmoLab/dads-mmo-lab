@@ -4078,6 +4078,9 @@ def test_every_zone_the_game_ports_are_written_to_is_named_in_the_plan() -> None
         daemon="running",
         route=networking.SshRoute(ports=(2222,), listeners_readable=True),
         zones=("public", "wanzone"),
+        # Both zones answered a plain no before the plan (T142): only then is
+        # the take-back the plan's own write to remove.
+        admitted=_answering(False, False),
     )
     written = [" ".join(c) for c in p.firewall_commands]
     assert "firewall-cmd --permanent --zone=wanzone --add-port=3724/tcp" in written
@@ -6302,3 +6305,299 @@ def test_t140_apply_runs_the_runtime_adds_elevated_and_counts_an_already_enabled
     assert report.done == tuple(" ".join(c) for c in _PUBLIC_WRITES + _PUBLIC_RUNTIME_ADDS)
     assert not any("firewall-cmd" in line for line in report.skipped), report.skipped
     assert report.refusals == ()
+
+
+# --- T142: the breadth note's take-back must not cut a hole in the user's range --
+#
+# Measured on a Fedora box running firewalld 2.4.0. At runtime (2026-09-26,
+# T140's gate, `runtime-add-rc.txt`): in a zone listing `1025-65535/tcp`,
+# `--add-port=3724/tcp` answered `success` and left no entry of its own, and
+# `--remove-port=3724/tcp` then left `1025-3723/tcp 3725-65535/tcp`. In the
+# saved configuration (2026-09-27, throwaway permanent zones): the same zone
+# answered `--query-port=3724/tcp` yes, `--add-port=3724/tcp` "Warning:
+# ALREADY_ENABLED" rc 0 with the list unchanged, and `--remove-port=3724/tcp`
+# split it the same way; an empty zone answered no, took `3724/tcp` as its own
+# entry, and was empty again after the remove. The breadth note handed every
+# exposed zone that remove command, so a user who followed it on a zone whose
+# own range admitted the game port closed that port for everything the range
+# let in. The take-back is now offered only for a pair firewalld answered a
+# plain NO for before the plan wrote it — and for no pair it could not answer
+# (Codex: an unknown pair may hold the user's own exact `3724/tcp` entry, and
+# nothing read after the write can tell it from the plan's).
+#
+# The fixture below answers the way the same Fedora box answered from the
+# logged-in desktop session (both sides readable): `FedoraWorkstation` lists
+# `1025-65535/tcp` and says yes on both sides; `docker` says `target: ACCEPT`.
+# `wanzone` — a second NIC's zone that admits nothing — is constructed, and
+# answers the way firewall-cmd answers for a port a zone does not list (rc 1
+# `no`, measured on `docker`'s port query and on the empty permanent zone).
+
+_WANZONE_INFO = "wanzone (active)\n  target: default\n  interfaces: eth1\n  ports: \n"
+"""`--info-zone` of a zone that lets nothing in: default target, no ports."""
+
+
+def _workstation_and_wanzone(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """firewalld from the desktop session: the range zone yes, docker ACCEPT, `wanzone` no."""
+    assert argv[0] == "firewall-cmd", f"a desktop-session probe carries no prefix: {argv}"
+    rest = [a for a in argv if a != "--permanent"]
+    last = rest[-1]
+    if last == "--info-zone=docker":
+        return subprocess.CompletedProcess(argv, 0, _DOCKER_ZONE_INFO, "")
+    if last == "--info-zone=wanzone":
+        return subprocess.CompletedProcess(argv, 0, _WANZONE_INFO, "")
+    if last == "--info-zone=FedoraWorkstation":
+        return subprocess.CompletedProcess(argv, 0, _range_zone_info("FedoraWorkstation"), "")
+    if last.startswith("--query-port=") and "--zone=FedoraWorkstation" in rest:
+        return subprocess.CompletedProcess(argv, 0, "yes\n", "")
+    if last.startswith("--query-port=") and "--zone=wanzone" in rest:
+        return subprocess.CompletedProcess(argv, 1, "no\n", "")
+    raise AssertionError(f"not a query this plan should make: {argv}")
+
+
+_TWO_NIC_WORKSTATION = networking.FirewalldZoning(
+    write=("FedoraWorkstation", "docker", "wanzone"),
+    permanent=("FedoraWorkstation", "docker", "wanzone"),
+    runtime=("FedoraWorkstation", "docker", "wanzone"),
+    default_zone="FedoraWorkstation",
+    configured_default_zone="FedoraWorkstation",
+    machine_made=("docker",),
+)
+"""Fedora Workstation's own zone on one NIC, a `wanzone` on a second, and Docker's zone."""
+
+_SSH_22 = networking.SshRoute(connected=True, ports=(22,), listeners_readable=True)
+"""A settled table with sshd on 22: the guard allows the reload, so the breadth note is said."""
+
+_TAKE_BACK = (
+    "take one back with `sudo firewall-cmd --permanent --zone=<zone> "
+    "--remove-port=<port>/tcp`, then `sudo firewall-cmd --reload`."
+)
+
+
+def _breadth_note(p: networking.NetworkPlan) -> str:
+    notes = [w for w in p.warnings if w.startswith("firewalld: the game ports")]
+    assert len(notes) == 1, p.warnings
+    return notes[0]
+
+
+def test_t142_a_zone_whose_range_admitted_the_port_is_offered_no_take_back() -> None:
+    """The measured Fedora zone and a second zone that admits nothing, through the real plan.
+
+    `FedoraWorkstation`'s range admitted both game ports before the plan, so
+    neither is written there, and the note must not hand it a `--remove-port`
+    — that is the command measured to split the range. `wanzone` answered no,
+    so what is in it now is exactly what the plan wrote, and taking it back
+    restores what was there. Docker's zone admitted both by its ACCEPT target
+    and was written nothing either, so it did not "get the ports".
+    """
+    p = _firewalld_plan(
+        daemon="running",
+        route=_SSH_22,
+        zoning=_TWO_NIC_WORKSTATION,
+        admitted=_asking(_workstation_and_wanzone),
+        mode="internet",
+    )
+    game = [
+        c for c in p.firewall_commands if c[-1] in ("--add-port=3724/tcp", "--add-port=8085/tcp")
+    ]
+    assert game == [
+        ("firewall-cmd", "--permanent", "--zone=wanzone", "--add-port=3724/tcp"),
+        ("firewall-cmd", "--permanent", "--zone=wanzone", "--add-port=8085/tcp"),
+    ], "the range zone and Docker's ACCEPT zone need nothing written"
+    assert ("firewall-cmd", "--reload") in p.firewall_commands, "wanzone was not in effect"
+    said = _breadth_note(p)
+    assert (
+        "firewalld's saved configuration already allowed 3724/tcp and 8085/tcp in zone "
+        "FedoraWorkstation before this plan, so this plan wrote none of them and there is "
+        "nothing to take back"
+    ) in said
+    assert (
+        "This plan wrote 3724/tcp and 8085/tcp in zone wanzone, which firewalld did not allow "
+        "before: " + _TAKE_BACK
+    ) in said
+    assert said.count("--remove-port") == 1, "one take-back, and it names wanzone's pairs only"
+    assert "`docker` already let the game ports in and is not counted above" in said
+    assert "got the ports too" not in said
+
+
+def test_t142_every_exposed_zone_already_admitting_offers_no_remove_command() -> None:
+    """Both exposed zones saved-admit both ports; the reload stays (runtime said no): no remove."""
+    p = _firewalld_plan(
+        daemon="running",
+        route=_SSH_22,
+        zones=("home", "public"),
+        admitted=_answering(False, True),
+    )
+    assert ("firewall-cmd", "--reload") in p.firewall_commands
+    said = _breadth_note(p)
+    assert "--remove-port" not in said, said
+    assert (
+        "firewalld's saved configuration already allowed 3724/tcp and 8085/tcp in zones home "
+        "and public before this plan"
+    ) in said
+    assert "WRITTEN" not in said, "nothing was written to either zone"
+
+
+def test_t142_the_take_back_is_per_port_not_per_zone() -> None:
+    """One zone admits 8085 by its own settings and not 3724: only 3724 there may be taken back."""
+
+    def per_port(pairs: tuple[tuple[str, str], ...]) -> tuple[networking.PortAdmission, ...]:
+        return tuple(
+            networking.PortAdmission(
+                zone, port, False, not (zone == "public" and port == "3724/tcp")
+            )
+            for zone, port in pairs
+        )
+
+    p = _firewalld_plan(
+        daemon="running", route=_SSH_22, zones=("home", "public"), admitted=per_port
+    )
+    said = _breadth_note(p)
+    assert (
+        "This plan wrote 3724/tcp in zone public, which firewalld did not allow before: "
+        + _TAKE_BACK
+    ) in said
+    assert (
+        "firewalld's saved configuration already allowed 3724/tcp in zone home; 8085/tcp in "
+        "zones home and public before this plan, so this plan wrote none of them"
+    ) in said
+
+
+def test_t142_a_runtime_yes_is_not_a_saved_yes() -> None:
+    """A port in effect by a running rule only is still written, and still the plan's to take back.
+
+    `home` admits both ports at runtime and not in its saved configuration;
+    `public` admits neither, so the reload stays. The take-back is a
+    `--permanent --remove-port` and a reload, and the reload installs the saved
+    configuration — so only the saved answer decides it, and `home`'s saved
+    no makes both zones the plan's own writes.
+    """
+
+    def runtime_only_home(
+        pairs: tuple[tuple[str, str], ...],
+    ) -> tuple[networking.PortAdmission, ...]:
+        return tuple(
+            networking.PortAdmission(zone, port, zone == "home", False) for zone, port in pairs
+        )
+
+    p = _firewalld_plan(
+        daemon="running", route=_SSH_22, zones=("home", "public"), admitted=runtime_only_home
+    )
+    assert ("firewall-cmd", "--reload") in p.firewall_commands
+    said = _breadth_note(p)
+    assert (
+        "This plan wrote 3724/tcp and 8085/tcp in zones home and public, which firewalld did "
+        "not allow before: " + _TAKE_BACK
+    ) in said
+    assert "already allowed" not in said
+
+
+def test_t142_an_unknown_answer_offers_no_remove_command() -> None:
+    """No answer: the zone may hold the user's own exact rule, so no take-back is offered at all.
+
+    Codex's finding on round 1: the check it offered instead ("leave it if a
+    range covers it") reads the zone AFTER the plan wrote, so a zone that
+    already had the exact entry `3724/tcp` looks the same as one the plan
+    wrote it into, and the remove would take the user's own rule.
+    """
+    p = _firewalld_plan(daemon="running", route=_SSH_22, zones=("home", "public"))
+    said = _breadth_note(p)
+    assert "--remove-port" not in said, said
+    assert (
+        "Yu'lon could not tell whether firewalld already allowed 3724/tcp and 8085/tcp in "
+        "zones home and public before this plan wrote them, so it gives no command to take "
+        "them back"
+    ) in said
+    assert "This plan wrote" not in said
+
+
+def _per_port(pairs: tuple[tuple[str, str], ...]) -> tuple[networking.PortAdmission, ...]:
+    """`public` saved-admits 8085 and not 3724; `home` admits neither."""
+    return tuple(
+        networking.PortAdmission(zone, port, False, zone == "public" and port == "8085/tcp")
+        for zone, port in pairs
+    )
+
+
+@pytest.mark.parametrize(
+    ("admitted", "lead"),
+    [
+        (
+            _answering(False, False),
+            "have been WRITTEN to `home`, `public` — and are not in effect until firewalld "
+            "loads them",
+        ),
+        (
+            _answering(False, True),
+            "were already in firewalld's saved configuration for `home`, `public` — and are "
+            "not in effect until firewalld loads it",
+        ),
+        (
+            _per_port,
+            "have been WRITTEN to, or were already in firewalld's saved configuration for, "
+            "`home`, `public` — and are not in effect until firewalld loads them",
+        ),
+    ],
+    ids=["none saved", "all saved", "some saved"],
+)
+def test_t142_a_refused_reload_says_written_only_for_what_was_written(
+    admitted: _Admission, lead: str
+) -> None:
+    """With the reload refused nothing is in effect, and a pair already saved was not WRITTEN."""
+    p = _firewalld_plan(
+        daemon="running", route=_UNSETTLED, zones=("home", "public"), admitted=admitted
+    )
+    assert any("REFUSED to run `firewall-cmd --reload`" in r for r in p.refusals)
+    assert _breadth_note(p).startswith(f"firewalld: the game ports (3724, 8085) {lead} — ")
+
+
+def test_t142_a_stopped_daemon_nobody_asked_gets_no_remove_command() -> None:
+    """A stopped daemon is never asked (no answers at all): every pair is unknown, not dropped.
+
+    And no `firewall-cmd` line of any kind: this plan's writes were
+    `firewall-offline-cmd`, and `firewall-cmd` refuses while the daemon is down.
+    """
+    p = _firewalld_plan(
+        daemon="stopped", route=_SSH_22, zones=("home", "public"), admitted=_never_asked
+    )
+    said = _breadth_note(p)
+    assert (
+        "Yu'lon could not tell whether firewalld already allowed 3724/tcp and 8085/tcp in "
+        "zones home and public before this plan wrote them"
+    ) in said
+    assert "--remove-port" not in said and "firewall-cmd" not in said, said
+
+
+def test_t142_a_stopped_daemon_takes_back_with_the_offline_tool() -> None:
+    """A pair answered NO on a stopped daemon is taken back the way it was written: offline.
+
+    `plan()` never asks a stopped daemon today, so this is the decision alone
+    (`decide_lockout()`), with the answers named: `firewall-cmd --permanent`
+    and `--reload` both refuse while firewalld is down, and the offline tool
+    writes the zone file firewalld loads when it starts.
+    """
+    zones = ("home", "public")
+    question = networking.LockoutQuestion(
+        backend="firewalld",
+        route=_SSH_22,
+        enables=False,
+        reloads=False,
+        ports=(3724, 8085),
+        firewalld_daemon="stopped",
+        zones=zones,
+        zoning=networking.FirewalldZoning(
+            write=zones, permanent=zones, default_zone="public", configured_default_zone="public"
+        ),
+        admissions=tuple(
+            networking.PortAdmission(zone, port, None, False)
+            for zone in zones
+            for port in ("3724/tcp", "8085/tcp")
+        ),
+    )
+    notes = networking.decide_lockout(question).notes
+    assert len(notes) == 1, notes
+    assert (
+        "This plan wrote 3724/tcp and 8085/tcp in zones home and public, which firewalld did "
+        "not allow before: take one back with `sudo firewall-offline-cmd --zone=<zone> "
+        "--remove-port=<port>/tcp`"
+    ) in notes[0]
+    assert "firewall-cmd" not in notes[0] and "--reload" not in notes[0], notes[0]
