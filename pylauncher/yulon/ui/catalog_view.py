@@ -43,6 +43,7 @@ from yulon.catalog.installer import (
     unsupported_platform_message,
 )
 from yulon.log import get_logger
+from yulon.ui import single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import COLOR_TEXT_GOLD
@@ -1031,8 +1032,11 @@ class CatalogView(QWidget):
         ):
             # Only returns if the exec failed, and then the user is told what
             # actually went wrong rather than being left looking at a dialog
-            # that closed and did nothing.
-            platform.restart_under_docker_group()
+            # that closed and did nothing. The single-instance lock is handed
+            # over around it: the exec keeps this PID, and the restarted app
+            # would otherwise find its own lock held and refuse to open (T152).
+            with single_instance.handed_over():
+                platform.restart_under_docker_group()
             QMessageBox.warning(self, "Install failed", message)
         return True
 
