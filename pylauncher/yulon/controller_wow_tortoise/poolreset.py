@@ -76,7 +76,10 @@ tab's log panel and runs on that panel's worker thread.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -478,21 +481,34 @@ def put_back_file(
 
     Returns the report's sentence when the key was kept, else None.
 
+    `put` is used for any other file only. `aiplayerbot.conf` is written from
+    the bytes read here, by `_replace_if_unchanged`, whichever the route: an
+    atomic replace, where the card's and the raw editor's `tuning.restore` was
+    a `copy2` straight onto the file; the backup's mode and times on a whole
+    copy, as `copy2` and `reset_defaults.restore` gave; the file's own mode
+    and a fresh time on a rewritten one, as `conf.replace_file` gave.
+
     Raises:
-        OSError: nothing was written -- `put`'s own failure, a backup that could
-            not be read, or one that asks for a rebuild and cannot be rewritten
-            (not UTF-8 text).
+        OSError: nothing was written -- a backup or file that could not be
+            read, one that asks for a rebuild and cannot be rewritten (not
+            UTF-8 text), a file that changed while this ran
+            (`CHANGED_WHILE_PUTTING_BACK`), or the write's own failure.
     """
     if target != server_dir / bot_population.CONF_FILE:
         put(backup, target)
         return None
+    # One read of each, and those bytes decide AND are written (round 5): a
+    # backup opened twice could say one thing to the question and another to
+    # the copy, and a file whose key lines were read must still be that file
+    # when the result replaces it (`_replace_if_unchanged`).
     raw = backup.read_bytes()
+    before = _read_if_there(target)
     # Replacement characters only for the question; the answer that writes decodes strictly.
     requests = [
         v for v in values_in(raw.decode("utf-8", errors="replace")) if asks_for_a_rebuild(v)
     ]
     if not requests:
-        put(backup, target)
+        _replace_if_unchanged(target, raw, before, like=backup)
         return None
     restored = requests[0]
     try:
@@ -503,21 +519,79 @@ def put_back_file(
             f"random bots ({KEY} = {restored}), so Yu'lon will not put it back: {exc}"
         ) from exc
     try:
-        with target.open(encoding="utf-8", newline="") as handle:
-            current = handle.read()
-    except (OSError, UnicodeDecodeError) as exc:
+        current = (before or b"").decode("utf-8")
+    except UnicodeDecodeError as exc:
         logger.warning(f"could not read {target} before putting a backup back: {exc}")
         current = ""
     text = _with_key_lines_of(current, backup_text)
     if text == backup_text:
-        put(backup, target)
+        _replace_if_unchanged(target, raw, before, like=backup)
         return None
-    try:
-        conf.replace_file(target, text)
-    except InstallerError as exc:
-        raise OSError(str(exc)) from exc
+    _replace_if_unchanged(target, text.encode("utf-8"), before, like=None)
     logger.info(f"put {backup.name} back over {target} with its {KEY} lines kept as they were")
     return REQUEST_NOT_PUT_BACK.format(file=target.name, restored=restored)
+
+
+def _read_if_there(path: Path) -> bytes | None:
+    """The file's bytes, or None when there is no file. Raises any other `OSError`."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _replace_if_unchanged(
+    target: Path, data: bytes, before: bytes | None, *, like: Path | None
+) -> None:
+    """Put `data` in place of `target` atomically, if `target` still holds `before`. Round 5.
+
+    `data` goes to an owner-only sibling first (`tuning.private_copy`'s rule:
+    the conf holds the database password). `like` given: that file's mode and
+    times (`shutil.copystat`, only its metadata is read again), which is what
+    the routes' copies of a whole backup gave. None: the file's own mode, as
+    `conf.replace_file` keeps it, owner-writable.
+
+    Then `target` is read again and compared with `before`, the bytes its key
+    lines were taken from; changed -- another press, a restore clearing the
+    request, a hand edit -- the temp is removed and nothing is written. That
+    shrinks the window to one read and one rename; without a lock every writer
+    honours it cannot be closed, and no such lock exists across the app, the
+    server and an editor. Refusing rather than retrying: what to put back over
+    a file that moved is the person's call.
+
+    Raises:
+        OSError: nothing was written.
+    """
+    tmp = target.with_name(f"{target.name}{PUT_BACK_TEMP_SUFFIX}")
+    try:
+        mode: int | None = stat.S_IMODE(target.stat().st_mode)
+    except OSError:
+        mode = None
+    try:
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, tuning.PRIVATE_MODE)
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        if like is not None:
+            shutil.copystat(like, tmp)
+        elif mode is not None:
+            os.chmod(tmp, mode | stat.S_IWUSR)
+        if _read_if_there(target) != before:
+            raise OSError(CHANGED_WHILE_PUTTING_BACK.format(file=target.name))
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+PUT_BACK_TEMP_SUFFIX = ".yulon-putback-tmp"
+"""What a Tuning backup being put back is called until the rename lands (round 5)."""
+
+CHANGED_WHILE_PUTTING_BACK = (
+    "{file} changed on disk while the copy was being put back, so nothing was written; press "
+    "the button again to put it back over the file as it is now"
+)
+"""`_replace_if_unchanged`'s refusal: the routes put it in their own report line."""
 
 
 def _with_key_lines_of(current: str, backup: str) -> str:

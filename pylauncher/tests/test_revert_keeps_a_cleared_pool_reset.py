@@ -22,6 +22,9 @@ that.
 
 from __future__ import annotations
 
+import os
+import stat
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -638,25 +641,149 @@ def test_a_section_the_backup_has_without_the_key_gets_the_files_line_under_its_
     assert path.read_text() == MAIN + OFF_KEY_LINE + OTHER + ONCE_B + "Y = 1\n"
 
 
-def test_matching_key_lines_go_back_byte_for_byte_through_the_routes_own_copy(
-    tmp_path: Path,
-) -> None:
+def test_matching_key_lines_go_back_byte_for_byte(tmp_path: Path) -> None:
     """The backup's key lines are the file's own, two disagreeing sections included: nothing
-    changes about the request, so the route's copy puts the backup back exactly."""
-    copied: list[Path] = []
-
-    def put(backup: Path, target: Path) -> None:
-        copied.append(backup)
-        tuning.restore(backup, target)
-
+    changes about the request, so the backup goes back exactly, with no note. Since round 5
+    it is written from the bytes inspected, not by the route's copy."""
     path = _conf(tmp_path, MAIN + ONCE_A + "X = 1\n" + OTHER + ONCE_B)
     made = tuning.backup(path)
     _conf(tmp_path, MAIN + ONCE_A + "X = 2\n" + OTHER + ONCE_B)
-    assert World(tmp_path).rebuild().put_back_file(made, path, put) is None
-    assert copied == [made]
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is None
     assert path.read_bytes() == made.read_bytes()
 
 
 def test_the_files_key_line_takes_the_place_of_the_backups(tmp_path: Path) -> None:
     path, _, _ = _revert(tmp_path, MAIN + "X = 1\n" + ARMED_LINE + "Y = 1\n", MAIN + ONCE_B)
     assert path.read_text() == MAIN + "X = 1\n" + ONCE_B + "Y = 1\n"
+
+
+# ------------------------------------------------------ round 5: what was read is written
+#
+# Codex on round 4: the backup was inspected, then copied again by path; and the
+# file's key lines were read, then the file replaced without a look. Now the
+# bytes inspected are the bytes written, and the file is read again just before
+# the replace: changed since, nothing is written.
+
+CHANGED = "changed on disk while the copy was being put back"
+
+
+def _after_reading(
+    monkeypatch: pytest.MonkeyPatch, watched: Path, then: Callable[[], None]
+) -> list[bool]:
+    """Run `then` once, right after the first read of `watched` -- by `read_bytes` or `open`.
+
+    `then` writes by `os.replace`, so a handle already open keeps the old bytes: the
+    reader has what it read, and the disk has moved on, whichever way the code reads.
+    """
+    fired: list[bool] = []
+    real_read_bytes, real_open = Path.read_bytes, Path.open
+
+    def fire(path: Path) -> None:
+        if path == watched and not fired:
+            fired.append(True)
+            then()
+
+    def read_bytes(self: Path) -> bytes:
+        data = real_read_bytes(self)
+        fire(self)
+        return data
+
+    def open_(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        handle = real_open(self, mode, *args, **kwargs)  # type: ignore[call-overload]
+        if "r" in mode and "+" not in mode:
+            fire(self)
+        return handle
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "open", open_)
+    return fired
+
+
+def _swap(path: Path, text: str) -> Callable[[], None]:
+    def write() -> None:
+        side = path.with_name(path.name + ".swap")
+        side.write_bytes(text.encode("utf-8"))
+        os.replace(side, path)
+
+    return write
+
+
+def test_a_file_cleared_while_its_key_lines_were_read_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file asks `once:B`; the backup asks `once:A`. Between reading the file and writing
+    the result, another path clears the request: writing the key lines read before would
+    arm B again."""
+    path = _conf(tmp_path, MAIN + ONCE_A + "X = 1\n")
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + ONCE_B + "X = 2\n")
+    cleared = MAIN + OFF_KEY_LINE + "X = 2\n"
+    fired = _after_reading(monkeypatch, path, _swap(path, cleared))
+    with pytest.raises(OSError, match=CHANGED):
+        World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
+    assert fired
+    assert path.read_text() == cleared, "the clear stands"
+    assert not list(tmp_path.glob("etc/*tmp*")), "no temporary file left behind"
+
+
+def test_a_file_edited_while_a_plain_backup_goes_back_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole-backup branch too: a backup with no request, a file edited meanwhile."""
+    path = _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 1\n")
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
+    edited = MAIN + ARMED_LINE + "X = 3\n"
+    _after_reading(monkeypatch, path, _swap(path, edited))
+    with pytest.raises(OSError, match=CHANGED):
+        World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
+    assert path.read_text() == edited
+
+
+def test_a_backup_changed_after_it_was_inspected_is_not_what_goes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backup read as `off` is what is written, even when the file at its path has come
+    to say `once:` since."""
+    inspected = MAIN + OFF_KEY_LINE + "X = 1\n"
+    path = _conf(tmp_path, inspected)
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
+    _after_reading(monkeypatch, made, _swap(made, MAIN + ARMED_LINE + "X = 1\n"))
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is None
+    assert path.read_text() == inspected
+
+
+def test_a_rewritten_backup_is_the_inspected_one_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inspected = MAIN + ARMED_LINE + "X = 1\n"
+    path = _conf(tmp_path, inspected)
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
+    _after_reading(monkeypatch, made, _swap(made, MAIN + ARMED_LINE + "X = 9\n"))
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is not None
+    assert path.read_text() == MAIN + OFF_KEY_LINE + "X = 1\n"
+
+
+def test_a_whole_backup_keeps_its_mode_and_times_as_the_copy_did(tmp_path: Path) -> None:
+    path = _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 1\n")
+    os.chmod(path, 0o640)
+    os.utime(path, (1_000_000_000, 1_000_000_000))
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
+    os.chmod(path, 0o600)
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is None
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert path.stat().st_mtime == 1_000_000_000
+    assert not list(tmp_path.glob("etc/*tmp*")), "no temporary file left behind"
+
+
+def test_a_rewritten_backup_keeps_the_files_own_mode(tmp_path: Path) -> None:
+    path = _conf(tmp_path, MAIN + ARMED_LINE + "X = 1\n")
+    os.chmod(path, 0o600)
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE + "X = 2\n")
+    os.chmod(path, 0o644)
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is not None
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
