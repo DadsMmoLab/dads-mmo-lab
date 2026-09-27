@@ -27,7 +27,6 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal
 
@@ -2801,32 +2800,6 @@ def world_running(container: str, *, wsl_distro: str | None = None) -> bool | No
 def started_at(container: str, *, wsl_distro: str | None = None) -> str:
     """When the container's CURRENT run began, or `""` if it cannot be read."""
     return container_state(container, wsl_distro=wsl_distro).started_at
-
-
-_DOCKER_TIME = re.compile(
-    r"^(?P<second>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d+))?"
-    r"(?P<zone>Z|[+-]\d{2}:\d{2})$"
-)
-
-
-def started_at_time(container: str, *, wsl_distro: str | None = None) -> datetime | None:
-    """`started_at()` as an aware datetime, or None when unreadable or never started (T144).
-
-    Docker prints RFC 3339 with nanoseconds (`2026-09-26T10:00:05.123456789Z`),
-    which `fromisoformat` does not take, so the fraction is cut to
-    microseconds first. `0001-01-01T00:00:00Z` is Docker's "never started".
-    """
-    raw = started_at(container, wsl_distro=wsl_distro)
-    m = _DOCKER_TIME.match(raw.strip())
-    if m is None:
-        return None
-    fraction = (m["fraction"] or "")[:6].ljust(6, "0")
-    zone = "+00:00" if m["zone"] == "Z" else m["zone"]
-    try:
-        when = datetime.fromisoformat(f"{m['second']}.{fraction}{zone}")
-    except ValueError:
-        return None
-    return None if when.year <= 1 else when.astimezone(UTC)
 
 
 def _logs(
