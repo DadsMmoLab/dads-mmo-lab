@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import apply as apply_module
+from yulon.git import Behind, is_behind
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import FAMILY_FILES
 from yulon.ui.theme import (
@@ -224,16 +225,35 @@ first.
 """
 
 
-def chip_update_label(behind: int, release: str = "", updated: bool = False) -> str:
+def chip_update_label(behind: int | Behind, release: str = "", updated: bool = False) -> str:
     """The update chip's own label, so the view and the tests cannot spell it apart.
 
     A module that follows its releases (T126) is offered the RELEASE, not a
-    count of the commits between it and the branch tip.
+    count of the commits between it and the branch tip. A shallow checkout
+    that cannot prove how far behind it is (T147) is offered the update and no
+    number: the one it used to show was measured at 2775 for a real 50.
     """
     if release:
         return f"Update available — {'updated' if updated else 'new'} release {release}"
+    if behind is Behind.UNCOUNTED:
+        return "Update available"
     plural = "" if behind == 1 else "s"
     return f"Update available — {behind} commit{plural} behind"
+
+
+def _upstream_has(behind: int | Behind) -> str:
+    """The update chips' first sentence, with the count only where there is one (T147).
+
+    One spelling for both update chips -- the per-module one and T146's
+    `server_update` -- so neither can print a figure for a checkout that could
+    not prove it.
+    """
+    if behind is Behind.UNCOUNTED:
+        return (
+            "its upstream has commits this checkout does not — how many, a shallow checkout "
+            "cannot count."
+        )
+    return f"its upstream has {behind} commit(s) this checkout does not."
 
 
 def chip_required_by_label(names: Sequence[str]) -> str:
@@ -380,8 +400,11 @@ class SessionState:
 
     rebuild_owed: frozenset[tuple[str, str]] = frozenset()
     sql_owed: Mapping[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
-    behind: Mapping[tuple[str, str], int] = field(default_factory=dict)
+    behind: Mapping[tuple[str, str], int | Behind] = field(default_factory=dict)
     """All three keyed by `(family, id)` and NOT by a bare id (round 2).
+
+    `behind` holds a count or `Behind.UNCOUNTED` (T147), and only for a row
+    `git.is_behind()` says has something to update to.
 
     Nothing makes a manifest id unique across families: the store loads
     `manifests/<game>/<family>/` one directory at a time and no invariant spans
@@ -581,25 +604,25 @@ def _chips_for(
         )
     behind = session.behind.get(key, 0)
     release = session.releases.get(key, "")
-    if behind > 0 and manifest is None and server_update:
+    if is_behind(behind) and manifest is None and server_update:
         chips.append(
             Chip(
                 "owed",
                 chip_update_label(behind),
-                f"{item_id}: its upstream has {behind} commit(s) this checkout does not. It is "
-                "part of the server: the server install cloned it, no module manifest covers "
-                "it, and it is updated with the server. This press is "
-                f"{CHIP_ACTION_LABELS['server_update']}, which asks first and then moves the "
-                f"server's code and {item_id} together to upstream's newest and rebuilds.",
+                f"{item_id}: {_upstream_has(behind)} It is part of the server: the server "
+                "install cloned it, no module manifest covers it, and it is updated with the "
+                f"server. This press is {CHIP_ACTION_LABELS['server_update']}, which asks first "
+                f"and then moves the server's code and {item_id} together to upstream's newest "
+                "and rebuilds.",
                 "server_update",
             )
         )
-    elif behind > 0 and manifest is not None:
+    elif is_behind(behind) and manifest is not None:
         said = (
             f"{item_id}: {release} is its newest published release, and this checkout is not "
             f"on it. Update fetches and RESETS the clone to that release, "
             if release
-            else f"{item_id}: its upstream has {behind} commit(s) this checkout does not. "
+            else f"{item_id}: {_upstream_has(behind)} "
             "Update fetches and RESETS the clone to the upstream tip, "
         )
         chips.append(

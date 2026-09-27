@@ -28,6 +28,7 @@ Two traps are baked in here rather than left for each caller to remember:
 
 from __future__ import annotations
 
+import enum
 import os
 import re
 import shutil
@@ -532,6 +533,44 @@ class HistoryReader(Protocol):
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None: ...
 
 
+class Behind(enum.Enum):
+    """ "Behind, and this checkout cannot say by how many": the third answer (T147).
+
+    A shallow checkout lies about the distance in both directions, and the
+    number is read by a person on a chip and in a report. Measured on
+    mod-playerbots, depth 1 at `b949b50b` and one `git fetch origin master`:
+    `rev-list --count HEAD..FETCH_HEAD` said **2775** for a distance GitHub
+    and a full clone both put at **50**. The fetch hands the history of every
+    branch merged since, down to the root, while the commits under HEAD's
+    graft never arrive to exclude it. The same checkout with the tip already
+    fetched at depth 1 -- `_pin()`'s shape -- said **1**, because that tip is a
+    graft too and the walk from it stops at once.
+
+    A member of its own and not a number, so it cannot be added, compared or
+    formatted as a count by anybody who has not first asked what it is; and not
+    `None`, which is "could not ask" and carries no chip at all. The one thing
+    it does say is true: the fetched commit is not one this checkout can show
+    it already has.
+    """
+
+    UNCOUNTED = "uncounted"
+
+
+BehindCount = int | Behind | None
+"""What `commits_behind()` answers: a count, `Behind.UNCOUNTED`, or `None` for "could not ask"."""
+
+
+def is_behind(count: BehindCount) -> bool:
+    """Is there anything to update to? `Behind.UNCOUNTED` is; `0` and `None` are not (T147).
+
+    Spelled once because every reader of the figure has to make the same
+    three-way decision, and `(behind or 0) > 0` -- what they each wrote before
+    the uncounted answer existed -- is a type error on it rather than a silent
+    "no".
+    """
+    return count is Behind.UNCOUNTED or (isinstance(count, int) and count > 0)
+
+
 @runtime_checkable
 class BehindReader(Protocol):
     """ "How many commits would an update bring in?" — the fourth read-only question.
@@ -543,7 +582,9 @@ class BehindReader(Protocol):
     is a NUMBER a user reads, so "could not ask" has to stay distinguishable
     from "nothing to bring in" — `None` and `0` are different sentences on
     screen, and collapsing them is the same defect this file has already
-    recorded twice (`native.read_claim()`, `read_clone_claim()`).
+    recorded twice (`native.read_claim()`, `read_clone_claim()`). A third
+    answer, `Behind.UNCOUNTED`, is "behind, by a number a shallow checkout
+    cannot prove" (T147), and it is neither of those two either.
 
     A fourth one-method Protocol rather than a method on `HistoryReader`, for
     the reason `HistoryReader` is not a method on `TreeReader`: a fake satisfies
@@ -552,7 +593,7 @@ class BehindReader(Protocol):
     instead.
     """
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None: ...
+    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount: ...
 
 
 class VersionReader(Protocol):
@@ -636,6 +677,80 @@ def _parse_count(raw: str) -> int | None:
     except ValueError:
         logger.debug(f"git rev-list --count did not answer with a number: {raw!r}")
         return None
+
+
+_SHALLOW_AND_HEAD = ["rev-parse", "--is-shallow-repository", "HEAD"]
+"""One question, two answers: is this checkout shallow, and which commit is HEAD (T147)."""
+
+_BEHIND_COUNT = ["rev-list", "--count", "HEAD..FETCH_HEAD"]
+"""The figure for a FULL checkout, where the range is the truth as it stands."""
+
+_BEHIND_WALK = ["rev-list", "--parents", "--boundary", "HEAD..FETCH_HEAD"]
+"""The same range for a SHALLOW checkout, listed so the count can be proved first (T147).
+
+Each counted commit on a line with its parents -- none shown for a root or a
+graft -- and, prefixed `-`, every commit the walk stopped at.
+"""
+
+
+def _behind_after_fetch(ask: Callable[[list[str]], str]) -> BehindCount:
+    """`commits_behind()` once its fetch has landed: `ask` runs one read-only git argv.
+
+    One body for both implementations, because a caller narrowing to
+    `BehindReader` never learns which it got and the figure is read by a person
+    (the argument `parse_status()` makes for `local_edits()`). `ask` raises
+    `GitError` for a git that refused, which is "could not ask".
+
+    **A full checkout is counted as it always was.** Every commit is here with
+    its real parents, so `HEAD..FETCH_HEAD` is the distance.
+
+    **A shallow one is counted only when the count can be proved (T147).** Its
+    grafts cut edges, and a cut edge lies in both directions: a commit whose
+    history was cut from the FETCHED side hides everything under it (the "1"),
+    and one cut from HEAD's side leaves HEAD's own past to be counted as new
+    (the "2775"). Two things together rule both out, and both are read off the
+    walk itself:
+
+    1. **No counted commit is parentless.** A graft or a root inside the range
+       is where history the count needs has been cut off, or where HEAD's
+       unfetched past has been handed in by a merged branch and walked to the
+       root. Every undercount goes through one, and so does the measured 2775.
+    2. **The walk stopped at HEAD and nowhere else.** If a counted commit were
+       really one of HEAD's ancestors, walking down from it inside the range
+       would end at a commit whose parents are all outside it; by (1) it has
+       parents, by (2) the only one outside is HEAD -- and HEAD cannot be an
+       ancestor of its own ancestor. A branch forked under the graft and merged
+       later breaks exactly this rule while keeping the first (the fixtures in
+       `tests/test_git.py` hold one of each).
+
+    What passes is every range laid straight on top of HEAD -- the ordinary
+    shape of a module that squash-merges -- and a checkout already up to date,
+    which is 0 on any shape. What does not is `Behind.UNCOUNTED`, never a
+    guess. Nothing is fetched to decide it: deepening would change the shape of
+    a clone this app promised to leave the shape it was made (`_update()`).
+    """
+    said = ask(_SHALLOW_AND_HEAD).split()
+    if len(said) != 2 or said[0] not in ("true", "false"):
+        logger.debug(f"git rev-parse did not say whether this is shallow and where HEAD is: {said}")
+        return None
+    shallow, head = said[0] == "true", said[1]
+    if not shallow:
+        return _parse_count(ask(_BEHIND_COUNT))
+    counted = 0
+    for line in ask(_BEHIND_WALK).splitlines():
+        ids = line.split()
+        if not ids:
+            continue
+        if ids[0].startswith("-"):
+            if ids[0][1:] != head:
+                logger.debug(f"the walk from FETCH_HEAD stopped at {ids[0][1:]}, not at HEAD")
+                return Behind.UNCOUNTED
+            continue
+        if len(ids) == 1:
+            logger.debug(f"{ids[0]} has no parent in this shallow checkout; not counting")
+            return Behind.UNCOUNTED
+        counted += 1
+    return counted
 
 
 def _fetch_ref(branch: str | None) -> str:
@@ -1059,7 +1174,7 @@ class RunnerGit:
         """
         _run_git(["git", *_LINE_ENDING_ARGS, "checkout", "--detach", "--force", rev], cwd=dest)
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
         """How many commits an update would bring into `dest`. None = cannot ask.
 
         `no_local_commits()`'s fetch and `no_local_commits()`'s target, with the
@@ -1076,6 +1191,13 @@ class RunnerGit:
         the same spelling would read a ref nothing had written since clone time
         — the measured 2026-09-01 defect in `no_local_commits()`. Same figure,
         different tree, and it had to be asked rather than inherited.
+
+        **On a shallow checkout the range is proved before it is counted**
+        (T147), and `Behind.UNCOUNTED` is the answer when it cannot be: every
+        module clone is depth 1, and there the plain range said 2775 for a
+        real 50. `_behind_after_fetch()` holds the rule, for both bodies. The
+        fetch still carries no depth, for `no_local_commits()`'s reason, and
+        nothing is deepened to make a count provable.
 
         Read-only in the sense that matters: nothing outside `.git` is touched
         and no working tree is changed. It does cost a network round trip, so it
@@ -1095,11 +1217,10 @@ class RunnerGit:
             )
             return None
         try:
-            proc = _run_git(["git", "rev-list", "--count", "HEAD..FETCH_HEAD"], cwd=dest)
+            return _behind_after_fetch(lambda argv: _run_git(["git", *argv], cwd=dest).stdout)
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
             return None
-        return _parse_count(proc.stdout)
 
     def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
         """Clone or update `spec`. With `clear_only`, stop once the destination is ready.
@@ -1669,7 +1790,7 @@ class ContainerGit:
             return None
         return _only_grafts(proc.stdout, dest)
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
         """How many commits an update would bring into `dest`. None = cannot ask.
 
         `RunnerGit.commits_behind()` carries the reasoning; both implementations
@@ -1680,8 +1801,9 @@ class ContainerGit:
         The split of containers is `no_local_commits()`'s and for its measured
         reason: the fetch is `writes=True` because `_READ_ONLY_CONTAINER_ARGS`
         begins `--network none` and a reader container cannot reach a remote at
-        all, and the count that follows stays `writes=False` because it answers
-        from the objects that fetch just landed.
+        all, and the questions that follow stay `writes=False` because they
+        answer from the objects that fetch just landed -- since T147 two of them
+        (is it shallow, then the count or the walk), each its own reader.
         """
         if not (dest / ".git").is_dir():
             return None
@@ -1694,11 +1816,10 @@ class ContainerGit:
             )
             return None
         try:
-            proc = self._capture(dest, ["rev-list", "--count", "HEAD..FETCH_HEAD"], writes=False)
+            return _behind_after_fetch(lambda argv: self._capture(dest, argv, writes=False).stdout)
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
             return None
-        return _parse_count(proc.stdout)
 
     def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
         """See `RunnerGit.clone()` for what `clear_only` is and why it exists."""
