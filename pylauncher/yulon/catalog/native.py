@@ -1497,7 +1497,9 @@ class RewrittenHistory(InstallerError):
     def __init__(self, repo: str, line: str) -> None:
         super().__init__(
             f"{line} The question you answered did not say so, so nothing was changed. "
-            f"Press \u201cUpdate the server to latest\u2026\u201d again: it will ask with "
+            # T89: the press is an entry in the "Server build ▾" menu now.
+            f"Press \u201cUpdate the server to latest\u2026\u201d under "
+            f"\u201cServer build \u25be\u201d on the Modules tab again: it will ask with "
             f"that line in it."
         )
         self.repo = repo

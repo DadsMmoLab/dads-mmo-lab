@@ -172,3 +172,181 @@ def test_sdl_parity_detects_drift_and_returns_false(monkeypatch: pytest.MonkeyPa
     assert gamepad_module._assert_sdl_parity() is False
     # And the verdict is memoized: a second call does not re-raise or re-drift.
     assert gamepad_module._assert_sdl_parity() is False
+
+
+# --- T89: a button that opens a menu, driven without a mouse. ---------------
+#
+# The Modules tab's three server-build presses are one "Server build ▾" button
+# with a menu since T89. A menu's items are `QAction`s and not widgets, so the
+# D-pad walk has nothing to move between once one is open, and the keyboard
+# filter used to eat the arrows and Return the menu reads its own items with.
+
+
+class _MenuWindow:
+    """A window holding a button whose menu has a live, a dead and a live item."""
+
+    def __init__(self) -> None:
+        from PySide6.QtWidgets import QMenu
+
+        self.win = QWidget()
+        tabs = QTabWidget(self.win)
+        tabs.setObjectName("sidebar-tabs")
+        first = QWidget()
+        layout = QVBoxLayout(first)
+        self.other = QPushButton("Other", first)
+        self.button = QPushButton("Choose ▾", first)
+        layout.addWidget(self.other)
+        layout.addWidget(self.button)
+        self.menu = QMenu(self.button)
+        self.fired: list[str] = []
+        for text in ("one", "two", "three"):
+            action = self.menu.addAction(text)
+            action.triggered.connect(lambda _checked=False, said=text: self.fired.append(said))
+        # The middle one is dead, so "Down twice lands on three" is a claim that
+        # the menu's OWN rule ran -- it skips a disabled item -- and not merely
+        # that two key presses arrived.
+        self.menu.actions()[1].setEnabled(False)
+        self.button.setMenu(self.menu)
+        tabs.addTab(first, "one")
+        tabs.addTab(QWidget(), "two")
+        self.tabs = tabs
+        QVBoxLayout(self.win).addWidget(tabs)
+        self.navigator, self.keyboard, self.gamepad = install_gamepad_navigation(self.win)
+        self.win.show()
+        self.win.activateWindow()
+        process_events()
+
+    def open_popup(self) -> object:
+        from PySide6.QtWidgets import QApplication
+
+        return QApplication.activePopupWidget()
+
+    def close(self) -> None:
+        self.menu.close()
+        self.keyboard.stop()
+        self.gamepad.stop()
+        self.win.close()
+        self.win.deleteLater()
+        process_events()
+
+
+@pytest.fixture
+def menu_window(qapp: object) -> Iterator[_MenuWindow]:
+    made = _MenuWindow()
+    yield made
+    made.close()
+
+
+def test_the_keyboard_opens_a_menu_button_moves_in_the_menu_and_chooses(
+    menu_window: _MenuWindow,
+) -> None:
+    """Return opens it, Down walks it past the dead item, Return picks (T89)."""
+    menu_window.button.setFocus()
+    process_events()
+    _press(menu_window.win, Qt.Key.Key_Return)
+    assert menu_window.open_popup() is menu_window.menu, "Return did not open the menu"
+
+    _press(menu_window.win, Qt.Key.Key_Down)
+    active = menu_window.menu.activeAction()
+    assert active is not None and active.text() == "one", "Down did not move into the menu"
+    _press(menu_window.win, Qt.Key.Key_Down)
+    active = menu_window.menu.activeAction()
+    assert active is not None and active.text() == "three", "Down did not skip the dead item"
+    _press(menu_window.win, Qt.Key.Key_Return)
+
+    assert menu_window.fired == ["three"]
+    assert menu_window.open_popup() is None, "choosing an item left the menu open"
+
+
+def test_the_pad_opens_a_menu_button_moves_in_the_menu_and_chooses(
+    menu_window: _MenuWindow,
+) -> None:
+    """The same walk through `Navigator`, which is all `GamepadSource` calls (T89).
+
+    Not a key press: a real pad reaches the navigator as `navigate()` and
+    `perform()` from the SDL poller, with no `QKeyEvent` anywhere, so passing
+    keys through the filter is not enough on its own.
+    """
+    from yulon.ui.gamepad import Action, Direction
+
+    nav = menu_window.navigator
+    menu_window.button.setFocus()
+    process_events()
+    nav.perform(Action.CONFIRM)
+    process_events()
+    assert menu_window.open_popup() is menu_window.menu, "A did not open the menu"
+
+    assert nav.navigate(Direction.DOWN) is True
+    assert nav.navigate(Direction.DOWN) is True
+    active = menu_window.menu.activeAction()
+    assert active is not None and active.text() == "three", "the D-pad did not walk the menu"
+    nav.perform(Action.CONFIRM)
+    process_events()
+
+    assert menu_window.fired == ["three"]
+    assert menu_window.open_popup() is None
+
+
+def test_back_closes_an_open_menu_and_a_bumper_does_not_switch_tab_under_it(
+    menu_window: _MenuWindow,
+) -> None:
+    """B leaves the menu with nothing chosen; LB/RB wait until it is closed (T89)."""
+    from yulon.ui.gamepad import Action, Direction
+
+    nav = menu_window.navigator
+    menu_window.button.setFocus()
+    process_events()
+    nav.perform(Action.CONFIRM)
+    process_events()
+    assert menu_window.open_popup() is menu_window.menu
+    nav.navigate(Direction.DOWN)
+
+    nav.perform(Action.CYCLE_NEXT)
+    process_events()
+    assert menu_window.tabs.currentIndex() == 0, "a bumper switched tab under an open menu"
+    nav.perform(Action.BACK)
+    process_events()
+
+    assert menu_window.open_popup() is None, "B did not close the menu"
+    assert menu_window.fired == []
+    # And once it is closed the bumper is the tab switch again.
+    nav.perform(Action.CYCLE_NEXT)
+    assert menu_window.tabs.currentIndex() == 1
+
+
+def test_backspace_closes_an_open_menu_as_b_does(menu_window: _MenuWindow) -> None:
+    """Backspace is the pad's B under Steam Input's keyboard emulation (T89 round 2).
+
+    A `QMenu` closes on Escape and ignores Backspace, so handing an open menu
+    EVERY key left B dead inside one: the menu stayed open over nothing chosen.
+    """
+    menu_window.button.setFocus()
+    process_events()
+    _press(menu_window.win, Qt.Key.Key_Return)
+    assert menu_window.open_popup() is menu_window.menu
+    _press(menu_window.win, Qt.Key.Key_Down)
+
+    _press(menu_window.win, Qt.Key.Key_Backspace)
+
+    assert menu_window.open_popup() is None, "Backspace did not close the menu"
+    assert menu_window.fired == []
+
+
+def test_the_bumper_and_confirm_keys_keep_their_pad_meaning_in_an_open_menu(
+    menu_window: _MenuWindow,
+) -> None:
+    """R and L switch nothing under an open menu; Space is A and chooses (T89 round 2)."""
+    menu_window.button.setFocus()
+    process_events()
+    _press(menu_window.win, Qt.Key.Key_Return)
+    _press(menu_window.win, Qt.Key.Key_Down)
+    for key in (Qt.Key.Key_R, Qt.Key.Key_L):
+        _press(menu_window.win, key)
+        assert menu_window.open_popup() is menu_window.menu, f"{key} closed the menu"
+        assert menu_window.tabs.currentIndex() == 0, f"{key} switched tab under the menu"
+    assert menu_window.fired == []
+
+    _press(menu_window.win, Qt.Key.Key_Space)
+
+    assert menu_window.fired == ["one"]
+    assert menu_window.open_popup() is None

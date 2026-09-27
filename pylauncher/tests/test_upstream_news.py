@@ -60,8 +60,8 @@ def test_the_count_is_asked_against_each_head_and_said_per_source(tmp_path: Path
     ]
     assert upstream.line(news) == (
         "Upstream has new code since this server was built: server 300 commits, "
-        "mod-playerbots 50 commits. “Update the server to latest…” on the "
-        "Modules tab brings it in."
+        "mod-playerbots 50 commits. “Update the server to latest…” under "
+        "“Server build ▾” on the Modules tab brings it in."
     )
 
 
