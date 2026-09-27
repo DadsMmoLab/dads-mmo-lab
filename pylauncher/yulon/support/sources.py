@@ -47,6 +47,9 @@ core files -- it never sees `mangosd.conf`, which is where CMaNGOS keeps its
 CREDENTIALS_DIR = "credentials"
 """`channel_setup.credential_path()`'s folder under the config dir."""
 
+PENDING_CREDENTIALS_DIR = "credentials/pending"
+"""`channel_setup.pending_path()`'s folder: channel accounts created and not yet proved (T138)."""
+
 APP_LOG_BACKUPS = 3
 """`log.configure(backup_count=3)`: `yulon.log.1` to `.3`."""
 
@@ -284,10 +287,16 @@ def _channel_password(game: str, install_id: str, config_dir: Path) -> str | Non
     return endpoint.password if endpoint is not None else None
 
 
+def _pending_channel_password(game: str, install_id: str, config_dir: Path) -> str | None:
+    pending = channel_setup.load_pending(game, install_id, config_dir=config_dir)
+    return pending.password if pending is not None else None
+
+
 def gather_known(sources: Sources) -> Known:
     """Every password this machine can tell us about. Never raises.
 
-    `db-secrets/` (kept copies), `credentials/` (channel accounts), each
+    `db-secrets/` (kept copies), `credentials/` (channel accounts) and
+    `credentials/pending/` (channel accounts not yet proved, T138), each
     generated install's `.db_password`, and the `DatabaseInfo` passwords in each
     install's confs, minus the catalog's public fixed values. Every value is
     stripped and a blank one dropped (see `_secret`). A store that cannot be
@@ -308,6 +317,7 @@ def gather_known(sources: Sources) -> Known:
     readers: tuple[tuple[str, Callable[[str, str, Path], str | None]], ...] = (
         (dbsecret.DIR_NAME, _kept_password),
         (CREDENTIALS_DIR, _channel_password),
+        (PENDING_CREDENTIALS_DIR, _pending_channel_password),
     )
     for folder, read in readers:
         try:

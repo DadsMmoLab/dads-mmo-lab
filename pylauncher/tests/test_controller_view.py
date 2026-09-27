@@ -4642,6 +4642,77 @@ def test_a_fresh_install_asks_again_only_while_the_first_answer_is_pending(
     assert stub.settles == 2, "Verified is not asked again"
 
 
+def test_closing_while_the_channel_is_pending_and_reopening_proves_it_without_a_repair(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enable, Start, close inside the ~40 s window, reopen: Verified, no Repair (T138).
+
+    The real `InstallChannel` over a scratch config dir and the real
+    `SoapChannel`; only the world is fake (`tests/test_channel_pending.py`).
+    The reopen lands while the world is still loading, so the tab's own check
+    times out too -- and the tab asks once more a minute later, as it does
+    after an install, because nothing else will: the server is already up, so
+    no Start is coming to settle it.
+    """
+    from tests.test_channel_pending import ACCOUNT, _launch, _World
+
+    world = _World()
+    first = ControllerView(
+        WOTLK,
+        _with_channel(ps, tmp_path, _launch(tmp_path, world)),  # type: ignore[arg-type]
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
+    ps.names = ""
+    first.refresh_status()
+    first.enable_channel()
+    first._server_action_done(None)
+    assert "waiting to be proved" in first.channel_label.text()
+    first.shutdown()
+
+    scheduled: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+    )
+    reopened = ControllerView(
+        WOTLK,
+        _with_channel(ps, tmp_path, _launch(tmp_path, world)),  # type: ignore[arg-type]
+        status_poll_ms=5,
+        job_runner=run_inline,
+    )
+    assert "waiting to be proved" in reopened.channel_label.text()
+    again = [fn for ms, fn in scheduled if ms == controller_view_module._POST_INSTALL_RESETTLE_MS]
+    assert len(again) == 1, "a pending channel found on opening is never asked again"
+
+    world.loading = False
+    again[0]()  # type: ignore[operator]
+
+    assert "verified as" in reopened.channel_label.text()
+    assert reopened.repair_channel_button.isVisibleTo(reopened) is False
+    assert world.creates == [ACCOUNT] and world.resets == 0
+    reopened.shutdown()
+
+
+def test_a_tab_that_opens_on_no_pending_channel_schedules_no_second_ask(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extra ask is for a row an earlier run left un-proved, and only then."""
+    scheduled: list[int] = []
+    monkeypatch.setattr(
+        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append(ms)
+    )
+    stub = _StubSetup(
+        state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-27 01:00 UTC")
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=5, job_runner=run_inline
+    )
+
+    assert stub.checks == 1
+    assert controller_view_module._POST_INSTALL_RESETTLE_MS not in scheduled
+    view.shutdown()
+
+
 def test_a_tab_torn_down_within_the_minute_is_not_asked_again(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
