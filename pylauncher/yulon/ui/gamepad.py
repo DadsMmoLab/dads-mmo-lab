@@ -38,11 +38,13 @@ window composes it and connects its signals.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Iterable
 from enum import Enum
 from typing import Protocol
 
+import shiboken6
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
@@ -56,6 +58,10 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QWidget,
 )
+
+from yulon.log import get_logger
+
+_logger = get_logger(__name__)
 
 
 class GameController(Protocol):
@@ -100,6 +106,87 @@ AXIS_RIGHT_X = 2
 AXIS_RIGHT_Y = 3
 AXIS_TRIGGER_LEFT = 4
 AXIS_TRIGGER_RIGHT = 5
+
+# The mirrored `pygame.CONTROLLER_*` constants above are hand-copied from SDL's
+# gamecontrollerdb semantic IDs. They are fixed by the SDL spec and will not
+# drift on their own, but "will not drift" is not "verified": a future pygame
+# that remaps them would silently mis-bind every button with no error at all.
+# This table maps each re-exported name to the pygame attribute it mirrors, so
+# `_assert_sdl_parity()` can prove the mirror at controller start-up.
+_SDL_PARITY: dict[str, str] = {
+    "BTN_A": "CONTROLLER_BUTTON_A",
+    "BTN_B": "CONTROLLER_BUTTON_B",
+    "BTN_X": "CONTROLLER_BUTTON_X",
+    "BTN_Y": "CONTROLLER_BUTTON_Y",
+    "BTN_BACK": "CONTROLLER_BUTTON_BACK",
+    "BTN_GUIDE": "CONTROLLER_BUTTON_GUIDE",
+    "BTN_START": "CONTROLLER_BUTTON_START",
+    "BTN_LEFT_STICK": "CONTROLLER_BUTTON_LEFTSTICK",
+    "BTN_RIGHT_STICK": "CONTROLLER_BUTTON_RIGHTSTICK",
+    "BTN_LB": "CONTROLLER_BUTTON_LEFTSHOULDER",
+    "BTN_RB": "CONTROLLER_BUTTON_RIGHTSHOULDER",
+    "BTN_DPAD_UP": "CONTROLLER_BUTTON_DPAD_UP",
+    "BTN_DPAD_DOWN": "CONTROLLER_BUTTON_DPAD_DOWN",
+    "BTN_DPAD_LEFT": "CONTROLLER_BUTTON_DPAD_LEFT",
+    "BTN_DPAD_RIGHT": "CONTROLLER_BUTTON_DPAD_RIGHT",
+    "AXIS_LEFT_X": "CONTROLLER_AXIS_LEFTX",
+    "AXIS_LEFT_Y": "CONTROLLER_AXIS_LEFTY",
+    "AXIS_RIGHT_X": "CONTROLLER_AXIS_RIGHTX",
+    "AXIS_RIGHT_Y": "CONTROLLER_AXIS_RIGHTY",
+    "AXIS_TRIGGER_LEFT": "CONTROLLER_AXIS_TRIGGERLEFT",
+    "AXIS_TRIGGER_RIGHT": "CONTROLLER_AXIS_TRIGGERRIGHT",
+}
+
+_parity_result: bool | None = None
+
+
+def _assert_sdl_parity() -> bool:
+    """Return True when the SDL constant mirror is safe to poll live hardware with.
+
+    Proves the hand-copied `BTN_*`/`AXIS_*` constants against pygame's own
+    `CONTROLLER_*` values. A genuine drift (a future pygame remapping the
+    semantic IDs) would silently re-bind every button, so it must be caught —
+    but a caught drift must DEGRADE to the keyboard, not abort launch, which is
+    why this returns a verdict instead of raising.
+
+    `False` means "the mapping is known-bad, do not start the poller". `True`
+    covers both "parity holds" and "nothing to verify against" (pygame absent,
+    or a stubbed pygame without the constants) — the mirror cannot be proven
+    wrong against nothing, and the keyboard source runs regardless.
+
+    The verdict is memoized once computed. `None` alone means "unchecked", so a
+    `False` result is NOT re-written to `True` on a later call — a drifted
+    mapping stays disabled for the life of the process.
+    """
+    global _parity_result
+    if _parity_result is not None:
+        return _parity_result
+    try:
+        import pygame
+    except ImportError:
+        _parity_result = True
+        return True
+    if not hasattr(pygame, "CONTROLLER_BUTTON_A"):
+        # A stubbed pygame (the thread test's fake) or a partial install has no
+        # semantic constants to compare against — nothing to prove wrong.
+        _parity_result = True
+        return True
+    for local, upstream in _SDL_PARITY.items():
+        expected = globals()[local]
+        actual = getattr(pygame, upstream, None)
+        if actual != expected:
+            _logger.error(
+                "gamepad SDL constant drift: %s=%s but pygame.%s=%s — "
+                "falling back to keyboard navigation",
+                local,
+                expected,
+                upstream,
+                actual,
+            )
+            _parity_result = False
+            return False
+    _parity_result = True
+    return True
 
 # The raw SDL ceiling `SDL_GameControllerAxis` can reach (Sint16 magnitude),
 # used to express the deadzone as a fraction of the full range.
@@ -171,16 +258,21 @@ _KEY_TO_ACTION: dict[int, Action] = {
     int(Qt.Key.Key_L): Action.CYCLE_PREV,
     int(Qt.Key.Key_R): Action.CYCLE_NEXT,
 }
-# The mapped keys that also type or delete text. While a field that accepts typing
-# has focus they go to the field: a player could not type an r into the console or
-# an account name (T139). Arrows, Return and Escape keep their pad meaning there,
-# so Up/Down still leave the field and A still opens the on-screen keyboard.
+# The mapped keys that also type, delete, or move the caret within a field.
+# While a field that accepts typing has focus they reach the field: a player
+# could not type an r into the console or an account name (T139). Left/Right
+# move the caret within a line/editor instead of navigating, so a keyboard
+# user can fix a typo mid-value. The vertical arrows, Return and Escape keep
+# their pad meaning there: Up/Down still leave the field and A still opens the
+# on-screen keyboard.
 _TYPING_KEYS = frozenset(
     {
         int(Qt.Key.Key_L),
         int(Qt.Key.Key_R),
         int(Qt.Key.Key_Space),
         int(Qt.Key.Key_Backspace),
+        int(Qt.Key.Key_Left),
+        int(Qt.Key.Key_Right),
     }
 )
 # Discrete actions must not auto-repeat (holding A must not spam clicks); held
@@ -277,13 +369,23 @@ class Navigator(QObject):
         """Every focusable descendant of `root`, cached per widget id.
 
         Call `invalidate()` after the tree changes (a tab opens, an install
-        adopts a server, a tile is added).
+        adopts a server, a tile is added). A miss is also recovered here: a
+        cached widget whose C++ object was deleted after the cache was built (a
+        rebuilt tab, a removed tile) is a dangling wrapper — calling
+        `mapTo()`/`setFocus()` on it raises `RuntimeError: Internal C++ object
+        already deleted`. Dead entries are dropped on read, and a cache whose
+        entries are all dead is re-walked, so navigation can never touch a
+        deleted object even when a mutation forgot `invalidate()`.
         """
         key = id(root)
         cached = self._cache.get(key)
         if cached is not None:
-            return cached
-        found = list(_iter_focusable(root))
+            alive = [w for w in cached if shiboken6.isValid(w)]
+            if alive:
+                self._cache[key] = alive
+                return alive
+            self._cache.pop(key, None)
+        found = [w for w in _iter_focusable(root) if shiboken6.isValid(w)]
         self._cache[key] = found
         return found
 
@@ -298,6 +400,8 @@ class Navigator(QObject):
         root = self._context_root()
         candidates = self._focusable(root)
         current = QApplication.focusWidget()
+        if current is not None and not shiboken6.isValid(current):
+            current = None
         if current is None and candidates:
             # Nothing focused yet (first D-pad press on a fresh window): seed the
             # top-left-most focusable so there is a visible origin for both the
@@ -398,10 +502,13 @@ class Navigator(QObject):
                 widget.click()
             return True
         if isinstance(widget, QLineEdit):
-            # Ask the platform for its on-screen keyboard (SteamOS/Windows).
-            from PySide6.QtGui import QGuiApplication
+            # Ask the platform for its on-screen keyboard (SteamOS/Windows),
+            # unless the field is read-only — summoning a keyboard there would
+            # be a dead, confusing interaction.
+            if not widget.isReadOnly():
+                from PySide6.QtGui import QGuiApplication
 
-            QGuiApplication.inputMethod().show()
+                QGuiApplication.inputMethod().show()
             return True
         if isinstance(widget, QComboBox):
             # Open the dropdown; the popup becomes the context root next event.
@@ -498,11 +605,16 @@ class KeyboardSource(QObject):
             key = int(event.key())
 
             if key in _KEY_TO_DIRECTION:
-                # A direction key is always CONSUMED by the navigator, even when
-                # it dead-ends at an edge: returning `False` here would let the
-                # arrow key fall through to the focused widget and move a
-                # spinbox value or a text cursor. Navigation either moved focus
-                # or intentionally did nothing — the key must never leak.
+                # Horizontal arrows double as typing keys: they move a caret in
+                # a field, so while a text field has focus they reach it instead
+                # of navigating (see `_TYPING_KEYS`). Every other direction key
+                # is CONSUMED by the navigator, even when it dead-ends at an
+                # edge: returning `False` here would otherwise let Up/Down move
+                # a spinbox value or leak into a widget and desync focus.
+                # Navigation either moved focus or intentionally did nothing —
+                # the key must never leak.
+                if key in _TYPING_KEYS and _accepts_typing(QApplication.focusWidget()):
+                    return False
                 self._navigator.navigate(_KEY_TO_DIRECTION[key])
                 return True
 
@@ -558,6 +670,12 @@ class GamepadSource(QObject):
     action = Signal(object)
 
     def __init__(self, navigator: Navigator, parent: QObject | None = None) -> None:
+        # `navigator` is accepted but deliberately inert: the source is wired to
+        # the Navigator in `install_gamepad_navigation()`, which connects the
+        # emitted signals (`gamepad.direction -> navigator.navigate`), not by
+        # storing a reference here. Keeping the parameter preserves the caller
+        # symmetry and the thread-safety tests (`GamepadSource(navigator=None)`),
+        # but a second caller wiring it again inside would double-drive focus.
         super().__init__(parent)
         self._thread: QThread | None = None
         self._worker: _GamepadWorker | None = None
@@ -591,6 +709,12 @@ class GamepadSource(QObject):
             from pygame._sdl2 import controller as _sdl2ctl  # noqa: F401
         except ImportError:
             return
+        if not _assert_sdl_parity():
+            # The mirrored SDL constants do not match this pygame build: every
+            # button would be mis-bound. Degrade to the keyboard rather than
+            # drive the UI with a wrong mapping (the keyboard source already
+            # runs independent of pygame).
+            return
         try:
             # The controller subsystem ALONE under-counts on macOS: it reports
             # only the device SDL enumerated first (a phantom that reads all
@@ -601,6 +725,11 @@ class GamepadSource(QObject):
             pygame.joystick.init()
             _sdl2ctl.init()
             has_stick = _sdl2ctl.get_count() > 0
+        except pygame.error:
+            # SDL failed to init (a headless box, a container with pygame
+            # installed but no controller subsystem): nothing to read. Degrade
+            # to the keyboard rather than aborting launch with a raw traceback.
+            return
         finally:
             _sdl2ctl.quit()
             pygame.joystick.quit()
@@ -703,9 +832,14 @@ class _GamepadWorker(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self._stop = False
+        # A `threading.Event`, not a bare bool: the GUI thread sets it from
+        # `stop()` while the poller reads it, and an Event's flag is safe to
+        # cross threads without assuming the GIL (the codebase-standard cancel
+        # primitive — see `log_panel.py`/`update_progress.py`).
+        self._stop = threading.Event()
         self._held: Direction | None = None
         self._held_since = 0.0
+        self._last_emit = 0.0
         self._pressed: set[tuple[int, int]] = set()
 
     @Slot()
@@ -798,7 +932,7 @@ class _GamepadWorker(QObject):
 
         try:
             reenumerate()
-            while not self._stop:
+            while not self._stop.is_set():
                 # `_sdl2ctl.update()` is `SDL_GameControllerUpdate()`: it
                 # refreshes the controller layer's POLLED state for the
                 # `get_button`/`get_axis` reads below. `pygame.event.pump()`
@@ -846,8 +980,8 @@ class _GamepadWorker(QObject):
 
     @Slot()
     def stop(self) -> None:
-        """Signal the poll loop to break (thread-safe enough for a bool flag)."""
-        self._stop = True
+        """Signal the poll loop to break; the flag is thread-safe."""
+        self._stop.set()
 
     def _poll(self, sticks: dict[int, GameController]) -> None:
         """Decode one snapshot of every controller into logical events.
@@ -902,16 +1036,19 @@ class _GamepadWorker(QObject):
             # begin the hold-repeat clock.
             self._held = direction
             self._held_since = now
+            self._last_emit = now
             self.direction.emit(direction)
             return
         # Same direction still held: after the initial delay, re-emit once per
         # interval so a held D-pad scrolls a list instead of stepping once.
+        # The clock is `_last_emit` (monotonic time of the previous emit), not
+        # arithmetic on the assumed poll cadence — a slow tick can neither
+        # double-emit nor skip a repeat, because the emit is gated on real
+        # elapsed time since the last one rather than a reconstructed count.
         elapsed = now - self._held_since
-        if elapsed >= FIRST_REPEAT_S:
-            steps = int((elapsed - FIRST_REPEAT_S) / REPEAT_S)
-            previous = int((elapsed - POLL_S - FIRST_REPEAT_S) / REPEAT_S)
-            if steps > previous:
-                self.direction.emit(direction)
+        if elapsed >= FIRST_REPEAT_S and now - self._last_emit >= REPEAT_S:
+            self._last_emit = now
+            self.direction.emit(direction)
 
 
 def _axis_to_direction(dx: int, dy: int, deadzone: float) -> Direction | None:

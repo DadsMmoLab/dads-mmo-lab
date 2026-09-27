@@ -145,3 +145,30 @@ def test_down_still_leaves_a_field(window: QWidget) -> None:
     field = _focus(window, "field")
     _press(window, Qt.Key.Key_Down)
     assert not field.hasFocus()
+
+
+# --- the SDL parity guard: it must catch a remap and DEGRADE, not raise. ----
+
+
+def test_sdl_parity_passes_against_real_pygame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mirrored constants agree with the pygame this process imports."""
+    import pygame  # noqa: F401  # pyinstaller-visible; present in the venv
+
+    import yulon.ui.gamepad as gamepad_module
+
+    monkeypatch.setattr(gamepad_module, "_parity_result", None)
+    assert gamepad_module._assert_sdl_parity() is True
+
+
+def test_sdl_parity_detects_drift_and_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A remapped SDL constant is caught as a verdict, not raised as an abort."""
+    import pygame
+
+    import yulon.ui.gamepad as gamepad_module
+
+    monkeypatch.setattr(gamepad_module, "_parity_result", None)
+    monkeypatch.setattr(pygame, "CONTROLLER_BUTTON_A", 999)
+    # A bad mapping must report False (poll disabled) without throwing.
+    assert gamepad_module._assert_sdl_parity() is False
+    # And the verdict is memoized: a second call does not re-raise or re-drift.
+    assert gamepad_module._assert_sdl_parity() is False
