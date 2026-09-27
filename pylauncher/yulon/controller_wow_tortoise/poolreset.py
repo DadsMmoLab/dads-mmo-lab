@@ -238,6 +238,59 @@ def _assigned(line: str) -> str | None:
     return value
 
 
+Mode = Literal["off", "always", "once", "invalid"]
+
+
+@dataclass(frozen=True)
+class Request:
+    """What one value of the key means to the module: its mode and, for `once`, the token."""
+
+    mode: Mode
+    token: str = ""
+
+
+_MODULE_TRIM = " \t\r\n"
+"""What `ParsePoolResetSetting` trims off the whole value (`PoolResetPolicy.h:63-65`)."""
+_TOKEN_TRIM = " \t"
+"""What it trims off the token after `once:` (`PoolResetPolicy.h:83-85`)."""
+
+
+def parse(value: str) -> Request:
+    """`value` classified exactly as TortoiseBots' `ParsePoolResetSetting` does. Pure.
+
+    TortoiseBots 632e1b63, `runtime/PoolResetPolicy.h:58-108`, called on the
+    raw config string by `RandomBotPoolReset::PlanAtStartup`
+    (`runtime/RandomBotPoolReset.cpp:311`) and `RandomBotService.cpp:250` (T145
+    round 3). `value` is what ACE hands the module (`_assigned`: squished,
+    one pair of quotes off), so padding INSIDE quotes is still there:
+
+    1. trim `" \t\r\n"` off both ends (:63-65) -- not `\v` or `\f`;
+    2. lower-case a copy (:67-69); empty or `off` is Off (:71), `always` is
+       Always (:74);
+    3. a lower-cased copy starting `once:` (:80): the token is the ORIGINAL
+       text after those five characters, case kept (:82), trimmed of `" \t"`
+       (:83-85); empty, or failing `IsValidPoolResetToken` (1-128 characters,
+       each 0x21-0x7e, :44-56), is Invalid (:87-99); else Once with it;
+    4. anything else is Invalid (:105-107).
+
+    Invalid schedules nothing (`ShouldResetForGeneration`, :113-124), and the
+    token is compared with the applied generation case-sensitively.
+    """
+    trimmed = value.strip(_MODULE_TRIM)
+    # `std::tolower` in the C locale folds A-Z only, `str.lower()` far more; the
+    # two agree on these three words, because the only characters `str.lower()`
+    # turns into ASCII are U+0130 (to "i" + a combining dot) and U+212A (to "k").
+    lowered = trimmed.lower()
+    if lowered in ("", "off"):
+        return Request("off")
+    if lowered == "always":
+        return Request("always")
+    if lowered.startswith("once:"):
+        token = trimmed[5:].strip(_TOKEN_TRIM)
+        return Request("once", token) if is_valid_token(token) else Request("invalid")
+    return Request("invalid")
+
+
 def values_in(text: str) -> tuple[str, ...]:
     """What each `[section]` of `text` sets the key to, as the module reads it, in file order.
 
@@ -265,11 +318,6 @@ def values_in(text: str) -> tuple[str, ...]:
     return tuple(found.values())
 
 
-def _is_off(value: str) -> bool:
-    """`ParsePoolResetSetting`: empty or `off`, trimmed and case-blind, is Off."""
-    return value.strip(" \t\r\n").lower() in ("", "off")
-
-
 def value_in(text: str) -> str:
     """What `text` asks of the module: `off` when it never says. Fails safe across sections.
 
@@ -289,22 +337,26 @@ def value_in(text: str) -> str:
     * else the first value that is not off: sections that disagree never read
       as off;
     * else the first (every section is off in some spelling).
+
+    Each value is classified by `parse`, the module's own rule, and returned
+    as written (`_assigned`'s answer), so a token goes back exactly.
     """
     values = values_in(text)
     if not values:
         return "off"
-    once = [v for v in values if v.lower().startswith("once:")]
-    always = [v for v in values if v.lower() == "always"]
-    not_off = [v for v in values if not _is_off(v)]
+    modes = [parse(v).mode for v in values]
+    once = [v for v, mode in zip(values, modes, strict=True) if mode == "once"]
+    always = [v for v, mode in zip(values, modes, strict=True) if mode == "always"]
+    not_off = [v for v, mode in zip(values, modes, strict=True) if mode != "off"]
     return (once or always or not_off or list(values))[0]
 
 
 def setting(server_dir: Path) -> str:
     """What the install's `aiplayerbot.conf` asks of the module (`value_in`): `off` if unset.
 
-    The case is kept, because a `once:` token is compared case-sensitively by
-    the module and may have to be written back exactly; compare the keyword
-    with `.lower()`.
+    As written, case and padding kept, because a `once:` token is compared
+    case-sensitively by the module and may have to be written back exactly;
+    classify it with `parse`, never by comparing strings.
 
     Read the way the module reads it (T145), not the way `conf.patch` writes:
     an indented or quoted `once:` a person typed is a request the module acts
@@ -360,7 +412,10 @@ def _with_value(entry: CatalogEntry, text: str, value: str) -> str:
         ),
         {},
     )
-    if set(values_in(patched)) != {value}:
+    # By meaning (`parse`), not by spelling: a value written back as it was
+    # read -- `" once:T "` from inside quotes -- is written unquoted, and ACE
+    # then trims the padding the module would have trimmed anyway.
+    if {parse(v) for v in values_in(patched)} != {parse(value)}:
         raise PoolResetError(
             f"{bot_population.CONF_NAME} has a line Yu'lon cannot rewrite so that the bots "
             f"module reads {KEY} = {value}; set it by hand"
@@ -369,9 +424,8 @@ def _with_value(entry: CatalogEntry, text: str, value: str) -> str:
 
 
 def asks_for_a_rebuild(value: str) -> bool:
-    """Is `value` a rebuild request: `once:<anything>` or `always`, as the module lowercases?"""
-    lowered = value.lower()
-    return lowered.startswith("once:") or lowered == "always"
+    """Is `value` a rebuild request to the module (`parse`): a valid `once:<token>`, or `always`?"""
+    return parse(value).mode in ("once", "always")
 
 
 def put_back_file(
@@ -393,8 +447,9 @@ def put_back_file(
     next start deleted the restored bots.
 
     So: when any section of the backup sets a value that asks for a rebuild
-    (`asks_for_a_rebuild`) and is not exactly what the file on disk says now
-    (`value_in`, which fails safe across sections), the backup goes back with
+    (`asks_for_a_rebuild`) and is not the request the file on disk makes now
+    (`value_in`, which fails safe across sections; compared by `parse`, so
+    `ONCE:T` is `once:T` and `once:t` is not), the backup goes back with
     the key set to the file's CURRENT value in every section -- a restore can
     clear a request, never arm one, and never swap one token for another.
     Every line that does not assign the key is the backup's (`_with_value`).
@@ -423,10 +478,12 @@ def put_back_file(
     # Any section, not only the one `value_in` reports: the module may read any
     # of them (round 2), so a backup whose second section adds a request the
     # file does not have is not put back whole either.
-    if not any(asks_for_a_rebuild(v) and v != current for v in sections):
+    now = parse(current)
+    arming = [v for v in sections if asks_for_a_rebuild(v) and parse(v) != now]
+    if not arming:
         put(backup, target)
         return None
-    restored = next(v for v in sections if asks_for_a_rebuild(v) and v != current)
+    restored = arming[0]
     try:
         text = _with_value(entry, raw.decode("utf-8"), current)
     except UnicodeDecodeError as exc:
@@ -487,7 +544,7 @@ def before_restore(entry: CatalogEntry, server_dir: Path) -> TakenBack | None:
         value = setting(server_dir)
     except (OSError, UnicodeDecodeError) as exc:
         raise PoolResetError(_restore_refused(exc)) from exc
-    if not value.lower().startswith("once:"):
+    if parse(value).mode != "once":
         return None
     try:
         take_back(entry, server_dir)
@@ -535,7 +592,7 @@ def after_a_failed_restore(
 def restore_warning(server_dir: Path) -> str | None:
     """The plan's warning when the conf says `always`, which a restore does not change."""
     try:
-        return ALWAYS_BEFORE_RESTORE if setting(server_dir).lower() == "always" else None
+        return ALWAYS_BEFORE_RESTORE if parse(setting(server_dir)).mode == "always" else None
     except (OSError, UnicodeDecodeError):
         return None
 

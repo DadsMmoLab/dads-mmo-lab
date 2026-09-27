@@ -455,3 +455,118 @@ def test_a_backup_whose_other_section_would_add_always_is_not_put_back_whole(
     note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
     assert note is not None
     assert path.read_text() == MAIN + ARMED_LINE + OTHER + ARMED_LINE
+
+
+# ------------------------------------------------------------------ round 3: the module's own parse
+#
+# `ParsePoolResetSetting` (TortoiseBots 632e1b63, `runtime/PoolResetPolicy.h:58-108`)
+# trims " \t\r\n" off the value ACE hands it (after ACE took the quotes off),
+# lower-cases it to compare with `off`, `always` and the `once:` prefix, trims
+# " \t" off the token, keeps the token's case, and calls a token that fails
+# `IsValidPoolResetToken` (or is empty) Invalid: no reset.
+
+PADDED = f'{KEY} = " once:{TOKEN} "\n'
+PADDED_ALWAYS = f'{KEY} = " always "\n'
+
+
+@pytest.mark.parametrize(
+    "line",
+    [PADDED, f"{KEY} = ONCE:{TOKEN}\n", f"{KEY} = once: {TOKEN}\n"],
+    ids=["padded-quoted", "upper-case-prefix", "space-after-colon"],
+)
+@pytest.mark.parametrize("where", ["one-section", "second-section"])
+def test_the_restore_gate_clears_a_request_however_the_module_would_spell_it(
+    tmp_path: Path, line: str, where: str
+) -> None:
+    text = MAIN + line if where == "one-section" else MAIN + OFF_KEY_LINE + OTHER + line
+    path = _conf(tmp_path, text)
+    taken = poolreset.before_restore(TORTOISE, tmp_path)
+    assert taken is not None
+    assert TOKEN in taken.previous
+    assert poolreset.setting(tmp_path) == "off"
+    assert TOKEN not in path.read_text()
+
+
+@pytest.mark.parametrize("line", [PADDED_ALWAYS, f"{KEY} = ALWAYS\n"], ids=["padded", "upper"])
+@pytest.mark.parametrize("where", ["one-section", "second-section"])
+def test_always_is_warned_about_however_the_module_would_spell_it(
+    tmp_path: Path, line: str, where: str
+) -> None:
+    text = MAIN + line if where == "one-section" else MAIN + OFF_KEY_LINE + OTHER + line
+    _conf(tmp_path, text)
+    assert poolreset.restore_warning(tmp_path) == poolreset.ALWAYS_BEFORE_RESTORE
+
+
+@pytest.mark.parametrize("line", [PADDED, PADDED_ALWAYS], ids=["once", "always"])
+@pytest.mark.parametrize("where", ["one-section", "second-section"])
+def test_a_padded_request_in_a_backup_is_not_put_back_over_off(
+    tmp_path: Path, line: str, where: str
+) -> None:
+    text = MAIN + line if where == "one-section" else MAIN + OFF_KEY_LINE + OTHER + line
+    path = _conf(tmp_path, text)
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE)
+    note = World(tmp_path).rebuild().put_back_file(made, path, tuning.restore)
+    assert note is not None and NOT_PUT_BACK in note
+    assert set(poolreset.values_in(path.read_text())) == {"off"}
+
+
+def test_the_same_request_spelt_otherwise_goes_back_whole(tmp_path: Path) -> None:
+    """`ONCE:<token>` is the module's `once:<token>`: the same request, so nothing is armed
+    that is not armed already, and the backup goes back byte for byte."""
+    path = _conf(tmp_path, MAIN + f"{KEY} = ONCE:{TOKEN}\nX = 1\n")
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + ARMED_LINE + "X = 2\n")
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is None
+    assert path.read_bytes() == made.read_bytes()
+
+
+def test_a_token_differing_only_in_case_is_another_request(tmp_path: Path) -> None:
+    """The token keeps its case (`value.substr(5)`), and generations compare case-sensitively."""
+    path = _conf(tmp_path, MAIN + f"{KEY} = once:{TOKEN.lower()}\n")
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + ARMED_LINE)
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is not None
+    assert poolreset.setting(tmp_path) == f"once:{TOKEN}"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["once:", "once:a b", "once:" + "x" * 129, f'"\x0bonce:{TOKEN}"'],
+    ids=["empty-token", "space-in-token", "129-characters", "vertical-tab-inside-quotes"],
+)
+def test_a_once_the_module_calls_invalid_is_no_request(tmp_path: Path, value: str) -> None:
+    """Invalid schedules nothing (`ShouldResetForGeneration` is false for it), so the gate
+    leaves it and a backup holding it goes back whole. The last one: ACE takes the quotes
+    off, and the module trims " \t\r\n" only, so the vertical tab stays and the value is
+    not `once:`."""
+    path = _conf(tmp_path, MAIN + f"{KEY} = {value}\n")
+    assert poolreset.before_restore(TORTOISE, tmp_path) is None
+    made = tuning.backup(path)
+    _conf(tmp_path, MAIN + OFF_KEY_LINE)
+    assert World(tmp_path).rebuild().put_back_file(made, path, tuning.restore) is None
+    assert path.read_bytes() == made.read_bytes()
+
+
+def test_a_padded_request_is_put_back_after_a_restore_that_loaded_nothing(
+    tmp_path: Path,
+) -> None:
+    """The raw value goes back; the read-back compares what the module would read."""
+    _conf(tmp_path, MAIN + PADDED)
+    taken = poolreset.before_restore(TORTOISE, tmp_path)
+    assert taken is not None
+    said = poolreset.after_a_failed_restore(TORTOISE, tmp_path, taken, loaded=False)
+    assert "put back as it was" in said
+    assert poolreset.setting(tmp_path) == f"once:{TOKEN}", "ACE trims the unquoted padding"
+
+
+def test_a_padded_once_beside_always_is_the_one_the_restore_gate_clears(tmp_path: Path) -> None:
+    """Sections are ranked by what the module makes of them: the padded `once:` is a once."""
+    path = _conf(tmp_path, MAIN + f"{KEY} = always\n" + OTHER + PADDED)
+    assert poolreset.before_restore(TORTOISE, tmp_path) is not None
+    assert path.read_text() == MAIN + OFF_KEY_LINE + OTHER + OFF_KEY_LINE
+
+
+def test_an_invalid_once_beside_always_does_not_hide_the_always(tmp_path: Path) -> None:
+    _conf(tmp_path, MAIN + f"{KEY} = once:a b\n" + OTHER + f"{KEY} = always\n")
+    assert poolreset.restore_warning(tmp_path) == poolreset.ALWAYS_BEFORE_RESTORE
