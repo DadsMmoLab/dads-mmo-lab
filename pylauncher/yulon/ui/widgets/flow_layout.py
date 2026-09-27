@@ -24,6 +24,13 @@ shipping target, `theme.TOUCH_TARGET_PX`) they cannot reach the tooltip that
 says why at all. That is the same argument T75 made about the lock chips, and it
 is decided the same way here. Wrapping also keeps every button a real widget in
 the tab order, which is what `ui.gamepad`'s D-pad walk enumerates.
+
+One exception, and it is the owner's (T89, 2026-09-27): Rebuild and T64's two
+presses are one "Server build ▾" button with a menu, because the three are one
+act -- compile this server -- and seven buttons wrapped the bar at the 1280x800
+the app opens at. What the menu costs is paid where it can be: the button greys
+when no entry it shows can act, so "dead" is still readable without a press,
+and `ui.gamepad` hands an open menu its own keys so the pad can walk it.
 """
 
 from __future__ import annotations

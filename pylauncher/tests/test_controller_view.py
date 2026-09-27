@@ -682,6 +682,12 @@ def test_removing_a_cpp_module_is_not_told_it_is_inert_on_disk() -> None:
     )
     assert "If mod-solocraft was in the last build it is still in there" in text
     assert "is on disk and inert" not in text
+    # T89: no banner is raised for a removal, so the only Rebuild on the tab is
+    # the entry under "Server build ▾" -- and the sentence says where it is.
+    assert (
+        f'"{controller_view_module.SERVER_BUILD_LABEL}"' in text
+        and f'"{controller_view_module.REBUILD_BUTTON_LABEL}"' in text
+    ), text
 
 
 def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
@@ -6701,7 +6707,7 @@ def test_the_modules_tab_offers_a_rebuild_beside_the_sentence_that_demands_one(
     go looking for on another tab is most of the way back to not having one.
     """
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    assert "ebuild" in view.rebuild_button.text()
+    assert "ebuild" in view.rebuild_action.text()
 
 
 def test_declining_the_rebuild_confirmation_starts_nothing(
@@ -6851,7 +6857,7 @@ def test_a_game_with_no_rebuild_wiring_greys_the_button_instead_of_failing_on_cl
     services = _services(ps, tmp_path, [])
     services.rebuild = None
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    assert view.rebuild_button.isEnabled() is False
+    assert view.rebuild_action.isEnabled() is False
     assert view.rebuild_server() is False
 
 
@@ -7015,7 +7021,7 @@ def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
 
     report = view.module_report.toPlainText()
     assert "REBUILD required" in report
-    assert view.rebuild_button.text() in report, (
+    assert view.rebuild_action.text() in report, (
         "the report tells the user to press something whose name is not on this tab: " f"{report!r}"
     )
 
@@ -7061,7 +7067,7 @@ def test_a_running_rebuild_locks_the_server_tab_and_unlocks_it_afterwards(
     # And the lock comes off — including for the buttons `_set_busy` re-enables
     # rather than the ones it left alone.
     view.refresh_status()
-    assert view.rebuild_button.isEnabled() is True
+    assert view.rebuild_action.isEnabled() is True
     assert view.repair_button.isEnabled() is True
 
 
@@ -7083,7 +7089,7 @@ def test_a_rebuild_is_refused_while_another_action_of_this_tab_is_running(
     assert view.rebuild_server() is False
     assert started == [], "a rebuild started on top of another action"
     assert answered == [], "the confirmation was shown for a press that could not run"
-    assert view.rebuild_button.isEnabled() is False
+    assert view.rebuild_action.isEnabled() is False
 
 
 def test_a_job_ending_never_hands_back_a_button_the_game_cannot_use(
@@ -7101,13 +7107,13 @@ def test_a_job_ending_never_hands_back_a_button_the_game_cannot_use(
     services = _services(ps, tmp_path, [])
     services.rebuild = None
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    assert view.rebuild_button.isEnabled() is False
+    assert view.rebuild_action.isEnabled() is False
 
     view._set_busy(True)
     view._set_busy(False)
 
     assert (
-        view.rebuild_button.isEnabled() is False
+        view.rebuild_action.isEnabled() is False
     ), "a job ending handed back a button whose action does not exist"
 
 
@@ -10782,12 +10788,12 @@ def test_the_update_button_sits_beside_rebuild_and_is_hidden_where_there_is_no_r
     """
     services, _ = _latest(ps, tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    assert view.update_to_latest_button.text() == UPDATE_TO_LATEST_BUTTON_LABEL
-    assert not view.update_to_latest_button.isHidden()
+    assert view.update_to_latest_action.text() == UPDATE_TO_LATEST_BUTTON_LABEL
+    assert view.update_to_latest_action.isVisible()
 
     bare = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     assert bare.services.update_to_latest is None
-    assert bare.update_to_latest_button.isHidden()
+    assert not bare.update_to_latest_action.isVisible()
     assert bare.update_to_latest() is False
 
 
@@ -11034,7 +11040,7 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     # `return_to_the_tested_pin()`, which answer False for the same refusal.
     assert view.update_to_latest() is False
     assert spy.presses == []
-    assert view.update_to_latest_button.isEnabled() is False
+    assert view.update_to_latest_action.isEnabled() is False
 
 
 # -- T146: the update chip on a folder the SERVER install cloned ---------------
@@ -11452,7 +11458,7 @@ def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
     assert spy.revs == ()
     assert view.source_version_label.text() == ""
     assert view.source_version_label.isHidden()
-    assert view.return_to_pin_button.isHidden()
+    assert not view.return_to_pin_action.isVisible()
 
     spy.revs = (native.SourceRev("x/y", "a1b2c3d · 2026-09-16", pin=_PIN, ahead=12),)
     view._refresh_source_version()
@@ -11460,8 +11466,8 @@ def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
         f"Built from a1b2c3d (2026-09-16), 12 commits past the tested pin {_PIN[:7]}"
     )
     assert not view.source_version_label.isHidden()
-    assert not view.return_to_pin_button.isHidden()
-    assert view.return_to_pin_button.text() == RETURN_TO_PIN_BUTTON_LABEL
+    assert view.return_to_pin_action.isVisible()
+    assert view.return_to_pin_action.text() == RETURN_TO_PIN_BUTTON_LABEL
 
 
 def test_the_way_back_is_hidden_after_a_return_and_offered_again_after_an_update(
@@ -11490,13 +11496,13 @@ def test_the_way_back_is_hidden_after_a_return_and_offered_again_after_an_update
     view = ControllerView(WOTLK, services, status_poll_ms=0)
 
     assert view.update_to_latest() is True
-    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back was offered")
+    pump_until(lambda: view.return_to_pin_action.isVisible(), "the way back was offered")
     assert view.source_version_label.text() == (
         f"Built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
     )
 
     assert view.return_to_the_tested_pin() is True
-    pump_until(lambda: view.return_to_pin_button.isHidden(), "the way back was withdrawn")
+    pump_until(lambda: not view.return_to_pin_action.isVisible(), "the way back was withdrawn")
     # The LINE stays: the server has been moved and moved back, and that is
     # still a fact about this folder the catalog does not carry.
     assert view.source_version_label.text() == f"On the tested pin {_PIN[:7]} (2026-09-02)"
@@ -11505,7 +11511,7 @@ def test_the_way_back_is_hidden_after_a_return_and_offered_again_after_an_update
     # And an update offers it again, which is what says the rule reads the
     # record rather than latching once.
     assert view.update_to_latest() is True
-    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back came back")
+    pump_until(lambda: view.return_to_pin_action.isVisible(), "the way back came back")
 
 
 def test_a_mixed_record_still_offers_the_way_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -11525,7 +11531,7 @@ def test_a_mixed_record_still_offers_the_way_back(qapp: object, ps: _Ps, tmp_pat
     )
     view._refresh_source_version()
 
-    assert not view.return_to_pin_button.isHidden()
+    assert view.return_to_pin_action.isVisible()
     said = view.source_version_label.text().splitlines()
     assert said[0] == f"a/b: on the tested pin {_PIN[:7]} (2026-09-02)"
     assert said[1] == f"c/d: built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
@@ -11546,7 +11552,7 @@ def test_a_read_that_failed_draws_nothing_and_offers_nothing(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     spy.revs = (native.SourceRev("x/y", "7bcee96 · 2026-09-15", pin=_PIN),)
     view._refresh_source_version()
-    assert not view.return_to_pin_button.isHidden()
+    assert view.return_to_pin_action.isVisible()
 
     def unreadable() -> native.SourceVersion:
         raise OSError("the state file could not be read")
@@ -11555,7 +11561,7 @@ def test_a_read_that_failed_draws_nothing_and_offers_nothing(
     view._refresh_source_version()
     assert view.source_version_label.isHidden()
     assert view.source_version_label.text() == ""
-    assert view.return_to_pin_button.isHidden()
+    assert not view.return_to_pin_action.isVisible()
 
 
 def test_returning_to_the_pin_asks_yes_no_defaulting_to_no_and_offers_no_backup(
@@ -11640,7 +11646,7 @@ def test_a_second_update_press_while_the_backup_runs_is_refused(
     def backup_and_press_again() -> BackupReport:
         assert view is not None
         during.append(view._backup_before_update)
-        during.append(view.update_to_latest_button.isEnabled())
+        during.append(view.update_to_latest_action.isEnabled())
         during.append(view.update_to_latest())
         during.append(view.return_to_the_tested_pin())
         return real_backup()
@@ -11658,7 +11664,7 @@ def test_a_second_update_press_while_the_backup_runs_is_refused(
     assert told and told[0] == "A backup is running", told
     # And it is released: the lock is not a one-way door.
     assert view._backup_before_update is False
-    assert view.update_to_latest_button.isEnabled() is True
+    assert view.update_to_latest_action.isEnabled() is True
 
 
 # -- T76: the backup starts the database when it is down ----------------------
@@ -14224,15 +14230,18 @@ def _module_toolbar_buttons(view: ControllerView) -> list[Any]:
     is exactly where this ticket's defect would come back, and a hand-written
     list would go on passing about the six it knew.
 
-    **The ones the bar is SHOWING**, which is not a narrowing of that rule but
-    the whole of what it is about. T64 put two more buttons on this bar --
-    "Update the server to latest…" and "Return to the tested pin…" -- and both
-    are hidden until the entry has a route and the install has something to
-    return from. `FlowLayout` does not lay a hidden item out at all, so those
-    two keep the 100x30 every Qt widget starts at, and `_clipped()` read that
-    default as a label cut in half on a button nobody can see. The moment
-    either is shown it is laid out, comes back here, and is measured like the
-    rest; a button added to this bar and left visible is still caught.
+    **The ones the bar is SHOWING.** For CLIPPING that is no narrowing:
+    `FlowLayout` does not lay a hidden item out at all, so a hidden button keeps
+    the 100x30 every Qt widget starts at and `_clipped()` would read that default
+    as a label cut in half on a button nobody can see; the moment it is shown it
+    is laid out, comes back here, and is measured like the rest. For the
+    one-line-at-1280 rule it IS one, and T89 is what it hid: T64's "Update the
+    server to latest…" is shown wherever the entry has a route, which is every
+    catalog entry in production, and the one caller then wired none -- so the
+    seventh button that wrapped the bar was never here to count. Since T89 those
+    two presses and Rebuild are entries in "Server build ▾" and not on the bar,
+    and `test_with_every_server_build_press_offered_the_toolbar_still_fits_one_
+    line_at_1280` is the caller that wires the route.
     """
     from PySide6.QtWidgets import QPushButton
 
@@ -14305,6 +14314,207 @@ def test_every_modules_toolbar_button_reads_whole_at_every_width(
     _at(window, (1280, 800))
     tops = sorted({b.y() for b in _module_toolbar_buttons(view)})
     assert len(tops) == 1, f"the bar wrapped at the size the app opens at: {tops}"
+
+
+def _past_the_pin(ps: _Ps, tmp_path: Path) -> tuple[ControllerView, _LatestSpy, list[object]]:
+    """A view with rebuild wiring, an update route, and an install off its pins.
+
+    Every server-build press is offered AND live here, which is the state T89
+    was filed about: T83's toolbar test wires no route, so it never saw the
+    seventh button. Returns the view, the route's spy and the rebuild seam's
+    record of what it was asked.
+    """
+    services, spy = _latest(ps, tmp_path)
+    rebuilt: list[object] = []
+
+    def rebuild(cancel: object = None) -> Iterator[str]:
+        rebuilt.append(cancel)
+        yield "--- build"
+
+    services.rebuild = rebuild
+    spy.revs = (native.SourceRev("x/y", "a1b2c3d · 2026-09-16", pin=_PIN, ahead=12),)
+    assert spy.version().past_the_pin, "the fixture is not past its pin"
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    return view, spy, rebuilt
+
+
+def test_with_every_server_build_press_offered_the_toolbar_still_fits_one_line_at_1280(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T89: the sibling T83's test owed, with a route wired and the install past its pin.
+
+    Before T89 this state put seven buttons on the bar -- Rebuild, "Update the
+    server to latest…" and "Return to the tested pin…" side by side -- and it
+    wrapped at the 1280x800 the app opens at. The same three assertions as
+    `test_every_modules_toolbar_button_reads_whole_at_every_width`, and then that
+    all three presses are still OFFERED: a bar made to fit by dropping one is not
+    the fix.
+    """
+    view, _spy, _rebuilt = _past_the_pin(ps, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+
+    for size in TOOLBAR_WIDTHS:
+        _at(window, size)
+        buttons = _module_toolbar_buttons(view)
+        clipped = [why for why in (_clipped(b) for b in buttons) if why is not None]
+        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
+        outside = _bar_holds_every_line(view)
+        assert outside == [], f"a button is drawn outside the action bar at {size}: {outside}"
+
+    _at(window, (1280, 800))
+    buttons = _module_toolbar_buttons(view)
+    tops = sorted({b.y() for b in buttons})
+    assert len(tops) == 1, (
+        f"the bar wrapped at the size the app opens at: {tops}, "
+        f"{[(b.text(), b.y()) for b in buttons]}"
+    )
+    # The triangle is in the label, so the style must not draw its own beside
+    # it: a plain button with the same label, under the same theme, is exactly
+    # as wide. The menu indicator Qt reserves is the only difference there is.
+    from PySide6.QtWidgets import QPushButton
+
+    plain = QPushButton(view.server_build_button.text(), view.module_actions)
+    process_events()
+    assert view.server_build_button.sizeHint().width() == plain.sizeHint().width(), (
+        f"{view.server_build_button.sizeHint().width()}px against a plain "
+        f"{plain.sizeHint().width()}: a second arrow is drawn beside the label's"
+    )
+    plain.deleteLater()
+    offered = [a.text() for a in view.server_build_menu.actions() if a.isVisible()]
+    assert offered == [
+        controller_view_module.REBUILD_BUTTON_LABEL,
+        UPDATE_TO_LATEST_BUTTON_LABEL,
+        RETURN_TO_PIN_BUTTON_LABEL,
+    ]
+    assert view.server_build_button in buttons
+
+
+def test_the_three_server_build_presses_are_one_menu_and_each_reaches_its_own_slot(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T89: one "Server build ▾" button, its three entries in the old left-to-right order.
+
+    Each entry is proved by what it DOES -- the dialog its own slot asks, and
+    declined so nothing starts -- rather than by its label: an entry wired to a
+    copy of the slot, or to its neighbour's, reads the same in the menu.
+
+    And the tooltips: the three buttons each explained themselves on hover, and
+    a `QMenu` does not show an action's tooltip unless it is told to.
+    """
+    qmb = controller_view_module.QMessageBox
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(title)
+        return qmb.StandardButton.No
+
+    monkeypatch.setattr(qmb, "question", question)
+    boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
+    view, spy, rebuilt = _past_the_pin(ps, tmp_path)
+
+    assert view.server_build_button.text() == controller_view_module.SERVER_BUILD_LABEL
+    assert view.server_build_button.menu() is view.server_build_menu
+    assert view.server_build_menu.actions() == [
+        view.rebuild_action,
+        view.update_to_latest_action,
+        view.return_to_pin_action,
+    ]
+    assert view.server_build_menu.toolTipsVisible(), "the menu hides its entries' tooltips"
+    for action in view.server_build_menu.actions():
+        # A QAction's tooltip defaults to its text; the three carried sentences.
+        assert action.toolTip().rstrip("…") != action.text().rstrip("…"), action.text()
+
+    view.rebuild_action.trigger()
+    assert len(asked) == 1 and boxes == [], (asked, boxes)
+    view.update_to_latest_action.trigger()
+    assert len(asked) == 1 and len(boxes) == 1, (asked, boxes)
+    view.return_to_pin_action.trigger()
+    assert len(asked) == 2 and len(boxes) == 1, (asked, boxes)
+    assert asked[0] != asked[1], f"Rebuild and Return asked the same question: {asked}"
+    assert spy.presses == [] and spy.pin_presses == [] and rebuilt == [], "a No still pressed"
+
+
+def test_the_server_build_button_greys_only_when_every_press_it_offers_is_dead(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T89: the button says "dead" on the bar only when the menu would say it three times.
+
+    The toolbar's other buttons grey where they cannot act, and the reader sees
+    that without pressing anything (`flow_layout`'s module docstring). A menu
+    moves that behind a press, so the button carries the menu's answer: live
+    while any entry it SHOWS is live. Counting a hidden entry would light a
+    button whose menu holds one greyed line; the rule leans on Qt for that -- a
+    hidden `QAction` reports itself disabled -- and the last step below is what
+    says so if Qt ever stops.
+    """
+    view, _spy, _rebuilt = _past_the_pin(ps, tmp_path)
+    assert view.server_build_button.isEnabled() is True
+
+    view._set_busy(True)
+    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [False, False, False]
+    assert view.server_build_button.isEnabled() is False, "a job is running and it is live"
+    view._set_busy(False)
+    assert [a.isEnabled() for a in view.server_build_menu.actions()] == [True, True, True]
+    assert view.server_build_button.isEnabled() is True, "the job ended and it stayed grey"
+
+    # No rebuild wiring and no route: Rebuild is the one entry shown, and dead.
+    services = _services(ps, tmp_path, [])
+    services.rebuild = None
+    bare = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not bare.update_to_latest_action.isVisible()
+    assert bare.server_build_button.isEnabled() is False, "no entry can act and it is live"
+    # A hidden entry told to be enabled, by hand: no path today enables one while
+    # every shown entry is dead (`_set_update_buttons` sets both T64 entries
+    # together), so this asks the rule directly.
+    bare.update_to_latest_action.setEnabled(True)
+    assert bare.server_build_button.isEnabled() is False, "lit by an entry nobody can see"
+
+    # The same, with a route: Update is shown and live, so the menu has a use.
+    services, _spy = _latest(ps, tmp_path)
+    services.rebuild = None
+    routed = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert routed.rebuild_action.isEnabled() is False
+    assert routed.server_build_button.isEnabled() is True
+
+
+def test_the_pad_opens_server_build_and_chooses_update_from_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T89 on a Steam Deck: A opens the menu, the D-pad walks it, A chooses.
+
+    Through the real `Navigator` in the real window, which is what the pad's
+    poller calls -- the menu's entries are not widgets, so the D-pad walk that
+    moves between the toolbar's buttons has nothing to move to inside it.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Action, Direction, install_gamepad_navigation
+
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
+    view, spy, rebuilt = _past_the_pin(ps, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1280, 800))
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        view.server_build_button.setFocus()
+        process_events()
+        nav.perform(Action.CONFIRM)
+        process_events()
+        assert QApplication.activePopupWidget() is view.server_build_menu, "A did not open it"
+        nav.navigate(Direction.DOWN)
+        nav.navigate(Direction.DOWN)
+        assert view.server_build_menu.activeAction() is view.update_to_latest_action
+        nav.perform(Action.CONFIRM)
+        process_events()
+    finally:
+        view.server_build_menu.close()
+        keyboard.stop()
+        gamepad.stop()
+
+    assert len(boxes) == 1, "choosing Update did not reach its dialog"
+    assert QApplication.activePopupWidget() is None
+    assert spy.presses == [] and rebuilt == []
 
 
 def test_the_modules_toolbar_wraps_rather_than_shrinking_at_the_smallest_window(
@@ -15185,19 +15395,27 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
             )
 
 
-THE_WRAPPED_WIDTHS = tuple(range(960, 1120, 10))
-"""Every width at the minimum window's height where the action bar takes two lines.
+THE_WRAPPED_WIDTHS = tuple(range(960, 1070, 10))
+"""Widths at the minimum window's height where the action bar takes two lines.
 
-960 is `main.MINIMUM_WINDOW_SIZE`'s width and 1120 is where the bar goes back to
-one line; between them the theme's font grows with the width while the bar still
-wraps, so the tab wants MORE height as the window gets wider. Swept rather than
-asked at 960 because the worst case is not at either end: with the rebuild banner
-up, the smallest height at which nothing is cut is 634 at 960 and 637 at 1090,
-and a test that asked only at the minimum width would have passed on a 634 that
-clips the custom-module card thirteen widths later (T85).
+960 is `main.MINIMUM_WINDOW_SIZE`'s width and about 1080 is where the bar goes
+back to one line (1120 until T89 folded three buttons into "Server build ▾");
+between them the theme's font grows with the width while the bar still wraps, so
+the tab wants MORE height as the window gets wider. Swept rather than asked at
+960 because the worst case is not at the narrow end: with the rebuild banner up,
+the smallest height at which nothing is cut is 635 at 960 and 636 from 1040 on
+(measured 2026-09-27; 637 at 1090 before T89), and a test that asked only at the
+minimum width would pass on a height that clips the custom-module card further
+along (T85).
 
-Every ten pixels rather than every twenty, so that 1090 is really asked: a
-twenty-pixel step from 960 lands on 1080 and 1100 and steps over the worst one.
+It stops at 1060, a step short of the edge, because the edge itself is not one
+width: on both CI interpreters the bar was one line at 1080 run alone and in the
+full suite, and still wrapped at 1080 in one narrower selection on 3.13 -- it
+moves with what ran earlier in the process. A sweep that ends on the edge fails
+on "the bar is one line", which is not what it is about.
+
+Every ten pixels rather than every twenty, so that no width where the bar still
+wraps is stepped over -- a twenty-pixel step once stepped over the worst one.
 """
 
 
@@ -15255,7 +15473,7 @@ def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild
     48px short, so `MINIMUM_WINDOW_SIZE` went from 600 to 640.
 
     Swept across `THE_WRAPPED_WIDTHS` rather than asked at the minimum, because
-    the worst case is at 1090 and not at 960: see that constant.
+    the worst case is at the wide end and not at 960: see that constant.
 
     After a job AND with a report in the box, which is the state that puts every
     rung of the ladder under load at once.

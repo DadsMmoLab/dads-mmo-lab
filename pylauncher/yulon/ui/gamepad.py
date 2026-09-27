@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QTabWidget,
     QTextEdit,
@@ -317,6 +318,44 @@ def _iter_focusable(root: QWidget) -> Iterable[QWidget]:
     yield from walk(root)
 
 
+# The keys an open `QMenu` reads its own items with, one per logical event (T89).
+_DIRECTION_TO_KEY: dict[Direction, Qt.Key] = {
+    Direction.UP: Qt.Key.Key_Up,
+    Direction.DOWN: Qt.Key.Key_Down,
+    Direction.LEFT: Qt.Key.Key_Left,
+    Direction.RIGHT: Qt.Key.Key_Right,
+}
+
+
+def _open_menu() -> QMenu | None:
+    """The `QMenu` popup that is open now, or None (T89).
+
+    A menu is the one popup the D-pad walk cannot move in: its items are
+    `QAction`s, not widgets, so `_iter_focusable()` finds nothing inside it. Qt's
+    own `QMenu.keyPressEvent` already walks the items -- skipping dead ones --
+    chooses, and closes, so while one is open its keys are handed to it rather
+    than navigated.
+    """
+    app = QApplication.instance()
+    if isinstance(app, QApplication):
+        popup = app.activePopupWidget()
+        if isinstance(popup, QMenu):
+            return popup
+    return None
+
+
+def _press_into(menu: QMenu, key: Qt.Key) -> bool:
+    """Deliver `key` to `menu` as a press and a release; the menu does the rest.
+
+    Sent, not posted, so the menu has moved (or chosen, and closed) before the
+    pad's next event is resolved. It passes `KeyboardSource`'s filter on the way,
+    which lets it through because a menu is open.
+    """
+    for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+        QApplication.sendEvent(menu, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+    return True
+
+
 def _center(w: QWidget, relative_to: QWidget) -> QPoint:
     """The widget's viewport center, in `relative_to`'s coordinate space."""
     top_left = w.mapTo(relative_to, QPoint(0, 0))
@@ -398,6 +437,10 @@ class Navigator(QObject):
 
     def navigate(self, direction: Direction) -> bool:
         """Move focus one step in `direction`. Returns whether focus moved."""
+        menu = _open_menu()
+        if menu is not None:
+            # T89: an open menu moves its own highlight; see `_open_menu()`.
+            return _press_into(menu, _DIRECTION_TO_KEY[direction])
         root = self._context_root()
         candidates = self._focusable(root)
         current = QApplication.focusWidget()
@@ -486,6 +529,14 @@ class Navigator(QObject):
 
     def perform(self, action: Action) -> bool:
         """Execute a discrete logical action in the active context."""
+        menu = _open_menu()
+        if menu is not None and action is not Action.BACK:
+            # T89: A chooses the highlighted item (the menu closes itself), and
+            # a bumper does nothing -- switching tab would leave the menu open
+            # over a page its button is no longer on. B is `_back()`'s, below.
+            if action is Action.CONFIRM:
+                return _press_into(menu, Qt.Key.Key_Return)
+            return False
         if action is Action.CONFIRM:
             return self._confirm()
         if action is Action.BACK:
@@ -603,6 +654,12 @@ class KeyboardSource(QObject):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            if _open_menu() is not None:
+                # T89: every key goes to an open menu, which walks, chooses and
+                # closes on its own keys (`_open_menu()`). Eaten here, Down did
+                # nothing and Return chose nothing, so a menu opened from the
+                # pad could only be closed again.
+                return False
             key = int(event.key())
 
             if key in _KEY_TO_DIRECTION:

@@ -133,6 +133,7 @@ from yulon.ui.theme import (
     COLOR_GOLD_LIGHT,
     COLOR_TEXT_GOLD,
     COLOR_TEXT_WARNING,
+    SERVER_BUILD_BUTTON,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.flow_layout import flow_bar
@@ -2816,13 +2817,31 @@ def _relabel(box: QMessageBox, which: QMessageBox.StandardButton, text: str) -> 
 
 
 REBUILD_BUTTON_LABEL = "Rebuild the server…"
-"""The rebuild button's label, in one place because two things say it.
+"""The rebuild press's label, in one place because two things say it.
 
-The button wears it, and `_format_report()` tells the user to press it by
-name. Two literals would be one rename away from a report that points at a
+The press wears it -- the banner's button, and the first entry under
+`SERVER_BUILD_LABEL` since T89 -- and `_format_report()` tells the user to press
+it by name. Two literals would be one rename away from a report that points at a
 control that is not there any more, which is the class of defect this whole
 feature is a fix for.
 """
+
+SERVER_BUILD_LABEL = "Server build ▾"
+"""The Modules toolbar button that holds the three compile-this-server presses (T89).
+
+Rebuild, "Update the server to latest…" and "Return to the tested pin…" were
+three buttons side by side, and with a route wired -- every catalog entry that
+offers one -- the bar was seven buttons and wrapped at the 1280x800 the app
+opens at. The owner's decision of 2026-09-27: one button with a menu, the three
+labels unchanged. The triangle is in the label because it is the only thing on
+the bar that says this press opens a list rather than acting or asking.
+"""
+
+SERVER_BUILD_TIP = (
+    "Compile this server again: from the same code, from the newest code, or back on the "
+    "commit this app was tested against. Every entry asks first."
+)
+"""The menu button's own tooltip; each entry keeps the one its button had (T89)."""
 
 REMOVE_IDLE = "Stop and remove containers…"
 REMOVE_ARMED = "Press again to remove"
@@ -5602,13 +5621,14 @@ class ControllerView(QWidget):
                 self.set_client_dir_button.setEnabled(False)
             if self.forget_client_dir_button is not None:
                 self.forget_client_dir_button.setEnabled(False)
-            self.rebuild_button.setEnabled(False)
+            self.rebuild_action.setEnabled(False)
             # And both T64 presses, for the rebuild's reason exactly: each of
             # them IS that rebuild with a fetch in front of it. Disabled and not
             # hidden -- whether they exist at all is `_refresh_source_version()`'s
-            # question and a job of ours must not answer it.
-            self.update_to_latest_button.setEnabled(False)
-            self.return_to_pin_button.setEnabled(False)
+            # question and a job of ours must not answer it. All three dead
+            # greys "Server build ▾" itself (`_set_server_build_button`, T89).
+            self.update_to_latest_action.setEnabled(False)
+            self.return_to_pin_action.setEnabled(False)
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
             # databases, so one while another action is live is two writers.
@@ -5708,7 +5728,7 @@ class ControllerView(QWidget):
                 self.set_client_dir_button.setEnabled(True)
             if self.forget_client_dir_button is not None:
                 self.forget_client_dir_button.setEnabled(True)
-            self.rebuild_button.setEnabled(self.services.rebuild is not None)
+            self.rebuild_action.setEnabled(self.services.rebuild is not None)
             # Back to what this install can do, never unconditionally, and then
             # the version line is re-read: the job that just finished may BE the
             # press that moved this server off its pins, so the line and the
@@ -8695,12 +8715,26 @@ class ControllerView(QWidget):
         # rebuild/compile/build button across `yulon/ui/` returned nothing at
         # all, so that sentence named an action this app did not have.
         #
-        # The ellipsis is the convention for "this opens a dialog first": it is
-        # the only visual difference between this and the two buttons beside it,
-        # and the two beside it act immediately.
-        self.rebuild_button = QPushButton(REBUILD_BUTTON_LABEL, tab)
-        self.rebuild_button.clicked.connect(self.rebuild_server)
-        self.rebuild_button.setToolTip(
+        # The ellipsis is the convention for "this opens a dialog first".
+        #
+        # T89: an ENTRY in the "Server build ▾" menu, with the two T64 presses
+        # below it, and no longer a button of its own. Seven buttons wrapped
+        # the bar at the 1280x800 the app opens at; the three are one act --
+        # compile this server again -- at three sources, so they are one
+        # button, on the owner's decision of 2026-09-27. Each is a `QAction`
+        # named `_action` and not `_button`, so a caller that still expects a
+        # widget (`click()`, `isHidden()`) fails at mypy rather than reading
+        # plausibly.
+        self.server_build_button = QPushButton(SERVER_BUILD_LABEL, tab)
+        self.server_build_button.setObjectName(SERVER_BUILD_BUTTON)
+        self.server_build_button.setToolTip(SERVER_BUILD_TIP)
+        self.server_build_menu = QMenu(self.server_build_button)
+        # Off by default on a `QMenu`, and each entry's sentence is the only
+        # place it says what it costs.
+        self.server_build_menu.setToolTipsVisible(True)
+        self.rebuild_action = self.server_build_menu.addAction(REBUILD_BUTTON_LABEL)
+        self.rebuild_action.triggered.connect(self.rebuild_server)
+        self.rebuild_action.setToolTip(
             "Compile the server again so modules installed since the last build are in it. "
             "Asks first — it takes as long as an install's compile and the server goes down."
         )
@@ -8731,35 +8765,48 @@ class ControllerView(QWidget):
             "install. Asks first, names the one row it writes, and refuses while the server "
             "is running. Yu'lon cannot check the import finished -- you are saying so."
         )
-        # T64, immediately right of Rebuild, which is what the approved design
-        # asks for: the two are the same act -- compile this server again -- and
-        # they differ only in what is compiled. Put anywhere else, a user
-        # looking for "how do I get the newest code" would find the button that
-        # recompiles the same commit.
+        # T64, immediately below Rebuild (right of it, until T89 made the three
+        # one menu), which is what the approved design asks for: the two are
+        # the same act -- compile this server again -- and they differ only in
+        # what is compiled. Put anywhere else, a user looking for "how do I get
+        # the newest code" would find the press that recompiles the same commit.
         #
         # ABSENT rather than greyed where there is no route, which is the one
         # place this tab breaks its own rule (see `ControllerServices.
         # update_to_latest`): for a WSL-resident server or an entry the catalog
         # does not offer this for, there is nothing that would ever enable it.
-        self.update_to_latest_button = QPushButton(UPDATE_TO_LATEST_BUTTON_LABEL, tab)
-        self.update_to_latest_button.clicked.connect(self.update_to_latest)
-        self.update_to_latest_button.setToolTip(
+        self.update_to_latest_action = self.server_build_menu.addAction(
+            UPDATE_TO_LATEST_BUTTON_LABEL
+        )
+        self.update_to_latest_action.triggered.connect(self.update_to_latest)
+        self.update_to_latest_action.setToolTip(
             "Fetch the newest code from the repositories this server was built from and compile "
             "it. Asks first, and offers a backup: this is code nobody has tested with this app."
         )
-        self.update_to_latest_button.setVisible(self.services.update_to_latest is not None)
+        self.update_to_latest_action.setVisible(self.services.update_to_latest is not None)
         # Hidden until this install has actually been moved off its pins, and
-        # that is not the same rule as the button above. There is nothing to
+        # that is not the same rule as the entry above. There is nothing to
         # return FROM on a server that is still on the commit the gates ran on,
         # and a live "Return to the tested pin…" there would offer a multi-hour
         # compile that ends exactly where it started.
-        self.return_to_pin_button = QPushButton(RETURN_TO_PIN_BUTTON_LABEL, tab)
-        self.return_to_pin_button.clicked.connect(self.return_to_the_tested_pin)
-        self.return_to_pin_button.setToolTip(
+        self.return_to_pin_action = self.server_build_menu.addAction(RETURN_TO_PIN_BUTTON_LABEL)
+        self.return_to_pin_action.triggered.connect(self.return_to_the_tested_pin)
+        self.return_to_pin_action.setToolTip(
             "Compile the server again from the commit this app was tested against. It does not "
             "undo anything the newer server wrote into your databases."
         )
-        self.return_to_pin_button.setVisible(False)
+        self.return_to_pin_action.setVisible(False)
+        self.server_build_button.setMenu(self.server_build_menu)
+        # The button greys when every entry it SHOWS is dead, and only then, so
+        # the bar still says "nothing here can act" without a press -- one of
+        # the two things `flow_layout`'s module docstring holds a menu costs
+        # (the other, a tooltip a touch screen cannot reach, it still does). Driven off
+        # each entry's own `changed`, so every place that enables, disables,
+        # shows or hides an entry (the busy lock, T64's backup window, T77's
+        # reading) moves the button without having to know it exists.
+        for action in self.server_build_menu.actions():
+            action.changed.connect(self._set_server_build_button)
+        self._set_server_build_button()
         # What this install was last built from, in `native.source_revs_line()`'s
         # words. Blank -- and the whole row hidden -- for a server still on its
         # pins, which is every install that has never pressed the button above:
@@ -8818,9 +8865,7 @@ class ControllerView(QWidget):
         actions.addWidget(self.adopt_button)
         actions.addWidget(self.updates_button)
         actions.addWidget(self.module_sql_button)
-        actions.addWidget(self.rebuild_button)
-        actions.addWidget(self.update_to_latest_button)
-        actions.addWidget(self.return_to_pin_button)
+        actions.addWidget(self.server_build_button)
         # The banner, hidden until something owes a rebuild. It is above the
         # cards rather than on each owing row because the ACTION is one action
         # for all of them -- one compile covers every module installed since the
@@ -8945,7 +8990,7 @@ class ControllerView(QWidget):
         # patched. Tying the rebuild to `store` would have taken the control
         # away from three of the four games for a reason that is about
         # manifests.
-        self.rebuild_button.setEnabled(self.services.rebuild is not None)
+        self.rebuild_action.setEnabled(self.services.rebuild is not None)
         self.rebuild_banner_button.setEnabled(self.services.rebuild is not None)
         # A third gate, separate again and for the mirror reason: this one is
         # about the install PLAN, not about the store and not about the
@@ -10023,8 +10068,22 @@ class ControllerView(QWidget):
         one.
         """
         offered = self.services.update_to_latest is not None and not self._backup_before_update
-        self.update_to_latest_button.setEnabled(offered)
-        self.return_to_pin_button.setEnabled(offered)
+        self.update_to_latest_action.setEnabled(offered)
+        self.return_to_pin_action.setEnabled(offered)
+
+    @Slot()
+    def _set_server_build_button(self) -> None:
+        """Grey "Server build ▾" exactly when no entry it shows can act (T89).
+
+        `isEnabled()` alone is already "shown and enabled": a hidden `QAction`
+        reports itself disabled whatever it was last set to, and gets that
+        setting back when it is shown (measured, PySide6 6.11). So an entry
+        hidden for want of a route or a pin cannot light a button whose menu
+        holds nothing but a dead Rebuild.
+        """
+        self.server_build_button.setEnabled(
+            any(a.isEnabled() for a in self.server_build_menu.actions())
+        )
 
     def _refresh_source_version(self) -> None:
         """Redraw the version line and decide whether there is a pin to return to.
@@ -10056,7 +10115,7 @@ class ControllerView(QWidget):
         route = self.services.update_to_latest
         if route is None:
             self.source_version_label.setVisible(False)
-            self.return_to_pin_button.setVisible(False)
+            self.return_to_pin_action.setVisible(False)
             return
         try:
             said = route.source_version()
@@ -10065,7 +10124,7 @@ class ControllerView(QWidget):
             said = native.SourceVersion(line="", past_the_pin=False)
         self.source_version_label.setText(said.line)
         self.source_version_label.setVisible(bool(said.line))
-        self.return_to_pin_button.setVisible(said.past_the_pin)
+        self.return_to_pin_action.setVisible(said.past_the_pin)
 
     def _refresh_upstream_news(self) -> None:
         """Ask, off the GUI thread, how far upstream is past this server's build (T124).
@@ -10214,8 +10273,8 @@ class ControllerView(QWidget):
         # `_update_route_busy()` holds what a second press does without it.
         self._backup_before_update = True
         self.backup_button.setEnabled(False)
-        self.update_to_latest_button.setEnabled(False)
-        self.return_to_pin_button.setEnabled(False)
+        self.update_to_latest_action.setEnabled(False)
+        self.return_to_pin_action.setEnabled(False)
         self.maintenance_report.setPlainText(
             "Backing up before the update… this can take minutes on a full world."
         )
@@ -12155,7 +12214,9 @@ def _format_report(report: ApplyReport) -> str:
                 f"  ⚠ {item} is a C++ module: it is off disk now, but the worldserver still "
                 "runs whatever was compiled into it -- worldserver REBUILD required before this "
                 f"takes effect. If {item} was in the last build it is still in there until you "
-                f'press "{REBUILD_BUTTON_LABEL}" below.'
+                # T89: a removal raises no banner, so the one Rebuild left on
+                # the tab is the entry in the menu, and the sentence says so.
+                f'press "{SERVER_BUILD_LABEL}" and then "{REBUILD_BUTTON_LABEL}".'
             )
         else:
             lines.append(

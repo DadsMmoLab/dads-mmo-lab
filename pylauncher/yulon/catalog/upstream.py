@@ -304,7 +304,9 @@ def line(news: UpstreamNews | None) -> str:
         return ""
     return (
         f"Upstream has new code since this server was built: {', '.join(said)}. "
-        "“Update the server to latest…” on the Modules tab brings it in."
+        # The menu named as well as the entry (T89): the press is not on the
+        # Modules toolbar itself any more, it is under "Server build ▾".
+        "“Update the server to latest…” under “Server build ▾” on the Modules tab brings it in."
     )
 
 
