@@ -71,7 +71,7 @@ from collections.abc import Callable, Collection, Generator, Iterator, Mapping, 
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from secrets import token_hex
 from typing import Any, ClassVar, Literal, Protocol
 
@@ -1401,6 +1401,23 @@ def held_at_its_pin(source: EmulatorSource) -> bool:
     if name.endswith(".git"):
         name = name[: -len(".git")]
     return name.endswith(_DB_REPO_SUFFIX)
+
+
+def server_update_dests(entry: CatalogEntry) -> frozenset[PurePosixPath]:
+    """Where "Update the server to latest…" moves a checkout on this entry, by `dest` (T146).
+
+    The moving sources are `StagedInstaller.sources_that_move()`'s, read through
+    the same `held_at_its_pin()`, so a `*-db` source is never here. The Modules
+    tab asks this of a folder no manifest names: on WotLK `modules/mod-playerbots`
+    is one, cloned by the SERVER install, and this button is what moves it.
+    Normalised through `PurePosixPath`, so a `dest` spelled `./modules/x/` still
+    matches the folder it names.
+    """
+    return frozenset(
+        PurePosixPath(source.dest)
+        for source in entry.emulator.sources
+        if not held_at_its_pin(source)
+    )
 
 
 def _named(paths: Sequence[str], most: int = 5) -> str:
