@@ -61,7 +61,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.git import RunnerGit, git_available
+from yulon.git import Behind, RunnerGit, git_available
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
@@ -9169,6 +9169,27 @@ def test_an_update_check_puts_the_count_on_the_row_it_counted(
     labels = [b.text() for b in view.modules_panel.row("mod-transmog").chip_buttons]
     assert modules_panel.chip_update_label(3) in labels, labels
     assert view.modules_panel.row("mod-aoe-loot").chip_buttons == ()
+
+
+def test_an_update_check_that_cannot_count_still_offers_the_update(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T147: a shallow checkout behind by a number it cannot prove keeps its chip.
+
+    The report prints the row's own sentence and no figure; the chip is the
+    update chip with no count on it.
+
+    Mutation: filter the counted rows on `(row.behind or 0) > 0` again and the
+    uncounted row loses its chip -- a module with an update available shows
+    none.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    row = apply_module.ModuleUpdate("mod-transmog", tmp_path, True, Behind.UNCOUNTED)
+    view._module_updates_done((row,))
+
+    assert view.module_report.toPlainText() == row.line
+    labels = [b.text() for b in view.modules_panel.row("mod-transmog").chip_buttons]
+    assert modules_panel.chip_update_label(Behind.UNCOUNTED) in labels, labels
 
 
 def test_busy_greys_every_row_button_and_gives_them_back(

@@ -24,7 +24,7 @@ from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.controller_wow_tortoise import modules as tortoise_modules
-from yulon.git import CloneSpec
+from yulon.git import Behind, BehindCount, CloneSpec
 from yulon.manifest import Source, parse_manifest
 from yulon.resources import manifests_dir
 from yulon.ui.widgets import modules_panel
@@ -805,3 +805,43 @@ def test_an_ordinary_release_asks_the_ordinary_question(
     assert "rewrote" not in route.confirmation()
     list(route.press(None))
     assert rec.heads[_bots_dest(server_dir)] == REL
+
+
+# -- T147: behind, by a number a shallow checkout cannot prove -----------------
+
+
+def test_an_uncounted_release_module_is_still_offered_its_release() -> None:
+    """`Behind.UNCOUNTED` is "not on it" for a release row, like any positive count.
+
+    Mutation: read the release branch's `behind` as a plain truth value that
+    excludes the uncounted answer, and a shallow addon two releases back says it
+    is on the newest one.
+    """
+    row = apply_module.ModuleUpdate(
+        "tbm", Path("/x"), True, Behind.UNCOUNTED, family="mod", release=TAG
+    )
+    assert row.line == f"tbm: new release {TAG}"
+    assert modules_panel.chip_update_label(Behind.UNCOUNTED, TAG) == (
+        f"Update available — new release {TAG}"
+    )
+
+
+def test_an_uncounted_addon_count_still_says_the_release_moved(tmp_path: Path) -> None:
+    """The Tortoise note reads the cached row; an uncounted one is a newer build too."""
+    _addon_installed(tmp_path, TAG)
+    _server_on(tmp_path, TAG)
+    clone = tmp_path / apply_module.CLONE_DIRS["mod"] / tortoise_modules.ADDON_ID
+    (clone / ".git").mkdir()
+
+    class _G:
+        def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
+            return Behind.UNCOUNTED
+
+        def head_sha(self, dest: Path) -> str | None:
+            return OLD
+
+    tortoise_modules.module_updates(
+        tmp_path, git=_G(), newest_release=lambda slug: upstream.Release(TAG, REL), now=T0
+    )
+    note = tortoise_modules.release_notes(tmp_path)[("mod", "tortoise-bots-manager")]
+    assert f"an updated release {TAG} has come out since the addon was installed" in note, note

@@ -26,7 +26,7 @@ from yulon import apply as apply_module
 from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
-from yulon.git import CloneSpec, RunnerGit, git_available
+from yulon.git import Behind, BehindCount, CloneSpec, RunnerGit, git_available
 from yulon.manifest import Manifest, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.ownership import Ownership
@@ -2569,6 +2569,64 @@ def test_module_updates_keeps_could_not_ask_apart_from_up_to_date(tmp_path: Path
     assert by_key["mod-offline"].behind is None
     assert "0 commits behind" in by_key["mod-current"].line
     assert "could not ask" in by_key["mod-offline"].line
+
+
+class _CountedGit:
+    """The real `RunnerGit`, counting how often the Check actually asked it."""
+
+    def __init__(self) -> None:
+        self.real = RunnerGit()
+        self.counted = 0
+
+    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
+        self.counted += 1
+        return self.real.commits_behind(dest, branch)
+
+    def head_sha(self, dest: Path) -> str | None:
+        return self.real.head_sha(dest)
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_shallow_module_that_cannot_prove_its_count_says_update_available_and_no_number(
+    tmp_path: Path,
+) -> None:
+    """T147 on the real path: a depth-1 module clone, a real fetch, the row a player reads.
+
+    The upstream merges a branch forked before the installed commit, which on
+    a depth-1 checkout makes `HEAD..FETCH_HEAD` count upstream's whole past --
+    measured 2775 for a real 50 on mod-playerbots. The row must say there is an
+    update and print no number; the day's cache must keep that answer as an
+    answer (a day, not the hour "could not ask" gets) and read it back as the
+    same thing, not as `None` and not as a count.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    shas = [_publish(origin, {"a.txt": "{v}\n"}, f"v{i}") for i in range(12)]
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-example"
+    RunnerGit().clone(CloneSpec(url=origin.as_uri(), dest=clone))
+    assert (clone / ".git" / "shallow").is_file(), "not the depth-1 shape modules install as"
+    _git(origin, "checkout", "-q", "-b", "side", shas[4])
+    _publish(origin, {"side.txt": "{v}\n"}, "side")
+    _git(origin, "checkout", "-q", "main")
+    _git(origin, "merge", "-q", "--no-ff", "side", "-m", "merge side")
+
+    rows = apply_module.module_updates(server, git=RunnerGit())
+    assert rows[0].behind is Behind.UNCOUNTED, rows[0].behind
+    assert rows[0].line == (
+        "mod-example: update available (a shallow checkout cannot count how many commits)"
+    )
+
+    git = _CountedGit()
+    first = apply_module.cached_module_updates(server, kind="module", git=git, now=1_000)
+    later = apply_module.cached_module_updates(
+        server, kind="module", git=git, now=1_000 + upstream.RETRY_SECONDS + 1
+    )
+    assert git.counted == 1, "an answer was treated as 'could not ask' and asked again"
+    assert first[0].behind is Behind.UNCOUNTED
+    assert later[0].behind is Behind.UNCOUNTED
+    assert later[0].line == rows[0].line
 
 
 def test_module_updates_on_a_server_with_no_modules_folder_is_empty(tmp_path: Path) -> None:

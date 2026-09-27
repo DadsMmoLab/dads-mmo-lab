@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 
 from yulon.catalog import native
 from yulon.catalog.catalog import EmulatorSource, load_catalog
+from yulon.git import Behind
 from yulon.manifest import ClientFile, Manifest, ManifestType, Patch, Prompt, Source
 from yulon.ui.widgets import modules_panel as mp
 
@@ -1764,3 +1765,23 @@ def test_a_conflict_and_a_missing_requirement_do_not_both_speak(tmp_path: Path) 
     assert locked.install_reason == mp.conflict_reason("Mod Ah Bot")
     assert mp.chip_conflicts_with_label("Mod Ah Bot") in _labels(locked)
     assert not [label for label in _labels(locked) if label.startswith("needs ")]
+
+
+def test_an_uncounted_update_gets_the_chip_and_no_number() -> None:
+    """T147: behind by a number a shallow checkout cannot prove is still an update.
+
+    The chip is offered, with its Update press, and nothing on it or in its
+    detail is a figure -- the figure it used to carry was measured at 2775 for
+    a real 50.
+
+    Mutation: gate the chip on `behind > 0` again and the uncounted row has no
+    chip (or the type check refuses the comparison first).
+    """
+    session = mp.SessionState(behind={("module", "mod-a"): Behind.UNCOUNTED})
+    rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+
+    chip = next(c for c in _row(rows, "mod-a").chips if c.kind == "owed")
+    assert chip.label == mp.chip_update_label(Behind.UNCOUNTED) == "Update available"
+    assert chip.action == "update"
+    assert "cannot count" in chip.detail
+    assert not any(ch.isdigit() for ch in chip.label + chip.detail), chip.detail

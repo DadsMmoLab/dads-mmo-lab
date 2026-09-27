@@ -64,7 +64,7 @@ from yulon.catalog.upstream import Release, github_slug
 from yulon.catalog.upstream import cached_row as upstream_cached_row
 from yulon.controller_wow_tortoise import autoupdate
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
-from yulon.git import Git
+from yulon.git import Git, is_behind
 from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import (
@@ -289,7 +289,7 @@ def release_notes(server_dir: Path) -> dict[tuple[str, str], str]:
     rev = state.rev_for(BOTS_REPO) if state is not None else None
     server = rev.release if rev is not None else ""
     counted = cached_module_update(server_dir, "mod", ADDON_ID)
-    addon_moved = counted is not None and counted.release == addon and (counted.behind or 0) > 0
+    addon_moved = counted is not None and counted.release == addon and is_behind(counted.behind)
     news = upstream_cached_row(server_dir, BOTS_REPO)
     server_moved = news is not None and news.release == server and (news.behind or 0) > 0
     return {
