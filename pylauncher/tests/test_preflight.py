@@ -1701,6 +1701,27 @@ def test_the_linux_daemon_remedy_does_not_assert_docker_is_a_system_service() ->
     assert "systemctl start docker" in said
 
 
+def test_a_steam_decks_dead_daemon_remedy_names_the_reinstall_button_first() -> None:
+    """T160: on a Deck the commonest dead Docker is one a SteamOS update removed."""
+    deck = preflight._daemon_remedy(
+        preflight.Facts(platform_id="linux", docker_ready=False, steamos=True)
+    )
+    assert deck.index(platform_module.STEAMOS_DOCKER_REPAIR_LABEL) < deck.index(
+        "systemctl start docker"
+    )
+    plain = preflight._daemon_remedy(preflight.Facts(platform_id="linux", docker_ready=False))
+    assert platform_module.STEAMOS_DOCKER_REPAIR_LABEL not in plain
+
+
+@pytest.mark.parametrize(("here", "asked"), [("linux", True), ("windows", False)])
+def test_gather_asks_whether_this_is_steamos_only_on_linux(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, here: str, asked: bool
+) -> None:
+    monkeypatch.setattr(platform_module, "is_steamos", lambda: True)
+    got = _client_gather(ENTRY, tmp_path, platform_id=lambda: here)
+    assert got.steamos is asked
+
+
 def test_facts_default_to_a_plain_linux_machine_rather_than_a_docker_desktop() -> None:
     """Which way the unestablished fact falls, and why that way.
 

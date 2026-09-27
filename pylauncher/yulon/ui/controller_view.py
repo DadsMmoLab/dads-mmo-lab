@@ -126,7 +126,7 @@ from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
-from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
+from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import (
@@ -149,6 +149,7 @@ from yulon.ui.widgets.modules_panel import (
     moved_by_server_update,
 )
 from yulon.ui.widgets.party_panel import PartyPanel
+from yulon.ui.widgets.prompt import InputPrompter
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
 logger = get_logger(__name__)
@@ -4859,6 +4860,14 @@ class ControllerView(QWidget):
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
         self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
+        # T160. Hidden unless this is a Steam Deck whose `docker` command is
+        # gone, which is what a SteamOS update leaves behind. The press runs the
+        # upstream fix script's repair through the app's own questions; the
+        # prompter is kept on the view because PySide6 holds its slot weakly.
+        self.reinstall_docker_button = QPushButton(platform.STEAMOS_DOCKER_REPAIR_LABEL, tab)
+        self.reinstall_docker_button.setProperty("primary", True)
+        self.reinstall_docker_button.setVisible(False)
+        self._docker_prompter: InputPrompter | None = None
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -4921,6 +4930,7 @@ class ControllerView(QWidget):
         self.remove_button.clicked.connect(self.remove_containers)
         self.repair_button.clicked.connect(self.repair_import)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
+        self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         row = QHBoxLayout()
         for b in (
             self.start_button,
@@ -5009,6 +5019,7 @@ class ControllerView(QWidget):
         box.addWidget(self.steam_label)
         box.addWidget(self.problem_label)
         box.addWidget(self.stop_other_button)
+        box.addWidget(self.reinstall_docker_button)
         box.addWidget(self.repair_label)
         if self.uninstall_button is not None:
             box.addWidget(self.uninstall_button)
@@ -5335,6 +5346,8 @@ class ControllerView(QWidget):
             # asked before the removal says nothing about after it.
             self._nothing_to_remove = False
         self._update_forget_visibility()
+        # T160: Docker answered, so there is nothing to reinstall.
+        self.reinstall_docker_button.setVisible(False)
         self._update_client_dir_row()
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
@@ -5611,6 +5624,7 @@ class ControllerView(QWidget):
         self._ask_again_if_superseded(self._status_superseded)
         self.status_label.setText(f"status: Docker not reachable ({exc})")
         self.realm_badge.set_status("stopped")
+        self._offer_docker_repair()
         # T54. The reveal used to run only on the success path, and the control
         # it reveals exists for an install that is GONE -- which is the case
         # most likely to have taken Docker with it. A user deleted their server
@@ -5650,6 +5664,9 @@ class ControllerView(QWidget):
             self.stop_button.setEnabled(False)
             self.remove_button.setEnabled(False)
             self.repair_button.setEnabled(False)
+            # T160: a second repair on top of a running one would reset the
+            # keyring under a pacman that is reading it.
+            self.reinstall_docker_button.setEnabled(False)
             if self.uninstall_button is not None:
                 self.uninstall_button.setEnabled(False)
             if self.forget_install_button is not None:
@@ -5761,6 +5778,7 @@ class ControllerView(QWidget):
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
             self.repair_button.setEnabled(True)
+            self.reinstall_docker_button.setEnabled(True)
             if self.uninstall_button is not None:
                 self.uninstall_button.setEnabled(True)
             if self.forget_install_button is not None:
@@ -5936,6 +5954,13 @@ class ControllerView(QWidget):
             return
         self._hide_stop_other()
         msg = str(exc)
+        if isinstance(exc, docker.DockerCliMissingError) and self._offer_docker_repair():
+            # T160. The missing-CLI sentence says to install Docker Desktop or
+            # Docker Engine, which on a Deck after a SteamOS update is the wrong
+            # errand: the button below does it, the way the fix script did.
+            # (Not named by its constant here: `test_platform` counts the
+            # modules that name it as the modules that RAISE it.)
+            msg = platform.STEAMOS_DOCKER_GONE_HELP
         rolled = self._roll_the_channel_back_if_it_took_the_port(msg)
         self.problem_label.setText(rolled or msg)
         self.action_failed.emit(rolled or msg)
@@ -6007,6 +6032,66 @@ class ControllerView(QWidget):
     def _hide_stop_other(self) -> None:
         """The offer only stands while the collision does."""
         self.stop_other_button.setVisible(False)
+
+    def _offer_docker_repair(self) -> bool:
+        """Show the SteamOS Docker repair when this Deck's `docker` is gone; say if it is (T160).
+
+        Asked on the two paths that meet a missing Docker: a status poll that
+        could not ask it, and a Start that had no CLI to run. Stateless, as
+        `platform.steamos_docker_removed()` explains, and cheap enough for the
+        GUI thread. Withdrawn by the first poll Docker answers.
+        """
+        offered = platform.steamos_docker_removed()
+        self.reinstall_docker_button.setVisible(offered)
+        return offered
+
+    @Slot()
+    def reinstall_docker(self) -> None:
+        """Run the SteamOS Docker repair off the GUI thread, its questions asked here (T160)."""
+        self._disarm_actions()
+        self._set_busy(True)
+        self.problem_label.setText(
+            "Reinstalling Docker. Answer the questions as they come; this can take a few minutes."
+        )
+        if self._docker_prompter is None:
+            self._docker_prompter = InputPrompter(self)
+        ask = self._docker_prompter.ask
+        self._run(
+            lambda: platform.repair_docker_after_steamos_update(ask=ask),
+            self._docker_reinstalled,
+            self._docker_reinstall_failed,
+        )
+
+    @Slot(object)
+    def _docker_reinstalled(self, result: object) -> None:
+        """Say what the repair did, and offer the restart that picks up the group."""
+        self._set_busy(False)
+        if not isinstance(result, platform.ProvisionReport):
+            return
+        self.problem_label.setText("\n".join(result.manual_steps))
+        if result.docker_ready:
+            self.reinstall_docker_button.setVisible(False)
+        elif platform.STEAMOS_DOCKER_SESSION_STEP in result.manual_steps:
+            self._restart_for_the_group()
+        self.refresh_status()
+
+    def _restart_for_the_group(self) -> None:
+        """Offer the `sg docker` restart when the daemon runs but this process cannot reach it.
+
+        The same offer an install makes after it joined the group, through the
+        same function (`catalog_view.offer_a_docker_group_restart()`), because
+        supplementary groups are fixed at process start and the restart has to
+        hand the single-instance lock over around its exec (T152).
+        """
+        offer_a_docker_group_restart(
+            self, self.problem_label.text(), failed_title="Reinstalling Docker"
+        )
+
+    @Slot(object)
+    def _docker_reinstall_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self.problem_label.setText(f"Reinstalling Docker stopped: {exc}")
+        self.refresh_status()
 
     @Slot()
     def stop_other_and_start(self) -> None:

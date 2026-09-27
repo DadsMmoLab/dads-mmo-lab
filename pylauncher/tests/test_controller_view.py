@@ -39,6 +39,7 @@ from yulon import (
     tuning,
     useraccounts,
 )
+from yulon import platform as yulon_platform
 from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
 from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
@@ -8889,6 +8890,140 @@ def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach
     ), "the poll failed, so the user is told to press a button they cannot see"
     # The failure is still reported — this must not paper over Docker being gone.
     assert "Docker not reachable" in view.status_label.text()
+
+
+def _steam_deck_without_docker(monkeypatch: pytest.MonkeyPatch, *, steamos: bool = True) -> None:
+    """The machine a SteamOS update leaves: SteamOS, and no `docker` on PATH (T160)."""
+    monkeypatch.setattr(yulon_platform, "is_steamos", lambda: steamos)
+    monkeypatch.setattr(yulon_platform, "_which", lambda _name, path=None: None)
+
+
+def _docker_gone() -> NoReturn:
+    raise docker.DockerCliMissingError(yulon_platform.DOCKER_CLI_MISSING_HELP)
+
+
+def test_a_steam_deck_that_lost_docker_is_offered_the_reinstall_on_the_server_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T160: a failed poll on a Deck with no `docker` reveals the button; Docker back hides it."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    real_status = view.services.controller.status
+    assert view.reinstall_docker_button.isHidden()
+
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    view.refresh_status()
+    assert not view.reinstall_docker_button.isHidden(), "the Deck was not offered the repair"
+
+    view.services.controller.status = real_status  # type: ignore[method-assign]
+    view.refresh_status()
+    assert view.reinstall_docker_button.isHidden(), "the offer outlived Docker coming back"
+
+
+def test_off_steamos_a_missing_docker_is_not_offered_the_steamos_repair(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch, steamos=False)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+
+    view.refresh_status()
+    view.start_server()
+
+    assert view.reinstall_docker_button.isHidden()
+    assert view.problem_label.text() == yulon_platform.DOCKER_CLI_MISSING_HELP
+
+
+def test_a_start_with_no_docker_on_a_deck_names_the_update_not_docker_desktop(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    # Both, as on the Deck: the refresh after a failed Start polls a Docker that is not there.
+    view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+
+    view.start_server()
+
+    assert view.problem_label.text() == yulon_platform.STEAMOS_DOCKER_GONE_HELP
+    assert "Docker Desktop" not in view.problem_label.text()
+    assert not view.reinstall_docker_button.isHidden()
+
+
+def test_pressing_the_reinstall_runs_the_repair_with_a_prompter_and_shows_its_report(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    view.refresh_status()
+    calls: list[dict[str, object]] = []
+
+    def repaired(**kw: object) -> yulon_platform.ProvisionReport:
+        calls.append(kw)
+        view.services.controller.status = real_status  # type: ignore[method-assign]
+        return yulon_platform.ProvisionReport(
+            "linux",
+            manual_steps=(
+                yulon_platform.STEAMOS_DOCKER_BACK_STEP,
+                yulon_platform.STEAMOS_READONLY_LEFT_OFF_STEP,
+            ),
+            docker_ready=True,
+            docker_group="already-member",
+        )
+
+    real_status = Controller(WOTLK.container_spec(), tmp_path).status
+    monkeypatch.setattr(yulon_platform, "repair_docker_after_steamos_update", repaired)
+
+    view.reinstall_docker_button.click()
+
+    assert len(calls) == 1 and callable(calls[0]["ask"])
+    assert yulon_platform.STEAMOS_DOCKER_BACK_STEP in view.problem_label.text()
+    assert yulon_platform.STEAMOS_READONLY_LEFT_OFF_STEP in view.problem_label.text()
+    assert view.reinstall_docker_button.isHidden()
+    assert view.start_button.isEnabled() or view.stop_button.isEnabled()
+
+
+def test_a_running_docker_this_session_cannot_reach_offers_the_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    report = yulon_platform.ProvisionReport(
+        "linux",
+        manual_steps=(yulon_platform.STEAMOS_DOCKER_SESSION_STEP,),
+        docker_group="granted",
+    )
+    monkeypatch.setattr(yulon_platform, "repair_docker_after_steamos_update", lambda **_kw: report)
+    monkeypatch.setattr(yulon_platform, "docker_group_reexec", lambda: ["sg", "docker"])
+    restarted: list[object] = []
+    monkeypatch.setattr(
+        yulon_platform, "restart_under_docker_group", lambda **kw: restarted.append(kw)
+    )
+    asked: list[object] = []
+
+    def question(*a: object, **_k: object) -> object:
+        asked.append(a)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    # The exec is faked, so it "failed", and the offer says so in a warning;
+    # answered here rather than by a modal box nobody can press.
+    warned: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **_k: warned.append(a)
+    )
+
+    view.reinstall_docker()
+
+    assert len(asked) == 1 and len(restarted) == 1
+    # Through the install's offer, which hands the single-instance lock over
+    # around the exec (T152): a bare restart would be called with no `reexec`.
+    assert "reexec" in restarted[0], "restarted without the argv the offer asked once"
+    assert warned and warned[0][1] == "Reinstalling Docker"
+    assert not view.reinstall_docker_button.isHidden(), "Docker is still unreachable here"
 
 
 def test_the_drawn_row_for_a_keg_clone_is_marked_installed_and_appears_once(
