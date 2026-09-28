@@ -5315,8 +5315,9 @@ class StagedInstaller:
                     # `git.RunnerGit.clone()` sees an existing `.git`, runs
                     # `_update()` -- fetch, then `reset --hard FETCH_HEAD` -- and
                     # `_pin()` then returns immediately. With `rev=source.rev` the
-                    # same two calls run and the pin is re-applied on top, which is
-                    # the way back. One seam, two directions, no second fetch path.
+                    # same two calls run, the reset is skipped and the pin is the
+                    # one move (T166), which is the way back. One seam, two
+                    # directions, no second fetch path.
                     #
                     # APPENDED BEFORE the call and not after: `clone_lines()` can
                     # fail half way through, after the reset has already landed, and

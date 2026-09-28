@@ -23,6 +23,7 @@ from typing import Any, NoReturn
 import pytest
 
 from yulon import apply as apply_module
+from yulon import git as git_module
 from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
@@ -4813,6 +4814,55 @@ def test_an_ordinary_shallow_release_update_goes_ahead_once_github_places_it(
 
     assert _git(clone, "rev-parse", "HEAD") == newer
     assert [asked[1:] for asked in compare.asked] == [(installed, newer)]
+    assert apply_module.clone_release(clone, item_id=manifest.id) == "vD"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_release_update_whose_checkout_failed_goes_ahead_on_the_next_press(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T166, through `update()`: a failed pin must not leave the clone past the release.
+
+    Installed at release C with the tip T past it; release D out, with E past
+    D. The first press's checkout meets a real `index.lock` and fails. Until
+    T149 round 2 the clone seam had already reset onto the branch tip E by
+    then, so the checkout failing left HEAD on E, AHEAD of D, and every later
+    press was refused by T150's step-back guard "ahead of the newest release"
+    -- measured, this test's second press, before the fix. Now the pin is the
+    one move, so the clone stays on C and the second press lands on D.
+    """
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path)
+    clone = applier.clone_dir(manifest)
+    installed = _publish(origin, files, "C")
+    released["release"] = upstream.Release("vC", installed)
+    _publish(origin, files, "T")
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    _publish(origin, files, "E")
+    released["release"] = upstream.Release("vD", newer)
+    real = git_module._run_git
+    failed: list[list[str]] = []
+
+    def run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        # The lock appears for the first checkout only, and is git's own refusal.
+        if "checkout" in argv and not failed and cwd is not None:
+            failed.append(argv)
+            (cwd / ".git" / "index.lock").touch()
+            try:
+                return real(argv, cwd=cwd)
+            finally:
+                (cwd / ".git" / "index.lock").unlink()
+        return real(argv, cwd=cwd)
+
+    monkeypatch.setattr(git_module, "_run_git", run)
+    with pytest.raises(ApplyError, match="index.lock"):
+        applier.update(manifest)
+    assert failed, "no checkout was attempted, so nothing here was tested"
+    assert _git(clone, "rev-parse", "HEAD") == installed, "the failed press moved the clone"
+
+    applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == newer
     assert apply_module.clone_release(clone, item_id=manifest.id) == "vD"
 
 

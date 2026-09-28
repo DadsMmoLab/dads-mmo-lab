@@ -267,11 +267,12 @@ def _only_grafts(ahead: str, dest: Path) -> bool:
 
     T66's second layer. `no_local_commits()` counts `FETCH_HEAD..HEAD` and
     reads a non-zero count as "HEAD carries work of the user's own". In a
-    depth-1 clone that is only true when the history is connected, and
-    `_pin()`'s `fetch --depth 1 <rev>` on a pin that was ALREADY behind the tip
-    leaves the checkout holding the tip and the pin as two grafted roots with
-    no edge between them. The pin then counts as one commit ahead, and the user
-    is refused an update over a commit the remote handed them.
+    depth-1 clone that is only true when the history is connected, and a
+    fresh clone's `_pin()` -- `fetch --depth 1 <rev>` on a pin that was
+    ALREADY behind the tip -- leaves the checkout holding the tip and the pin
+    as two grafted roots with no edge between them. The pin then counts as one
+    commit ahead, and the user is refused an update over a commit the remote
+    handed them.
 
     Measured against git 2.43 before this was written: on that shape `git
     merge-base --is-ancestor HEAD FETCH_HEAD` answers no as well, so the
@@ -1242,11 +1243,15 @@ class RunnerGit:
         **A SHALLOW clone is refused outright, and that is what makes the number
         trustworthy at all.** Nine of the ten sources this app ships are
         `depth: 1` (`Source.depth` defaults to 1, and only AzerothCore's core
-        overrides it), and `ContainerGit.clone()` -- the production seam --
-        passes that depth on its update fetch, so HEAD's parents are cut at the
-        graft. The old pin's object is still in the store, because the checkout
-        was sitting on it a moment ago, so `rev-list --count <pin>..HEAD` walks
-        HEAD, finds no parent, and answers **1** whatever the real distance is.
+        overrides it), and a checkout whose HEAD is a graft -- `_pin()`'s
+        depth-1 fetch makes one, and `ContainerGit.clone()` made one on every
+        update until T149 -- has HEAD's parents cut. The old pin's object is
+        still in the store, because the checkout was sitting on it a moment
+        ago, so `rev-list --count <pin>..HEAD` walks HEAD, finds no parent, and
+        answers **1** whatever the real distance is. A HEAD whose history IS
+        connected is no safer: a branch merged from under the graft is handed
+        in down to the root and counted, and `_behind_after_fetch()` (T147)
+        records why a count across a graft lies in both directions.
         A version line reading "1 commit past the tested pin" after a year of
         upstream history is a figure with nothing behind it (cold review,
         2026-09-16), and it is exactly the class this file has already recorded
@@ -1296,7 +1301,9 @@ class RunnerGit:
         unless the only modified tracked files are ones this app wrote
         (`app_written_paths()`), and the caller writes those again immediately
         afterwards. It is not a general-purpose checkout and there must not be
-        a second caller that has not made that check.
+        a second caller that has not made that check. (`_pin_args()`'s update
+        checkout is `--force` too, since T166, and is no second caller of this:
+        it replaces a `reset --hard` that discarded the same things.)
 
         It does not swallow a failure. A restore that did not happen leaves the
         source tree ahead of the image that was built from it, and the caller's
@@ -1382,7 +1389,7 @@ class RunnerGit:
             if clear_only:
                 return
             self._update(spec)
-            self._pin(spec)
+            self._pin(spec, in_place=True)
             return
         if spec.dest.exists():
             # T49: read-only git objects stop a bare rmtree on Windows, and a
@@ -1406,7 +1413,7 @@ class RunnerGit:
             _run_git([*argv, spec.url, str(spec.dest)])
         else:
             self._sparse_clone(spec)
-        self._pin(spec)
+        self._pin(spec, in_place=False)
 
     def clone_lines(self, spec: CloneSpec, *, stage: str = "clone") -> Iterator[str]:
         """`clone()`, yielding git's own progress as it arrives (T35).
@@ -1434,7 +1441,7 @@ class RunnerGit:
         """
         if (spec.dest / ".git").is_dir():
             yield from self._update_lines(spec, stage)
-            self._pin(spec)
+            yield from self._pin_lines(spec, stage)
             return
         if spec.sparse_path is not None:
             self.clone(spec)
@@ -1453,13 +1460,14 @@ class RunnerGit:
         if spec.branch:
             argv += ["--branch", spec.branch]
         yield from _streamed_git([*argv, spec.url, str(spec.dest)], stage=stage)
-        self._pin(spec)
+        self._pin(spec, in_place=False)
 
     def _update_lines(self, spec: CloneSpec, stage: str) -> Iterator[str]:
         """`_update()`'s fetch, streamed; the reset that follows has nothing to report.
 
         Depth is deliberately not passed here, for the reason `_update()` gives
-        in full: `git fetch --depth=1` truncates a full clone in place.
+        in full: `git fetch --depth=1` truncates a full clone in place. No reset
+        when the spec pins, for `_update()`'s T166 reason.
         """
         ref = _fetch_ref(spec.branch)
         yield from _streamed_git(
@@ -1467,7 +1475,8 @@ class RunnerGit:
             cwd=spec.dest,
             stage=stage,
         )
-        _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
+        if _resets_to_the_tip(spec):
+            _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
 
     def _sparse_clone(self, spec: CloneSpec) -> None:
         assert spec.sparse_path is not None
@@ -1513,46 +1522,157 @@ class RunnerGit:
 
         The line-ending flags are repeated because `git -c` did not persist into
         this repository if it was cloned by an older build of this launcher.
+
+        **A spec that pins is fetched and NOT reset** (T166). The pin is where
+        it ends up, and `_pin()` moves it there in one checkout; a reset onto
+        the branch tip first was a stop on the way, and when the checkout after
+        it failed the clone was left on the tip -- past the release a
+        release-following module is on, where T150's guard refuses every later
+        Update as "ahead of the newest release". The fetch stays: it is the
+        same fetch `ContainerGit.clone()` asks "can the container run git at
+        all?" with, and after the update guard's own fetch it costs nothing.
         """
         ref = _fetch_ref(spec.branch)
         _run_git(
             ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
             cwd=spec.dest,
         )
-        _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
+        if _resets_to_the_tip(spec):
+            _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
 
-    def _pin(self, spec: CloneSpec) -> None:
+    def _pin(self, spec: CloneSpec, *, in_place: bool) -> None:
         """Move the checkout to `spec.rev` when the source pins one; a no-op otherwise.
 
         Fetched BY HASH first, because a shallow clone holds only the tip: `git
         checkout <sha>` on a `--depth 1` clone answers "reference is not a tree"
-        for every commit but one. The fetch carries the clone's own depth so a
-        shallow clone stays the shape it was created with (see `_update()`).
-        `--detach` because a pin is not a branch: there is nothing to pull, and
-        an attached HEAD would let the next `reset --hard FETCH_HEAD` drag the
-        checkout back to the tip — which is why `clone()` re-applies the pin
-        after every update as well as after the first clone.
+        for every commit but one. `--detach` because a pin is not a branch:
+        there is nothing to pull, and an attached HEAD would let the next `reset
+        --hard FETCH_HEAD` drag the checkout back to the tip — which is why
+        `clone()` re-applies the pin after every update as well as after the
+        first clone.
+
+        `in_place` is an UPDATE of a checkout that was already there, and
+        `_pin_args()` carries what changes with it and why (T149, T166). It has
+        no default so that no call site can forget which of the two it is.
         """
         if spec.rev is None:
             return
-        _run_git(
-            [
-                "git",
-                *_LINE_ENDING_ARGS,
-                *_HTTP_VERSION_ARGS,
-                "fetch",
-                *_pull_depth_args(spec.depth),
-                "origin",
-                spec.rev,
-            ],
-            cwd=spec.dest,
-        )
-        _run_git(["git", *_LINE_ENDING_ARGS, "checkout", "--detach", spec.rev], cwd=spec.dest)
+        fetch, checkout = _pin_args(spec, in_place=in_place)
+        if not (in_place and self._has_commit(spec.dest, spec.rev)):
+            _run_git(["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, *fetch], cwd=spec.dest)
+        _run_git(["git", *_LINE_ENDING_ARGS, *checkout], cwd=spec.dest)
+
+    def _pin_lines(self, spec: CloneSpec, stage: str) -> Iterator[str]:
+        """`_pin(in_place=True)` for `clone_lines()`, its fetch streamed like the branch's.
+
+        The one fetch here that can be long is a pin the checkout does not have
+        -- one older than the commit the clone was made at brings its history
+        down to the root (`_pin_args()`) -- and run silently after a streamed
+        branch fetch it looked like a hang. So it streams, and says so as it
+        goes (T149).
+        """
+        if spec.rev is None:
+            return
+        fetch, checkout = _pin_args(spec, in_place=True)
+        if not self._has_commit(spec.dest, spec.rev):
+            yield from _streamed_git(
+                ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, *_with_progress(fetch)],
+                cwd=spec.dest,
+                stage=stage,
+            )
+        _run_git(["git", *_LINE_ENDING_ARGS, *checkout], cwd=spec.dest)
+
+    def _has_commit(self, dest: Path, rev: str) -> bool:
+        """Is `rev` a commit this checkout already holds? False when git will not say.
+
+        `False` on any refusal, because what it decides is whether to fetch: a
+        fetch that was not needed costs a round trip, and a skipped one that
+        was needed fails the checkout.
+        """
+        try:
+            _run_git(["git", *_has_commit_args(rev)], cwd=dest)
+        except GitError:
+            return False
+        return True
 
 
 def _pull_depth_args(depth: int | None) -> list[str]:
     """`git pull`/`git fetch` spell depth as one token, unlike `git clone`."""
     return [] if depth is None else [f"--depth={depth}"]
+
+
+def _has_commit_args(rev: str) -> list[str]:
+    """`cat-file -e <rev>^{commit}`: exit 0 only when the commit object is in the store."""
+    return ["cat-file", "-e", f"{rev}^{{commit}}"]
+
+
+def _with_progress(fetch: list[str]) -> list[str]:
+    """A `fetch` argv with `--progress`, which git needs to report into a pipe at all."""
+    assert fetch[0] == "fetch"
+    return ["fetch", "--progress", *fetch[1:]]
+
+
+def _resets_to_the_tip(spec: CloneSpec) -> bool:
+    """Does updating this existing checkout reset it onto the fetched tip? Only unpinned (T166).
+
+    A pinned spec is moved by `_pin_args()`'s one checkout instead, so that a
+    failure leaves it where it was rather than on the tip; `RunnerGit._update()`
+    carries the measurement.
+    """
+    return spec.rev is None
+
+
+def _pin_args(spec: CloneSpec, *, in_place: bool) -> tuple[list[str], list[str]]:
+    """The pin's fetch and its checkout, as git arguments, for both bodies (T149, T166).
+
+    **A fresh clone** fetches the pin at the clone's own depth: the clone
+    holds one commit, and a pin fetched without a depth would bring its whole
+    history down to the root. It checks out plainly, because nothing is in
+    the way of a tree that was cloned a moment ago.
+
+    **An update in place** differs in both halves, and each is a measured
+    trap:
+
+    - **No depth on the fetch.** At a depth it writes the pin into
+      `.git/shallow`, and a pin OFF the branch can lie above a HEAD that is
+      not a graft -- a release tagged on a release branch, or a pin left on no
+      branch at all. If the checkout then fails, that graft stays above HEAD,
+      and once the branch moves through the pin `no_local_commits()` reads
+      HEAD's own history as the user's commits: T149's stranded shape, made by
+      the pin. Without a depth nothing in `.git/shallow` changes, as in
+      `_update()`. A pin the store already holds is not fetched at all
+      (`_has_commit()`): measured, Return to the tested pin after Update to
+      latest is always that, because the pin is the commit the install
+      grafted. Measured on a 210-commit `file://` fixture after the guard's own
+      fetch, a pin under the branch tip brought 0 objects (it came with the
+      tip's history) and one on a release branch above the tip 3; T150's guard
+      has already fetched a module's release by its id without a depth before
+      this runs. The one pin that costs is one OLDER than the commit the clone
+      was made at: it brings its own history to the root (150 of the
+      fixture's 633 objects), which a catalog pin moved backwards or a release
+      older than the install would be -- accepted, and streamed by
+      `clone_lines()` so it is seen to move (T149 round 3). Putting the old
+      `.git/shallow` back after a depth-1 fetch instead is not an option: it
+      leaves a commit whose parent the store does not have (measured: `fsck`
+      "broken link", `gc` errors).
+    - **`--force` on the checkout, because the reset is gone** (T166,
+      `_resets_to_the_tip()`). `reset --hard FETCH_HEAD` used to throw away
+      what was in the way before this checkout ran; without it a plain
+      checkout refuses whenever a file this app writes into a checkout (a
+      carried patch, a compose file) differs between the two commits.
+      Measured to leave the same tree as the `reset --hard` it replaces,
+      tracked changes and untracked files in the way included, so it
+      discards nothing that reset did not, on every road that reached it --
+      the update guards (`Applier._reset_cost()`,
+      `native._refuse_unless_updatable()`) ran before either.
+    """
+    assert spec.rev is not None
+    if not in_place:
+        return (
+            ["fetch", *_pull_depth_args(spec.depth), "origin", spec.rev],
+            ["checkout", "--detach", spec.rev],
+        )
+    return ["fetch", "origin", spec.rev], ["checkout", "--detach", "--force", spec.rev]
 
 
 def _is_fresh_mount_race(message: str) -> bool:
@@ -1848,10 +1968,12 @@ class ContainerGit:
         """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
 
         The shallow refusal is asked here too, and this is the transport it was
-        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
-        on its update fetch, so a `depth: 1` source stays grafted and the count
-        would answer 1 for any distance. Both bodies must answer identically --
-        a caller never learns which it got, and the figure is read by a person.
+        MEASURED against: `clone()` above passed `_pull_depth_args(spec.depth)`
+        on its update fetch until T149, so a `depth: 1` source stayed grafted
+        and the count would answer 1 for any distance. `RunnerGit`'s docstring
+        carries why a shallow HEAD that is not a graft is refused as well. Both
+        bodies must answer identically -- a caller never learns which it got,
+        and the figure is read by a person.
         """
         if not (dest / ".git").is_dir():
             return None
@@ -1971,11 +2093,23 @@ class ContainerGit:
             if clear_only:
                 return
             try:
-                self._run(
-                    spec,
-                    ["fetch", *_pull_depth_args(spec.depth), "origin", _fetch_ref(spec.branch)],
-                )
-                self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
+                # No depth, for `RunnerGit._update()`'s reason and one of this
+                # body's own (T149). At a depth the fetch writes the tip into
+                # `.git/shallow` BEFORE the reset, so a reset that then failed
+                # left a graft above HEAD, and on a HEAD that is not a graft
+                # itself `no_local_commits()` reads everything under it as the
+                # user's commits: every later Update refused, over nothing.
+                # Without one the fetch leaves `.git/shallow` as it was, and a
+                # failed update leaves the checkout exactly as the next one
+                # found it. On an Update it downloads nothing the guard's own
+                # fetch has not just downloaded: `update()`, `install()` over a
+                # checkout and "Update to latest" all ask `no_local_commits()`
+                # first, and that fetch has never carried a depth. The one other
+                # road here, an install finishing a clone a previous run left
+                # part-way, brings a clone minutes old up to date.
+                self._run(spec, ["fetch", "origin", _fetch_ref(spec.branch)])
+                if _resets_to_the_tip(spec):
+                    self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
                 if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
                     logger.warning(
@@ -1995,7 +2129,7 @@ class ContainerGit:
             # fetch again through host git, and only then admitted to
             # `upload-pack: not our ref`. The fresh-clone path below has always
             # pinned outside its own fallback; this is that same rule.
-            self._pin(spec)
+            self._pin(spec, in_place=True)
             return
         if spec.dest.exists():
             rmtree.remove_tree(spec.dest)  # T49
@@ -2034,14 +2168,33 @@ class ContainerGit:
             # cone mode yields all four. Two implementations of one Protocol
             # must not disagree about what they produce.
             self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
-        self._pin(spec)
+        self._pin(spec, in_place=False)
 
-    def _pin(self, spec: CloneSpec) -> None:
-        """`RunnerGit._pin()`, containerised: fetch by hash at the clone's depth, then detach."""
+    def _pin(self, spec: CloneSpec, *, in_place: bool) -> None:
+        """`RunnerGit._pin()`, containerised: fetch by hash, then detach (`_pin_args()`)."""
         if spec.rev is None:
             return
-        self._run(spec, ["fetch", *_pull_depth_args(spec.depth), "origin", spec.rev])
-        self._run(spec, ["checkout", "--detach", spec.rev])
+        fetch, checkout = _pin_args(spec, in_place=in_place)
+        if not (in_place and self._has_commit(spec.dest, spec.rev)):
+            self._run(spec, fetch)
+        self._run(spec, checkout)
+
+    def _pin_lines(self, spec: CloneSpec, stage: str) -> Iterator[str]:
+        """`RunnerGit._pin_lines()`, containerised: the fetch through `_streamed_capture()`."""
+        if spec.rev is None:
+            return
+        fetch, checkout = _pin_args(spec, in_place=True)
+        if not self._has_commit(spec.dest, spec.rev):
+            yield from self._streamed_capture(spec.dest, _with_progress(fetch), stage=stage)
+        self._run(spec, checkout)
+
+    def _has_commit(self, dest: Path, rev: str) -> bool:
+        """`RunnerGit._has_commit()`, in a reader container: it only looks in the store."""
+        try:
+            self._capture(dest, _has_commit_args(rev), writes=False)
+        except GitError:
+            return False
+        return True
 
     def _run(self, spec: CloneSpec, git_args: list[str]) -> None:
         """One containerized `git` invocation against this spec's destination."""
@@ -2332,18 +2485,15 @@ class ContainerGit:
         """
         if (spec.dest / ".git").is_dir():
             try:
+                # No depth, for `clone()`'s T149 reason: a depth writes a graft
+                # before the reset, and a failed reset then strands the clone.
                 yield from self._streamed_capture(
                     spec.dest,
-                    [
-                        "fetch",
-                        "--progress",
-                        *_pull_depth_args(spec.depth),
-                        "origin",
-                        _fetch_ref(spec.branch),
-                    ],
+                    ["fetch", "--progress", "origin", _fetch_ref(spec.branch)],
                     stage=stage,
                 )
-                self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
+                if _resets_to_the_tip(spec):
+                    self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
                 if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
                     logger.warning(
@@ -2353,7 +2503,7 @@ class ContainerGit:
                     yield from RunnerGit().clone_lines(spec, stage=stage)
                     return
                 raise
-            self._pin(spec)
+            yield from self._pin_lines(spec, stage)
             return
         self.clone(spec, clear_only=True)
         argv = [
@@ -2384,7 +2534,7 @@ class ContainerGit:
             # --no-cone, for the measured reason `clone()` gives: cone mode
             # materialises a different tree than `RunnerGit` produces.
             self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
-        self._pin(spec)
+        self._pin(spec, in_place=False)
 
     def _streamed_clone_with_mount_race_retry(
         self, spec: CloneSpec, git_args: list[str], *, stage: str
