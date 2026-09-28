@@ -28,6 +28,7 @@ same `ahead_by`.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -77,14 +78,23 @@ def https_get(url: str, accept: str) -> bytes:
 
     Verified for the reason every GET in this package is: an unverified answer
     would decide what a user is told about their server's code.
+
+    `OSError` on any failure, as `HttpGet` promises: `http.client` raises its
+    own `HTTPException` for a body cut off mid-read (`IncompleteRead`) or a
+    status line it cannot parse, and every caller catches only `OSError` --
+    so one of those could fail a whole Modules "Check for updates" press,
+    every other row with it (T148).
     """
     request = urllib.request.Request(
         url, headers={"User-Agent": f"yulon/{__version__}", "Accept": accept}
     )
-    with urllib.request.urlopen(
-        request, timeout=_TIMEOUT_SECONDS, context=platform.verify_context()
-    ) as resp:
-        body = resp.read(_MAX_BYTES + 1)
+    try:
+        with urllib.request.urlopen(
+            request, timeout=_TIMEOUT_SECONDS, context=platform.verify_context()
+        ) as resp:
+            body = resp.read(_MAX_BYTES + 1)
+    except http.client.HTTPException as exc:
+        raise OSError(f"{url} did not answer with a whole HTTP response: {exc!r}") from exc
     if len(body) > _MAX_BYTES:
         raise OSError(f"{url} answered with more than {_MAX_BYTES} bytes")
     return bytes(body)
