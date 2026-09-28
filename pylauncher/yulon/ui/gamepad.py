@@ -386,6 +386,37 @@ class Navigator(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._cache: dict[int, list[QWidget]] = {}
+        # The cache is a list of what was focusable WHEN it was walked, and a
+        # widget shown, hidden, enabled or disabled since is a different list
+        # (T153). Nothing that changes one of those calls `invalidate()` -- a
+        # tab switched with a bumper, a report strip folding, the Modules tab's
+        # custom-module card going to one line -- so the navigator watches for
+        # the change itself. Measured before this, offscreen: after RB from the
+        # Modules tab to Tuning the cache still held the Modules tab's 70
+        # widgets, six of the Tuning tab's ten were out of reach, and the next
+        # D-pad press put the focus on a hidden button of the tab just left.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    _TREE_CHANGES = (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.EnabledChange)
+    """The events after which a cached focus chain may be wrong (T153).
+
+    A widget's own `Show`/`Hide` arrives for an implicit change too -- the
+    children of a tab page that is hidden are each sent one -- and
+    `EnabledChange` likewise reaches every child of a widget that is greyed.
+    """
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802  (Qt's own name)
+        """Drop the caches when any widget's visibility or greying moves; eat nothing.
+
+        Cheap on purpose, because it sees every event in the application: a
+        clear of an already-empty dict is skipped, and the walk it forces is
+        paid on the next D-pad press, not here.
+        """
+        if self._cache and event.type() in self._TREE_CHANGES and isinstance(watched, QWidget):
+            self._cache.clear()
+        return False
 
     # -- context ---------------------------------------------------------
 
@@ -421,8 +452,10 @@ class Navigator(QObject):
         """Every focusable descendant of `root`, cached per widget id.
 
         Call `invalidate()` after the tree changes (a tab opens, an install
-        adopts a server, a tile is added). A miss is also recovered here: a
-        cached widget whose C++ object was deleted after the cache was built (a
+        adopts a server, a tile is added); a widget shown, hidden, enabled or
+        disabled invalidates it by itself (`eventFilter`, T153). A miss is also
+        recovered here: a cached widget whose C++ object was deleted after the
+        cache was built (a
         rebuilt tab, a removed tile) is a dangling wrapper — calling
         `mapTo()`/`setFocus()` on it raises `RuntimeError: Internal C++ object
         already deleted`. Dead entries are dropped on read, and a cache whose

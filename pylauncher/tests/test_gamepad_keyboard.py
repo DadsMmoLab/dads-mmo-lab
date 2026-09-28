@@ -350,3 +350,137 @@ def test_the_bumper_and_confirm_keys_keep_their_pad_meaning_in_an_open_menu(
 
     assert menu_window.fired == ["one"]
     assert menu_window.open_popup() is None
+
+
+def _reached_from(navigator: object, start: QWidget) -> set[QWidget]:
+    """Every widget the D-pad reaches from `start`, through the navigator's own list.
+
+    A breadth-first walk of presses in all four directions. The navigator is
+    asked rather than the widget tree, because what is under test is what the
+    navigator believes is there -- its cache -- and a fresh walk of the tree
+    would not see a stale one.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, Navigator
+
+    assert isinstance(navigator, Navigator)
+    seen = {start}
+    frontier = [start]
+    while frontier:
+        here = frontier.pop()
+        for direction in Direction:
+            here.setFocus()
+            navigator.navigate(direction)
+            landed = QApplication.focusWidget()
+            if landed is not None and landed not in seen:
+                seen.add(landed)
+                frontier.append(landed)
+    return seen
+
+
+def test_the_pad_follows_a_widget_shown_hidden_greyed_or_ungreyed_and_a_bumper(
+    qapp: object,
+) -> None:
+    """The navigator's cached focus chain is redrawn when the tree it lists changes (T153).
+
+    Found on the Modules tab, whose custom-module card swaps for a one-line form
+    at small windows: a navigator primed before the swap kept the hidden card's
+    buttons and never found the new ones, because the list is filtered on
+    visible and enabled once, when it is walked, and nothing called
+    `invalidate()`. The same held for a tab switched with a bumper -- the old
+    tab's buttons stayed in the list and the new tab's were out of reach.
+
+    Each case is ONE change on a freshly primed navigator, because one change of
+    any kind would clear the cache for the others: a button SHOWN, a button
+    UNGREYED, a button HIDDEN -- which is seen as a dead press rather than a
+    missing target, since the navigator aims at the hidden button and the focus
+    cannot land on it -- and a tab switched by RB. And the widget still gets its
+    own `Show` event: the navigator watches the application's events and must
+    not eat them.
+    """
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Action, Direction
+
+    win = QWidget()
+    tabs = QTabWidget(win)
+    tabs.setObjectName("sidebar-tabs")
+    first = QWidget()
+    first_box = QVBoxLayout(first)
+    start = QPushButton("Start", first)
+    shown_later = QPushButton("Shown later", first)
+    ungreyed_later = QPushButton("Ungreyed later", first)
+    hidden_later = QPushButton("Hidden later", first)
+    bottom = QPushButton("Bottom", first)
+    for button in (start, shown_later, ungreyed_later, hidden_later, bottom):
+        first_box.addWidget(button)
+    second = QWidget()
+    second_box = QVBoxLayout(second)
+    other_tab = [QPushButton("Other one", second), QPushButton("Other two", second)]
+    for button in other_tab:
+        second_box.addWidget(button)
+    tabs.addTab(first, "one")
+    tabs.addTab(second, "two")
+    QVBoxLayout(win).addWidget(tabs)
+    navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    shown_later.hide()
+    ungreyed_later.setEnabled(False)
+    win.show()
+    win.activateWindow()
+    process_events()
+
+    shows: list[object] = []
+
+    class _Shows(QObject):
+        def eventFilter(self, watched: object, event: QEvent) -> bool:  # noqa: N802
+            if event.type() == QEvent.Type.Show:
+                shows.append(watched)
+            return False
+
+    shown_later.installEventFilter(_Shows(shown_later))
+    try:
+        primed = _reached_from(navigator, start)
+        assert shown_later not in primed and ungreyed_later not in primed
+
+        shown_later.show()
+        process_events()
+        assert shows == [shown_later], "the navigator ate the button's own Show event"
+        assert shown_later in _reached_from(
+            navigator, start
+        ), "a button shown after the walk is out of the pad's reach"
+
+        ungreyed_later.setEnabled(True)
+        process_events()
+        assert ungreyed_later in _reached_from(
+            navigator, start
+        ), "a button ungreyed after the walk is out of the pad's reach"
+
+        hidden_later.hide()
+        process_events()
+        ungreyed_later.setFocus()
+        navigator.navigate(Direction.DOWN)
+        assert (
+            QApplication.focusWidget() is bottom
+        ), "Down aimed at a button hidden since the walk and the focus went nowhere"
+
+        _reached_from(navigator, start)
+        start.setFocus()
+        navigator.perform(Action.CYCLE_NEXT)
+        process_events()
+        assert tabs.currentIndex() == 1
+        reached = _reached_from(navigator, other_tab[0])
+        assert set(other_tab) <= reached, "the tab a bumper opened is out of the pad's reach"
+        assert not reached & {
+            start,
+            shown_later,
+            ungreyed_later,
+            bottom,
+        }, f"the pad lands on the tab it left: {[w.text() for w in reached]}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()

@@ -3249,7 +3249,9 @@ cheapest height on the tab to buy the second row with.
 
 A second floor, above `MODULE_LIST_MIN_HEIGHT` and defended by a different rung
 of `_TabFit`: the log and the report fold to keep THAT one, and only the card
-goes to its one line to keep this. Raising `MODULE_LIST_MIN_HEIGHT` instead
+goes to its one line to keep this -- and only where the list would be under it
+even with both boxes folded, so a box a taller window can hold open never costs
+the card its sentence (T153 round 2). Raising `MODULE_LIST_MIN_HEIGHT` instead
 would fold the log and the report at the 1280x800 the app opens at, which T80
 and T85 measured and the gates photographed open.
 
@@ -3610,10 +3612,10 @@ class _TabFit(QObject):
        names what is behind it.
     3. the CUSTOM-MODULE CARD goes to its one-line form (T153): its title and
        its two buttons on one line, without the sentence that explains them.
-       Taken whenever the list would otherwise be under
-       `MODULE_LIST_ROWS_HEIGHT` -- a higher floor than the one steps 1 and 2
-       defend, and the rung only the card stands on: the card gives its
-       sentence for the list's ROWS, and never folds or opens a panel.
+       Taken only where the list would be under `MODULE_LIST_ROWS_HEIGHT` --
+       a family header and two rows -- even with the log AND the report
+       folded, so it is the last thing to go before the list: whatever the
+       boxes could have given, they are counted as having given it.
     4. the LIST's floor gives. It scrolls, so it is complete at any height; every
        pixel taken from it is a pixel of a row somebody can still scroll to.
 
@@ -3632,13 +3634,26 @@ class _TabFit(QObject):
     from a link. The line costs 50px where a strip would cost 14, and it keeps
     both presses on screen at every size the window can be.
 
-    **Why steps 1 and 2 bill the card WHOLE.** The card is decided after them and
-    from their answer, and it is decided from the card whole rather than from
-    whichever form is showing. Read off the form on screen, a folded card leaves
-    room over, the room says "unfold", and the unfolded card says "fold" -- two
-    transitions per settle, the log's flicker (T83) in a third widget. And
-    decided before them, the card's line would move the widths at which the log
-    and the report fold, which T85's presses are measured against.
+    **Why the card and the boxes are decided apart (T153 round 2).** Each is
+    decided from a sum the other does not change: the boxes with the card
+    billed WHOLE, the card with both boxes billed FOLDED. Chained instead --
+    the card decided from what the boxes left -- a taller window that could
+    keep the report open had less left over for the list than a shorter one
+    that folded it, and the card paid: measured past the pins with a rebuild
+    owed, the card was whole at 1280x740 and 1280x760 and on one line at
+    1280x800, so dragging the window taller took its sentence away. Apart,
+    each of the three is shown at every height above the first it is shown
+    at, which is `test_a_taller_window_never_takes_back_what_a_shorter_one_
+    showed`. It also leaves T80's shot at 1280x800 as it was: both boxes open
+    over a list of under two rows, and the card whole, because folding the
+    boxes WOULD give the list its rows -- the card does not give its sentence
+    for height the boxes are holding.
+
+    The same separation is what stops a flicker. Read off the form on screen,
+    a folded card leaves room over, the room says "unfold", and the unfolded
+    card says "fold" -- two transitions per settle, the log's flicker (T83) in
+    a third widget. And billing the card as its line for the boxes would move
+    the widths at which they fold, which T85's presses are measured against.
 
     **One thing reorders it: a press on a handle (T85).** Steps 1 and 2 are a
     guess at which of the two panels the reader would rather keep, and a user who
@@ -3817,11 +3832,13 @@ class _TabFit(QObject):
             report_room = open_now[self._report]
             self._log.set_room(log_room)
             self._report.set_room(report_room)
-            # Step 3 (T153): what the list would have with the card whole, the
-            # list billed at nothing so the answer is the list's whole share.
-            # Asked with the card WHOLE whichever form is showing -- see the
-            # class docstring -- so the answer cannot depend on its own result.
-            rows = height - self._owed(log_open=log_room, report_open=report_room, list_floor=0)
+            # Step 3 (T153): what the list would have with the card whole AND
+            # both boxes folded, the list billed at nothing so the answer is
+            # its whole share. Asked of neither box's decision above, so the
+            # card cannot fold because a taller window kept a box open -- see
+            # the class docstring -- and asked with the card WHOLE whichever
+            # form is showing, so the answer cannot depend on its own result.
+            rows = height - self._owed(log_open=False, report_open=False, list_floor=0)
             card_whole = rows >= self._rows_floor
             self._show_the_card(whole=card_whole)
             spare = height - self._owed(
