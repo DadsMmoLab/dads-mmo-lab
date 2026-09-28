@@ -27,7 +27,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from functools import cache, partial
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Protocol, cast
 
@@ -1182,11 +1182,24 @@ def _db_password(
     tab is built when the app opens, and reading `.db_password` under
     `\\\\wsl.localhost\\` then started a stopped distro. Nothing needs the password
     before something talks to the database, which starts the distro anyway, so
-    the file is read at that first use (`apply.mysql_env()`), once.
+    the file is read at that first use (`apply.mysql_env()`), and kept once a
+    read has found it: a first read that fell back to the default (the distro's
+    share not reachable yet, the file briefly missing) is asked again the next
+    time rather than remembered (T133 review).
     """
-    if wsl_distro is not None:
-        return cache(partial(_read_db_password, entry, server_dir))
-    return _read_db_password(entry, server_dir)
+    if wsl_distro is None:
+        return _read_db_password(entry, server_dir)
+    found: list[str] = []
+
+    def read_when_asked() -> str:
+        if not found:
+            password = entry.install.db_password(server_dir)
+            if password is None:
+                return _password_unknown(entry, server_dir)
+            found.append(password)
+        return found[0]
+
+    return read_when_asked
 
 
 def _read_db_password(entry: CatalogEntry, server_dir: Path) -> str:
@@ -1194,6 +1207,11 @@ def _read_db_password(entry: CatalogEntry, server_dir: Path) -> str:
     password = entry.install.db_password(server_dir)
     if password is not None:
         return password
+    return _password_unknown(entry, server_dir)
+
+
+def _password_unknown(entry: CatalogEntry, server_dir: Path) -> str:
+    """The last-resort default, said in the log when a generated password could not be read."""
     # `db_password()` says None when the entry NAMES a password file and that
     # file cannot be read - which is not the same as "use the default", and
     # silently defaulting here would rebuild the bug this seam exists to close.
@@ -4093,6 +4111,13 @@ DISTRO_STOPPED = (
 )
 """The Server tab's line while the distro is stopped (T133, wsl-resident-servers §2)."""
 
+DISTRO_UNKNOWN = (
+    "Yu'lon couldn't ask WSL whether the distro {distro} is running, so it reads nothing inside "
+    "it, because reading a stopped distro would start it: press Start to start it, and the "
+    "other tabs fill in once it is up."
+)
+"""The same line when WSL's listing did not answer (T133 review): no permission to read."""
+
 REPAIR_FILES_LABEL = "Repair server files…"
 """T106's press: re-render this install's docker-compose.yml from the current template.
 T137's, on the same button: write a module conf the install writes from its `.dist`."""
@@ -4598,14 +4623,18 @@ class ControllerView(QWidget):
         super().__init__(parent)
         self.entry = entry
         self.services = services
-        # T133: whether this server's WSL distro is stopped, asked of WSL's own
-        # listing BEFORE any tab is built -- every tab reads the install's
-        # files as it is built, and reading `\\wsl.localhost\<distro>` starts
-        # a stopped distro. Each status poll answers it again
-        # (`InstallStatus.distro_stopped`); what waited runs when it turns
-        # False (`_distro_answered()`). Keyed by what is waiting, in order, so a
-        # reading asked twice while stopped runs once.
-        self._distro_stopped = wsl.reading_would_start(services.controller.wsl_distro)
+        # T133: what WSL last said about this server's distro. Every tab reads
+        # the install's files as it is built, and reading
+        # `\\wsl.localhost\<distro>` starts a stopped distro, so a WSL install
+        # starts NOT ASKED (None) and reads nothing until an answer says
+        # `running`: asked off the GUI thread once the tabs are built, and again
+        # by every status poll (`InstallStatus.distro`). A server on this host
+        # is `running` from the start and never waits. What waited runs on the
+        # first `running` (`_distro_answered()`), keyed by what is waiting, in
+        # order, so a reading asked twice while it waits runs once.
+        self._distro: wsl.DistroState | None = (
+            "running" if services.controller.wsl_distro is None else None
+        )
         self._waiting_on_distro: dict[str, Callable[[], None]] = {}
         # How the Modules tab asks a manifest's own questions. A seam, so a test
         # can answer them without a modal dialog; the real one is the dialog.
@@ -4804,6 +4833,10 @@ class ControllerView(QWidget):
         # it is shown whether or not this tab polls. Asking the SERVER about it
         # is the part that is gated on polling, just below.
         self.refresh_channel()
+
+        # T133: now that every tab has queued what it would read, ask whether
+        # the distro runs -- off the GUI thread, polling or not.
+        self._ask_the_distro()
 
         self._timer = QTimer(self)
         # T95: through `_tick`, so a tick never marks the poll in flight stale.
@@ -5241,30 +5274,53 @@ class ControllerView(QWidget):
     # ------------------------------------------- a stopped WSL distro (T133)
 
     def _waits_for_the_distro(self, key: str, reading: Callable[[], None]) -> bool:
-        """True, keeping `reading` for later, while this server's WSL distro is stopped.
+        """True, keeping `reading` for later, unless WSL last SAID this server's distro runs.
 
         Every reading this tab takes by itself -- building a sub-tab, a poll,
         the reload after an action -- asks this first. From the desktop session
         ANY read under `\\\\wsl.localhost\\<distro>` starts a stopped distro, and
         so does any `wsl -d` (measured, T132 M7): opening the app booted it, and
         a server killed earlier came back through `restart: unless-stopped`.
-        `reading` runs once a status poll finds the distro no longer stopped
-        (`_distro_answered()`); Start is what starts it, because Start is asked
-        for. One gate for every reading, so a new one cannot keep the rule by
-        spelling it differently -- or forget it that way.
+        Stopped, a listing that did not answer, and not asked yet all wait (T133
+        review): only `running` is permission. `reading` runs once an answer
+        says so (`_distro_answered()`); Start is what starts it, because Start is
+        asked for. One gate for every reading, so a new one cannot keep the rule
+        by spelling it differently -- or forget it that way.
         """
-        if not self._distro_stopped:
+        if self._distro == "running":
             return False
         self._waiting_on_distro[key] = reading
         return True
 
-    def _distro_answered(self, stopped: bool) -> None:
-        """A status poll's word on the distro: say it, and run what waited once it is up."""
-        if stopped == self._distro_stopped:
+    def _ask_the_distro(self) -> None:
+        """Ask WSL's listing about this server's distro, off the GUI thread (T133).
+
+        Two `wsl.exe -l -q` calls, each allowed a minute, so never on the GUI
+        thread: the tab is built not asked, and this answers it whether or not
+        the tab polls. A server on this host asks nothing.
+        """
+        distro = self.services.controller.wsl_distro
+        if distro is None:
             return
-        self._distro_stopped = stopped
+        self._run(lambda: wsl.distro_state(distro), self._distro_asked, self._distro_ask_failed)
+
+    @Slot(object)
+    def _distro_asked(self, state: object) -> None:
+        if state == "running" or state == "stopped" or state == "unknown":
+            self._distro_answered(state)
+
+    @Slot(object)
+    def _distro_ask_failed(self, exc: object) -> None:
+        logger.warning(f"could not ask WSL about {self.services.controller.wsl_distro}: {exc}")
+        self._distro_answered("unknown")
+
+    def _distro_answered(self, state: wsl.DistroState) -> None:
+        """WSL's word on the distro: say it, and run what waited once it says `running`."""
+        if state == self._distro:
+            return
+        self._distro = state
         self._show_the_distro()
-        if stopped:
+        if state != "running":
             return
         waiting = list(self._waiting_on_distro.values())
         self._waiting_on_distro.clear()
@@ -5272,10 +5328,30 @@ class ControllerView(QWidget):
             reading()
 
     def _show_the_distro(self) -> None:
-        """The Server tab's line about a stopped distro, shown only while it is."""
-        said = DISTRO_STOPPED.format(distro=self.services.controller.wsl_distro)
-        self.distro_label.setText(said if self._distro_stopped else "")
-        self.distro_label.setVisible(self._distro_stopped)
+        """The Server tab's line while the distro is stopped or WSL did not say; hidden else."""
+        distro = self.services.controller.wsl_distro
+        said = {"stopped": DISTRO_STOPPED, "unknown": DISTRO_UNKNOWN}.get(self._distro or "", "")
+        self.distro_label.setText(said.format(distro=distro))
+        self.distro_label.setVisible(bool(said))
+
+    def _world_reading(self, reading: Callable[[], object]) -> Callable[[], object]:
+        """`reading`, run on the worker only if WSL says the distro runs at that moment (T133).
+
+        For the readings a TIMER starts -- the dashboard verdict every five
+        seconds, T138's later settle -- whose `_waits_for_the_distro()` answer
+        is up to one poll old: a distro stopped from outside (`wsl -t`,
+        `--shutdown`) since that poll would be started again by `wsl -d` and
+        never idle out (T133 review). None when it does not run; the slot
+        ignores a None. A server on this host asks nothing.
+        """
+        distro = self.services.controller.wsl_distro
+
+        def guarded() -> object:
+            if distro is not None and not wsl.may_read(distro):
+                return None
+            return reading()
+
+        return guarded
 
     @Slot()
     def _tick(self) -> None:
@@ -5325,7 +5401,9 @@ class ControllerView(QWidget):
         if self._waits_for_the_distro("verdict", self.refresh_verdict):
             return
         self._verdict_pending = True
-        self._run(self.services.dashboard, self._verdict_ready, self._verdict_failed)
+        self._run(
+            self._world_reading(self.services.dashboard), self._verdict_ready, self._verdict_failed
+        )
 
     @Slot(object)
     def _verdict_ready(self, result: object) -> None:
@@ -5524,9 +5602,10 @@ class ControllerView(QWidget):
         # T160: Docker answered, so there is nothing to reinstall.
         self.reinstall_docker_button.setVisible(False)
         self._update_client_dir_row()
-        # T133: every answer, stale or not -- whether the distro is stopped is
+        # T133: every answer, stale or not -- what WSL said about the distro is
         # not a fact an action of ours can make wrong the way "world down" is.
-        self._distro_answered(status.distro_stopped)
+        if status.distro is not None:
+            self._distro_answered(status.distro)
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
         self._ask_again_if_superseded(superseded)
@@ -6098,11 +6177,19 @@ class ControllerView(QWidget):
         # is not answered asks the world's container why, in the distro.
         if self._waits_for_the_distro("channel resettle", self._resettle_if_pending):
             return
-        self._settle_the_channel()
+        self._run(
+            self._world_reading(setup.settle), self._channel_resettled, self._channel_settle_failed
+        )
 
     @Slot(object)
     def _channel_settled(self, state: object) -> None:
         self._show_channel(state)
+
+    @Slot(object)
+    def _channel_resettled(self, state: object) -> None:
+        """T138's later settle; None is a distro that stopped since the last poll (T133)."""
+        if state is not None:
+            self._show_channel(state)
 
     @Slot(object)
     def _channel_settle_failed(self, exc: object) -> None:

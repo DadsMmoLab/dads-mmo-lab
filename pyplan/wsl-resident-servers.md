@@ -154,8 +154,8 @@ opt-in that says starting it is what will happen.
 **Polling obeys the same rule**, and did not at first. The Server tab refreshes
 every five seconds, so once `Controller.status()` correctly ran `wsl -d …` it
 booted an adopted server's distro simply by opening the app — the rule written
-for discovery, broken by the poll. `status()` now asks `wsl.is_running()` first
-and reports nothing up when the distro is down, which is true rather than merely
+for discovery, broken by the poll. `status()` now asks `wsl.distro_state()` first
+and reports nothing up unless WSL says the distro runs, which is true rather than merely
 convenient. Start still starts it, because that is something the user asked for. A user who knows their server
 is in a stopped distro can still reach it in one click; a user who does not is
 not made to wait for distros they do not care about.
@@ -197,21 +197,35 @@ containers then came back on their own through `restart: unless-stopped`.
 
 ### Readings wait for the distro (T133)
 
-Every reading a tab takes by itself asks one gate first, `ControllerView._waits_for_the_distro()`:
-while WSL says the distro is stopped (`wsl.reading_would_start()`, which is `known_stopped()`, the
-fail-closed reading) it keeps the reading and returns, and the Server tab says the distro is
-stopped and that Start starts it. The tab asks WSL once as it is built, before any sub-tab reads,
-and every status poll answers again (`InstallStatus.distro_stopped`, asked only when the distro
-is not running); the first answer that it is up runs what waited, once each. Gated that way:
+Every reading a tab takes by itself asks one gate first, `ControllerView._waits_for_the_distro()`,
+and it goes only when WSL's listing last SAID the distro is running (`wsl.distro_state()`:
+`running`, `stopped`, or `unknown` for a listing that did not answer or does not name the
+distro). Stopped and unknown alike keep the reading and return (T133 review: an unanswered
+listing is no permission), and the Server tab says which, and that Start starts it. The tab
+is built not asked, so nothing waits on `wsl.exe` on the GUI thread; it asks once off the GUI
+thread when its sub-tabs are built, and every status poll answers again
+(`InstallStatus.distro`). Only a `running` answer runs what waited, once each. Gated that way:
 the Maintenance tab's backup list and interrupted-restore record, the Modules tab (clone
 folders, module answers, release notes, the version walk's `git`), the version line and the
 upstream line, the Tuning tab (its files, the reset Undo lookup, the bot count), My Party's
-level cap and spec list, the bot dashboard state, the compose check, the dashboard verdict on
-the poll and the command channel's opening check (an unanswered SOAP channel asks the world's
-container why). The generated database password of a TBC, Vanilla or Tortoise server in a
-distro is handed to the SQL seams as a reader (`apply.RootPassword`), read at the first
-database call, which starts the distro anyway. `install_wiring`'s own readings ask the same
-`wsl.reading_would_start()`.
+level cap and spec list, the bot dashboard state, the compose and conf checks (T106, T137),
+the dashboard verdict on the poll, the command channel's opening check (an unanswered SOAP
+channel asks the world's container why) and T138's later settle. The two a TIMER starts,
+the verdict and that settle, also ask `wsl.may_read()` on their worker thread, because the
+tab's answer is up to one poll old and a distro stopped from outside since (`wsl -t`,
+`--shutdown`) would otherwise be started again every five seconds and never idle out.
+
+The generated database password of a TBC, Vanilla or Tortoise server in a distro is handed
+to the SQL seams as a reader (`apply.RootPassword`), read at the first database call, which
+starts the distro anyway, and kept only once a read found it. `install_wiring`'s own
+readings ask `wsl.may_read()` too.
+
+**`wsl -l -q --running` when nothing runs.** T132's gate logged its output (empty) but not
+its exit code. The listing is therefore read off what it prints: the sentence "There are no
+running distributions" means none, whatever the exit code and in either stream; a non-zero
+exit without it is no answer, because reading it as "none running" would let
+`known_stopped()` skip a stop of a running server (T95). The sentence is translated, so on a
+Windows in another language a non-zero "none" reads as unknown until it is measured.
 
 Presses are not gated: Start, Stop, Repair, the updates, and every other button may start
 the distro, because the player asked for them. **The Logs tab is a press too, by decision:**
@@ -394,8 +408,8 @@ still out of scope (§7).
   than the one the install is remembered in (compared case-insensitively),
   before anything is read or run. The wiring checks it first of all.
 * **§2 for the two readings.** `LatestRoute.source_version` (every tab reload)
-  and `upstream_news` (T124, once a day) answer "nothing to say" while
-  `wsl.is_running()` says the distro is down: no read of the folder (a UNC read
+  and `upstream_news` (T124, once a day) answer "nothing to say" unless
+  `wsl.may_read()` says the distro runs: no read of the folder (a UNC read
   boots it, T133) and no git. The presses may start it; the user asked.
 * The backup offered before an update is the existing one, which already passes
   `MYSQL_PWD` through `WSLENV` (§4).

@@ -379,7 +379,7 @@ def test_the_wsl_press_builds_its_engine_on_the_distros_seams(
 def test_a_stopped_distro_is_not_read_for_the_version_line_or_the_news(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(install_wiring.wsl, "known_stopped", lambda distro: True)
+    monkeypatch.setattr(install_wiring.wsl, "distro_state", lambda distro: "stopped")
     # Built first: the route's construction reads the catalog, never the folder.
     route = install_wiring.update_to_latest_for_app(ENTRY, tmp_path, wsl_distro=DISTRO)
     assert route is not None and route.upstream_news is not None
@@ -399,7 +399,7 @@ def test_a_stopped_distro_is_not_read_for_the_version_line_or_the_news(
 
 
 def test_a_running_distro_is_read_as_usual(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(install_wiring.wsl, "known_stopped", lambda distro: False)
+    monkeypatch.setattr(install_wiring.wsl, "distro_state", lambda distro: "running")
     monkeypatch.setattr(platform, "wsl_location", lambda path: (DISTRO, "/home/pk/x"))
     read: list[Path] = []
     monkeypatch.setattr(
@@ -535,7 +535,7 @@ def _through_the_distro(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tupl
     monkeypatch.setattr(runner, "run", lambda cmd, *a, **kw: distro.answer(cmd))
     monkeypatch.setattr(runner, "stream", distro.stream)
     monkeypatch.setattr(runner, "stream_progress", distro.stream)
-    monkeypatch.setattr(wsl, "is_running", lambda name: True)
+    monkeypatch.setattr(wsl, "distro_state", lambda name: "running")
     monkeypatch.setattr(
         platform, "docker_program", lambda: pytest.fail("the local docker was asked")
     )
@@ -638,7 +638,7 @@ def test_asking_the_update_question_does_not_start_a_stopped_distro(
     """Pressing the button and cancelling must not boot the distro to read a cache."""
     route = install_wiring.update_to_latest_for_app(ENTRY, Path(UNC_SERVER), wsl_distro=DISTRO)
     assert route is not None
-    monkeypatch.setattr(install_wiring.wsl, "known_stopped", lambda distro: True)
+    monkeypatch.setattr(install_wiring.wsl, "distro_state", lambda distro: "stopped")
     _no_share_access(monkeypatch)
     said = route.confirmation()
     assert native.WSL_DISTRO_STOPPED_NOTE in said
@@ -652,7 +652,7 @@ def test_a_divergence_met_while_stopped_is_named_by_the_next_question(
     anything, and the next question -- distro still stopped, nothing read -- names it."""
     route = install_wiring.update_to_latest_for_app(ENTRY, Path(UNC_SERVER), wsl_distro=DISTRO)
     assert route is not None
-    monkeypatch.setattr(install_wiring.wsl, "known_stopped", lambda distro: True)
+    monkeypatch.setattr(install_wiring.wsl, "distro_state", lambda distro: "stopped")
     line = "cmangos/x rewrote its history; 3 commits of yours would be dropped."
 
     class _Engine:
@@ -673,7 +673,7 @@ def test_a_divergence_met_while_stopped_is_named_by_the_next_question(
 def test_a_running_distro_still_reads_the_rewrite_lines(monkeypatch: pytest.MonkeyPatch) -> None:
     route = install_wiring.update_to_latest_for_app(ENTRY, Path(UNC_SERVER), wsl_distro=DISTRO)
     assert route is not None
-    monkeypatch.setattr(install_wiring.wsl, "known_stopped", lambda distro: False)
+    monkeypatch.setattr(install_wiring.wsl, "distro_state", lambda distro: "running")
     asked: list[object] = []
     monkeypatch.setattr(upstream, "read_cached", lambda *a: asked.append(a[0]) or {})
     said = route.confirmation()

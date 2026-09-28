@@ -223,15 +223,15 @@ def _in_the_distro(server_dir: Path, wsl_distro: str | None) -> bool:
 
 
 def _distro_down(wsl_distro: str | None) -> bool:
-    """True when this install's distro is stopped, so a READING must not touch it.
+    """True unless WSL SAID this install's distro is running, so a READING must not touch it.
 
-    `wsl.reading_would_start()`, the tab's own gate (T133): WSL's listing,
-    which starts nothing, where asking the folder (`\\\\wsl.localhost\\...`)
-    or its Docker would boot the distro (`pyplan/wsl-resident-servers.md` §2).
-    Fail-closed since T133: a listing that did not answer reads, where the
-    `not wsl.is_running()` this was skipped. A local install is never down here.
+    `wsl.may_read()`, the tab's own rule (T133): WSL's listing, which starts
+    nothing, where asking the folder (`\\\\wsl.localhost\\...`) or its Docker would
+    boot the distro (`pyplan/wsl-resident-servers.md` §2). A listing that did
+    not answer is no permission either (T133 review). A local install is never
+    down here.
     """
-    return wsl.reading_would_start(wsl_distro)
+    return not wsl.may_read(wsl_distro)
 
 
 RebuildSource = Callable[[threading.Event | None], Iterator[str]]
@@ -449,9 +449,9 @@ def repair_confs_for_app(
 
     But the CHECK waits for such a distro to run (review, round 2). The tab asks
     it when it is built, and reading `\\wsl.localhost\\<distro>\\…` starts a
-    stopped distro (T133), so while WSL says the distro is down (`wsl.known_stopped`,
-    the fail-closed reading: a listing that did not answer reads the disk) the
-    check answers "nothing to offer" and the next Refresh asks again. The press
+    stopped distro (T133), so until WSL says the distro is running (`_distro_down()`,
+    which a listing that did not answer does not satisfy) the check answers
+    "nothing to offer" and the next Refresh asks again. The press
     is not gated: it is only offered after a check that read the disk, and it
     is the person asking for the write.
     """
@@ -459,7 +459,7 @@ def repair_confs_for_app(
         return None
 
     def check() -> ConfCheck:
-        if wsl_distro is not None and wsl.known_stopped(wsl_distro):
+        if _distro_down(wsl_distro):
             return ConfCheck()
         return azerothcore.conf_check(entry, server_dir)
 

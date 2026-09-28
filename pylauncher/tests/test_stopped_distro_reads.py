@@ -10,7 +10,7 @@ the distro is stopped -- an open, a listing, a stat, or a child process run in
 it or naming it (`wsl -d <distro>`, git with its cwd there) -- and the tests
 open the real tab, built through the real `ControllerServices.for_entry()`, and
 run its polls. WSL is faked at its listing only, so the app's own answer to "is
-it stopped" (`wsl.known_stopped()`) is the real one.
+it running" (`wsl.distro_state()`) is the real one.
 """
 
 from __future__ import annotations
@@ -26,13 +26,18 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import process_events
+from tests.conftest import process_events, pump_until
 from yulon import channel_setup, docker, platform, runner, wsl
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
 from yulon.ui import controller_view as controller_view_module
-from yulon.ui.controller_view import DISTRO_STOPPED, ControllerServices, ControllerView
+from yulon.ui.controller_view import (
+    DISTRO_STOPPED,
+    DISTRO_UNKNOWN,
+    ControllerServices,
+    ControllerView,
+)
 from yulon.ui.widgets.job import run_inline
 
 DISTRO = "Ubuntu-yulon"
@@ -42,19 +47,32 @@ NO_WSL_EXE = "/nonexistent/yulon-test/wsl"
 
 GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
 
+_THREADED = controller_view_module.threaded_job_runner
+"""The view's real job runner, taken before `_inline_jobs` replaces it for each test."""
+
 
 class _DistroDisk:
-    """The distro's folder, and every touch of it while the distro is stopped.
+    """The distro's folder, and every touch of it while WSL does not say it runs.
 
-    `stopped` is the one switch: WSL's listing answers from it, and a touch is
-    recorded only while it is set. Each touch carries the app frames that made
-    it, so a failure names the site rather than just the file.
+    `wsl` is the one switch -- `running`, `stopped`, or `unknown` for a
+    `--running` listing that does not answer: WSL's listing answers from it,
+    and a touch is recorded whenever it is not `running`. `stopped` is the
+    two-way spelling of it. Each touch carries the app frames that made it, so
+    a failure names the site rather than just the file.
     """
 
     def __init__(self, root: Path) -> None:
         self.root = os.fspath(root)
-        self.stopped = True
+        self.wsl = "stopped"
         self.touched: list[str] = []
+
+    @property
+    def stopped(self) -> bool:
+        return self.wsl != "running"
+
+    @stopped.setter
+    def stopped(self, value: bool) -> None:
+        self.wsl = "stopped" if value else "running"
 
     def under(self, path: object) -> bool:
         if isinstance(path, int):
@@ -152,10 +170,11 @@ def disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_DistroDis
     _lay_an_install(root)
     recorder = _DistroDisk(root)
 
-    def listing(*args: str) -> tuple[str, ...]:
+    def listing(*args: str) -> tuple[str, ...] | None:
         # WSL's own listing, which starts nothing: the one place the app may ask.
-        running = () if recorder.stopped else (DISTRO,)
-        return running if "--running" in args else (DISTRO,)
+        if "--running" not in args:
+            return (DISTRO,)
+        return {"running": (DISTRO,), "stopped": (), "unknown": None}[recorder.wsl]
 
     monkeypatch.setattr(wsl, "_wsl_listing", listing)
 
@@ -376,13 +395,126 @@ def test_a_pending_channel_is_not_resettled_inside_a_stopped_distro(
         view.shutdown()
 
 
+def test_a_listing_that_does_not_answer_reads_nothing_and_says_so(
+    qapp: object, disk: _DistroDisk
+) -> None:
+    """T133 review: `unknown` is no permission. Only a listing that SAYS running drains."""
+    disk.wsl = "unknown"
+    view = _open_the_tab(_entry("wow-wotlk"), Path(disk.root))
+    try:
+        _poll(view)
+        assert disk.touched == [], "\n".join(disk.touched)
+        assert not view.distro_label.isHidden()
+        assert view.distro_label.text() == DISTRO_UNKNOWN.format(distro=DISTRO)
+        disk.wsl = "stopped"
+        _poll(view)
+        assert view.distro_label.text() == DISTRO_STOPPED.format(distro=DISTRO)
+        assert view.backup_list.count() == 0 and disk.touched == []
+        disk.wsl = "running"
+        _poll(view)
+        assert view.distro_label.isHidden() and view.backup_list.count() == 1
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
+def test_the_verdict_on_its_worker_does_not_start_a_distro_stopped_since_the_last_poll(
+    qapp: object, disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T133 review: the verdict runs every five seconds on the timer, beside the poll, off
+    the tab's last answer -- up to one poll old. A distro stopped from outside since then
+    (`wsl -t`, `--shutdown`) must not be started again by its `docker inspect`. With the
+    view's REAL worker thread, so the order is the app's."""
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", _THREADED)
+    disk.stopped = False
+    view = _open_the_tab(_entry("wow-wotlk"), Path(disk.root))
+    try:
+        pump_until(lambda: view._distro == "running", "the first answer said running")
+        pump_until(
+            lambda: not view._verdict_pending and not view._status_pending,
+            "the opening poll and verdict finished",
+        )
+        disk.stopped = True  # `wsl -t` from outside; the tab has not polled since
+        assert view._distro == "running"
+        view.refresh_verdict()
+        pump_until(lambda: not view._verdict_pending, "the verdict came back")
+        assert disk.touched == [], "\n".join(disk.touched)
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
+def test_a_tab_that_does_not_poll_still_asks_and_fills_in_on_a_running_distro(
+    qapp: object, disk: _DistroDisk
+) -> None:
+    """The tab is built not asked; its own ask, off the GUI thread, answers it without a poll."""
+    disk.stopped = False
+    entry = _entry("wow-wotlk")
+    services = ControllerServices.for_entry(entry, Path(disk.root), None, DISTRO)
+    view = ControllerView(entry, services, status_poll_ms=0)
+    try:
+        assert view._distro == "running"
+        assert view.backup_list.count() == 1, "a running distro's tab never filled in"
+    finally:
+        view.shutdown()
+
+
+def test_the_update_route_reads_nothing_while_wsl_does_not_answer(
+    disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T125's two readings take the same rule: `unknown` is no permission (T133 review)."""
+    from yulon import install_wiring
+
+    disk.wsl = "unknown"
+    route = install_wiring.update_to_latest_for_app(
+        _entry("wow-wotlk"), Path(disk.root), wsl_distro=DISTRO
+    )
+    assert route is not None and route.upstream_news is not None
+    said = route.source_version()
+    news = route.upstream_news()
+    assert said.line == "" and news.sources == ()
+    assert disk.touched == [], "\n".join(disk.touched)
+
+
+def test_the_later_settle_on_its_worker_does_not_start_a_distro_stopped_since_the_last_poll(
+    qapp: object, disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T138's settle a minute after opening is a timer too: the same worker-side ask."""
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", _THREADED)
+    entry = _entry("wow-wotlk")
+    server_dir = Path(disk.root)
+    channel_setup.save_pending(
+        channel_setup.Pending(account="YULON-T133", password="not-a-real-one"),
+        game=entry.id,
+        install_id=composegen.install_id(server_dir),
+    )
+    disk.stopped = False
+    services = ControllerServices.for_entry(entry, server_dir, None, DISTRO)
+    view = ControllerView(entry, services, status_poll_ms=0)
+    try:
+        pump_until(lambda: view._distro == "running", "the first answer said running")
+        # The version walk the opening reload starts is one event-loop turn per
+        # clone; it is over before a minute is.
+        pump_until(lambda: not view._filling_versions, "the module version walk finished")
+        came_back: list[object] = []
+        monkeypatch.setattr(view, "_channel_resettled", came_back.append)
+        monkeypatch.setattr(view, "_channel_settle_failed", came_back.append)
+        disk.stopped = True  # `wsl --shutdown` from outside, before the minute is up
+        view._resettle_if_pending()
+        pump_until(lambda: bool(came_back), "the settle came back")
+        assert disk.touched == [], "\n".join(disk.touched)
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
 # -- the pieces the gate is made of --------------------------------------------------------
 
 
-def test_only_a_distro_wsl_said_is_stopped_makes_a_reading_wait(
+def test_only_a_listing_that_says_running_lets_a_reading_go(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`wsl.reading_would_start()`: fail-closed, and never a question for a local server."""
+    """`wsl.distro_state()` and `wsl.may_read()`: an unanswered listing is no permission."""
     answers: dict[tuple[str, ...], tuple[str, ...] | None] = {
         ("--running",): (),
         (): (DISTRO,),
@@ -394,29 +526,98 @@ def test_only_a_distro_wsl_said_is_stopped_makes_a_reading_wait(
         return answers[args]
 
     monkeypatch.setattr(wsl, "_wsl_listing", listing)
-    assert wsl.reading_would_start(None) is False
+    assert wsl.may_read(None) is True
     assert asked == [], "a server on this host asked WSL about a distro"
-    assert wsl.reading_would_start(DISTRO) is True
+    assert wsl.distro_state(DISTRO) == "stopped" and wsl.may_read(DISTRO) is False
     answers[("--running",)] = (DISTRO,)
-    assert wsl.reading_would_start(DISTRO) is False, "a running distro was read as stopped"
+    asked.clear()
+    assert wsl.distro_state(DISTRO) == "running"
+    assert asked == [("--running",)], "a running distro cost more than the one listing"
+    assert wsl.may_read(DISTRO) is True
     answers[("--running",)] = None
-    assert wsl.reading_would_start(DISTRO) is False, "a listing that did not answer skipped"
+    assert wsl.distro_state(DISTRO) == "unknown"
+    assert wsl.may_read(DISTRO) is False, "a --running listing that did not answer let it read"
+    answers[("--running",)] = ()
+    answers[()] = None
+    assert wsl.distro_state(DISTRO) == "unknown", "an unanswered full listing read as stopped"
+    answers[()] = ("Other",)
+    assert wsl.distro_state(DISTRO) == "unknown", "a distro WSL does not list read as stopped"
+    assert wsl.known_stopped(DISTRO) is False and wsl.is_running(DISTRO) is False
 
 
-def test_the_status_poll_says_whether_wsl_called_the_distro_stopped(
+class _Listed:
+    """`subprocess.run` for one `wsl -l -q` call: an exit code and what it printed."""
+
+    def __init__(self, code: int, stdout: str = "", stderr: bytes = b"") -> None:
+        self.code, self.stdout, self.stderr = code, stdout.encode("utf-16le"), stderr
+
+    def __call__(self, argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, self.code, self.stdout, self.stderr)
+
+
+@pytest.mark.parametrize(
+    ("listed", "means"),
+    [
+        (_Listed(0, "Ubuntu-yulon\r\ndocker-desktop\r\n"), (DISTRO, "docker-desktop")),
+        (_Listed(0, ""), ()),
+        (_Listed(0, "There are no running distributions.\r\n"), ()),
+        (_Listed(1, ""), None),
+        (_Listed(1, "There are no running distributions.\r\n"), ()),
+        (_Listed(0xFFFFFFFF, "Es werden keine Verteilungen ausgef\u00fchrt.\r\n"), None),
+        (_Listed(1, "", b"There are no running distributions.\n"), ()),
+        (_Listed(1, "Catastrophic failure\r\nError code: Wsl/Service/E_UNEXPECTED\r\n"), None),
+        (_Listed(1, "", b"Error code: Wsl/Service/E_UNEXPECTED\n"), None),
+    ],
+    ids=[
+        "names",
+        "nothing, exit 0",
+        "the sentence, exit 0",
+        "nothing, exit 1: no answer (T95)",
+        "the sentence, exit 1",
+        "translated, exit -1: no answer until measured",
+        "the sentence on stderr in UTF-8",
+        "a failure with its code",
+        "a failure's code on stderr in UTF-8",
+    ],
+)
+def test_a_running_listing_that_says_none_runs_is_empty_whatever_its_exit_code(
+    monkeypatch: pytest.MonkeyPatch, listed: _Listed, means: tuple[str, ...] | None
+) -> None:
+    """T133 review: whether `--running` exits non-zero when nothing runs is not measured,
+    so the sentence it prints for that decides, in either stream and either encoding.
+    A non-zero exit without it stays no answer: T95's stop must not skip on a guess."""
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: NO_WSL_EXE)
+    monkeypatch.setattr(wsl.subprocess, "run", listed)
+    assert wsl._wsl_listing("--running") == means
+
+
+def test_a_full_listing_that_fails_is_no_answer_even_with_the_sentence_in_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The none-running reading is `--running`'s alone: the full listing names distros."""
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: NO_WSL_EXE)
+    monkeypatch.setattr(
+        wsl.subprocess, "run", _Listed(1, "There are no running distributions.\r\n")
+    )
+    assert wsl._wsl_listing() is None
+
+
+def test_the_status_poll_says_what_wsl_said_about_the_distro(
     disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`InstallStatus.distro_stopped` is what tells the tab when its readings may go."""
+    """`InstallStatus.distro` is what tells the tab when its readings may go."""
     spec = _entry("wow-wotlk").container_spec()
     controller = Controller(spec, Path(disk.root), wsl_distro=DISTRO)
-    assert controller.status().distro_stopped is True
-    assert disk.touched == [], "the poll of a stopped distro asked inside it"
+    assert controller.status().distro == "stopped"
+    disk.wsl = "unknown"
+    assert controller.status().distro == "unknown"
+    assert disk.touched == [], "the poll of a distro not known to run asked inside it"
     disk.stopped = False
     status = controller.status()
-    assert status.distro_stopped is False and not status.any_running
+    assert status.distro == "running" and not status.any_running
     disk.stopped = True
     monkeypatch.setattr(docker, "status", lambda wsl_distro=None: [])
-    assert Controller(spec, Path(disk.root)).status().distro_stopped is False
+    assert Controller(spec, Path(disk.root)).status().distro is None
 
 
 def _mysql_passwords(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -447,6 +648,26 @@ def test_a_generated_password_in_a_distro_is_read_at_its_first_use_and_only_then
     with contextlib.suppress(Exception):
         services.create_account("bob", "pw", 0)
     assert set(seen) == {"generated-0123456789"}, "the password file was read again"
+
+
+def test_a_password_that_could_not_be_read_is_asked_again_rather_than_kept_as_the_default(
+    disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T133 review: only a read that FOUND the password is kept."""
+    services = ControllerServices.for_entry(_entry("wow-tbc"), Path(disk.root), None, DISTRO)
+    disk.stopped = False
+    password_file = Path(disk.root) / ".db_password"
+    password_file.unlink()
+    seen = _mysql_passwords(monkeypatch)
+    with contextlib.suppress(Exception):
+        services.create_account("bob", "pw", 0)
+    first = set(seen)
+    assert first and "generated-0123456789" not in first, "the missing file was read somehow"
+    password_file.write_text("generated-0123456789\n", encoding="utf-8")
+    seen.clear()
+    with contextlib.suppress(Exception):
+        services.create_account("bob", "pw", 0)
+    assert seen and set(seen) == {"generated-0123456789"}, "the default was kept"
 
 
 def test_a_local_install_still_reads_its_generated_password_when_the_tab_is_built(

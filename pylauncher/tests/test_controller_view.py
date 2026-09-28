@@ -7166,7 +7166,7 @@ def test_a_world_a_wsl_rebuild_brought_up_is_held_by_the_next_status_poll(
         "wsl_location",
         lambda path: ("Ubuntu", "/home/pk/wow"),
     )
-    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: True)
+    monkeypatch.setattr(controller_module.wsl, "distro_state", lambda distro: "running")
     monkeypatch.setattr(docker, "status", lambda **kw: sorted(running))
     monkeypatch.setattr(
         controller_module.wsl,
