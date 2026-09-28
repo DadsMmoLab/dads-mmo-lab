@@ -48,6 +48,7 @@ from yulon.git import (
     ContainerGit,
     Git,
     GitError,
+    HeadReader,
     HistoryReader,
     RemoteReader,
     RunnerGit,
@@ -385,6 +386,22 @@ _CONF_KEY_WRITE_SUFFIXES = (".conf",)
 
 class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
+
+
+class ReleaseDirectionUnknown(ApplyError):
+    """An update to a release that nobody could show is not a step back (T150).
+
+    Raised by `Applier.update()` before anything is changed, when the clone's
+    own graph cannot place HEAD against the release (`Behind.UNPLACED`) and
+    GitHub's compare did not answer either. Only the person can decide that,
+    and the engine cannot open a dialog, so the view asks `question` and, on a
+    yes, presses Update again with `unchecked_ok=True`. An `ApplyError`, so a
+    caller that does not know it still reports a refusal that changed nothing.
+    """
+
+    def __init__(self, message: str, question: str) -> None:
+        super().__init__(message)
+        self.question = question
 
 
 class SqlNotSent(ApplyError):
@@ -1867,8 +1884,16 @@ class Applier:
         world_running: Callable[[], bool | None] | None = None,
         start_database: Callable[[], bool] | None = None,
         newest_release: Callable[[str], upstream.Release | None] | None = None,
+        compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
     ) -> None:
         self.server_dir = server_dir
+        # T150: "how does this release stand to this commit?", asked of GitHub
+        # by `update()` only when the clone's own shallow graph cannot say. A
+        # seam for `_newest_release`'s reason: it is the network, and a test
+        # that could not make it fail could not show the question it leads to.
+        self._compare_commits: Callable[[str, str, str], upstream.Comparison | None] = (
+            compare_commits if compare_commits is not None else _github_compare
+        )
         # T126: "which published release is newest, and which commit is it?" for
         # a manifest whose source says `follow: releases`. A seam because it is
         # the network, and a test that could not make it fail could not show an
@@ -1981,14 +2006,14 @@ class Applier:
         has to be askable about a checkout).
         """
 
-        def ask(*args: object) -> Any:
+        def ask(*args: object, **kwargs: object) -> Any:
             seam = self.git
             bound = (
                 getattr(seam, member)
                 if isinstance(seam, protocol)
                 else getattr(RunnerGit(), member)
             )
-            return bound(*args)
+            return bound(*args, **kwargs)
 
         return ask
 
@@ -2038,6 +2063,7 @@ class Applier:
         complete: Completer | None = None,
         replacing: bool = False,
         first_configure_sql: bool = True,
+        release: upstream.Release | None = None,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
@@ -2143,7 +2169,10 @@ class Applier:
             ):
                 self._require_own_clone(manifest, clone, "install")
         else:
-            release = self._release_for(manifest)
+            # `update()` hands over the release it has just proved is not a
+            # step back (T150), so the reset goes to THAT commit and not to
+            # whichever one GitHub names a second later.
+            release = release if release is not None else self._release_for(manifest)
             self._require_own_clone(manifest, clone, "install")
             self._costly_reset(manifest, clone, replacing)
             try:
@@ -2318,7 +2347,13 @@ class Applier:
                 f"{_rel(self.server_dir, clone)} will keep offering Install"
             )
 
-    def update(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
+    def update(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        unchecked_ok: bool = False,
+    ) -> ApplyReport:
         """Fast-forward this module's clone and re-apply it — refusing anything a reset destroys.
 
         `install()` over a folder that is already a checkout IS the pull: the
@@ -2373,11 +2408,90 @@ class Applier:
         A folder that is not there at all is refused rather than quietly
         installed: the press the user made was Update, and an Update that
         silently installs is a different action wearing the same button.
+
+        **A fourth question for a module that follows its releases (T150):
+        would this move it BACK?** Its update resets to the newest release's
+        commit, and question 3 asks against the branch -- so a clone newer than
+        the release passes all three and is reset backwards.
+        `_step_back_refusal()` asks it, after the three and before anything is
+        changed. `unchecked_ok` is the person's own yes to going ahead when
+        neither the clone nor GitHub could answer it (`ReleaseDirectionUnknown`).
         """
         refusal = self._update_refusal(manifest)
         if refusal is not None:
             raise ApplyError(refusal)
-        return self.install(manifest, values, first_configure_sql=False)
+        release = self._release_for(manifest)
+        if release is not None:
+            self._refuse_a_step_back(manifest, release, unchecked_ok=unchecked_ok)
+        return self.install(manifest, values, first_configure_sql=False, release=release)
+
+    def _refuse_a_step_back(
+        self, manifest: Manifest, release: upstream.Release, *, unchecked_ok: bool
+    ) -> None:
+        """Raise unless resetting this clone to `release` is proved not to be a step back (T150).
+
+        The clone answers first, with the very question "Check for updates"
+        asked (`commits_behind(..., release=True)`), so the row and the press
+        cannot disagree: under the release -- counted, uncounted or 0 -- goes
+        ahead, and ahead of it, off its line or not contained in it is refused
+        in the row's own sentence. `Behind.UNPLACED` is the shallow shape the
+        clone cannot place, and there GitHub's compare is asked, base HEAD and
+        head the release: nothing of HEAD's missing from the release goes
+        ahead, anything missing is refused as ahead or off its line. A compare
+        that does not answer -- offline, rate-limited, a HEAD GitHub has never
+        seen -- is `ReleaseDirectionUnknown`, unless the person already said
+        go ahead. "Could not ask git" is refused: nothing was checked.
+        """
+        clone = self.clone_dir(manifest)
+        reader = self._reader("commits_behind", BehindReader)
+        placed: BehindCount = reader(clone, release.sha, release=True)
+        if placed is Behind.UNPLACED:
+            placed = self._placed_by_github(manifest, clone, release, unchecked_ok=unchecked_ok)
+        if placed is None:
+            raise ApplyError(
+                f"{manifest.id}: Yu'lon could not ask git whether release {release.tag} is newer "
+                f"than this checkout, so it did not update it. Nothing was changed; try again."
+            )
+        sentence = _NOT_UNDER_RELEASE.get(placed) if isinstance(placed, Behind) else None
+        if sentence is not None:
+            raise ApplyError(
+                f"{manifest.id}: {sentence.format(release=release.tag)}. Nothing was changed."
+            )
+
+    def _placed_by_github(
+        self, manifest: Manifest, clone: Path, release: upstream.Release, *, unchecked_ok: bool
+    ) -> BehindCount:
+        """GitHub's answer for a clone its own graph could not place, spelled as git's.
+
+        `0` stands for "under it" (it is only compared with the refusals), and
+        `AHEAD_OF_RELEASE` / `OFF_RELEASE` for the two refusals. No answer
+        raises `ReleaseDirectionUnknown`, or is `0` once the person said yes.
+        """
+        source = manifest.source
+        slug = upstream.github_slug(source.repo) if source is not None else None
+        head = self._reader("head_sha", HeadReader)(clone)
+        said = (
+            self._compare_commits(slug, head, release.sha)
+            if slug is not None and head is not None
+            else None
+        )
+        if said is None:
+            if unchecked_ok:
+                logger.info(f"updating {manifest.id} to {release.tag} unchecked, on the user's yes")
+                return 0
+            short = head[:7] if head else "unknown"
+            raise ReleaseDirectionUnknown(
+                f"{manifest.id}: Yu'lon could not check whether release {release.tag} is newer "
+                f"than this checkout. Nothing was changed.",
+                f"Yu'lon could not check whether updating {manifest.id} to release "
+                f"{release.tag} would move it backwards. This shallow checkout cannot show "
+                f"whether its commit ({short}) is older than the release, and GitHub did not "
+                f"answer. If the folder is newer than the release, Update resets it back to "
+                f"{release.tag}.\n\nUpdate anyway?",
+            )
+        if said.behind == 0:
+            return 0
+        return Behind.AHEAD_OF_RELEASE if said.ahead == 0 else Behind.OFF_RELEASE
 
     def _update_refusal(self, manifest: Manifest) -> str | None:
         """Why this clone must not be fast-forwarded, in the user's words, or `None`.
@@ -4633,7 +4747,7 @@ class ModuleUpdate:
                 word = upstream.release_word(self.release, self.installed_release)
                 return f"{self.key}: {word} {self.release}"
             return f"{self.key}: on the newest release, {self.release}"
-        if self.behind is Behind.UNCOUNTED:
+        if isinstance(self.behind, Behind):
             return (
                 f"{self.key}: update available (a shallow checkout cannot count how many commits)"
             )
@@ -5316,6 +5430,11 @@ def module_sql_report(
                 f"already in its updates ledger looks like"
             )
     return tuple(lines)
+
+
+def _github_compare(slug: str, base: str, ref: str) -> upstream.Comparison | None:
+    """`Applier`'s default compare (T150): GitHub's compare API, over verified HTTPS."""
+    return upstream.compare(slug, base, ref, get=upstream.https_get)
 
 
 def _github_newest_release(slug: str) -> upstream.Release | None:

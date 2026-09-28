@@ -9499,6 +9499,75 @@ def test_an_update_check_that_finds_a_checkout_ahead_of_its_release_offers_no_up
     assert not [label for label in labels if label.startswith("Update available")], labels
 
 
+class _UnplacedReleaseApplier(_FakeApplier):
+    """An applier whose Update cannot place the release until it is told to go ahead (T150).
+
+    `update()` IS overridden here, unlike `_FakeApplier`'s rule, because what is
+    under test is the VIEW's answer to `ReleaseDirectionUnknown`; the engine
+    that raises it is proved against real repositories in `test_apply.py`.
+    """
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(server_dir)
+        self.updates: list[tuple[object, bool]] = []
+
+    def update(  # type: ignore[override]
+        self, manifest: object, values: object = None, *, unchecked_ok: bool = False
+    ) -> ApplyReport:
+        self.updates.append((values, unchecked_ok))
+        if not unchecked_ok:
+            raise apply_module.ReleaseDirectionUnknown("nothing was changed", "Update anyway?")
+        return self.install(manifest, values)
+
+
+@pytest.mark.parametrize("yes", [False, True], ids=["no-cancels", "yes-runs-it-unchecked"])
+def test_an_update_nobody_could_place_asks_first_and_only_a_yes_runs_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, yes: bool
+) -> None:
+    """T150: GitHub could not say whether the release is newer, so the person decides.
+
+    The question is the engine's own sentence, under the tab's title, and the
+    dialog defaults to No (`_confirm()`). A No is a cancel that changed
+    nothing; a Yes runs the SAME update again with the same answers and
+    `unchecked_ok=True`, and its report lands where any Update's does.
+
+    Mutation: drop the `ReleaseDirectionUnknown` branch from `_module_failed()`
+    and neither press asks -- the row just says FAILED.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    services = _services(ps, tmp_path, [])
+    applier = _UnplacedReleaseApplier(server_dir)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return yes
+
+    monkeypatch.setattr(view, "_confirm", confirm)
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+
+    assert asked == [("Update mod-transmog without checking?", "Update anyway?")]
+    assert [unchecked for _values, unchecked in applier.updates] == (
+        [False, True] if yes else [False]
+    )
+    if yes:
+        assert applier.installed == ["mod-transmog"]
+        assert len({repr(values) for values, _ in applier.updates}) == 1, "the answers changed"
+        assert "FAILED" not in view.module_report.toPlainText()
+    else:
+        assert applier.installed == []
+        assert view.module_report.toPlainText() == (
+            "update mod-transmog: cancelled — nothing on this machine was changed."
+        )
+
+
 def test_busy_greys_every_row_button_and_gives_them_back(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

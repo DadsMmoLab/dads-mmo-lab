@@ -573,10 +573,24 @@ class Behind(enum.Enum):
     that much is proved. Which of the two it is, the graft under HEAD hides --
     and neither is an update.
     """
+    UNPLACED = "unplaced"
+    """A SHALLOW checkout a graft keeps from being placed against its release at all.
+
+    The ordinary shape of a release this app installed, and still offered as an
+    update (`is_behind()` says yes, like `UNCOUNTED`): the tip cloned at install
+    stays behind as a graft, and a newer release is walked down to it and no
+    further. It is NOT `UNCOUNTED`, which is proved under the release, because
+    a checkout newer than its release can look exactly like this -- so
+    `Applier.update()` asks GitHub before it resets anything (T150).
+    """
 
 
 BehindCount = int | Behind | None
 """What `commits_behind()` answers: a count, `Behind.UNCOUNTED`, or `None` for "could not ask"."""
+
+
+_OFFERED = frozenset({Behind.UNCOUNTED, Behind.UNPLACED})
+"""The two `Behind` members that are an update to offer (T147, T150)."""
 
 
 def is_behind(count: BehindCount) -> bool:
@@ -587,8 +601,9 @@ def is_behind(count: BehindCount) -> bool:
     the uncounted answer existed -- is a type error on it rather than a silent
     "no". T150's three release answers are "no" by this same line: each says
     the checkout is not under its release, and an update there goes backwards.
+    `Behind.UNPLACED` is "yes", and the update that follows proves it first.
     """
-    return count is Behind.UNCOUNTED or (isinstance(count, int) and count > 0)
+    return count in _OFFERED or (isinstance(count, int) and count > 0)
 
 
 @runtime_checkable
@@ -616,6 +631,18 @@ class BehindReader(Protocol):
     def commits_behind(
         self, dest: Path, branch: str | None, *, release: bool = False
     ) -> BehindCount: ...
+
+
+@runtime_checkable
+class HeadReader(Protocol):
+    """ "Which commit is this checkout on?" -- the full id, read locally (T150).
+
+    A one-method Protocol for `BehindReader`'s reason. `Applier.update()` hands
+    it to GitHub's compare when the checkout's own graph cannot place HEAD
+    against a release.
+    """
+
+    def head_sha(self, dest: Path) -> str | None: ...
 
 
 class VersionReader(Protocol):
@@ -834,12 +861,13 @@ def _release_lacks_head(ask: Callable[[list[str]], str], parentless: list[str]) 
       `parent` line in its own object -- so history under the release is cut
       and HEAD could be below the cut. That is `_pin()`'s own shape, the
       ordinary T126 update: the tip cloned at install stays behind as a graft,
-      and a newer release built on it is walked down to it and no further. It
-      is left as T147 answers it -- behind, uncounted -- because taking the chip
-      off it would take it off every release update this app installed. A
-      checkout NEWER than its release with such a graft in the way gets the
-      same answer; the proof cannot reach it without deepening, which this does
-      not do (`_behind_after_fetch()`).
+      and a newer release built on it is walked down to it and no further.
+      That is `UNPLACED`, still offered, because taking the chip off it would
+      take it off every release update this app installed. A checkout NEWER
+      than its release with such a graft in the way gets the same answer -- the
+      proof cannot reach it without deepening, which this does not do
+      (`_behind_after_fetch()`) -- so `Applier.update()` asks GitHub which way
+      the release lies before it resets anything, and refuses the step back.
 
     `git cat-file commit` and not `.git/shallow`, because it is the object's own
     word, read through `ask` like every other question here, and a checkout
@@ -851,7 +879,7 @@ def _release_lacks_head(ask: Callable[[list[str]], str], parentless: list[str]) 
         header = body.split("\n\n", 1)[0]
         if any(line.startswith("parent ") for line in header.splitlines()):
             logger.debug(f"{commit} is a graft; the release's history under it is not here")
-            return Behind.UNCOUNTED
+            return Behind.UNPLACED
     return Behind.NOT_IN_RELEASE
 
 

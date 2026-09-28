@@ -65,6 +65,7 @@ from typing import Literal
 
 from yulon import docker
 from yulon.apply import Applier, ApplyError, ApplyReport, Completer, FolderSource, SqlRunner
+from yulon.catalog import upstream
 from yulon.dbreads import SqlReader
 from yulon.git import Git
 from yulon.log import get_logger
@@ -493,6 +494,7 @@ class GuardedApplier(Applier):
         complete: Completer | None = None,
         replacing: bool = False,
         first_configure_sql: bool = True,
+        release: upstream.Release | None = None,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill
         # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
@@ -501,6 +503,10 @@ class GuardedApplier(Applier):
         # ignored a keyword its base accepts would report an install it copied
         # nothing for. The guard still runs first, whichever route fills the
         # folder -- the restart a C++ module asks for is the same restart.
+        # `release` is the same rule's third keyword (T150): the release
+        # `update()` proved is not a step back, and the one addon on this game
+        # that follows its releases is the reason it exists -- dropped here, the
+        # base would re-resolve it and could reset to a release nobody checked.
         note = self._guard(manifest, "install")
         return _with_note(
             super().install(
@@ -510,6 +516,7 @@ class GuardedApplier(Applier):
                 complete=complete,
                 replacing=replacing,
                 first_configure_sql=first_configure_sql,
+                release=release,
             ),
             note,
         )

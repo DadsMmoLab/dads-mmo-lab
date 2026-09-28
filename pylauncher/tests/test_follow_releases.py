@@ -922,3 +922,23 @@ def test_an_addon_ahead_of_its_release_is_not_an_updated_release(tmp_path: Path)
     assert row is not None and row.behind is Behind.AHEAD_OF_RELEASE
     note = tortoise_modules.release_notes(tmp_path)[("mod", "tortoise-bots-manager")]
     assert "has come out since" not in note, note
+
+
+def test_a_release_row_the_clone_cannot_place_is_still_offered_its_release(tmp_path: Path) -> None:
+    """`Behind.UNPLACED` keeps the chip (the owner's option (a)); the Update then checks first.
+
+    It is the ordinary shape of a release this app installed, so it reads as
+    any newer release does, and the day's cache gives it back as itself.
+    """
+    row = apply_module.ModuleUpdate(
+        "tbm", Path("/x"), True, Behind.UNPLACED, family="mod", release=TAG
+    )
+    assert is_behind(Behind.UNPLACED)
+    assert row.line == f"tbm: new release {TAG}"
+    assert modules_panel.chip_update_label(Behind.UNPLACED, TAG) == (
+        f"Update available — new release {TAG}"
+    )
+    assert modules_panel.chip_update_label(Behind.UNPLACED) == "Update available"
+    assert apply_module._behind_from_json(apply_module._behind_to_json(Behind.UNPLACED)) is (
+        Behind.UNPLACED
+    )

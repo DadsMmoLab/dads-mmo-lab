@@ -1664,7 +1664,7 @@ def test_commits_behind_asked_as_a_release_places_head_before_counting(
     assert seen_argv[-1][-3:] == ["cat-file", "commit", "a" * 40]
     graft = _completed(stdout=f"tree {'f' * 40}\nparent {'9' * 40}\nauthor t\n\ncut\n")
     answers += [_completed(), shallow, sides(1, 2), _completed(stdout=walk), graft]
-    assert impl.commits_behind(dest, rel, release=True) is git.Behind.UNCOUNTED
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.UNPLACED
     # A message that merely MENTIONS a parent is not one.
     quoted = _completed(stdout=f"tree {'f' * 40}\nauthor t\n\nparent {'9' * 40}\n")
     answers += [_completed(), shallow, sides(1, 2), _completed(stdout=walk), quoted]
@@ -2137,9 +2137,11 @@ def test_a_release_install_behind_a_newer_release_is_still_offered_it(tmp_path: 
     fetching the release at depth 1 (`_pin()`), so the old tip stays behind as
     a second graft. A newer release built on that tip is walked down to the
     tip's graft, which hides whether HEAD is under it -- exactly what hides it
-    for a checkout that is AHEAD with a graft in the way. That is left as T147
-    answered it: behind, uncounted. The one fixture that differs only in the
-    release being straight on top of HEAD keeps its exact figure.
+    for a checkout that is AHEAD with a graft in the way. So it is `UNPLACED`:
+    still offered, and not `UNCOUNTED`, which is proved under the release --
+    `Applier.update()` asks GitHub before it resets from here. The one fixture
+    that differs only in the release being straight on top of HEAD keeps its
+    exact figure.
     """
     up = _Upstream(tmp_path)
     history = up.commits("c", 20)
@@ -2152,7 +2154,7 @@ def test_a_release_install_behind_a_newer_release_is_still_offered_it(tmp_path: 
     up.publish()
 
     said = impl.commits_behind(dest, newer[-1], release=True)
-    assert said is git.Behind.UNCOUNTED, said
+    assert said is git.Behind.UNPLACED, said
     assert git.is_behind(said)
 
     straight = tmp_path / "mod-straight"
