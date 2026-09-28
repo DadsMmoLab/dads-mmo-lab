@@ -494,6 +494,9 @@ def render(
     `new_install_zone` is the zone a NEW install gets when the folder holds no
     Yu'lon base file yet (the install's stage passes this computer's); an
     installed server without a zone is never given one (`time_zone.for_render`).
+    On a CMaNGOS game the zone's line brings the bind of the server's own zone
+    files, labelled like every other bind; the files themselves are the
+    WRITER's to copy (`time_zone.place`), since a render is also only compared.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, a template is
@@ -609,6 +612,7 @@ def render(
                 installed=installed.is_file() and is_ours(installed),
                 new_zone=new_install_zone,
             ),
+            label=bind_label,
         )
     except time_zone.TimeZoneError as exc:  # the template's own shape; a test pins it
         raise ComposeGenError(

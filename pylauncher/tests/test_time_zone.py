@@ -73,79 +73,126 @@ def test_the_list_a_player_picks_from_is_one_place_per_country_region() -> None:
     assert set(picker) <= time_zone.zones()
 
 
-@pytest.mark.parametrize(
-    ("zone", "rule"),
-    [
-        (OSLO, OSLO_POSIX),
-        ("America/New_York", "EST5EDT,M3.2.0,M11.1.0"),
-        ("Asia/Kolkata", "IST-5:30"),
-        ("UTC", "UTC0"),
-    ],
-)
-def test_a_zones_posix_rule_is_its_tz_files_own_footer(zone: str, rule: str) -> None:
-    assert time_zone.posix(zone) == rule
+@pytest.mark.parametrize("zone", [OSLO, "America/New_York", "Australia/Sydney", "UTC"])
+def test_a_zones_file_is_the_shipped_databases_own(zone: str) -> None:
+    shipped = import_resources.files("tzdata") / "zoneinfo"
+    for part in zone.split("/"):
+        shipped = shipped / part
+    assert time_zone.zone_file(zone) == shipped.read_bytes()
 
 
 @pytest.mark.parametrize("name", ["Mars/Olympus", "../../../etc/passwd", "", "zoneinfo/UTC"])
-def test_a_name_that_is_not_a_zone_has_no_rule(name: str) -> None:
-    assert time_zone.posix(name) is None
+def test_a_name_that_is_not_a_zone_has_no_file(name: str) -> None:
+    assert time_zone.zone_file(name) is None
+
+
+@pytest.mark.parametrize("entry", [WOTLK, TBC, VANILLA, TORTOISE], ids=lambda e: e.id)
+def test_every_game_gets_the_zones_name(entry: CatalogEntry) -> None:
+    """The name glibc looks up: in the image's tzdata (WotLK) or in the bound copy (CMaNGOS)."""
+    assert time_zone.line_for(entry, OSLO) == time_zone.Line(OSLO)
+
+
+def test_only_the_cmangos_images_need_the_files_brought() -> None:
+    """AzerothCore's image installs tzdata (`apps/docker/Dockerfile`, skeleton stage)."""
+    assert [time_zone.needs_files(e) for e in (WOTLK, TBC, VANILLA, TORTOISE)] == [
+        False,
+        True,
+        True,
+        True,
+    ]
+
+
+def test_no_line_is_made_for_a_name_that_is_not_a_zone() -> None:
+    assert time_zone.line_for(WOTLK, "Mars/Olympus") is None
+    assert time_zone.line_for(TBC, "Mars/Olympus") is None
+
+
+def test_the_zone_files_bind_is_read_only_and_labelled_like_every_other() -> None:
+    assert time_zone.bind_line("") == "./zoneinfo:/usr/share/zoneinfo:ro"
+    assert time_zone.bind_line(":z") == "./zoneinfo:/usr/share/zoneinfo:ro,z"
+    assert composegen.bind_label_of("    - " + time_zone.bind_line(":z")) == ":z"
+    assert composegen.bind_label_of("    - " + time_zone.bind_line("")) == ""
+
+
+# -- the zone files in the server folder ---------------------------------------------
+
+
+def _tbc_override(zone: str = OSLO) -> str:
+    lines = dict.fromkeys(time_zone.services(TBC), time_zone.Line(zone))
+    return time_zone.lay_over("services: {}\n", TBC, lines)
+
+
+def test_place_copies_the_named_zone_from_the_apps_own_database(tmp_path: Path) -> None:
+    written = time_zone.place(TBC, tmp_path, _tbc_override())
+
+    target = tmp_path / "zoneinfo" / "Europe" / "Oslo"
+    assert written == (target,)
+    assert target.read_bytes() == time_zone.zone_file(OSLO)
+    assert time_zone.ready(TBC, tmp_path, OSLO)
+    assert [p.name for p in (tmp_path / "zoneinfo").rglob("*")] == ["Europe", "Oslo"]
+
+
+def test_place_copies_again_only_what_differs(tmp_path: Path) -> None:
+    """A rule a Yu'lon update brings reaches the server; an equal file is left alone."""
+    time_zone.place(TBC, tmp_path, _tbc_override())
+    target = tmp_path / "zoneinfo" / "Europe" / "Oslo"
+    assert time_zone.place(TBC, tmp_path, _tbc_override()) == ()
+    target.write_bytes(b"TZif2 an older rule")
+    assert not time_zone.ready(TBC, tmp_path, OSLO)
+
+    assert time_zone.place(TBC, tmp_path, _tbc_override()) == (target,)
+    assert target.read_bytes() == time_zone.zone_file(OSLO)
+
+
+def test_place_brings_nothing_for_wotlk_or_for_a_value_that_is_not_a_zone(
+    tmp_path: Path,
+) -> None:
+    wotlk = time_zone.lay_over(
+        "services:\n", WOTLK, dict.fromkeys(time_zone.services(WOTLK), time_zone.Line(OSLO))
+    )
+    assert time_zone.place(WOTLK, tmp_path, wotlk) == ()
+    assert time_zone.place(TBC, tmp_path, _tbc_override("Mars/Olympus")) == ()
+    assert not (tmp_path / "zoneinfo").exists()
+
+
+def test_place_refuses_a_zoneinfo_that_is_not_a_folder(tmp_path: Path) -> None:
+    (tmp_path / "zoneinfo").write_text("not a folder", encoding="utf-8")
+    with pytest.raises(time_zone.TimeZoneError):
+        time_zone.place(TBC, tmp_path, _tbc_override())
 
 
 @pytest.mark.skipif(
     not sys.platform.startswith("linux") or not hasattr(time, "tzset"),
     reason="measures glibc, the C library in every server image",
 )
-def test_every_rule_keeps_the_zones_own_clock_without_any_zone_files(
+def test_glibc_reads_the_placed_folder_as_the_zone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The CMaNGOS images carry no tzdata, so their glibc gets the rule and nothing else.
+    """glibc looks a name up in the folder `place()` makes; without it the name is UTC.
 
-    For every zone the app ships: the local time glibc gives for the POSIX rule
-    with an EMPTY zone folder, against the local time it gives for the zone's
-    own TZif file, every six hours for a year from now. Measured wider when the
-    approach was chosen (2026-09-28, tzdata 2026d): 598 zones, 14,640 instants
-    over five years, glibc 2.39 (Tortoise's ubuntu:24.04) and the jammy
-    libc6 2.35 (TBC's and Vanilla's ubuntu:22.04) -- no difference anywhere.
+    The images' own glibc (2.35, 2.39) did the same with this folder bound at
+    `/usr/share/zoneinfo`, measured on a Linux test box 2026-09-28 in all three built
+    CMaNGOS images: `TZ=Europe/Oslo` gave CEST +0200 with the bind, +0000
+    without it.
     """
-    shipped = Path(str(import_resources.files("tzdata") / "zoneinfo"))
-    empty = tmp_path / "no-zoneinfo"
-    empty.mkdir()
-    now = int(time.time())
-    stamps = range(now, now + 366 * 86400, 6 * 3600)
+    time_zone.place(TBC, tmp_path, _tbc_override())
+    july = 1814443200  # 2027-07-01 12:00 UTC
 
-    def clock(tz: str, folder: Path) -> list[tuple[int, ...]]:
-        os.environ["TZ"], os.environ["TZDIR"] = tz, str(folder)
+    def offset(folder: Path) -> int:
+        os.environ["TZ"] = "UTC"  # glibc keeps a zone it already read under the same TZ
         time.tzset()
-        return [tuple(time.localtime(t)[:6]) + (time.localtime(t).tm_gmtoff,) for t in stamps]
+        os.environ["TZ"], os.environ["TZDIR"] = OSLO, str(folder)
+        time.tzset()
+        return time.localtime(july).tm_gmtoff
 
     monkeypatch.setenv("TZ", "UTC")
-    monkeypatch.setenv("TZDIR", str(empty))
+    monkeypatch.setenv("TZDIR", str(tmp_path))
     try:
-        assert clock(OSLO, empty) == clock("UTC", empty), "control: a bare name is UTC there"
-        wrong = [
-            zone
-            for zone in sorted(time_zone.zones())
-            if clock(time_zone.posix(zone) or "", empty) != clock(zone, shipped)
-        ]
+        placed, bare = offset(tmp_path / "zoneinfo"), offset(tmp_path)
     finally:
         monkeypatch.undo()
         time.tzset()
-    assert wrong == []
-
-
-@pytest.mark.parametrize("entry", [TBC, VANILLA, TORTOISE], ids=lambda e: e.id)
-def test_a_cmangos_server_gets_the_rule_and_the_name_beside_it(entry: CatalogEntry) -> None:
-    assert time_zone.line_for(entry, OSLO) == time_zone.Line(OSLO_POSIX, OSLO)
-
-
-def test_a_wotlk_server_gets_the_name_its_image_looks_up() -> None:
-    """AzerothCore's image installs tzdata (`apps/docker/Dockerfile`, skeleton stage)."""
-    assert time_zone.line_for(WOTLK, OSLO) == time_zone.Line(OSLO)
-
-
-def test_no_line_is_made_for_a_name_that_is_not_a_zone() -> None:
-    assert time_zone.line_for(WOTLK, "Mars/Olympus") is None
-    assert time_zone.line_for(TBC, "Mars/Olympus") is None
+    assert (placed, bare) == (7200, 0)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Qt reads $TZ on Linux")
@@ -167,6 +214,17 @@ def test_a_zone_qt_cannot_name_is_utc(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(QTimeZone, "systemTimeZoneId", broken)
     assert time_zone.host_zone() == "UTC"
+
+
+@pytest.mark.parametrize("name", ["Etc/UTC", "Etc/Zulu", "UCT", "GMT", "Etc/Greenwich"])
+def test_a_computer_on_a_utc_alias_is_in_utc(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Cold review NIT: `Etc/UTC` is UTC, so a new server there writes no line."""
+    from PySide6.QtCore import QByteArray, QTimeZone
+
+    monkeypatch.setattr(time_zone, "host_zone", REAL_HOST_ZONE)
+    monkeypatch.setattr(QTimeZone, "systemTimeZoneId", lambda: QByteArray(name.encode()))
+    assert time_zone.host_zone() == "UTC"
+    assert time_zone.for_render(WOTLK, None, installed=False, new_zone=name) == {}
 
 
 def test_the_suite_pins_this_computers_zone_to_utc() -> None:
@@ -191,9 +249,9 @@ def test_a_wotlk_zone_is_one_line_in_each_servers_environment(tmp_path: Path) ->
 
 
 def test_laying_the_same_zone_twice_is_laying_it_once(tmp_path: Path) -> None:
-    lines = dict.fromkeys(time_zone.services(TBC), time_zone.Line(OSLO_POSIX, OSLO))
-    once = time_zone.lay_over(_render(TBC, tmp_path), TBC, lines)
-    assert time_zone.lay_over(once, TBC, lines) == once
+    lines = dict.fromkeys(time_zone.services(TBC), time_zone.Line(OSLO))
+    once = time_zone.lay_over(_render(TBC, tmp_path), TBC, lines, label=":z")
+    assert time_zone.lay_over(once, TBC, lines, label=":z") == once
 
 
 def test_a_new_zone_replaces_the_old_line_where_it_stands(tmp_path: Path) -> None:
@@ -219,30 +277,54 @@ def test_a_crlf_override_gets_crlf_lines(tmp_path: Path) -> None:
 def test_a_cmangos_override_with_no_services_gets_both() -> None:
     """`services: {}` is what the template renders when the base file publishes the port."""
     before = "# generated by Yu'lon — runtime settings for the native stack.\nservices: {}\n"
-    line = time_zone.Line(OSLO_POSIX, OSLO)
 
-    after = time_zone.lay_over(before, TBC, dict.fromkeys(time_zone.services(TBC), line))
+    after = time_zone.lay_over(
+        before, TBC, dict.fromkeys(time_zone.services(TBC), time_zone.Line(OSLO))
+    )
 
     spec = TBC.container_spec()
+    block = '    environment:\n      TZ: "Europe/Oslo"\n    volumes:\n'
+    block += "      - ./zoneinfo:/usr/share/zoneinfo:ro\n"
     assert after == (
         "# generated by Yu'lon — runtime settings for the native stack.\nservices:\n"
-        f'  {spec.auth}:\n    environment:\n      TZ: "{OSLO_POSIX}"  # {OSLO}\n'
-        f'  {spec.world}:\n    environment:\n      TZ: "{OSLO_POSIX}"  # {OSLO}\n'
+        f"  {spec.auth}:\n{block}  {spec.world}:\n{block}"
     )
-    assert _tz(after, TBC) == {spec.auth: OSLO_POSIX, spec.world: OSLO_POSIX}
+    assert _tz(after, TBC) == {spec.auth: OSLO, spec.world: OSLO}
 
 
-def test_a_cmangos_channel_block_keeps_its_port(tmp_path: Path) -> None:
+def test_a_cmangos_channel_block_keeps_its_port_and_gains_the_bind(tmp_path: Path) -> None:
     before = _render(TORTOISE, tmp_path)
     assert "ports:" in before, "control: Tortoise's override publishes the channel's port"
-    line = time_zone.Line(OSLO_POSIX, OSLO)
+    lines = dict.fromkeys(time_zone.services(TORTOISE), time_zone.Line(OSLO))
 
-    after = time_zone.lay_over(before, TORTOISE, dict.fromkeys(time_zone.services(TORTOISE), line))
+    after = time_zone.lay_over(before, TORTOISE, lines, label=":z")
 
     parsed = yaml.safe_load(after)["services"]
     spec = TORTOISE.container_spec()
     assert parsed[spec.world]["ports"] == yaml.safe_load(before)["services"][spec.world]["ports"]
-    assert _tz(after, TORTOISE) == {spec.auth: OSLO_POSIX, spec.world: OSLO_POSIX}
+    assert _tz(after, TORTOISE) == {spec.auth: OSLO, spec.world: OSLO}
+    for name in (spec.auth, spec.world):
+        assert parsed[name]["volumes"] == ["./zoneinfo:/usr/share/zoneinfo:ro,z"]
+
+
+def test_a_bind_of_the_folder_already_there_is_replaced_not_doubled() -> None:
+    text = (
+        "services:\n  tbc-mangosd:\n    volumes:\n      - ./x:/x\n"
+        "      - ./old:/usr/share/zoneinfo\n"
+    )
+    after = time_zone.lay_over(text, TBC, {"tbc-mangosd": time_zone.Line(OSLO)})
+    assert yaml.safe_load(after)["services"]["tbc-mangosd"]["volumes"] == [
+        "./x:/x",
+        "./zoneinfo:/usr/share/zoneinfo:ro",
+    ]
+
+
+def test_a_value_that_is_not_a_zone_gets_no_bind() -> None:
+    """A hand-written rule is kept as it is, and there is no file to show for it."""
+    after = time_zone.lay_over(
+        "services:\n", TBC, {"tbc-mangosd": time_zone.Line("CET-1CEST,M3.5.0,M10.5.0/3")}
+    )
+    assert "volumes" not in after and "zoneinfo" not in after
 
 
 @pytest.mark.parametrize(
@@ -272,9 +354,9 @@ def _env(value_line: str, service: str = "ac-worldserver") -> str:
     [
         ('TZ: "Europe/Oslo"', time_zone.Line(OSLO)),
         ("TZ: Europe/Oslo", time_zone.Line(OSLO)),
-        ("TZ: 'Mars/Olympus'  # mine", time_zone.Line("Mars/Olympus")),
+        ("TZ: 'Mars/Olympus'  # mine", time_zone.Line("Mars/Olympus", "mine")),
         (f'TZ: "{OSLO_POSIX}"  # {OSLO}', time_zone.Line(OSLO_POSIX, OSLO)),
-        (f'TZ: "{OSLO_POSIX}"  # Mars/Olympus', time_zone.Line(OSLO_POSIX)),
+        ("TZ: Europe/Oslo # set by me", time_zone.Line(OSLO, "set by me")),
         ('TZ: "${HOME}"', None),
         ('TZ: "Europe/Oslo', None),
         ('TZ: "Europe/Oslo" junk', None),
@@ -284,8 +366,8 @@ def _env(value_line: str, service: str = "ac-worldserver") -> str:
         "quoted",
         "bare",
         "not-a-zone",
-        "rule-and-name",
-        "rule-and-a-name-that-is-not-a-zone",
+        "a-hand-rule-and-its-note",
+        "a-note",
         "interpolated",
         "unclosed-quote",
         "not-a-comment-after",
@@ -336,10 +418,12 @@ def test_a_render_carries_the_zone_off_the_override_it_replaces(tmp_path: Path) 
     }
 
 
-def test_a_new_install_gets_the_zone_it_is_handed(tmp_path: Path) -> None:
-    rendered = _render(TBC, tmp_path, new_install_zone=OSLO)
+def test_a_new_install_gets_the_zone_it_is_handed_and_the_bind_its_label(tmp_path: Path) -> None:
+    rendered = _render(TBC, tmp_path, new_install_zone=OSLO, bind_label=":z")
     spec = TBC.container_spec()
-    assert _tz(rendered, TBC) == {spec.auth: OSLO_POSIX, spec.world: OSLO_POSIX}
+    assert _tz(rendered, TBC) == {spec.auth: OSLO, spec.world: OSLO}
+    assert composegen.bind_label_of(rendered) == ":z"
+    assert not (tmp_path / "zoneinfo").exists(), "a render writes nothing; the writer places"
 
 
 def test_an_installed_server_with_no_zone_is_not_handed_one(tmp_path: Path) -> None:

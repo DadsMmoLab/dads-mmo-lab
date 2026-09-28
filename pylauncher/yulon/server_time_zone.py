@@ -5,7 +5,8 @@ The zone is the `TZ` line of the world's and the login server's environment in
 AzerothCore and the CMaNGOS images, is `catalog/time_zone.py`. This module is
 the tab's two presses over that file, in `bot_population`'s shape (T99): read
 what the file says, and set one zone with a backup first, changing only the
-`TZ` lines (`time_zone.lay_over`), every other byte of the file kept.
+`TZ` lines -- and on a CMaNGOS game the bind of the server's own zone files,
+whose copy it makes first (`time_zone.place`) -- every other byte kept.
 
 Chosen from a list, never typed (owner decision 2026-09-28): a hand-typed zone
 is how a player once broke the file. A value the list does not hold -- one a
@@ -48,14 +49,10 @@ TWICE = (
     "line the server reads. Remove the extra line and press Reload."
 )
 NOT_A_ZONE = "{zone!r} is not a time zone Yu'lon knows"
-NO_DATABASE = (
-    "the time zone list is missing from this copy of Yu'lon, so no zone can be set. Reinstall "
-    "Yu'lon to get it back."
-)
 WRITE_FAILED = "{file} could not be written ({exc}); it was left as it was"
-NAME_WITHOUT_FILES = (
-    "this server's image has no time zone files, so it reads {value} as UTC. Pick {value} "
-    "here to write it in a form the server understands."
+NO_ZONE_FILE = (
+    "this server's image has no time zone files, and its folder has no {folder}/{value} bound "
+    "for it, so the server reads {value} as UTC. Apply {value} here, or Repair, to copy it in."
 )
 
 
@@ -121,20 +118,38 @@ def _raw(text: str, entry: CatalogEntry, service: str) -> list[str]:
     return [compose_env.env_value(lines[index]) for index in at]
 
 
-def _zone_of(entry: CatalogEntry, line: time_zone.Line | None) -> str | None:
-    """The zone a line is, when it is exactly the line Yu'lon would write for one.
-
-    Plain `UTC` too, on either image: glibc reads that name as UTC with or
-    without zone files.
-    """
+def _zone_of(line: time_zone.Line | None) -> str | None:
+    """The zone a line names, when it names one the database lists."""
     if line is None:
         return None
-    if line.value == UTC:
+    if line.value in time_zone.LIKE_UTC:
         return UTC
-    for zone in (line.zone, line.value):
-        if zone is not None and time_zone.line_for(entry, zone) == line:
-            return zone
-    return None
+    return line.value if line.value in time_zone.zones() else None
+
+
+def _label(server_dir: Path, text: str) -> str:
+    """The install's own SELinux answer, read off its files: the override's binds, else the base's.
+
+    The install's decision read back, never the host asked again (T102, T106):
+    a host briefly permissive would strip the `:z` a zone bind needs.
+    """
+    for candidate in (text, _text_or_none(server_dir / composegen.BASE_FILE)):
+        if candidate is None:
+            continue
+        try:
+            label = composegen.bind_label_of(candidate)
+        except composegen.MixedBindLabels:
+            continue
+        if label is not None:
+            return label
+    return ""
+
+
+def _text_or_none(path: Path) -> str | None:
+    try:
+        return _read_text(path)
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def read(entry: CatalogEntry, server_dir: Path) -> Reading:
@@ -164,12 +179,15 @@ def read(entry: CatalogEntry, server_dir: Path) -> Reading:
     if not found[world]:
         return Reading(FILE, None, UTC, login, problem)
     value = _raw(text, entry, world)[0]
-    zone = _zone_of(entry, found[world][0])
+    zone = _zone_of(found[world][0])
     note: str | None = None
-    if zone is None and value in time_zone.zones() and time_zone.line_for(entry, value) is not None:
-        # A CMaNGOS image has no zone files (`time_zone`), so a bare name there
-        # is UTC -- which is what the player who wrote it did not mean.
-        note = NAME_WITHOUT_FILES.format(value=value)
+    if zone is not None and zone != UTC and time_zone.needs_files(entry):
+        # A CMaNGOS image has no zone files of its own (`time_zone`): without
+        # the copy in the server folder, or the bind that shows it, the name
+        # is UTC there -- not what the player who set it meant.
+        bound = time_zone.bind_line("") in text or time_zone.bind_line(":z") in text
+        if not (bound and time_zone.ready(entry, server_dir, zone)):
+            note = NO_ZONE_FILE.format(value=value, folder=time_zone.FOLDER)
     return Reading(FILE, value, zone, login, problem, note)
 
 
@@ -177,13 +195,15 @@ def write(entry: CatalogEntry, server_dir: Path, zone: str) -> Written:
     """Set both servers' `TZ` to `zone`, backing the file up first; nothing written if it says so.
 
     Read fresh here, not handed in: the file's shape is the disk's answer at the
-    moment of writing. Only the `TZ` lines change (`time_zone.lay_over`).
+    moment of writing. Only the `TZ` lines change (`time_zone.lay_over`), and
+    on CMaNGOS the zone folder's bind, labelled as the install's other binds
+    are; the zone's file is copied in before the override names it.
 
     Raises:
         TimeZoneSettingError: a refusal a player reads; nothing was written.
     """
     if not time_zone.zones():
-        raise TimeZoneSettingError(NO_DATABASE)
+        raise TimeZoneSettingError(time_zone.MISSING_DATA)
     line = time_zone.line_for(entry, zone)
     if line is None:
         raise TimeZoneSettingError(NOT_A_ZONE.format(zone=zone))
@@ -197,14 +217,20 @@ def write(entry: CatalogEntry, server_dir: Path, zone: str) -> Written:
     except (OSError, UnicodeDecodeError) as exc:
         raise TimeZoneSettingError(WRITE_FAILED.format(file=path.name, exc=exc)) from exc
     services = time_zone.services(entry)
-    kept = time_zone.carried(text, entry)
     unset = not any(time_zone.found(text, entry).values())
-    if all(kept.get(service) == line for service in services) or (zone == UTC and unset):
+    if zone == UTC and unset:
         return Written(FILE, rule, None, reading.shown, zone)
     try:
-        after = time_zone.lay_over(text, entry, dict.fromkeys(services, line))
-    except time_zone.TimeZoneError as exc:
+        after = time_zone.lay_over(
+            text, entry, dict.fromkeys(services, line), label=_label(server_dir, text)
+        )
+        # The zone's file first, so no bind ever names a folder without it; and
+        # again when the file already says this zone, which refreshes the copy.
+        time_zone.place(entry, server_dir, after)
+    except (OSError, time_zone.TimeZoneError) as exc:
         raise TimeZoneSettingError(WRITE_FAILED.format(file=path.name, exc=exc)) from exc
+    if after == text:
+        return Written(FILE, rule, None, reading.shown, zone)
     try:
         made = tuning.backup(path)
     except (OSError, tuning.TuningError) as exc:
@@ -225,15 +251,15 @@ def question(entry: CatalogEntry, reading: Reading, zone: str) -> str:
     name = Path(reading.file).name
     auth, world = time_zone.services(entry) or ("", "")
     parts = [f"Set this server's time zone to {zone}?"]
-    line = time_zone.line_for(entry, zone)
     said = (
         f"TZ for the world ({world}) and the login server ({auth}); only those lines change. A "
         "backup of it is made beside it first."
     )
-    if line is not None and line.zone is not None:
+    if time_zone.needs_files(entry):
         parts.append(
-            f"{name} gets {said} This server's image has no time zone files, so Yu'lon writes "
-            f"the zone's own rule ({line.value}) with its name beside it."
+            f"{name} gets {said} This server's image has no time zone files, so Yu'lon copies "
+            f"this zone's file into the server folder ({time_zone.FOLDER}/{zone}) and adds the "
+            "line that shows that folder to both, read-only."
         )
     else:
         parts.append(f"{name} gets {said}")

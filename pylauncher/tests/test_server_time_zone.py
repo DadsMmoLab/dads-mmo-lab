@@ -19,7 +19,6 @@ WOTLK = CATALOG.get("wow-wotlk")
 TBC = CATALOG.get("wow-tbc")
 OVERRIDE = composegen.OVERRIDE_FILE
 OSLO = "Europe/Oslo"
-OSLO_POSIX = "CET-1CEST,M3.5.0,M10.5.0/3"
 
 
 def _installed(server_dir: Path, entry: CatalogEntry = WOTLK) -> str:
@@ -71,7 +70,10 @@ def test_a_hand_written_value_is_shown_as_it_is(tmp_path: Path) -> None:
 
 
 def test_a_bare_name_on_a_cmangos_server_says_it_runs_as_utc(tmp_path: Path) -> None:
-    """The CMaNGOS images have no zone files, so a hand-written `Europe/Oslo` is UTC there."""
+    """The CMaNGOS images have no zone files, so a hand-written `Europe/Oslo` is UTC there.
+
+    Until its file is copied and bound: the next Repair or Apply does both.
+    """
     text = _installed(tmp_path, TBC)
     world = TBC.container_spec().world
     text = text.replace("    ports:\n", "    environment:\n      TZ: Europe/Oslo\n    ports:\n")
@@ -80,8 +82,8 @@ def test_a_bare_name_on_a_cmangos_server_says_it_runs_as_utc(tmp_path: Path) -> 
 
     reading = server_time_zone.read(TBC, tmp_path)
 
-    assert (reading.value, reading.zone) == (OSLO, None)
-    assert reading.note is not None and "UTC" in reading.note
+    assert (reading.value, reading.zone) == (OSLO, OSLO)
+    assert reading.note is not None and "UTC" in reading.note, "no file, no bind: it is UTC"
 
 
 def test_the_login_servers_own_value_is_read_too(tmp_path: Path) -> None:
@@ -147,10 +149,48 @@ def test_a_wotlk_write_sets_both_servers_and_backs_the_file_up(tmp_path: Path) -
     )
 
 
-def test_a_tbc_write_is_the_rule_with_the_name_beside_it(tmp_path: Path) -> None:
+def test_a_tbc_write_is_the_name_the_bind_and_the_copied_file(tmp_path: Path) -> None:
     _installed(tmp_path, TBC)
     server_time_zone.write(TBC, tmp_path, OSLO)
-    assert _override(tmp_path).count(f'TZ: "{OSLO_POSIX}"  # {OSLO}') == 2
+    text = _override(tmp_path)
+    assert text.count('TZ: "Europe/Oslo"') == 2
+    assert text.count("- ./zoneinfo:/usr/share/zoneinfo:ro\n") == 2
+    assert time_zone.ready(TBC, tmp_path, OSLO)
+    assert server_time_zone.read(TBC, tmp_path).note is None
+
+
+def test_a_write_on_an_enforcing_install_labels_the_bind_as_the_install_did(
+    tmp_path: Path,
+) -> None:
+    """The label is read off the install's own files (T102), never asked of the host again."""
+    plan = composegen.render(
+        TBC,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        db_password="pw",
+        bind_label=":z",
+        platform_id=lambda: "linux",
+    )
+    (tmp_path / composegen.BASE_FILE).write_text(plan.base, encoding="utf-8")
+    (tmp_path / OVERRIDE).write_text(plan.override, encoding="utf-8")
+
+    server_time_zone.write(TBC, tmp_path, OSLO)
+
+    assert _override(tmp_path).count("- ./zoneinfo:/usr/share/zoneinfo:ro,z\n") == 2
+
+
+def test_a_zone_whose_file_is_gone_says_so_and_apply_brings_it_back(tmp_path: Path) -> None:
+    _installed(tmp_path, TBC)
+    server_time_zone.write(TBC, tmp_path, OSLO)
+    (tmp_path / "zoneinfo" / "Europe" / "Oslo").unlink()
+
+    reading = server_time_zone.read(TBC, tmp_path)
+    assert reading.zone == OSLO and reading.note is not None and "UTC" in reading.note
+
+    assert not server_time_zone.write(TBC, tmp_path, OSLO).changed, "the override already says it"
+    assert (
+        time_zone.ready(TBC, tmp_path, OSLO) and server_time_zone.read(TBC, tmp_path).note is None
+    )
 
 
 def test_a_second_zone_replaces_the_first_and_nothing_else(tmp_path: Path) -> None:
@@ -205,8 +245,8 @@ def test_the_question_says_where_what_and_what_it_owes() -> None:
     wotlk = server_time_zone.question(WOTLK, reading, OSLO)
     assert "Europe/Oslo" in wotlk and "ac-worldserver" in wotlk and "ac-authserver" in wotlk
     assert "RECREATED" in wotlk and "Reset to default keeps" in wotlk
-    assert OSLO_POSIX not in wotlk
-    assert OSLO_POSIX in server_time_zone.question(TBC, reading, OSLO)
+    assert "zoneinfo" not in wotlk
+    assert "zoneinfo/Europe/Oslo" in server_time_zone.question(TBC, reading, OSLO)
 
 
 def test_every_game_yulon_makes_compose_files_for_has_the_route(tmp_path: Path) -> None:

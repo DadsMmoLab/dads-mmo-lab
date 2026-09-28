@@ -36,6 +36,7 @@ from yulon import (
     purge,
     reset_defaults,
     runner,
+    server_time_zone,
     state,
     steam,
     tuning,
@@ -10995,6 +10996,9 @@ def _tuning_view(ps: _Ps, tmp_path: Path) -> ControllerView:
     object.__setattr__(
         services, "installed_modules", lambda: {"module": frozenset({"mod-npc-beastmaster"})}
     )
+    # T171: the time zone row is on this tab for every game Yu'lon installs, so
+    # every layout measured here is measured with it shown (cold review).
+    object.__setattr__(services, "time_zone", server_time_zone.time_zone_route(WOTLK, tmp_path))
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
@@ -13740,6 +13744,48 @@ def test_the_tuning_cards_get_the_height_their_report_used_to_take(
         view.tuning_report, A_BOX_THAT_GAVE_NOTHING_BACK
     ), f"a long report takes the cards with it: the box grew to {view.tuning_report.height()}px"
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800)], ids=["960x640", "1280x800"])
+def test_the_time_zone_leaves_nothing_on_the_tuning_tab_cut(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """T171 cold review: with the time zone shown, nothing on the Tuning tab is cut.
+
+    As a row above the panel it drew the panel 44px under its minimum at
+    960x640 (316 < 360); it now heads the card column. A hand-written value
+    longer than any zone name must be elided, whole in its tooltip, rather
+    than widen the column past its viewport.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    long = "America/Argentina/ComodRivadavia_as_somebody_wrote_it_by_hand"
+    installed = _wotlk_override(tmp_path)
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(
+        installed.replace("    environment:\n", f"    environment:\n      TZ: {long}\n"),
+        encoding="utf-8",
+    )
+    view = _tuning_view(ps, tmp_path)
+    window, tab = _controller_in_the_real_window(view, "Tuning")
+    _at(window, size)
+
+    group = view.time_zone_group
+    assert group.isVisible() and view.time_zone_where.isEnabled(), "control: the row is live"
+    assert long in view.time_zone_where.currentText() and long in view.time_zone_where.toolTip()
+    cut = _drawn_under_their_minimum(tab)
+    viewport = view.tuning_panel._area.viewport()
+    if group.width() > viewport.width():
+        cut.append(f"the time zone is {group.width()}px in a {viewport.width()}px column")
+    for widget in (view.time_zone_where, view.time_zone_place, view.time_zone_apply_button):
+        right = widget.mapTo(group, widget.rect().bottomRight())
+        if right.x() >= group.width() or right.y() >= group.height():
+            cut.append(f"{type(widget).__name__} ends at {right.x()},{right.y()} of {group.size()}")
+        if widget.width() < widget.minimumSizeHint().width():
+            cut.append(f"{type(widget).__name__} is {widget.width()}px, under its minimum")
+    for button in tab.findChildren(QPushButton):
+        if button.isVisible() and (why := _clipped(button)) is not None:
+            cut.append(why)
+    assert cut == [], cut
 
 
 # ------------------ the press that ran the updater over SQL the app had applied

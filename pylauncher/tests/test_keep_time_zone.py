@@ -13,6 +13,7 @@ read back with a YAML parser, as compose would read it.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -264,9 +265,46 @@ def test_a_tbc_repair_renders_the_file_the_tab_wrote(tmp_path: Path) -> None:
     _generate_tbc(tmp_path)
     tabbed = _tab_set(tmp_path, TBC)
     spec = TBC.container_spec()
-    assert _zones(tmp_path, TBC) == {spec.auth: OSLO_POSIX, spec.world: OSLO_POSIX}
+    assert _zones(tmp_path, TBC) == {spec.auth: OSLO, spec.world: OSLO}
 
     assert _generate_tbc(tmp_path) == tabbed
+
+
+def test_a_tbc_repair_copies_the_zone_file_again_from_this_yulon(tmp_path: Path) -> None:
+    """A rule a Yu'lon update brings reaches the server at the next Repair or Update."""
+    _generate_tbc(tmp_path)
+    _tab_set(tmp_path, TBC)
+    placed = tmp_path / "zoneinfo" / "Europe" / "Oslo"
+    assert placed.read_bytes() == time_zone.zone_file(OSLO), "control: Apply copied it"
+    placed.write_bytes(b"TZif2 the rule an older Yu'lon shipped")
+
+    _generate_tbc(tmp_path)
+
+    assert placed.read_bytes() == time_zone.zone_file(OSLO)
+
+
+def test_a_tbc_repair_makes_the_zone_folder_before_the_compose_file_binds_it(
+    tmp_path: Path,
+) -> None:
+    """Docker makes a missing bind folder as root; the stage copies first, so it never has to."""
+    _generate_tbc(tmp_path)
+    _tab_set(tmp_path, TBC)
+    shutil.rmtree(tmp_path / "zoneinfo")
+
+    _generate_tbc(tmp_path)
+
+    assert time_zone.ready(TBC, tmp_path, OSLO)
+
+
+def test_the_tbc_channel_press_keeps_the_zone_and_its_label(tmp_path: Path) -> None:
+    """The bind is `:ro,z`: the channel's label reader must read it as labelled (T102)."""
+    _generate_tbc(tmp_path, selinux_enforcing=lambda: True, fs_type=lambda p: "xfs")
+    assert (
+        composegen.bind_label_of((tmp_path / composegen.BASE_FILE).read_text(encoding="utf-8"))
+        == ":z"
+    ), "control: an enforcing host's install"
+    _tab_set(tmp_path, TBC)
+    assert channel_setup._label_on_disk(tmp_path / OVERRIDE) == ":z"
 
 
 def test_the_zone_the_count_and_the_channel_ride_a_repair_together(tmp_path: Path) -> None:
@@ -318,7 +356,8 @@ def test_a_new_install_gets_this_computers_zone(tmp_path: Path) -> None:
     (tmp_path / "tbc").mkdir()
     _generate_tbc(tmp_path / "tbc", host_zone=lambda: OSLO)
     spec = TBC.container_spec()
-    assert _zones(tmp_path / "tbc", TBC) == {spec.auth: OSLO_POSIX, spec.world: OSLO_POSIX}
+    assert _zones(tmp_path / "tbc", TBC) == {spec.auth: OSLO, spec.world: OSLO}
+    assert time_zone.ready(TBC, tmp_path / "tbc", OSLO), "the stage copied the zone's file"
 
 
 def test_an_installed_server_keeps_utc_when_repaired_on_a_computer_elsewhere(
@@ -360,3 +399,17 @@ def test_a_mis_indented_zone_line_is_not_carried_so_the_reset_still_mends_the_fi
 
     assert reasons == {}
     assert texts[OVERRIDE] == installed
+
+
+def test_a_hand_written_name_on_a_tbc_server_starts_to_count_at_the_next_repair(
+    tmp_path: Path,
+) -> None:
+    """Kept as the player wrote it; the Repair brings the file and the bind it lacked."""
+    _generate_tbc(tmp_path)
+    _hand_write(tmp_path, OSLO, TBC)
+    assert server_time_zone.read(TBC, tmp_path).note is not None, "control: UTC as it stands"
+
+    _generate_tbc(tmp_path)
+
+    assert _zones(tmp_path, TBC)[TBC.container_spec().world] == OSLO
+    assert server_time_zone.read(TBC, tmp_path).note is None

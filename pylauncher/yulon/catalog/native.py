@@ -7643,6 +7643,19 @@ class StagedInstaller:
         made = self._make_server_folders(ctx.server_dir)
         for path in made:
             yield f"Made {path.name}/ for the server to write into."
+        # T171: the zone the override names, copied again from this Yu'lon's
+        # own `tzdata` before a compose file binds the folder -- so Docker never
+        # makes it as root, and a rule change an update brings reaches the
+        # server at this Repair or Update. CMaNGOS only; nothing elsewhere.
+        try:
+            placed = time_zone.place(self.entry, ctx.server_dir, plan.override)
+        except (OSError, time_zone.TimeZoneError) as exc:
+            raise InstallerError(
+                f"the server's time zone file could not be copied into "
+                f"{ctx.server_dir / time_zone.FOLDER}: {exc}. Nothing else was written."
+            ) from exc
+        for path in placed:
+            yield f"Copied the time zone file {path.relative_to(ctx.server_dir).as_posix()}."
         replaceable = self._replaceable_compose(ctx.server_dir)
         if replaceable:
             yield (

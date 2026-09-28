@@ -36,7 +36,6 @@ WOTLK = CATALOG.get("wow-wotlk")
 TBC = CATALOG.get("wow-tbc")
 OVERRIDE = composegen.OVERRIDE_FILE
 OSLO = "Europe/Oslo"
-OSLO_POSIX = "CET-1CEST,M3.5.0,M10.5.0/3"
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +114,8 @@ def test_the_zone_is_read_off_the_gui_thread_and_the_lists_wait_for_it(
     assert _where(view) == time_zone.UTC
     assert view.time_zone_where.isEnabled()
     assert not view.time_zone_apply_button.isEnabled(), "UTC is what the file already says"
-    assert "Now UTC" in view.time_zone_note.text()
+    assert view.time_zone_note.text() == "Now UTC"
+    assert "names no time zone" in view.time_zone_note.toolTip()
 
 
 def test_apply_writes_both_servers_backs_up_and_offers_the_recreate(
@@ -140,7 +140,8 @@ def test_apply_writes_both_servers_backs_up_and_offers_the_recreate(
     assert view.tuning_banner.isHidden() is False
     assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
     assert OVERRIDE in view.tuning_banner_label.text()
-    assert backups[0].name in view.time_zone_note.text()
+    assert backups[0].name in view.tuning_report.toPlainText()
+    assert view.time_zone_note.text() == f"Now {OSLO}"
     assert (_where(view), view.time_zone_place.currentData()) == ("Europe", OSLO), "read again"
     assert not view.time_zone_apply_button.isEnabled()
 
@@ -158,7 +159,8 @@ def test_same_as_this_computer_on_a_cmangos_server_writes_the_rule(
     assert not view.time_zone_place.isEnabled()
     view.time_zone_apply_button.click()
 
-    assert (tmp_path / OVERRIDE).read_text(encoding="utf-8").count(f'TZ: "{OSLO_POSIX}"') == 2
+    assert (tmp_path / OVERRIDE).read_text(encoding="utf-8").count(f'TZ: "{OSLO}"') == 2
+    assert time_zone.ready(TBC, tmp_path, OSLO)
     assert view.time_zone_where.currentIndex() == 0, "the file's zone IS this computer's"
 
 
@@ -201,7 +203,7 @@ def test_a_file_the_tab_cannot_change_leaves_the_lists_dead_and_says_why(
         composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
     )
     view = _view(ps, tmp_path)
-    assert "not on disk" in view.time_zone_note.text()
+    assert "not on disk" in view.time_zone_note.toolTip()
     assert not view.time_zone_where.isEnabled() and not view.time_zone_apply_button.isEnabled()
 
 

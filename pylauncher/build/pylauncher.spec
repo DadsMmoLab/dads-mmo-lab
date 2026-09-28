@@ -44,9 +44,12 @@ datas = [
 
 # T171: `tzdata` is DATA read through `importlib.resources` (the zone list and
 # each zone's file), which modulegraph cannot see; without it the frozen app
-# has no zone to offer and the server time zone stays UTC. Named here rather
-# than trusted to a contrib hook, for the reason the certifi note below gives.
-datas += collect_data_files("tzdata")
+# has no zone to offer, a new server gets no zone, and a CMaNGOS server's zone
+# file cannot be copied. Its `__init__.py` files ride along
+# (`include_py_files`) so `importlib.resources.files("tzdata")` finds a
+# package in the frozen tree, and it is a hidden import below for the same
+# reason: nothing imports it by name. Named here rather than trusted to a contrib hook.
+datas += collect_data_files("tzdata", include_py_files=True)
 
 # certifi is imported lazily inside `yulon.platform.verify_context()`; naming it
 # here (PyInstaller's own hook then collects `cacert.pem` as data) is what keeps
@@ -83,6 +86,7 @@ hiddenimports = collect_submodules("yulon") + [
     "pydantic_core",
     "certifi",
     "pygame",
+    "tzdata",
 ]
 
 # AND THE STAMP BY NAME, not by trusting the machinery above a second time.

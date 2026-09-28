@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -8765,7 +8766,7 @@ class ControllerView(QWidget):
     # ------------------------------------------------- T171: server time zone
 
     def _build_time_zone_group(self) -> None:
-        """ "Server time zone: [where ▾] [place ▾] [Apply…]" and the line under it (T171).
+        """ "Server time zone": [where ▾] [place ▾] / [Apply…] Now … (T171).
 
         Two lists, not one of 400 zones: the first says "Same as this
         computer", "UTC", a hand-written value kept as it is, or a region, and
@@ -8774,35 +8775,55 @@ class ControllerView(QWidget):
         typed zone is how a player broke the file (owner decision 2026-09-28).
         Dead until the read lands, while any job of ours runs, and while its
         own write runs, as the bot count's box is.
+
+        It sits at the top of the Tuning tab's card column and scrolls with the
+        cards (`TuningPanel.set_header`), cold review round 2: as a row of its
+        own above the panel it cost 50px, and at 960x640 the panel's minimum
+        (360 of a 466px tab) left 12 to spare, so the panel was drawn under its
+        minimum; and one line of both lists and the press needs ~750px, which
+        the column does not have at 1280x800 (536). Compact inside: two lines,
+        the status a few words with the whole sentence as its tooltip, both
+        lists sized to a fixed number of characters (a long hand-written value
+        is elided, whole in the tooltip), and what a press did goes to the
+        tab's own report box.
         """
         self._time_zone_generation = 0
         self._time_zone_reading: server_time_zone.Reading | None = None
         self._time_zone_pending = False
         self._time_zone_writing = False
-        # The last press's sentence, kept over the read that follows it.
-        self._time_zone_report = ""
         self.time_zone_group = QGroupBox(TIME_ZONE_TITLE, self)
-        inside = QVBoxLayout(self.time_zone_group)
-        row = QHBoxLayout()
+        grid = QGridLayout(self.time_zone_group)
         self.time_zone_where = QComboBox(self.time_zone_group)
         self.time_zone_place = QComboBox(self.time_zone_group)
+        for box, chars in ((self.time_zone_where, 22), (self.time_zone_place, 16)):
+            box.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            box.setMinimumContentsLength(chars)
         self.time_zone_apply_button = QPushButton(TIME_ZONE_APPLY, self.time_zone_group)
         self.time_zone_apply_button.clicked.connect(self.apply_time_zone)
-        row.addWidget(self.time_zone_where)
-        row.addWidget(self.time_zone_place, 1)
-        row.addWidget(self.time_zone_apply_button)
-        # One line: what the file says now, or what the last press did. The
-        # recreate a change owes is the banner's above, on this same tab.
         self.time_zone_note = QLabel("", self.time_zone_group)
-        self.time_zone_note.setWordWrap(True)
-        self.time_zone_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        inside.addLayout(row)
-        inside.addWidget(self.time_zone_note)
+        self.time_zone_note.setWordWrap(False)
+        self.time_zone_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Two lines, so the column's width at 1280x800 (536px) holds both lists
+        # at a readable size: "Same as this computer (…)" on its own, then the
+        # place, the press, and the status.
+        grid.addWidget(self.time_zone_where, 0, 0, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(self.time_zone_place, 1, 0)
+        grid.addWidget(self.time_zone_apply_button, 1, 1)
+        grid.addWidget(self.time_zone_note, 1, 2)
+        grid.setColumnStretch(2, 1)
         self._fill_time_zone_where(None)
         self.time_zone_where.currentIndexChanged.connect(self._time_zone_where_changed)
         self.time_zone_place.currentIndexChanged.connect(self._set_time_zone_controls)
         self.time_zone_group.setVisible(self.services.time_zone is not None)
         self._set_time_zone_controls()
+
+    def _say_time_zone(self, short: str, whole: str) -> None:
+        """The status after the button: a few words, and the whole sentence as the tooltip."""
+        self.time_zone_note.setText(short)
+        self.time_zone_note.setToolTip(whole)
+        self.time_zone_group.setToolTip(whole)
 
     def _fill_time_zone_where(self, kept: str | None) -> None:
         """The first list: this computer, UTC, a kept hand value, then every region."""
@@ -8843,6 +8864,7 @@ class ControllerView(QWidget):
     @Slot()
     def _time_zone_where_changed(self) -> None:
         self._fill_time_zone_place()
+        self.time_zone_where.setToolTip(self.time_zone_where.currentText())
         self._set_time_zone_controls()
 
     def _chosen_time_zone(self) -> str | None:
@@ -8927,14 +8949,16 @@ class ControllerView(QWidget):
         reading = answer.reading
         self._time_zone_reading = reading
         if reading.problem is not None:
-            self.time_zone_note.setText(f"Cannot change the time zone here: {reading.problem}")
+            self._say_time_zone(
+                "Cannot be changed here", f"Cannot change the time zone here: {reading.problem}"
+            )
         elif not time_zone.zones():
-            self.time_zone_note.setText(f"Cannot set a time zone: {server_time_zone.NO_DATABASE}")
+            self._say_time_zone("No zone list", f"Cannot set a time zone: {time_zone.MISSING_DATA}")
         else:
             self._show_time_zone(reading)
-            if not self._time_zone_report:
-                self.time_zone_note.setText(self._time_zone_now(reading))
-        self._time_zone_report = ""
+            self.time_zone_where.setToolTip(self.time_zone_where.currentText())
+            short = f"Now {reading.shown}" + (" (see note)" if reading.note else "")
+            self._say_time_zone(short, self._time_zone_now(reading))
         self._set_time_zone_controls()
 
     def _time_zone_now(self, reading: server_time_zone.Reading) -> str:
@@ -8957,7 +8981,7 @@ class ControllerView(QWidget):
             logger.warning(f"a stale or untagged time zone read failed: {exc}")
             return
         self._time_zone_pending = False
-        self.time_zone_note.setText(f"Could not read this server's time zone: {exc}")
+        self._say_time_zone("Could not read", f"Could not read this server's time zone: {exc}")
         self._set_time_zone_controls()
 
     @Slot()
@@ -8980,7 +9004,7 @@ class ControllerView(QWidget):
             return
         self._time_zone_writing = True
         self._set_time_zone_controls()
-        self.time_zone_note.setText(f"setting the time zone to {zone}…")
+        self._say_time_zone("Setting…", f"setting the time zone to {zone}…")
         self._run(partial(route.write, zone), self._time_zone_written, self._time_zone_failed)
 
     @Slot(object)
@@ -8989,16 +9013,14 @@ class ControllerView(QWidget):
         if isinstance(result, server_time_zone.Written):
             name = Path(result.file).name
             if result.backup is None:
-                self._time_zone_report = (
-                    f"{name} already says {result.after}, so nothing was written."
-                )
+                said = f"{name} already says {result.after}, so nothing was written."
             else:
                 self._note_tuning_owed(result.file, result.rule)
-                self._time_zone_report = (
+                said = (
                     f"Time zone set to {result.after} in {name}; the file as it was is beside it "
                     f"at {result.backup.name}. " + server_time_zone.WHEN_IT_COUNTS
                 )
-            self.time_zone_note.setText(self._time_zone_report)
+            self.tuning_report.setPlainText(said)
         # Read again: the lists say what the disk says.
         self._look_up_time_zone()
 
@@ -9006,8 +9028,7 @@ class ControllerView(QWidget):
     def _time_zone_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and read again."""
         self._time_zone_writing = False
-        self._time_zone_report = f"The time zone was NOT changed: {exc}"
-        self.time_zone_note.setText(self._time_zone_report)
+        self.tuning_report.setPlainText(f"The time zone was NOT changed: {exc}")
         self.action_failed.emit(str(exc))
         self._look_up_time_zone()
 
@@ -12095,6 +12116,8 @@ class ControllerView(QWidget):
         tab = QWidget(self)
         box = QVBoxLayout(tab)
         self.tuning_panel = TuningPanel(tab)
+        # T171: the time zone, above the cards and scrolling with them.
+        self.tuning_panel.set_header(self.time_zone_group)
         self.tuning_panel.save_pressed.connect(self.save_tuning)
         self.tuning_panel.revert_pressed.connect(self.revert_tuning)
         self.tuning_panel.file_selected.connect(self.open_tuning_file)
@@ -12200,7 +12223,6 @@ class ControllerView(QWidget):
         self.tuning_report_strip = _ReportStrip(self.tuning_report, tab)
         box.addLayout(actions)
         box.addWidget(self.tuning_banner)
-        box.addWidget(self.time_zone_group)
         box.addWidget(self.tuning_panel, 1)
         box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)

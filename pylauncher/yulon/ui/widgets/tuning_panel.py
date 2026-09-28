@@ -804,6 +804,18 @@ class TuningPanel(QWidget):
             self._content_layout.insertWidget(self._content_layout.count() - 1, widget)
         self.empty_label.setVisible(not self._cards)
 
+    def set_header(self, widget: QWidget) -> None:
+        """Put `widget` above the cards, in the same scrolling column (T171).
+
+        For a server setting that is not a module's -- the time zone -- and
+        that the view builds: here it costs the tab no height of its own, where
+        a row above the panel took the 44px the Tuning tab does not have at
+        960x640 (the panel's own minimum is 360 there, of a 466px tab). Kept
+        through every `set_cards()`, which inserts the cards after it.
+        """
+        widget.setParent(self._content)
+        self._content_layout.insertWidget(0, widget)
+
     def cards(self) -> tuple[CardWidget, ...]:
         return tuple(self._cards[key] for key in self._order)
 
