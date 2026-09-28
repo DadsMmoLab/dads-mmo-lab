@@ -380,7 +380,8 @@ def test_an_image_no_longer_on_the_machine_says_install_again_into_this_folder(
         TBC, server, files, seams=_seams(_never, image_present=lambda refs: False)
     )
     assert texts == {} and set(reasons) == set(files)
-    assert all(native.INSTALL_AGAIN_HERE in reason for reason in reasons.values())
+    route = native.install_again_here(TBC.name, server)
+    assert all(route in reason for reason in reasons.values())
 
 
 def test_docker_not_answering_is_its_own_reason(tmp_path: Path) -> None:

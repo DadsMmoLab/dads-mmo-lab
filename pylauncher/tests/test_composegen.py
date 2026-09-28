@@ -521,6 +521,76 @@ def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_p
         )
 
 
+def _disk_fills_half_way(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """`os.write` as a disk that fills: the first call lands half, the next raises ENOSPC.
+
+    What a truncating `write_text()` met on a full disk -- some bytes, then the
+    error -- so an in-place write leaves a cut-off file, and only a write that
+    goes somewhere else first leaves the old one whole.
+    """
+    import errno
+    import os
+
+    real = os.write
+    calls: list[int] = []
+
+    def filling(fd: int, data: bytes | memoryview) -> int:
+        calls.append(len(data))
+        if len(calls) == 1:
+            return real(fd, bytes(data)[: max(1, len(data) // 2)])
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(composegen.os, "write", filling)
+    return calls
+
+
+def test_a_disk_that_fills_during_write_plan_leaves_the_old_file_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T163: the file on disk is the old one, byte for byte, and nothing is left beside it.
+
+    The case that made it matter: the repository's own `docker-compose.yml`,
+    about to be replaced, and a disk the compile just filled. A cut-off file
+    there is neither git's nor Yu'lon's, and every press that could write it
+    again refuses it; the untouched original is the one the install's resume
+    replaces.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    upstream = "services:\n  ac-database:\n    image: mysql:8.4\n"
+    base = server_dir / composegen.BASE_FILE
+    base.write_text(upstream, encoding="utf-8")
+    base.chmod(0o640)
+    before = sorted(p.name for p in server_dir.iterdir())
+    calls = _disk_fills_half_way(monkeypatch)
+
+    with pytest.raises(OSError, match="No space left"):
+        composegen.write_plan(render(server_dir), server_dir, replaceable=(composegen.BASE_FILE,))
+
+    assert len(calls) >= 2, "the fill never reached a second write"
+    assert base.read_text(encoding="utf-8") == upstream
+    assert sorted(p.name for p in server_dir.iterdir()) == before, "a temp file was left"
+    if sys.platform != "win32":
+        assert base.stat().st_mode & 0o777 == 0o640
+
+
+def test_write_plan_keeps_a_files_mode_and_gives_a_new_one_the_usual_mode(tmp_path: Path) -> None:
+    """The replaced file keeps its own mode; a file that was not there gets 0644."""
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    composegen.write_plan(render(server_dir), server_dir)
+    base = server_dir / composegen.BASE_FILE
+    if sys.platform != "win32":
+        assert base.stat().st_mode & 0o777 == composegen.NEW_COMPOSE_MODE
+        base.chmod(0o600)
+    base.write_text(base.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    assert base in composegen.write_plan(render(server_dir), server_dir)
+    assert "# changed" not in base.read_text(encoding="utf-8")
+    if sys.platform != "win32":
+        assert base.stat().st_mode & 0o777 == 0o600
+    assert not list(server_dir.glob(f"*{composegen.COMPOSE_TEMP_SUFFIX}"))
+
+
 # -- is_marker_line: the exact banners, not a separator rule (T25) -----------
 
 

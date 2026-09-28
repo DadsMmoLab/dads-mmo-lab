@@ -1244,11 +1244,63 @@ def write_plan(
             )
         if path.exists() and path.read_text(encoding="utf-8") == text:
             continue
-        path.write_text(text, encoding="utf-8", newline="\n")
+        _replace_whole(path, text)
         written.append(path)
     if plan.dotenv:
         written.append(write_dotenv(server_dir, plan.dotenv))
     return tuple(written)
+
+
+COMPOSE_TEMP_SUFFIX = ".yulon-tmp"
+"""`.<name>.yulon-tmp`: a compose file on its way in, beside the one it replaces (T163)."""
+
+NEW_COMPOSE_MODE = 0o644
+"""A compose file not yet on disk: what `write_text()` gave it under the usual 022 umask."""
+
+
+def _replace_whole(path: Path, text: str) -> None:
+    """Put `text` at `path` in one step, or leave what was there whole (T163).
+
+    Until T163 this was `path.write_text()`, which truncates first: a full disk
+    left an empty or half-written `docker-compose.yml`. On the one path that
+    matters most -- "Update the server to latest…" putting the sources back
+    after a compile that filled the disk -- that file was then neither
+    upstream's (git calls it modified) nor Yu'lon's (no marker), so every press
+    that could have written it again refused it as somebody's own. Written
+    whole beside it, fsynced, and `os.replace`d over it, the old file stays
+    exactly as it was until the new one is complete, and the next press finds
+    either one.
+
+    The temp takes the old file's mode before the rename, so the file keeps it;
+    a temp left by a crash is removed first, never appended to. The bytes are
+    `text` encoded as it stands -- `write_plan()`'s old `newline="\n"` -- so the
+    file is identical on every platform.
+    """
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except FileNotFoundError:
+        mode = NEW_COMPOSE_MODE
+    temp = path.with_name(f".{path.name}{COMPOSE_TEMP_SUFFIX}")
+    temp.unlink(missing_ok=True)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            data = memoryview(text.encode("utf-8"))
+            while data:
+                data = data[os.write(fd, data) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+    except BaseException:
+        # Owner-writable first: Windows will not delete a read-only file.
+        try:
+            os.chmod(temp, 0o600)
+        except OSError:
+            pass
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:

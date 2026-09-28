@@ -50,7 +50,7 @@ from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
-from yulon.catalog.native import INSTALL_AGAIN_HERE, Secrets
+from yulon.catalog.native import Secrets, install_again_here
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -107,10 +107,12 @@ NO_PASSWORD = (
 )
 IMAGE_GONE = (
     "the server's image ({image}) is not on this machine any more, and the default files are "
-    "read out of it. To build it again, " + INSTALL_AGAIN_HERE + "; then reset"
+    "read out of it. The install builds it again. {again} Then reset"
 )
 """T164: not "rebuild the server first" -- Rebuild keeps the image it compiles over
-as a rollback and refuses when it is gone (`native._keep_rollback()`)."""
+as a rollback and refuses when it is gone (`native._keep_rollback()`). `{again}` is
+`native.install_again_here()`. A server inside a WSL distro never reaches this one:
+`IN_WSL` is returned before the image is asked about."""
 DOCKER_SILENT = (
     "Docker did not answer, so the server's image could not be read. Start Docker and try again"
 )
@@ -450,7 +452,9 @@ def _from_image(
         return every(str(exc))
     present = seams.image_present([image])
     if present is False:
-        return every(IMAGE_GONE.format(image=image))
+        return every(
+            IMAGE_GONE.format(image=image, again=install_again_here(entry.name, server_dir))
+        )
     if present is None:
         return every(DOCKER_SILENT)
     source = table.source_dir.rstrip("/")
