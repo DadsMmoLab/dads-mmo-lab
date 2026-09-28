@@ -166,7 +166,7 @@ def installer_for_app(
     """The engine the app drives for `entry`: `installer_for()` plus this game's import gate.
 
     `wsl_distro` is for an EXISTING install that lives inside a distro -- the
-    Server tab's Rebuild and Update to latest (T125) -- and builds the engine on
+    Modules tab's Rebuild and Update to latest (T125) -- and builds the engine on
     `Seams.in_wsl()`, whose every docker and git question goes to that distro's
     Docker. An install never passes one: it creates the server on whatever
     daemon this process reaches, and Yu'lon does not install into a distro

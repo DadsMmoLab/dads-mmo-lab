@@ -75,6 +75,7 @@ from yulon import (
     purge,
     reset_defaults,
     resources,
+    server_build_presses,
     tuning,
     useraccounts,
     wsl,
@@ -2767,15 +2768,15 @@ together without retyping the string, and placed below `_assemble()` so it does
 not move the `networking.apply(...)` call `test_controller_view.py` pins by line.
 """
 
-UPDATE_TO_LATEST_BUTTON_LABEL = "Update the server to latest…"
-"""The T64 press, in one place because the button and its tests both say it.
+UPDATE_TO_LATEST_BUTTON_LABEL = server_build_presses.UPDATE_TO_LATEST
+"""The T64 press. Spelled in `server_build_presses`, which the chip and the engine read too (T155).
 
 The ellipsis is this tab's convention for "this opens a dialog first", and here
 it is carrying more than usual: it is the only thing between a single click and
 a multi-hour compile of code nobody has tested.
 """
 
-RETURN_TO_PIN_BUTTON_LABEL = "Return to the tested pin…"
+RETURN_TO_PIN_BUTTON_LABEL = server_build_presses.RETURN_TO_PIN
 """The way back off an untested commit, shown only once there is one to go back from."""
 
 
@@ -2874,17 +2875,19 @@ def _relabel(box: QMessageBox, which: QMessageBox.StandardButton, text: str) -> 
         found.setText(text)
 
 
-REBUILD_BUTTON_LABEL = "Rebuild the server…"
-"""The rebuild press's label, in one place because two things say it.
+REBUILD_BUTTON_LABEL = server_build_presses.REBUILD
+"""The rebuild press's label, in one place because many things say it.
 
-The press wears it -- the banner's button, and the first entry under
-`SERVER_BUILD_LABEL` since T89 -- and `_format_report()` tells the user to press
-it by name. Two literals would be one rename away from a report that points at a
-control that is not there any more, which is the class of defect this whole
-feature is a fix for.
+The press wears it -- the banner's button, the first entry under
+`SERVER_BUILD_LABEL` since T89, and a rebuild-owed chip's subpanel button -- and
+`_format_report()`, the chip's sentence and the engine's refusals tell the user
+to press it by name. Two literals would be one rename away from a report that
+points at a control that is not there any more, which is the class of defect
+this whole feature is a fix for; T155 found the chip's copy had drifted, and the
+spelling now lives in `server_build_presses`, below everything that says it.
 """
 
-SERVER_BUILD_LABEL = "Server build ▾"
+SERVER_BUILD_LABEL = server_build_presses.SERVER_BUILD
 """The Modules toolbar button that holds the three compile-this-server presses (T89).
 
 Rebuild, "Update the server to latest…" and "Return to the tested pin…" were
@@ -10626,7 +10629,11 @@ class ControllerView(QWidget):
                 self,
                 "Something else is running",
                 "This server is busy with another action — wait for it to finish on the "
-                "Server tab, then press Rebuild again. Nothing was started.",
+                # T155: named in full and placed, because the reader is being
+                # sent to the Server tab and has to find the press again after.
+                "Server tab, then press "
+                f"{server_build_presses.under_server_build(REBUILD_BUTTON_LABEL)} again. "
+                "Nothing was started.",
             )
             return False
         if not said_yes(
@@ -12912,7 +12919,8 @@ def _format_report(report: ApplyReport) -> str:
     of them rebuilt anything, so the sentence read as an instruction to press
     something that did not exist. It is an instruction again as of 2026-09-08,
     because the button it names was built -- `ControllerView.rebuild_server()`,
-    one row below the report this line appears in -- and the label is read from
+    on the banner above the cards, which are above the report this line appears
+    in (it said "below" until T155) -- and the label is read from
     `REBUILD_BUTTON_LABEL` rather than retyped, so a rename cannot leave the
     report pointing at nothing.
 
@@ -12964,7 +12972,11 @@ def _format_report(report: ApplyReport) -> str:
             lines.append(
                 f"  ⚠ {item} is a C++ module: it does nothing until its code is compiled "
                 "into the worldserver -- worldserver REBUILD required before this takes effect. "
-                f'Press "{REBUILD_BUTTON_LABEL}" below; until that has run it is on disk and '
+                # T155: it said "below", and the banner this report raises is
+                # ABOVE the cards and so above this box; the menu entry is the
+                # same slot and is named as the second place to find it.
+                f'Press "{REBUILD_BUTTON_LABEL}" on the banner above the module list (it is '
+                f'also under "{SERVER_BUILD_LABEL}"); until that has run it is on disk and '
                 "inert."
             )
     elif report.restart_recommended:
