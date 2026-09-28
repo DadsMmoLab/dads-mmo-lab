@@ -934,8 +934,9 @@ def _folder_binds(entry: CatalogEntry, bind_label: str) -> dict[str, str]:
     """`SERVER_FOLDER_CONFS`'s tokens: one `- ./<name>:<target><label>` line per folder.
 
     Each value starts with its own newline, so the token sits at the end of the
-    bind line before it and an entry with no folders renders byte for byte what
-    it did before T165.
+    bind line before it and an entry with no folders renders the same services
+    it did before T165 -- only the template's comments around the tokens are
+    new, and `same_compose` ignores comments, so no Repair is offered for it.
     """
     return {
         token: "".join(
