@@ -143,6 +143,7 @@ def _lay_an_install(root: Path) -> None:
         ".yulon-upstream.json",
         ".yulon-module-answers.json",
         ".yulon-module-updates.json",
+        ".yulon-module-compare.json",
         "env/dist/etc/worldserver.conf",
         "env/dist/etc/authserver.conf",
         "env/dist/etc/modules/playerbots.conf",

@@ -27,7 +27,15 @@ from yulon import git as git_module
 from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
-from yulon.git import Behind, BehindCount, CloneSpec, RunnerGit, git_available, is_behind
+from yulon.git import (
+    Behind,
+    BehindCount,
+    CloneSpec,
+    Counted,
+    RunnerGit,
+    git_available,
+    is_behind,
+)
 from yulon.manifest import Manifest, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.ownership import Ownership
@@ -2723,6 +2731,919 @@ def test_a_full_module_clone_ahead_of_its_release_says_so(tmp_path: Path) -> Non
 def test_module_updates_on_a_server_with_no_modules_folder_is_empty(tmp_path: Path) -> None:
     """The three CMaNGOS games have no `modules/` at all, and that is not an error."""
     assert apply_module.module_updates(tmp_path, git=_FakeBehind({})) == ()
+
+
+# ------------------------------- T148: GitHub counts what a shallow checkout cannot
+
+_T0 = 1_790_000_000
+_HEAD = "a" * 40
+_FETCHED = "f" * 40
+_RELEASE_SHA = "b" * 40
+
+_Said = upstream.Comparison | upstream.Refused | None
+
+
+class _AskedGitHub:
+    """The `compare_commits` seam: answers from a list IN ORDER, recording every ask.
+
+    The list is what makes "asked once" provable: a second ask gets a
+    DIFFERENT answer, so a row that shows the first one after a second press
+    was served from the file and not asked again.
+    """
+
+    def __init__(self, *answers: _Said) -> None:
+        self.answers = list(answers)
+        self.asked: list[tuple[str, str, str]] = []
+
+    def __call__(self, slug: str, base: str, ref: str) -> _Said:
+        self.asked.append((slug, base, ref))
+        return self.answers[min(len(self.asked), len(self.answers)) - 1]
+
+
+def _behind_by(ahead: int) -> upstream.Comparison:
+    """GitHub's answer for a checkout under upstream's tip: `status: ahead` of base."""
+    return upstream.Comparison(ahead=ahead, behind=0, status="ahead")
+
+
+class _ShallowGit:
+    """A module clone as the Check sees it: the local count, HEAD, the fetched commit, `origin`.
+
+    `counted` is what the count says, with the two commits it was taken
+    between (`Counted`); `origin` is the other read the GitHub ask is built
+    from. `per_folder` gives each folder a fetched commit of its own, so the
+    asks of a press can be told apart. Asked as a release, the fetched commit
+    is the release's, as a real fetch of that commit makes it.
+    """
+
+    def __init__(
+        self,
+        counted: BehindCount = Behind.UNCOUNTED,
+        *,
+        head: str | None = _HEAD,
+        fetched: str | None = _FETCHED,
+        origin: str | None = "https://github.com/liyunfan1223/mod-playerbots.git",
+        per_folder: bool = False,
+    ) -> None:
+        self.counted = counted
+        self.head = head
+        self.fetched = fetched
+        self.origin = origin
+        self.per_folder = per_folder
+
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> BehindCount:
+        return self.counted
+
+    def counted_behind(self, dest: Path, branch: str | None, *, release: bool = False) -> Counted:
+        if release:
+            fetched = branch
+        else:
+            fetched = _fetched_for(dest.name) if self.per_folder else self.fetched
+        return Counted(self.counted, self.head, fetched)
+
+    def head_sha(self, dest: Path) -> str | None:
+        return self.head
+
+    def remote_url(self, dest: Path) -> str | None:
+        return self.origin
+
+
+def _fetched_for(name: str) -> str:
+    """A 40-hex commit id of a folder's own, readable back from the ask."""
+    return (name.encode().hex() + "0" * 40)[:40]
+
+
+def _one_module(server: Path, name: str = "mod-playerbots") -> Path:
+    clone = server / "modules" / name
+    (clone / ".git").mkdir(parents=True)
+    return clone
+
+
+def test_an_uncounted_module_row_is_counted_by_github(tmp_path: Path) -> None:
+    """T148: the row a shallow checkout could not count gets GitHub's number.
+
+    Asked with the checkout's own HEAD as the base and, as the head, the very
+    commit the count's own fetch brought (`FETCH_HEAD`), of the repository
+    `origin` points at -- the one that fetch asked. GitHub then answers the
+    same question git could not. The number is an ordinary count: the chip
+    and the line say it like any other.
+    """
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50))
+
+    rows = apply_module.module_updates(tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0)
+
+    assert github.asked == [("liyunfan1223/mod-playerbots", _HEAD, _FETCHED)], github.asked
+    assert rows[0].behind == 50, rows[0].behind
+    assert rows[0].line == "mod-playerbots: 50 commits behind"
+
+
+def test_the_fetched_commit_is_asked_about_not_the_branch_name(tmp_path: Path) -> None:
+    """A named branch is what the FETCH asked for; GitHub is asked about what it brought."""
+    _one_module(tmp_path, "mod-example")
+    github = _AskedGitHub(_behind_by(3))
+
+    apply_module.module_updates(
+        tmp_path,
+        git=_ShallowGit(origin="https://github.com/o/mod-example"),
+        branches={"mod-example": "develop"},
+        compare_commits=github,
+        now=_T0,
+    )
+
+    assert github.asked == [("o/mod-example", _HEAD, _FETCHED)], github.asked
+
+
+def test_a_checkout_whose_fetched_commit_cannot_be_read_is_not_asked(tmp_path: Path) -> None:
+    """No fetched commit in the count's answer, nothing exact to ask about: git's answer stays."""
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50))
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(fetched=None), compare_commits=github, now=_T0
+    )
+
+    assert github.asked == []
+    assert rows[0].behind is Behind.UNCOUNTED
+
+
+@pytest.mark.parametrize("counted", [0, 7, None], ids=["up-to-date", "counted", "could-not-ask"])
+def test_a_row_git_answered_never_asks_github(tmp_path: Path, counted: BehindCount) -> None:
+    """Only the uncounted rows ask. A count, a zero and "could not ask" cost GitHub nothing.
+
+    "Could not ask" included: the fetch failed, and a machine that could not
+    reach the remote has nothing for GitHub to settle.
+    """
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50))
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(counted), compare_commits=github, now=_T0
+    )
+
+    assert github.asked == [], github.asked
+    assert rows[0].behind == counted
+
+
+def test_an_answer_is_kept_for_as_long_as_the_same_two_commits_are_asked_about(
+    tmp_path: Path,
+) -> None:
+    """A compare of two exact commits never changes, so its answer does not age.
+
+    The double answers 60 the second time; a row that still says 50 three
+    days later was not asked again.
+    """
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50), _behind_by(60))
+
+    def press(at: int) -> BehindCount:
+        rows = apply_module.module_updates(
+            tmp_path, git=_ShallowGit(), compare_commits=github, now=at
+        )
+        return rows[0].behind
+
+    assert press(_T0) == 50
+    assert press(_T0 + 3 * upstream.MAX_AGE_SECONDS) == 50
+    assert len(github.asked) == 1, github.asked
+
+
+def test_an_upstream_that_moved_or_was_rewritten_is_asked_about_at_once(tmp_path: Path) -> None:
+    """The answer is about the commit the fetch brought, so a new fetched commit is a new question.
+
+    Cold review, round 2: keyed by the branch NAME, a cached "5 behind" was
+    served for up to a day after upstream force-pushed under it -- a diverged
+    history the row must never put a number on (`_github_placed()`) -- and a
+    count taken in the morning was shown all day as the branch moved on.
+    """
+    _one_module(tmp_path)
+    github = _AskedGitHub(
+        _behind_by(5),
+        upstream.Comparison(ahead=9, behind=3, status="diverged"),
+        _behind_by(40),
+    )
+
+    def press(fetched: str, at: int) -> BehindCount:
+        rows = apply_module.module_updates(
+            tmp_path, git=_ShallowGit(fetched=fetched), compare_commits=github, now=at
+        )
+        return rows[0].behind
+
+    assert press("1" * 40, _T0) == 5
+    assert press("2" * 40, _T0 + 60) is Behind.UNCOUNTED, "a rewritten upstream was counted"
+    assert press("3" * 40, _T0 + 120) == 40
+    assert [ref for _slug, _base, ref in github.asked] == ["1" * 40, "2" * 40, "3" * 40]
+
+
+def test_a_row_is_asked_again_once_its_checkout_has_moved(tmp_path: Path) -> None:
+    """GitHub's answer is about ONE commit: a clone an Update moved is asked again at once."""
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50), _behind_by(4))
+
+    first = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0
+    )
+    moved = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(head="c" * 40), compare_commits=github, now=_T0 + 60
+    )
+
+    assert (first[0].behind, moved[0].behind) == (50, 4)
+    assert github.asked[1] == ("liyunfan1223/mod-playerbots", "c" * 40, _FETCHED), github.asked
+
+
+def test_github_not_answering_keeps_update_available_and_is_asked_again_in_an_hour(
+    tmp_path: Path,
+) -> None:
+    """Offline, a HEAD GitHub has never seen: today's row, no number, and asked again in an hour.
+
+    Not a request per press: "no answer" is kept `upstream.RETRY_SECONDS`,
+    T124's hour.
+    """
+    _one_module(tmp_path)
+    github = _AskedGitHub(None, _behind_by(50))
+
+    def press(at: int) -> BehindCount:
+        rows = apply_module.module_updates(
+            tmp_path, git=_ShallowGit(), compare_commits=github, now=at
+        )
+        return rows[0].behind
+
+    assert press(_T0) is Behind.UNCOUNTED
+    assert press(_T0 + upstream.RETRY_SECONDS - 1) is Behind.UNCOUNTED
+    assert len(github.asked) == 1, github.asked
+    assert press(_T0 + upstream.RETRY_SECONDS) == 50
+    assert len(github.asked) == 2, github.asked
+
+
+def test_a_failure_from_the_future_is_not_kept(tmp_path: Path) -> None:
+    """A clock set back must not keep an hour's "no answer" for longer (T124's rule)."""
+    _one_module(tmp_path)
+    github = _AskedGitHub(None, _behind_by(60))
+
+    apply_module.module_updates(tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0)
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0 - 60
+    )
+
+    assert rows[0].behind == 60
+    assert len(github.asked) == 2
+
+
+def _many_modules(server: Path, count: int) -> list[str]:
+    names = [f"mod-{i:02d}" for i in range(count)]
+    for name in names:
+        _one_module(server, name)
+    return names
+
+
+def test_a_press_asks_github_at_most_its_budget_and_the_rest_wait_for_the_next(
+    tmp_path: Path,
+) -> None:
+    """More uncounted rows than one press may ask about: the rest keep git's answer, unrecorded.
+
+    `GITHUB_ASKS_PER_PRESS` of the unauthenticated 60 an hour, which the
+    Server tab's reading (T124) and the release lookups (T126) share. A row
+    the budget left out was NOT asked, so it is not a failure to wait an hour
+    for: the next press asks it, and does not ask the answered ones again.
+    """
+    cap = apply_module.GITHUB_ASKS_PER_PRESS
+    names = _many_modules(tmp_path, cap + 2)
+    github = _AskedGitHub(*(_behind_by(n + 1) for n in range(cap + 2)))
+    git = _ShallowGit(per_folder=True)
+
+    first = apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0)
+    assert len(github.asked) == cap, github.asked
+    assert [r.behind for r in first[cap:]] == [Behind.UNCOUNTED, Behind.UNCOUNTED]
+
+    again = apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0 + 60)
+    assert [ref for _s, _b, ref in github.asked[cap:]] == [_fetched_for(n) for n in names[cap:]]
+    assert [r.behind for r in again] == list(range(1, cap + 3))
+
+
+@pytest.mark.parametrize("code", [403, 429])
+def test_a_refusal_stops_the_press_asking_and_only_the_refused_row_waits_an_hour(
+    tmp_path: Path, code: int
+) -> None:
+    """GitHub's rate limit answers 403 (or 429): nothing more is asked in that press.
+
+    The row that was refused was asked and waits `RETRY_SECONDS` like any
+    failure; the rows after it were never asked, so the next press asks them.
+    """
+    names = _many_modules(tmp_path, 4)
+    github = _AskedGitHub(
+        _behind_by(50), upstream.Refused(code), _behind_by(7), _behind_by(8), _behind_by(9)
+    )
+    git = _ShallowGit(per_folder=True)
+
+    first = apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0)
+    assert len(github.asked) == 2, github.asked
+    assert [r.behind for r in first] == [50] + [Behind.UNCOUNTED] * 3
+
+    again = apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0 + 60)
+    assert [ref for _s, _b, ref in github.asked[2:]] == [_fetched_for(n) for n in names[2:]]
+    assert [r.behind for r in again] == [50, Behind.UNCOUNTED, 7, 8]
+
+
+@pytest.mark.parametrize(
+    ("code", "refused"), [(403, True), (429, True), (404, False), (500, False)]
+)
+def test_compare_says_which_failures_are_github_refusing(code: int, refused: bool) -> None:
+    """403 and 429 are GitHub's rate-limit answers (measured: `urlopen` raises `HTTPError`,
+    an `OSError`, with `.code`); a 404 -- a HEAD GitHub never saw -- or a 500 is only "no answer".
+    """
+    import urllib.error
+
+    def get(url: str, accept: str) -> bytes:
+        raise urllib.error.HTTPError(url, code, "no", {}, None)  # type: ignore[arg-type]
+
+    said = upstream.compare_or_refused("o/m", _HEAD, _FETCHED, get=get)
+    assert said == (upstream.Refused(code) if refused else None)
+    assert upstream.compare("o/m", _HEAD, _FETCHED, get=get) is None
+
+
+def test_a_reader_that_cannot_say_which_commits_it_counted_asks_nothing(tmp_path: Path) -> None:
+    """Only the count's own two commits are asked about; a figure alone has none to ask with.
+
+    The reader has HEAD and `origin` to hand, and a later read of either is
+    exactly what the count's answer must not be joined up with (round 3).
+    """
+
+    class _FigureOnly:
+        def commits_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> BehindCount:
+            return Behind.UNCOUNTED
+
+        def head_sha(self, dest: Path) -> str | None:
+            return _HEAD
+
+        def remote_url(self, dest: Path) -> str | None:
+            return "https://github.com/o/mod-example"
+
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50))
+
+    rows = apply_module.module_updates(tmp_path, git=_FigureOnly(), compare_commits=github, now=_T0)
+
+    assert github.asked == []
+    assert rows[0].behind is Behind.UNCOUNTED
+
+
+def test_every_failing_row_is_asked_within_ceil_rows_over_budget_presses(tmp_path: Path) -> None:
+    """Never-asked first, then the oldest failure: nobody is starved by the name order (round 3).
+
+    `2 * budget + 3` rows whose asks all fail, pressed an hour apart: every
+    row is asked within ceil(rows / budget) presses, and the rows never asked
+    go before any that were. Asked in name order, the first `budget` names
+    would be asked every press and the rest never.
+    """
+    cap = apply_module.GITHUB_ASKS_PER_PRESS
+    names = _many_modules(tmp_path, 2 * cap + 3)
+    github = _AskedGitHub(None)
+    git = _ShallowGit(per_folder=True)
+    presses = -(-len(names) // cap)
+
+    for press in range(presses):
+        before = len(github.asked)
+        apply_module.module_updates(
+            tmp_path, git=git, compare_commits=github, now=_T0 + press * upstream.RETRY_SECONDS
+        )
+        assert len(github.asked) - before == cap, "a press did not use its whole budget"
+
+    asked = [ref for _slug, _base, ref in github.asked]
+    assert set(asked) == {_fetched_for(name) for name in names}, "a row was never asked"
+    assert asked[: len(names)] == [_fetched_for(name) for name in names]
+
+
+def test_after_every_row_was_asked_the_oldest_failure_goes_first(tmp_path: Path) -> None:
+    """Among failures, the one tried longest ago is asked first, whatever its name."""
+    cap = apply_module.GITHUB_ASKS_PER_PRESS
+    names = _many_modules(tmp_path, cap + 1)
+    github = _AskedGitHub(None)
+    git = _ShallowGit(per_folder=True)
+
+    apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0)
+    later = _T0 + upstream.RETRY_SECONDS
+    apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=later)
+    # Press two asked the last name (never asked) and then the seven oldest by name;
+    # so press three's oldest failure is the one name press two left out.
+    left_out = names[cap - 1]
+    apply_module.module_updates(
+        tmp_path, git=git, compare_commits=github, now=later + upstream.RETRY_SECONDS
+    )
+
+    third = [ref for _slug, _base, ref in github.asked[2 * cap :]]
+    assert third[0] == _fetched_for(left_out), third
+
+
+def test_a_row_whose_upstream_moved_is_a_never_asked_question_again(tmp_path: Path) -> None:
+    """A failure is about ONE pair of commits; a new fetched commit goes with the never-asked.
+
+    The last name failed an hour ago and its upstream has moved since. Its new
+    question has never been asked, so it goes ahead of the failures of the
+    same hour -- by name it would come last, and the budget would leave it out.
+    """
+    cap = apply_module.GITHUB_ASKS_PER_PRESS
+    names = _many_modules(tmp_path, cap + 1)
+    github = _AskedGitHub(None)
+    moved = names[cap - 1]
+
+    class _Moved(_ShallowGit):
+        def counted_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> Counted:
+            said = super().counted_behind(dest, branch, release=release)
+            return dataclasses.replace(said, fetched="9" * 40) if dest.name == moved else said
+
+    apply_module.module_updates(
+        tmp_path, git=_ShallowGit(per_folder=True), compare_commits=github, now=_T0
+    )
+    apply_module.module_updates(
+        tmp_path,
+        git=_Moved(per_folder=True),
+        compare_commits=github,
+        now=_T0 + upstream.RETRY_SECONDS,
+    )
+
+    second = [ref for _slug, _base, ref in github.asked[cap:]]
+    assert second[:2] == ["9" * 40, _fetched_for(names[cap])], second
+    assert len(second) == cap
+
+
+def _kept_rows(server: Path) -> list[tuple[str, str, int]]:
+    """`(family, key, checked_unix)` of every row the compare file holds, in file order."""
+    said = json.loads((server / apply_module.MODULE_COMPARE_FILE).read_text(encoding="utf-8"))
+    return [(row["family"], row["key"], row["checked_unix"]) for row in said["rows"]]
+
+
+def test_a_removed_clone_s_failure_is_pruned_and_the_rest_keep_their_turn(tmp_path: Path) -> None:
+    """Only the clones on disk keep a row (Codex, round 4); the others keep their timestamps.
+
+    Press one asks the budget's worth and all fail; mod-03 is then removed.
+    Press two asks the two never-asked rows and writes: mod-03's row is gone,
+    and the failures that stay still say T0. Press three, an hour on, asks
+    those failures in the same order as before, without mod-03.
+    """
+    cap = apply_module.GITHUB_ASKS_PER_PRESS
+    names = _many_modules(tmp_path, cap + 2)
+    github = _AskedGitHub(None)
+    git = _ShallowGit(per_folder=True)
+
+    apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0)
+    removed = names[3]
+    shutil.rmtree(tmp_path / "modules" / removed)
+    apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0 + 60)
+
+    kept = {key: at for _family, key, at in _kept_rows(tmp_path)}
+    assert removed not in kept, kept
+    assert kept == {
+        **{name: _T0 for name in names[:cap] if name != removed},
+        **{name: _T0 + 60 for name in names[cap:]},
+    }
+
+    before = len(github.asked)
+    apply_module.module_updates(
+        tmp_path, git=git, compare_commits=github, now=_T0 + upstream.RETRY_SECONDS
+    )
+    third = [ref for _slug, _base, ref in github.asked[before:]]
+    assert third == [_fetched_for(name) for name in names[:cap] if name != removed], third
+
+
+def test_a_removed_clone_s_answer_is_pruned_too(tmp_path: Path) -> None:
+    """An answer outlives nothing but its clone: renamed or removed, its row goes at the next write.
+
+    Rows of the OTHER family (a Tortoise press's addon, in the same folder)
+    are not this press's to judge and stay.
+    """
+    _one_module(tmp_path, "mod-a")
+    _one_module(tmp_path, "mod-b")
+    addon = tmp_path / apply_module.CLONE_DIRS["mod"] / "tortoise-gm-manager"
+    (addon / ".git").mkdir(parents=True)
+    github = _AskedGitHub(_behind_by(1), _behind_by(2), _behind_by(3), _behind_by(4))
+
+    apply_module.module_updates(tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0)
+    apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), kind="mod", compare_commits=github, now=_T0
+    )
+    shutil.rmtree(tmp_path / "modules" / "mod-a")
+    apply_module.module_updates(
+        tmp_path, git=_ShallowGit(head="c" * 40), compare_commits=github, now=_T0 + 60
+    )
+
+    kept = [(family, key) for family, key, _at in _kept_rows(tmp_path)]
+    assert sorted(kept) == [("mod", "tortoise-gm-manager"), ("module", "mod-b")], kept
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_fetch_between_the_count_and_the_ask_does_not_change_what_is_asked(
+    tmp_path: Path,
+) -> None:
+    """The ask is about the commit the COUNT was taken against, not `FETCH_HEAD` afterwards.
+
+    Codex, round 3: the fetched commit used to be read again after the count,
+    in a command of its own, and any fetch in between -- another ref, another
+    program -- moved `FETCH_HEAD`; the answer about the wrong commit was then
+    kept for good. Here a real fetch of another branch lands straight after
+    the real count.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    shas = [_publish(origin, {"a.txt": "{v}\n"}, f"v{i}") for i in range(12)]
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-example"
+    RunnerGit().clone(CloneSpec(url=origin.as_uri(), dest=clone))
+    _git(origin, "checkout", "-q", "-b", "side", shas[4])
+    side = _publish(origin, {"side.txt": "{v}\n"}, "side")
+    _git(origin, "checkout", "-q", "main")
+    _git(origin, "merge", "-q", "--no-ff", "side", "-m", "merge side")
+    _git(origin, "checkout", "-q", "-b", "other", shas[2])
+    other = _publish(origin, {"other.txt": "{v}\n"}, "other")
+    _git(origin, "checkout", "-q", "main")
+    tip = _git(origin, "rev-parse", "HEAD")
+
+    class _FetchedAgainInBetween(RunnerGit):
+        def _meanwhile(self, dest: Path) -> None:
+            _git(dest, "fetch", "-q", "origin", "other")
+
+        def counted_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> Counted:
+            said = super().counted_behind(dest, branch, release=release)
+            self._meanwhile(dest)
+            return said
+
+        def commits_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> BehindCount:
+            said = super().commits_behind(dest, branch, release=release)
+            self._meanwhile(dest)
+            return said
+
+        def remote_url(self, dest: Path) -> str | None:
+            return "https://github.com/o/mod-example.git"
+
+    github = _AskedGitHub(_behind_by(2))
+    rows = apply_module.module_updates(
+        server, git=_FetchedAgainInBetween(), compare_commits=github, now=_T0
+    )
+
+    assert _git(clone, "rev-parse", "FETCH_HEAD") == other, "the in-between fetch did not land"
+    assert side != tip
+    assert github.asked == [("o/mod-example", shas[-1], tip)], github.asked
+    assert rows[0].behind == 2
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://gitlab.com/o/mod-example.git",
+        "file:///srv/mirror/mod-example",
+        None,
+    ],
+    ids=["another-host", "a-local-mirror", "no-origin"],
+)
+def test_a_module_not_cloned_from_github_is_never_asked(tmp_path: Path, origin: str | None) -> None:
+    """Only GitHub has the compare API; any other origin keeps "Update available".
+
+    `origin` and not the manifest's repository, because it is what the count's
+    own fetch asked -- and a module no manifest covers (mod-playerbots on
+    WotLK, cloned by the server install) has no manifest to ask.
+    """
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50))
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(origin=origin), compare_commits=github, now=_T0
+    )
+
+    assert github.asked == [], github.asked
+    assert rows[0].behind is Behind.UNCOUNTED
+
+
+def test_a_checkout_whose_head_cannot_be_read_is_not_asked(tmp_path: Path) -> None:
+    """No HEAD, no base to compare from: the row keeps git's own answer."""
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50))
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(head=None), compare_commits=github, now=_T0
+    )
+
+    assert github.asked == []
+    assert rows[0].behind is Behind.UNCOUNTED
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        upstream.Comparison(ahead=285, behind=2, status="diverged"),
+        upstream.Comparison(ahead=0, behind=3, status="behind"),
+        upstream.Comparison(ahead=0, behind=0, status="identical"),
+    ],
+    ids=["diverged", "checkout-past-the-tip", "identical"],
+)
+def test_a_branch_row_takes_github_s_number_only_when_it_is_plainly_behind(
+    tmp_path: Path, said: upstream.Comparison
+) -> None:
+    """Anything but "the tip has commits HEAD lacks, and HEAD none the tip lacks" keeps git's word.
+
+    Diverged is upstream rewriting its history under the checkout (measured on
+    mod-playerbots: a branch forked and left behind compared against master
+    said ahead_by 285, behind_by 2, `diverged`). 285 is then not what an
+    Update brings: the reset also DROPS the two, and "285 commits behind" would
+    hide that. A checkout past the fetched tip, or on it, contradicts the walk
+    that just called it behind; git's "Update available" stands.
+    """
+    _one_module(tmp_path)
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), compare_commits=_AskedGitHub(said), now=_T0
+    )
+
+    assert rows[0].behind is Behind.UNCOUNTED, rows[0].behind
+
+
+@pytest.mark.parametrize("counted", [Behind.UNCOUNTED, Behind.UNPLACED])
+@pytest.mark.parametrize(
+    ("said", "placed"),
+    [
+        (upstream.Comparison(ahead=4, behind=0, status="ahead"), 4),
+        (upstream.Comparison(ahead=0, behind=3, status="behind"), Behind.AHEAD_OF_RELEASE),
+        (upstream.Comparison(ahead=4, behind=2, status="diverged"), Behind.OFF_RELEASE),
+    ],
+    ids=["under-it", "past-it", "off-its-line"],
+)
+def test_a_release_row_git_could_not_place_is_placed_by_github(
+    tmp_path: Path, counted: Behind, said: upstream.Comparison, placed: BehindCount
+) -> None:
+    """T148 for T150's shallow release shapes: GitHub says which way the release lies.
+
+    Compared with the release's commit, in the manifest's repository -- the
+    same question `Applier.update()` asks before it resets (`_placed_by_github`)
+    -- so the row and the press give the same answer. A checkout past its
+    release was offered an update that the press then refused; now the row
+    says it is ahead and offers nothing.
+    """
+    _one_module(tmp_path, "mod-example")
+    github = _AskedGitHub(said)
+
+    rows = apply_module.module_updates(
+        tmp_path,
+        git=_ShallowGit(counted, origin=None),
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: upstream.Release("v2.0", _RELEASE_SHA),
+        compare_commits=github,
+        now=_T0,
+    )
+
+    assert github.asked == [("o/mod-example", _HEAD, _RELEASE_SHA)], github.asked
+    assert rows[0].behind == placed, rows[0].behind
+    assert is_behind(rows[0].behind) == isinstance(placed, int)
+
+
+def test_a_new_release_is_asked_about_again_the_same_day(tmp_path: Path) -> None:
+    """The cached answer is about one release commit; a newer release is a new question."""
+    _one_module(tmp_path, "mod-example")
+    github = _AskedGitHub(upstream.Comparison(ahead=0, behind=3, status="behind"), _behind_by(2))
+    newest = [upstream.Release("v2.0", _RELEASE_SHA)]
+
+    def press(at: int) -> BehindCount:
+        rows = apply_module.module_updates(
+            tmp_path,
+            git=_ShallowGit(Behind.UNPLACED, origin=None),
+            releases={"mod-example": "o/mod-example"},
+            newest_release=lambda slug: newest[0],
+            compare_commits=github,
+            now=at,
+        )
+        return rows[0].behind
+
+    assert press(_T0) is Behind.AHEAD_OF_RELEASE
+    newest[0] = upstream.Release("v3.0", "d" * 40)
+    assert press(_T0 + 60) == 2
+    assert [ref for _slug, _base, ref in github.asked] == [_RELEASE_SHA, "d" * 40]
+
+
+def test_a_damaged_answer_file_is_asked_past_and_rewritten(tmp_path: Path) -> None:
+    """A file this build cannot read costs one more ask, never the panel."""
+    _one_module(tmp_path)
+    (tmp_path / apply_module.MODULE_COMPARE_FILE).write_text("{not json", encoding="utf-8")
+    github = _AskedGitHub(_behind_by(50), _behind_by(60))
+
+    first = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0
+    )
+    again = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0 + 60
+    )
+
+    assert (first[0].behind, again[0].behind) == (50, 50)
+    assert len(github.asked) == 1, github.asked
+
+
+def test_the_answers_of_other_rows_are_kept_when_one_is_asked(tmp_path: Path) -> None:
+    """A press that asks about ONE row keeps the answers of the rows it served from the file.
+
+    mod-a is updated (its HEAD moves) and asked again; mod-b is served from the
+    file in that same press. A third press must still serve mod-b -- its
+    answer must survive the write the second press made for mod-a.
+    """
+    _one_module(tmp_path, "mod-a")
+    _one_module(tmp_path, "mod-b")
+    github = _AskedGitHub(_behind_by(1), _behind_by(2), _behind_by(3), _behind_by(99))
+
+    class _MovedA(_ShallowGit):
+        def counted_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> Counted:
+            head = "c" * 40 if dest.name == "mod-a" else _HEAD
+            return Counted(self.counted, head, self.fetched)
+
+    def press(git: _ShallowGit, at: int) -> list[BehindCount]:
+        rows = apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=at)
+        return [r.behind for r in rows]
+
+    assert press(_ShallowGit(), _T0) == [1, 2]
+    assert press(_MovedA(), _T0 + 60) == [3, 2]
+    assert press(_MovedA(), _T0 + 120) == [3, 2]
+    assert [base for _slug, base, _ref in github.asked] == [_HEAD, _HEAD, "c" * 40], github.asked
+
+
+def test_an_answer_another_writer_kept_meanwhile_survives_this_write(tmp_path: Path) -> None:
+    """The file is read again as it is written, so a row written after this press read it stays.
+
+    The second writer is real: while the WotLK-shaped press is asking GitHub
+    about its module, a Tortoise-shaped press over the same folder asks about
+    its addon and writes its answer. The first press's write must merge onto
+    that file, not onto the one it read before it asked.
+    """
+    _one_module(tmp_path, "mod-a")
+    addon = tmp_path / apply_module.CLONE_DIRS["mod"] / "tortoise-gm-manager"
+    (addon / ".git").mkdir(parents=True)
+    addon_asks = _AskedGitHub(_behind_by(5), _behind_by(99))
+
+    def meanwhile(slug: str, base: str, ref: str) -> _Said:
+        apply_module.module_updates(
+            tmp_path, git=_ShallowGit(), kind="mod", compare_commits=addon_asks, now=_T0
+        )
+        return _behind_by(1)
+
+    apply_module.module_updates(tmp_path, git=_ShallowGit(), compare_commits=meanwhile, now=_T0)
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), kind="mod", compare_commits=addon_asks, now=_T0 + 60
+    )
+
+    assert rows[0].behind == 5
+    assert len(addon_asks.asked) == 1, "the other writer's answer was dropped"
+
+
+@pytest.mark.parametrize(
+    "cache", [apply_module.MODULE_COMPARE_FILE, apply_module.MODULE_UPDATES_FILE]
+)
+def test_a_temp_file_of_the_old_fixed_name_is_nobody_s_to_take(tmp_path: Path, cache: str) -> None:
+    """Each write has a temp of its own; `<file>.new`, the name every writer once shared, is left.
+
+    Codex, round 2: with one fixed name, a second writer overwrote and then
+    renamed away the first writer's temp, or unlinked it after its own failure.
+    A file at that name is somebody else's here and must come through a
+    press untouched, while the press still writes its own cache.
+    """
+    clone = tmp_path / apply_module.CLONE_DIRS["mod"] / "tortoise-gm-manager"
+    (clone / ".git").mkdir(parents=True)
+    theirs = tmp_path / (cache + ".new")
+    theirs.write_text("somebody else's\n", encoding="utf-8")
+
+    apply_module.cached_module_updates(
+        tmp_path,
+        kind="mod",
+        git=_ShallowGit(origin="https://github.com/o/tortoise-gm-manager"),
+        compare_commits=_AskedGitHub(_behind_by(5)),
+        now=_T0,
+    )
+
+    assert theirs.read_text(encoding="utf-8") == "somebody else's\n"
+    assert json.loads((tmp_path / cache).read_text(encoding="utf-8"))["rows"], "nothing written"
+    assert not [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")], "a temp was left"
+
+
+def test_github_failing_mid_read_does_not_fail_the_check(tmp_path: Path) -> None:
+    """A body cut off mid-read is `http.client.IncompleteRead`, which is not an `OSError`.
+
+    `upstream.HttpGet` promises `OSError` on any failure and every caller
+    relies on it; before T148 this one escaped `https_get()` and would have
+    failed the whole Check press, every other row with it.
+    """
+    import http.client
+
+    _one_module(tmp_path)
+
+    class _CutOff:
+        def __enter__(self) -> _CutOff:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self, size: int) -> bytes:
+            raise http.client.IncompleteRead(b"{", 100)
+
+    def compare(slug: str, base: str, ref: str) -> _Said:
+        return upstream.compare_or_refused(slug, base, ref, get=_real_get_through(_CutOff()))
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), compare_commits=compare, now=_T0
+    )
+
+    assert rows[0].behind is Behind.UNCOUNTED
+
+
+def _real_get_through(response: object) -> upstream.HttpGet:
+    """The REAL `https_get()`, with `urlopen` answering `response` instead of the network."""
+    from unittest import mock
+
+    from tests.conftest import UNGUARDED_HTTPS_GET
+
+    def get(url: str, accept: str) -> bytes:
+        with mock.patch.object(upstream.urllib.request, "urlopen", lambda *a, **k: response):
+            return UNGUARDED_HTTPS_GET(url, accept)
+
+    return get
+
+
+def test_the_check_asks_github_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The press runs `module_updates(server_dir)` with no seam: its default is GitHub's compare.
+
+    The WotLK entry point the Modules tab's lambda calls, over mod-playerbots
+    -- the ticket's own row, which no module manifest covers, so its GitHub
+    repository can only come from its `origin`.
+    """
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    _one_module(tmp_path)
+    github = _AskedGitHub(_behind_by(50))
+    monkeypatch.setattr(apply_module, "_github_compare_or_refused", github)
+
+    rows = wotlk_modules.module_updates(tmp_path, git=_ShallowGit())
+
+    assert github.asked == [("liyunfan1223/mod-playerbots", _HEAD, _FETCHED)], github.asked
+    assert [r.behind for r in rows] == [50]
+
+
+def test_the_tortoise_check_asks_github_for_its_uncounted_addon(tmp_path: Path) -> None:
+    """Tortoise's own press (`cached_module_updates`) settles an uncounted clone the same way."""
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    clone = tmp_path / apply_module.CLONE_DIRS["mod"] / "tortoise-gm-manager"
+    (clone / ".git").mkdir(parents=True)
+    github = _AskedGitHub(_behind_by(5), _behind_by(9))
+
+    def press(at: int) -> BehindCount:
+        rows = tortoise_modules.module_updates(
+            tmp_path,
+            git=_ShallowGit(origin="https://github.com/o/tortoise-gm-manager"),
+            compare_commits=github,
+            now=at,
+        )
+        return rows[0].behind
+
+    assert press(_T0) == 5
+    assert press(_T0 + 60) == 5
+    assert len(github.asked) == 1, github.asked
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_real_shallow_clone_git_cannot_count_is_counted_by_github(tmp_path: Path) -> None:
+    """T148 on the real path: T147's depth-1 shape, a real fetch, GitHub asked about the real pair.
+
+    HEAD and the commit the real fetch brought are read by the real
+    `RunnerGit`; only `origin` is reported as a GitHub URL, by a thin wrapper
+    -- the fetch itself goes to the local origin -- because a real one would
+    send the fetch to GitHub (`git remote get-url` expands `insteadOf`,
+    measured, so no config trick can split the two).
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    shas = [_publish(origin, {"a.txt": "{v}\n"}, f"v{i}") for i in range(12)]
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-example"
+    RunnerGit().clone(CloneSpec(url=origin.as_uri(), dest=clone))
+    _git(origin, "checkout", "-q", "-b", "side", shas[4])
+    _publish(origin, {"side.txt": "{v}\n"}, "side")
+    _git(origin, "checkout", "-q", "main")
+    _git(origin, "merge", "-q", "--no-ff", "side", "-m", "merge side")
+    tip = _git(origin, "rev-parse", "HEAD")
+
+    class _OnGitHub(RunnerGit):
+        def remote_url(self, dest: Path) -> str | None:
+            return "https://github.com/o/mod-example.git"
+
+    github = _AskedGitHub(_behind_by(2))
+    rows = apply_module.module_updates(server, git=_OnGitHub(), compare_commits=github, now=_T0)
+
+    assert github.asked == [("o/mod-example", shas[-1], tip)], github.asked
+    assert rows[0].line == "mod-example: 2 commits behind"
 
 
 # ----------------------------------------------- a folder instead of a clone

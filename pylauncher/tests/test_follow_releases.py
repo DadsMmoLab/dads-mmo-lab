@@ -840,7 +840,11 @@ def test_an_uncounted_release_module_is_still_offered_its_release() -> None:
 
 
 def test_an_uncounted_addon_count_still_says_the_release_moved(tmp_path: Path) -> None:
-    """The Tortoise note reads the cached row; an uncounted one is a newer build too."""
+    """The Tortoise note reads the cached row; an uncounted one is a newer build too.
+
+    GitHub does not answer here, so the row stays uncounted: since T148 an
+    uncounted release row asks GitHub's compare where the addon stands.
+    """
     _addon_installed(tmp_path, TAG)
     _server_on(tmp_path, TAG)
     clone = tmp_path / apply_module.CLONE_DIRS["mod"] / tortoise_modules.ADDON_ID
@@ -856,7 +860,11 @@ def test_an_uncounted_addon_count_still_says_the_release_moved(tmp_path: Path) -
             return OLD
 
     tortoise_modules.module_updates(
-        tmp_path, git=_G(), newest_release=lambda slug: upstream.Release(TAG, REL), now=T0
+        tmp_path,
+        git=_G(),
+        newest_release=lambda slug: upstream.Release(TAG, REL),
+        compare_commits=lambda slug, base, ref: None,
+        now=T0,
     )
     note = tortoise_modules.release_notes(tmp_path)[("mod", "tortoise-bots-manager")]
     assert f"an updated release {TAG} has come out since the addon was installed" in note, note

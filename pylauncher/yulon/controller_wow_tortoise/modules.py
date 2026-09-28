@@ -60,7 +60,7 @@ from yulon.apply import (
     clone_release,
 )
 from yulon.catalog.native import read_state
-from yulon.catalog.upstream import Release, github_slug
+from yulon.catalog.upstream import Comparison, Release, github_slug
 from yulon.catalog.upstream import cached_row as upstream_cached_row
 from yulon.controller_wow_tortoise import autoupdate
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
@@ -202,6 +202,7 @@ def module_updates(
     *,
     git: CountingGit | None = None,
     newest_release: Callable[[str], Release | None] | None = None,
+    compare_commits: Callable[[str, str, str], Comparison | None] | None = None,
     now: int | None = None,
 ) -> tuple[ModuleUpdate, ...]:
     """ "Check for updates" for this install's cloned mods -- the two client addons (T126).
@@ -233,6 +234,7 @@ def module_updates(
         branches=branches,
         releases=releases,
         newest_release=newest_release,
+        compare_commits=compare_commits,
         now=now,
     )
 

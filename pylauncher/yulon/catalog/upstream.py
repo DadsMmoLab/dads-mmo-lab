@@ -28,10 +28,12 @@ same `ahead_by`.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -77,14 +79,23 @@ def https_get(url: str, accept: str) -> bytes:
 
     Verified for the reason every GET in this package is: an unverified answer
     would decide what a user is told about their server's code.
+
+    `OSError` on any failure, as `HttpGet` promises: `http.client` raises its
+    own `HTTPException` for a body cut off mid-read (`IncompleteRead`) or a
+    status line it cannot parse, and every caller catches only `OSError` --
+    so one of those could fail a whole Modules "Check for updates" press,
+    every other row with it (T148).
     """
     request = urllib.request.Request(
         url, headers={"User-Agent": f"yulon/{__version__}", "Accept": accept}
     )
-    with urllib.request.urlopen(
-        request, timeout=_TIMEOUT_SECONDS, context=platform.verify_context()
-    ) as resp:
-        body = resp.read(_MAX_BYTES + 1)
+    try:
+        with urllib.request.urlopen(
+            request, timeout=_TIMEOUT_SECONDS, context=platform.verify_context()
+        ) as resp:
+            body = resp.read(_MAX_BYTES + 1)
+    except http.client.HTTPException as exc:
+        raise OSError(f"{url} did not answer with a whole HTTP response: {exc!r}") from exc
     if len(body) > _MAX_BYTES:
         raise OSError(f"{url} answered with more than {_MAX_BYTES} bytes")
     return bytes(body)
@@ -130,20 +141,45 @@ class Comparison:
         return self.ahead > 0 and self.behind > 0
 
 
-def compare(slug: str, base: str, ref: str, *, get: HttpGet) -> Comparison | None:
-    """`compare/{base}...{ref}` on GitHub, whole. None = could not ask, never a guess.
+_REFUSING_CODES = frozenset({403, 429})
+"""What GitHub answers when it will not answer this machine for now: its rate limit.
 
-    `ahead_by` is `git rev-list --count base..ref` -- the Modules tab's
-    `HEAD..FETCH_HEAD`, asked of GitHub instead of a fetched clone -- and
-    `behind_by` is the other direction. A body missing either count, or holding
-    a negative one, is "could not ask".
+GitHub's documented answer to a spent primary limit is 403 or 429 with
+`x-ratelimit-remaining: 0`, and to a secondary (abuse) limit the same two
+codes. `urlopen` raises them as `urllib.error.HTTPError`, an `OSError` with
+`.code` (measured, 2026-09-28, against a local server answering 403).
+"""
+
+
+@dataclass(frozen=True)
+class Refused:
+    """GitHub said no to this machine -- a 403 or 429 -- rather than failing to answer (T148).
+
+    Its own answer so a caller asking several questions can stop asking: after
+    a refusal the rest of them would spend nothing but more refusals. There is
+    no record of it beyond the caller: T124's reading and T126's release lookups
+    keep none either, and each gets its own "no answer" from the same 403.
     """
+
+    code: int
+
+
+def compare_or_refused(
+    slug: str, base: str, ref: str, *, get: HttpGet
+) -> Comparison | Refused | None:
+    """`compare()`, saying apart GitHub refusing (`Refused`) from any other "no answer" (T148)."""
     url = (
         f"https://api.github.com/repos/{slug}/compare/"
         f"{quote(base, safe='')}...{quote(ref, safe='')}?per_page=1&page=2"
     )
     try:
         payload = json.loads(get(url, "application/vnd.github+json").decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in _REFUSING_CODES:
+            logger.info(f"GitHub refused to compare {slug} ({exc.code}): its rate limit")
+            return Refused(exc.code)
+        logger.debug(f"could not ask GitHub how {slug} {ref} stands to {base}: {exc}")
+        return None
     except (OSError, ValueError) as exc:
         logger.debug(f"could not ask GitHub how {slug} {ref} stands to {base}: {exc}")
         return None
@@ -154,6 +190,19 @@ def compare(slug: str, base: str, ref: str, *, get: HttpGet) -> Comparison | Non
         logger.debug(f"GitHub's compare of {slug} did not carry counts: {str(payload)[:200]}")
         return None
     return Comparison(ahead=ahead, behind=behind, status=str(payload.get("status", "")))
+
+
+def compare(slug: str, base: str, ref: str, *, get: HttpGet) -> Comparison | None:
+    """`compare/{base}...{ref}` on GitHub, whole. None = could not ask, never a guess.
+
+    `ahead_by` is `git rev-list --count base..ref` -- the Modules tab's
+    `HEAD..FETCH_HEAD`, asked of GitHub instead of a fetched clone -- and
+    `behind_by` is the other direction. A body missing either count, or holding
+    a negative one, is "could not ask", and so is GitHub refusing: a caller that
+    must stop asking on a refusal asks `compare_or_refused()` instead.
+    """
+    said = compare_or_refused(slug, base, ref, get=get)
+    return said if isinstance(said, Comparison) else None
 
 
 def _count(value: object) -> int | None:

@@ -10763,7 +10763,8 @@ class ControllerView(QWidget):
         figure equals `git rev-list --count HEAD..FETCH_HEAD` run by hand, and
         a number the view re-formatted would be a second place for it to change.
         Where a shallow checkout makes that range wrong (T147) the row carries
-        no figure, only that an update is there.
+        no figure, only that an update is there -- or GitHub's figure, when its
+        compare API answered for that row (T148, `apply._question()`).
         """
         route = self.services.module_updates
         if route is None:
