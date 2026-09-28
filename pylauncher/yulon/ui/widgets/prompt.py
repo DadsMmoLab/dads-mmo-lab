@@ -42,6 +42,14 @@ _NOT_SECRET = re.compile(
     re.IGNORECASE,
 )
 
+INSTALLER_TITLE = "The installer needs an answer"
+"""The dialog's title unless the owner of the prompter names its own.
+
+The SteamOS Docker repair names its own (T160): it runs from the Server tab
+of a server that is already installed, where "the installer" is not what is
+asking.
+"""
+
 # How often the worker wakes to re-check `cancel` while waiting for an answer.
 _POLL_SECONDS = 0.1
 
@@ -74,8 +82,9 @@ class InputPrompter(QObject):
     #: (prompt text, whether the answer must be masked). Emitted from the worker.
     requested = Signal(str, bool)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, title: str = INSTALLER_TITLE) -> None:
         super().__init__(parent)
+        self._title = title
         self._answer: str | None = None
         self._answered = threading.Event()
         self._cancel: threading.Event | None = None
@@ -131,7 +140,7 @@ class InputPrompter(QObject):
         parent = self.parent()
         text, ok = QInputDialog.getText(
             parent if isinstance(parent, QWidget) else None,
-            "The installer needs an answer",
+            self._title,
             prompt,
             QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal,
             "",

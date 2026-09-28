@@ -1701,6 +1701,42 @@ def test_the_linux_daemon_remedy_does_not_assert_docker_is_a_system_service() ->
     assert "systemctl start docker" in said
 
 
+def test_a_steam_decks_dead_daemon_remedy_names_the_reinstall_button_when_it_is_shown() -> None:
+    """T160: named only when the Server tab shows it, i.e. SteamOS with no `docker` command."""
+    deck = preflight._daemon_remedy(
+        preflight.Facts(platform_id="linux", docker_ready=False, steamos_docker_gone=True)
+    )
+    assert platform_module.STEAMOS_DOCKER_REPAIR_LABEL in deck
+    plain = preflight._daemon_remedy(preflight.Facts(platform_id="linux", docker_ready=False))
+    assert platform_module.STEAMOS_DOCKER_REPAIR_LABEL not in plain
+    assert "systemctl start docker" in plain
+
+
+@pytest.mark.parametrize(
+    ("here", "steamos", "docker", "gone"),
+    [
+        ("linux", True, None, True),
+        ("linux", True, "/usr/bin/docker", False),
+        ("linux", False, None, False),
+        ("windows", True, None, False),
+    ],
+)
+def test_gather_reads_the_same_steamos_question_the_button_does(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    here: str,
+    steamos: bool,
+    docker: str | None,
+    gone: bool,
+) -> None:
+    monkeypatch.setattr(platform_module, "is_steamos", lambda: steamos)
+    monkeypatch.setattr(
+        platform_module, "_which", lambda name, path=None: docker if name == "docker" else None
+    )
+    got = _client_gather(ENTRY, tmp_path, platform_id=lambda: here)
+    assert got.steamos_docker_gone is gone
+
+
 def test_facts_default_to_a_plain_linux_machine_rather_than_a_docker_desktop() -> None:
     """Which way the unestablished fact falls, and why that way.
 

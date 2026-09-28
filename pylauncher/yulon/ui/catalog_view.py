@@ -1016,60 +1016,7 @@ class CatalogView(QWidget):
         Escape and the window's close button both return `NoButton`, and only
         an explicit Yes may throw away a running application.
         """
-        # Asked ONCE, here, and the answer is what the restart execs (T152). It
-        # can run `id -nG` for up to five seconds, and the restart gives the
-        # single-instance lock up around its exec: asked again in there, those
-        # seconds were a window in which another launch could take the lock.
-        argv = platform.docker_group_reexec()
-        if argv is None:
-            return False
-        if said_yes(
-            QMessageBox.question(
-                self,
-                "Restart Yu'lon to finish setting up Docker",
-                f"{message}\n\n"
-                "Docker is set up and your account has been given access to it. "
-                "Yu'lon just needs to start again to pick that up — you do NOT "
-                "need to log out.\n\n"
-                "Restart Yu'lon now?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-        ):
-            # Only returns if the exec failed, and then the user is told what
-            # actually went wrong rather than being left looking at a dialog
-            # that closed and did nothing. The single-instance lock is handed
-            # over around it: the exec keeps this PID, and the restarted app
-            # would otherwise find its own lock held and refuse to open (T152).
-            with single_instance.handed_over() as handover:
-                platform.restart_under_docker_group(reexec=lambda: argv)
-            if handover.lost:
-                # Another Yu'lon took the lock in the moment it was free. Two
-                # copies running is what the lock exists to prevent, so this
-                # one goes, rather than carrying on unguarded beside it - and
-                # it goes FIRST, before anything that waits on the player: a
-                # modal box here kept this window and its jobs running beside
-                # the winner until someone pressed OK (review, round 3).
-                logger.warning(f"docker-group restart failed and the lock was lost: {message}")
-                window = self.window()
-                if not window.close():
-                    # Refused, because something that cannot be stopped is
-                    # running (the database import): force-quitting would
-                    # leave it half-written, so the window stays until it ends,
-                    # and says why without blocking the work it is waiting for.
-                    box = FittedMessageBox(
-                        QMessageBox.Icon.Warning,
-                        single_instance.LOST_TITLE,
-                        f"{message}\n\n{single_instance.LOST_TEXT}",
-                        QMessageBox.StandardButton.Ok,
-                        window,
-                    )
-                    box.setWindowModality(Qt.WindowModality.NonModal)
-                    box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-                    box.show()
-                return True
-            QMessageBox.warning(self, "Install failed", message)
-        return True
+        return offer_a_docker_group_restart(self, message, failed_title="Install failed")
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         """Lock the tiles while a job runs, and unlock them when it ends.
@@ -1092,3 +1039,70 @@ class CatalogView(QWidget):
             )
         for button in self._existing_buttons.values():
             button.setEnabled(enabled)
+
+
+def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title: str) -> bool:
+    """`CatalogView._offer_a_restart_instead()`'s offer, for any view that needs it (T160).
+
+    Moved out of the method, unchanged, so the Server tab's SteamOS Docker
+    repair makes the same offer rather than a second copy of it: the restart
+    has to hand the single-instance lock over around its exec (T152), and a
+    copy that called `restart_under_docker_group()` bare would restart into an
+    app that finds its own lock held and refuses to open. `failed_title`
+    heads the warning shown when the exec itself fails. See the method for
+    when this is offered and why it returns True.
+    """
+    # Asked ONCE, here, and the answer is what the restart execs (T152). It
+    # can run `id -nG` for up to five seconds, and the restart gives the
+    # single-instance lock up around its exec: asked again in there, those
+    # seconds were a window in which another launch could take the lock.
+    argv = platform.docker_group_reexec()
+    if argv is None:
+        return False
+    if said_yes(
+        QMessageBox.question(
+            parent,
+            "Restart Yu'lon to finish setting up Docker",
+            f"{message}\n\n"
+            "Docker is set up and your account has been given access to it. "
+            "Yu'lon just needs to start again to pick that up — you do NOT "
+            "need to log out.\n\n"
+            "Restart Yu'lon now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+    ):
+        # Only returns if the exec failed, and then the user is told what
+        # actually went wrong rather than being left looking at a dialog
+        # that closed and did nothing. The single-instance lock is handed
+        # over around it: the exec keeps this PID, and the restarted app
+        # would otherwise find its own lock held and refuse to open (T152).
+        with single_instance.handed_over() as handover:
+            platform.restart_under_docker_group(reexec=lambda: argv)
+        if handover.lost:
+            # Another Yu'lon took the lock in the moment it was free. Two
+            # copies running is what the lock exists to prevent, so this
+            # one goes, rather than carrying on unguarded beside it - and
+            # it goes FIRST, before anything that waits on the player: a
+            # modal box here kept this window and its jobs running beside
+            # the winner until someone pressed OK (review, round 3).
+            logger.warning(f"docker-group restart failed and the lock was lost: {message}")
+            window = parent.window()
+            if not window.close():
+                # Refused, because something that cannot be stopped is
+                # running (the database import): force-quitting would
+                # leave it half-written, so the window stays until it ends,
+                # and says why without blocking the work it is waiting for.
+                box = FittedMessageBox(
+                    QMessageBox.Icon.Warning,
+                    single_instance.LOST_TITLE,
+                    f"{message}\n\n{single_instance.LOST_TEXT}",
+                    QMessageBox.StandardButton.Ok,
+                    window,
+                )
+                box.setWindowModality(Qt.WindowModality.NonModal)
+                box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                box.show()
+            return True
+        QMessageBox.warning(parent, failed_title, message)
+    return True

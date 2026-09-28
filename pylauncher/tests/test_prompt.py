@@ -1081,3 +1081,21 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     `HANG_BOUND`.
     """
     assert spelled_bounds(__file__) == {"HANG_BOUND", "HANG_BOUND_MS"}
+
+
+def test_a_prompter_can_name_its_own_dialog_title(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T160: the SteamOS repair's questions are not "the installer" asking."""
+    from yulon.ui.widgets import prompt as prompt_module
+
+    titles: list[str] = []
+
+    def get_text(_parent: object, title: str, *_a: object, **_k: object) -> tuple[str, bool]:
+        titles.append(title)
+        return "y", True
+
+    monkeypatch.setattr(prompt_module.QInputDialog, "getText", staticmethod(get_text))
+    prompt_module.InputPrompter(None, title="Reinstalling Docker")._show("Go on? (y/n): ", False)
+    prompt_module.InputPrompter(None)._show("Go on? (y/n): ", False)
+    assert titles == ["Reinstalling Docker", prompt_module.INSTALLER_TITLE]

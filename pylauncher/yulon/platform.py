@@ -11,6 +11,7 @@ import functools
 import importlib
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -750,7 +751,11 @@ so what was asked, answered and then actually done is legible from a bug report.
 
 @dataclass(frozen=True)
 class ProvisionReport:
-    """What `ensure_docker()` / `ensure_wsl2()` did, and what is still needed."""
+    """What a provisioning run did, and what is still needed.
+
+    Made by `ensure_docker()`, `ensure_wsl2()` and, since T160,
+    `repair_docker_after_steamos_update()`.
+    """
 
     platform: PlatformId
     done: tuple[str, ...] = ()
@@ -2798,6 +2803,39 @@ class SudoSession:
         self.outcome = "refused" if self.asked else "unavailable"
         return False
 
+    def adopt(self, password: str) -> bool:
+        """Take a password this run has just SET, proved with `sudo -v` like a typed one (T160).
+
+        The Steam Deck case: `deck` has no password until one is set, and the
+        repair sets it in the app (`set_own_password()`). Asking the user to type
+        it a third time, straight after typing it twice, would be the dialog
+        this class exists to ask only once — so the new password is handed in
+        here instead of through `ask`, and `asked` stays 0.
+
+        Proved rather than trusted: a password `passwd` accepted is not yet a
+        password sudo accepts (a sudoers file that does not list the user, a
+        PAM stack that refuses it), and a session that claimed `verified`
+        without asking sudo would feed every later step a password nothing had
+        checked. The same outcomes as `verify()`, and an outcome already
+        settled is kept exactly as `verify()` keeps it.
+        """
+        if self.outcome != "unasked":
+            return self.outcome == "verified"
+        try:
+            proc = self._run_input(self.argv(["-v"]), password + "\n")
+        except OSError as exc:
+            logger.warning(f"sudo could not be run: {exc}")
+            self.outcome = "unavailable"
+            return False
+        if proc.returncode == 0:
+            logger.info("sudo accepted the password this run set")
+            self._authorise(password)
+            self.outcome = "verified"
+            return True
+        logger.info("sudo refused the password this run set")
+        self.outcome = "refused"
+        return False
+
 
 def _may_open_a_dialog(dry_run: bool, cancel: threading.Event | None) -> bool:
     """Whether this run is allowed to put a question to the user at all.
@@ -3203,6 +3241,640 @@ def _settle_docker_group(
     answer = _explicit_yes(ask(DOCKER_GROUP_QUESTION.format(user=user)))
     logger.info(f"docker group consent for {user}: {'granted' if answer else 'declined'}")
     return "granted" if answer else "declined"
+
+
+# ------------------------------------------- Docker after a SteamOS update (T160)
+#
+# A SteamOS update writes a fresh system image, and every package pacman put on
+# the old one -- Docker included -- is gone with it. The server folders and the
+# app's own records survive, so the Server tab is left with an install it knows
+# about and no `docker` to ask. Dad's MMO Lab answered that with a script,
+# `archive/guides/Steam-Update-Fix/fix-after-update.sh`, run by hand in Konsole.
+# This is the same repair, in the script's order, run through the app's own
+# elevation and asked through its own dialogs.
+
+STEAMOS_DOCKER_REPAIR_LABEL = "Reinstall Docker after a SteamOS update…"
+"""The Server tab's button, named here because the report's sentences name it too."""
+
+STEAMOS_DOCKER_REPAIR_QUESTION = (
+    "A SteamOS update puts this Deck's system files back the way Valve ships them, and that "
+    "removes Docker, which your servers run on. Yu'lon can put it back the way the Dad's MMO "
+    "Lab fix script does:\n"
+    "\n"
+    "  • switch off SteamOS's read-only lock on the system files. It stays off afterwards; the "
+    "next SteamOS update switches it back on.\n"
+    "  • reset the package keyring, then reinstall Docker and start it.\n"
+    "\n"
+    "About the keyring reset: it deletes /etc/pacman.d/gnupg, where this Deck keeps the keys "
+    "that packages are checked against, and rebuilds it with the standard Arch Linux and "
+    "SteamOS keys. Any keys you added yourself are removed, and you will need to add them "
+    "again. On a normal Steam Deck nothing else changes.\n"
+    "\n"
+    "Nothing here touches your server folders.\n"
+    "\n"
+    "Reinstall Docker now? (y/n): "
+)
+"""The one question the repair asks before anything runs, and it carries the keyring warning.
+
+Owner's decision (2026-09-27): the keyring is reset on EVERY repair, as the
+upstream script does, so the warning belongs in the question that consents to
+the repair rather than in a second question asked half way through it. The
+script's own warning box, in plain words: what is deleted, what it is rebuilt
+with, what is lost, and that a normal Deck loses nothing.
+
+The `(y/n)` is what `ui.widgets.prompt.is_secret()` reads to leave the answer
+unmasked, exactly as it does for `DOCKER_GROUP_QUESTION`.
+"""
+
+STEAMOS_DOCKER_GONE_HELP = (
+    "Docker is not on this Steam Deck any more: a SteamOS update removes it. Press "
+    f'"{STEAMOS_DOCKER_REPAIR_LABEL}" to put it back; your server folder is not touched.'
+)
+"""What a Start that found no `docker` says on a Deck, in place of `DOCKER_CLI_MISSING_HELP`."""
+
+STEAMOS_DOCKER_REPAIR_NOT_STEAMOS = (
+    "Nothing was changed: this machine is not running SteamOS, and this repair is only for a "
+    "Steam Deck whose Docker a SteamOS update removed."
+)
+
+STEAMOS_DOCKER_REPAIR_DOCKER_PRESENT = (
+    "Nothing was changed: the docker command is on this Deck, so there is no Docker for this "
+    "repair to put back. Press Refresh, then Start."
+)
+
+STEAMOS_DOCKER_REPAIR_BUSY = (
+    "Nothing was changed: Docker is already being reinstalled from another server's tab. "
+    "Wait for that to finish, then press Refresh."
+)
+
+STEAMOS_DOCKER_REPAIR_STOPPED_EARLY = (
+    "You stopped the reinstall before anything ran, so nothing was changed."
+)
+
+STEAMOS_DOCKER_REPAIR_STOPPED_AT = (
+    'You stopped the reinstall. It stopped before "{step}"; nothing from there on ran, and '
+    "Docker is not back yet."
+)
+
+STEAMOS_DOCKER_REPAIR_DECLINED_STEP = (
+    "You said no, so nothing was changed. Docker is still missing, and the server cannot start "
+    f'until it is back: press "{STEAMOS_DOCKER_REPAIR_LABEL}" when you are ready.'
+)
+
+STEAMOS_SET_PASSWORD_QUESTION = (
+    "Reinstalling Docker needs administrator rights, which on a Steam Deck means a sudo "
+    "password — and '{user}' has none yet, so sudo cannot be used at all.\n"
+    "\n"
+    "Yu'lon can set one for '{user}' now. It becomes this Deck's administrator password: "
+    "whatever asks for administrator rights later (sudo in Konsole, for one) wants it, so "
+    "choose one you will remember.\n"
+    "\n"
+    "Set a password for '{user}' now? (y/n): "
+)
+"""Asked only when sudo needs a password AND `passwd -S` says the account has none (`NP`).
+
+Owner's decision (2026-09-27): offer to set it in the app. The `(y/n)` keeps
+the answer unmasked; the two questions after it carry no such token, so
+`is_secret()` masks them.
+"""
+
+STEAMOS_NEW_PASSWORD_QUESTION = (
+    "Choose the new password for {user}. A very short one may be refused by this Deck:"
+)
+STEAMOS_NEW_PASSWORD_AGAIN = "Type the new password for {user} again:"
+STEAMOS_PASSWORDS_DIFFER = "The two passwords were not the same. "
+"""Put in front of the first question again when the two answers differ."""
+
+_NEW_PASSWORD_ATTEMPTS = 3
+"""How many times the pair is asked before the in-app route gives way to Konsole."""
+
+STEAMOS_SET_PASSWORD_BY_HAND_STEP = (
+    "Nothing was changed: reinstalling Docker needs a sudo password, and {user} has none yet. "
+    "To set one yourself: switch to Desktop Mode, open Konsole, type passwd and press Enter, "
+    f'and choose a password. Then press "{STEAMOS_DOCKER_REPAIR_LABEL}" again and give it '
+    "that password."
+)
+
+STEAMOS_DOCKER_BACK_STEP = "Docker is back and running. Press Start to bring the server up again."
+"""The script ended on `cd ~/wow-server && docker compose up -d`, which is not how Yu'lon starts
+a server and names a folder a Yu'lon install need not be in (T160)."""
+
+STEAMOS_READONLY_LEFT_OFF_STEP = (
+    "SteamOS's read-only lock on the system files was switched off for this and has been left "
+    "off, as the Dad's MMO Lab fix script leaves it; the next SteamOS update switches it back "
+    "on. To switch it on now: sudo steamos-readonly enable."
+)
+"""Said on every run that switched the lock off: T57's rule that touching it has to be visible."""
+
+STEAMOS_DOCKER_NOT_STARTED_STEP = (
+    "Docker was reinstalled but it did not start. Restart the Steam Deck, then press "
+    f'"{STEAMOS_DOCKER_REPAIR_LABEL}" again.'
+)
+
+STEAMOS_DOCKER_SESSION_STEP = (
+    "Docker is running, but this Yu'lon was started before your account could use it. Restart "
+    "Yu'lon (log out and back in if that is not enough), then press Start."
+)
+"""The daemon is `active` but `docker info` does not answer: the socket refuses this process."""
+
+STEAMOS_DOCKER_NEEDS_PASSWORD_STEP = (
+    "Nothing was reinstalled, because sudo did not run the first step: {why}. Press "
+    f'"{STEAMOS_DOCKER_REPAIR_LABEL}" again and give this Deck\'s sudo password.'
+)
+
+STEAMOS_DOCKER_STOPPED_STEP = (
+    'Stopped at "{step}", so Docker was not reinstalled. Nothing after it ran. Check that the '
+    f'Deck is online and press "{STEAMOS_DOCKER_REPAIR_LABEL}" again; if it stops at the same '
+    "step twice, restart the Deck first."
+)
+
+
+def steamos_docker_removed(which: Callable[[str], str | None] | None = None) -> bool:
+    """SteamOS, and no `docker` command at all: what a SteamOS update leaves behind (T160).
+
+    Stateless on purpose. The package lives on the system image, so an update
+    takes the command with it, and nothing else on a Deck removes it — a
+    stopped service or a missing group still leaves `docker` on PATH, and gets
+    the ordinary advice rather than a reinstall and a keyring reset. Asking the
+    tab it is shown on is what supplies "Docker worked here once": the tab
+    exists because an install was made or adopted.
+
+    Two local reads, no subprocess, so it can be asked on the GUI thread.
+    """
+    find = which if which is not None else _which
+    return is_steamos() and find("docker") is None
+
+
+def steamos_docker_repair_commands(*, devmode: bool) -> list[tuple[list[str], bool]]:
+    """The repair's (sudo-less) commands, each with whether a failure is carried past.
+
+    The upstream script's order, with its three tolerated steps tolerated and
+    everything else stopping the run the way its `set -e` did:
+
+    1. `steamos-readonly disable`.
+    2. The keyring reset, EVERY time (owner, 2026-09-27): `rm -rf
+       /etc/pacman.d/gnupg`, `pacman-key --init`, `pacman-key --populate
+       archlinux holo` — the script's two `--populate` calls as one, which is
+       the spelling T57's advice already uses.
+    3. `steamos-devmode enable` when the Deck has it; a failure is carried past,
+       as the script's `|| print_warning` does. Owner's choice to keep it.
+    4. `pacman -Sy archlinux-keyring`, carried past on failure (the script warns).
+    5. Docker itself, with `docker-buildx`: `compose build` needs BuildKit, and
+       `docker_engine_commands()` installs it for the same reason.
+    6. `systemctl daemon-reload`, then `systemctl enable --now docker`.
+
+    **No `steamos-readonly enable` at the end, and that is deliberate.** The
+    owner chose to match the upstream script, which leaves the lock off
+    (2026-09-27). The other two SteamOS paths — `firewall_commands()`' ufw
+    install and `docker_engine_commands()` — still relock, and are not changed
+    by this. The report says the lock was left off (`STEAMOS_READONLY_LEFT_OFF_STEP`).
+    """
+    commands: list[tuple[list[str], bool]] = [
+        (["steamos-readonly", "disable"], False),
+        (["rm", "-rf", "/etc/pacman.d/gnupg"], False),
+        (["pacman-key", "--init"], False),
+        (["pacman-key", "--populate", "archlinux", "holo"], False),
+    ]
+    if devmode:
+        commands.append((["steamos-devmode", "enable"], True))
+    commands += [
+        (["pacman", "-Sy", "--noconfirm", "archlinux-keyring"], True),
+        (["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"], False),
+        (["systemctl", "daemon-reload"], False),
+        (["systemctl", "enable", "--now", "docker"], False),
+    ]
+    return commands
+
+
+@dataclass(frozen=True)
+class PasswordChange:
+    """What `passwd` said when it was asked to set a password. Never the password itself."""
+
+    ok: bool
+    said: tuple[str, ...] = ()
+    interrupted: bool = False
+    """`passwd` was stopped part way — its time ran out, or the repair was stopped.
+
+    Which is the one case where `ok` cannot say whether the password changed:
+    `passwd` may have written it just before it was stopped. The caller asks
+    `passwd -S` rather than guessing (T160 review).
+    """
+
+
+PasswordSetter = Callable[[str], PasswordChange]
+
+_PASSWD_CURRENT = re.compile(r"^(?:\(current\)\s+|current\s+|old\s+)(?:\S+\s+)?password:$")
+"""`Current password:`, `Current UNIX password:`, `(current) UNIX password:`, `Old password:`.
+
+Linux-PAM's own prompts (`libpam/pam_get_authtok.c`: "Current password: ",
+"Current %s password: "), an older PAM's, and shadow's own when it is built
+without PAM. Anchored at both ends and matched on the whole stripped line, so a
+remark such as `BAD PASSWORD: it is too short` never reads as a prompt.
+"""
+
+_PASSWD_RETYPE = re.compile(
+    r"^(?:retype|re-enter|reenter|repeat)\s+(?:new\s+)?(?:\S+\s+)?password:$"
+)
+"""`Retype new password:`, `Retype new UNIX password:`, `Re-enter new password:`."""
+
+_PASSWD_NEW = re.compile(r"^(?:enter\s+)?new\s+(?:\S+\s+)?password:$")
+"""`New password:`, `New UNIX password:`, `Enter new UNIX password:`."""
+
+_PASSWD_SECONDS = 60.0
+"""How long `passwd` may take. It answers in under a second; this bounds a prompt nobody reads."""
+
+
+def set_own_password(
+    new_password: str,
+    *,
+    command: Iterable[str] = ("passwd",),
+    timeout: float = _PASSWD_SECONDS,
+    cancel: threading.Event | None = None,
+) -> PasswordChange:
+    """Set this account's password with `passwd`, on a terminal, answering its prompts (T160).
+
+    `passwd` reads from the controlling terminal, not from stdin, so it is run
+    through `runner.interact(terminal=True)` — the transport the installer
+    built for sudo — with echo off, so nothing typed comes back as output.
+
+    Which prompts come is a property of the PAM stack, so both shapes are
+    answered. Linux-PAM's `pam_unix` does not ask for the current password of
+    an account whose password is empty: its chauthtok turns `nullok` on ("This
+    is not an AUTH module!") and returns early when `_unix_blankpasswd()` says
+    blank (`modules/pam_unix/pam_unix_passwd.c`, main, read 2026-09-27). A stack
+    that asks anyway is answered with the empty line that IS the current
+    password of an account `passwd -S` reported as `NP`, once. Then the new
+    password twice.
+
+    A prompt that comes back — `New password:` after both were answered, which
+    is what a quality check that refused the password does — is not answered
+    again: the run is stopped and reported, with `passwd`'s own words, rather
+    than typing the same refused password into it until it gives up. A prompt
+    nobody recognises is left alone and the run ends at `timeout`, or sooner
+    when `cancel` is set (the Server tab's Stop): both are `interrupted`.
+
+    The password is never logged and never kept: it reaches `passwd` on the
+    terminal and nowhere else, and any output line that should somehow carry
+    it is dropped from `said`.
+    """
+    stop = threading.Event()
+    asked = {"current": 0, "new": 0}
+
+    def respond(text: str) -> str | None:
+        prompt = text.strip().lower()
+        if _PASSWD_CURRENT.match(prompt):
+            asked["current"] += 1
+            if asked["current"] > 1:
+                stop.set()
+                return None
+            return ""
+        if _PASSWD_RETYPE.match(prompt):
+            return new_password
+        if _PASSWD_NEW.match(prompt):
+            asked["new"] += 1
+            if asked["new"] > 1:
+                stop.set()
+                return None
+            return new_password
+        return None
+
+    said: list[str] = []
+    ok = False
+    interrupted = threading.Event()
+    finished = threading.Event()
+
+    def watch() -> None:
+        # One stop for `interact()` to read, fed by three causes: a prompt this
+        # function refused to answer again (`respond`), the deadline, and the
+        # caller's own cancel. Only the last two are `interrupted`.
+        deadline = time.monotonic() + timeout
+        while not finished.wait(0.05):
+            if (cancel is not None and cancel.is_set()) or time.monotonic() >= deadline:
+                interrupted.set()
+                stop.set()
+                return
+
+    watchdog = threading.Thread(target=watch, daemon=True)
+    watchdog.start()
+    try:
+        for line in runner.interact(
+            list(command), respond=respond, env=_c_locale_env(), terminal=True, cancel=stop
+        ):
+            clean = runner.strip_ansi(line).strip()
+            if clean and new_password not in clean:
+                said.append(clean)
+        # `interact()` returns normally on a cancel, so a clean return is only a
+        # success when nothing stopped it.
+        ok = not stop.is_set()
+    except subprocess.CalledProcessError as exc:
+        logger.info(f"passwd exited {exc.returncode}")
+    except OSError as exc:
+        logger.info(f"passwd could not be run: {exc}")
+        said.append(f"passwd could not be run: {exc}")
+    finally:
+        finished.set()
+        watchdog.join(timeout=1.0)
+    logger.info(f"setting the account password: {'done' if ok else 'failed'}")
+    return PasswordChange(ok, tuple(said), interrupted.is_set())
+
+
+def _sudo_needs_password(do: RunCmd) -> bool:
+    """Would a privileged step stop at "a password is required"? `sudo -n true` asks."""
+    try:
+        proc = do(["sudo", "-n", "true"])
+    except OSError as exc:
+        logger.info(f"sudo could not be asked: {exc}")
+        return False
+    return proc.returncode != 0 and _needs_password(proc.stderr)
+
+
+def _password_status(do: RunCmd) -> str | None:
+    """The status field of `passwd -S` for this account (`P`, `NP`, `L`), or None."""
+    try:
+        proc = do(["passwd", "-S"])
+    except OSError as exc:
+        logger.info(f"passwd -S could not be run: {exc}")
+        return None
+    fields = proc.stdout.split()
+    return fields[1] if proc.returncode == 0 and len(fields) >= 2 else None
+
+
+def _has_no_password(do: RunCmd) -> bool:
+    """`passwd -S` says this account's password is empty (`NP`). False when it cannot tell.
+
+    `-S` on one's own account needs no privilege — shadow's `passwd.c`: "-S now
+    ok for normal users (check status of my own account)" — and prints
+    `<name> <status> <date> …`, status `P`, `NP` or `L`. Measured on Ubuntu
+    24.04 as uid 1000, 2026-09-27: `perzi L 2026-09-10 0 99999 7 -1`, rc 0.
+    Only `NP` answers yes. A locked account (`L`) cannot set its own password
+    either — `passwd` refuses it ("The password for %s cannot be changed") —
+    so offering to would promise a change that fails.
+    """
+    return _password_status(do) == "NP"
+
+
+def _new_password_from(ask: runner.Prompter, user: str) -> str | None:
+    """The new password, typed twice and the same both times, or None."""
+    lead = ""
+    for _ in range(_NEW_PASSWORD_ATTEMPTS):
+        first = ask(lead + STEAMOS_NEW_PASSWORD_QUESTION.format(user=user))
+        if not first:
+            return None
+        second = ask(STEAMOS_NEW_PASSWORD_AGAIN.format(user=user))
+        if second is None:
+            return None
+        if first == second:
+            return first
+        lead = STEAMOS_PASSWORDS_DIFFER
+    return None
+
+
+def _set_a_password_first(
+    ask: runner.Prompter,
+    session: SudoSession,
+    user: str,
+    set_password: PasswordSetter,
+    do: RunCmd,
+) -> tuple[bool, tuple[str, ...]]:
+    """Offer to set the missing sudo password, set it, and hand it to `session`.
+
+    Returns whether the session now holds a verified password, and what to tell
+    the user when it does not. The password lives in this frame and in the
+    session's closure only: it is not returned, logged or stored.
+
+    A `passwd` that was stopped part way may still have written the password,
+    so the account is asked (`passwd -S`) rather than told it has none: `P`
+    means it was set, and the repair goes on with it exactly as after a clean
+    run; anything else is reported as not set.
+    """
+    if not _explicit_yes(ask(STEAMOS_SET_PASSWORD_QUESTION.format(user=user))):
+        return False, ()
+    password = _new_password_from(ask, user)
+    if password is None:
+        return False, ()
+    change = set_password(password)
+    if not change.ok and change.interrupted and _password_status(do) == "P":
+        logger.info("passwd was stopped part way, and the account now has a password")
+    elif not change.ok and change.interrupted:
+        return False, (
+            "Setting the password was stopped before passwd finished, and the Deck does not show "
+            "a password set for this account.",
+        )
+    elif not change.ok:
+        said = "; ".join(change.said) or "passwd gave no reason"
+        return False, (f"Setting the password did not work — passwd said: {said}",)
+    if not session.adopt(password):
+        return False, (
+            "The password was set, but sudo would not accept it, so nothing else was run. "
+            "Try the password with sudo in Konsole.",
+        )
+    return True, ()
+
+
+_STEAMOS_REPAIR_LOCK = threading.Lock()
+"""One repair at a time in this process, whichever tab pressed it (T160 review).
+
+Two servers on one Deck are two tabs, each with its own button. Two repairs
+at once would delete and rebuild the keyring under a pacman the other one is
+running, so the second press is refused before it asks anything.
+"""
+
+
+def steamos_docker_repair_running() -> bool:
+    """Is a repair running in this process? What the other tabs read to refuse their press."""
+    return _STEAMOS_REPAIR_LOCK.locked()
+
+
+def _steamos_repair_refusal(find: Callable[[str], str | None]) -> str | None:
+    """Why this machine is not one to repair, or None: SteamOS, and no `docker` command.
+
+    The repair deletes the keyring, so it re-checks the machine itself rather
+    than trusting the button that started it. Asked before the first question
+    and again just before the keyring is deleted: Docker that appeared in
+    between (installed by hand in Konsole while the dialogs were open) means
+    there is nothing to put back, and the destructive step must not run.
+    """
+    if not is_steamos():
+        return STEAMOS_DOCKER_REPAIR_NOT_STEAMOS
+    if find("docker") is not None:
+        return STEAMOS_DOCKER_REPAIR_DOCKER_PRESENT
+    return None
+
+
+_KEYRING_DELETION = ["rm", "-rf", "/etc/pacman.d/gnupg"]
+
+
+def repair_docker_after_steamos_update(
+    *,
+    ask: runner.Prompter,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+    run_input: RunWithInput | None = None,
+    set_password: PasswordSetter | None = None,
+    user: str | None = None,
+    wait_seconds: float = 30.0,
+    cancel: threading.Event | None = None,
+) -> ProvisionReport:
+    """Put Docker back on a Steam Deck after a SteamOS update removed it (T160).
+
+    The questions come first and in this order, before anything privileged:
+    the repair itself, with the keyring warning in it; the docker group, only
+    when `user` is not already a member (`_settle_docker_group()`, the same
+    question an install asks); and then — only when sudo needs a password and
+    the account has none — the offer to set one. A Deck that has a password is
+    asked for it by `SudoSession` at the first step, once.
+
+    Then `steamos_docker_repair_commands()`, in order, stopping at the first
+    failure that is not a tolerated one; the `usermod` if it was agreed to; and
+    the verification: `docker info` for up to `wait_seconds`, and when that
+    does not answer, `systemctl is-active docker` to tell a daemon that did not
+    start from one this process may not reach. Nothing starts the server; the
+    report says to press Start.
+
+    `ask` is required: this is only ever run from the Server tab's button, and
+    headless `--provision` never reaches it, so the password is never offered
+    to a run with nobody there.
+
+    Refused without running anything when another repair holds
+    `_STEAMOS_REPAIR_LOCK`, and when `_steamos_repair_refusal()` says this is
+    not a Deck whose Docker is gone — checked before the first question and
+    again just before the keyring is deleted.
+    """
+    if not _STEAMOS_REPAIR_LOCK.acquire(blocking=False):
+        logger.info("steamos docker repair: refused, another one is running")
+        return ProvisionReport(
+            "linux", manual_steps=(STEAMOS_DOCKER_REPAIR_BUSY,), docker_group="not-asked"
+        )
+    try:
+        return _repair_docker_after_steamos_update(
+            ask, run, which, run_input, set_password, user, wait_seconds, cancel
+        )
+    finally:
+        _STEAMOS_REPAIR_LOCK.release()
+
+
+def _repair_docker_after_steamos_update(
+    ask: runner.Prompter,
+    run: RunCmd | None,
+    which: Callable[[str], str | None] | None,
+    run_input: RunWithInput | None,
+    set_password: PasswordSetter | None,
+    user: str | None,
+    wait_seconds: float,
+    cancel: threading.Event | None,
+) -> ProvisionReport:
+    """`repair_docker_after_steamos_update()`'s body, run while it holds the lock."""
+    do: RunCmd = run if run is not None else _DefaultRunner(_c_locale_env())
+    find = which if which is not None else _which
+    who = _linux_user(user)
+    refusal = _steamos_repair_refusal(find)
+    if refusal is not None:
+        logger.info(f"steamos docker repair: refused before asking: {refusal}")
+        return ProvisionReport("linux", manual_steps=(refusal,), docker_group="not-asked")
+    if not _may_open_a_dialog(False, cancel):
+        return ProvisionReport("linux", docker_group="not-asked")
+    if not _explicit_yes(ask(STEAMOS_DOCKER_REPAIR_QUESTION)):
+        stopped_early = cancel is not None and cancel.is_set()
+        logger.info(f"steamos docker repair: {'stopped' if stopped_early else 'declined'}")
+        said = (
+            STEAMOS_DOCKER_REPAIR_STOPPED_EARLY
+            if stopped_early
+            else (STEAMOS_DOCKER_REPAIR_DECLINED_STEP)
+        )
+        return ProvisionReport("linux", manual_steps=(said,), docker_group="not-asked")
+    consent = _settle_docker_group(do, who, False, cancel, ask)
+    session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
+    # What HAPPENED to the group, as `_ensure_docker_linux()` reports it: a yes
+    # whose `usermod` never ran or did not work is `join-failed`, not `granted`.
+    outcome: DockerGroupOutcome = "join-failed" if consent == "granted" else consent
+
+    if _sudo_needs_password(do) and _has_no_password(do):
+        setter: PasswordSetter = (
+            set_password
+            if set_password is not None
+            else (lambda password: set_own_password(password, cancel=cancel))
+        )
+        elevated, why = _set_a_password_first(ask, session, who, setter, do)
+        if not elevated:
+            return ProvisionReport(
+                "linux",
+                manual_steps=(*why, STEAMOS_SET_PASSWORD_BY_HAND_STEP.format(user=who)),
+                docker_group=outcome,
+            )
+
+    done: list[str] = []
+    skipped: list[str] = []
+    stopped: str | None = None
+    commands = steamos_docker_repair_commands(devmode=find("steamos-devmode") is not None)
+    refused_late: str | None = None
+    for cmd, tolerated in commands:
+        if cancel is not None and cancel.is_set():
+            stopped = f"{' '.join(cmd)}: stopped before it ran"
+            break
+        if cmd == _KEYRING_DELETION:
+            refused_late = _steamos_repair_refusal(find)
+            if refused_late is not None:
+                logger.info(f"steamos docker repair: refused before the keyring: {refused_late}")
+                break
+        ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
+        done += ran
+        skipped += failed
+        if failed and not tolerated:
+            stopped = failed[0]
+            break
+
+    if stopped is None and refused_late is None and consent == "granted":
+        joined, refused = _run_steps(
+            do, [["usermod", "-aG", "docker", who]], sudo=True, dry_run=False, session=session
+        )
+        done += joined
+        skipped += refused
+        if joined and not refused:
+            outcome = "granted"
+
+    manual: list[str] = []
+    ready = False
+    if refused_late is not None:
+        manual.append(refused_late)
+    elif stopped is not None and stopped.endswith(": stopped before it ran"):
+        manual.append(STEAMOS_DOCKER_REPAIR_STOPPED_AT.format(step=_step_command(stopped)))
+    elif stopped is not None and session.outcome in ("declined", "refused", "unavailable"):
+        # Stopped by sudo, not by the step: "check that the Deck is online" is
+        # the wrong advice for a password that was left empty or mistyped.
+        manual.append(
+            STEAMOS_DOCKER_NEEDS_PASSWORD_STEP.format(why=_sudo_skip_reason(session.outcome))
+        )
+    elif stopped is not None:
+        manual.append(STEAMOS_DOCKER_STOPPED_STEP.format(step=_step_command(stopped)))
+        manual.append(f"What it said: {stopped}")
+    else:
+        ready = _wait_docker_ready(do, wait_seconds, 2.0, cancel)
+        if ready:
+            manual.append(STEAMOS_DOCKER_BACK_STEP)
+        elif _docker_service_active(do):
+            if outcome == "declined":
+                manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=who))
+            else:
+                manual.append(STEAMOS_DOCKER_SESSION_STEP)
+        else:
+            manual.append(STEAMOS_DOCKER_NOT_STARTED_STEP)
+    if outcome == "join-failed" and stopped is None and refused_late is None:
+        manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=who))
+    if "steamos-readonly disable" in done:
+        manual.append(STEAMOS_READONLY_LEFT_OFF_STEP)
+    logger.info(f"steamos docker repair: ready={ready} stopped={stopped is not None}")
+    return ProvisionReport(
+        "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
+    )
+
+
+def _docker_service_active(do: RunCmd) -> bool:
+    """`systemctl is-active docker` answers `active`. Needs no privilege."""
+    try:
+        proc = do(["systemctl", "is-active", "docker"])
+    except OSError:
+        return False
+    return proc.stdout.strip() == "active"
 
 
 def _ps_quote(value: object) -> str:
