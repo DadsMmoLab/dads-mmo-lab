@@ -37,6 +37,7 @@ import os
 import posixpath
 import re
 import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -1289,7 +1290,9 @@ def _replace_whole(path: Path, text: str) -> None:
     and given the old file's mode before the rename, so the file keeps it. The
     folder is fsynced after the rename on POSIX, because until its entry is on
     disk a power cut can bring the old file back; Windows cannot open a folder
-    and is not asked. The bytes are `text` encoded as it stands --
+    and is not asked. A rename Windows refuses because another program holds
+    the file is tried again for under a second (`_replace_when_free()`). The
+    bytes are `text` encoded as it stands --
     `write_plan()`'s old `newline="\n"` -- so the file is identical on every
     platform.
     """
@@ -1308,7 +1311,7 @@ def _replace_whole(path: Path, text: str) -> None:
         finally:
             os.close(fd)
         os.chmod(temp, mode)
-        os.replace(temp, path)
+        _replace_when_free(temp, path)
     except BaseException:
         # Owner-writable first: Windows will not delete a read-only file.
         try:
@@ -1318,6 +1321,55 @@ def _replace_whole(path: Path, text: str) -> None:
         temp.unlink(missing_ok=True)
         raise
     _fsync_folder(path.parent)
+
+
+REPLACE_BACKOFF = (0.05, 0.1, 0.2, 0.4)
+"""The waits between tries of a rename a Windows sharing violation refused: 0.75 s in all."""
+
+REPLACE_TRIES = len(REPLACE_BACKOFF) + 1
+"""How many times that rename is tried, in all (T163)."""
+
+_sleep = time.sleep
+"""The wait, as a module attribute so a test can take it away."""
+
+
+class ComposeFileLocked(OSError):
+    """A compose file another program held open through every try of the rename (T163).
+
+    An `OSError`, so every caller that already turns an `OSError` from
+    `write_plan()` into its sentence still does; the message is the part a
+    player acts on.
+    """
+
+
+def _replace_when_free(temp: Path, path: Path) -> None:
+    """`os.replace(temp, path)`, tried again while Windows says another program holds `path`.
+
+    On Windows a rename onto a file that an editor, a virus scanner or a
+    backup tool has open without delete sharing fails with a sharing
+    violation (`PermissionError`, winerror 5 or 32), and those holds are
+    usually brief -- so it is tried `REPLACE_TRIES` times over
+    `REPLACE_BACKOFF` (Codex, round 4). Still held, it raises
+    `ComposeFileLocked` saying so in plain words; the caller removes the temp.
+    POSIX has no sharing violations, and a `PermissionError` there is a real
+    refusal, so it is raised at once. Not exercised on a real Windows file
+    lock: the tests fake the refusal.
+    """
+    if os.name != "nt":
+        os.replace(temp, path)
+        return
+    for wait in (*REPLACE_BACKOFF, None):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError as exc:
+            if wait is None:
+                raise ComposeFileLocked(
+                    f"{path} is open in another program (an editor, a virus scanner or a "
+                    f"backup tool), so Yu'lon could not replace it; it was left as it was. "
+                    f"Close that program and press again. ({exc})"
+                ) from exc
+            _sleep(wait)
 
 
 def _fsync_folder(folder: Path) -> None:

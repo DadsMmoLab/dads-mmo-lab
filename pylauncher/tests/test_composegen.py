@@ -704,6 +704,83 @@ def test_on_windows_the_folder_is_not_opened_to_be_fsynced(
     assert spy.dir_fsyncs == []
 
 
+class _OsWithALockedFile:
+    """`composegen`'s `os` on a platform of the test's choosing, whose `replace` is refused.
+
+    `locked` is how many renames meet a sharing violation -- another program
+    holding the file open without delete sharing, which Windows reports as a
+    `PermissionError` with winerror 32 -- before one is let through.
+    """
+
+    def __init__(self, name: str, locked: int) -> None:
+        self.name = name
+        self.locked = locked
+        self.replaces = 0
+
+    def replace(self, src: object, dst: object) -> None:
+        self.replaces += 1
+        if self.replaces <= self.locked:
+            error = PermissionError(13, "The process cannot access the file")
+            error.winerror = 32  # type: ignore[attr-defined]
+            raise error
+        os.replace(src, dst)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def _locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name: str, locked: int
+) -> tuple[Path, _OsWithALockedFile, list[float]]:
+    path = tmp_path / composegen.BASE_FILE
+    path.write_text("old\n", encoding="utf-8")
+    spy = _OsWithALockedFile(name, locked)
+    monkeypatch.setattr(composegen, "os", spy)
+    slept: list[float] = []
+    monkeypatch.setattr(composegen, "_sleep", slept.append)
+    return path, spy, slept
+
+
+def test_on_windows_a_file_held_open_for_a_moment_is_replaced_on_a_later_try(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 4: an editor or a virus scanner holding the file refuses the rename, briefly."""
+    path, spy, slept = _locked(tmp_path, monkeypatch, name="nt", locked=2)
+    composegen._replace_whole(path, "new\n")
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert spy.replaces == 3
+    assert len(slept) == 2 and sum(slept) <= 1.0
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
+
+
+def test_on_windows_a_file_that_stays_open_is_refused_in_plain_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every try refused: the old file stays, the temp goes, and the error says what to do."""
+    path, spy, slept = _locked(tmp_path, monkeypatch, name="nt", locked=100)
+    with pytest.raises(composegen.ComposeFileLocked) as raised:
+        composegen._replace_whole(path, "new\n")
+    said = str(raised.value)
+    assert str(path) in said and "open in another program" in said and "press" in said, said
+    assert isinstance(raised.value, OSError), "callers that catch OSError must still catch it"
+    assert spy.replaces == composegen.REPLACE_TRIES
+    assert sum(slept) <= 1.0
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
+
+
+def test_on_posix_a_refused_rename_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX has no sharing violations; a PermissionError there is a real one, raised at once."""
+    path, spy, slept = _locked(tmp_path, monkeypatch, name="posix", locked=1)
+    with pytest.raises(PermissionError):
+        composegen._replace_whole(path, "new\n")
+    assert spy.replaces == 1 and slept == []
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
+
+
 # -- is_marker_line: the exact banners, not a separator rule (T25) -----------
 
 
