@@ -531,3 +531,69 @@ def test_a_name_that_would_leave_the_folder_is_refused(
         time_zone.place(TBC, tmp_path / "server", override)
 
     assert not (tmp_path / "evil").exists() and not (tmp_path / "server" / "zoneinfo").exists()
+
+
+# -- round 4: a Windows junction is a link, and zoneinfo must be the server's own --
+
+
+def _reparse_at(monkeypatch: pytest.MonkeyPatch, junction: Path) -> None:
+    """`lstat` as Windows answers it for a directory junction at `junction`, and only there."""
+    import stat
+    from types import SimpleNamespace
+
+    real = os.lstat
+
+    def lstat(path: Any) -> Any:
+        found = real(path)
+        if Path(path) == junction:
+            return SimpleNamespace(
+                st_mode=found.st_mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT
+            )
+        return found
+
+    monkeypatch.setattr(time_zone, "_lstat", lstat)
+
+
+@pytest.mark.parametrize("where", ["zoneinfo", "zoneinfo/Europe"])
+def test_a_junction_is_refused_like_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """`Path.is_symlink()` does not see a junction; its reparse attribute does (Codex, round 4)."""
+    (tmp_path / where).mkdir(parents=True)
+    _reparse_at(monkeypatch, tmp_path / where)
+    assert not (tmp_path / where).is_symlink(), "control: the stand-in is not a symlink"
+
+    with pytest.raises(time_zone.TimeZoneError, match=rf"{where} is a link"):
+        time_zone.place(TBC, tmp_path, _tbc_override())
+
+    assert not (tmp_path / "zoneinfo" / "Europe" / "Oslo").exists()
+
+
+def test_a_zoneinfo_that_resolves_outside_the_server_folder_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """However it gets there -- a reparse point no check names -- the resolution decides."""
+    server, elsewhere = tmp_path / "server", tmp_path / "elsewhere"
+    (server / "zoneinfo").mkdir(parents=True)
+    elsewhere.mkdir()
+    real = Path.resolve
+
+    def resolve(path: Path) -> Path:
+        return elsewhere if path == server / "zoneinfo" else real(path)
+
+    monkeypatch.setattr(time_zone, "_real", resolve)
+
+    with pytest.raises(time_zone.TimeZoneError, match="not into the server folder"):
+        time_zone.place(TBC, server, _tbc_override())
+
+    assert list(elsewhere.iterdir()) == [] and list((server / "zoneinfo").iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+def test_a_placed_zone_file_is_readable_by_every_user(tmp_path: Path) -> None:
+    """`mkstemp` makes 0600; a server running as another uid would read UTC (live, Vanilla)."""
+    import stat
+
+    (placed,) = time_zone.place(TBC, tmp_path, _tbc_override())
+
+    assert stat.S_IMODE(placed.stat().st_mode) == 0o644

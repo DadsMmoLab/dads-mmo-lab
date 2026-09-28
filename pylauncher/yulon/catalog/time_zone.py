@@ -58,6 +58,7 @@ imports nothing that imports `composegen`.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -493,9 +494,39 @@ def _parts(zone: str) -> list[str]:
     return parts
 
 
+ZONE_FILE_MODE = 0o644
+"""A placed zone file's mode: readable by whoever the server runs as."""
+
+_lstat = os.lstat
+"""`os.lstat`, by a name a test can stand in for: this box has no Windows junction to make."""
+
+_real = Path.resolve
+"""`Path.resolve`, by a name a test can stand in for, for the reason `_lstat` gives."""
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink, OR a Windows junction or other reparse point (Codex, round 4).
+
+    `Path.is_symlink()` does not see a directory junction, and `mklink /J` needs
+    no administrator, so on Windows the lstat attribute is read too; Python
+    3.12's `Path.is_junction()` is asked as well where it exists. A path that
+    is not there is not a link.
+    """
+    try:
+        found = _lstat(path)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(found.st_mode):
+        return True
+    if getattr(found, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
 def _no_link(path: Path, *, folder: bool) -> None:
     """Refuse `path` when it is a link, or is there but is not what it should be."""
-    if path.is_symlink():
+    if _is_link(path):
         raise TimeZoneError(f"{path} is a link, so no zone file was written through it")
     if path.exists() and path.is_dir() != folder:
         raise TimeZoneError(
@@ -509,14 +540,25 @@ def _write_one(root: Path, parts: list[str], data: bytes) -> Path | None:
 
     Every component from `root` down to the file is checked as it is reached,
     and made when missing: a link at any of them -- `zoneinfo`, `Europe`, the
-    file -- is refused, never followed, so nothing is ever written outside the
-    server's own `zoneinfo/`. The new bytes go to a fresh temporary name
-    (`mkstemp`: created exclusively, so an old link at a temporary name is never
-    written through), are flushed to disk, and are renamed onto the file only
-    after the folder is checked again to still resolve inside `root`.
+    file; a symlink or a Windows junction (`_is_link`) -- is refused, never
+    followed. The new bytes go to a fresh temporary name (`mkstemp`: created
+    exclusively, so an old link at a temporary name is never written through),
+    are flushed to disk, and are renamed onto the file only after the folder is
+    checked to resolve to exactly `<server, resolved>/zoneinfo/<Area>` -- the
+    SERVER folder's own resolution, so a `zoneinfo` that leads anywhere else is
+    refused however it got there. This does not defend against a process that
+    swaps a folder between these checks and the rename: such a process can
+    already write the server folder, and so already controls the server (it can
+    edit `docker-compose.yml` to mount anything), so it is not guarded here.
     """
     _no_link(root, folder=True)
     root.mkdir(exist_ok=True)
+    expected = _real(root.parent) / root.name
+    if _real(root) != expected:
+        raise TimeZoneError(
+            f"{root} leads to {_real(root)}, not into the server folder, so no zone file was "
+            "written there"
+        )
     parent = root
     for part in parts[:-1]:
         parent = parent / part
@@ -536,7 +578,12 @@ def _write_one(root: Path, parts: list[str], data: bytes) -> Path | None:
             out.write(data)
             out.flush()
             os.fsync(out.fileno())
-        if not parent.resolve().is_relative_to(root.resolve()):
+        # Zone data is public, and `mkstemp` makes the file owner-only (0600,
+        # measured on a live Vanilla server): a world running as another uid,
+        # or a Docker Desktop mapping, could not read it and would run on UTC.
+        # The folders keep their default mode.
+        os.chmod(partial, ZONE_FILE_MODE)
+        if _real(parent) != expected.joinpath(*parts[:-1]):
             raise TimeZoneError(f"{parent} is no longer inside {root}; the zone file was not put")
         os.replace(partial, target)
     except BaseException:
