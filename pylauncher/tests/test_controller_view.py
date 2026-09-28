@@ -9478,6 +9478,119 @@ def test_an_update_check_that_cannot_count_still_offers_the_update(
     assert modules_panel.chip_update_label(Behind.UNCOUNTED) in labels, labels
 
 
+def test_an_update_check_that_finds_a_checkout_ahead_of_its_release_offers_no_update(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T150: a release row past its release prints where it is and gets no update chip.
+
+    The chip's press resets the clone to the release, which from there is a
+    downgrade. Mutation: make `is_behind()` true for the release answers and
+    this row grows an "Update available" chip whose press moves it back.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    row = apply_module.ModuleUpdate(
+        "mod-transmog", tmp_path, True, Behind.AHEAD_OF_RELEASE, release="v1.0"
+    )
+    view._module_updates_done((row,))
+
+    assert view.module_report.toPlainText() == row.line
+    assert "ahead of the newest release, v1.0" in row.line
+    labels = [b.text() for b in view.modules_panel.row("mod-transmog").chip_buttons]
+    assert not [label for label in labels if label.startswith("Update available")], labels
+
+
+class _UnplacedReleaseApplier(_FakeApplier):
+    """An applier whose Update cannot place the release until it is told to go ahead (T150).
+
+    `update()` IS overridden here, unlike `_FakeApplier`'s rule, because what is
+    under test is the VIEW's answer to `ReleaseDirectionUnknown`; the engine
+    that raises it is proved against real repositories in `test_apply.py`.
+    """
+
+    def __init__(self, server_dir: Path, *, questions: int = 1) -> None:
+        super().__init__(server_dir)
+        self.questions = questions
+        self.updates: list[tuple[object, apply_module.UncheckedApproval | None]] = []
+
+    def update(  # type: ignore[override]
+        self,
+        manifest: object,
+        values: object = None,
+        *,
+        approved: apply_module.UncheckedApproval | None = None,
+    ) -> ApplyReport:
+        self.updates.append((values, approved))
+        if len(self.updates) <= self.questions:
+            # A second question stands for "the newest release changed before
+            # the yes came back": the engine asks again, about the new one.
+            release = upstream.Release(f"v{len(self.updates)}", "e" * 40)
+            raise apply_module.ReleaseDirectionUnknown(
+                "nothing was changed",
+                f"Update to {release.tag} anyway?",
+                apply_module.UncheckedApproval(head="d" * 40, release=release),
+            )
+        return self.install(manifest, values)
+
+
+@pytest.mark.parametrize(
+    ("yes", "questions"),
+    [(False, 1), (True, 1), (True, 2)],
+    ids=["no-cancels", "yes-runs-it-unchecked", "a-second-question-is-asked-too"],
+)
+def test_an_update_nobody_could_place_asks_first_and_only_a_yes_runs_it(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    yes: bool,
+    questions: int,
+) -> None:
+    """T150: GitHub could not say whether the release is newer, so the person decides.
+
+    The question is the engine's own sentence, under the tab's title, and the
+    dialog defaults to No (`_confirm()`). A No is a cancel that changed
+    nothing; a Yes runs the SAME update again with the same answers and the
+    question's own approval, and its report lands where any Update's does. A
+    retry that comes back with a NEW question (the newest release changed) is
+    asked too, and runs on that question's approval -- never the first's.
+
+    Mutation: drop the `ReleaseDirectionUnknown` branch from `_module_failed()`
+    and neither press asks -- the row just says FAILED.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    services = _services(ps, tmp_path, [])
+    applier = _UnplacedReleaseApplier(server_dir, questions=questions)
+    services.applier = applier
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str) -> bool:
+        asked.append((title, question))
+        return yes
+
+    monkeypatch.setattr(view, "_confirm", confirm)
+    _select_module(view, "mod-transmog")
+    view._module_action("update")
+
+    shown = [f"Update to v{n} anyway?" for n in range(1, questions + 1)]
+    assert asked == [("Update mod-transmog without checking?", q) for q in shown]
+    said = [approved.release.tag if approved else None for _values, approved in applier.updates]
+    assert said == ([None, *[f"v{n}" for n in range(1, questions + 1)]] if yes else [None])
+    if yes:
+        assert applier.installed == ["mod-transmog"]
+        assert len({repr(values) for values, _ in applier.updates}) == 1, "the answers changed"
+        assert "FAILED" not in view.module_report.toPlainText()
+    else:
+        assert applier.installed == []
+        assert view.module_report.toPlainText() == (
+            "update mod-transmog: cancelled — nothing on this machine was changed."
+        )
+
+
 def test_busy_greys_every_row_button_and_gives_them_back(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

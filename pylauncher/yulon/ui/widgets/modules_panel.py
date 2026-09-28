@@ -235,7 +235,7 @@ def chip_update_label(behind: int | Behind, release: str = "", updated: bool = F
     """
     if release:
         return f"Update available — {'updated' if updated else 'new'} release {release}"
-    if behind is Behind.UNCOUNTED:
+    if isinstance(behind, Behind):
         return "Update available"
     plural = "" if behind == 1 else "s"
     return f"Update available — {behind} commit{plural} behind"
@@ -248,7 +248,7 @@ def _upstream_has(behind: int | Behind) -> str:
     `server_update` -- so neither can print a figure for a checkout that could
     not prove it.
     """
-    if behind is Behind.UNCOUNTED:
+    if isinstance(behind, Behind):
         return (
             "its upstream has commits this checkout does not — how many, a shallow checkout "
             "cannot count."
@@ -620,7 +620,9 @@ def _chips_for(
     elif is_behind(behind) and manifest is not None:
         said = (
             f"{item_id}: {release} is its newest published release, and this checkout is not "
-            f"on it. Update fetches and RESETS the clone to that release, "
+            "on it. Update first checks that the release is not older than this checkout — it "
+            "refuses if it is, and asks if nobody can tell — then fetches and RESETS the clone "
+            "to that release, "
             if release
             else f"{item_id}: {_upstream_has(behind)} "
             "Update fetches and RESETS the clone to the upstream tip, "

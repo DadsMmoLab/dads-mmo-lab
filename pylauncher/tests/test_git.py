@@ -1600,6 +1600,97 @@ def test_commits_behind_counts_what_the_update_would_bring_in(
     assert impl.commits_behind(tmp_path / "not-a-checkout", None) is None
 
 
+@pytest.mark.parametrize(
+    "impl",
+    [
+        git.RunnerGit(),
+        git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"),
+    ],
+    ids=["host", "containerized"],
+)
+def test_commits_behind_asked_as_a_release_places_head_before_counting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.BehindReader
+) -> None:
+    """T150: both back-ends read the release's two sides, and the walk, the same way.
+
+    The real-repository tests below prove what git answers for each shape;
+    this pins that the containerized body -- which a host with no git runs --
+    reads those answers identically, and that an answer that does not parse
+    is "could not ask", never a guess in either direction.
+    """
+    dest = tmp_path / "mod-example"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    rel = "e" * 40
+    full = _completed(stdout=f"false\n{HEAD_SHA}\n")
+    shallow = _completed(stdout=f"true\n{HEAD_SHA}\n")
+
+    def sides(mine: int, theirs: int) -> subprocess.CompletedProcess[str]:
+        return _completed(stdout=f"{mine}\t{theirs}\n")
+
+    # Full: under the release is its count, read off the same answer.
+    answers += [_completed(), full, sides(0, 4)]
+    assert impl.commits_behind(dest, rel, release=True) == 4
+    assert seen_argv[-3][-3:] == ["fetch", "origin", rel]
+    assert seen_argv[-1][-4:] == ["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"]
+    answers += [_completed(), full, sides(0, 0)]
+    assert impl.commits_behind(dest, rel, release=True) == 0
+    # Past it, on either shape, and off its line on a full one.
+    answers += [_completed(), full, sides(3, 0)]
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.AHEAD_OF_RELEASE
+    answers += [_completed(), shallow, sides(1, 0)]
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.AHEAD_OF_RELEASE
+    answers += [_completed(), full, sides(3, 2)]
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.OFF_RELEASE
+
+    # Shallow and under it: T147's walk, unchanged.
+    straight = f"{'b' * 40} {HEAD_SHA}\n-{HEAD_SHA}\n"
+    answers += [_completed(), shallow, sides(0, 1), _completed(stdout=straight)]
+    assert impl.commits_behind(dest, rel, release=True) == 1
+    assert seen_argv[-1][-4:] == ["rev-list", "--parents", "--boundary", "HEAD..FETCH_HEAD"]
+
+    # Shallow and not under it: a parentless commit decides, by its own object.
+    walk = f"{rel} {'a' * 40}\n{'a' * 40}\n"
+    root = _completed(stdout=f"tree {'f' * 40}\nauthor t\n\nroot\n")
+    answers += [_completed(), shallow, sides(1, 2), _completed(stdout=walk), root]
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.NOT_IN_RELEASE
+    assert seen_argv[-1][-3:] == ["cat-file", "commit", "a" * 40]
+    graft = _completed(stdout=f"tree {'f' * 40}\nparent {'9' * 40}\nauthor t\n\ncut\n")
+    answers += [_completed(), shallow, sides(1, 2), _completed(stdout=walk), graft]
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.UNPLACED
+    # A message that merely MENTIONS a parent is not one.
+    quoted = _completed(stdout=f"tree {'f' * 40}\nauthor t\n\nparent {'9' * 40}\n")
+    answers += [_completed(), shallow, sides(1, 2), _completed(stdout=walk), quoted]
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.NOT_IN_RELEASE
+    # Every walked commit has its parents and the walk stopped only on HEAD's side.
+    beside = f"{rel} {'c' * 40}\n-{'c' * 40}\n"
+    answers += [_completed(), shallow, sides(1, 1), _completed(stdout=beside)]
+    assert impl.commits_behind(dest, rel, release=True) is git.Behind.NOT_IN_RELEASE
+
+    # Could not ask stays could not ask.
+    answers += [_completed(), full, _completed(stdout="7\n")]
+    assert impl.commits_behind(dest, rel, release=True) is None
+    answers += [_completed(), full, _completed(stdout="x\ty\n")]
+    assert impl.commits_behind(dest, rel, release=True) is None
+    answers += [_completed(), full, _completed(returncode=128, stderr="broken")]
+    assert impl.commits_behind(dest, rel, release=True) is None
+    answers += [
+        _completed(),
+        shallow,
+        sides(1, 2),
+        _completed(stdout=walk),
+        _completed(returncode=128, stderr="broken"),
+    ]
+    assert impl.commits_behind(dest, rel, release=True) is None
+
+
 @pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
 def test_the_behind_figure_equals_the_same_range_run_by_hand(tmp_path: Path) -> None:
     """8.7a's definition of done, against real git rather than a mock.
@@ -1874,6 +1965,203 @@ def test_a_full_checkout_counts_through_merges_exactly(tmp_path: Path) -> None:
     up.commit("after")
     tip = up.publish()
     assert impl.commits_behind(spec.dest, None) == up.distance(installed, tip) == 5
+
+
+# -- T150: a checkout that is not UNDER its release --------------------------
+#
+# A module that follows its releases (T126) is counted against the newest
+# release's commit, and its update resets the clone to that commit. Where HEAD
+# is newer than the release, or on another line, that reset is a downgrade --
+# so the question asked as a release has three more answers than T147's, and
+# none of them is behind. Each fixture below puts HEAD in ONE place relative
+# to the release and changes nothing else.
+
+
+def _release_off_main(up: _Upstream, base: str, name: str, count: int) -> str:
+    """`count` commits on a branch forked at `base`, pushed but NOT merged: a release off main."""
+    up.git("checkout", "-q", "-b", name, base)
+    tip = up.commits(f"{name}-", count)[-1]
+    up.git("checkout", "-q", "main")
+    up.git("push", "-q", "--force", str(up.bare), name)
+    return tip
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_full_checkout_newer_than_its_release_is_ahead_of_it(tmp_path: Path) -> None:
+    """HEAD descends from the release: nothing to update to, and the row says why.
+
+    Before T150 this was 0, "on the newest release" -- not true, and the row
+    could not say what it was instead. Asked as a BRANCH the same commit is
+    still 0: branch rows keep T147's figure exactly.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example", depth=None)
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    release = history[15]
+
+    assert impl.commits_behind(spec.dest, release, release=True) is git.Behind.AHEAD_OF_RELEASE
+    assert impl.commits_behind(spec.dest, release) == 0
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_full_checkout_off_its_release_line_is_off_it(tmp_path: Path) -> None:
+    """HEAD and the release each carry commits the other lacks: not behind.
+
+    Before T150 this counted the release's own two commits and offered them as
+    "new release", and the update then dropped the four HEAD has that the
+    release does not.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    release = _release_off_main(up, history[15], "rel", 2)
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example", depth=None)
+    impl = git.RunnerGit()
+    impl.clone(spec)
+
+    assert _by_hand_after(impl, spec.dest, release) == 2
+    assert impl.commits_behind(spec.dest, release, release=True) is git.Behind.OFF_RELEASE
+
+
+def _by_hand_after(impl: git.RunnerGit, dest: Path, ref: str) -> int:
+    """Fetch `ref` as the count does, then `HEAD..FETCH_HEAD` by hand: what T147 would print."""
+    impl.commits_behind(dest, ref)
+    return _by_hand(dest)
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_full_checkout_under_its_release_keeps_its_exact_count(tmp_path: Path) -> None:
+    """What the new answers must not swallow: a release that IS newer, and one HEAD is on."""
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example", depth=None)
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    up.git("checkout", "-q", "--detach", history[12], cwd=spec.dest)
+
+    assert impl.commits_behind(spec.dest, history[19], release=True) == 7
+    assert impl.commits_behind(spec.dest, history[12], release=True) == 0
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_depth_1_checkout_newer_than_its_release_is_not_offered_it(tmp_path: Path) -> None:
+    """The ticket's shape: installed from the branch at depth 1, then told to follow releases.
+
+    The fetch of the older release hands its whole history down to the root,
+    and HEAD -- a graft -- is not in it. Nothing under HEAD's graft is here, so
+    whether HEAD is NEWER than the release or on another line this checkout
+    cannot show; what it can show is that the release does not contain HEAD,
+    because the release's history arrived whole. Before T150: uncounted, the
+    "Update available" chip, and a reset back to the release.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    assert spec.depth == 1
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    grafts = (spec.dest / ".git" / "shallow").read_text(encoding="utf-8")
+
+    said = impl.commits_behind(spec.dest, history[15], release=True)
+    assert impl.commits_behind(spec.dest, history[15]) is git.Behind.UNCOUNTED, "not the shape"
+    assert said is git.Behind.NOT_IN_RELEASE, said
+    assert (spec.dest / ".git" / "shallow").read_text(encoding="utf-8") == grafts
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_depth_1_checkout_off_its_release_line_is_not_offered_it(tmp_path: Path) -> None:
+    """A release published from a branch forked below HEAD: the same answer, for the same proof."""
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    release = _release_off_main(up, history[15], "rel", 2)
+
+    assert impl.commits_behind(spec.dest, release, release=True) is git.Behind.NOT_IN_RELEASE
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_shallow_checkout_that_can_see_its_release_underneath_is_ahead_of_it(
+    tmp_path: Path,
+) -> None:
+    """Shallow, and still proved: the release sits between the graft and HEAD.
+
+    Installed from the branch at depth 1, then updated once (a fetch with no
+    depth, then the reset), so everything from the old graft up to HEAD is
+    here with its parents -- and the release is one of those commits.
+    """
+    up = _Upstream(tmp_path)
+    up.commits("c", 20)
+    up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    newer = up.commits("new", 5)
+    up.publish()
+    impl.clone(spec)  # the existing clone, so `_update()`: fetch + reset --hard FETCH_HEAD
+    assert (spec.dest / ".git" / "shallow").is_file(), "the clone must still be shallow"
+
+    said = impl.commits_behind(spec.dest, newer[1], release=True)
+    assert said is git.Behind.AHEAD_OF_RELEASE, said
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_commit_of_the_users_on_top_of_the_release_is_ahead_of_it(tmp_path: Path) -> None:
+    """This app's release install, then a commit of the user's own: past the release, not on it."""
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    dest = tmp_path / "mod-example"
+    impl = git.RunnerGit()
+    impl.clone(git.CloneSpec(url=up.url, dest=dest, rev=history[15]))
+    (dest / "mine.txt").write_text("mine\n", encoding="utf-8")
+    up.git("add", "-A", cwd=dest)
+    up.git("commit", "-qm", "mine", cwd=dest)
+
+    said = impl.commits_behind(dest, history[15], release=True)
+    assert said is git.Behind.AHEAD_OF_RELEASE, said
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_release_install_behind_a_newer_release_is_still_offered_it(tmp_path: Path) -> None:
+    """The ordinary T126 update must keep its chip, and it is the shape the proof cannot finish.
+
+    This app installs a release by cloning the branch tip at depth 1 and then
+    fetching the release at depth 1 (`_pin()`), so the old tip stays behind as
+    a second graft. A newer release built on that tip is walked down to the
+    tip's graft, which hides whether HEAD is under it -- exactly what hides it
+    for a checkout that is AHEAD with a graft in the way. So it is `UNPLACED`:
+    still offered, and not `UNCOUNTED`, which is proved under the release --
+    `Applier.update()` asks GitHub before it resets from here. The one fixture
+    that differs only in the release being straight on top of HEAD keeps its
+    exact figure.
+    """
+    up = _Upstream(tmp_path)
+    history = up.commits("c", 20)
+    up.publish()
+    dest = tmp_path / "mod-example"
+    impl = git.RunnerGit()
+    impl.clone(git.CloneSpec(url=up.url, dest=dest, rev=history[15]))
+    assert impl.commits_behind(dest, history[15], release=True) == 0
+    newer = up.commits("new", 3)
+    up.publish()
+
+    said = impl.commits_behind(dest, newer[-1], release=True)
+    assert said is git.Behind.UNPLACED, said
+    assert git.is_behind(said)
+
+    straight = tmp_path / "mod-straight"
+    impl.clone(git.CloneSpec(url=up.url, dest=straight, rev=newer[-1]))
+    more = up.commits("more", 2)
+    up.publish()
+    assert impl.commits_behind(straight, more[-1], release=True) == 2
 
 
 # ---------------------------------------------------------------------------

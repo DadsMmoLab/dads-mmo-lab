@@ -87,6 +87,7 @@ from yulon.apply import (
     ApplyReport,
     DockerSql,
     PendingSql,
+    ReleaseDirectionUnknown,
     must_ask,
     reapplies_on_top,
     required_prompts,
@@ -4447,6 +4448,14 @@ MODULE_REPLACE_TITLE = "Replace the checkout of {id}?"
 The title asks and the body explains, which is how every other Yes/No on this
 tab reads — and the id is in it because a user who reaches this has a folder
 under `modules/` whose name is the only thing the two repositories share."""
+
+MODULE_UPDATE_UNCHECKED_TITLE = "Update {id} without checking?"
+"""The title over `ReleaseDirectionUnknown.question` (T150): the release could not be placed.
+
+Asked only after a press of Update came back saying neither the clone nor
+GitHub could show the release is newer than the folder -- and it defaults to
+No, because a yes is the one way left to move a module back without meaning to.
+"""
 
 _IMPORT_LINE_CHARS = 110
 """How much of the import's output the label carries: the last two lines, trimmed.
@@ -9137,6 +9146,10 @@ class ControllerView(QWidget):
         # `ApplyReport` carries an id and no family, so a second lookup by id is
         # a guess where this is the answer (round 2).
         self._acting_on: Manifest | None = None
+        # T150: the Update in flight and the answers it was handed, so a press
+        # that comes back `ReleaseDirectionUnknown` can be asked about and run
+        # again with the same answers. `None` for every other job.
+        self._update_asked: tuple[Manifest, Mapping[str, str] | None] | None = None
         # The importer talks from a worker thread for however long it runs, and
         # this is what carries its lines to the GUI one. Same mechanism as the
         # repair's `_import_relay`, and a separate object because the two runs
@@ -9650,6 +9663,7 @@ class ControllerView(QWidget):
         }[action]
         self._acting_on = manifest
         self._module_pending = f"{action} {manifest.id}"
+        self._update_asked = (manifest, values) if action == "update" else None
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
 
@@ -9885,6 +9899,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _module_done(self, result: object) -> None:
         self._module_pending = None
+        self._update_asked = None
         acted_on, self._acting_on = self._acting_on, None
         if not isinstance(result, ApplyReport):
             return
@@ -9981,6 +9996,10 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
+        asked, self._update_asked = self._update_asked, None
+        if isinstance(exc, ReleaseDirectionUnknown) and asked is not None:
+            self._ask_to_update_unchecked(exc, *asked)
+            return
         what, acted_on = self._module_pending or "module action", self._acting_on
         self._module_pending = None
         self._acting_on = None
@@ -10004,6 +10023,40 @@ class ControllerView(QWidget):
         self.reload_modules()
         self.reload_tuning()
         self.action_failed.emit(str(exc))
+
+    def _ask_to_update_unchecked(
+        self, exc: ReleaseDirectionUnknown, manifest: Manifest, values: Mapping[str, str] | None
+    ) -> None:
+        """T150: nobody could show this release is not a step back -- ask, default No.
+
+        The engine refused before it changed anything, so a No is a cancel in
+        the tab's own words. A Yes runs the SAME update again with the same
+        answers and the question's own `approval` -- the HEAD and the release
+        it named, and nothing wider -- through the same slots, so its report and
+        its failures (a new question included) land where the first press's did.
+        """
+        applier = self.services.applier
+        if applier is None or not self._confirm(
+            MODULE_UPDATE_UNCHECKED_TITLE.format(id=manifest.id), exc.question
+        ):
+            logger.info(f"update {manifest.id} declined at the unchecked-release question")
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(
+                f"update {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
+        self._acting_on = manifest
+        self._module_pending = f"update {manifest.id}"
+        # Kept for the retry too: a yes about one release, answered after the
+        # newest became another, comes back as a NEW question about that one.
+        self._update_asked = (manifest, values)
+        self.module_report.setPlainText(f"{self._module_pending}…")
+        self._run(
+            lambda: applier.update(manifest, values, approved=exc.approval),
+            self._module_done,
+            self._module_failed,
+        )
 
     @Slot()
     def check_module_updates(self) -> None:

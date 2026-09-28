@@ -26,7 +26,7 @@ from yulon import apply as apply_module
 from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native, upstream
-from yulon.git import Behind, BehindCount, CloneSpec, RunnerGit, git_available
+from yulon.git import Behind, BehindCount, CloneSpec, RunnerGit, git_available, is_behind
 from yulon.manifest import Manifest, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.ownership import Ownership
@@ -2500,7 +2500,9 @@ class _FakeBehind:
         self.answers = answers
         self.asked: list[tuple[str, str | None]] = []
 
-    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> int | None:
         self.asked.append((dest.name, branch))
         return self.answers.get(dest.name)
 
@@ -2578,9 +2580,11 @@ class _CountedGit:
         self.real = RunnerGit()
         self.counted = 0
 
-    def commits_behind(self, dest: Path, branch: str | None) -> BehindCount:
+    def commits_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> BehindCount:
         self.counted += 1
-        return self.real.commits_behind(dest, branch)
+        return self.real.commits_behind(dest, branch, release=release)
 
     def head_sha(self, dest: Path) -> str | None:
         return self.real.head_sha(dest)
@@ -2627,6 +2631,92 @@ def test_a_shallow_module_that_cannot_prove_its_count_says_update_available_and_
     assert first[0].behind is Behind.UNCOUNTED
     assert later[0].behind is Behind.UNCOUNTED
     assert later[0].line == rows[0].line
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_depth_1_module_newer_than_its_release_is_not_offered_a_downgrade(
+    tmp_path: Path,
+) -> None:
+    """T150 on the real path: installed from the branch, now following an OLDER release.
+
+    `module_updates()` is what the Check button runs, and it must ask the
+    release AS a release -- the same commit asked as a branch is T147's
+    uncounted "Update available", whose press resets the clone back to the
+    release. The row says where the checkout is and no chip is earned
+    (`is_behind()`); the day's cache keeps that answer and reads it back as
+    itself, and a T147 build reading the same file cannot take it for a count.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    shas = [_publish(origin, {"a.txt": "{v}\n"}, f"v{i}") for i in range(12)]
+    server = tmp_path / "server"
+    clone = server / "modules" / "mod-example"
+    RunnerGit().clone(CloneSpec(url=origin.as_uri(), dest=clone))
+    assert (clone / ".git" / "shallow").is_file(), "not the depth-1 shape modules install as"
+    release = upstream.Release("v1.0", shas[8])
+
+    rows = apply_module.module_updates(
+        server,
+        git=RunnerGit(),
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: release,
+    )
+    assert rows[0].behind is Behind.NOT_IN_RELEASE, rows[0].behind
+    assert not is_behind(rows[0].behind)
+    assert rows[0].line == (
+        "mod-example: not on the newest release, v1.0 — the release does not contain this "
+        "checkout's commit, and a shallow checkout cannot show whether that commit is newer "
+        "or on another line, so no update is offered"
+    )
+
+    git = _CountedGit()
+    first = apply_module.cached_module_updates(
+        server,
+        kind="module",
+        git=git,
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: release,
+        now=1_000,
+    )
+    later = apply_module.cached_module_updates(
+        server,
+        kind="module",
+        git=git,
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: release,
+        now=1_000 + upstream.RETRY_SECONDS + 1,
+    )
+    assert git.counted == 1, "an answer was treated as 'could not ask' and asked again"
+    assert first[0].behind is later[0].behind is Behind.NOT_IN_RELEASE
+    assert later[0].line == rows[0].line
+    said = json.loads((server / apply_module.MODULE_UPDATES_FILE).read_text(encoding="utf-8"))
+    with pytest.raises(ValueError):
+        int(said["rows"][0]["behind"])  # what a T147 build does with any name but "uncounted"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_full_module_clone_ahead_of_its_release_says_so(tmp_path: Path) -> None:
+    """T150: a full clone past its release is ahead of it, where it read "on the newest release"."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    shas = [_publish(origin, {"a.txt": "{v}\n"}, f"v{i}") for i in range(6)]
+    server = tmp_path / "server"
+    (server / "modules").mkdir(parents=True)
+    _git(server / "modules", "clone", "-q", origin.as_uri(), "mod-example")
+
+    rows = apply_module.module_updates(
+        server,
+        git=RunnerGit(),
+        releases={"mod-example": "o/mod-example"},
+        newest_release=lambda slug: upstream.Release("v1.0", shas[3]),
+    )
+    assert rows[0].behind is Behind.AHEAD_OF_RELEASE, rows[0].behind
+    assert rows[0].line == (
+        "mod-example: ahead of the newest release, v1.0 — this checkout already has it and "
+        "commits newer than it, so there is no update to offer"
+    )
 
 
 def test_module_updates_on_a_server_with_no_modules_folder_is_empty(tmp_path: Path) -> None:
@@ -4586,6 +4676,397 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
         _git(origin, "rev-parse", "HEAD~1"),
     ]
     assert apply_module.clone_release(applier.clone_dir(manifest), item_id=item_id) == "v2"
+
+
+# --------------------------------------------------------------------------
+# T150: Update on a module that follows its releases resets to the release's
+# commit, so it must first prove that is not a step BACK. The clone answers
+# where its graph can; where a shallow graft hides the answer GitHub's compare
+# is asked -- here computed from the fixture origin, which has every commit --
+# and where neither answers, the person is asked.
+# --------------------------------------------------------------------------
+
+
+class _Compare:
+    """GitHub's compare, answered from the fixture origin's full history; or no answer at all."""
+
+    def __init__(self, origin: Path, *, answers: bool = True) -> None:
+        self.origin = origin
+        self.answers = answers
+        self.asked: list[tuple[str, str, str]] = []
+
+    def __call__(self, slug: str, base: str, ref: str) -> upstream.Comparison | None:
+        self.asked.append((slug, base, ref))
+        if not self.answers:
+            return None
+        ahead = int(_git(self.origin, "rev-list", "--count", f"{base}..{ref}"))
+        behind = int(_git(self.origin, "rev-list", "--count", f"{ref}..{base}"))
+        return upstream.Comparison(ahead=ahead, behind=behind, status="")
+
+
+def _release_follower(
+    tmp_path: Path, *, answers: bool = True
+) -> tuple[Applier, Any, Path, dict[str, str], dict[str, upstream.Release], _Compare]:
+    """The Tortoise addon that follows its releases, installed through the real clone seam."""
+    item_id = "tortoise-bots-manager"
+    _family, _game, files, _lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    # History under everything the tests release: a graft on the repository's
+    # ROOT has no parent to hide, so `_release_lacks_head()` would read it as
+    # the whole history and answer without the graft these tests are about.
+    for early in ("a0", "a1"):
+        _publish(origin, files, early)
+    manifest = _unpinned_shipped(item_id)
+    assert manifest.source is not None and manifest.source.follow == "releases"
+    applier, _seam = _unpinned_applier(tmp_path, origin, manifest)
+    released: dict[str, upstream.Release] = {}
+    applier._newest_release = lambda slug: released["release"]
+    compare = _Compare(origin, answers=answers)
+    applier._compare_commits = compare
+    _origin_answers_as_the_manifest(applier, manifest)
+    return applier, manifest, origin, files, released, compare
+
+
+def _moved_by_hand_at_depth_1(clone: Path, commit: str) -> None:
+    """What the reviewer's shapes did: `fetch --depth=1` a newer commit and reset onto it."""
+    _git(clone, "fetch", "-q", "--depth=1", "origin", commit)
+    _git(clone, "reset", "-q", "--hard", commit)
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("tip_past_the_release", [False, True], ids=["graft-at-C", "graft-at-tip"])
+def test_update_refuses_to_move_a_shallow_clone_back_to_an_older_release(
+    tmp_path: Path, tip_past_the_release: bool
+) -> None:
+    """The cold review's two shapes: HEAD E fetched at depth 1 over a graft, release D older.
+
+    Installed at release C -- either the tip then (`graft-at-C`), or with a
+    newer tip left behind as a second graft (`graft-at-tip`). Somebody then
+    fetched E at depth 1 and reset onto it; the newest release is D, between.
+    The walk from D stops at a graft, so the clone cannot place HEAD
+    (`Behind.UNPLACED`: the chip stays), and before this the press reset E back
+    to D. GitHub says D lacks what E has, and the update refuses in the row's
+    own sentence, having changed nothing.
+    """
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path)
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vC", _publish(origin, files, "C"))
+    if tip_past_the_release:
+        _publish(origin, files, "T")
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    head = _publish(origin, files, "E")
+    _moved_by_hand_at_depth_1(clone, head)
+    released["release"] = upstream.Release("vD", newer)
+
+    assert RunnerGit().commits_behind(clone, newer, release=True) is Behind.UNPLACED
+    with pytest.raises(ApplyError, match=r"ahead of the newest release, vD .*Nothing was changed"):
+        applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == head, "the clone was moved back"
+    assert [asked[1:] for asked in compare.asked] == [(head, newer)]
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_update_refuses_a_step_back_the_clone_itself_proves_without_asking_github(
+    tmp_path: Path,
+) -> None:
+    """A clone pulled forward WITHOUT a depth has the release under HEAD in its own graph."""
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path)
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vC", _publish(origin, files, "C"))
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    head = _publish(origin, files, "E")
+    _git(clone, "fetch", "-q", "origin", head)
+    _git(clone, "reset", "-q", "--hard", head)
+    released["release"] = upstream.Release("vD", newer)
+
+    with pytest.raises(ApplyError, match=r"ahead of the newest release, vD"):
+        applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == head
+    assert compare.asked == [], "the clone could answer, and GitHub was asked anyway"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_an_ordinary_shallow_release_update_goes_ahead_once_github_places_it(
+    tmp_path: Path,
+) -> None:
+    """What the guard must not take away: this app's own release install, a newer release out.
+
+    Installed at release C with the tip T past it (`_pin()` leaves T as a
+    graft), then release D on top of T. The clone cannot place HEAD -- the
+    same `UNPLACED` as the step back above -- and GitHub says D has everything
+    C has, so the update resets to D.
+    """
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path)
+    clone = applier.clone_dir(manifest)
+    installed = _publish(origin, files, "C")
+    released["release"] = upstream.Release("vC", installed)
+    _publish(origin, files, "T")
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    released["release"] = upstream.Release("vD", newer)
+
+    applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == newer
+    assert [asked[1:] for asked in compare.asked] == [(installed, newer)]
+    assert apply_module.clone_release(clone, item_id=manifest.id) == "vD"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_release_update_the_clone_proves_goes_ahead_without_asking_github(
+    tmp_path: Path,
+) -> None:
+    """Straight on top of the installed release: proved by the clone, and GitHub is not asked."""
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path)
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vC", _publish(origin, files, "C"))
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    released["release"] = upstream.Release("vD", newer)
+
+    applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == newer
+    assert compare.asked == []
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_release_update_github_cannot_place_asks_and_a_yes_goes_ahead(tmp_path: Path) -> None:
+    """GitHub unreachable where the clone cannot answer: a question, never a silent reset.
+
+    The first press raises `ReleaseDirectionUnknown` -- an `ApplyError` that
+    changed nothing -- carrying the sentence the view asks and the approval a
+    yes hands back: this HEAD, this release. That press resets to the release.
+    """
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path, answers=False)
+    clone = applier.clone_dir(manifest)
+    installed = _publish(origin, files, "C")
+    released["release"] = upstream.Release("vC", installed)
+    _publish(origin, files, "T")
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    released["release"] = upstream.Release("vD", newer)
+
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as caught:
+        applier.update(manifest)
+    assert _git(clone, "rev-parse", "HEAD") == installed, "nothing may change before the yes"
+    assert "could not check whether updating tortoise-bots-manager to release vD would move it" in (
+        caught.value.question
+    )
+    assert "Nothing was changed" in str(caught.value)
+
+    assert caught.value.approval == apply_module.UncheckedApproval(
+        head=installed, release=released["release"]
+    )
+
+    applier.update(manifest, approved=caught.value.approval)
+    assert _git(clone, "rev-parse", "HEAD") == newer
+
+
+def _unplaced_twice(
+    tmp_path: Path,
+) -> tuple[Applier, Any, Path, dict[str, str], dict[str, upstream.Release], str, str, str]:
+    """This app's release install at C with the tip T left as a graft; two later commits on T.
+
+    Both later commits walk down to T's graft, so the clone can place neither,
+    and GitHub is not answering: every release on them is a question.
+    """
+    applier, manifest, origin, files, released, _compare = _release_follower(
+        tmp_path, answers=False
+    )
+    installed = _publish(origin, files, "C")
+    released["release"] = upstream.Release("vC", installed)
+    _publish(origin, files, "T")
+    applier.install(manifest)
+    first = _publish(origin, files, "U")
+    second = _publish(origin, files, "V")
+    return applier, manifest, origin, files, released, installed, first, second
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_yes_about_one_release_does_not_reset_to_another(tmp_path: Path) -> None:
+    """Codex on T150 round 2: the yes named vD; by the retry the newest release is vU.
+
+    Before, the retry re-resolved the newest release and reset to it on the
+    strength of a yes about a different one. Now that yes is not one: nothing
+    is reset, and the retry asks again -- about vU -- and only a yes to THAT
+    resets, to vU.
+    """
+    applier, manifest, _origin_, _files, released, installed, first, second = _unplaced_twice(
+        tmp_path
+    )
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vD", second)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as about_d:
+        applier.update(manifest)
+
+    released["release"] = upstream.Release("vU", first)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as about_u:
+        applier.update(manifest, approved=about_d.value.approval)
+    assert _git(clone, "rev-parse", "HEAD") == installed, "reset on a yes about another release"
+    assert about_u.value.approval.release == released["release"]
+    assert "to release vU would move it backwards" in about_u.value.question
+
+    applier.update(manifest, approved=about_u.value.approval)
+    assert _git(clone, "rev-parse", "HEAD") == first
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_yes_about_one_commit_does_not_reset_a_checkout_that_has_moved(tmp_path: Path) -> None:
+    """The yes was about the folder on C; by the retry it is somewhere else. Asked again.
+
+    Moved to a1, under C, where the walk from the release still stops at T's
+    graft -- so the clone still cannot place it, and only the approval stood
+    between the retry and a reset.
+    """
+    applier, manifest, origin, _files, released, installed, _first, second = _unplaced_twice(
+        tmp_path
+    )
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vD", second)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as asked:
+        applier.update(manifest)
+    assert asked.value.approval.head == installed
+
+    elsewhere = _git(origin, "rev-parse", "HEAD~4")
+    _moved_by_hand_at_depth_1(clone, elsewhere)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as again:
+        applier.update(manifest, approved=asked.value.approval)
+    assert _git(clone, "rev-parse", "HEAD") == elsewhere, "reset on a yes about another commit"
+    assert again.value.approval.head == elsewhere
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_checkout_that_moves_between_the_check_and_the_reset_is_not_reset(
+    tmp_path: Path,
+) -> None:
+    """HEAD is read again right before the reset: the check was about the commit it was on THEN.
+
+    The move is made from inside the one step that runs between the check and
+    the reset (`_costly_reset()`), which is the only way a test can stand in
+    that gap.
+    """
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path)
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vC", _publish(origin, files, "C"))
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    elsewhere = _publish(origin, files, "E")
+    released["release"] = upstream.Release("vD", newer)
+    costly_reset = applier._costly_reset
+
+    def then_moved(*args: Any) -> None:
+        costly_reset(*args)
+        _moved_by_hand_at_depth_1(clone, elsewhere)
+
+    applier._costly_reset = then_moved  # type: ignore[method-assign]
+    with pytest.raises(ApplyError, match="moved from .* while Update was checking it"):
+        applier.update(manifest)
+    assert _git(clone, "rev-parse", "HEAD") == elsewhere
+
+
+def test_a_release_update_git_could_not_place_at_all_is_refused(tmp_path: Path) -> None:
+    """ "Could not ask git" after the update's own guards passed is a refusal, not a go-ahead.
+
+    The first three questions answered -- same repository, clean tree, nothing
+    of the user's -- and then the release fetch did not. Nothing was checked,
+    so nothing is reset (T150).
+    """
+
+    class _NoAnswer:
+        def clone(self, spec: CloneSpec) -> None:
+            raise AssertionError("the update reset a clone nobody could place")
+
+        def commits_behind(
+            self, dest: Path, branch: str | None, *, release: bool = False
+        ) -> BehindCount:
+            return None
+
+    manifest = _unpinned_shipped("tortoise-bots-manager")
+    assert manifest.source is not None
+    applier = Applier(
+        tmp_path / "server",
+        git=_NoAnswer(),  # type: ignore[arg-type]
+        remote_url=lambda _dest: manifest.source.url,  # type: ignore[union-attr]
+        unmodified=lambda _dest, _path: True,
+        no_local_commits=lambda _dest, _branch: True,
+        newest_release=lambda slug: upstream.Release("vD", "d" * 40),
+        compare_commits=lambda slug, base, ref: None,
+    )
+    (applier.clone_dir(manifest) / ".git").mkdir(parents=True)
+
+    with pytest.raises(ApplyError, match="could not ask git whether release vD is newer"):
+        applier.update(manifest)
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_the_tortoise_applier_carries_the_proved_release_through_its_guard(
+    tmp_path: Path,
+) -> None:
+    """The addon's real applier is `GuardedApplier`, whose `install()` overrides the base's.
+
+    `update()` hands the release it proved to `install()` (T150); an override
+    that dropped the keyword would raise on it -- or, taking `**kwargs`, re-ask
+    GitHub and reset to a release nobody checked. Driven with the updater
+    disarmed and the world down, so its own guard permits and only the release
+    decides: the one GitHub named for the update is the one that lands, and
+    GitHub's releases are not asked a second time.
+    """
+    from yulon.controller_wow_tortoise import autoupdate
+
+    item_id = "tortoise-bots-manager"
+    _family, _game, files, _lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    for early in ("a0", "a1"):
+        _publish(origin, files, early)
+    manifest = _unpinned_shipped(item_id)
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface" / "AddOns").mkdir(parents=True)
+    releases: list[upstream.Release] = [upstream.Release("vC", _publish(origin, files, "C"))]
+    resolved: list[str] = []
+
+    def newest(slug: str) -> upstream.Release:
+        resolved.append(slug)
+        return releases[-1]
+
+    applier = autoupdate.GuardedApplier(
+        tmp_path / "server",
+        arming=lambda: autoupdate.Arming(enabled=False),
+        world_running=lambda: False,
+        git=_LocalOrigin(origin),
+        client_dir=client,
+        newest_release=newest,
+        compare_commits=_Compare(origin),
+    )
+    _origin_answers_as_the_manifest(applier, manifest)
+    applier.install(manifest)
+    releases.append(upstream.Release("vD", _publish(origin, files, "D")))
+    resolved.clear()
+
+    applier.update(manifest)
+
+    assert _git(applier.clone_dir(manifest), "rev-parse", "HEAD") == releases[-1].sha
+    assert len(resolved) == 1, f"GitHub's releases were asked {len(resolved)} times for one Update"
+
+    # And the commit the check was made from: a checkout that moves before the
+    # reset is not reset, through this override as through the base.
+    clone = applier.clone_dir(manifest)
+    releases.append(upstream.Release("vF", _publish(origin, files, "F")))
+    elsewhere = _publish(origin, files, "G")
+    costly_reset = applier._costly_reset
+
+    def then_moved(*args: Any) -> None:
+        costly_reset(*args)
+        _moved_by_hand_at_depth_1(clone, elsewhere)
+
+    applier._costly_reset = then_moved  # type: ignore[method-assign]
+    with pytest.raises(ApplyError, match="while Update was checking it"):
+        applier.update(manifest)
+    assert _git(clone, "rev-parse", "HEAD") == elsewhere
 
 
 # --------------------------------------------------------------------------
