@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import apply as apply_module
+from yulon import server_build_presses
 from yulon.git import Behind, is_behind
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import FAMILY_FILES
@@ -203,25 +204,26 @@ ChipAction = Literal["rebuild", "sql", "update", "server_update"]
 """The job an owed chip's subpanel offers one press for (T44 item 4).
 
 A KEY and not a label. The view routes on it -- `rebuild` is the tab's own
-Rebuild server…, `sql` is Apply module SQL, `update` is the per-module pull,
-`server_update` is Update the server to latest… for a folder the SERVER install
-cloned (T146) -- and routing on the button's TEXT would break the day one of
-these is reworded.
+"Rebuild the server…", `sql` is Apply module SQL, `update` is the per-module
+pull, `server_update` is "Update the server to latest…" for a folder the SERVER
+install cloned (T146) -- and routing on the button's TEXT would break the day
+one of these is reworded.
 """
 
 CHIP_ACTION_LABELS: dict[ChipAction, str] = {
-    "rebuild": "Rebuild server…",
+    "rebuild": server_build_presses.REBUILD,
     "sql": "Apply module SQL",
     "update": "Update",
-    "server_update": "Update the server to latest…",
+    "server_update": server_build_presses.UPDATE_TO_LATEST,
 }
-"""What each action's button says, spelled HERE rather than imported.
+"""What each action's button says: the same words as the press it runs.
 
-The three of them that also exist on the action bar are worded the same way on
-purpose, and cannot be imported from `controller_view` -- this module deliberately
-imports nothing from it (module docstring). The ellipsis on the rebuild and on
-the server update carries the app's own convention: that press opens a dialog
-first.
+The two "Server build ▾" entries come from `server_build_presses`, which the view
+reads too; they cannot be imported from `controller_view` -- this module
+deliberately imports nothing from it (module docstring). Until T155 they were
+typed here, and the rebuild's had stayed "Rebuild server…" after the press it
+runs was renamed. The ellipsis on the rebuild and on the server update carries
+the app's own convention: that press opens a dialog first.
 """
 
 
@@ -586,7 +588,11 @@ def _chips_for(
                 "owed",
                 CHIP_REBUILD_PENDING,
                 f"{item_id}: the worldserver has not been compiled since this changed, so it "
-                "is not in the running server yet. Press Rebuild server… on this tab.",
+                # T155: the press by its label and its menu. The subpanel's
+                # button under this sentence wears the same label and runs the
+                # same slot, so the sentence is true of both.
+                "is not in the running server yet. Press "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}.",
                 "rebuild",
             )
         )

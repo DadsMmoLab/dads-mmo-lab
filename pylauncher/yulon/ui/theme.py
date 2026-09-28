@@ -374,8 +374,8 @@ QPushButton:disabled {{
     border: 1px solid {COLOR_BRASS_DEEP};
 }}
 
-/* T89: "Server build ▾" says it opens a menu in its own label, so the style's
-   indicator would be a second arrow, and it reserves width for one too. */
+/* T89: the menu button says it opens a menu in its own label (its triangle), so the
+   style's indicator would be a second arrow, and it reserves width for one too. */
 QPushButton#{SERVER_BUILD_BUTTON}::menu-indicator {{
     image: none;
     width: 0px;

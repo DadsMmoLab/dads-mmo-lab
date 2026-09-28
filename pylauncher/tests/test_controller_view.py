@@ -9503,6 +9503,30 @@ def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
     assert modules_panel.CHIP_REBUILD_PENDING in labels, labels
 
 
+def test_the_install_report_points_up_at_the_banner_it_raised(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T155: the report said 'Press "Rebuild the server…" below', and nothing below has it.
+
+    The tab stacks the toolbar, the banner, the cards, then the report and the
+    rebuild log; the banner's button is ABOVE the report, and the log has no
+    button at all. "Above" is read off the layout here rather than asserted in
+    a docstring, so moving the banner fails this instead of making the sentence
+    false again.
+    """
+    view = _owing_a_rebuild(ps, tmp_path)
+    text = view.module_report.toPlainText()
+    box = view.rebuild_banner.parentWidget().layout()
+    assert box is view.module_report.parentWidget().layout()
+    assert 0 <= box.indexOf(view.rebuild_banner) < box.indexOf(view.module_report)
+
+    assert "below" not in text, text
+    assert (
+        f'"{controller_view_module.REBUILD_BUTTON_LABEL}" on the banner above the module list'
+    ) in text, text
+    assert f'"{controller_view_module.SERVER_BUILD_LABEL}"' in text, text
+
+
 def _owing_a_rebuild(
     ps: _Ps, tmp_path: Path, services: ControllerServices | None = None
 ) -> ControllerView:

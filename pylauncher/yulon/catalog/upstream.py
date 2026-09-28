@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from yulon import __version__, platform
+from yulon import __version__, platform, server_build_presses
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -305,8 +305,10 @@ def line(news: UpstreamNews | None) -> str:
     return (
         f"Upstream has new code since this server was built: {', '.join(said)}. "
         # The menu named as well as the entry (T89): the press is not on the
-        # Modules toolbar itself any more, it is under "Server build ▾".
-        "“Update the server to latest…” under “Server build ▾” on the Modules tab brings it in."
+        # Modules toolbar itself any more, it is under "Server build ▾". Built
+        # from the labels since T155, so a rename carries this line with it.
+        f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+        "brings it in."
     )
 
 

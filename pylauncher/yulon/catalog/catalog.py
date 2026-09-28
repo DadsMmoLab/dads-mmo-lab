@@ -17,6 +17,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from yulon import server_build_presses
 from yulon.docker import ContainerSpec
 from yulon.manifest import Db, Source
 from yulon.platform import PlatformId
@@ -813,10 +814,13 @@ class NativeInstall(_Strict):
     update_to_latest: bool = Field(
         default=False,
         description=(
-            "Offer the Server tab's 'Update the server to latest…' control for this game "
-            "(T64). Data rather than a rule about families, because what the control needs "
-            "is per ENTRY and is not derivable from anything else here: every source it "
-            "would move must be one this app cloned and pins, its upstream must be a "
+            # T155: it said "the Server tab's", and the control has never been
+            # there; since T89 it is an entry of the Modules tab's menu.
+            "Offer "
+            f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+            "for this game (T64). Data rather than a rule about families, because what the "
+            "control needs is per ENTRY and is not derivable from anything else here: every "
+            "source it would move must be one this app cloned and pins, its upstream must be a "
             "repository a rebuild of this entry can compile, and any patch the entry carries "
             "must be one somebody is prepared to see refused when upstream moves under it. "
             "Default false, so a new entry gets the control by somebody deciding it does — "

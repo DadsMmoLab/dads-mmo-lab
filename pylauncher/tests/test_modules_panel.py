@@ -1012,6 +1012,27 @@ def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none()
     assert all(c.action is None for c in _row(rows, "mod-ask").chips if c.kind != "owed")
 
 
+def test_the_rebuild_chip_names_the_press_the_menu_holds() -> None:
+    """T155: the chip said "Press Rebuild server… on this tab"; the press is not called that.
+
+    Since T89 it is "Rebuild the server…" under "Server build ▾", and the
+    subpanel's own button runs the same slot, so it carries the same label: a
+    player who reads the sentence and then looks at either finds those words.
+    Read against the VIEW's constants, which this module cannot import, so the
+    two sides are compared rather than one copied.
+    """
+    from yulon.ui import controller_view as cv
+
+    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
+    rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+    chip = next(c for c in _row(rows, "mod-a").chips if c.label == mp.CHIP_REBUILD_PENDING)
+
+    assert mp.CHIP_ACTION_LABELS["rebuild"] == cv.REBUILD_BUTTON_LABEL
+    assert mp.CHIP_ACTION_LABELS["server_update"] == cv.UPDATE_TO_LATEST_BUTTON_LABEL
+    assert cv.REBUILD_BUTTON_LABEL in chip.detail, chip.detail
+    assert cv.SERVER_BUILD_LABEL in chip.detail, chip.detail
+
+
 def test_every_chip_action_has_a_button_label() -> None:
     """A key with no label is a button that renders empty. Mutation: drop one key."""
     assert set(mp.CHIP_ACTION_LABELS) == {"rebuild", "sql", "update", "server_update"}

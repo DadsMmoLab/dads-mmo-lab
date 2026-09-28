@@ -75,7 +75,17 @@ from pathlib import Path, PurePosixPath
 from secrets import token_hex
 from typing import Any, ClassVar, Literal, Protocol
 
-from yulon import dbsecret, docker, git, module_answers, networking, platform, resources, runner
+from yulon import (
+    dbsecret,
+    docker,
+    git,
+    module_answers,
+    networking,
+    platform,
+    resources,
+    runner,
+    server_build_presses,
+)
 from yulon.catalog import bot_count, composegen, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -1732,10 +1742,11 @@ class RewrittenHistory(InstallerError):
     def __init__(self, repo: str, line: str) -> None:
         super().__init__(
             f"{line} The question you answered did not say so, so nothing was changed. "
-            # T89: the press is an entry in the "Server build ▾" menu now.
-            f"Press \u201cUpdate the server to latest\u2026\u201d under "
-            f"\u201cServer build \u25be\u201d on the Modules tab again: it will ask with "
-            f"that line in it."
+            # T89: the press is an entry in the "Server build ▾" menu now, and
+            # since T155 the sentence is built from the label it names.
+            "Press "
+            f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+            "again: it will ask with that line in it."
         )
         self.repo = repo
         self.line = line
@@ -4680,7 +4691,13 @@ class StagedInstaller:
             raise InstallerError(
                 "Docker is not answering, so the containers were not replaced -- the server "
                 "you have is still the one that was running before this rebuild. Nothing was "
-                "touched. Check the docker daemon is up, then press Rebuild again."
+                "touched. Check the docker daemon is up, then press the same entry under "
+                # T155: not "Rebuild" -- Update to latest and Return to the tested
+                # pin reach this too, through `rebuild()`, and all three are
+                # entries of the one menu. An install does not: its tuple ends
+                # in `up`, and this stage is only ever `rebuild_stages()`'s
+                # (`test_only_a_server_build_press_runs_the_recreate_stage`).
+                f"\u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab again."
             )
         yield (
             "Replacing the containers so the build from before this rebuild is what starts."
@@ -5598,8 +5615,9 @@ class StagedInstaller:
             logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
             yield (
                 f"The source folders are back on their old commits, but Yu'lon's own files "
-                f"inside them could not be written again ({exc}). Press Rebuild once the "
-                f"reason is fixed; nothing was compiled."
+                f"inside them could not be written again ({exc}). Press "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "once the reason is fixed; nothing was compiled."
             )
 
     def _put_sources_back(self, moved: Sequence[tuple[EmulatorSource, Path, str]]) -> Iterator[str]:
@@ -5724,14 +5742,20 @@ class StagedInstaller:
             raise InstallerError(
                 "Docker would not say whether this install's images exist, so the build you "
                 "have now could not be kept as a rollback and nothing was compiled over it. "
-                "Nothing was started. Check the docker daemon is up, then press Rebuild again."
+                "Nothing was started. Check the docker daemon is up, then press the same entry "
+                # T155: `stage_recreate()`'s reason -- all three entries reach this.
+                f"under \u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab "
+                "again."
             )
         if not present:
             raise InstallerError(
                 "This install's images are not all on the daemon under their tags, so there "
                 "is no build to keep as a rollback, and a rebuild does not run without one. "
                 "Nothing was started. Press Install on this folder instead: its resume "
-                "rebuilds the missing images, and Rebuild works from then on."
+                "rebuilds the missing images, and "
+                # T155: the press by its label and its menu, not "Rebuild".
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "works from then on."
             )
         kept: list[str] = []
         for ref in refs:
