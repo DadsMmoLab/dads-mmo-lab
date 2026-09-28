@@ -36,6 +36,8 @@ import hashlib
 import os
 import posixpath
 import re
+import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -1244,11 +1246,149 @@ def write_plan(
             )
         if path.exists() and path.read_text(encoding="utf-8") == text:
             continue
-        path.write_text(text, encoding="utf-8", newline="\n")
+        _replace_whole(path, text)
         written.append(path)
     if plan.dotenv:
         written.append(write_dotenv(server_dir, plan.dotenv))
     return tuple(written)
+
+
+COMPOSE_TEMP_PREFIX = ".yulon-tmp-"
+"""`.<name>.yulon-tmp-XXXXXXXX`: a compose file on its way in, beside the one it replaces (T163).
+
+A name of its own per writer (`tempfile.mkstemp`), never a fixed one: with one
+name a second writer's clean-up unlinked the first writer's open temp and made
+its own under the same name, so the first rename published the second writer's
+bytes and reported success (Codex, round 3). A temp left by a crash is never
+deleted by name for the same reason -- it may be somebody's open file. Left in
+a WotLK checkout it is an untracked file, and git's answers the update route
+asks do not see one (measured on a real repository, 2026-09-28:
+`status --porcelain --untracked-files=no`, `status --porcelain --
+docker-compose.yml`, `RunnerGit.local_edits()` and `is_unmodified()` all
+answered clean with one beside the file, and `checkout --detach --force` and
+`reset --hard` both left it where it was).
+"""
+
+NEW_COMPOSE_MODE = 0o644
+"""A compose file not yet on disk: what `write_text()` gave it under the usual 022 umask."""
+
+
+def _replace_whole(path: Path, text: str) -> None:
+    """Put `text` at `path` in one step, or leave what was there whole (T163).
+
+    Until T163 this was `path.write_text()`, which truncates first: a full disk
+    left an empty or half-written `docker-compose.yml`. On the one path that
+    matters most -- "Update the server to latest…" putting the sources back
+    after a compile that filled the disk -- that file was then neither
+    upstream's (git calls it modified) nor Yu'lon's (no marker), so every press
+    that could have written it again refused it as somebody's own. Written
+    whole beside it, fsynced, and `os.replace`d over it, the old file stays
+    exactly as it was until the new one is complete, and the next press finds
+    either one.
+
+    The temp is this writer's own (`COMPOSE_TEMP_PREFIX`), created owner-only,
+    and given the old file's mode before the rename, so the file keeps it. The
+    folder is fsynced after the rename on POSIX, because until its entry is on
+    disk a power cut can bring the old file back; Windows cannot open a folder
+    and is not asked. A rename Windows refuses because another program holds
+    the file is tried again for under a second (`_replace_when_free()`). The
+    bytes are `text` encoded as it stands --
+    `write_plan()`'s old `newline="\n"` -- so the file is identical on every
+    platform.
+    """
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except FileNotFoundError:
+        mode = NEW_COMPOSE_MODE
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}{COMPOSE_TEMP_PREFIX}")
+    temp = Path(name)
+    try:
+        try:
+            data = memoryview(text.encode("utf-8"))
+            while data:
+                data = data[os.write(fd, data) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(temp, mode)
+        _replace_when_free(temp, path)
+    except BaseException:
+        # Owner-writable first: Windows will not delete a read-only file.
+        try:
+            os.chmod(temp, 0o600)
+        except OSError:
+            pass
+        temp.unlink(missing_ok=True)
+        raise
+    _fsync_folder(path.parent)
+
+
+REPLACE_BACKOFF = (0.05, 0.1, 0.2, 0.4)
+"""The waits between tries of a rename a Windows sharing violation refused: 0.75 s in all."""
+
+REPLACE_TRIES = len(REPLACE_BACKOFF) + 1
+"""How many times that rename is tried, in all (T163)."""
+
+_sleep = time.sleep
+"""The wait, as a module attribute so a test can take it away."""
+
+
+class ComposeFileLocked(OSError):
+    """A compose file another program held open through every try of the rename (T163).
+
+    An `OSError`, so every caller that already turns an `OSError` from
+    `write_plan()` into its sentence still does; the message is the part a
+    player acts on.
+    """
+
+
+def _replace_when_free(temp: Path, path: Path) -> None:
+    """`os.replace(temp, path)`, tried again while Windows says another program holds `path`.
+
+    On Windows a rename onto a file that an editor, a virus scanner or a
+    backup tool has open without delete sharing fails with a sharing
+    violation (`PermissionError`, winerror 5 or 32), and those holds are
+    usually brief -- so it is tried `REPLACE_TRIES` times over
+    `REPLACE_BACKOFF` (Codex, round 4). Still held, it raises
+    `ComposeFileLocked` saying so in plain words; the caller removes the temp.
+    POSIX has no sharing violations, and a `PermissionError` there is a real
+    refusal, so it is raised at once. Not exercised on a real Windows file
+    lock: the tests fake the refusal.
+    """
+    if os.name != "nt":
+        os.replace(temp, path)
+        return
+    for wait in (*REPLACE_BACKOFF, None):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError as exc:
+            if wait is None:
+                raise ComposeFileLocked(
+                    f"{path} is open in another program (an editor, a virus scanner or a "
+                    f"backup tool), so Yu'lon could not replace it; it was left as it was. "
+                    f"Close that program and press again. ({exc})"
+                ) from exc
+            _sleep(wait)
+
+
+def _fsync_folder(folder: Path) -> None:
+    """Put the folder's entries on disk: the rename above is not durable until they are.
+
+    POSIX only; Windows cannot open a directory. After the rename, so a
+    failure here is a warning and not a raise: the new file is already in
+    place, and reporting the write as failed would be untrue.
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        logger.warning(f"could not fsync {folder} after replacing a compose file in it: {exc}")
 
 
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:

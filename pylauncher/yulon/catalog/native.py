@@ -78,6 +78,7 @@ from typing import Any, ClassVar, Literal, Protocol
 from yulon import (
     dbsecret,
     docker,
+    forgetting,
     git,
     module_answers,
     networking,
@@ -1669,6 +1670,68 @@ true is `_put_sources_back()`, which yields its own line per source, INCLUDING
 when a restore failed: a user who sees that line and this sentence has the
 contradiction in front of them rather than only the comfortable half.
 """
+
+USE_EXISTING_LABEL = "Use existing…"
+"""The Catalog tile's button that brings a removed server back (`catalog_view`, T95)."""
+
+
+def install_again_here(game: str, server_dir: Path) -> str:
+    """How to reach the one press that mends what Rebuild will not, as sentences (T163, T164).
+
+    Rebuild refuses two states its own advice used to send players into:
+    compose files Yu'lon did not write (`_refuse_unless_rebuildable()`) and
+    images that are gone (`_keep_rollback()`). The install's resume mends both
+    -- `generate-compose` re-runs and may replace the repository's untouched
+    `docker-compose.yml`, and `build` compiles when the images are not all
+    there. Nothing else does: Repair server files refuses a compose file that
+    is not Yu'lon's, and the owner ruled (2026-09-28) that the advice is made
+    true for today's presses rather than the presses changed.
+
+    **The way to that press is most of the sentence, and it has three shapes.**
+
+    * On a server Yu'lon knows, the Catalog tile reads "Installed" and is
+      greyed, so "press Install" alone named a button nobody could press.
+      Removing first is T95's own route back (it keeps the folder, the
+      database and the images), and since T112 the resume is not refused for
+      disk space it will not spend.
+    * With a SECOND server of the same game listed, the tile stays greyed after
+      the first is removed (`catalog_view.forget_installed()`), and its menu
+      hides "Install Server…" -- so that one has to go too, and comes back
+      through "Use existing…". The engine cannot see the app's list, so the
+      sentence says it conditionally.
+    * A server inside a WSL distro cannot take that press from Windows at all:
+      the install preflight refuses a `\\\\wsl.localhost` folder
+      (`platform.server_dir_problem()`) and `Seams.in_wsl()` refuses every
+      install-only seam. The server was built by Yu'lon for Linux inside the
+      distro, and that is where the same route runs, on the folder's Linux path.
+    """
+    keeps = (
+        f"(\u201c{forgetting.BUTTON_LABEL}\u201d on its Server tab keeps the folder, the database "
+        "and the images)"
+    )
+    resumes = (
+        "the install resumes there, writes back the files it owns and compiles only what is missing"
+    )
+    other = (
+        f"If {{who}} also lists another {game} server, the {game} tile stays greyed until that one "
+        f"is removed too; bring it back afterwards with \u201c{USE_EXISTING_LABEL}\u201d on the "
+        "same tile."
+    )
+    found = platform.wsl_location(server_dir)
+    if found is None:
+        return (
+            f"Remove this server from Yu'lon {keeps}, then press Install on the {game} tile in "
+            f"the Catalog and choose {server_dir}: {resumes}. " + other.format(who="Yu'lon")
+        )
+    distro, inside = found
+    return (
+        f"Yu'lon on Windows cannot do that for this server: it rebuilds and updates a server "
+        f"inside the WSL distro {distro}, but it does not install into one. Do it in the Yu'lon "
+        f"inside {distro} that built this server: remove the server there if that Yu'lon lists "
+        f"it {keeps}, then press Install on the {game} tile and choose {inside}: {resumes}. "
+        + other.format(who="that Yu'lon")
+    )
+
 
 _DB_REPO_SUFFIX = "-db"
 """How a world-database repository is spelled, in upstream CMaNGOS's own convention.
@@ -5491,6 +5554,9 @@ class StagedInstaller:
         # leave the folder half a version ahead of the image.
         targets = {} if to_pin else self._release_targets(plan, rewritten_ok)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
+        press = (
+            server_build_presses.RETURN_TO_PIN if to_pin else server_build_presses.UPDATE_TO_LATEST
+        )
         yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
         yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
         for said in targets.values():
@@ -5539,7 +5605,7 @@ class StagedInstaller:
                 # restore on it would leave the folder ahead of the image for the
                 # one failure most likely to happen twice in a row (cold review
                 # round 2, 2026-09-16).
-                yield from self._restore_the_folder(moved, server_dir, opts, state)
+                yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             try:
                 yield from self.rebuild(opts, cancel=cancel)
@@ -5547,7 +5613,7 @@ class StagedInstaller:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
                 # It puts the IMAGE back; this puts the SOURCE back; and it is the
                 # pair that makes the folder and the running container agree again.
-                yield from self._restore_the_folder(moved, server_dir, opts, state)
+                yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             self._record_source_revs(
                 server_dir,
@@ -5778,8 +5844,12 @@ class StagedInstaller:
         server_dir: Path,
         opts: InstallOptions,
         state: InstallState,
+        press: str,
     ) -> Iterator[str]:
         """Put the sources back AND write this app's own files into them again.
+
+        `press` is the label of the press being put back (T163): the carried
+        patch's sentence sends the player to it again.
 
         **Two halves, and the second is not tidying.** `restore_rev()` is a
         `checkout --force`: it puts the checkout on the old commit and, with it,
@@ -5800,16 +5870,41 @@ class StagedInstaller:
         yield from self._put_sources_back(moved)
         if not moved:
             return
+        # T163: each half names the press that mends IT, and neither is
+        # Rebuild. Upstream's compose file in the folder is one Rebuild refuses
+        # (`_refuse_unless_rebuildable()`) and so does this same press, which
+        # starts with that guard; only the install's resume writes over it, and
+        # only because the file is still git's own: `composegen.write_plan()`
+        # replaces a compose file whole, so a disk that fills part-way leaves
+        # the old file untouched. Until T163 it truncated first, and a full disk
+        # left a cut-off file that is neither git's nor Yu'lon's and that the
+        # resume refuses as well. A server inside a WSL distro takes that route
+        # in the distro, not here (`install_again_here()`). An
+        # unpatched tree is one Rebuild compiles as it stands -- the defect the
+        # patch is carried for -- and the install refuses (its build would be
+        # skipped); this same press writes the patch before it compiles. Neither
+        # sentence says "nothing was compiled": this also runs after a compile
+        # that `rebuild()` rolled back.
         try:
             yield from self._rewrite_what_we_own(server_dir, opts, state)
+        except (InstallerError, OSError) as exc:
+            logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
+            yield (
+                f"The source folders are back on their old commits, but Yu'lon's own compose "
+                f"files could not be written into them again ({exc}). Once the reason is "
+                f"fixed, the install puts them back. "
+                f"{install_again_here(self.entry.name, server_dir)}"
+            )
+            return
+        try:
             yield from self.apply_carried_patches(server_dir)
         except (InstallerError, OSError) as exc:
             logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
             yield (
-                f"The source folders are back on their old commits, but Yu'lon's own files "
-                f"inside them could not be written again ({exc}). Press "
-                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
-                "once the reason is fixed; nothing was compiled."
+                f"The source folders are back on their old commits, but the source patch "
+                f"Yu'lon carries could not be written into them again ({exc}). Once the "
+                f"reason is fixed, press {server_build_presses.under_server_build(press)} "
+                "again: it writes the patch before it compiles."
             )
 
     def _put_sources_back(self, moved: Sequence[tuple[EmulatorSource, Path, str]]) -> Iterator[str]:
@@ -5943,8 +6038,10 @@ class StagedInstaller:
             raise InstallerError(
                 "This install's images are not all on the daemon under their tags, so there "
                 "is no build to keep as a rollback, and a rebuild does not run without one. "
-                "Nothing was started. Press Install on this folder instead: its resume "
-                "rebuilds the missing images, and "
+                # T164: the resume is the press that compiles missing images,
+                # and on a server Yu'lon knows it is reached by removing first.
+                "Nothing was started. The install compiles missing images. "
+                f"{install_again_here(self.entry.name, ctx.server_dir)} "
                 # T155: the press by its label and its menu, not "Rebuild".
                 f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
                 "works from then on."

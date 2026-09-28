@@ -10,6 +10,7 @@ this project would notice until two containers fought over 3724.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -519,6 +520,265 @@ def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_p
         assert (
             (server_dir / name).read_text(encoding="utf-8").startswith(composegen.GENERATED_MARKER)
         )
+
+
+def _disk_fills_half_way(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """`os.write` as a disk that fills: the first call lands half, the next raises ENOSPC.
+
+    What a truncating `write_text()` met on a full disk -- some bytes, then the
+    error -- so an in-place write leaves a cut-off file, and only a write that
+    goes somewhere else first leaves the old one whole.
+    """
+    import errno
+    import os
+
+    real = os.write
+    calls: list[int] = []
+
+    def filling(fd: int, data: bytes | memoryview) -> int:
+        calls.append(len(data))
+        if len(calls) == 1:
+            return real(fd, bytes(data)[: max(1, len(data) // 2)])
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(composegen.os, "write", filling)
+    return calls
+
+
+def test_a_disk_that_fills_during_write_plan_leaves_the_old_file_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T163: the file on disk is the old one, byte for byte, and nothing is left beside it.
+
+    The case that made it matter: the repository's own `docker-compose.yml`,
+    about to be replaced, and a disk the compile just filled. A cut-off file
+    there is neither git's nor Yu'lon's, and every press that could write it
+    again refuses it; the untouched original is the one the install's resume
+    replaces.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    upstream = "services:\n  ac-database:\n    image: mysql:8.4\n"
+    base = server_dir / composegen.BASE_FILE
+    base.write_text(upstream, encoding="utf-8")
+    base.chmod(0o640)
+    before = sorted(p.name for p in server_dir.iterdir())
+    calls = _disk_fills_half_way(monkeypatch)
+
+    with pytest.raises(OSError, match="No space left"):
+        composegen.write_plan(render(server_dir), server_dir, replaceable=(composegen.BASE_FILE,))
+
+    assert len(calls) >= 2, "the fill never reached a second write"
+    assert base.read_text(encoding="utf-8") == upstream
+    assert sorted(p.name for p in server_dir.iterdir()) == before, "a temp file was left"
+    if sys.platform != "win32":
+        assert base.stat().st_mode & 0o777 == 0o640
+
+
+def test_write_plan_keeps_a_files_mode_and_gives_a_new_one_the_usual_mode(tmp_path: Path) -> None:
+    """The replaced file keeps its own mode; a file that was not there gets 0644."""
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    composegen.write_plan(render(server_dir), server_dir)
+    base = server_dir / composegen.BASE_FILE
+    if sys.platform != "win32":
+        assert base.stat().st_mode & 0o777 == composegen.NEW_COMPOSE_MODE
+        base.chmod(0o600)
+    base.write_text(base.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    assert base in composegen.write_plan(render(server_dir), server_dir)
+    assert "# changed" not in base.read_text(encoding="utf-8")
+    if sys.platform != "win32":
+        assert base.stat().st_mode & 0o777 == 0o600
+    assert not list(server_dir.glob(f"*{composegen.COMPOSE_TEMP_PREFIX}*"))
+
+
+class _OsWithTurns:
+    """`composegen`'s `os`, recording what it does and holding each writer's rename for its turn.
+
+    Only `replace` and `fsync` are intercepted; everything else is the real
+    `os`. `order` names the threads in the order their renames may land, and
+    each rename waits until every writer has reached its own -- the worst
+    interleaving: all temps written, then the renames one after another.
+    """
+
+    def __init__(self, order: list[str], published: dict[str, bytes], path: Path) -> None:
+        import threading
+
+        self.order = order
+        self.published = published
+        self.path = path
+        self.arrived = threading.Barrier(len(order), timeout=10)
+        self.turn = threading.Condition()
+        self.next = 0
+        self.dir_fsyncs: list[str] = []
+        self.name = os.name
+
+    def replace(self, src: object, dst: object) -> None:
+        import threading
+
+        me = threading.current_thread().name
+        self.arrived.wait()
+        with self.turn:
+            assert self.turn.wait_for(lambda: self.order[self.next] == me, timeout=10)
+            try:
+                os.replace(src, dst)  # type: ignore[arg-type]
+                self.published[me] = self.path.read_bytes()
+            finally:
+                self.next += 1
+                self.turn.notify_all()
+
+    def fsync(self, fd: int) -> None:
+        import stat as stat_mod
+
+        if stat_mod.S_ISDIR(os.fstat(fd).st_mode):
+            self.dir_fsyncs.append(
+                os.readlink(f"/proc/self/fd/{fd}") if sys.platform == "linux" else "dir"
+            )
+        os.fsync(fd)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def test_two_writers_at_once_each_publish_their_own_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 3: a fixed temp name, unlinked before `O_EXCL`, let one writer take another's.
+
+    Two writers of the same compose file, both temps written before either
+    rename lands (A's first). With one temp name, B's start unlinked A's temp
+    and made its own under the same name, so A's rename published B's bytes
+    and A reported success. Each writer's rename must publish exactly its own
+    text, and the file ends as one writer's text, whole.
+    """
+    import threading
+
+    path = tmp_path / composegen.BASE_FILE
+    path.write_text("old\n", encoding="utf-8")
+    texts = {"A": "A\n" * 5000, "B": "B\n" * 7000}
+    published: dict[str, bytes] = {}
+    monkeypatch.setattr(composegen, "os", _OsWithTurns(["A", "B"], published, path))
+    raised: dict[str, BaseException] = {}
+
+    def write(name: str) -> None:
+        try:
+            composegen._replace_whole(path, texts[name])
+        except BaseException as exc:  # noqa: BLE001 - recorded and asserted on below
+            raised[name] = exc
+
+    writers = [threading.Thread(target=write, args=(n,), name=n) for n in ("A", "B")]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=20)
+
+    assert published.get("A") == texts["A"].encode("utf-8"), "A's rename published another file"
+    assert raised == {}, f"a writer failed: {raised}"
+    assert published["B"] == texts["B"].encode("utf-8"), "B's rename published another file"
+    assert path.read_bytes() in {text.encode("utf-8") for text in texts.values()}
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="names the fsynced directory via /proc")
+def test_the_folder_is_fsynced_after_the_rename_on_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 3: the rename is durable only once the directory entry is on disk."""
+    path = tmp_path / composegen.BASE_FILE
+    spy = _OsWithTurns(["MainThread"], {}, path)
+    monkeypatch.setattr(composegen, "os", spy)
+    composegen._replace_whole(path, "services: {}\n")
+    assert spy.dir_fsyncs == [str(tmp_path)]
+
+
+def test_on_windows_the_folder_is_not_opened_to_be_fsynced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows cannot open a directory, so the directory fsync is skipped there, quietly."""
+    path = tmp_path / composegen.BASE_FILE
+    spy = _OsWithTurns(["MainThread"], {}, path)
+    spy.name = "nt"
+    monkeypatch.setattr(composegen, "os", spy)
+    composegen._replace_whole(path, "services: {}\n")
+    assert path.read_text(encoding="utf-8") == "services: {}\n"
+    assert spy.dir_fsyncs == []
+
+
+class _OsWithALockedFile:
+    """`composegen`'s `os` on a platform of the test's choosing, whose `replace` is refused.
+
+    `locked` is how many renames meet a sharing violation -- another program
+    holding the file open without delete sharing, which Windows reports as a
+    `PermissionError` with winerror 32 -- before one is let through.
+    """
+
+    def __init__(self, name: str, locked: int) -> None:
+        self.name = name
+        self.locked = locked
+        self.replaces = 0
+
+    def replace(self, src: object, dst: object) -> None:
+        self.replaces += 1
+        if self.replaces <= self.locked:
+            error = PermissionError(13, "The process cannot access the file")
+            error.winerror = 32  # type: ignore[attr-defined]
+            raise error
+        os.replace(src, dst)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def _locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name: str, locked: int
+) -> tuple[Path, _OsWithALockedFile, list[float]]:
+    path = tmp_path / composegen.BASE_FILE
+    path.write_text("old\n", encoding="utf-8")
+    spy = _OsWithALockedFile(name, locked)
+    monkeypatch.setattr(composegen, "os", spy)
+    slept: list[float] = []
+    monkeypatch.setattr(composegen, "_sleep", slept.append)
+    return path, spy, slept
+
+
+def test_on_windows_a_file_held_open_for_a_moment_is_replaced_on_a_later_try(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 4: an editor or a virus scanner holding the file refuses the rename, briefly."""
+    path, spy, slept = _locked(tmp_path, monkeypatch, name="nt", locked=2)
+    composegen._replace_whole(path, "new\n")
+    assert path.read_text(encoding="utf-8") == "new\n"
+    assert spy.replaces == 3
+    assert len(slept) == 2 and sum(slept) <= 1.0
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
+
+
+def test_on_windows_a_file_that_stays_open_is_refused_in_plain_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every try refused: the old file stays, the temp goes, and the error says what to do."""
+    path, spy, slept = _locked(tmp_path, monkeypatch, name="nt", locked=100)
+    with pytest.raises(composegen.ComposeFileLocked) as raised:
+        composegen._replace_whole(path, "new\n")
+    said = str(raised.value)
+    assert str(path) in said and "open in another program" in said and "press" in said, said
+    assert isinstance(raised.value, OSError), "callers that catch OSError must still catch it"
+    assert spy.replaces == composegen.REPLACE_TRIES
+    assert sum(slept) <= 1.0
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
+
+
+def test_on_posix_a_refused_rename_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX has no sharing violations; a PermissionError there is a real one, raised at once."""
+    path, spy, slept = _locked(tmp_path, monkeypatch, name="posix", locked=1)
+    with pytest.raises(PermissionError):
+        composegen._replace_whole(path, "new\n")
+    assert spy.replaces == 1 and slept == []
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
 
 
 # -- is_marker_line: the exact banners, not a separator rule (T25) -----------

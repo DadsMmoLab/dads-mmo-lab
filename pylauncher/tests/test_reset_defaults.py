@@ -366,14 +366,22 @@ def test_the_override_takes_the_bind_label_the_install_would_take_here(tmp_path:
 # -- every reason a CMaNGOS default cannot be built ----------------------------
 
 
-def test_an_image_no_longer_on_the_machine_says_rebuild_first(tmp_path: Path) -> None:
+def test_an_image_no_longer_on_the_machine_says_install_again_into_this_folder(
+    tmp_path: Path,
+) -> None:
+    """T164: not "rebuild the server first" -- Rebuild refuses without its image.
+
+    The whole sequence, Rebuild's refusal and the install that compiles, is
+    pressed in `test_recovery_advice.py`.
+    """
     server, _ = _server(tmp_path, "wow-tbc")
     files = reset_defaults.core_files(TBC)
     texts, reasons = reset_defaults.default_texts(
         TBC, server, files, seams=_seams(_never, image_present=lambda refs: False)
     )
     assert texts == {} and set(reasons) == set(files)
-    assert all("rebuild the server first" in reason for reason in reasons.values())
+    route = native.install_again_here(TBC.name, server)
+    assert all(route in reason for reason in reasons.values())
 
 
 def test_docker_not_answering_is_its_own_reason(tmp_path: Path) -> None:

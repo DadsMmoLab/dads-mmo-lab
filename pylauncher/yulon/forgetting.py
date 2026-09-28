@@ -14,10 +14,14 @@ true of one type is false of another:
 
 * On this host, built by Yu'lon or adopted: "Use existing…" on the Catalog
   tile, pointed at the same folder. The m910q gate brought a removed TBC
-  server back that way (T95, 2026-09-24). Installing into the same folder
-  again is NOT offered: the gate found the install preflight's disk check
-  refusing it before the installer ever read its resume record (T112), and an
-  adopted folder, with no record, is refused outright.
+  server back that way (T95, 2026-09-24). That is the way back this dialog
+  offers, because it works for both. Installing into the same folder again
+  also brings back a server Yu'lon BUILT -- the install resumes from its
+  record, and since T112 its preflight no longer refuses the disk space the
+  resume will not spend -- and it is the route `native.install_again_here()`
+  sends a player down when a server needs its compose files or its images
+  made again (T163, T164). An adopted folder, with no record, is refused by
+  the install outright, so this dialog does not offer that route.
 * In a WSL distro: "Find in WSL…".
 * Folder gone: nothing to bring back, and T34's promise about Docker, word
   for word.
