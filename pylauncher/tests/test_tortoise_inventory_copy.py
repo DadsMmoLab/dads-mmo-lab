@@ -93,12 +93,17 @@ class _TortoiseDb(_Mariadb):
 
     _LIKE = re.compile(r"CREATE TABLE IF NOT EXISTS (`?\w+`?) LIKE (`?\w+`?)", flags=re.IGNORECASE)
     _COLUMNS = re.compile(
-        r"SELECT column_name, column_type FROM information_schema\.columns WHERE "
+        r"SELECT ([\w, ]+) FROM information_schema\.columns WHERE "
         r"table_schema='(\w+)' AND table_name='(\w+)' ORDER BY ordinal_position"
     )
 
     def __init__(self, root: Path) -> None:
         super().__init__(root, SCHEMAS)
+        self.declared: dict[tuple[str, str], dict[str, str]] = {}
+        """`(table, column)` -> the fields sqlite cannot hold: charset, collation, extra.
+
+        A fixture sets what a hand-made MariaDB table would carry; anything not
+        set is NULL, as a column with no charset reads."""
         self.exec_stdin_raw(
             "tw_char",
             "CREATE TABLE character_inventory (guid INT, bag INT, slot INT, item INT PRIMARY KEY, "
@@ -147,15 +152,34 @@ class _TortoiseDb(_Mariadb):
 
         The second translation this stand-in makes, and the same kind as the
         first: the question `sqlplan.check_same_columns()` asks, answered off
-        the tables sqlite really holds (name and declared type, in order).
+        the tables sqlite really holds. Name, declared type and nullability
+        (`notnull`) are sqlite's own; charset, collation and `extra` sqlite
+        does not keep per column, so they come from `declared` and are the
+        client's `NULL` otherwise. Their use in the comparison is also proved
+        at the query level, without this stand-in.
         """
         asked = self._COLUMNS.fullmatch(statement)
         if asked is None:
             return super().query(
                 container, client, password, schema, statement, wsl_distro=wsl_distro
             )
-        rows = self.rows(asked.group(1), f"PRAGMA table_info({asked.group(2)})")
-        return "".join(f"{row[1]}\t{row[2]}\n" for row in rows)
+        wanted = [name.strip() for name in asked.group(1).split(",")]
+        table = asked.group(3)
+        lines = []
+        for row in self.rows(asked.group(2), f"PRAGMA table_info({table})"):
+            more = self.declared.get((table, row[1]), {})
+            known = {
+                "column_name": row[1],
+                "column_type": row[2],
+                "is_nullable": "NO" if row[3] else "YES",
+                "character_set_name": more.get("character_set_name", "NULL"),
+                "collation_name": more.get("collation_name", "NULL"),
+                "extra": more.get("extra", ""),
+            }
+            # Exactly the fields asked, in the order asked: a field this stand-in
+            # was never told about is a KeyError, not a quiet blank.
+            lines.append("\t".join(known[name] for name in wanted) + "\n")
+        return "".join(lines)
 
 
 def marked_by_a_release(db: _TortoiseDb) -> None:
@@ -917,3 +941,125 @@ def test_a_copy_whose_columns_cannot_be_read_is_not_called_built_right(tmp_path:
         (run,), container="tortoise-db", client="mariadb", password="pw", sql_query=refuses
     )
     assert len(failed) == 1 and "could not be read" in failed[0]
+
+
+# -- round 3 (Codex): what "built like" compares --------------------------------
+
+COPY_COLUMNS = "guid INT, bag INT, slot INT, item INT PRIMARY KEY, item_template INT"
+"""`character_inventory`'s columns as the stand-in creates them, so a fixture differs in ONE way."""
+
+
+def _refused_and_not_recorded(db: _TortoiseDb, tmp_path: Path) -> str:
+    engine = an_engine(db)
+    options = folder(tmp_path)
+    with pytest.raises(InstallerError) as caught:
+        list(engine.apply_corrections(engine.correction_check(options), options))
+    assert engine.correction_check(options).offered == (PHASE,), "the step was recorded"
+    return str(caught.value)
+
+
+def test_a_copy_that_differs_only_in_nullability_is_refused_and_nothing_recorded(
+    tmp_path: Path,
+) -> None:
+    """`NOT NULL` where the original allows NULL: the core's copy fails on the first NULL.
+
+    The single rule broken: `guid` is `NOT NULL`; name, type and order match.
+
+    Catches `is_nullable` left out of the comparison (round 2 compared name and type only).
+    """
+    db = _TortoiseDb(tmp_path)
+    marked_by_a_release(db)
+    db.exec_stdin_raw(
+        "tw_char",
+        "CREATE TABLE character_inventory_copy "
+        f"({COPY_COLUMNS.replace('guid INT', 'guid INT NOT NULL')});\n",
+    )
+    message = _refused_and_not_recorded(db, tmp_path)
+    assert "column 1 (`guid`) has nullable `NO` where character_inventory has `YES`" in message
+
+
+def test_a_copy_that_differs_only_in_collation_is_refused_and_nothing_recorded(
+    tmp_path: Path,
+) -> None:
+    """Same columns, same nullability, one column's collation different: text is converted.
+
+    Catches `collation_name` left out of the comparison.
+    """
+    db = _TortoiseDb(tmp_path)
+    marked_by_a_release(db)
+    db.exec_stdin_raw("tw_char", f"CREATE TABLE character_inventory_copy ({COPY_COLUMNS});\n")
+    db.declared[("character_inventory_copy", "item_template")] = {"collation_name": "utf8mb4_bin"}
+    message = _refused_and_not_recorded(db, tmp_path)
+    assert "(`item_template`) has collation `utf8mb4_bin` where character_inventory has `NULL`" in (
+        message
+    )
+
+
+def test_a_copy_built_exactly_like_the_original_is_kept_and_recorded(tmp_path: Path) -> None:
+    """The negative to the two above: every field alike, the step lands over it.
+
+    Catches a comparison that refuses a table the stand-in reads identically
+    (a field read from one table and not the other).
+    """
+    db = _TortoiseDb(tmp_path)
+    marked_by_a_release(db)
+    db.exec_stdin_raw("tw_char", f"CREATE TABLE character_inventory_copy ({COPY_COLUMNS});\n")
+    engine = an_engine(db)
+    options = folder(tmp_path)
+    list(engine.apply_corrections(engine.correction_check(options), options))
+    assert engine.correction_check(options).state == "current"
+
+
+ORIGINAL_ROW = ("guid", "int(10) unsigned", "NO", "NULL", "NULL", "")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "said"),
+    [
+        ("column_name", "owner", "column 1 is `owner int(10) unsigned`"),
+        ("column_type", "bigint(20)", "column 1 is `guid bigint(20)`"),
+        ("is_nullable", "YES", "has nullable `YES`"),
+        ("character_set_name", "latin1", "has character set `latin1`"),
+        ("collation_name", "latin1_swedish_ci", "has collation `latin1_swedish_ci`"),
+        ("extra", "auto_increment", "has extra `auto_increment`"),
+    ],
+)
+def test_every_compared_field_is_asked_for_and_a_difference_in_it_alone_is_a_failure(
+    field: str, value: str, said: str
+) -> None:
+    """At the query level, with no stand-in: the SQL selects each field and the comparison uses it.
+
+    The one place charset and `extra` -- which sqlite cannot hold -- are proved
+    without a translation in between. MariaDB's own spelling of a row, as the
+    batch client prints it.
+
+    Catches a field dropped from `COLUMN_FIELDS` (the query no longer asks it)
+    and a field asked for and then not compared.
+    """
+    from yulon.catalog.families import sqlplan
+
+    asked: list[str] = []
+    index = sqlplan.COLUMN_FIELDS.index(field)
+    copy_row = ORIGINAL_ROW[:index] + (value,) + ORIGINAL_ROW[index + 1 :]
+
+    def query(
+        container: str, client: str, password: str, schema: str | None, statement: str, **_: object
+    ) -> str:
+        asked.append(statement)
+        row = copy_row if "table_name='character_inventory_copy'" in statement else ORIGINAL_ROW
+        return "\t".join(row) + "\n"
+
+    run = sqlplan.PhaseRun(_phase(), "tw_char", None, STATEMENT, False, "statement 1")
+    failed = sqlplan.check_same_columns(
+        (run,), container="tortoise-db", client="mariadb", password="pw", sql_query=query
+    )
+    assert asked and all(f" {field}" in text.split(" FROM ")[0] for text in asked), asked
+    assert len(failed) == 1 and said in failed[0], failed
+    same = sqlplan.check_same_columns(
+        (run,),
+        container="tortoise-db",
+        client="mariadb",
+        password="pw",
+        sql_query=lambda *a, **k: "\t".join(ORIGINAL_ROW) + "\n",
+    )
+    assert same == ()

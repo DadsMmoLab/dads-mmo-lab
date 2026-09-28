@@ -949,6 +949,32 @@ def check_update_levels(
     return tuple(failed)
 
 
+COLUMN_FIELDS = (
+    "column_name",
+    "column_type",
+    "is_nullable",
+    "character_set_name",
+    "collation_name",
+    "extra",
+)
+"""What `check_same_columns()` compares for each column, in `ordinal_position` order (T159).
+
+Name and type were all round 2 compared, and on MariaDB `column_type` carries
+neither nullability nor charset or collation (Codex, round 3): a copy that
+declares `NOT NULL` where the original allows NULL takes the step's `IF NOT
+EXISTS`, and the core's `INSERT ... SELECT *` then fails on the first NULL; a
+different collation converts or refuses the text it copies. `extra` is where a
+generated column or `auto_increment` shows."""
+
+_FIELD_WORDS = {
+    "is_nullable": "nullable",
+    "character_set_name": "character set",
+    "collation_name": "collation",
+    "extra": "extra",
+}
+"""How the refusal names each field past the name and type, which it spells as SQL does."""
+
+
 def _columns(
     schema: str,
     table: str,
@@ -958,15 +984,20 @@ def _columns(
     password: str,
     sql_query: SqlQuery,
     wsl_distro: str | None,
-) -> tuple[tuple[str, str], ...]:
-    """`(name, type)` of each column of `schema`.`table`, in order; empty when there is no table."""
+) -> tuple[tuple[str, ...], ...]:
+    """`COLUMN_FIELDS` of each column of `schema`.`table`, in order; empty when there is no table.
+
+    Each value as the client prints it -- a NULL is the word `NULL` in batch
+    mode -- and compared as printed: two columns with no charset read alike.
+    """
     query = (
-        "SELECT column_name, column_type FROM information_schema.columns WHERE table_schema="
+        f"SELECT {', '.join(COLUMN_FIELDS)} FROM information_schema.columns WHERE table_schema="
         f"{_quoted(schema)} AND table_name={_quoted(table)} ORDER BY ordinal_position"
     )
     answer = sql_query(container, client, password, schema, query, wsl_distro=wsl_distro)
+    width = len(COLUMN_FIELDS)
     rows = [line.split("\t") for line in answer.splitlines() if line.strip()]
-    return tuple((row[0].strip(), row[1].strip() if len(row) > 1 else "") for row in rows)
+    return tuple(tuple(value.strip() for value in (row + [""] * width)[:width]) for row in rows)
 
 
 def check_same_columns(
@@ -984,8 +1015,9 @@ def check_same_columns(
     over a `copy` that is already there whatever it looks like, so a step
     judged by its statement alone is called landed over a table the core's
     `INSERT INTO copy SELECT * FROM original` then fails on. The question is
-    the one that copy asks: the same columns, of the same types, in the same
-    order (`information_schema.columns`, by `ordinal_position`).
+    the one that copy asks: the same columns in the same order, each alike in
+    every field of `COLUMN_FIELDS` (`information_schema.columns`, by
+    `ordinal_position`) -- name, type, nullability, charset, collation, extra.
 
     Returns one sentence per table that is not, naming it and the first place
     it differs and saying what to do; empty when every one checks out. A table
@@ -1035,15 +1067,25 @@ def check_same_columns(
 
 
 def _first_difference(
-    mine: Sequence[tuple[str, str]], theirs: Sequence[tuple[str, str]], original: str
+    mine: Sequence[tuple[str, ...]], theirs: Sequence[tuple[str, ...]], original: str
 ) -> str:
-    """Where two column lists first part, in words: position, name and type on each side."""
+    """Where two column lists first part, in words: the position, and what differs there.
+
+    A different name or type reads as the two declarations; any other field
+    reads as that field's value on each side (`_FIELD_WORDS`).
+    """
     for position, (have, want) in enumerate(zip(mine, theirs, strict=False), start=1):
-        if have != want:
+        if have[:2] != want[:2]:
             return (
                 f"column {position} is `{have[0]} {have[1]}` where {original} has "
                 f"`{want[0]} {want[1]}`"
             )
+        for index, field in enumerate(COLUMN_FIELDS[2:], start=2):
+            if have[index] != want[index]:
+                return (
+                    f"column {position} (`{have[0]}`) has {_FIELD_WORDS[field]} "
+                    f"`{have[index]}` where {original} has `{want[index]}`"
+                )
     return f"it has {len(mine)} columns where {original} has {len(theirs)}"
 
 

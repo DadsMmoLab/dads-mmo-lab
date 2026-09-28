@@ -586,10 +586,10 @@ class SqlPhase(_Strict):
         default=(),
         description=(
             "`(table, original)` pairs: after this phase, each `table` in the phase's `into` "
-            "schema must have exactly `original`'s columns: the same names and types, in the "
-            "same order. Asked by the corrections press before it records the step; a step "
-            "whose check fails is not "
-            "recorded, and the press says which table and what to do. Not with "
+            "schema must have exactly `original`'s columns, in the same order: name, type, "
+            "nullability, charset, collation and `extra` (`sqlplan.COLUMN_FIELDS`). Asked by "
+            "the corrections press before it records the step; a step whose check fails is "
+            "not recorded, and the press says which table and what to do. Not with "
             "`rerun_on_marked`, whose route does not ask it. For a `CREATE TABLE IF NOT "
             "EXISTS ... LIKE` step, which leaves a "
             "table that is already there as it is -- including one somebody made by hand that "
