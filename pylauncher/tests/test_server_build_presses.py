@@ -51,9 +51,11 @@ STALE = re.compile(
     # A capital "Rebuild" is a press name, and the only true ones are the label
     # itself and the controls that are NOT a server build: the "Rebuild
     # pending" chip, T144's "Rebuild random bots…" and its dialog ("Rebuild the
-    # random bots?", "Rebuild without a backup"), and a dialog TITLE naming
-    # what is rebuilt ("Rebuild {…}?").
+    # random bots?", "Rebuild without a backup"), T162's "Rebuild the bot
+    # dashboard" on the Bots tab and its question ("Rebuild it now?"), and a
+    # dialog TITLE naming what is rebuilt ("Rebuild {…}?").
     r"|\bRebuild\b(?! the server…| pending| random bots| the random bots| without a backup"
+    r"| the bot dashboard| it now\?"
     r"| \{…\})"
     # "Update" alone is the per-module pull's own button (`apply.py` sends the
     # player back to it), and "Update now" is the app's self-update; any other

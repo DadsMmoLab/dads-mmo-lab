@@ -28,6 +28,18 @@ container, so the switch never ends half on.
 out, puts the three keys back to what the backup says and removes the image. The
 world keeps sending to an address nobody listens on until it restarts, which is
 harmless; the tab offers the restart.
+
+**After an update** the image is rebuilt from the module the update moved
+(`after_update()`). If that rebuild fails after the module moved, the old
+container is removed rather than left running: its daemon speaks the old
+module's datagram protocol and nothing on either side says so (T162, measured
+on TortoiseBots 632e1b63 -> ad9d71fb, protocol 4 -> 5: the daemon never reads
+the datagram's `v`, and the module only sends). The switch stays On -- the
+block and the three keys are the player's choice -- and `files.owe_rebuild()`
+records the debt (the server folder, else Yu'lon's config dir, else memory),
+which the Bots tab shows beside a "Rebuild the bot dashboard" press and the
+server's Start honours. A container that will not go, or whose state cannot be
+read back, is recorded as possibly still running, and the tab says so.
 """
 
 from __future__ import annotations
@@ -55,6 +67,9 @@ DOCKERFILE_DIR = "tools/observability"
 """Where the bots module keeps the daemon's Dockerfile (upstream's layout since it shipped)."""
 
 Press = Callable[[threading.Event | None], Iterator[str]]
+
+REBUILD_PRESS = "Rebuild the bot dashboard"
+"""The Bots tab's button for a dashboard stopped until it is rebuilt (T162)."""
 
 START_HOOK_TIMEOUT_S = 120.0
 """How long the server's Start waits for the dashboard's `compose up` before going on without it.
@@ -122,6 +137,14 @@ class Dashboard:
             )
         if cancel is not None and cancel.is_set():
             raise SwitchError("Stopped before anything was changed. The dashboard is still off.")
+        try:
+            # A record an interrupted Off left behind would keep the next
+            # Start from bringing this new dashboard up (T162).
+            files.forget_rebuild(self.server_dir)
+        except OSError as exc:
+            raise SwitchError(
+                f"{files.REBUILD_OWED_FILE} could not be removed ({exc}). Nothing was changed."
+            ) from exc
 
         self._ensure_secret()
         world_was_up = self.world_running()
@@ -232,6 +255,10 @@ class Dashboard:
                 ) from exc
             yield f"Took the dashboard out of {base.name}."
         conf.with_name(conf.name + files.CONF_BACKUP_SUFFIX).unlink(missing_ok=True)
+        try:
+            files.forget_rebuild(self.server_dir)
+        except OSError as exc:  # the block is gone, so it reads Off; the next On clears it
+            logger.warning(f"could not remove {files.REBUILD_OWED_FILE}: {exc}")
         said = docker.remove_image(
             files.image_ref(self.entry, self.server_dir), wsl_distro=self.wsl_distro
         )
@@ -264,6 +291,148 @@ class Dashboard:
         if after != now:
             files.write_keeping_mode(conf, after)
         yield f"Put the bots module's telemetry settings back ({conf.name})."
+
+    # -- the rebuild (T162) -------------------------------------------------
+
+    def rebuild(self, cancel: threading.Event | None = None) -> Iterator[str]:
+        """The Bots tab's "Rebuild the bot dashboard": the update's rebuild, run again.
+
+        The same build from the module checkout there now, the container
+        recreated, and the world restarted if it is running -- the container was
+        removed, so what address the world has for it is unknown. Raises
+        `SwitchError` when it fails, having stopped the dashboard again.
+        """
+        if not files.is_on(self.server_dir):
+            raise SwitchError("The bot dashboard is off, so there is nothing to rebuild.")
+        yield "Rebuilding the bot dashboard from the bots module this server has now…"
+        failed = yield from self._rebuild(cancel)
+        if failed is not None:
+            yield from self._stop_until_rebuilt(failed.why)
+            raise SwitchError(
+                f"The dashboard could not be rebuilt ({failed.why}). Press {REBUILD_PRESS} "
+                "to try again."
+            )
+
+    def _rebuild(self, cancel: threading.Event | None) -> Generator[str, None, _Failed | None]:
+        """Build, recreate, restart the world if the address moved. None, or what went wrong.
+
+        Nothing is stopped here on a failure: whether the old container may go
+        on running is the caller's question.
+        """
+        service = files.service(self.entry)
+        distro = self.wsl_distro
+        built = False
+        try:
+            context = self._context()
+            run = yield from _streamed(
+                lambda sink: docker.build_image(
+                    context,
+                    files.image_ref(self.entry, self.server_dir),
+                    wsl_distro=distro,
+                    sink=sink,
+                    cancel=cancel,
+                ),
+                cancel=cancel,
+            )
+            if run.returncode == docker.CANCELLED_RETURNCODE:
+                return _Failed("the build was stopped")
+            if run.returncode != 0:
+                return _Failed(
+                    f"the build failed, exit {run.returncode}; its last words were: "
+                    f"{docker.last_words(run.tail, from_build=True)}"
+                )
+            built = True
+            before = docker.container_ip(service, wsl_distro=distro)
+            docker.compose_up_service(
+                self.server_dir, service, force_recreate=True, wsl_distro=distro
+            )
+            after = docker.container_ip(service, wsl_distro=distro)
+        except (SwitchError, docker.DockerCommandError, OSError) as exc:
+            return _Failed(str(exc), built=built)
+        try:
+            files.forget_rebuild(self.server_dir)
+        except OSError as exc:
+            yield (
+                f"The note that the dashboard needed rebuilding could not be removed ({exc}), "
+                f"so the next server Start leaves it stopped. Remove {files.REBUILD_OWED_FILE} "
+                "from the server folder."
+            )
+        yield "The dashboard is running the updated version."
+        if before is not None and before == after:
+            return None
+        if self.world_running() is not True:
+            return None
+        yield "The dashboard came back on a new address, so the world is restarted to find it…"
+        yield from self._restart()
+        return None
+
+    def _stop_until_rebuilt(self, why: str) -> Iterator[str]:
+        """Record the debt, stop the old container, read that it stopped. Fails closed.
+
+        The record first, saying the old one may still run: it is what keeps
+        the server's Start from bringing the old image back, and a stop that
+        then fails, or cannot be read back, leaves it saying the worse thing.
+        Only a read that found the container gone or exited rewrites it to
+        "stopped" (Codex, T162 round 2).
+        """
+        where, problem = files.owe_rebuild(self.server_dir, why, old_may_run=True)
+        if where == "config":
+            yield (
+                f"The server folder would not take the note that the dashboard needs rebuilding "
+                f"({problem}), so Yu'lon keeps it in its own settings instead."
+            )
+        elif where == "memory":
+            yield (
+                "The note that the dashboard needs rebuilding could not be saved anywhere "
+                f"({problem}). Until Yu'lon is closed, the server's Start leaves the dashboard "
+                f"stopped; after that, the next Start brings the old one back. Press "
+                f"{REBUILD_PRESS}, or switch the dashboard off, before closing Yu'lon."
+            )
+        stopped = yield from self._stop_old()
+        if not stopped:
+            yield (
+                "The old dashboard may still be running, made for the old bots module, so what "
+                f"it shows may be wrong. Press {REBUILD_PRESS} on the Bots tab to replace it, "
+                "or switch the dashboard off."
+            )
+            return
+        files.owe_rebuild(self.server_dir, why, old_may_run=False)
+        yield "Stopped the old dashboard: it was made for the old bots module."
+        yield (
+            "The bot dashboard is still switched on, but stays stopped until it is rebuilt. "
+            f"Press {REBUILD_PRESS} on the Bots tab to try again."
+        )
+
+    def _stop_old(self) -> Generator[str, None, bool]:
+        """Compose's removal, else `docker stop`, else `docker kill`; then a read.
+
+        True only when that read found the container gone or exited.
+        """
+        service = files.service(self.entry)
+        distro = self.wsl_distro
+        try:
+            docker.compose_remove_service(self.server_dir, service, wsl_distro=distro)
+        except docker.DockerCommandError as exc:
+            logger.warning(f"compose could not remove the out-of-date dashboard: {exc}")
+            yield f"Compose could not remove the old dashboard ({exc}); stopping it by name…"
+            try:
+                docker.stop_containers([service], wsl_distro=distro)
+            except docker.DockerCommandError as stop_exc:
+                logger.warning(f"docker stop {service} failed: {stop_exc}")
+                yield f"It would not stop ({stop_exc}); killing it…"
+                try:
+                    docker.kill_container(service, wsl_distro=distro)
+                except docker.DockerCommandError as kill_exc:
+                    logger.warning(f"docker kill {service} failed: {kill_exc}")
+                    yield f"It could not be killed either ({kill_exc})."
+        running = _running(service, distro)
+        if running is None:
+            yield "Docker would not say whether the old dashboard is still running."
+        return running is False
+
+    def _module_head(self) -> str | None:
+        dest = botpool.module_dir(self.entry, self.server_dir)
+        return None if dest is None else botpool.head_sha(dest, wsl_distro=self.wsl_distro)
 
     # -- the restart ------------------------------------------------------
 
@@ -379,6 +548,28 @@ def _streamed(
     return outcome[0]
 
 
+@dataclass(frozen=True)
+class _Failed:
+    """Why a rebuild did not run, and whether the image was built before it stopped (T162)."""
+
+    why: str
+    built: bool = False
+
+
+_DOWN = ("exited", "dead", "created")
+"""`docker.world_running()`'s terminal statuses: nothing is running in the container."""
+
+
+def _running(container: str, wsl_distro: str | None) -> bool | None:
+    """Is it running? A real read: False only for a container gone or exited; None = unknown."""
+    state = docker.container_state(container, wsl_distro=wsl_distro)
+    if state.missing:
+        return False
+    if not state.status:
+        return None
+    return state.status not in _DOWN
+
+
 # -- the Start hook and the update route -----------------------------------------
 
 
@@ -391,9 +582,14 @@ def start_if_on(entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
     switched on stays down after the next Stop and Start. And the conf is
     re-asserted because a writer this app may run between two starts (the
     Tuning tab's Reset to default, T94) writes the catalog's table back: the
-    switch is the compose block, and the conf follows it.
+    switch is the compose block, and the conf follows it. A dashboard that owes
+    a rebuild (T162) gets its keys and is not started: its image was made for
+    the bots module as it was before the last update.
     """
-    if files.conf_file(entry) is None or not files.is_on(server_dir):
+    if files.conf_file(entry) is None:
+        return
+    state = files.state(server_dir)
+    if not state.on:
         return
     conf = files.conf_path(entry, server_dir)
     try:
@@ -403,6 +599,13 @@ def start_if_on(entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
             if after != now:
                 files.write_keeping_mode(conf, after)
                 logger.info(f"put the bot dashboard's keys back into {conf}")
+        if state.rebuild_owed:
+            # `compose up` would recreate it from the image made for the old
+            # bots module (T162). The keys stay: the switch is still On.
+            logger.warning(
+                f"the bot dashboard stays stopped until it is rebuilt: {state.rebuild_why}"
+            )
+            return
         docker.compose_up_service(
             server_dir, files.service(entry), timeout=START_HOOK_TIMEOUT_S, wsl_distro=wsl_distro
         )
@@ -424,44 +627,46 @@ def after_update(
     the module checkout the update just moved. It is rebuilt and the container
     recreated; if that gave the container a new address, the world -- which
     resolved the old one when it loaded -- is restarted.
+
+    **A rebuild that fails after the module moved stops the dashboard** (T162).
+    The old image speaks the old module's datagram protocol, and neither side
+    says when they disagree, so the container is removed and the debt recorded
+    for the Bots tab's "Rebuild the bot dashboard". A head nobody could read
+    counts as moved, `botpool.after_update()`'s rule. When the module did not
+    move, the running image was built from this same module and is kept --
+    unless an earlier failure had already stopped it, which stays owed.
     """
+    before = dashboard._module_head() if files.is_on(dashboard.server_dir) else None
     yield from update(cancel)
     if not files.is_on(dashboard.server_dir):
         return
-    entry, server_dir, distro = dashboard.entry, dashboard.server_dir, dashboard.wsl_distro
-    service = files.service(entry)
+    moved = before is None or before != dashboard._module_head()
     yield "Rebuilding the bot dashboard from the updated bots module…"
-    try:
-        context = dashboard._context()
-        run = yield from _streamed(
-            lambda sink: docker.build_image(
-                context,
-                files.image_ref(entry, server_dir),
-                wsl_distro=distro,
-                sink=sink,
-                cancel=cancel,
-            ),
-            cancel=cancel,
+    failed = yield from dashboard._rebuild(cancel)
+    if failed is None:
+        return
+    yield f"The dashboard could not be rebuilt ({failed.why})."
+    if moved or files.rebuild_owed(dashboard.server_dir) is not None:
+        yield from dashboard._stop_until_rebuilt(failed.why)
+        return
+    if not failed.built:
+        yield (
+            "The bots module did not move, so the dashboard keeps running the version it had, "
+            "which was built from this same module."
         )
-        if run.returncode != 0:
-            yield (
-                "The dashboard could not be rebuilt, so it keeps running the version it had. "
-                f"Its last words were: {docker.last_words(run.tail, from_build=True)}"
-            )
-            return
-        before = docker.container_ip(service, wsl_distro=distro)
-        docker.compose_up_service(server_dir, service, force_recreate=True, wsl_distro=distro)
-        after = docker.container_ip(service, wsl_distro=distro)
-    except (SwitchError, docker.DockerCommandError, OSError) as exc:
-        yield f"The dashboard could not be rebuilt ({exc}); switch it off and on to try again."
         return
-    yield "The dashboard is running the updated version."
-    if before is not None and before == after:
-        return
-    if dashboard.world_running() is not True:
-        return
-    yield "The dashboard came back on a new address, so the world is restarted to find it…"
-    yield from dashboard._restart()
+    # Built from the same module, then the recreate failed: the container may
+    # be the old one, the new one, or gone. Read it rather than guess (T162).
+    running = _running(files.service(dashboard.entry), dashboard.wsl_distro)
+    if running is True:
+        yield "The dashboard is still running, built from this same bots module."
+    elif running is False:
+        yield (
+            "The dashboard is not running now. The bots module did not move, so the next "
+            "server Start starts it again."
+        )
+    else:
+        yield "Docker would not say whether the dashboard is running."
 
 
 def wrap_route(route: LatestRoute | None, dashboard: Dashboard | None) -> LatestRoute | None:

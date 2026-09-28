@@ -2829,6 +2829,17 @@ def stop_containers(
         _run_docker_stop(name, wsl_distro=wsl_distro)
 
 
+def kill_container(container: str, *, wsl_distro: str | None = None) -> None:
+    """`docker kill <container>`: the last resort after a stop that failed (T162).
+
+    Raises `DockerCommandError` on a non-zero exit, a container that is not
+    running included: the caller reads the container's state afterwards
+    rather than trusting any exit code, so the words of Docker's refusal need
+    not be matched here.
+    """
+    _run(["kill", container], wsl_distro=wsl_distro)
+
+
 def stop_staged(
     spec: ContainerSpec,
     server_dir: Path,
