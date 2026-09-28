@@ -50,7 +50,7 @@ from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
-from yulon.catalog.native import Secrets
+from yulon.catalog.native import INSTALL_AGAIN_HERE, Secrets
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -107,8 +107,10 @@ NO_PASSWORD = (
 )
 IMAGE_GONE = (
     "the server's image ({image}) is not on this machine any more, and the default files are "
-    "read out of it: rebuild the server first, then reset"
+    "read out of it. To build it again, " + INSTALL_AGAIN_HERE + "; then reset"
 )
+"""T164: not "rebuild the server first" -- Rebuild keeps the image it compiles over
+as a rollback and refuses when it is gone (`native._keep_rollback()`)."""
 DOCKER_SILENT = (
     "Docker did not answer, so the server's image could not be read. Start Docker and try again"
 )
