@@ -1071,3 +1071,303 @@ def test_a_reset_with_the_switch_on_keeps_the_three_keys(
         TORTOISE, server_dir, [file], seams=_seams(FakeImage(TEMPLATES["wow-tortoise"]))
     )
     assert "AiPlayerbot.Observability = 0" in (server_dir / file).read_text(encoding="utf-8")
+
+
+# -- T162: a rebuild that fails after the update moved the module ---------------------------
+#
+# Measured on TortoiseBots 632e1b63 -> ad9d71fb (protocol 4 -> 5): the old daemon never
+# reads the datagram's `v`, so it keeps parsing heartbeats and bot batches, and silently
+# drops the renamed stuck anomaly (`BOT_STUCK` -> `STUCK` is not in its accepted set). The
+# module never hears from the daemon (UDP, send only), so nothing refuses the skew and
+# nothing says it happened. A later bump need not be that mild, so a dashboard that could
+# not be rebuilt from the module the update moved is stopped until it can be.
+
+
+def _moving_update(heads: dict[str, str]) -> Callable[[threading.Event | None], Iterator[str]]:
+    """An update press that moves the bots module's checkout, as the real one does."""
+
+    def press(_cancel: threading.Event | None) -> Iterator[str]:
+        heads["module"] = "ad9d71fb"
+        yield "engine: updated"
+
+    return press
+
+
+def _heads(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """The module checkout's commit, as `botpool.head_sha()` reads it; a moving press changes it."""
+    from yulon.controller_wow_tortoise import botpool
+
+    heads = {"module": "632e1b63"}
+    monkeypatch.setattr(botpool, "head_sha", lambda _dest, **_kw: heads["module"])
+    return heads
+
+
+def test_a_rebuild_that_fails_after_the_update_moved_the_module_stops_the_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the real factory's wrapped update press, with the dashboard's build failing.
+
+    The switch stays On (the block and the three keys: the player's intent), the
+    container is removed rather than left on the old protocol, and the files
+    record that a rebuild is owed.
+    """
+    from yulon import install_wiring
+    from yulon.controller_wow_tortoise import botpool
+    from yulon.ui.controller_view import ControllerServices
+
+    heads = _heads(monkeypatch)
+
+    class Engine:
+        def update_to_latest(self, _options: object, **_kw: object) -> Iterator[str]:
+            yield from _moving_update(heads)(None)
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry, **_kw: Engine())
+    monkeypatch.setattr(botpool, "adopt_over", lambda *_a, **_kw: botpool.Adopted(0))
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    lifecycle: list[str] = []
+    monkeypatch.setattr(
+        tortoise_controller.TortoiseController, "stop", lambda _self: lifecycle.append("stop")
+    )
+    monkeypatch.setattr(
+        tortoise_controller.TortoiseController, "start", lambda _self: lifecycle.append("start")
+    )
+    services = ControllerServices.for_entry(TORTOISE, server_dir)
+    seam = services.bot_dashboard
+    assert isinstance(seam, botdash.Dashboard)
+    list(seam.switch_on(lan=False))
+    fake.calls.clear()
+    lifecycle.clear()
+    on_disk = (_base(server_dir), _conf(server_dir).read_text(encoding="utf-8"))
+    fake.build_code = 1
+    route = services.update_to_latest
+    assert route is not None
+
+    said = list(route.press(None))
+
+    image = files.image_ref(TORTOISE, server_dir)
+    assert fake.calls == [
+        f"build observability {image}",
+        "rm tortoise-observability",
+    ], "the old dashboard must not be left running on the old protocol"
+    assert (_base(server_dir), _conf(server_dir).read_text(encoding="utf-8")) == on_disk
+    state = files.state(server_dir)
+    assert state.on and state.rebuild_owed
+    assert "exit 1" in state.rebuild_why
+    assert any(botdash.REBUILD_PRESS in line for line in said), said
+    assert lifecycle == []
+
+
+def test_a_rebuild_that_fails_when_the_module_did_not_move_keeps_the_running_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its image was built from this same module, so it still understands the world."""
+    _heads(monkeypatch)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.calls.clear()
+    fake.build_code = 1
+
+    said = list(botdash.after_update(_update, None, dashboard=switch))
+
+    assert fake.calls == [f"build observability {files.image_ref(TORTOISE, server_dir)}"]
+    assert not files.state(server_dir).rebuild_owed
+    assert "keeps running" in said[-1]
+
+
+def test_a_failed_rebuild_that_was_already_owed_stays_owed_when_the_module_did_not_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An earlier failure stopped it; a second update that moves nothing does not start it."""
+    heads = _heads(monkeypatch)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = 1
+    list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+    fake.calls.clear()
+
+    said = list(botdash.after_update(_update, None, dashboard=switch))
+
+    assert "up tortoise-observability --force-recreate" not in fake.calls
+    assert files.state(server_dir).rebuild_owed
+    assert not any("keeps running" in line for line in said), "it is not running"
+    assert any(botdash.REBUILD_PRESS in line for line in said), said
+
+
+def test_the_start_hook_does_not_bring_back_a_dashboard_that_owes_a_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start's `compose up` would recreate it from the old image; the keys still go back."""
+    heads = _heads(monkeypatch)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = 1
+    list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+    _conf(server_dir).write_text(CONF_TEXT, encoding="utf-8")
+    order: list[str] = []
+    monkeypatch.setattr(tortoise_controller.TortoiseController, "port_conflicts", lambda _self: [])
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_kw: order.append("start_staged"))
+    monkeypatch.setattr(
+        docker, "compose_up_service", lambda *_a, **_kw: order.append("dashboard up")
+    )
+
+    tortoise_controller.controller_for(server_dir).start()
+
+    assert order == ["start_staged"]
+    assert "AiPlayerbot.Observability = 1" in _conf(server_dir).read_text(encoding="utf-8")
+
+
+def test_the_rebuild_press_retries_the_same_build_then_starts_it_and_restarts_the_world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The container was removed, so the world's address for it is unknown: it is restarted."""
+    heads = _heads(monkeypatch)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    lifecycle = _Lifecycle()
+    switch = _switch(server_dir, lifecycle)
+    list(switch.switch_on(lan=False))
+    fake.build_code = 1
+    list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+    fake.calls.clear()
+    lifecycle.calls.clear()
+    fake.build_code = 0
+    fake.ips = iter([None, "10.0.0.5"])
+
+    list(switch.rebuild(None))
+
+    image = files.image_ref(TORTOISE, server_dir)
+    assert fake.calls == [
+        f"build observability {image}",
+        "up tortoise-observability --force-recreate",
+    ]
+    assert lifecycle.calls == ["stop", "start"]
+    state = files.state(server_dir)
+    assert state.on and not state.rebuild_owed
+
+
+def test_a_rebuild_press_that_fails_again_stays_owed_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    heads = _heads(monkeypatch)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = 1
+    list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+    fake.calls.clear()
+    fake.build_code = 2
+
+    with pytest.raises(botdash.SwitchError, match="exit 2"):
+        list(switch.rebuild(None))
+
+    assert "up tortoise-observability --force-recreate" not in fake.calls
+    state = files.state(server_dir)
+    assert state.rebuild_owed and "exit 2" in state.rebuild_why
+
+
+def test_switching_off_a_dashboard_that_owes_a_rebuild_forgets_the_debt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off is off: no record is left in the server folder to be read by a later On."""
+    heads = _heads(monkeypatch)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = 1
+    list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+    assert files.state(server_dir).rebuild_owed
+
+    list(switch.switch_off())
+
+    assert files.rebuild_owed(server_dir) is None
+    assert not (server_dir / files.REBUILD_OWED_FILE).exists()
+    fake.build_code = 0
+    list(switch.switch_on(lan=False))
+    assert files.state(server_dir) == files.State(on=True)
+
+
+def test_switching_on_over_a_leftover_debt_clears_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Off that stopped between the block and the record leaves the record behind alone."""
+    server_dir = _install(tmp_path)
+    _Docker(monkeypatch)
+    files.owe_rebuild(server_dir, "left over")
+
+    list(_switch(server_dir).switch_on(lan=False))
+
+    assert files.state(server_dir) == files.State(on=True)
+
+
+class _OwedSeam(_Seam):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on = True
+        self.owed = True
+
+    def state(self) -> files.State:
+        self._note("state")
+        return files.State(on=self.on, rebuild_owed=self.owed, rebuild_why="exit 1")
+
+    def rebuild(self, cancel: threading.Event | None = None) -> Iterator[str]:
+        self._note("rebuild")
+        self.owed = False
+        yield "rebuilt"
+
+
+def test_the_tab_says_the_dashboard_owes_a_rebuild_and_its_press_runs_it(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seam = _OwedSeam()
+    view = _view(qapp, tmp_path, seam)
+    view.refresh_bot_dashboard()
+
+    assert not view.dashboard_stale.isHidden() and "exit 1" in view.dashboard_stale.text()
+    assert not view.rebuild_dashboard_button.isHidden()
+    assert view.rebuild_dashboard_button.text() == botdash.REBUILD_PRESS
+    assert view.rebuild_dashboard_button.isEnabled()
+    assert not view.open_dashboard_button.isEnabled(), "nothing is listening to open"
+    assert view.dashboard_switch.isChecked(), "the switch is still On"
+
+    titles: list[str] = []
+
+    def yes(_parent: object, title: str, *_a: object) -> object:
+        titles.append(title)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", yes)
+    view.rebuild_dashboard_button.click()
+    _wait(view, qapp)
+
+    assert titles == ["Rebuild the bot dashboard?"]
+    assert "rebuild" in seam.calls
+    assert seam.threads[seam.calls.index("rebuild")] is not threading.main_thread()
+    assert view.dashboard_stale.isHidden()
+    assert view.rebuild_dashboard_button.isHidden()
+    assert view.open_dashboard_button.isEnabled()
+
+
+def test_the_tab_rereads_the_dashboard_when_a_server_update_finishes(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The update press runs in the server-build panel, not the dashboard's own."""
+    seam = _OwedSeam()
+    seam.owed = False
+    view = _view(qapp, tmp_path, seam)
+    view.refresh_bot_dashboard()
+    assert view.rebuild_dashboard_button.isHidden()
+    seam.owed = True
+
+    view.rebuild_log.run(lambda: iter(["engine: updated"]), title="Updating the server")
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update finished")
+
+    assert not view.rebuild_dashboard_button.isHidden()

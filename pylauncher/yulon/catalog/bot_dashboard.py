@@ -86,6 +86,15 @@ MIN_GM_LEVEL = 2
 CONF_BACKUP_SUFFIX = ".before-dashboard"
 """The copy of the conf the first switch-on takes, and the switch-off puts the keys back from."""
 
+REBUILD_OWED_FILE = ".yulon-bot-dashboard-rebuild-owed"
+"""Beside `docker-compose.yml`: the dashboard is stopped until it is rebuilt (T162).
+
+Written when the rebuild after an update that moved the bots module failed.
+The old image speaks the old module's datagram protocol, so the container was
+removed rather than left running on it; this file holds why, in one line, for
+the Bots tab, and keeps the server's Start from bringing the old image back.
+It means something only while the block is there: the block is the switch."""
+
 BEGIN = (
     "  # >>> Yu'lon: the bot dashboard (T127). The Bots tab's switch adds and removes this block."
 )
@@ -104,6 +113,10 @@ class State:
     lan: bool = False
     problem: str = ""
     """Why the state could not be read; `on`/`lan` are then meaningless."""
+    rebuild_owed: bool = False
+    """On, but stopped until "Rebuild the bot dashboard" succeeds (T162)."""
+    rebuild_why: str = ""
+    """Why the last rebuild failed, when `rebuild_owed`."""
 
 
 # -- names, read off the entry ------------------------------------------------
@@ -325,11 +338,42 @@ def state(server_dir: Path) -> State:
         if has_half_a_block(text):
             return State(problem=f"{path.name} has half a bot dashboard block in it")
         return State()
-    return State(on=True, lan=lan_of(found))
+    why = rebuild_owed(server_dir)
+    return State(on=True, lan=lan_of(found), rebuild_owed=why is not None, rebuild_why=why or "")
 
 
 def is_on(server_dir: Path) -> bool:
     return state(server_dir).on
+
+
+# -- a rebuild owed (T162) ----------------------------------------------------
+
+
+def rebuild_owed(server_dir: Path) -> str | None:
+    """Why the dashboard is stopped until it is rebuilt, or None when it is not. Never raises.
+
+    A record that is there but cannot be read counts as owed: the cost of a
+    wrong "owed" is one press, and of a wrong "not owed" a Start that brings
+    the old protocol back.
+    """
+    path = server_dir / REBUILD_OWED_FILE
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"{path.name} could not be read: {exc}"
+    return text or "the last rebuild failed"
+
+
+def owe_rebuild(server_dir: Path, why: str) -> None:
+    """Record that the dashboard needs rebuilding, and why. Raises `OSError`."""
+    (server_dir / REBUILD_OWED_FILE).write_text(" ".join(why.split()) + "\n", encoding="utf-8")
+
+
+def forget_rebuild(server_dir: Path) -> None:
+    """The dashboard runs an image built from the module there now, or is off. Raises `OSError`."""
+    (server_dir / REBUILD_OWED_FILE).unlink(missing_ok=True)
 
 
 # -- the conf -----------------------------------------------------------------
