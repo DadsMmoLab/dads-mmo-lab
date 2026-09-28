@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -561,6 +562,8 @@ def render(
             "IMAGE_TAG": tag,
             "CONTAINER_USER": container_user(platform_id),
             "BIND_LABEL": bind_label,
+            # T165: the folders the server writes into, bound out with the same label.
+            **_folder_binds(entry, bind_label),
             # The catalog facts (contract A6), last so the install-identity keys
             # above stay the authority on any name the two sets ever share. A
             # token no template uses costs nothing — `fill()` minds unfilled
@@ -838,6 +841,109 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
         tokens["MAKE_JOBS"] = str(native.cmangos.dockerfile.make_jobs)
         tokens["CORE_DIR"] = str(PurePosixPath(native.cmangos.conf.source_dir).parent)
     return tokens
+
+
+SERVER_FOLDER_KEYS: tuple[str, ...] = ("LogsDir", "HonorDir", "PDumpDir")
+"""The CMaNGOS conf settings that name a folder the server WRITES into at run time (T165).
+
+Found on a Tortoise install on 2026-09-28: `realmd.conf` said `LogsDir =
+"../logs/"` and `mangosd.conf` `LogsDir = "../logs"`, both ran in
+`{CORE_DIR}/bin`, and the image held only `bin`, `etc`, `modules`, `sql` and
+`src` there. The same `mangosd.conf.dist.in` at the pin also says `HonorDir =
+"../honor"` and `PDumpDir = "../pdump"`. So every file log, the weekly honor
+report and the automatic character dumps were written nowhere. `DataDir` is not here: the
+template binds `./data` itself, and extraction, not the server, fills it.
+"""
+
+SERVER_WORKING_DIR = "bin"
+"""Where realmd and mangosd run, under the core's prefix: the template's
+`working_dir: {{CORE_DIR}}/bin`. A relative `*Dir` setting is read from there;
+`test_server_folders.py` reads `working_dir` back off the rendered file."""
+
+SERVER_FOLDER_CONFS: Mapping[str, str] = {
+    "REALMD_FOLDERS": "realmd.conf",
+    "MANGOSD_FOLDERS": "mangosd.conf",
+}
+"""The base template's per-service token, and the conf that service's binary reads."""
+
+_FOLDER_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+
+_CORE_OWN_FOLDERS = frozenset({"bin", "etc", "data"})
+"""The prefix's folders the template already binds or the image fills: a setting
+that lands on one of them is not a folder of the server's own to bind out."""
+
+
+@dataclass(frozen=True)
+class ServerFolder:
+    """`./<name>` in the server folder, bound onto `target` in the container (T165)."""
+
+    name: str
+    target: str
+
+
+def server_folders(entry: CatalogEntry, conf_file: str | None = None) -> tuple[ServerFolder, ...]:
+    """The folders `conf_file`'s table says the server writes into; every conf's when None.
+
+    Read off the catalog's conf table, which is what the install leaves in the
+    conf: a `SERVER_FOLDER_KEYS` value, relative to `SERVER_WORKING_DIR` unless it
+    is absolute, must land on a folder directly under the core's prefix, and the
+    host side is the server folder's folder of the same name. An entry whose
+    table names none -- TBC's and Vanilla's keep upstream's `LogsDir = ""`, which
+    writes into `bin/` -- has none, and its compose file does not change.
+
+    The name is spliced into YAML unquoted, so it is held to letters, digits,
+    `_` and `-`; anything else, or a folder outside the prefix or one of its own
+    (`bin`, `etc`, `data`), is refused rather than bound.
+
+    Raises:
+        ComposeGenError: a stated folder is not one this engine can bind out.
+    """
+    native = _native_of(entry)
+    if native.cmangos is None:
+        return ()
+    core = PurePosixPath(native.cmangos.conf.source_dir).parent
+    workdir = core / SERVER_WORKING_DIR
+    found: dict[str, ServerFolder] = {}
+    for name, patch in native.cmangos.conf.files.items():
+        if conf_file is not None and name != conf_file:
+            continue
+        for key in SERVER_FOLDER_KEYS:
+            raw = patch.keys.get(key)
+            if raw is None:
+                continue
+            value = raw.strip()
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1]
+            target = posixpath.normpath(str(workdir / value))
+            folder = PurePosixPath(target)
+            if (
+                folder.parent != core
+                or not _FOLDER_NAME.match(folder.name)
+                or folder.name in _CORE_OWN_FOLDERS
+            ):
+                raise ComposeGenError(
+                    f"{entry.id}'s {name} sets {key} = {raw}, which is {target} in the "
+                    f"container: not a folder of the server's own directly under {core}, so "
+                    "it cannot be bound out to the server folder."
+                )
+            found.setdefault(folder.name, ServerFolder(folder.name, target))
+    return tuple(found.values())
+
+
+def _folder_binds(entry: CatalogEntry, bind_label: str) -> dict[str, str]:
+    """`SERVER_FOLDER_CONFS`'s tokens: one `- ./<name>:<target><label>` line per folder.
+
+    Each value starts with its own newline, so the token sits at the end of the
+    bind line before it and an entry with no folders renders byte for byte what
+    it did before T165.
+    """
+    return {
+        token: "".join(
+            f"\n      - ./{folder.name}:{folder.target}{bind_label}"
+            for folder in server_folders(entry, conf)
+        )
+        for token, conf in SERVER_FOLDER_CONFS.items()
+    }
 
 
 def _channel_service(entry: CatalogEntry, base: str, server_dir: Path) -> str:

@@ -497,7 +497,12 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
         for line in volume_entries(path.read_text(encoding="utf-8")):
             item = line.strip()
             if _HOST_BIND.match(line):
-                assert line.rstrip().endswith("{{BIND_LABEL}}"), f"{entry.id} {name}: {item}"
+                # T165: a folder token may follow the label; what it renders is
+                # counted below, and every line it renders is held to `:z` there.
+                bare = line.rstrip()
+                for token in composegen.SERVER_FOLDER_CONFS:
+                    bare = bare.removesuffix("{{" + token + "}}")
+                assert bare.endswith("{{BIND_LABEL}}"), f"{entry.id} {name}: {item}"
                 if name != "build.yml.tmpl":
                     labelled += 1
             elif _NAMED_VOLUME.match(line):
@@ -521,7 +526,11 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
         for line in volume_entries(text)
         if _HOST_BIND.match(line)
     ]
-    assert len(rendered) == labelled, (entry.id, len(rendered), labelled)
+    folders = sum(
+        len(composegen.server_folders(entry, conf))
+        for conf in composegen.SERVER_FOLDER_CONFS.values()
+    )
+    assert len(rendered) == labelled + folders, (entry.id, len(rendered), labelled, folders)
     assert all(line.rstrip().endswith(":z") for line in rendered), (entry.id, rendered)
 
 
