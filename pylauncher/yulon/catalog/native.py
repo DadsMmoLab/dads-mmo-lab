@@ -4694,7 +4694,9 @@ class StagedInstaller:
                 "touched. Check the docker daemon is up, then press the same entry under "
                 # T155: not "Rebuild" -- Update to latest and Return to the tested
                 # pin reach this too, through `rebuild()`, and all three are
-                # entries of the one menu.
+                # entries of the one menu. An install does not: its tuple ends
+                # in `up`, and this stage is only ever `rebuild_stages()`'s
+                # (`test_only_a_server_build_press_runs_the_recreate_stage`).
                 f"\u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab again."
             )
         yield (
@@ -5750,7 +5752,10 @@ class StagedInstaller:
                 "This install's images are not all on the daemon under their tags, so there "
                 "is no build to keep as a rollback, and a rebuild does not run without one. "
                 "Nothing was started. Press Install on this folder instead: its resume "
-                "rebuilds the missing images, and Rebuild works from then on."
+                "rebuilds the missing images, and "
+                # T155: the press by its label and its menu, not "Rebuild".
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "works from then on."
             )
         kept: list[str] = []
         for ref in refs:
