@@ -1192,6 +1192,20 @@
                   ]
                 },
                 {
+                  "name": "character_inventory_copy table",
+                  "into": "tw_char",
+                  "statements": [
+                    "CREATE TABLE IF NOT EXISTS `character_inventory_copy` LIKE `character_inventory`"
+                  ],
+                  "on_error": "fail",
+                  "reapply_when_changed": true,
+                  "notes": [
+                    "THE TABLE HONOR MAINTENANCE TRUNCATES, which nothing on the pinned core creates (T159). `HonorMaintenancer::DoMaintenance()` runs in `World::SetInitialWorldSettings()` on the first start after a running world has marked the week's honor day (`saved_variables.honorMaintenanceMarker`), and with `BackupCharacterInventory = 1` -- the dist conf's value, which this entry's conf block leaves alone -- it calls `ObjectMgr::BackupCharacterInventory()`: `TRUNCATE character_inventory_copy`, then `INSERT ... SELECT * FROM character_inventory` (`ObjectMgr.cpp:10123-10130`). Read at 187af788: no CREATE for it in `create_databases.sql`, `database_updates/` or TortoiseBots' `data/sql`. Errno 1146 there is `ASSERT(false)` in `HandleMySQLError` (`DatabaseMysql.cpp:185-191`), a throw nothing catches, and the marker is cleared only by a maintenance that finished -- so every restart dies on the same statement. Measured on the retired fork's identical C++ on 2026-09-09 (`.notes/gates/7.9-rerun-m910q-2026-09-09`, finding 1), where its `character_updates/20260812142512_character_inventory_copy.sql` was the file that made the table; that directory went with the fork.",
+                    "`LIKE`, as that file had it: `INSERT ... SELECT *` needs the copy's columns to be the original's, and `LIKE` takes the engine and keys too (MyISAM, for `DISABLE KEYS`). `IF NOT EXISTS` keeps whatever a server made by hand, and makes the statement safe to apply to a server that already has data -- which is what `reapply_when_changed` offers it for: every Tortoise server a release installed is offered this one step, behind a dialog, on the Server tab. Also `.character diffitems` reads this table and dies the same way without it.",
+                    "Not `BackupCharacterInventory = 0` instead: that leaves `diffitems` on the same assert, turns off an upstream feature, and reaches an existing server only through an Install press, since a rebuild does not re-run the conf stage."
+                  ]
+                },
+                {
                   "name": "realm row",
                   "into": "tw_logon",
                   "statements": [
@@ -1209,6 +1223,11 @@
                 {
                   "db": "tw_logon",
                   "query": "SELECT COUNT(*) FROM realmlist",
+                  "min": 1
+                },
+                {
+                  "db": "tw_char",
+                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='tw_char' AND table_name='character_inventory_copy'",
                   "min": 1
                 }
               ],

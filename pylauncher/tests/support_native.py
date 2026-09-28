@@ -754,6 +754,9 @@ class Recorder:
             exec_stdin=self.exec_stdin,
             sql_query=self.sql_query,
             volume_exists=self.volume_exists,
+            # T159: the corrections press stops a running world by name. Bound
+            # for the T64 reason above -- the default is the real `docker stop`.
+            stop_world=lambda containers: self.calls.append(f"stop-world:{','.join(containers)}"),
         )
         for key, value in overrides.items():
             setattr(seams, key, value)

@@ -11213,7 +11213,8 @@ class ControllerView(QWidget):
             f"This version of Yu'lon corrects {', '.join(check.offered)} in this server's install "
             f"plan, and these databases were imported before that. "
             f"{native.CORRECTIONS_BUTTON_LABEL} applies it — it asks first, names every step, "
-            f"and needs the server stopped. Nothing changes until you press it.{held}"
+            f"and stops the world server first if it is up. Nothing changes until you "
+            f"press it.{held}"
         )
         self.corrections_banner.setVisible(True)
 
