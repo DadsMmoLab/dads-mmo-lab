@@ -388,6 +388,21 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
+@dataclass(frozen=True)
+class UncheckedApproval:
+    """The person's yes to ONE unchecked update: from this commit, to this release (T150).
+
+    A yes to a sentence naming a release and a folder, so it is kept as exactly
+    those two and nothing wider. `Applier.update()` honours it only while the
+    newest release is still `release` and the checkout is still on `head`;
+    either one moved, and the yes was about something else -- the check runs
+    again and, if it still cannot tell, asks again about what is there now.
+    """
+
+    head: str
+    release: upstream.Release
+
+
 class ReleaseDirectionUnknown(ApplyError):
     """An update to a release that nobody could show is not a step back (T150).
 
@@ -395,13 +410,15 @@ class ReleaseDirectionUnknown(ApplyError):
     own graph cannot place HEAD against the release (`Behind.UNPLACED`) and
     GitHub's compare did not answer either. Only the person can decide that,
     and the engine cannot open a dialog, so the view asks `question` and, on a
-    yes, presses Update again with `unchecked_ok=True`. An `ApplyError`, so a
-    caller that does not know it still reports a refusal that changed nothing.
+    yes, presses Update again with `approved=approval` -- the HEAD and the
+    release the question was about. An `ApplyError`, so a caller that does not
+    know it still reports a refusal that changed nothing.
     """
 
-    def __init__(self, message: str, question: str) -> None:
+    def __init__(self, message: str, question: str, approval: UncheckedApproval) -> None:
         super().__init__(message)
         self.question = question
+        self.approval = approval
 
 
 class SqlNotSent(ApplyError):
@@ -2064,6 +2081,7 @@ class Applier:
         replacing: bool = False,
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
+        expect_head: str | None = None,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
@@ -2175,6 +2193,7 @@ class Applier:
             release = release if release is not None else self._release_for(manifest)
             self._require_own_clone(manifest, clone, "install")
             self._costly_reset(manifest, clone, replacing)
+            self._refuse_a_moved_head(manifest, clone, expect_head)
             try:
                 self.git.clone(
                     CloneSpec(
@@ -2352,7 +2371,7 @@ class Applier:
         manifest: Manifest,
         values: Mapping[str, str] | None = None,
         *,
-        unchecked_ok: bool = False,
+        approved: UncheckedApproval | None = None,
     ) -> ApplyReport:
         """Fast-forward this module's clone and re-apply it — refusing anything a reset destroys.
 
@@ -2413,22 +2432,52 @@ class Applier:
         would this move it BACK?** Its update resets to the newest release's
         commit, and question 3 asks against the branch -- so a clone newer than
         the release passes all three and is reset backwards.
-        `_step_back_refusal()` asks it, after the three and before anything is
-        changed. `unchecked_ok` is the person's own yes to going ahead when
-        neither the clone nor GitHub could answer it (`ReleaseDirectionUnknown`).
+        `_refuse_a_step_back()` asks it, after the three and before anything is
+        changed, and the commit it checked is handed to `install()`, which will
+        not reset a checkout that has moved off it since. `approved` is the
+        person's own yes to going ahead when neither the clone nor GitHub could
+        answer (`ReleaseDirectionUnknown`), and holds for that HEAD and that
+        release only (`UncheckedApproval`).
         """
         refusal = self._update_refusal(manifest)
         if refusal is not None:
             raise ApplyError(refusal)
         release = self._release_for(manifest)
-        if release is not None:
-            self._refuse_a_step_back(manifest, release, unchecked_ok=unchecked_ok)
-        return self.install(manifest, values, first_configure_sql=False, release=release)
+        checked = (
+            self._refuse_a_step_back(manifest, release, approved=approved)
+            if release is not None
+            else None
+        )
+        return self.install(
+            manifest, values, first_configure_sql=False, release=release, expect_head=checked
+        )
+
+    def _refuse_a_moved_head(self, manifest: Manifest, clone: Path, expected: str | None) -> None:
+        """No reset of a checkout that moved after `update()` checked it (T150).
+
+        Read right before the clone seam resets, because the check -- and a
+        person's yes -- was about the commit the checkout was on THEN. A move
+        in between is refused, not re-judged here: pressing Update again runs
+        the whole check against where it is now, and asks again if it must.
+        """
+        if expected is None:
+            return
+        now = self._reader("head_sha", HeadReader)(clone)
+        if now != expected:
+            raise ApplyError(
+                f"{manifest.id}: this checkout moved from {expected[:7]} to "
+                f"{now[:7] if now else 'a commit git could not read'} while Update was checking "
+                f"it, so it was not reset. Nothing was changed; press Update to check it again."
+            )
 
     def _refuse_a_step_back(
-        self, manifest: Manifest, release: upstream.Release, *, unchecked_ok: bool
-    ) -> None:
-        """Raise unless resetting this clone to `release` is proved not to be a step back (T150).
+        self,
+        manifest: Manifest,
+        release: upstream.Release,
+        *,
+        approved: UncheckedApproval | None,
+    ) -> str:
+        """The HEAD a reset to `release` was checked from; raises unless it is no step back (T150).
 
         The clone answers first, with the very question "Check for updates"
         asked (`commits_behind(..., release=True)`), so the row and the press
@@ -2440,46 +2489,52 @@ class Applier:
         ahead, anything missing is refused as ahead or off its line. A compare
         that does not answer -- offline, rate-limited, a HEAD GitHub has never
         seen -- is `ReleaseDirectionUnknown`, unless the person already said
-        go ahead. "Could not ask git" is refused: nothing was checked.
+        go ahead to this very HEAD and release. "Could not ask git" is refused:
+        nothing was checked.
         """
         clone = self.clone_dir(manifest)
         reader = self._reader("commits_behind", BehindReader)
         placed: BehindCount = reader(clone, release.sha, release=True)
-        if placed is Behind.UNPLACED:
-            placed = self._placed_by_github(manifest, clone, release, unchecked_ok=unchecked_ok)
-        if placed is None:
+        head: str | None = self._reader("head_sha", HeadReader)(clone)
+        if placed is None or head is None:
             raise ApplyError(
                 f"{manifest.id}: Yu'lon could not ask git whether release {release.tag} is newer "
                 f"than this checkout, so it did not update it. Nothing was changed; try again."
             )
+        if placed is Behind.UNPLACED:
+            placed = self._placed_by_github(manifest, head, release, approved=approved)
         sentence = _NOT_UNDER_RELEASE.get(placed) if isinstance(placed, Behind) else None
         if sentence is not None:
             raise ApplyError(
                 f"{manifest.id}: {sentence.format(release=release.tag)}. Nothing was changed."
             )
+        return head
 
     def _placed_by_github(
-        self, manifest: Manifest, clone: Path, release: upstream.Release, *, unchecked_ok: bool
+        self,
+        manifest: Manifest,
+        head: str,
+        release: upstream.Release,
+        *,
+        approved: UncheckedApproval | None,
     ) -> BehindCount:
         """GitHub's answer for a clone its own graph could not place, spelled as git's.
 
         `0` stands for "under it" (it is only compared with the refusals), and
         `AHEAD_OF_RELEASE` / `OFF_RELEASE` for the two refusals. No answer
-        raises `ReleaseDirectionUnknown`, or is `0` once the person said yes.
+        raises `ReleaseDirectionUnknown`, or is `0` when the person already said
+        yes to this HEAD and this release -- a yes about any other pair is not
+        one, and they are asked again about this one.
         """
         source = manifest.source
         slug = upstream.github_slug(source.repo) if source is not None else None
-        head = self._reader("head_sha", HeadReader)(clone)
-        said = (
-            self._compare_commits(slug, head, release.sha)
-            if slug is not None and head is not None
-            else None
-        )
+        said = self._compare_commits(slug, head, release.sha) if slug is not None else None
         if said is None:
-            if unchecked_ok:
+            asking = UncheckedApproval(head=head, release=release)
+            if approved == asking:
                 logger.info(f"updating {manifest.id} to {release.tag} unchecked, on the user's yes")
                 return 0
-            short = head[:7] if head else "unknown"
+            short = head[:7]
             raise ReleaseDirectionUnknown(
                 f"{manifest.id}: Yu'lon could not check whether release {release.tag} is newer "
                 f"than this checkout. Nothing was changed.",
@@ -2488,6 +2543,7 @@ class Applier:
                 f"whether its commit ({short}) is older than the release, and GitHub did not "
                 f"answer. If the folder is newer than the release, Update resets it back to "
                 f"{release.tag}.\n\nUpdate anyway?",
+                asking,
             )
         if said.behind == 0:
             return 0

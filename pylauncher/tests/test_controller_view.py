@@ -9507,29 +9507,52 @@ class _UnplacedReleaseApplier(_FakeApplier):
     that raises it is proved against real repositories in `test_apply.py`.
     """
 
-    def __init__(self, server_dir: Path) -> None:
+    def __init__(self, server_dir: Path, *, questions: int = 1) -> None:
         super().__init__(server_dir)
-        self.updates: list[tuple[object, bool]] = []
+        self.questions = questions
+        self.updates: list[tuple[object, apply_module.UncheckedApproval | None]] = []
 
     def update(  # type: ignore[override]
-        self, manifest: object, values: object = None, *, unchecked_ok: bool = False
+        self,
+        manifest: object,
+        values: object = None,
+        *,
+        approved: apply_module.UncheckedApproval | None = None,
     ) -> ApplyReport:
-        self.updates.append((values, unchecked_ok))
-        if not unchecked_ok:
-            raise apply_module.ReleaseDirectionUnknown("nothing was changed", "Update anyway?")
+        self.updates.append((values, approved))
+        if len(self.updates) <= self.questions:
+            # A second question stands for "the newest release changed before
+            # the yes came back": the engine asks again, about the new one.
+            release = upstream.Release(f"v{len(self.updates)}", "e" * 40)
+            raise apply_module.ReleaseDirectionUnknown(
+                "nothing was changed",
+                f"Update to {release.tag} anyway?",
+                apply_module.UncheckedApproval(head="d" * 40, release=release),
+            )
         return self.install(manifest, values)
 
 
-@pytest.mark.parametrize("yes", [False, True], ids=["no-cancels", "yes-runs-it-unchecked"])
+@pytest.mark.parametrize(
+    ("yes", "questions"),
+    [(False, 1), (True, 1), (True, 2)],
+    ids=["no-cancels", "yes-runs-it-unchecked", "a-second-question-is-asked-too"],
+)
 def test_an_update_nobody_could_place_asks_first_and_only_a_yes_runs_it(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, yes: bool
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    yes: bool,
+    questions: int,
 ) -> None:
     """T150: GitHub could not say whether the release is newer, so the person decides.
 
     The question is the engine's own sentence, under the tab's title, and the
     dialog defaults to No (`_confirm()`). A No is a cancel that changed
-    nothing; a Yes runs the SAME update again with the same answers and
-    `unchecked_ok=True`, and its report lands where any Update's does.
+    nothing; a Yes runs the SAME update again with the same answers and the
+    question's own approval, and its report lands where any Update's does. A
+    retry that comes back with a NEW question (the newest release changed) is
+    asked too, and runs on that question's approval -- never the first's.
 
     Mutation: drop the `ReleaseDirectionUnknown` branch from `_module_failed()`
     and neither press asks -- the row just says FAILED.
@@ -9537,7 +9560,7 @@ def test_an_update_nobody_could_place_asks_first_and_only_a_yes_runs_it(
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     services = _services(ps, tmp_path, [])
-    applier = _UnplacedReleaseApplier(server_dir)
+    applier = _UnplacedReleaseApplier(server_dir, questions=questions)
     services.applier = applier
     object.__setattr__(
         services, "installed_modules", lambda: {"module": frozenset({"mod-transmog"})}
@@ -9553,10 +9576,10 @@ def test_an_update_nobody_could_place_asks_first_and_only_a_yes_runs_it(
     _select_module(view, "mod-transmog")
     view._module_action("update")
 
-    assert asked == [("Update mod-transmog without checking?", "Update anyway?")]
-    assert [unchecked for _values, unchecked in applier.updates] == (
-        [False, True] if yes else [False]
-    )
+    shown = [f"Update to v{n} anyway?" for n in range(1, questions + 1)]
+    assert asked == [("Update mod-transmog without checking?", q) for q in shown]
+    said = [approved.release.tag if approved else None for _values, approved in applier.updates]
+    assert said == ([None, *[f"v{n}" for n in range(1, questions + 1)]] if yes else [None])
     if yes:
         assert applier.installed == ["mod-transmog"]
         assert len({repr(values) for values, _ in applier.updates}) == 1, "the answers changed"

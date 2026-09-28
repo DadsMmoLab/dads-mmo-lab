@@ -4839,8 +4839,8 @@ def test_a_release_update_github_cannot_place_asks_and_a_yes_goes_ahead(tmp_path
     """GitHub unreachable where the clone cannot answer: a question, never a silent reset.
 
     The first press raises `ReleaseDirectionUnknown` -- an `ApplyError` that
-    changed nothing -- carrying the sentence the view asks. The person's yes
-    is `unchecked_ok=True`, and that press resets to the release.
+    changed nothing -- carrying the sentence the view asks and the approval a
+    yes hands back: this HEAD, this release. That press resets to the release.
     """
     applier, manifest, origin, files, released, compare = _release_follower(tmp_path, answers=False)
     clone = applier.clone_dir(manifest)
@@ -4859,8 +4859,114 @@ def test_a_release_update_github_cannot_place_asks_and_a_yes_goes_ahead(tmp_path
     )
     assert "Nothing was changed" in str(caught.value)
 
-    applier.update(manifest, unchecked_ok=True)
+    assert caught.value.approval == apply_module.UncheckedApproval(
+        head=installed, release=released["release"]
+    )
+
+    applier.update(manifest, approved=caught.value.approval)
     assert _git(clone, "rev-parse", "HEAD") == newer
+
+
+def _unplaced_twice(
+    tmp_path: Path,
+) -> tuple[Applier, Any, Path, dict[str, str], dict[str, upstream.Release], str, str, str]:
+    """This app's release install at C with the tip T left as a graft; two later commits on T.
+
+    Both later commits walk down to T's graft, so the clone can place neither,
+    and GitHub is not answering: every release on them is a question.
+    """
+    applier, manifest, origin, files, released, _compare = _release_follower(
+        tmp_path, answers=False
+    )
+    installed = _publish(origin, files, "C")
+    released["release"] = upstream.Release("vC", installed)
+    _publish(origin, files, "T")
+    applier.install(manifest)
+    first = _publish(origin, files, "U")
+    second = _publish(origin, files, "V")
+    return applier, manifest, origin, files, released, installed, first, second
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_yes_about_one_release_does_not_reset_to_another(tmp_path: Path) -> None:
+    """Codex on T150 round 2: the yes named vD; by the retry the newest release is vU.
+
+    Before, the retry re-resolved the newest release and reset to it on the
+    strength of a yes about a different one. Now that yes is not one: nothing
+    is reset, and the retry asks again -- about vU -- and only a yes to THAT
+    resets, to vU.
+    """
+    applier, manifest, _origin_, _files, released, installed, first, second = _unplaced_twice(
+        tmp_path
+    )
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vD", second)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as about_d:
+        applier.update(manifest)
+
+    released["release"] = upstream.Release("vU", first)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as about_u:
+        applier.update(manifest, approved=about_d.value.approval)
+    assert _git(clone, "rev-parse", "HEAD") == installed, "reset on a yes about another release"
+    assert about_u.value.approval.release == released["release"]
+    assert "to release vU would move it backwards" in about_u.value.question
+
+    applier.update(manifest, approved=about_u.value.approval)
+    assert _git(clone, "rev-parse", "HEAD") == first
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_yes_about_one_commit_does_not_reset_a_checkout_that_has_moved(tmp_path: Path) -> None:
+    """The yes was about the folder on C; by the retry it is somewhere else. Asked again.
+
+    Moved to a1, under C, where the walk from the release still stops at T's
+    graft -- so the clone still cannot place it, and only the approval stood
+    between the retry and a reset.
+    """
+    applier, manifest, origin, _files, released, installed, _first, second = _unplaced_twice(
+        tmp_path
+    )
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vD", second)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as asked:
+        applier.update(manifest)
+    assert asked.value.approval.head == installed
+
+    elsewhere = _git(origin, "rev-parse", "HEAD~4")
+    _moved_by_hand_at_depth_1(clone, elsewhere)
+    with pytest.raises(apply_module.ReleaseDirectionUnknown) as again:
+        applier.update(manifest, approved=asked.value.approval)
+    assert _git(clone, "rev-parse", "HEAD") == elsewhere, "reset on a yes about another commit"
+    assert again.value.approval.head == elsewhere
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_checkout_that_moves_between_the_check_and_the_reset_is_not_reset(
+    tmp_path: Path,
+) -> None:
+    """HEAD is read again right before the reset: the check was about the commit it was on THEN.
+
+    The move is made from inside the one step that runs between the check and
+    the reset (`_costly_reset()`), which is the only way a test can stand in
+    that gap.
+    """
+    applier, manifest, origin, files, released, compare = _release_follower(tmp_path)
+    clone = applier.clone_dir(manifest)
+    released["release"] = upstream.Release("vC", _publish(origin, files, "C"))
+    applier.install(manifest)
+    newer = _publish(origin, files, "D")
+    elsewhere = _publish(origin, files, "E")
+    released["release"] = upstream.Release("vD", newer)
+    costly_reset = applier._costly_reset
+
+    def then_moved(*args: Any) -> None:
+        costly_reset(*args)
+        _moved_by_hand_at_depth_1(clone, elsewhere)
+
+    applier._costly_reset = then_moved  # type: ignore[method-assign]
+    with pytest.raises(ApplyError, match="moved from .* while Update was checking it"):
+        applier.update(manifest)
+    assert _git(clone, "rev-parse", "HEAD") == elsewhere
 
 
 def test_a_release_update_git_could_not_place_at_all_is_refused(tmp_path: Path) -> None:
@@ -4945,6 +5051,22 @@ def test_the_tortoise_applier_carries_the_proved_release_through_its_guard(
 
     assert _git(applier.clone_dir(manifest), "rev-parse", "HEAD") == releases[-1].sha
     assert len(resolved) == 1, f"GitHub's releases were asked {len(resolved)} times for one Update"
+
+    # And the commit the check was made from: a checkout that moves before the
+    # reset is not reset, through this override as through the base.
+    clone = applier.clone_dir(manifest)
+    releases.append(upstream.Release("vF", _publish(origin, files, "F")))
+    elsewhere = _publish(origin, files, "G")
+    costly_reset = applier._costly_reset
+
+    def then_moved(*args: Any) -> None:
+        costly_reset(*args)
+        _moved_by_hand_at_depth_1(clone, elsewhere)
+
+    applier._costly_reset = then_moved  # type: ignore[method-assign]
+    with pytest.raises(ApplyError, match="while Update was checking it"):
+        applier.update(manifest)
+    assert _git(clone, "rev-parse", "HEAD") == elsewhere
 
 
 # --------------------------------------------------------------------------

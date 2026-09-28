@@ -495,6 +495,7 @@ class GuardedApplier(Applier):
         replacing: bool = False,
         first_configure_sql: bool = True,
         release: upstream.Release | None = None,
+        expect_head: str | None = None,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill
         # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
@@ -503,10 +504,11 @@ class GuardedApplier(Applier):
         # ignored a keyword its base accepts would report an install it copied
         # nothing for. The guard still runs first, whichever route fills the
         # folder -- the restart a C++ module asks for is the same restart.
-        # `release` is the same rule's third keyword (T150): the release
-        # `update()` proved is not a step back, and the one addon on this game
-        # that follows its releases is the reason it exists -- dropped here, the
-        # base would re-resolve it and could reset to a release nobody checked.
+        # `release` and `expect_head` are the same rule's next two keywords
+        # (T150): the release `update()` proved is not a step back and the
+        # commit it proved that from. The one addon on this game that follows
+        # its releases is why they exist -- dropped here, the base would
+        # re-resolve the release, or reset a checkout that moved after the check.
         note = self._guard(manifest, "install")
         return _with_note(
             super().install(
@@ -517,6 +519,7 @@ class GuardedApplier(Applier):
                 replacing=replacing,
                 first_configure_sql=first_configure_sql,
                 release=release,
+                expect_head=expect_head,
             ),
             note,
         )

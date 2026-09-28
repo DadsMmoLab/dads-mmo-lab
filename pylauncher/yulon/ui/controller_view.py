@@ -10031,8 +10031,9 @@ class ControllerView(QWidget):
 
         The engine refused before it changed anything, so a No is a cancel in
         the tab's own words. A Yes runs the SAME update again with the same
-        answers and `unchecked_ok=True`, through the same slots, so its report
-        and its failures land exactly where the first press's would have.
+        answers and the question's own `approval` -- the HEAD and the release
+        it named, and nothing wider -- through the same slots, so its report and
+        its failures (a new question included) land where the first press's did.
         """
         applier = self.services.applier
         if applier is None or not self._confirm(
@@ -10047,9 +10048,12 @@ class ControllerView(QWidget):
             return
         self._acting_on = manifest
         self._module_pending = f"update {manifest.id}"
+        # Kept for the retry too: a yes about one release, answered after the
+        # newest became another, comes back as a NEW question about that one.
+        self._update_asked = (manifest, values)
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(
-            lambda: applier.update(manifest, values, unchecked_ok=True),
+            lambda: applier.update(manifest, values, approved=exc.approval),
             self._module_done,
             self._module_failed,
         )
