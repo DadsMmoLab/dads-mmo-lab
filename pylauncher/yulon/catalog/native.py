@@ -742,6 +742,9 @@ class ConfRepairRoute:
 REPAIR_BACKUP_SUFFIX = ".repair.bak"
 """`docker-compose.yml.<stamp>.repair.bak`: the file as it was before a repair replaced it."""
 
+_O_BINARY = getattr(os, "O_BINARY", 0)
+"""Windows' untranslated-bytes flag for `os.open`; 0 (no such flag) everywhere else."""
+
 
 def _backup_beside(path: Path, when: datetime) -> Path:
     """Copy `path` to a stamped `.repair.bak` beside it that did not exist, and return it.
@@ -749,13 +752,30 @@ def _backup_beside(path: Path, when: datetime) -> Path:
     Microseconds in a fixed-width stamp so two presses are two files, and the next
     free microsecond on a clash rather than a counter suffix -- `tuning.backup()`'s
     rule, for its reason: a later copy must never land on an earlier one.
+
+    The name is claimed with `O_CREAT | O_EXCL`, owner-only, so the copy can only
+    ever land in a file THIS call made -- a conf's backup holds the database
+    password, and is never readable by others while its bytes arrive -- and
+    then takes `path`'s mode and times (`copystat`, as `copy2` gave them). A copy
+    that fails part-way removes that file (Codex, T169 round 3): a truncated
+    `.repair.bak` would claim to be the file as it was. An existing file at the
+    name is never touched; the next microsecond is tried instead.
     """
     for _ in range(1000):
         target = path.with_name(f"{path.name}.{when:%Y%m%d-%H%M%S-%f}{REPAIR_BACKUP_SUFFIX}")
-        if not target.exists():
-            shutil.copy2(path, target)
-            return target
-        when += timedelta(microseconds=1)
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY, 0o600)
+        except FileExistsError:
+            when += timedelta(microseconds=1)
+            continue
+        try:
+            with os.fdopen(fd, "wb") as out, path.open("rb") as source:
+                shutil.copyfileobj(source, out)
+            shutil.copystat(path, target)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+        return target
     raise OSError(f"no free name for a backup of {path.name}")
 
 
@@ -7738,16 +7758,11 @@ class StagedInstaller:
             f"{path} changed while it was being repaired, so it was not replaced and is "
             "left as it is now. Check again (Refresh) and press Repair once more."
         )
-        # T165: the folders the new file binds, made before it can name them.
-        # Only on `stale`, so a refused repair makes nothing either; the check's
-        # `fresh` was rendered from the same table, so these are its binds.
-        try:
-            self._make_server_folders(server_dir)
-        except InstallerError as exc:
-            raise InstallerError(f"{exc} {path} is as it was, and no backup was made.") from exc
         when = now or datetime.now()
-        # The compose file's backup first, and checked, BEFORE any conf is edited
-        # (Codex, T169 round 2): a backup that fails then truly leaves nothing written.
+        # The compose file's backup first, and checked, BEFORE any folder is made
+        # or any conf edited (Codex, T169 rounds 2-3): a backup that fails then
+        # truly leaves nothing written, and `_backup_beside()` removes a copy
+        # it could not finish.
         try:
             backup = _backup_beside(path, when)
         except OSError as exc:
@@ -7759,6 +7774,16 @@ class StagedInstaller:
             # The copy is not of the file that was checked: it changed in between.
             backup.unlink(missing_ok=True)
             raise InstallerError(changed)
+        # T165: the folders the new file binds, made before it can name them.
+        # Only on `stale`, so a refused repair makes nothing either; the check's
+        # `fresh` was rendered from the same table, so these are its binds. A
+        # folder that cannot be made takes the backup just made with it: nothing
+        # was changed, so it would record nothing.
+        try:
+            self._make_server_folders(server_dir)
+        except InstallerError as exc:
+            backup.unlink(missing_ok=True)
+            raise InstallerError(f"{exc} {path} is as it was, and no backup was made.") from exc
         done: list[tuple[Path, Path]] = []
         for edit in edits:
             done.append((edit.path, self._set_conf(edit, when, path, backup, done)))

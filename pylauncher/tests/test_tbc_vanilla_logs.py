@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import posixpath
 import stat
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -688,3 +689,57 @@ def test_a_conf_made_again_by_a_reset_takes_upstreams_empty_logs_dir_until_bound
     )
     assert [r.outcome for r in report.results] == ["recreated"], report.lines()
     assert (server_dir / "etc" / "realmd.conf").read_bytes() == untuned["etc/realmd.conf"]
+
+
+# -- round 3: a backup that fails part-way (Codex) --------------------------------
+
+
+def test_a_compose_backup_that_fails_part_way_leaves_no_backup_and_no_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy dies after some bytes landed: the half backup goes, no folder was made."""
+    server_dir, _fresh, paths = an_old_install(tmp_path)
+    real = native.shutil.copyfileobj
+
+    def half(source: object, out: object, *args: object) -> None:
+        out.write(source.read(10))  # type: ignore[attr-defined]
+        out.flush()  # type: ignore[attr-defined]
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(native.shutil, "copyfileobj", half)
+    with pytest.raises(InstallerError, match="Nothing was written"):
+        engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+    monkeypatch.setattr(native.shutil, "copyfileobj", real)
+    assert not list(server_dir.glob(composegen.BASE_FILE + ".*" + native.REPAIR_BACKUP_SUFFIX))
+    assert not (server_dir / "logs").exists(), "a folder was made before the backup"
+    for name, conf_path in paths.items():
+        assert conf_path.read_text(encoding="utf-8") == DISTS[name]
+
+
+def test_a_backup_never_touches_a_file_already_at_its_name(tmp_path: Path) -> None:
+    """A name that is taken is skipped, never opened, and never removed on a failure."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text("mine\n", encoding="utf-8")
+    when = datetime(2026, 9, 28, 12, 0, 0, 0)
+    taken = path.with_name(f"{path.name}.20260928-120000-000000{native.REPAIR_BACKUP_SUFFIX}")
+    taken.write_text("an older backup\n", encoding="utf-8")
+    made = native._backup_beside(path, when)
+    assert made != taken and made.read_text(encoding="utf-8") == "mine\n"
+    assert taken.read_text(encoding="utf-8") == "an older backup\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(made.stat().st_mode) == stat.S_IMODE(path.stat().st_mode)
+
+
+def test_a_compose_backup_that_fails_makes_no_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backup is taken before any folder is made, so "Nothing was written" stays true."""
+    server_dir, _fresh, _paths = an_old_install(tmp_path)
+
+    def refuse(path: Path, when: object) -> Path:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(native, "_backup_beside", refuse)
+    with pytest.raises(InstallerError, match="Nothing was written"):
+        engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert not (server_dir / "logs").exists(), "a folder was made before the backup"
