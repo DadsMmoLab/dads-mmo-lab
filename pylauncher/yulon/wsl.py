@@ -167,6 +167,16 @@ def distro_state(distro: str) -> DistroState:
     running anything is what starts one. One `--running` call when the answer
     is running -- the five-second poll's common case -- and the full listing
     only to tell stopped from unknown.
+
+    **An answer, not a lock (T133, accepted).** `running` is true when the
+    listing ran; the `wsl -d` or `\\\\wsl.localhost` read a caller makes next is a
+    separate call, and wsl.exe has no way to say "only if it is already up". A
+    distro stopped in the gap between the two -- one listing-to-command gap per
+    poll or reading -- is started once by that command. Nothing Yu'lon runs on a
+    timer keeps it up after that: the next listing says stopped and every
+    reading waits again, so it idles out as usual -- unless its containers come
+    back through `restart: unless-stopped`, in which case the next poll sees
+    the world up and T132's hold keeps it, as it does any world it finds running.
     """
     running = _wsl_listing("--running")
     if running is None:
@@ -212,7 +222,8 @@ def may_read(distro: str | None) -> bool:
     server on this host -- always may. The one question every automatic reading
     of a WSL install asks: the status poll that feeds the tab's gate
     (`ControllerView._waits_for_the_distro()`), the dashboard verdict on its
-    worker, and `install_wiring`'s own readings.
+    worker, and `install_wiring`'s own readings. It narrows the window to one
+    listing-to-command gap and cannot close it: see `distro_state()`.
     """
     return distro is None or distro_state(distro) == "running"
 

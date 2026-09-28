@@ -215,6 +215,15 @@ the verdict and that settle, also ask `wsl.may_read()` on their worker thread, b
 tab's answer is up to one poll old and a distro stopped from outside since (`wsl -t`,
 `--shutdown`) would otherwise be started again every five seconds and never idle out.
 
+**What is left, accepted (T133 review).** Asking is not locking: the listing that says
+`running` and the `wsl -d` or `\\wsl.localhost` read that follows are two calls, and wsl.exe
+has no "only if it is already up" mode, so this cannot be closed in code. The window is one
+listing-to-command gap per poll or reading. A distro stopped at exactly that instant is
+started once by the command. Nothing on a timer keeps it up afterwards: the next listing says
+stopped, every reading waits again, and it idles out 15-25 s later -- unless its server's
+containers come back through `restart: unless-stopped`, in which case the next poll finds the
+world running and T132's hold keeps the distro up, as it does for any world it finds running.
+
 The generated database password of a TBC, Vanilla or Tortoise server in a distro is handed
 to the SQL seams as a reader (`apply.RootPassword`), read at the first database call, which
 starts the distro anyway, and kept only once a read found it. `install_wiring`'s own
