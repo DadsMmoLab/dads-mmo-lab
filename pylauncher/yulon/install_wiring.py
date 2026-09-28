@@ -274,7 +274,7 @@ def rebuild_for_app(
             _refuse_unless_in_the_distro(server_dir, wsl_distro)
         engine = installer_for_app(entry, wsl_distro=wsl_distro)
         # T170: this press compiles a server whose images are gone, without a
-        # rollback -- its confirmation says so (`native.NO_ROLLBACK_CONFIRMATION`).
+        # rollback -- its confirmation says so (`native.no_rollback_confirmation()`).
         yield from engine.rebuild(
             InstallOptions(server_dir=server_dir), cancel=cancel, missing_images_ok=True
         )

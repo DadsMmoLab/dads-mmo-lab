@@ -155,6 +155,22 @@ class Recorder:
     real owner.
     """
 
+    folder_projects: dict[Path, tuple[str, ...] | None] = field(default_factory=dict)
+    """`docker.folder_projects()`: the project of each container brought up from a folder (T170).
+
+    A folder absent here has no containers; `None` is a Docker that would not say.
+    """
+
+    project_images: dict[str, tuple[tuple[str, str, str], ...] | None] = field(default_factory=dict)
+    """`docker.project_container_images()`: (container, ref it was made from, image id) (T170)."""
+
+    ids: set[str] = field(default_factory=set)
+    """Image ids on the daemon (T170): `images_built()` answers True for refs that are all here.
+
+    Kept apart from `images`, which answers for the install's NAMES: a retag
+    moves a name away and leaves the image, and its id, where it was.
+    """
+
     daemon_lists_containers: bool = True
     """False when `docker ps -a` fails, which the real `container_exists()` RAISES on."""
 
@@ -760,6 +776,10 @@ class Recorder:
                 f"stop-world:{','.join(containers)}"
             ),
         )
+        # T170's two, bound after construction like an override, the two
+        # readings a test states through `folder_projects`/`project_images`.
+        seams.folder_projects = lambda folder: self.folder_projects.get(folder, ())
+        seams.project_container_images = lambda project: self.project_images.get(project, ())
         for key, value in overrides.items():
             setattr(seams, key, value)
         return seams
@@ -772,6 +792,8 @@ class Recorder:
     def images_built(self, refs: Sequence[str]) -> bool | None:
         """`docker.images_built()`: answers `self.images`, and keeps what it was asked about."""
         self.images_asked.append(tuple(refs))
+        if refs and all(ref in self.ids for ref in refs):
+            return True
         return self.images
 
     def gather(self, entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:

@@ -4383,10 +4383,10 @@ REPAIR_FILES_DONE = (
 REPAIR_FILES_UPSTREAM_BANNER = (
     "This server's docker-compose.yml is the one that came with the server's source code, not "
     "the one Yu'lon writes for it — an update that could not finish leaves it there — so "
-    f"\u201c{server_build_presses.REBUILD}\u201d and "
-    f"\u201c{server_build_presses.UPDATE_TO_LATEST}\u201d refuse this folder. Repair server "
-    "files… writes Yu'lon's file over it and keeps it as a backup. Nothing changes until you "
-    "press it."
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} and "
+    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} refuse "
+    "this folder. Repair server files… writes Yu'lon's file over it and keeps it as a backup. "
+    "Nothing changes until you press it."
 )
 """T170: the banner for `upstream`, the repository's own file in a WotLK folder."""
 
@@ -5078,9 +5078,11 @@ class ControllerView(QWidget):
         self._compose_state: str | None = None
         self._compose_check: native.ComposeCheck | None = None
         self._compose_backup: Path | None = None
-        # T170: whether that backup is the repository's own file, for the banner.
+        # T170: whether that backup is the repository's own file, for the banner,
+        # and whether a check is owed once the one out answers.
         self._compose_backup_upstream = False
         self._compose_pending = False
+        self._compose_again = False
         # T137: the module confs the last check found missing, the ones the
         # last repair wrote (until the restart that loads them), and whether a
         # check is out.
@@ -11713,8 +11715,13 @@ class ControllerView(QWidget):
             # T170: an update press writes docker-compose.yml, and one that could
             # not write it back leaves the repository's own, which the message
             # it ends on sends the player to Repair server files… for. Asked
-            # again here so the banner is there when the message is read.
-            self.check_server_files()
+            # again here so the banner is there when the message is read -- and
+            # asked AGAIN after a check already out, which read the folder
+            # before the press ended (cold review, round 2).
+            if self._compose_pending:
+                self._compose_again = True
+            else:
+                self.check_server_files()
         if ok and moved and not self.rebuild_log.cancelled:
             # T146, on `_rebuild_owed`'s terms below: only a press that finished
             # and was not stopped. A failed one puts every source back on the
@@ -12105,6 +12112,12 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_files_checked(self, result: object) -> None:
         self._compose_pending = False
+        if self._compose_again:
+            # T170: this answer read the folder before an update press ended, so
+            # it is dropped for the one asked now, which draws the banner.
+            self._compose_again = False
+            self.check_server_files()
+            return
         if not isinstance(result, native.ComposeCheck):
             return
         self._compose_state = result.state
@@ -12120,6 +12133,9 @@ class ControllerView(QWidget):
         """`check` never raises by contract; if it does, the banner stays as it was."""
         self._compose_pending = False
         logger.warning(f"{self.entry.id}: the compose check failed: {exc}")
+        if self._compose_again:
+            self._compose_again = False
+            self.check_server_files()
 
     def _refresh_compose_banner(self) -> None:
         """Draw T106's banner from what it answers: a job owed, a stale file, a missing conf.

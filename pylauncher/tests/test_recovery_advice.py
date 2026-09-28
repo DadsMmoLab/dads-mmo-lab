@@ -249,9 +249,12 @@ def test_a_failed_update_is_mended_by_repair_then_recreate_and_rebuild_works(
     assert "Remove from Yu'lon" not in advice and "WSL" not in advice, advice
 
     rec.calls.clear()
-    with pytest.raises(InstallerError, match="not written by Yu'lon"):
+    with pytest.raises(InstallerError) as refused:
         list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert "build" not in rec.calls, "the refused rebuild compiled anyway"
+    # Cold review SF2: its refusal names the Repair, not "another launcher".
+    assert f"\u201c{native.REPAIR_FILES_LABEL}\u201d on the Server tab" in str(refused.value)
+    assert "another launcher" not in str(refused.value)
 
     assert not view.compose_banner.isHidden(), "the tab did not ask again after the update"
     assert view.compose_banner_label.text() == controller_view_module.REPAIR_FILES_UPSTREAM_BANNER
@@ -376,6 +379,79 @@ def test_the_repositorys_file_in_a_moved_folder_is_refused(tmp_path: Path) -> No
     assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == upstream
 
 
+def _ours(rec: Recorder, server_dir: Path) -> str:
+    """The compose project Yu'lon renders for this WotLK folder, by the engine's own id."""
+    made = engine(rec)
+    return composegen.project_name(ENTRY.id, server_dir, install_id=made._install_id(server_dir))
+
+
+def test_containers_of_this_folder_under_another_project_are_refused(tmp_path: Path) -> None:
+    """Codex round 2: brought up once with the repository's own stack, the characters are there.
+
+    The record and the path say Yu'lon; the containers say `azerothcore-wotlk`.
+    Writing Yu'lon's file would start the server as a new project beside an
+    empty database volume, so the file stays and the sentence names both.
+    """
+    rec, server_dir, upstream = _upstream_in_place(tmp_path)
+    rec.folder_projects[server_dir] = ("azerothcore-wotlk",) * 3
+    made = engine(rec)
+    check = made.base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "foreign", check
+    assert "azerothcore-wotlk" in check.why and _ours(rec, server_dir) in check.why, check.why
+    with pytest.raises(InstallerError, match="characters are under azerothcore-wotlk"):
+        made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == upstream
+    assert _backups(server_dir) == []
+
+
+def test_containers_of_this_folder_under_yulons_project_are_offered(tmp_path: Path) -> None:
+    """The failed update's own case: the containers Yu'lon brought up are still there."""
+    rec, server_dir, _upstream = _upstream_in_place(tmp_path)
+    rec.folder_projects[server_dir] = (_ours(rec, server_dir),) * 3
+    check = engine(rec).base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "upstream", check
+
+
+def test_a_docker_that_will_not_say_which_containers_are_here_is_not_offered(
+    tmp_path: Path,
+) -> None:
+    """`None` is "could not ask": a write on that answer is a write on a guess."""
+    rec, server_dir, upstream = _upstream_in_place(tmp_path)
+    rec.folder_projects[server_dir] = None
+    made = engine(rec)
+    check = made.base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "error" and "Docker would not say" in check.why, check
+    with pytest.raises(InstallerError, match="Docker would not say"):
+        made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == upstream
+
+
+def test_rebuilds_refusal_of_an_edited_repository_file_does_not_offer_the_repair(
+    tmp_path: Path,
+) -> None:
+    """Cold review SF2's other half: git says modified, so the Repair would refuse it too."""
+    rec, server_dir, upstream = _upstream_in_place(tmp_path)
+    (server_dir / composegen.BASE_FILE).write_text(upstream + "# mine\n", encoding="utf-8")
+    with pytest.raises(InstallerError) as refused:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert native.REPAIR_FILES_LABEL not in str(refused.value), refused.value
+    assert "not written by Yu'lon" in str(refused.value)
+
+
+def test_on_a_wsl_server_rebuilds_refusal_of_the_repositorys_file_names_the_distro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review SF2 from Windows: the Repair is the distro's, so the refusal says so."""
+    rec, server_dir, _upstream = _upstream_in_place(tmp_path)
+    _in_wsl(monkeypatch, server_dir)
+    with pytest.raises(InstallerError) as refused:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    said = str(refused.value)
+    assert f"WSL distro {DISTRO}" in said and f"({INSIDE})" in said, said
+    assert f"\u201c{native.REPAIR_FILES_LABEL}\u201d on its Server tab" in said, said
+    assert "Once the reason is fixed" not in said and "another launcher" not in said, said
+
+
 def test_yulons_own_wotlk_file_that_differs_is_still_left_to_update(tmp_path: Path) -> None:
     """T106's choice kept: WotLK's own file follows the app on Update, so Repair leaves it."""
     rec, server_dir = _wotlk_ready(tmp_path)
@@ -485,6 +561,65 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     assert {path: path.read_bytes() for path in patched} == patched_bytes
 
 
+def test_a_tbc_update_that_cannot_write_compose_again_names_the_same_press_not_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review SF1: on CMaNGOS the Repair the WotLK sentence names would never appear.
+
+    A TBC folder is not a checkout, so the fetch never touched its compose
+    files; the put-back rewrites them anyway (T173) and here the disk is full
+    for it. Each file is written whole, so each is still Yu'lon's and the
+    Repair reads `current` -- the advice may not send the player there. What
+    the failure did cost is the patch, written after the compose files; the
+    same press again writes both, and that is what the sentence says.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "tbc"
+    tbc_install(rec, server_dir, client_folder(tmp_path))
+    for source in TBC.emulator.sources:
+        rec.heads[server_dir / source.dest] = OLD
+        rec.upstream[server_dir / source.dest] = NEW
+    rec.on_clone = None
+    core = server_dir / "src/mangos-tbc"
+    base = server_dir / composegen.BASE_FILE
+    disk = _DiskThatFills()
+    monkeypatch.setattr(composegen, "os", disk)
+
+    def restore_then_fill_the_disk(dest: Path, rev: str) -> None:
+        rec.calls.append(f"restore:{dest.name}->{rev[:7]}")
+        rec.heads[dest] = rev
+        if dest == core:
+            # The file an older Yu'lon wrote, so the put-back has a write to make.
+            base.write_text(base.read_text(encoding="utf-8") + "# older\n", encoding="utf-8")
+            disk.armed = True
+
+    rec.build_result = AttachedRun(2, ("error: no",))
+    try:
+        said, raised = _said(
+            tbc_engine(rec, restore_rev=restore_then_fill_the_disk).update_to_latest(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    finally:
+        disk.armed = False
+    assert disk.writes >= 2, "the disk never filled"
+    assert raised is not None and native.SOURCES_PUT_BACK_NOTE in str(raised)
+    advice = next(line for line in said if "back on their old commits, but" in line)
+    assert native.REPAIR_FILES_LABEL not in advice, advice
+    assert server_build_presses.REBUILD not in advice, advice
+    again = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+    assert f"press {again} again" in advice, advice
+    assert composegen.is_marker_line(base.read_text(encoding="utf-8")), "not Yu'lon's any more"
+    check = tbc_engine(rec).base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state not in ("stale", "upstream"), "the Repair is offered after all"
+
+    rec.build_result = AttachedRun(0, ("built",))
+    rec.on_clone = lay_patch_sources(TBC)
+    _, raised = _said(tbc_engine(rec).update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert raised is None, raised
+    assert "# older" not in base.read_text(encoding="utf-8"), "the press again did not write it"
+
+
 # -- T170 (b): the images gone, one Rebuild press -----------------------------
 
 
@@ -560,7 +695,7 @@ def test_with_the_images_gone_rebuild_says_so_first_then_compiles_and_comes_up(
     player says Yes to does not promise a rollback the press then cannot keep.
     """
     rec, server_dir, _client = _tbc_images_gone(tmp_path)
-    assert native.NO_ROLLBACK_CONFIRMATION in rebuild_confirmation(TBC, server_dir)
+    assert native.no_rollback_confirmation(TBC) in rebuild_confirmation(TBC, server_dir)
 
     _wired_to(monkeypatch, lambda: tbc_engine(rec))
     said, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
@@ -654,3 +789,109 @@ def test_on_a_wsl_server_the_rebuild_from_windows_compiles_the_missing_images(
     assert raised is None, raised
     assert asked == [DISTRO], "the engine was not built for the distro"
     assert native.NO_ROLLBACK_KEPT in said and "build" in rec.calls
+
+
+# -- T170 round 2: a build whose names are gone, kept by its image id ----------
+
+
+def _held_by_containers(rec: Recorder, server_dir: Path, image_id: str) -> str:
+    """The TBC server image's name moved aside by a retag, its containers still on it."""
+    made = tbc_engine(rec)
+    (ref,) = made.image_refs_at(server_dir)
+    project = composegen.project_name(TBC.id, server_dir, install_id=made._install_id(server_dir))
+    rec.project_images[project] = (
+        (TBC.container_spec().world, ref, image_id),
+        (TBC.container_spec().auth, ref, image_id),
+    )
+    return ref
+
+
+def test_an_image_moved_aside_with_its_containers_still_on_it_is_kept_as_the_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 2: names gone is not a build gone. Kept by id, then put back by it.
+
+    The new build never reports ready; the rollback made from the id goes back
+    over the live name and the server comes up on it -- an ordinary rebuild.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    rec.ids = {"sha256:old"}
+    ref = _held_by_containers(rec, server_dir, "sha256:old")
+    back = ref + native.ROLLBACK_TAG_SUFFIX
+    ready = iter([False, True])
+    _wired_to(monkeypatch, lambda: tbc_engine(rec, wait_ready=lambda spec, r: next(ready, True)))
+    said, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+
+    assert f"tag:sha256:old->{back}" in rec.calls, rec.calls
+    assert native.NO_ROLLBACK_KEPT not in said
+    kept = next(line for line in said if line.startswith("Kept the build you have now"))
+    assert "lost their names" in kept, kept
+    assert rec.calls.index(f"tag:sha256:old->{back}") < rec.calls.index("build"), rec.calls
+    assert raised is not None and "put back" in str(raised), raised
+    assert f"tag:{back}->{ref}" in rec.calls, "the rollback made from the id was not put back"
+
+
+def test_containers_whose_image_is_gone_too_leave_no_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The containers name an id the daemon no longer has: no whole build, so none is kept."""
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    _held_by_containers(rec, server_dir, "sha256:old")
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
+    said, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is None, raised
+    assert native.NO_ROLLBACK_KEPT in said
+    assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
+
+
+def test_containers_on_two_different_builds_leave_no_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """World and realm made from one ref but running different images: no one build to keep."""
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    rec.ids = {"sha256:old", "sha256:older"}
+    ref = _held_by_containers(rec, server_dir, "sha256:old")
+    project = next(iter(rec.project_images))
+    rec.project_images[project] = (
+        (TBC.container_spec().world, ref, "sha256:old"),
+        (TBC.container_spec().auth, ref, "sha256:older"),
+    )
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
+    said, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is None, raised
+    assert native.NO_ROLLBACK_KEPT in said
+    assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
+
+
+@pytest.mark.parametrize("to_pin", [False, True], ids=["update", "return-to-pin"])
+def test_update_and_return_to_pin_still_refuse_with_the_images_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, to_pin: bool
+) -> None:
+    """Cold review: through the app's own Update route, not `engine.rebuild()`.
+
+    Their confirmations promise the build you have keeps running, so neither
+    compiles without a rollback; the refusal names Rebuild, the sources go back.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    for source in TBC.emulator.sources:
+        rec.heads[server_dir / source.dest] = OLD
+        rec.upstream[server_dir / source.dest] = NEW
+    rec.on_clone = lay_patch_sources(TBC)
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
+    route = install_wiring.update_to_latest_for_app(TBC, server_dir)
+    assert route is not None
+    press = route.to_pin if to_pin else route.press
+    _, raised = _said(press(None))
+    assert raised is not None, "it compiled without a rollback"
+    assert f"Press {REBUILD} first" in str(raised), raised
+    assert native.SOURCES_PUT_BACK_NOTE in str(raised)
+    assert "build" not in rec.calls and not [c for c in rec.calls if c.startswith("tag:")]
+
+
+def test_the_confirmation_names_reset_to_default_only_where_it_reads_the_image() -> None:
+    """Cold review NIT: WotLK's defaults are not in its image, so its Reset never says so."""
+    assert "Reset to default" in native.no_rollback_confirmation(TBC)
+    assert "Reset to default" not in native.no_rollback_confirmation(ENTRY)
+    for entry in (TBC, ENTRY):
+        said = native.no_rollback_confirmation(entry)
+        assert "leave the server as it is now" in said and "has replaced the containers" in said

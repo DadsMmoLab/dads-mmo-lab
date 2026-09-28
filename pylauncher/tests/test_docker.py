@@ -7113,3 +7113,90 @@ def test_the_plain_tail_survives_beside_the_link() -> None:
     said = docker.last_words(tail, from_build=True)
     assert "docker-desktop://" in said
     assert "cmake" in said, "the plain tail was thrown away for a link that may not open"
+
+
+# -- T170: the containers a folder was brought up with, and the images they hold ----
+
+
+def _answer_with(
+    monkeypatch: pytest.MonkeyPatch, answers: dict[str, subprocess.CompletedProcess[str]]
+) -> list[tuple[list[str], str | None]]:
+    """`_docker` answering by subcommand (`ps`, `inspect`), recording each argv and distro."""
+    seen: list[tuple[list[str], str | None]] = []
+
+    def answering(
+        argv: list[str],
+        cwd: Path | None = None,
+        timeout: float | None = None,
+        *,
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((argv, wsl_distro))
+        return answers[argv[0]]
+
+    monkeypatch.setattr(docker, "_docker", answering)
+    return seen
+
+
+def test_folder_projects_filters_on_the_working_dir_label_and_reads_the_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _answer_with(
+        monkeypatch, {"ps": _volume_proc(0, stdout="azerothcore-wotlk\n\nazerothcore-wotlk\n")}
+    )
+    got = docker.folder_projects(Path("/srv/wow"), wsl_distro="Ubuntu")
+    assert got == ("azerothcore-wotlk", "azerothcore-wotlk")
+    ((argv, distro),) = seen
+    assert distro == "Ubuntu"
+    assert f"label={docker.WORKING_DIR_LABEL}=/srv/wow" in argv and "-a" in argv
+    assert argv[-1] == '{{.Label "' + docker.PROJECT_LABEL + '"}}'
+
+
+def test_folder_projects_says_none_when_docker_would_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _answer_with(monkeypatch, {"ps": _volume_proc(1, stderr=_DAEMON_WILL_NOT_TALK)})
+    assert docker.folder_projects(Path("/srv/wow")) is None
+
+
+def test_project_container_images_reads_the_ref_and_the_id_of_each_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _answer_with(
+        monkeypatch,
+        {
+            "ps": _volume_proc(0, stdout="tbc-mangosd\ntbc-realmd\n"),
+            "inspect": _volume_proc(
+                0,
+                stdout="/tbc-mangosd\tyulon.local/cmangos-tbc-server:native-1\tsha256:aa\n"
+                "/tbc-realmd\tyulon.local/cmangos-tbc-server:native-1\tsha256:aa\n",
+            ),
+        },
+    )
+    got = docker.project_container_images("yulon-wow-tbc-1")
+    assert got == (
+        ("tbc-mangosd", "yulon.local/cmangos-tbc-server:native-1", "sha256:aa"),
+        ("tbc-realmd", "yulon.local/cmangos-tbc-server:native-1", "sha256:aa"),
+    )
+    assert f"label={docker.PROJECT_LABEL}=yulon-wow-tbc-1" in seen[0][0]
+    assert seen[1][0][-2:] == ["tbc-mangosd", "tbc-realmd"]
+
+
+def test_project_container_images_with_no_containers_asks_nothing_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _answer_with(monkeypatch, {"ps": _volume_proc(0, stdout="")})
+    assert docker.project_container_images("yulon-wow-tbc-1") == ()
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    "inspect",
+    [_volume_proc(1, stderr=_DAEMON_WILL_NOT_TALK), _volume_proc(0, stdout="/tbc-mangosd\t\t\n")],
+    ids=["refused", "unreadable"],
+)
+def test_project_container_images_says_none_rather_than_guess(
+    monkeypatch: pytest.MonkeyPatch, inspect: subprocess.CompletedProcess[str]
+) -> None:
+    _answer_with(monkeypatch, {"ps": _volume_proc(0, stdout="tbc-mangosd\n"), "inspect": inspect})
+    assert docker.project_container_images("yulon-wow-tbc-1") is None

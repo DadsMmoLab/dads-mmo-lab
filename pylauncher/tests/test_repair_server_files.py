@@ -595,3 +595,26 @@ def test_the_repositorys_own_file_gets_its_own_banner_and_question_before_a_miss
     assert view.compose_banner_button.text() == TUNING_RECREATE_LABEL
     assert "still run the old file" not in view.compose_banner_label.text()
     assert "Yu'lon's again" in view.compose_banner_label.text()
+
+
+def test_an_update_that_ends_while_a_check_is_out_asks_once_more(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Cold review round 2: a check already out read the folder before the press ended.
+
+    Its answer is dropped for one asked after it, so the banner shows what the
+    update left rather than what was there before.
+    """
+    route = _Route("current")
+    view = _view(ps, tmp_path, route)
+    assert route.checks == 1
+    view._compose_pending = True  # a check is out, as when the tab opened a moment ago
+    view._rebuild_moves_sources = True
+    route.state = "upstream"  # what the failed update left
+    view._rebuild_finished(False, "failed")
+    assert route.checks == 1, "asked while one was out"
+    view._server_files_checked(native.ComposeCheck("current"))  # the stale answer arrives
+    assert route.checks == 2, "the stale answer was taken as the last word"
+    assert view._compose_state == "upstream", "the stale answer overwrote the fresh one"
+    assert not view.compose_banner.isHidden()
+    assert view.compose_banner_label.text() == controller_view_module.REPAIR_FILES_UPSTREAM_BANNER
