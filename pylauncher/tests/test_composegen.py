@@ -10,6 +10,7 @@ this project would notice until two containers fought over 3724.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -588,7 +589,119 @@ def test_write_plan_keeps_a_files_mode_and_gives_a_new_one_the_usual_mode(tmp_pa
     assert "# changed" not in base.read_text(encoding="utf-8")
     if sys.platform != "win32":
         assert base.stat().st_mode & 0o777 == 0o600
-    assert not list(server_dir.glob(f"*{composegen.COMPOSE_TEMP_SUFFIX}"))
+    assert not list(server_dir.glob(f"*{composegen.COMPOSE_TEMP_PREFIX}*"))
+
+
+class _OsWithTurns:
+    """`composegen`'s `os`, recording what it does and holding each writer's rename for its turn.
+
+    Only `replace` and `fsync` are intercepted; everything else is the real
+    `os`. `order` names the threads in the order their renames may land, and
+    each rename waits until every writer has reached its own -- the worst
+    interleaving: all temps written, then the renames one after another.
+    """
+
+    def __init__(self, order: list[str], published: dict[str, bytes], path: Path) -> None:
+        import threading
+
+        self.order = order
+        self.published = published
+        self.path = path
+        self.arrived = threading.Barrier(len(order), timeout=10)
+        self.turn = threading.Condition()
+        self.next = 0
+        self.dir_fsyncs: list[str] = []
+        self.name = os.name
+
+    def replace(self, src: object, dst: object) -> None:
+        import threading
+
+        me = threading.current_thread().name
+        self.arrived.wait()
+        with self.turn:
+            assert self.turn.wait_for(lambda: self.order[self.next] == me, timeout=10)
+            try:
+                os.replace(src, dst)  # type: ignore[arg-type]
+                self.published[me] = self.path.read_bytes()
+            finally:
+                self.next += 1
+                self.turn.notify_all()
+
+    def fsync(self, fd: int) -> None:
+        import stat as stat_mod
+
+        if stat_mod.S_ISDIR(os.fstat(fd).st_mode):
+            self.dir_fsyncs.append(
+                os.readlink(f"/proc/self/fd/{fd}") if sys.platform == "linux" else "dir"
+            )
+        os.fsync(fd)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def test_two_writers_at_once_each_publish_their_own_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 3: a fixed temp name, unlinked before `O_EXCL`, let one writer take another's.
+
+    Two writers of the same compose file, both temps written before either
+    rename lands (A's first). With one temp name, B's start unlinked A's temp
+    and made its own under the same name, so A's rename published B's bytes
+    and A reported success. Each writer's rename must publish exactly its own
+    text, and the file ends as one writer's text, whole.
+    """
+    import threading
+
+    path = tmp_path / composegen.BASE_FILE
+    path.write_text("old\n", encoding="utf-8")
+    texts = {"A": "A\n" * 5000, "B": "B\n" * 7000}
+    published: dict[str, bytes] = {}
+    monkeypatch.setattr(composegen, "os", _OsWithTurns(["A", "B"], published, path))
+    raised: dict[str, BaseException] = {}
+
+    def write(name: str) -> None:
+        try:
+            composegen._replace_whole(path, texts[name])
+        except BaseException as exc:  # noqa: BLE001 - recorded and asserted on below
+            raised[name] = exc
+
+    writers = [threading.Thread(target=write, args=(n,), name=n) for n in ("A", "B")]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=20)
+
+    assert published.get("A") == texts["A"].encode("utf-8"), "A's rename published another file"
+    assert raised == {}, f"a writer failed: {raised}"
+    assert published["B"] == texts["B"].encode("utf-8"), "B's rename published another file"
+    assert path.read_bytes() in {text.encode("utf-8") for text in texts.values()}
+    assert sorted(p.name for p in tmp_path.iterdir()) == [composegen.BASE_FILE]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="names the fsynced directory via /proc")
+def test_the_folder_is_fsynced_after_the_rename_on_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 3: the rename is durable only once the directory entry is on disk."""
+    path = tmp_path / composegen.BASE_FILE
+    spy = _OsWithTurns(["MainThread"], {}, path)
+    monkeypatch.setattr(composegen, "os", spy)
+    composegen._replace_whole(path, "services: {}\n")
+    assert spy.dir_fsyncs == [str(tmp_path)]
+
+
+def test_on_windows_the_folder_is_not_opened_to_be_fsynced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows cannot open a directory, so the directory fsync is skipped there, quietly."""
+    path = tmp_path / composegen.BASE_FILE
+    spy = _OsWithTurns(["MainThread"], {}, path)
+    spy.name = "nt"
+    monkeypatch.setattr(composegen, "os", spy)
+    composegen._replace_whole(path, "services: {}\n")
+    assert path.read_text(encoding="utf-8") == "services: {}\n"
+    assert spy.dir_fsyncs == []
 
 
 # -- is_marker_line: the exact banners, not a separator rule (T25) -----------

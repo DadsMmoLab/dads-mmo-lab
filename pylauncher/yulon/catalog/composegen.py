@@ -36,6 +36,7 @@ import hashlib
 import os
 import posixpath
 import re
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -1251,8 +1252,21 @@ def write_plan(
     return tuple(written)
 
 
-COMPOSE_TEMP_SUFFIX = ".yulon-tmp"
-"""`.<name>.yulon-tmp`: a compose file on its way in, beside the one it replaces (T163)."""
+COMPOSE_TEMP_PREFIX = ".yulon-tmp-"
+"""`.<name>.yulon-tmp-XXXXXXXX`: a compose file on its way in, beside the one it replaces (T163).
+
+A name of its own per writer (`tempfile.mkstemp`), never a fixed one: with one
+name a second writer's clean-up unlinked the first writer's open temp and made
+its own under the same name, so the first rename published the second writer's
+bytes and reported success (Codex, round 3). A temp left by a crash is never
+deleted by name for the same reason -- it may be somebody's open file. Left in
+a WotLK checkout it is an untracked file, and git's answers the update route
+asks do not see one (measured on a real repository, 2026-09-28:
+`status --porcelain --untracked-files=no`, `status --porcelain --
+docker-compose.yml`, `RunnerGit.local_edits()` and `is_unmodified()` all
+answered clean with one beside the file, and `checkout --detach --force` and
+`reset --hard` both left it where it was).
+"""
 
 NEW_COMPOSE_MODE = 0o644
 """A compose file not yet on disk: what `write_text()` gave it under the usual 022 umask."""
@@ -1271,18 +1285,20 @@ def _replace_whole(path: Path, text: str) -> None:
     exactly as it was until the new one is complete, and the next press finds
     either one.
 
-    The temp takes the old file's mode before the rename, so the file keeps it;
-    a temp left by a crash is removed first, never appended to. The bytes are
-    `text` encoded as it stands -- `write_plan()`'s old `newline="\n"` -- so the
-    file is identical on every platform.
+    The temp is this writer's own (`COMPOSE_TEMP_PREFIX`), created owner-only,
+    and given the old file's mode before the rename, so the file keeps it. The
+    folder is fsynced after the rename on POSIX, because until its entry is on
+    disk a power cut can bring the old file back; Windows cannot open a folder
+    and is not asked. The bytes are `text` encoded as it stands --
+    `write_plan()`'s old `newline="\n"` -- so the file is identical on every
+    platform.
     """
     try:
         mode = os.stat(path).st_mode & 0o7777
     except FileNotFoundError:
         mode = NEW_COMPOSE_MODE
-    temp = path.with_name(f".{path.name}{COMPOSE_TEMP_SUFFIX}")
-    temp.unlink(missing_ok=True)
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}{COMPOSE_TEMP_PREFIX}")
+    temp = Path(name)
     try:
         try:
             data = memoryview(text.encode("utf-8"))
@@ -1301,6 +1317,26 @@ def _replace_whole(path: Path, text: str) -> None:
             pass
         temp.unlink(missing_ok=True)
         raise
+    _fsync_folder(path.parent)
+
+
+def _fsync_folder(folder: Path) -> None:
+    """Put the folder's entries on disk: the rename above is not durable until they are.
+
+    POSIX only; Windows cannot open a directory. After the rename, so a
+    failure here is a warning and not a raise: the new file is already in
+    place, and reporting the write as failed would be untrue.
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        logger.warning(f"could not fsync {folder} after replacing a compose file in it: {exc}")
 
 
 def merge_dotenv(existing: str, additions: Mapping[str, str]) -> str:
