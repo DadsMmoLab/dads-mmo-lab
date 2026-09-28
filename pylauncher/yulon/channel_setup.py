@@ -948,8 +948,9 @@ def load_credential(
     """
     path = credential_path(game, install_id, config_dir=config_dir)
     # A credential is rewritten only on a rotation, so one saved before T151
-    # gets its folder's owner-only DACL here, on the read every launch makes.
-    winacl.secure_folder(path.parent)
+    # gets its folder's owner-only DACL here, on the read every launch makes --
+    # asked once a launch, since `live_channel()` reads it on every GM press.
+    winacl.secure_folder(path.parent, reading=True)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return soap.Endpoint(

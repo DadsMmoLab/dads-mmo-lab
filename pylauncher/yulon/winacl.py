@@ -32,8 +32,16 @@ dependency (`requirements.txt`). `icacls` would need the account's SID from a
 second program, prints its answer in the machine's language (so reading it
 back is a parse of translated text), and flashes a console from a windowed
 app unless every call carries the right creation flags. The API takes and
-gives SDDL, which is the same in every locale, and each of the three calls is
-a seam a test replaces (`_user_sid`, `_read_dacl`, `_apply_dacl`).
+gives SDDL, which is the same in every locale, and each of the calls is
+a seam a test replaces (`_user_sid`, `_sid_of`, `_read_dacl`, `_apply_dacl`).
+
+Measured on Windows 11 25H2 with CPython 3.11 on 2026-09-28, with none of those
+replaced: the SID, the read, the apply and the read-back all worked; Windows
+rendered the result `D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;<SID>)`,
+which `is_owner_only` accepted; a folder loosened with `BUILTIN\\Users:(OI)(CI)(RX)`
+and the file already in it both lost `Users`, the file keeping the three as
+`(I)(F)`; and a second call changed nothing. The account was an ordinary one,
+so `_sid_of` on an alias (`LA`) was not reached there.
 
 **A failure is a warning, and the secret is still written.** The caller that
 matters most writes a GM password the server has ALREADY been given: a
@@ -57,6 +65,8 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +81,15 @@ ADMINISTRATORS_SID = "S-1-5-32-544"
 """`BUILTIN\\Administrators`. Kept, for the reasons the module docstring gives."""
 
 _ALIASES = {"SY": SYSTEM_SID, "BA": ADMINISTRATORS_SID}
-"""How Windows spells those two when it renders a DACL as SDDL."""
+"""How Windows spells those two when it renders a DACL as SDDL.
+
+Only the fallback `is_owner_only` reads trustees with when it is handed no
+`sid_of`. On Windows `secure_folder` hands it `_sid_of`, which asks Windows for
+every alias (round 2): the two above are not the only ones it renders. The
+built-in Administrator of this PC comes back as `LA` and its Guest as `LG`, and
+compared as text the owner's own entry never matched, so every read re-applied
+the DACL and warned.
+"""
 
 _FULL_CONTROL = frozenset({"FA", "0X1F01FF"})
 """`FILE_ALL_ACCESS`: Windows renders it `FA`, and a hand-made DACL can carry the number."""
@@ -93,15 +111,22 @@ def owner_only_sddl(user_sid: str) -> str:
     return f"D:P{aces}"
 
 
-def is_owner_only(sddl: str, user_sid: str) -> bool:
+def _alias_sid(trustee: str) -> str:
+    """`_ALIASES`' fold: the two it knows become SIDs, anything else is kept as spelt."""
+    return _ALIASES.get(trustee, trustee)
+
+
+def is_owner_only(sddl: str, user_sid: str, *, sid_of: Callable[[str], str] | None = None) -> bool:
     """Is this DACL, as Windows renders it, the one `owner_only_sddl` asks for?
 
-    Not a string comparison: the read-back spells SYSTEM and Administrators as
-    `SY` and `BA`, adds `AI` beside `P`, and may order the flags differently. So
-    it is read for what it means: protected, exactly one allow entry of full
-    control for each trustee, handed down to files and subfolders, and nothing
-    else at all.
+    Not a string comparison: the read-back spells well-known accounts by alias
+    (`SY`, `BA`, and this PC's built-in Administrator as `LA`), adds `AI` beside
+    `P`, and may order the flags differently. So it is read for what it means:
+    protected, exactly one allow entry of full control for each trustee, handed
+    down to files and subfolders, and nothing else at all. Trustees are
+    compared as SIDs, each turned into one by `sid_of` (`_sid_of` on Windows).
     """
+    resolve = sid_of if sid_of is not None else _alias_sid
     if not sddl.startswith("D:"):
         return False
     flags, _, rest = sddl[2:].partition("(")
@@ -116,12 +141,28 @@ def is_owner_only(sddl: str, user_sid: str) -> bool:
         handed = {ace_flags[i : i + 2] for i in range(0, len(ace_flags), 2)}
         if kind != "A" or handed != _HANDED_DOWN or rights.upper() not in _FULL_CONTROL:
             return False
-        seen.append(_ALIASES.get(trustee, trustee))
+        seen.append(resolve(trustee))
     return sorted(seen) == sorted(trustees(user_sid))
 
 
-def secure_folder(folder: Path) -> None:
+_checked_on_read: set[str] = set()
+"""The folders this launch has already asked Windows about (round 2).
+
+`live_channel()` reads the credential on every GM press, and the tab builds its
+channel on the GUI thread, so a read asks Windows about its folder only the
+first time in a launch. A write always asks again, since it is the moment the
+secret lands, and its answer counts for the reads after it. A failed attempt is
+remembered too: a profile that refuses `WRITE_DAC` warns once a launch, not on
+every press. Keyed by the absolute path."""
+
+_checked_lock = threading.Lock()
+
+
+def secure_folder(folder: Path, *, reading: bool = False) -> None:
     """Give `folder` the owner-only DACL on Windows, unless it already has it. Never raises.
+
+    `reading=True` for a read of a secret: once a launch per folder
+    (`_checked_on_read`). Every write asks, before the secret is created.
 
     A no-op anywhere else: there the file's own 0o600 mode is real and is what
     keeps it private. A folder that is not there is left alone -- the writers
@@ -135,10 +176,15 @@ def secure_folder(folder: Path) -> None:
     """
     if not _on_windows() or not folder.is_dir():
         return
+    key = str(folder.absolute())
+    with _checked_lock:
+        if reading and key in _checked_on_read:
+            return
+        _checked_on_read.add(key)
     try:
         user_sid = _user_sid()
         before = _read_dacl(folder)
-        if is_owner_only(before, user_sid):
+        if is_owner_only(before, user_sid, sid_of=_sid_of):
             return
         _apply_dacl(folder, owner_only_sddl(user_sid))
         after = _read_dacl(folder)
@@ -149,7 +195,7 @@ def secure_folder(folder: Path) -> None:
             "it inherits from the folder above it"
         )
         return
-    if is_owner_only(after, user_sid):
+    if is_owner_only(after, user_sid, sid_of=_sid_of):
         logger.info(f"made {folder} readable by this account only (T151); it was {before}")
     else:
         logger.warning(
@@ -158,7 +204,7 @@ def secure_folder(folder: Path) -> None:
         )
 
 
-# -- the three calls into Windows --------------------------------------------
+# -- the calls into Windows --------------------------------------------------
 #
 # Each is its own function so a test can stand in for it: no box this suite runs
 # on has the Win32 security API. `getattr` for `ctypes.WinDLL`, `WinError` and
@@ -218,6 +264,8 @@ def _dlls() -> tuple[Any, Any]:  # pragma: no cover - Windows only
     advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, out]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, out]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
     advapi32.GetNamedSecurityInfoW.argtypes = [
         wintypes.LPCWSTR,
         ctypes.c_int,
@@ -314,6 +362,35 @@ def _user_sid() -> str:  # pragma: no cover - Windows only
             kernel32.LocalFree(text)
     finally:
         kernel32.CloseHandle(token)
+
+
+def _sid_of(trustee: str) -> str:  # pragma: no cover - Windows only
+    """A DACL entry's trustee as a SID string: an alias (`SY`, `LA`, ...) as Windows maps it.
+
+    `ConvertStringSidToSidW` takes either a SID string or any SDDL alias and
+    answers the SID -- Windows' own table, so `LA` becomes THIS PC's account
+    domain plus RID 500, which is what it means. Guessing it from the RID was
+    the alternative, and it is wrong for a domain account that also ends in
+    -500. A SID string is handed back as it is, without a call.
+    """
+    if trustee.upper().startswith("S-"):
+        return trustee
+    import ctypes
+
+    advapi32, kernel32 = _dlls()
+    sid = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(trustee, ctypes.byref(sid)):
+        raise _failed(f"ConvertStringSidToSidW({trustee})")
+    try:
+        text = ctypes.c_void_p()
+        if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            raise _failed("ConvertSidToStringSidW")
+        try:
+            return _wide_string(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(sid)
 
 
 def _read_dacl(folder: Path) -> str:  # pragma: no cover - Windows only

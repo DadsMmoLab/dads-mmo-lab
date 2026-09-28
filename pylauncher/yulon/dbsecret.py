@@ -167,8 +167,9 @@ def recall(game: str, install_id: str, *, config_dir: Path | None = None) -> Kep
     on its own evidence, not on this one's silence.
     """
     path = secret_path(game, install_id, config_dir=config_dir)
-    # A copy kept before T151 gets its folder's owner-only DACL on this read.
-    winacl.secure_folder(path.parent)
+    # A copy kept before T151 gets its folder's owner-only DACL on this read
+    # (asked once a launch).
+    winacl.secure_folder(path.parent, reading=True)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         password = str(raw["password"])

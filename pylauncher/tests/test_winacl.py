@@ -4,8 +4,8 @@ A POSIX mode does nothing to a Windows DACL (measured by K.3 on 2026-09-01:
 `os.open(..., 0o600)` leaves the ACL byte-identical), so the command channel's
 GM password and a kept database password took whatever `%APPDATA%` gave them.
 
-No box this suite runs on has the Win32 security API, so the three calls that
-reach it (`_user_sid`, `_read_dacl`, `_apply_dacl`) are replaced by `FakeWindows`,
+No box this suite runs on has the Win32 security API, so the calls that reach
+it (`_user_sid`, `_sid_of`, `_read_dacl`, `_apply_dacl`) are replaced by `FakeWindows`,
 which keeps a DACL per folder the way Windows does: read back in the form
 Windows renders it (aliases, `PAI`), changed only by an apply. Everything
 between those calls -- what is asked for, when, what counts as already
@@ -40,12 +40,42 @@ LOOSENED = f"{PROFILE_DEFAULT}(A;OICIID;0x1200a9;;;BU)"
 
 PASSWORD = "a-password-nobody-should-see"
 
+MACHINE = "S-1-5-21-4444444444-5555555555-6666666666"
+"""This PC's own account domain: every local account's SID is this plus its RID."""
+
+BUILT_IN_ADMINISTRATOR = f"{MACHINE}-500"
+"""The account Windows makes with the PC, RID 500. SDDL renders it `LA`, not as its SID."""
+
+SDDL_ALIASES = {
+    "SY": winacl.SYSTEM_SID,
+    "BA": winacl.ADMINISTRATORS_SID,
+    "BU": "S-1-5-32-545",
+    "LA": BUILT_IN_ADMINISTRATOR,
+    "LG": f"{MACHINE}-501",
+}
+"""What `ConvertStringSidToSidW` answers for the aliases these tests use, on this PC."""
+
+
+def windows_sid_of(trustee: str) -> str:
+    """`ConvertStringSidToSidW` then `ConvertSidToStringSidW`: an alias becomes its SID."""
+    if trustee.startswith("S-"):
+        return trustee
+    if trustee not in SDDL_ALIASES:
+        raise OSError(1337, f"The security ID structure is invalid: {trustee}")
+    return SDDL_ALIASES[trustee]
+
+
+def rendered(sid: str) -> str:
+    """How `ConvertSecurityDescriptorToStringSecurityDescriptorW` spells a trustee."""
+    return next((alias for alias, known in SDDL_ALIASES.items() if known == sid), sid)
+
 
 class FakeWindows:
-    """The three Win32 calls, answering as Windows would, and recording what was asked."""
+    """The Win32 calls, answering as Windows would, and recording what was asked."""
 
-    def __init__(self, *, initial: str = LOOSENED) -> None:
+    def __init__(self, *, initial: str = LOOSENED, user: str = USER) -> None:
         self.initial = initial
+        self.user = user
         self.dacls: dict[Path, str] = {}
         self.applied: list[tuple[Path, str, list[str]]] = []
         self.reads: list[Path] = []
@@ -53,7 +83,12 @@ class FakeWindows:
         self.apply_does_not_stick = False
 
     def user_sid(self) -> str:
-        return USER
+        return self.user
+
+    def owner_only_as_windows_reads_it(self) -> str:
+        return "D:PAI" + "".join(
+            f"(A;OICI;FA;;;{rendered(sid)})" for sid in winacl.trustees(self.user)
+        )
 
     def read_dacl(self, folder: Path) -> str:
         self.reads.append(folder)
@@ -66,7 +101,7 @@ class FakeWindows:
         if self.refuse_apply is not None:
             raise self.refuse_apply
         if not self.apply_does_not_stick:
-            self.dacls[folder] = OWNER_ONLY_AS_WINDOWS_READS_IT
+            self.dacls[folder] = self.owner_only_as_windows_reads_it()
 
 
 @pytest.fixture
@@ -76,6 +111,9 @@ def windows(monkeypatch: pytest.MonkeyPatch) -> FakeWindows:
     monkeypatch.setattr(winacl, "_user_sid", fake.user_sid)
     monkeypatch.setattr(winacl, "_read_dacl", fake.read_dacl)
     monkeypatch.setattr(winacl, "_apply_dacl", fake.apply_dacl)
+    monkeypatch.setattr(winacl, "_sid_of", windows_sid_of)
+    # A launch of its own: what an earlier test's reads checked is not this one's.
+    monkeypatch.setattr(winacl, "_checked_on_read", set())
     return fake
 
 
@@ -331,3 +369,113 @@ def test_reading_a_kept_password_written_before_t151_narrows_its_folder(
 
     assert dbsecret.recall("wow-tbc", "ab12cd34", config_dir=tmp_path) is not None
     assert [folder for folder, _, _ in windows.applied] == [tmp_path / dbsecret.DIR_NAME]
+
+
+# -- round 2: the built-in Administrator, and a read checked once a launch ----
+
+
+def test_the_built_in_administrator_rendered_as_la_is_still_this_account() -> None:
+    """Windows spells RID 500 of this PC's domain `LA`, so a SID comparison is the only fair one.
+
+    Folded by `ConvertStringSidToSidW` -- Windows' own table -- rather than by
+    guessing from the RID: a DOMAIN account can end in -500 too, and `LA` is
+    never that one.
+    """
+    sddl = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
+    assert winacl.is_owner_only(sddl, BUILT_IN_ADMINISTRATOR, sid_of=windows_sid_of)
+
+
+def test_an_la_rendered_dacl_that_lets_users_read_too_is_not_owner_only() -> None:
+    sddl = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)(A;OICI;0x1200a9;;;BU)"
+    assert not winacl.is_owner_only(sddl, BUILT_IN_ADMINISTRATOR, sid_of=windows_sid_of)
+
+
+def test_la_is_not_folded_onto_a_domain_account_that_merely_ends_in_500() -> None:
+    """The guess this refuses: `LA` names THIS PC's administrator, not every RID 500."""
+    domain_admin = "S-1-5-21-7777777777-8888888888-9999999999-500"
+    sddl = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
+    assert not winacl.is_owner_only(sddl, domain_admin, sid_of=windows_sid_of)
+
+
+def test_the_built_in_administrator_s_folder_is_narrowed_once_and_never_warned_about(
+    tmp_path: Path, windows: FakeWindows, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Before round 2 the read-back said `LA`, never matched, and every call re-applied."""
+    windows.user = BUILT_IN_ADMINISTRATOR
+    with caplog.at_level(logging.INFO, logger="yulon.winacl"):
+        winacl.secure_folder(tmp_path)
+        winacl.secure_folder(tmp_path)
+
+    assert len(windows.applied) == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], caplog.text
+
+
+def test_a_read_checks_its_folder_once_a_launch_and_a_write_checks_again(
+    tmp_path: Path, windows: FakeWindows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`live_channel()` reads the credential on every GM press; Windows is asked on the first.
+
+    The folder is loosened behind the app's back after the first read, so the
+    fixture answers differently the second time: the reads that follow do not
+    ask (once a launch), and the next write does, and repairs it.
+    """
+    monkeypatch.setattr(winacl, "_on_windows", lambda: False)
+    _save_credential(tmp_path)
+    monkeypatch.setattr(winacl, "_on_windows", lambda: True)
+    folder = tmp_path / "credentials"
+
+    assert channel_setup.load_credential("wow-wotlk", "ab12cd34", config_dir=tmp_path)
+    asked = len(windows.reads)
+    windows.dacls[folder] = LOOSENED
+    for _ in range(3):
+        assert channel_setup.load_credential("wow-wotlk", "ab12cd34", config_dir=tmp_path)
+    assert len(windows.reads) == asked, "a later read asked Windows again"
+    assert [f for f, _, _ in windows.applied] == [folder]
+
+    _save_credential(tmp_path)
+    assert [f for f, _, _ in windows.applied] == [folder, folder]
+
+
+def test_a_write_s_check_counts_for_the_reads_after_it(
+    tmp_path: Path, windows: FakeWindows
+) -> None:
+    """The write asked a moment ago; a read straight after it has nothing new to learn."""
+    _save_credential(tmp_path)
+    asked = len(windows.reads)
+    assert channel_setup.load_credential("wow-wotlk", "ab12cd34", config_dir=tmp_path)
+    assert len(windows.reads) == asked
+
+
+def test_a_read_whose_check_failed_is_not_retried_on_every_read(
+    tmp_path: Path,
+    windows: FakeWindows,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile on a share that refuses `WRITE_DAC` warns once a launch, not once a GM press."""
+    monkeypatch.setattr(winacl, "_on_windows", lambda: False)
+    _save_credential(tmp_path)
+    monkeypatch.setattr(winacl, "_on_windows", lambda: True)
+    windows.refuse_apply = PermissionError(5, "Access is denied")
+
+    with caplog.at_level(logging.WARNING, logger="yulon.winacl"):
+        for _ in range(3):
+            assert channel_setup.load_credential("wow-wotlk", "ab12cd34", config_dir=tmp_path)
+
+    assert len(windows.applied) == 1
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_a_kept_password_s_folder_is_checked_once_a_launch_on_read(
+    tmp_path: Path, windows: FakeWindows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(winacl, "_on_windows", lambda: False)
+    dbsecret.remember("wow-tbc", "ab12cd34", password=PASSWORD, volume="v", config_dir=tmp_path)
+    monkeypatch.setattr(winacl, "_on_windows", lambda: True)
+
+    assert dbsecret.recall("wow-tbc", "ab12cd34", config_dir=tmp_path) is not None
+    asked = len(windows.reads)
+    for _ in range(2):
+        assert dbsecret.recall("wow-tbc", "ab12cd34", config_dir=tmp_path) is not None
+    assert len(windows.reads) == asked and asked > 0
+    assert len(windows.applied) == 1
