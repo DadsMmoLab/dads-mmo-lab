@@ -330,6 +330,11 @@ class Uninstaller:
         self._forget_pending = (
             forget_pending if forget_pending is not None else self._real_forget_pending
         )
+        # How the containers' removal is heard and steered while it waits for a
+        # world that is still loading (T158, `docker.StopControl`). Set by the
+        # tab after both exist, as `Controller.stop_control` is; None waits
+        # just the same, silently, with no way to force it.
+        self.stop_control: docker.StopControl | None = None
 
     # -- production defaults ----------------------------------------------
 
@@ -397,7 +402,13 @@ class Uninstaller:
         )
 
     def _real_remove_containers(self) -> bool:
-        return docker.remove_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        # A "Stop now anyway" left over from an earlier stop must not force this
+        # one; the wait never clears the event itself (T158).
+        if self.stop_control is not None:
+            self.stop_control.anyway.clear()
+        return docker.remove_staged(
+            self.spec, self.server_dir, wsl_distro=self.wsl_distro, control=self.stop_control
+        )
 
     def _real_remove_vol(self, name: str) -> None:
         docker.remove_volume(name, wsl_distro=self.wsl_distro)

@@ -280,6 +280,14 @@ class Uninstall(Protocol):
     the window's closure.
     """
 
+    stop_control: docker.StopControl | None
+    """How the removal of a loading world's containers is heard and forced (T158).
+
+    Set by the tab, as `Controller.stop_control` is: the uninstall's own
+    `remove_staged()` waits for a world that cannot yet hear a stop, and says
+    so in the uninstall label, with the Server tab's "Stop now anyway" beside it.
+    """
+
     def plan(self) -> purge.PurgePlan: ...
 
     def run(self, *, keep_characters: bool) -> purge.PurgeReport: ...
@@ -2874,6 +2882,14 @@ module's import block (a parallel ticket edits it). `test_controller_view.py`
 asserts the two spellings are equal.
 """
 
+STOP_ANYWAY_LABEL = "Stop now anyway"
+STOP_ANYWAY_TIP = (
+    "Stop the world now instead of waiting for it to finish loading. A world still loading "
+    "ignores the stop and is force-stopped when the stop's grace ends, losing anything since "
+    "its last save."
+)
+"""T158: the only way to end a load wait early, shown only while one is running."""
+
 STOPPING_FOR_REMOVAL = "status: stopping the server first, then removing it from Yu'lon…"
 STOPPING_FOR_REMOVAL_WAIT = (
     "Stopping the server before it is removed from Yu'lon. A server still loading its "
@@ -2881,9 +2897,12 @@ STOPPING_FOR_REMOVAL_WAIT = (
 )
 """T95, from the m910q gate: an × pressed on a world still loading took minutes.
 
-mangosd ignores SIGTERM while it loads, so the stop waits out its whole grace
-(`docker.STOP_GRACE_SECONDS`), and the locked buttons were all the player saw.
-The status line stays one short line (it does not wrap); the wait goes in the
+mangosd ignores SIGTERM while it loads. Until T158 the stop then sat out its
+whole grace (`docker.STOP_GRACE_SECONDS`) and ended in a SIGKILL; since T158 it
+waits until the world can hear the stop and then stops cleanly, which is still
+minutes on a slow load, and says so in this label while it waits
+(`_stop_notice`, with "Stop now anyway" beside it). The
+status line stays one short line (it does not wrap); the wait goes in the
 wrapped problem label.
 """
 
@@ -4684,6 +4703,35 @@ class ControllerView(QWidget):
         # down as the sink would call it on the worker thread instead.
         self._import_relay = LineRelay(self)
         self._import_relay.line.connect(self._import_line)
+        # T158: a stop that has to wait for a world to finish loading says so
+        # while it waits, from the stop's worker thread; the relays put it on
+        # this one. Every stop the controller runs speaks through the first --
+        # Stop, Remove containers, the restart and recreate jobs, the Bots
+        # tab's restarts, the stop before a removal and the stop of the server
+        # holding the ports -- and the uninstall through the second, into its
+        # own label. Both share the two events: "Stop now anyway" (the button
+        # below) and the give-up `shutdown()` sets so closing never hangs on a
+        # load and never signals one.
+        self._stop_anyway = threading.Event()
+        self._stop_abandon = threading.Event()
+        self._stop_relay = LineRelay(self)
+        self._stop_relay.line.connect(self._stop_notice)
+        self.services.controller.stop_control = docker.StopControl(
+            say=self._stop_relay.emit_line, anyway=self._stop_anyway, abandon=self._stop_abandon
+        )
+        self._uninstall_stop_relay = LineRelay(self)
+        self._uninstall_stop_relay.line.connect(self._uninstall_stop_notice)
+        if self.services.uninstall is not None:
+            self.services.uninstall.stop_control = docker.StopControl(
+                say=self._uninstall_stop_relay.emit_line,
+                anyway=self._stop_anyway,
+                abandon=self._stop_abandon,
+            )
+        # The one thing such a stop says that must outlive it: that the world
+        # may have been force-stopped. And whether the problem label is showing
+        # a stop's words at all, so the end of ANY job can take them down.
+        self._stop_forced = ""
+        self._stop_words_shown = False
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
         # T127's log panel, built with the Bots tab only where the game has a dashboard.
         self.dashboard_log: LogPanel | None = None
@@ -4889,6 +4937,13 @@ class ControllerView(QWidget):
         self._docker_prompter: InputPrompter | None = None
         # The running repair's cancel; None when this tab is not running one.
         self._docker_repair_cancel: threading.Event | None = None
+        # T158. Shown only while a stop waits for a world that cannot hear it
+        # yet, and the one way to end that wait early: there is no time limit,
+        # because a limit would force-stop a slow but healthy first boot.
+        self.stop_anyway_button = QPushButton(STOP_ANYWAY_LABEL, tab)
+        self.stop_anyway_button.setProperty("danger", True)
+        self.stop_anyway_button.setToolTip(STOP_ANYWAY_TIP)
+        self.stop_anyway_button.setVisible(False)
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -4952,6 +5007,7 @@ class ControllerView(QWidget):
         self.repair_button.clicked.connect(self.repair_import)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
+        self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
         row = QHBoxLayout()
         for b in (
             self.start_button,
@@ -5039,6 +5095,7 @@ class ControllerView(QWidget):
         box.addLayout(row)
         box.addWidget(self.steam_label)
         box.addWidget(self.problem_label)
+        box.addWidget(self.stop_anyway_button)
         box.addWidget(self.stop_other_button)
         box.addWidget(self.reinstall_docker_button)
         box.addWidget(self.repair_label)
@@ -5097,6 +5154,10 @@ class ControllerView(QWidget):
     def shutdown(self) -> None:
         """Stop this tab's timers and join its background jobs (called before teardown)."""
         self._closed = True
+        # T158: a stop still waiting for a world to load gives up at its next
+        # look and sends nothing, so the joins below are not held by a load
+        # and the world is left running rather than signalled mid-load.
+        self._stop_abandon.set()
         self._timer.stop()
         if self._docker_repair_cancel is not None:
             # T160: a repair waiting on a question stops rather than holding
@@ -5115,6 +5176,14 @@ class ControllerView(QWidget):
             # made that abort the ordinary outcome of closing the window during
             # one. Waiting out the grace is the lesser evil: the alternative is
             # not a faster exit, it is a crash (review, 2026-08-23).
+            # T158's load wait has no time limit, and is not what this join
+            # waits on: `_stop_abandon`, set above, ends it at its next check,
+            # with nothing sent -- within a quarter of a second if it is between
+            # looks, or once the look in flight returns, whose two docker
+            # commands are each bounded by `docker._LOAD_LOOK_TIMEOUT` (30 s).
+            # A rebuild panel's wait hears the panel's `stop()` above instead:
+            # before the replace that gives the rebuild up with nothing touched;
+            # in a rollback it stops the failed build regardless (its Cancel).
             waiter(int((docker.STOP_GRACE_SECONDS + 30) * 1000))
 
     # -------------------------------------------------------- background work
@@ -5684,6 +5753,16 @@ class ControllerView(QWidget):
         not have its greyed button handed back by a job ending.
         """
         self._busy = busy
+        if not busy:
+            # T158: whatever job just ended, a load wait's words and its button
+            # are over with it. `_tuning_job_done()` and the Bots tab's handlers
+            # never write this label, so they cannot be trusted to replace them;
+            # only the forced-stop warning is kept.
+            self.stop_anyway_button.setVisible(False)
+            self.rebuild_stop_anyway_button.setVisible(False)
+            if self._stop_words_shown:
+                self._stop_words_shown = False
+                self.problem_label.setText(self._stop_forced)
         if busy:
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(False)
@@ -5851,6 +5930,7 @@ class ControllerView(QWidget):
     def stop_server(self) -> None:
         self._disarm_actions()
         self.problem_label.setText("")
+        self._stop_forced = ""
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
         self.realm_badge.set_status("starting")
@@ -5946,15 +6026,20 @@ class ControllerView(QWidget):
         which had happened (review, 2026-08-22).
         """
         self._set_busy(False)
-        if result is False:
-            self.problem_label.setText("None of this install's servers were running.")
-        else:
-            self._say_where_the_log_went()
+        said = (
+            "None of this install's servers were running."
+            if result is False
+            else self._where_the_log_went()
+        )
+        # Written every time, never left alone: a stop that waited for a load
+        # (T158) left "stopping it now" in this label, which is false once the
+        # stop is over. Only the forced-stop warning is carried past it.
+        self.problem_label.setText(self._after_the_stop(said))
         self.refresh_status()
         self.refresh_verdict()
 
-    def _say_where_the_log_went(self) -> None:
-        """Name the file the pre-stop snapshot wrote, or say why there is none.
+    def _where_the_log_went(self) -> str:
+        """Name the file the pre-stop snapshot wrote, say why there is none, or say nothing.
 
         Read after the stop job has finished, so the value was written on the
         worker thread and is read on the GUI thread with the job's completion
@@ -5963,13 +6048,55 @@ class ControllerView(QWidget):
         recorder = self.services.log_snapshot
         snapshot = getattr(recorder, "last", None) if recorder is not None else None
         if snapshot is None:
-            return
+            return ""
         if snapshot.path is not None:
-            self.problem_label.setText(f"The server's log was saved to {snapshot.path}")
-        elif snapshot.problem:
-            self.problem_label.setText(
-                f"The server stopped. Its log was not saved: {snapshot.problem}"
-            )
+            return f"The server's log was saved to {snapshot.path}"
+        if snapshot.problem:
+            return f"The server stopped. Its log was not saved: {snapshot.problem}"
+        return ""
+
+    @Slot(str)
+    def _stop_notice(self, text: str) -> None:
+        """Show what a running stop is waiting for (T158). Reached only through `_stop_relay`.
+
+        The problem label, as the import's progress and the stop before a
+        removal use it: the status line does not wrap, and "the world is
+        finishing its load before it can stop" needs its second sentence.
+        """
+        self.problem_label.setText(text)
+        self._stop_words_shown = True
+        self._heard_from_a_stop(text)
+
+    @Slot(str)
+    def _uninstall_stop_notice(self, text: str) -> None:
+        """The same, for the uninstall's own removal of the containers, in its own label."""
+        self.uninstall_label.setText(text)
+        self._heard_from_a_stop(text)
+
+    def _heard_from_a_stop(self, text: str) -> None:
+        """Offer "Stop now anyway" while a stop waits; remember a warning that must stay."""
+        if text in docker.LOAD_WAIT_LINES:
+            self.stop_anyway_button.setEnabled(True)
+            self.stop_anyway_button.setVisible(True)
+        else:
+            self.stop_anyway_button.setVisible(False)
+        if text in docker.FORCE_STOP_WARNINGS:
+            self._stop_forced = text
+
+    @Slot()
+    def stop_now_anyway(self) -> None:
+        """End a load wait and send the stop now, on the person's word (T158).
+
+        Only sets the event: the waiting stop reads it at its next look (it
+        wakes for it at once) and says what it is doing, warning included.
+        """
+        self.stop_anyway_button.setEnabled(False)
+        self._stop_anyway.set()
+
+    def _after_the_stop(self, said: str) -> str:
+        """`said`, under the forced-stop warning if this stop's load wait ran out (T158)."""
+        forced, self._stop_forced = self._stop_forced, ""
+        return "\n\n".join(part for part in (forced, said) if part)
 
     @Slot(object)
     def _start_failed(self, exc: object) -> None:
@@ -6322,6 +6449,7 @@ class ControllerView(QWidget):
             return
         if self._uninstall_running:
             return
+        self._stop_forced = ""
         if self._uninstall_plan is None:
             self.uninstall_label.setText(UNINSTALL_NO_PLAN)
             self.action_failed.emit(UNINSTALL_NO_PLAN)
@@ -6344,7 +6472,10 @@ class ControllerView(QWidget):
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
         report = result if isinstance(result, purge.PurgeReport) else purge.PurgeReport()
-        said = [f"{self.services.controller.server_dir} was removed."]
+        # T158: a load wait's forced-stop warning goes first, as on a Stop.
+        forced, self._stop_forced = self._stop_forced, ""
+        said = [part for part in (forced,) if part]
+        said.append(f"{self.services.controller.server_dir} was removed.")
         if report.kept_volumes:
             said.append(
                 f"Kept {', '.join(report.kept_volumes)} \u2014 reinstall to the same folder to "
@@ -6603,6 +6734,7 @@ class ControllerView(QWidget):
             return
         self._disarm_remove()
         self._set_busy(True)
+        self._stop_forced = ""
         self.problem_label.setText("Removing containers…")
         self._run(self.services.controller.remove, self._remove_done, self._remove_failed)
 
@@ -6628,11 +6760,13 @@ class ControllerView(QWidget):
         # lights up.
         self._nothing_to_remove = not result
         self.problem_label.setText(
-            "Containers removed; volumes kept. The next Start will recreate them."
-            if result
-            else (
-                f'There were no containers to remove. "{REMOVE_FROM_YULON}" in the row above '
-                "takes this server off Yu'lon's list and deletes nothing."
+            self._after_the_stop(
+                "Containers removed; volumes kept. The next Start will recreate them."
+                if result
+                else (
+                    f'There were no containers to remove. "{REMOVE_FROM_YULON}" in the row '
+                    "above takes this server off Yu'lon's list and deletes nothing."
+                )
             )
         )
         self._update_forget_visibility()
@@ -9030,6 +9164,17 @@ class ControllerView(QWidget):
         # before.
         self.rebuild_log.run_started.connect(self._rebuild_started)
         self.rebuild_log.run_finished.connect(self._rebuild_finished)
+        # T158: the rebuild panel's own "Stop now anyway", for a rebuild or a
+        # rollback that is waiting to stop a world still loading. Shown only
+        # while the panel's lines say so (`_watch_for_load_wait`).
+        self.rebuild_stop_anyway_button = QPushButton(STOP_ANYWAY_LABEL, tab)
+        self.rebuild_stop_anyway_button.setProperty("danger", True)
+        self.rebuild_stop_anyway_button.setToolTip(STOP_ANYWAY_TIP)
+        self.rebuild_stop_anyway_button.setVisible(False)
+        self.rebuild_stop_anyway_button.clicked.connect(self.rebuild_stop_now_anyway)
+        self._rebuild_force: threading.Event | None = None
+        self._rebuild_wait_relay = LineRelay(self)
+        self._rebuild_wait_relay.line.connect(self._rebuild_wait_line)
         # ONE action bar, where there used to be two toolbars of nine buttons:
         # the two that acted on "the selection" have moved onto the rows
         # themselves and the two custom-module presses have moved into their own
@@ -9115,6 +9260,7 @@ class ControllerView(QWidget):
         box.addWidget(custom)
         box.addWidget(self.module_report_strip)
         box.addWidget(self.module_report)
+        box.addWidget(self.rebuild_stop_anyway_button)
         box.addWidget(self.rebuild_log)
         self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
         # T83: the one place that decides what gives when this tab cannot hold
@@ -10281,11 +10427,11 @@ class ControllerView(QWidget):
         # The engine's own cancel, handed to the panel so its Stop button reaches
         # a build that is blocked between lines rather than only stopping the
         # reader of them.
-        cancel = threading.Event()
+        cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = False
         return self.rebuild_log.run(
-            lambda: source(cancel),
+            lambda: self._watch_for_load_wait(source(cancel)),
             title=f"Rebuilding {self.entry.name}",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -10579,11 +10725,11 @@ class ControllerView(QWidget):
         route = self.services.update_to_latest
         if route is None or self._update_route_busy():
             return False
-        cancel = threading.Event()
+        cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = True
         return self.rebuild_log.run(
-            lambda: route.press(cancel),
+            lambda: self._watch_for_load_wait(route.press(cancel)),
             title=f"Updating {self.entry.name} to the newest code",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -10620,11 +10766,11 @@ class ControllerView(QWidget):
         ):
             logger.info(f"return to the tested pin of {self.entry.id} declined")
             return False
-        cancel = threading.Event()
+        cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = True
         return self.rebuild_log.run(
-            lambda: route.to_pin(cancel),
+            lambda: self._watch_for_load_wait(route.to_pin(cancel)),
             title=f"Returning {self.entry.name} to the tested commit",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -10693,11 +10839,11 @@ class ControllerView(QWidget):
         ):
             logger.info(f"database updates for {self.entry.id} declined at the confirmation")
             return False
-        cancel = threading.Event()
+        cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
         self._rebuild_moves_sources = False
         return self.rebuild_log.run(
-            lambda: route.press(cancel),
+            lambda: self._watch_for_load_wait(route.press(cancel)),
             title=f"Applying database updates to {self.entry.name}",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -10861,11 +11007,11 @@ class ControllerView(QWidget):
         ):
             logger.info(f"adopting {self.entry.id} declined at the confirmation")
             return False
-        cancel = threading.Event()
+        cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
         self._rebuild_moves_sources = False
         return self.rebuild_log.run(
-            lambda: route.press(cancel),
+            lambda: self._watch_for_load_wait(route.press(cancel)),
             title=f"Adopting {self.entry.name}'s databases as a finished import",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -10907,6 +11053,41 @@ class ControllerView(QWidget):
         self._set_busy(True)
 
     @Slot(bool, str)
+    def _rebuild_cancel(self) -> docker.CancelWithForce:
+        """The Cancel a rebuild-panel job gets, with the panel's "Stop now anyway" riding on it."""
+        cancel = docker.CancelWithForce()
+        self._rebuild_force = cancel.anyway
+        return cancel
+
+    def _watch_for_load_wait(self, lines: Iterator[str]) -> Iterator[str]:
+        """Pass a rebuild-panel job's lines through, noticing a load wait (T158).
+
+        Runs on the panel's worker thread, so what it notices goes through
+        `_rebuild_wait_relay`. Only the wait's own sentences are relayed; a
+        compile's thousands of lines are not.
+        """
+        for line in lines:
+            if line in docker.LOAD_WAIT_LINES or line in (
+                docker.WORLD_FINISHED_LOADING,
+                docker.WORLD_STOPPED_ANYWAY,
+            ):
+                self._rebuild_wait_relay.emit_line(line)
+            yield line
+
+    @Slot(str)
+    def _rebuild_wait_line(self, text: str) -> None:
+        """Offer the rebuild panel's "Stop now anyway" while a load wait is on (T158)."""
+        waiting = text in docker.LOAD_WAIT_LINES
+        self.rebuild_stop_anyway_button.setVisible(waiting)
+        self.rebuild_stop_anyway_button.setEnabled(waiting)
+
+    @Slot()
+    def rebuild_stop_now_anyway(self) -> None:
+        """Stop the waited-for world regardless, on the person's word (T158)."""
+        self.rebuild_stop_anyway_button.setEnabled(False)
+        if self._rebuild_force is not None:
+            self._rebuild_force.set()
+
     def _rebuild_finished(self, ok: bool, message: str) -> None:
         """Unlock, and put a refusal where the user is looking.
 

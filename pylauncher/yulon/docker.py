@@ -122,6 +122,16 @@ class ContainerSpec:
     and running whatever happens to answer to it.
     """
 
+    stop_waits_for_load: bool = False
+    """True for a world server that cannot hear a stop while it loads (T158).
+
+    Set by `CatalogEntry.container_spec()` from the entry's
+    `stop_waits_for_world_load`: the three CMaNGOS games, whose mangosd is the
+    container's PID 1 and installs its SIGTERM handler only once the world has
+    loaded. Every stop of such a world first goes through
+    `wait_for_the_world_to_load()`.
+    """
+
     def compose_services(self) -> tuple[str, ...]:
         """The long-running compose services, in dependency order (db first).
 
@@ -843,8 +853,40 @@ def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
     return ["compose", "stop", "-t", str(STOP_GRACE_SECONDS), *reversed(servers)]
 
 
+def stop_servers_staged(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    control: StopControl | None = None,
+    before_signal: Callable[[], None] | None = None,
+) -> None:
+    """Stop this install's servers and leave its database up: `recreate_stop_argv()`, waited for.
+
+    The first half of `recreate_staged()`, on its own for the rebuild's
+    rollback, which must stop the FAILED build's containers before it moves a
+    single tag back (T158, round 3): a tag moved while a container still runs
+    the image it named is a server whose tags and binary disagree.
+
+    A world still loading is waited for before the stop
+    (`wait_for_the_world_to_load()`); `before_signal` is called after that
+    wait and immediately before the command, so a caller can tell "nothing was
+    signalled" from "something may have been". Compose's stop of services that
+    are not running is a no-op, and so is the wait of a world that is down.
+    """
+    wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+    if before_signal is not None:
+        before_signal()
+    _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
+
+
 def recreate_staged(
-    spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    control: StopControl | None = None,
+    before_signal: Callable[[], None] | None = None,
 ) -> bool:
     """Replace this install's long-running containers from the images on disk now.
 
@@ -858,11 +900,14 @@ def recreate_staged(
     is the same guarantee `start_staged()` already relies on every time compose
     recreates a service whose configuration changed.
 
-    The servers are stopped first (`recreate_stop_argv()`), for the reason
-    given there. Compose's stop of services that are not running is a no-op,
-    so the rebuild of a stopped install pays nothing for it.
+    The servers are stopped first (`stop_servers_staged()`, whose argv is
+    `recreate_stop_argv()`), for the reason given there -- and with its wait
+    for a loading world, so the rebuild's replace is the check right before
+    the signal, cancellable through `control` (T158). `before_signal` is its.
     """
-    _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
+    stop_servers_staged(
+        spec, server_dir, wsl_distro=wsl_distro, control=control, before_signal=before_signal
+    )
     return start_staged(spec, server_dir, wsl_distro=wsl_distro, force_recreate=True)
 
 
@@ -1259,7 +1304,13 @@ def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> s
     return proc.stdout.strip() or None
 
 
-def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
+def remove_staged(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    control: StopControl | None = None,
+) -> bool:
     """Stop this install and REMOVE its containers. Volumes are never touched.
 
     The deliberate teardown, for a project that needs recreating rather than
@@ -1288,6 +1339,10 @@ def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | No
     but a census that cannot establish ownership means something is wrong with
     this install, and acting confidently on it is how the wrong server gets torn
     down.
+
+    A loading world is waited for before `compose down` signals it, exactly as
+    `stop_staged()` does and for its reason (`wait_for_the_world_to_load()`,
+    T158); `control` is how the caller hears and steers it.
 
     Returns:
         True if this install had containers and they are now gone; False if
@@ -1336,6 +1391,11 @@ def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | No
     # default that copy is false for a populated realm — the worldserver is
     # SIGKILLed mid-drain and the save queue is what is lost, not the containers
     # (review, 2026-08-23; the measurement is under `STOP_GRACE_SECONDS`).
+    # And no grace helps a CMaNGOS world that is still loading: it drops the
+    # SIGTERM, so it is waited for first (T158). It is always this install's
+    # container here -- the census above refused anything else.
+    if spec.world in before:
+        wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
     proc = _docker(
         ["compose", "down", "-t", str(STOP_GRACE_SECONDS), "--remove-orphans"],
         cwd=server_dir,
@@ -1414,6 +1474,15 @@ characters rolled back to their last save. It happens to agree with the
 `stop_grace_period: 5m` the earlier Rust launcher wrote into its generated
 compose file (`pyplan/rust-prior-art.md` §2); that is now a confirmed number
 rather than an inherited one.
+
+Every number above is AzerothCore's. The CMaNGOS worlds were measured on
+2026-09-27 (Vanilla, 500 bots online, a Linux gate box, T158): a loaded
+mangosd stopped on SIGTERM in **22.2s** (exit 0) and on SIGINT in 21.6s, every
+bot logged out, so 300 covers them many times over. What no grace covers is a
+CMaNGOS world signalled while it is still LOADING: it has no SIGTERM handler
+yet and, as PID 1, drops the signal, so it loads, runs, and is SIGKILLed when
+this grace ends (280.5s, exit 137). That is not fixed here but before the
+signal is sent, by `wait_for_the_world_to_load()` (T158).
 
 This is the CLI grace on the stop path. The compose `stop_grace_period` key is
 the same 300 seconds, and the install engine now writes it: see
@@ -2460,7 +2529,271 @@ def _stranger_message(
     return " ".join(lines)
 
 
-def stop_containers(containers: list[str], *, wsl_distro: str | None = None) -> None:
+WORLD_STILL_LOADING = (
+    "The world is finishing its load before it can stop. A world server that is still loading "
+    "ignores a stop, so Yu'lon waits until it can hear one and then stops it cleanly. That is "
+    "usually under a minute; a first start can take much longer."
+)
+"""Said when a stop finds the world still loading and waits (T158), and again after a spell
+of `WORLD_LOAD_UNCHECKED`.
+
+The owner's words are its first sentence. There is no time limit to state:
+the wait has none (see `wait_for_the_world_to_load()`), and the way out is
+the caller's "Stop now anyway".
+"""
+
+WORLD_LOAD_UNCHECKED = (
+    "Yu'lon can't check whether the world has finished loading: Docker is not answering the "
+    "question. It keeps checking and will not stop the world until it can hear the stop -- "
+    'press "Stop now anyway" to stop it regardless.'
+)
+"""Said when a look at a running world could not be read (T158, round 3: fail closed).
+
+A running world whose mask cannot be read is NOT taken for one that can hear
+the stop, and not for one that is gone: the wait goes on, says so, and says
+the loading sentence again once a look reads.
+"""
+
+WORLD_FINISHED_LOADING = "The world has finished loading; stopping it now."
+"""Said once the world can hear the stop, if a wait was announced first (T158)."""
+
+WORLD_STOPPED_ANYWAY = (
+    "Stopping the world now, as asked, although it had not finished loading. It may be "
+    "force-stopped: a world still loading ignores the stop and is killed when the "
+    f"{STOP_GRACE_SECONDS // 60}-minute grace ends, and anything since its last save is lost."
+)
+"""Said when "Stop now anyway" ends the wait of a world not seen able to hear the stop (T158)."""
+
+LOAD_WAIT_LINES = frozenset({WORLD_STILL_LOADING, WORLD_LOAD_UNCHECKED})
+"""The sentences said while a stop is WAITING: the ones "Stop now anyway" is offered beside."""
+
+FORCE_STOP_WARNINGS = frozenset({WORLD_STOPPED_ANYWAY})
+"""The sentences that must outlive the stop they were said in: it may have been forced."""
+
+_SIGTERM = 15
+"""SIGTERM's number on Linux, where the containers run, spelled out rather than read off
+`signal`: the app also runs on Windows, and what is parsed is a Linux process's mask."""
+
+_LOAD_POLL_SECONDS = 2.0
+"""How long a stop pauses between two looks at a loading world."""
+
+_LOAD_LOOK_TIMEOUT = 30.0
+"""The bound on each of a look's two docker commands (`inspect`, `exec`). A wedged daemon
+answers neither; a command that runs out is a look that could not be read, and the wait goes
+on. So a look takes at most a minute, and the events are read between looks and during the
+pause, which wakes for them within a quarter of a second."""
+
+
+class StopAbandoned(DockerCommandError):
+    """The stop was given up while it waited for a loading world; NOTHING was sent (T158).
+
+    Raised when the caller's `abandon` event is set -- the app closing, a
+    rebuild cancelled before it replaced anything -- so the world is left
+    running rather than signalled mid-load. Its own type so a caller that owns
+    the abandon can tell it from a stop that failed.
+    """
+
+
+class CancelWithForce(threading.Event):
+    """A job's Cancel that also carries a "Stop now anyway" (T158).
+
+    Is-a `threading.Event`, so every engine and panel that takes a cancel
+    takes this one unchanged; `anyway` rides along for the one place that
+    needs it -- a rebuild waiting to stop a loading world -- without a second
+    argument threaded through every route that can reach a rebuild.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.anyway = threading.Event()
+
+
+@dataclass(frozen=True)
+class StopControl:
+    """How the caller of a stop hears a load wait and steers it (T158).
+
+    `say` receives the wait's sentences on the stop's own (worker) thread; see
+    `OutputSink` for what that obliges a UI caller to hand in. `anyway` is the
+    person's "Stop now anyway": if the world still cannot hear the stop, the
+    wait ends and the stop is sent regardless. `also_anyway` are further
+    events that mean the same -- a rebuild's rollback counts its Cancel as one.
+    `abandon` is the app's: the wait ends and NOTHING is sent (`StopAbandoned`).
+    All are read at every look and interrupt the pause between looks.
+
+    The wait never clears them. A press left over from an earlier stop is the
+    owner of the event's business: `Controller` and `purge.Uninstaller` clear
+    `anyway` as each stop of theirs begins.
+    """
+
+    say: OutputSink | None = None
+    anyway: threading.Event = field(default_factory=threading.Event)
+    abandon: threading.Event = field(default_factory=threading.Event)
+    also_anyway: tuple[threading.Event, ...] = ()
+
+    def forced(self) -> bool:
+        """Has anyone asked for the stop regardless?"""
+        return self.anyway.is_set() or any(event.is_set() for event in self.also_anyway)
+
+
+def _sigterm_caught(status: str) -> bool | None:
+    """Does this `/proc/<pid>/status` say the process catches SIGTERM? None: no SigCgt line."""
+    for line in status.splitlines():
+        name, _, value = line.partition(":")
+        if name.strip() == "SigCgt":
+            try:
+                return bool(int(value.strip(), 16) >> (_SIGTERM - 1) & 1)
+            except ValueError:
+                return None
+    return None
+
+
+def _pause(control: StopControl, seconds: float) -> None:
+    """Sleep between looks, but wake within a quarter of a second for the caller's events."""
+    deadline = time.monotonic() + seconds
+    while not (control.forced() or control.abandon.is_set()):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        control.abandon.wait(min(left, 0.25))
+
+
+def wait_for_the_world_to_load(
+    spec: ContainerSpec,
+    control: StopControl | None = None,
+    *,
+    wsl_distro: str | None = None,
+) -> None:
+    """Before a stop: wait until the world server can hear it (T158).
+
+    The ONE wait every stop path goes through -- `stop_staged()`,
+    `remove_staged()`, `stop_servers_staged()`, `recreate_staged()` and
+    `stop_containers()` call it immediately before the command that signals
+    the world, so no Stop, Restart, Recreate, Remove, Uninstall, rebuild,
+    rollback or stop-the-other-server can reach a loading world without it.
+    It does nothing unless `spec.stop_waits_for_load`, which only the CMaNGOS
+    games' specs are.
+
+    Why: measured on a Linux gate box, 2026-09-27 (Vanilla, 500 bots), mangosd
+    is the container's PID 1 and its SigCgt was `0000000100000000` (no SIGTERM,
+    no SIGINT) at +3, +8, +15 and +25 s of its load, `0000000100004002` once
+    loaded. A namespace's init gets no default action for a signal it has no
+    handler for, so the SIGTERM a `compose stop` sent 15 s in was dropped: the
+    world loaded, ran, and was SIGKILLed when the grace ended -- 280.5 s, exit
+    137, nothing saved on the way out. Loaded, it stopped cleanly in 22.2 s.
+    The owner's decision the same day: wait for the load, then stop; never
+    kill a world mid-load, which is when it runs its start-up migrations.
+
+    **What is waited for is that fact itself**: bit 15 of PID 1's SigCgt, read
+    with `docker exec <world> cat /proc/1/status`. Not a log line. A log line
+    stands in for the handler only if the core prints it after `_HookSignals()`,
+    and Tortoise's ready banner ("World server is up and running!") is the
+    last line of `SetInitialWorldSettings()`, printed BEFORE the hook. The mask
+    cannot be early, and reading it costs no log.
+
+    Each look is a `docker inspect` and then a `docker exec`, each bounded by
+    `_LOAD_LOOK_TIMEOUT`. It ends on the first of:
+
+    * `control.abandon` -- raises `StopAbandoned` and sends nothing. Read
+      before every look.
+    * the container is not running (`docker inspect` says so: exited,
+      restarting, dead, or no such container) -- there is no process to
+      ignore anything, and `docker stop` cancels a pending restart, so the
+      stop goes at once.
+    * SIGTERM is caught -- the stop goes now. Said only after a wait was said.
+    * the world was looked at and was NOT seen able to hear the stop, and
+      `control.forced()` -- "Stop now anyway". Said as a warning, because the
+      stop that follows may be the forced one. A press never makes it skip the
+      look: a world that can hear the stop is stopped with no warning, however
+      the stop was asked for.
+
+    **Nothing else ends it** (round 3: fail closed). A look that cannot be read
+    while the world is running -- the `exec` failing or timing out, no SigCgt
+    line, an `inspect` that does not answer -- is neither "able to hear" nor
+    "gone"; the wait says `WORLD_LOAD_UNCHECKED` and goes on looking. A NEW run
+    (`StartedAt` changed: `restart: unless-stopped` brought a dead one back) is
+    loading again, deaf again, and is waited for in its turn.
+
+    **There is no time limit.** A cap would send, at a moment chosen by a
+    number, the very signal this exists to hold back -- and a measured valid
+    first boot (TBC, 46 minutes on a 9p share) outlasts any cap short enough
+    to matter. Only the person decides to force it.
+    """
+    for text in world_load_steps(spec, control, wsl_distro=wsl_distro):
+        if control is not None and control.say is not None:
+            control.say(text)
+
+
+def world_load_steps(
+    spec: ContainerSpec,
+    control: StopControl | None = None,
+    *,
+    wsl_distro: str | None = None,
+) -> Iterator[str]:
+    """`wait_for_the_world_to_load()` as a generator of its sentences, one loop in two shapes.
+
+    `wait_for_the_world_to_load()` hands each sentence to `control.say`; a
+    caller that yields its lines can iterate this instead. Every sentence is
+    logged here. Raises `StopAbandoned` when `control.abandon` is set.
+    """
+    if not spec.stop_waits_for_load:
+        return
+    control = control or StopControl()
+    world = spec.world
+    said = ""
+    run = ""
+
+    def say(text: str, *, warn: bool = False) -> Iterator[str]:
+        nonlocal said
+        if text != said:
+            said = text
+            (logger.warning if warn else logger.info)(text)
+            yield text
+
+    while True:
+        if control.abandon.is_set():
+            raise StopAbandoned(
+                f"The stop was not sent: it was given up while {world} was still loading, so "
+                "the world was left running."
+            )
+        state = container_state(world, timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro)
+        if state.missing or (state.status and not state.settled):
+            if said:
+                logger.info(f"{world} is no longer running ({state.status}); stopping at once")
+            return
+        caught: bool | None = None
+        if state.settled:
+            if run and state.started_at != run:
+                logger.info(f"{world} restarted while it was waited on; waiting on its new run")
+            run = state.started_at
+            proc = exec_output(
+                world, ["cat", "/proc/1/status"], timeout=_LOAD_LOOK_TIMEOUT, wsl_distro=wsl_distro
+            )
+            if proc.returncode == 0:
+                caught = _sigterm_caught(proc.stdout)
+        if caught:
+            if said:
+                logger.info(WORLD_FINISHED_LOADING)
+                yield WORLD_FINISHED_LOADING
+            return
+        if control.forced():
+            logger.warning(WORLD_STOPPED_ANYWAY)
+            yield WORLD_STOPPED_ANYWAY
+            return
+        if caught is None:
+            logger.warning(f"could not read whether {world} can hear a stop; asking again")
+            yield from say(WORLD_LOAD_UNCHECKED, warn=True)
+        else:
+            yield from say(WORLD_STILL_LOADING)
+        _pause(control, _LOAD_POLL_SECONDS)
+
+
+def stop_containers(
+    containers: list[str],
+    *,
+    wsl_distro: str | None = None,
+    known: Sequence[ContainerSpec] = (),
+    control: StopControl | None = None,
+) -> None:
     """Stop these containers, the worldserver-ish ones first.
 
     The public form of `_run_docker_stop()`, for the case where the containers
@@ -2472,6 +2805,12 @@ def stop_containers(containers: list[str], *, wsl_distro: str | None = None) -> 
     stopped before anything that mentions the database, because a worldserver
     losing its database mid-save is how character saves are lost. For a container
     this project did not create, the name is the only hint there is.
+
+    `known` is the specs the caller can put names to — the catalogue's, for the
+    port-conflict offer. A container that is the `world` of one of them gets
+    that game's `wait_for_the_world_to_load()` before its stop, because the
+    server holding the ports may be one that was started a minute ago and is
+    still loading (T158). A name nobody knows is stopped as before.
     """
 
     def rank(name: str) -> int:
@@ -2483,10 +2822,20 @@ def stop_containers(containers: list[str], *, wsl_distro: str | None = None) -> 
         return 2
 
     for name in sorted(containers, key=rank):
+        for spec in known:
+            if spec.world == name:
+                wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
+                break
         _run_docker_stop(name, wsl_distro=wsl_distro)
 
 
-def stop_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
+def stop_staged(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    control: StopControl | None = None,
+) -> bool:
     """Stop this install without destroying its containers.
 
     The counterpart to `start_staged()`. `docker compose down` *removes* the
@@ -2509,6 +2858,12 @@ def stop_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None
     while it was still flushing its character save queue. A Stop can therefore
     take minutes rather than seconds, and every caller of this runs it off the
     GUI thread already.
+
+    A world that cannot hear a stop while it loads is waited for first
+    (`wait_for_the_world_to_load()`, T158), so a Stop pressed during a
+    CMaNGOS load takes the rest of the load plus the ~22 s shutdown rather
+    than the full grace and a SIGKILL. `control` is how the caller hears that
+    wait and steers it (`StopControl`).
 
     Either way the result is verified rather than assumed. A zero exit from
     `compose stop` only means compose had nothing to complain about — it says
@@ -2587,6 +2942,12 @@ def stop_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None
     # `-t` for the same reason as `_run_docker_stop()`; compose has always
     # accepted the short form, and spelling the two call sites alike means a
     # future reader does not have to know which CLI they are looking at.
+    #
+    # After the census, so a refusal is never kept waiting for a load; before
+    # the command, because a CMaNGOS world signalled mid-load drops the SIGTERM
+    # and sits out the whole grace to a SIGKILL (T158).
+    if spec.world in before.ours:
+        wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
     proc = _docker(
         ["compose", "stop", "-t", str(STOP_GRACE_SECONDS)], cwd=server_dir, wsl_distro=wsl_distro
     )
@@ -2730,7 +3091,9 @@ class ContainerState:
         return self.status == "running"
 
 
-def container_state(container: str, *, wsl_distro: str | None = None) -> ContainerState:
+def container_state(
+    container: str, *, timeout: float | None = None, wsl_distro: str | None = None
+) -> ContainerState:
     """Status, current-run start time and restart count in ONE `docker inspect`.
 
     One call, not two, because `wait_ready()` asks for all of it every two
@@ -2744,9 +3107,14 @@ def container_state(container: str, *, wsl_distro: str | None = None) -> Contain
     an unreadable count (an older docker, a fake in a test) must not turn a
     running container into an empty `ContainerState` — the missing fields are
     read as `""`/`0`, which is what a container that has never restarted says.
+
+    `timeout` bounds the `docker inspect` (None: unbounded, as it always was).
+    A run that times out is a non-zero result, so it reads as unreadable. The
+    stop's load wait passes one (T158): a wedged daemon must not hold a stop
+    on a question it will never answer.
     """
     fmt = "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}"
-    proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
+    proc = _docker(["inspect", container, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))

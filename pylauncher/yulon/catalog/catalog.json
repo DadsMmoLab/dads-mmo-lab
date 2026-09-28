@@ -214,6 +214,7 @@
             "timeout_s": 1800,
             "restart_loop": 4
           },
+          "stop_waits_for_world_load": true,
           "cmangos": {
             "client": {
               "required_file": "Data/expansion.MPQ",
@@ -624,6 +625,7 @@
             "timeout_s": 1800,
             "restart_loop": 4
           },
+          "stop_waits_for_world_load": true,
           "cmangos": {
             "client": {
               "required_file": "Data/dbc.MPQ",
@@ -1024,6 +1026,7 @@
             "timeout_s": 10800,
             "restart_loop": 4
           },
+          "stop_waits_for_world_load": true,
           "cmangos": {
             "client": {
               "required_file": null,

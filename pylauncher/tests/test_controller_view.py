@@ -16,6 +16,7 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
+from tests import test_stop_waits_for_the_world as stop_world
 from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
 from yulon import apply as apply_module
 from yulon import (
@@ -6418,6 +6419,169 @@ def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
     assert view.refresh_button.isEnabled()
 
 
+def _loading_vanilla(
+    view: ControllerView, monkeypatch: pytest.MonkeyPatch, frames: list[stop_world.Frame]
+) -> stop_world._Docker:
+    """Point the tab's real controller at a Vanilla world that loads on `frames` (T158)."""
+    monkeypatch.setattr(docker, "_LOAD_POLL_SECONDS", 0.001)
+    controller = view.services.controller
+    controller.spec = load_catalog().get("wow-vanilla").container_spec()
+    fake = stop_world._Docker(controller.spec, frames)
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
+
+
+_STILL = ("running", stop_world.LOADING, stop_world.LOADING_MASK)
+_HEARS = ("running", stop_world.LOADED, stop_world.LOADED_MASK)
+
+
+def test_a_stop_that_waits_for_a_loading_world_says_so_and_offers_stop_now_anyway(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T158, the owner's words: the tab says the world is finishing its load before it can stop.
+
+    Read at each look the stop takes, through the real `controller.stop()`, so what is checked
+    is what the tab showed WHILE the stop waited. Once the stop is over, neither the words nor
+    the button are left behind.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    fake = _loading_vanilla(view, monkeypatch, [_STILL, _STILL, _HEARS])
+    seen: list[tuple[str, bool]] = []
+    fake.on_look = lambda: seen.append(
+        (view.problem_label.text(), not view.stop_anyway_button.isHidden())
+    )
+
+    view.stop_server()
+
+    assert fake.events == ["look 1", "look 2", "look 3", "stop"]
+    assert seen == [
+        ("", False),
+        (docker.WORLD_STILL_LOADING, True),
+        (docker.WORLD_STILL_LOADING, True),
+    ]
+    assert "finishing its load before it can stop" in seen[1][0]
+    assert view.problem_label.text() == ""
+    assert view.stop_anyway_button.isHidden()
+
+
+def test_a_stop_that_cannot_check_the_world_says_so_and_still_offers_stop_now_anyway(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 3: an unreadable world is waited on, so the way out is offered for it too."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    unreadable = ("running", stop_world.LOADING, None)
+    fake = _loading_vanilla(view, monkeypatch, [unreadable, unreadable, _HEARS])
+    seen: list[tuple[str, bool]] = []
+    fake.on_look = lambda: seen.append(
+        (view.problem_label.text(), not view.stop_anyway_button.isHidden())
+    )
+    view.stop_server()
+    assert seen[1:] == [(docker.WORLD_LOAD_UNCHECKED, True), (docker.WORLD_LOAD_UNCHECKED, True)]
+    assert view.problem_label.text() == "" and view.stop_anyway_button.isHidden()
+
+
+def test_stop_now_anyway_on_the_tab_sends_the_stop_and_keeps_the_warning_once(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The press ends the wait; the sentence that it may have been forced outlives the stop."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    fake = _loading_vanilla(view, monkeypatch, [_STILL])
+    fake.on_look = lambda: view.stop_anyway_button.click() if fake.looks == 3 else None
+
+    view.stop_server()
+
+    assert fake.events == ["look 1", "look 2", "look 3", "stop"]
+    assert view.problem_label.text() == docker.WORLD_STOPPED_ANYWAY
+    assert "force-stopped" in view.problem_label.text()
+    assert view.stop_anyway_button.isHidden()
+
+    _loading_vanilla(view, monkeypatch, [_HEARS])
+    view.stop_server()
+    assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
+
+
+def test_a_force_stop_warning_from_another_stop_path_does_not_reach_the_next_stop(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop before a removal speaks through the same relay but reports elsewhere.
+
+    Its forced-stop warning is never shown by `_stop_done()`, so a later Stop or Remove -- of a
+    world that stopped cleanly -- must not wear it.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    fake = _loading_vanilla(view, monkeypatch, [_STILL])
+    fake.on_look = lambda: view.stop_anyway_button.click() if fake.looks == 2 else None
+    view.stop_for_removal()
+
+    _loading_vanilla(view, monkeypatch, [_HEARS])
+    view.stop_server()
+    assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
+
+    fake = _loading_vanilla(view, monkeypatch, [_STILL])
+    fake.on_look = lambda: view.stop_anyway_button.click() if fake.looks == 2 else None
+    view.stop_for_removal()
+    _loading_vanilla(view, monkeypatch, [_HEARS])
+    view._remove_armed = True
+    view.remove_containers()
+    assert docker.WORLD_STOPPED_ANYWAY not in view.problem_label.text()
+
+
+def test_closing_the_tab_while_a_stop_waits_sends_nothing_and_does_not_hang(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`shutdown()` gives the wait up: the world is left running, never signalled mid-load."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    fake = _loading_vanilla(view, monkeypatch, [_STILL])
+    fake.on_look = lambda: view.shutdown() if fake.looks == 2 else None
+
+    view.stop_server()
+
+    assert fake.events == ["look 1", "look 2"]
+    assert fake.spec.world in fake.running
+    assert "was not sent" in view.problem_label.text()
+
+
+def test_a_restart_from_the_tuning_tab_leaves_no_stop_words_on_the_server_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_tuning_job_done()` never writes the problem label, so the end of the job clears it."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(view, "_confirm", lambda title, question: True)
+    fake = _loading_vanilla(view, monkeypatch, [_STILL, _HEARS])
+    said: list[str] = []
+    fake.on_look = lambda: said.append(view.problem_label.text())
+
+    view.restart_server()
+
+    assert fake.events[:3] == ["look 1", "look 2", "stop"]
+    assert said == ["", docker.WORLD_STILL_LOADING]
+    assert view.problem_label.text() == ""
+    assert view.stop_anyway_button.isHidden()
+
+
+def test_the_uninstall_says_the_wait_in_its_own_label_with_stop_now_anyway_beside_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The tab hands the uninstall a control of its own that shares the button's event."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    control = cast(docker.StopControl, fake.stop_control)  # type: ignore[attr-defined]
+    assert control.say is not None
+
+    def while_running() -> object:
+        assert control.say is not None
+        control.say(docker.WORLD_STILL_LOADING)
+        shown = (view.uninstall_label.text(), not view.stop_anyway_button.isHidden())
+        view.stop_anyway_button.click()
+        return (shown, control.anyway.is_set())
+
+    fake._while_running = while_running
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert fake.busy_seen == [((docker.WORLD_STILL_LOADING, True), True)]
+    assert view.stop_anyway_button.isHidden()
+
+
 class _Gate:
     """A job runner that runs inline until `hold` is set, then keeps the jobs for `release()`.
 
@@ -6694,6 +6858,65 @@ def _rebuild_services(
 
     services.rebuild = rebuild
     return services, started
+
+
+def test_the_rebuild_panel_offers_stop_now_anyway_while_its_rebuild_waits_on_a_load(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T158, round 3: the panel's own button, shown only while the wait's lines say so, and
+    reaching the rebuild through the Cancel it was handed."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    handed: list[object] = []
+    services = _services(ps, tmp_path, [])
+
+    def rebuild(cancel: object = None) -> Iterator[str]:
+        handed.append(cancel)
+        assert isinstance(cancel, docker.CancelWithForce)
+        yield "--- recreate"
+        yield docker.WORLD_STILL_LOADING
+        assert cancel.anyway.wait(HANG_BOUND), "the panel's press never reached the rebuild"
+        yield docker.WORLD_STOPPED_ANYWAY
+        yield "The containers were replaced."
+
+    services.rebuild = rebuild
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_stop_anyway_button.isHidden()
+    assert view.rebuild_server() is True
+    pump_until(lambda: not view.rebuild_stop_anyway_button.isHidden(), "the button to be offered")
+    view.rebuild_stop_anyway_button.click()
+    wait_for_panel(view.rebuild_log)
+    process_events()
+    (cancel,) = handed
+    assert isinstance(cancel, docker.CancelWithForce) and cancel.anyway.is_set()
+    assert not cancel.is_set(), "the press is not a Cancel"
+    assert view.rebuild_stop_anyway_button.isHidden()
+
+
+def test_a_rebuild_that_ends_mid_wait_takes_its_stop_now_anyway_away(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job that ends -- here refused -- while its last word was a wait leaves no live button."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services = _services(ps, tmp_path, [])
+
+    def rebuild(cancel: object = None) -> Iterator[str]:
+        yield docker.WORLD_STILL_LOADING
+        raise InstallerError("the rebuild was cancelled")
+
+    services.rebuild = rebuild
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_server() is True
+    wait_for_panel(view.rebuild_log)
+    process_events()
+    assert view.rebuild_stop_anyway_button.isHidden()
 
 
 def test_the_modules_tab_offers_a_rebuild_beside_the_sentence_that_demands_one(

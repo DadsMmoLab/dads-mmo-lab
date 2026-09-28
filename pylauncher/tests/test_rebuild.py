@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import re
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -1282,6 +1284,175 @@ def test_a_stop_between_the_compile_and_the_recreate_puts_the_recipe_back(
     assert {name: (server_dir / name).read_bytes() for name in fresh} == was, raised.value
 
 
+def test_the_rebuild_says_it_is_waiting_for_a_loading_world_in_its_own_panel(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """T158: the replace's own wait -- the one check before the signal -- is heard as it waits.
+
+    It runs inside `recreate` and speaks through the control it is handed, whose give-up is the
+    rebuild's Cancel and whose force is the panel's "Stop now anyway" riding on it.
+    """
+    rec = Recorder(images=True)
+    rec.load_lines = (docker.WORLD_STILL_LOADING, docker.WORLD_FINISHED_LOADING)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    asked: list[docker.StopControl | None] = []
+    rec.on_recreate = asked.append
+    cancel = docker.CancelWithForce()
+    said = list(cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir), cancel=cancel))
+    assert docker.WORLD_STILL_LOADING in said and docker.WORLD_FINISHED_LOADING in said, said
+    assert said.count(native.REBUILD_WAIT_HINT) == 1, said
+    assert said.index(docker.WORLD_FINISHED_LOADING) < said.index("The containers were replaced.")
+    (control,) = asked
+    assert control is not None
+    assert control.abandon is cancel and control.anyway is cancel.anyway
+
+
+def test_a_rebuild_cancelled_while_the_world_loads_replaces_nothing_and_puts_the_tags_back(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """Cancel during the replace's wait: nothing signalled, so nothing touched, and the rollback
+    says only that -- the tags go back and no container is replaced or stopped."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+
+    def give_up(control: docker.StopControl | None) -> None:
+        raise docker.StopAbandoned("given up")
+
+    rec.on_recreate = give_up
+    with pytest.raises(InstallerError) as raised:
+        list(cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "recreate" not in rec.calls, rec.calls
+    assert not [c for c in rec.calls if c.startswith("stop_servers")], rec.calls
+    said = str(raised.value)
+    assert "Nothing was touched" in said and "still loading" in said, said
+    assert "no container was replaced" in said, said
+
+
+def test_a_restart_during_the_replaces_wait_is_waited_for_and_heard(
+    cmangos_gate: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real `docker.recreate_staged()` under the stage: the world restarts mid-wait, the new
+    run is loading again, and the stop still waits for IT -- saying so in the rebuild's lines."""
+    from tests import test_stop_waits_for_the_world as stop_world
+
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    spec = CM_ENTRY.container_spec()
+    frames = [
+        ("running", stop_world.LOADING, stop_world.LOADING_MASK),
+        ("running", stop_world.LOADING, stop_world.LOADING_MASK),
+        ("running", stop_world.LOADED, stop_world.LOADED_MASK),
+    ]
+    fake = stop_world._Docker(
+        spec, frames, started=[stop_world.STARTED, stop_world.RESTARTED, stop_world.RESTARTED]
+    )
+    monkeypatch.setattr(docker, "_LOAD_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(docker, "_cwd_is_missing", lambda cwd: False)
+    monkeypatch.setattr(docker.runner, "run", fake)
+    said = list(
+        cm_engine(rec, recreate=docker.recreate_staged).rebuild(
+            InstallOptions(server_dir=server_dir)
+        )
+    )
+    assert fake.events[:4] == ["look 1", "look 2", "look 3", "stop"], fake.events
+    assert docker.WORLD_STILL_LOADING in said and docker.WORLD_FINISHED_LOADING in said, said
+
+
+def _replaced_then_failed(rec: Recorder, tmp_path: Path) -> Path:
+    """A CMaNGOS rebuild whose new build is replaced in and then never reports ready."""
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    rec.calls.clear()
+    return server_dir
+
+
+def _old_build_back(rec: Recorder, server_dir: Path) -> None:
+    refs = composegen.built_image_refs(CM_ENTRY, server_dir, platform_id=lambda: "macos")
+    backs = tuple(ref + native.ROLLBACK_TAG_SUFFIX for ref in refs)
+    restores = [f"tag:{b}->{r}" for r, b in zip(refs, backs, strict=True)]
+    for restore in restores:
+        assert restore in rec.calls, rec.calls
+    stop = next(i for i, c in enumerate(rec.calls) if c.startswith("stop_servers"))
+    assert stop < min(rec.calls.index(r) for r in restores), (
+        "a tag was moved back while the failed build's containers still ran",
+        rec.calls,
+    )
+    recreates = [i for i, c in enumerate(rec.calls) if c == "recreate"]
+    assert len(recreates) == 2 and rec.calls.index(restores[-1]) < recreates[1], rec.calls
+
+
+def test_a_cancel_that_lands_after_the_replace_rolls_back_stopping_the_failed_build_regardless(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """Cancel then rollback: in the rollback the Cancel FORCES the failed build's stop (the lead's
+    decision), which comes before any tag moves back, and the old build is running again."""
+    rec = Recorder(images=True)
+    server_dir = _replaced_then_failed(rec, tmp_path)
+    cancel = docker.CancelWithForce()
+    asked = {"n": 0}
+
+    def cancelled_while_waiting(spec: object, ready: docker.ReadySpec) -> bool:
+        asked["n"] += 1
+        if asked["n"] == 1:
+            cancel.set()
+            return False
+        return True
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            cm_engine(rec, wait_ready=cancelled_while_waiting).rebuild(
+                InstallOptions(server_dir=server_dir), cancel=cancel
+            )
+        )
+    assert "stop_servers:forced" in rec.calls, rec.calls
+    _old_build_back(rec, server_dir)
+    said = str(raised.value)
+    assert "put back and is running again" in said, said
+
+
+def test_a_new_world_stuck_in_its_load_holds_the_rollback_until_stop_now_anyway(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """Hung load then rollback: the rollback says the world is still loading, waits for the
+    panel's press, stops it regardless, and only then puts the old build back."""
+    rec = Recorder(images=True)
+    server_dir = _replaced_then_failed(rec, tmp_path)
+    cancel = docker.CancelWithForce()
+
+    def held_in_its_load(control: docker.StopControl | None) -> None:
+        assert control is not None and control.say is not None
+        control.say(docker.WORLD_STILL_LOADING)
+        assert control.forced() is False, "the rollback forced a stop nobody asked for"
+        deadline = time.monotonic() + 10.0
+        while not (control.forced() or control.abandon.is_set()):
+            assert time.monotonic() < deadline, "the press never reached the rollback's stop"
+            time.sleep(0.01)
+        control.say(docker.WORLD_STOPPED_ANYWAY)
+
+    rec.on_stop_servers = held_in_its_load
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in cm_engine(rec, wait_ready=_answers(False, True)).rebuild(
+            InstallOptions(server_dir=server_dir), cancel=cancel
+        ):
+            said.append(line)
+            if line == native.ROLLBACK_WAIT_HINT:
+                assert not [c for c in rec.calls if "-rollback->" in c], (
+                    "a tag moved back while the failed build was still up",
+                    rec.calls,
+                )
+                cancel.anyway.set()  # the panel's "Stop now anyway"
+    assert native.ROLLBACK_STOPPING in said, said
+    assert said.index(native.ROLLBACK_STOPPING) < said.index(docker.WORLD_STILL_LOADING)
+    assert said.count(native.ROLLBACK_WAIT_HINT) == 1, said
+    # Only true things: the second replace brings the OLD build back, and says so.
+    assert said.count("Replacing the running containers so the new build is what starts.") == 1
+    assert "Replacing the containers so the build from before this rebuild is what starts." in said
+    assert docker.WORLD_STOPPED_ANYWAY in said, said
+    assert "stop_servers:forced" in rec.calls, rec.calls
+    _old_build_back(rec, server_dir)
+    assert "put back and is running again" in str(raised.value), raised.value
+
+
 def test_a_recreate_that_cannot_even_start_puts_the_recipe_back_and_takes_no_second_call(
     cmangos_gate: None, tmp_path: Path
 ) -> None:
@@ -1350,7 +1521,14 @@ def test_a_recreate_that_fails_after_the_daemon_may_have_changed_something_is_no
 
     attempts = {"n": 0}
 
-    def recreate(spec: docker.ContainerSpec, dir_: Path) -> bool:
+    def recreate(
+        spec: docker.ContainerSpec,
+        dir_: Path,
+        control: docker.StopControl | None = None,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        if before_signal is not None:
+            before_signal()
         attempts["n"] += 1
         rec.calls.append("recreate")
         if attempts["n"] == 1:
@@ -1646,12 +1824,20 @@ class _Daemon:
         for ref in self.live:
             self.names[ref] = "after"
 
-    def recreate(self, spec: object, server_dir: Path) -> bool:
+    def recreate(
+        self,
+        spec: object,
+        server_dir: Path,
+        control: object = None,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
         """`compose up --force-recreate --no-deps <compose_services()>`.
 
         The pinned refs are the built images of the services that command does
         not name, so their containers go on holding what they were made from.
         """
+        if before_signal is not None:
+            before_signal()
         for ref in self.live:
             if ref not in self.pinned and ref in self.names:
                 self.containers[ref] = self.names[ref]
@@ -1861,7 +2047,7 @@ def test_a_crash_after_the_compile_keeps_the_rollback_rather_than_deleting_it(
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)
 
-    def explode(spec: object, server_dir: Path) -> bool:
+    def explode(spec: object, server_dir: Path, **_t158: object) -> bool:
         raise RuntimeError("the daemon went away mid-recreate")
 
     seams = _seams_of(rec, daemon)
