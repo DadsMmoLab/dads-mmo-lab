@@ -483,7 +483,7 @@ def test_polling_status_does_not_start_a_stopped_distro(monkeypatch: pytest.Monk
     monkeypatch.setattr(
         docker, "status", lambda **kw: ran.append(["docker", "ps"]) or []  # type: ignore[func-returns-value]
     )
-    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: False)
+    monkeypatch.setattr(controller_module.wsl, "distro_state", lambda distro: "stopped")
 
     ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
     assert not ctl.status().any_running
@@ -495,7 +495,7 @@ def test_polling_status_asks_docker_when_the_distro_is_up(
 ) -> None:
     """And the guard must not turn a running server into a permanently dead one."""
     monkeypatch.setattr(docker, "status", lambda **kw: [SPEC.db])
-    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: True)
+    monkeypatch.setattr(controller_module.wsl, "distro_state", lambda distro: "running")
     ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
     # `status()` returns an InstallStatus, not a list of names.
     assert ctl.status().any_running
@@ -869,7 +869,9 @@ class _Distro:
         self.spawned = 0
         self.alive = True
         wsl = controller_module.wsl
-        monkeypatch.setattr(wsl, "is_running", lambda distro: self.running)
+        monkeypatch.setattr(
+            wsl, "distro_state", lambda distro: "running" if self.running else "stopped"
+        )
         monkeypatch.setattr(wsl, "hold", self.hold)
         monkeypatch.setattr(wsl, "release", self.release)
 
@@ -945,7 +947,7 @@ def test_a_world_seen_down_is_not_held(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_hold_that_never_took_is_not_retried_every_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     """No flock in the distro: one failing spawn, not one per five-second poll."""
     spawned: list[str] = []
-    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: True)
+    monkeypatch.setattr(controller_module.wsl, "distro_state", lambda distro: "running")
     monkeypatch.setattr(
         controller_module.wsl,
         "hold",

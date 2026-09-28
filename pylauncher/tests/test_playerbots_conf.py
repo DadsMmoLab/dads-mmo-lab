@@ -436,11 +436,11 @@ def test_a_stopped_wsl_distro_is_not_read_and_gets_no_banner(
     asked: list[str] = []
     stopped = [True]
 
-    def known_stopped(distro: str) -> bool:
+    def distro_state(distro: str) -> str:
         asked.append(distro)
-        return stopped[0]
+        return "stopped" if stopped[0] else "running"
 
-    monkeypatch.setattr(wsl, "known_stopped", known_stopped)
+    monkeypatch.setattr(wsl, "distro_state", distro_state)
     route = ControllerServices.for_entry(WOTLK, tmp_path, wsl_distro="Ubuntu").repair_confs
     assert route is not None
     assert route.check() == native.ConfCheck()

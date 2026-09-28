@@ -82,6 +82,13 @@ class InstallStatus:
     db: bool
     auth: bool
     world: bool
+    distro: wsl.DistroState | None = None
+    """What WSL's listing said about this install's distro on this poll; None on this host.
+
+    The tab's readings wait until it says `running` (T133): reading the
+    distro's folder starts it, and `stopped` and `unknown` alike are no
+    permission. Nothing is up unless it is `running`.
+    """
 
     @property
     def any_running(self) -> bool:
@@ -176,19 +183,23 @@ class Controller:
         established, because that is where acting on the wrong container does
         damage, and its refusal is now shown on the tab.
         """
-        if self.wsl_distro is not None and not wsl.is_running(self.wsl_distro):
+        distro = wsl.distro_state(self.wsl_distro) if self.wsl_distro is not None else None
+        if distro not in (None, "running"):
             # Asking docker anything inside a distro STARTS that distro, and
             # this runs on a five-second timer - so an adopted server would boot
             # its distro simply by opening the app. Nothing is running when the
             # distro is down, so the empty answer is true rather than merely
-            # convenient; Start still starts it, because that is asked for.
-            logger.debug(f"{self.wsl_distro} is not running; reporting nothing up")
-            return InstallStatus(db=False, auth=False, world=False)
+            # convenient; Start still starts it, because that is asked for. A
+            # listing that did not answer is treated the same (T133 review),
+            # and the tab is told which it was.
+            logger.debug(f"{self.wsl_distro} is {distro}; reporting nothing up")
+            return InstallStatus(db=False, auth=False, world=False, distro=distro)
         running = set(docker.status(wsl_distro=self.wsl_distro))
         status = InstallStatus(
             db=self.spec.db in running,
             auth=self.spec.auth in running,
             world=self.spec.world in running,
+            distro=distro,
         )
         self._keep_the_distro_up(world_running=status.world)
         return status

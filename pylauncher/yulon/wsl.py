@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from yulon import platform, runner
 from yulon.log import get_logger
@@ -73,10 +73,18 @@ def parse_distro_names(text: str) -> tuple[str, ...]:
 def _wsl_listing(*args: str) -> tuple[str, ...] | None:
     """Names from one `wsl -l -q ...` listing, or None if it did not answer (T95).
 
-    None for no wsl.exe, a raise (the timeout among them) and a non-zero exit:
-    the caller that must not mistake "no answer" for "nothing" can tell them
-    apart. Whether `--running` exits non-zero when nothing runs has not been
-    measured, so a caller reading None as "unknown" may see it then too.
+    None for no wsl.exe, a raise (the timeout among them) and a failure: the
+    caller that must not mistake "no answer" for "nothing" can tell them apart.
+
+    **Nothing running is exit 0 and no output (measured, T133).** On
+    yulon-win11 (2026-09-28) `wsl -l -q --running` with every distro stopped
+    exited 0 with 0 bytes on stdout and stderr, from the desktop session and
+    over SSH alike; the sentence "There are no running distributions." and
+    exit -1 come only WITHOUT `-q`. So the common case is the plain one. The
+    sentence is still recognised, in either stream and whatever the exit code
+    (`_says_none_running()`), should a wsl.exe print it with `-q`. A non-zero
+    exit WITHOUT it stays no answer: read as "none running", it would let
+    `known_stopped()` skip a stop of a running server (T95's fail-closed rule).
     """
     launcher = platform._which(platform.WSL_PROGRAM)
     if launcher is None:
@@ -91,10 +99,39 @@ def _wsl_listing(*args: str) -> tuple[str, ...] | None:
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug(f"could not list WSL distros: {exc}")
         return None
-    if proc.returncode != 0:
-        return None
     # UTF-16LE, like every other `wsl.exe` listing — see `platform.wsl_distros()`.
-    return parse_distro_names(proc.stdout.decode("utf-16le", errors="ignore"))
+    out = proc.stdout.decode("utf-16le", errors="ignore")
+    if proc.returncode != 0:
+        # Both streams, both ways: wsl.exe writes UTF-16LE, but which stream a
+        # message lands on and whether WSL_UTF8 is set are not ours to know.
+        said = "\n".join(
+            stream.decode(codec, errors="ignore").replace("\0", "")
+            for stream in (proc.stdout or b"", proc.stderr or b"")
+            for codec in ("utf-16le", "utf-8")
+        )
+        if "--running" in args and _says_none_running(said):
+            return ()
+        logger.info(
+            f"wsl -l -q {' '.join(args)} exited {proc.returncode}: {said.strip() or 'no output'}"
+        )
+        return None
+    return tuple(name for name in parse_distro_names(out) if not _says_none_running(name))
+
+
+_NO_RUNNING_DISTROS = "There are no running distributions"
+"""What wsl.exe says for `--running` when nothing runs, in English -- measured WITHOUT `-q`.
+
+With `-q`, which is how this module asks, nothing running measured as exit 0
+and no output at all (T133, yulon-win11), so this is a second line of
+defence, not the path taken. It is translated, like every sentence wsl.exe
+prints: a translated one with a non-zero exit would read as no answer (the
+distro `unknown`, its readings waiting), the safe side for a reading and a stop.
+"""
+
+
+def _says_none_running(line: str) -> bool:
+    """The English "none running" sentence, which is never a distro's name."""
+    return _NO_RUNNING_DISTROS.lower() in line.lower()
 
 
 def _wsl_list(*args: str) -> tuple[str, ...]:
@@ -115,33 +152,81 @@ def distro_states() -> tuple[Distro, ...]:
     return tuple(Distro(name=name, running=name in running) for name in _wsl_list())
 
 
-def is_running(distro: str) -> bool:
-    """True if `distro` is up right now, WITHOUT starting it.
+DistroState = Literal["running", "stopped", "unknown"]
+"""What WSL's own listings say about one distro, WITHOUT starting it (T133).
 
-    Reads the listing rather than running anything inside the distro, because
-    running anything is what starts one. Callers that poll - the Server tab
-    refreshes every five seconds - must ask this first, or opening the app boots
-    every distro it has ever adopted a server from.
+* `running`: the `--running` listing names it.
+* `stopped`: both listings answered, the full one names it and `--running` does not.
+* `unknown`: a listing did not answer, or the full one does not name the distro.
+"""
+
+
+def distro_state(distro: str) -> DistroState:
+    """`distro` as WSL's listings describe it: running, stopped, or unknown. Starts nothing.
+
+    Reads the listings rather than running anything inside the distro, because
+    running anything is what starts one. One `--running` call when the answer
+    is running -- the five-second poll's common case -- and the full listing
+    only to tell stopped from unknown.
+
+    **An answer, not a lock (T133, accepted).** `running` is true when the
+    listing ran; the `wsl -d` or `\\\\wsl.localhost` read a caller makes next is a
+    separate call, and wsl.exe has no way to say "only if it is already up". A
+    distro stopped in the gap between the two -- one listing-to-command gap per
+    poll or reading -- is started once by that command. Nothing Yu'lon runs on a
+    timer keeps it up after that: the next listing says stopped and every
+    reading waits again, so it idles out as usual -- unless its containers come
+    back through `restart: unless-stopped`, in which case the next poll sees
+    the world up and T132's hold keeps it, as it does any world it finds running.
     """
-    return any(d.name == distro and d.running for d in distro_states())
+    running = _wsl_listing("--running")
+    if running is None:
+        return "unknown"
+    if distro in running:
+        return "running"
+    listed = _wsl_listing()
+    if listed is None or distro not in listed:
+        return "unknown"
+    return "stopped"
+
+
+def is_running(distro: str) -> bool:
+    """True only if WSL SAID `distro` is up right now (`distro_state()`), WITHOUT starting it.
+
+    Callers that poll - the Server tab refreshes every five seconds - must ask
+    this first, or opening the app boots every distro it has ever adopted a
+    server from. A listing that did not answer is False.
+    """
+    return distro_state(distro) == "running"
 
 
 def known_stopped(distro: str) -> bool:
     """True only if both listings ANSWERED: the full one names `distro`, `--running` does not.
 
     The fail-closed half of `is_running()` (T95 re-review), for a caller about
-    to SKIP something because the distro is down. `distro_states()` reads a
-    listing that did not answer as an empty one, so a `--running` call that
-    timed out made a running distro look stopped, and a stop skipped on that
-    left a server running. Any listing that did not answer is False here.
+    to SKIP something because the distro is down. A `--running` call that timed
+    out once made a running distro look stopped, and a stop skipped on that left
+    a server running. Any listing that did not answer is False here.
     """
-    running = _wsl_listing("--running")
-    if running is None:
-        return False
-    listed = _wsl_listing()
-    if listed is None:
-        return False
-    return distro in listed and distro not in running
+    return distro_state(distro) == "stopped"
+
+
+def may_read(distro: str | None) -> bool:
+    """Whether a reading nobody pressed for may touch `distro` now: only if WSL SAID it runs (T133).
+
+    Measured on Windows 11 (T132 M7): from the user's desktop session ANY read
+    under `\\\\wsl.localhost\\<distro>\\` starts a stopped distro (1.35 s), and so
+    does any `wsl -d`; a tab that read its install's files on opening booted it,
+    and a server killed earlier came back through `restart: unless-stopped`
+    (wsl-resident-servers §2). A listing that did not answer is not permission
+    (T133 review): the reading waits, as it does for a stopped distro. None -- a
+    server on this host -- always may. The one question every automatic reading
+    of a WSL install asks: the status poll that feeds the tab's gate
+    (`ControllerView._waits_for_the_distro()`), the dashboard verdict on its
+    worker, and `install_wiring`'s own readings. It narrows the window to one
+    listing-to-command gap and cannot close it: see `distro_state()`.
+    """
+    return distro is None or distro_state(distro) == "running"
 
 
 _DISTRO_NOT_FOUND_RETURNCODE = 0xFFFFFFFF

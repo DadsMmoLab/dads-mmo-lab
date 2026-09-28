@@ -321,6 +321,7 @@ class PartyPanel(QWidget):
         seam: PartySeam,
         *,
         jobs: JobRunner,
+        read_now: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -500,7 +501,14 @@ class PartyPanel(QWidget):
         # "Show this character's party": a game installed, a conf edited or a
         # module deployed while this tab is open changes both answers, and this
         # module's own rule is that facts are re-read per press rather than
-        # cached at start-up.
+        # cached at start-up. `read_now=False` is a server whose WSL distro is
+        # stopped (T133): both read its conf, which would start it, so the tab
+        # calls `read_install_facts()` once the distro is up.
+        if read_now:
+            self.read_install_facts()
+
+    def read_install_facts(self) -> None:
+        """Read the two per-install facts the pickers are drawn from: level cap and specs."""
         self._load_level_bound()
         self._load_specs()
 

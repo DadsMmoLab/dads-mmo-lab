@@ -154,8 +154,8 @@ opt-in that says starting it is what will happen.
 **Polling obeys the same rule**, and did not at first. The Server tab refreshes
 every five seconds, so once `Controller.status()` correctly ran `wsl -d …` it
 booted an adopted server's distro simply by opening the app — the rule written
-for discovery, broken by the poll. `status()` now asks `wsl.is_running()` first
-and reports nothing up when the distro is down, which is true rather than merely
+for discovery, broken by the poll. `status()` now asks `wsl.distro_state()` first
+and reports nothing up unless WSL says the distro runs, which is true rather than merely
 convenient. Start still starts it, because that is something the user asked for. A user who knows their server
 is in a stopped distro can still reach it in one click; a user who does not is
 not made to wait for distros they do not care about.
@@ -189,11 +189,62 @@ the start time recorded beside it (`/proc/<pid>/stat` field 22), so a recycled p
 alone, and it never asks a distro WSL says is stopped. A world stopped outside Yu'lon keeps
 its hold until the next Stop/Remove, `wsl --shutdown` or sign-out.
 
-Still open, measured the same night: **reading anything under `\\wsl.localhost\<distro>`
-from the user's desktop session starts that distro** (1.35 s, then running). The Server
-tab reads the install's files at open, so opening the app boots an adopted server's distro,
-which is exactly what the poll rule above exists to prevent. A killed (not stopped) server's
-containers then come back on their own through `restart: unless-stopped`.
+Measured the same night: **reading anything under `\\wsl.localhost\<distro>` from the
+user's desktop session starts that distro** (1.35 s, then running). The Server tab read the
+install's files at open, so opening the app booted an adopted server's distro, which is
+exactly what the poll rule above exists to prevent, and a killed (not stopped) server's
+containers then came back on their own through `restart: unless-stopped`.
+
+### Readings wait for the distro (T133)
+
+Every reading a tab takes by itself asks one gate first, `ControllerView._waits_for_the_distro()`,
+and it goes only when WSL's listing last SAID the distro is running (`wsl.distro_state()`:
+`running`, `stopped`, or `unknown` for a listing that did not answer or does not name the
+distro). Stopped and unknown alike keep the reading and return (T133 review: an unanswered
+listing is no permission), and the Server tab says which, and that Start starts it. The tab
+is built not asked, so nothing waits on `wsl.exe` on the GUI thread; it asks once off the GUI
+thread when its sub-tabs are built, and every status poll answers again
+(`InstallStatus.distro`). Only a `running` answer runs what waited, once each. Gated that way:
+the Maintenance tab's backup list and interrupted-restore record, the Modules tab (clone
+folders, module answers, release notes, the version walk's `git`), the version line and the
+upstream line, the Tuning tab (its files, the reset Undo lookup, the bot count), My Party's
+level cap and spec list, the bot dashboard state, the compose and conf checks (T106, T137),
+the dashboard verdict on the poll, the command channel's opening check (an unanswered SOAP
+channel asks the world's container why) and T138's later settle. The two a TIMER starts,
+the verdict and that settle, also ask `wsl.may_read()` on their worker thread, because the
+tab's answer is up to one poll old and a distro stopped from outside since (`wsl -t`,
+`--shutdown`) would otherwise be started again every five seconds and never idle out.
+
+**What is left, accepted (T133 review).** Asking is not locking: the listing that says
+`running` and the `wsl -d` or `\\wsl.localhost` read that follows are two calls, and wsl.exe
+has no "only if it is already up" mode, so this cannot be closed in code. The window is one
+listing-to-command gap per poll or reading. A distro stopped at exactly that instant is
+started once by the command. Nothing on a timer keeps it up afterwards: the next listing says
+stopped, every reading waits again, and it idles out 15-25 s later -- unless its server's
+containers come back through `restart: unless-stopped`, in which case the next poll finds the
+world running and T132's hold keeps the distro up, as it does for any world it finds running.
+
+The generated database password of a TBC, Vanilla or Tortoise server in a distro is handed
+to the SQL seams as a reader (`apply.RootPassword`), read at the first database call, which
+starts the distro anyway, and kept only once a read found it. `install_wiring`'s own
+readings ask `wsl.may_read()` too.
+
+**`wsl -l -q --running` when nothing runs** was measured on yulon-win11 (2026-09-28, T133
+live gate): exit 0, 0 bytes on stdout and stderr, from the desktop session and over SSH. The
+sentence "There are no running distributions." and exit -1 appear only WITHOUT `-q`. The
+parser takes the empty answer as "none running"; it still recognises the sentence in either
+stream whatever the exit code, and a non-zero exit without it stays no answer, because reading
+that as "none running" would let `known_stopped()` skip a stop of a running server (T95).
+
+Presses are not gated: Start, Stop, Repair, the updates, and every other button may start
+the distro, because the player asked for them. **The Logs tab is a press too, by decision:**
+it reads only when it is shown or refreshed (or a bundle is saved), and it then reads every
+install's `.db_password` and conf folders for the passwords it masks, a stopped distro's
+included, which starts that distro. Skipping it would let that install's passwords through
+unmasked, and that is never allowed (`support.sources.gather_known()`). T138's settle of a
+`Pending` channel, which the tab schedules a minute after opening, is not a press and waits
+like the other readings. T129's corrections check is not offered for a WSL install at all,
+and runs only when the database is seen up.
 
 ---
 
@@ -366,8 +417,8 @@ still out of scope (§7).
   than the one the install is remembered in (compared case-insensitively),
   before anything is read or run. The wiring checks it first of all.
 * **§2 for the two readings.** `LatestRoute.source_version` (every tab reload)
-  and `upstream_news` (T124, once a day) answer "nothing to say" while
-  `wsl.is_running()` says the distro is down: no read of the folder (a UNC read
+  and `upstream_news` (T124, once a day) answer "nothing to say" unless
+  `wsl.may_read()` says the distro runs: no read of the folder (a UNC read
   boots it, T133) and no git. The presses may start it; the user asked.
 * The backup offered before an update is the existing one, which already passes
   `MYSQL_PWD` through `WSLENV` (§4).
