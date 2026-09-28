@@ -2003,12 +2003,14 @@ def test_the_cmangos_build_overlay_names_a_service_the_base_file_defines(tmp_pat
 def test_the_cmangos_host_binds_carry_the_label_and_the_volume_does_not(tmp_path: Path) -> None:
     plan = render_generated(load_catalog().get("wow-tbc"), tmp_path / "wow")
     binds = [line for line in plan.base.splitlines() if line.strip().startswith("- ./")]
-    assert len(binds) == 3
+    # ./etc on both services, ./data, and (T169) ./logs on both services.
+    assert len(binds) == 5
     assert all(line.endswith(":z") for line in binds)
     assert "- db-data:/var/lib/mysql" in plan.base
     assert "/var/lib/mysql:z" not in plan.base
     assert "./etc:/opt/mangos/etc:z" in plan.base
     assert "./data:/opt/mangos/data:z" in plan.base
+    assert plan.base.count("./logs:/opt/mangos/logs:z") == 2
 
 
 # -- G.6: the per-game Dockerfile / dockerignore pair --------------------------

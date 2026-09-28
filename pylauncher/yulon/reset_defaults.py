@@ -46,7 +46,7 @@ from typing import Literal
 
 from yulon import dbsecret, docker, platform, resources, tuning
 from yulon.catalog import bot_dashboard, composegen
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
@@ -123,6 +123,13 @@ UNREADABLE = "{what} could not be read ({exc})"
 NOT_UTF8 = "{what} is not UTF-8 text ({exc})"
 NO_DEFAULT = "Yu'lon does not know what {game} installs into this file"
 OVERRIDE_UNRENDERABLE = "the install's compose settings could not be made again ({exc})"
+FOLDER_KEPT = (
+    "{settings} left as {pronoun} {verb}: this server's docker-compose.yml does not link the "
+    "folder the install now writes there, so that setting would stop the server writing those "
+    "files at all. Press Repair server files… on the Server tab: it links the folder and sets "
+    "it, so the server's logs land in the server folder."
+)
+"""T169: a folder setting a reset keeps, because the compose file on disk has no bind for it."""
 
 
 def _host_bind_label(server_dir: Path) -> str:
@@ -566,6 +573,8 @@ class ResetReport:
 
     results: tuple[FileResult, ...]
     undo: bool = False
+    notes: tuple[str, ...] = ()
+    """Lines said after the files' own (T169: a folder setting kept, and why)."""
 
     @property
     def written(self) -> tuple[FileResult, ...]:
@@ -607,7 +616,8 @@ class ResetReport:
             head = "Put back to how Yu'lon installed this server:"
         else:
             head = "Nothing needed resetting:"
-        return (head, *(r.line() for r in self.results))
+        notes = () if self.undo or "refused" in outcomes else self.notes
+        return (head, *(r.line() for r in self.results), *notes)
 
 
 ModuleKeys = Mapping[str, Sequence[str]]
@@ -871,6 +881,11 @@ def reset(
     holding such keys that is not UTF-8 refuses the press: its lines cannot be
     carried without guessing at its bytes.
 
+    A folder setting the table states (`LogsDir` and the like, T169) goes back
+    only where the compose file on disk binds its folder; elsewhere it keeps its
+    value (`_keep_unbound_folders()`), and the report's last line names Repair
+    server files… as the press that links the folder and sets it.
+
     Raises:
         ValueError: a file outside this game's set -- a caller bug, and the
             structural reason a module conf can never be reset from here.
@@ -935,6 +950,21 @@ def reset(
                 reasons[file] = NOT_UTF8.format(what=label(file), exc=exc)
                 continue
             texts[file] = carry_module_keys(texts[file], live, carry)
+    kept: list[str] = []
+    for file in present:
+        if file in reasons:
+            continue
+        try:
+            texts[file], held = _keep_unbound_folders(
+                entry, server_dir, file, texts[file], current.get(file)
+            )
+        except UnicodeDecodeError as exc:
+            reasons[file] = NOT_UTF8.format(what=label(file), exc=exc)
+            continue
+        except InstallerError as exc:
+            reasons[file] = str(exc)
+            continue
+        kept.extend(f"{key} in {label(file)}" for key in held)
     if reasons:
         return ResetReport(tuple(_before_writing(file, skipped, reasons) for file in files))
 
@@ -974,8 +1004,75 @@ def reset(
                 else done.get(file) or FileResult(file, "already")
             )
             for file in files
-        )
+        ),
+        notes=_folder_note(kept),
     )
+
+
+def _folder_note(kept: Sequence[str]) -> tuple[str, ...]:
+    """`FOLDER_KEPT` for the settings a reset kept, in one line; nothing when it kept none."""
+    if not kept:
+        return ()
+    one = len(kept) == 1
+    return (
+        FOLDER_KEPT.format(
+            settings=" and ".join(kept),
+            pronoun="it" if one else "they",
+            verb="is" if one else "are",
+        ),
+    )
+
+
+def _keep_unbound_folders(
+    entry: CatalogEntry, server_dir: Path, file: str, default: str, live: bytes | None
+) -> tuple[str, tuple[str, ...]]:
+    """`default` with each folder setting kept at its live value where nothing binds it (T169).
+
+    The table a reset patches with states `LogsDir = "../logs"` for TBC and
+    Vanilla since T169, and an install made before that has no `./logs` bind:
+    written into such a conf, the setting points the server at a folder its
+    container does not have, and the file logs it used to write into `bin/`
+    stop altogether (Codex, T169 round 2). So a `composegen.folder_settings()`
+    key whose table folder the compose file on disk does not bind -- on the
+    service that reads this conf (`composegen.bound_folders()`); no compose
+    file binds nothing -- keeps the conf's current value, the way the server
+    reads it (`composegen.conf_setting()`), or upstream's `""` when the conf has
+    none or is being made again. Only the compose file's Repair adds the bind,
+    and it sets the key with it; a reset never touches the compose file.
+
+    Returns the text and the keys it kept at a value other than the table's,
+    for the report's line naming Repair server files…. A key whose live value
+    already lands on the table's folder is not among them: nothing is held back.
+
+    Raises:
+        InstallerError: the catalog states a folder setting it cannot bind (its bug).
+        UnicodeDecodeError: the live conf is not UTF-8, so its value cannot be read.
+    """
+    name = file.removeprefix(f"{ETC_DIR}/")
+    if name == file:
+        return default, ()
+    try:
+        settings = composegen.folder_settings(entry, None, name)
+    except composegen.ComposeGenError as exc:
+        raise InstallerError(str(exc)) from exc
+    if not settings:
+        return default, ()
+    try:
+        compose = _read_text(server_dir / composegen.BASE_FILE)
+    except (OSError, UnicodeDecodeError):
+        compose = ""
+    bound = composegen.bound_folders(entry, compose, name)
+    text = live.decode("utf-8") if live is not None else None
+    held: list[str] = []
+    for setting in settings:
+        folder = setting.folder
+        if folder is None or folder.spec in bound:
+            continue
+        value = (composegen.conf_setting(text, setting.key) if text is not None else None) or ""
+        default = conf.patch(default, ConfPatch(keys={setting.key: f'"{value}"'}), {})
+        if composegen.folder_target(entry, value) != folder.target:
+            held.append(setting.key)
+    return default, tuple(held)
 
 
 def _before_writing(file: str, skipped: dict[str, Outcome], reasons: dict[str, str]) -> FileResult:

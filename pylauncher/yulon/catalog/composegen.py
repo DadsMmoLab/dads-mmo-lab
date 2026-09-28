@@ -564,8 +564,9 @@ def render(
             "IMAGE_TAG": tag,
             "CONTAINER_USER": container_user(platform_id),
             "BIND_LABEL": bind_label,
-            # T165: the folders the server writes into, bound out with the same label.
-            **_folder_binds(entry, bind_label),
+            # T165: the folders the server writes into, bound out with the same label;
+            # T169: the ones the install's confs name, when they are there to ask.
+            **_folder_binds(entry, bind_label, server_dir),
             # The catalog facts (contract A6), last so the install-identity keys
             # above stay the authority on any name the two sets ever share. A
             # token no template uses costs nothing — `fill()` minds unfilled
@@ -855,12 +856,21 @@ Found on a Tortoise install on 2026-09-28: `realmd.conf` said `LogsDir =
 "../honor"` and `PDumpDir = "../pdump"`. So every file log, the weekly honor
 report and the automatic character dumps were written nowhere. `DataDir` is not here: the
 template binds `./data` itself, and extraction, not the server, fills it.
+TBC's and Vanilla's confs name only `LogsDir` (T169: `""` upstream, which
+writes into `bin/`, inside the container).
 """
 
 SERVER_WORKING_DIR = "bin"
 """Where realmd and mangosd run, under the core's prefix: the template's
 `working_dir: {{CORE_DIR}}/bin`. A relative `*Dir` setting is read from there;
 `test_server_folders.py` reads `working_dir` back off the rendered file."""
+
+SERVER_CONF_DIR = "etc"
+"""Where a CMaNGOS install keeps its confs, relative to the server folder (T169).
+
+The template binds `./etc` onto `{{CORE_DIR}}/etc` and the conf stage patches
+the files there; `families.cmangos.ETC_DIR` is this name. `server_folders()`
+reads them there, to bind the folder a conf really names."""
 
 SERVER_FOLDER_CONFS: Mapping[str, str] = {
     "REALMD_FOLDERS": "realmd.conf",
@@ -882,57 +892,251 @@ class ServerFolder:
     name: str
     target: str
 
+    @property
+    def spec(self) -> str:
+        """`./<name>:<target>`: the bind as a compose file spells it, label left off (T169)."""
+        return f"./{self.name}:{self.target}"
 
-def server_folders(entry: CatalogEntry, conf_file: str | None = None) -> tuple[ServerFolder, ...]:
+
+SERVER_CONF_SERVICE: Mapping[str, str] = {
+    conf: token.removesuffix("_FOLDERS").lower() for token, conf in SERVER_FOLDER_CONFS.items()
+}
+"""Each conf, and the service (after `{{CONTAINER_PREFIX}}`) whose binary reads it (T169).
+
+Read off `SERVER_FOLDER_CONFS`' token names, so the two cannot disagree."""
+
+_SERVICE_KEY = re.compile(r"^  ([^\s#:][^:#]*):\s*(#.*)?$")
+
+
+def bound_folders(entry: CatalogEntry, text: str, conf: str) -> frozenset[str]:
+    """Each `ServerFolder.spec` the compose `text` binds on the service that reads `conf` (T169).
+
+    Per service, not per file (cold review, T169 round 2): a `./logs` bound on
+    mangosd says nothing about where realmd writes. Read by line rather than as
+    YAML -- the app ships no YAML parser, and this is Yu'lon's own file, marker
+    and all: a two-space service key under the top-level `services:`, and its
+    `- ./` items. A conf no service reads, or a service the file lacks, binds nothing.
+    """
+    role = SERVER_CONF_SERVICE.get(conf)
+    if role is None:
+        return frozenset()
+    wanted = f"{_container_prefix(entry)}{role}"
+    service: str | None = None
+    in_services = False
+    found: set[str] = set()
+    for line in text.splitlines():
+        if line[:1] not in ("", " ", "#"):
+            in_services = line.rstrip() == "services:"
+            service = None
+            continue
+        key = _SERVICE_KEY.match(line) if in_services else None
+        if key is not None:
+            service = key.group(1).strip()
+            continue
+        item = line.strip()
+        if service == wanted and item.startswith("- ./"):
+            source, _sep, rest = item[2:].partition(":")
+            found.add(f"{source}:{rest.split(':', 1)[0]}")
+    return frozenset(found)
+
+
+def folder_target(entry: CatalogEntry, value: str) -> str:
+    """Where a `*Dir` value lands in the container, read from the servers' working directory."""
+    native = _native_of(entry)
+    if native.cmangos is None:
+        return value
+    core = PurePosixPath(native.cmangos.conf.source_dir).parent
+    return _folder_at(core, _unquoted(value))[0]
+
+
+@dataclass(frozen=True)
+class FolderSetting:
+    """One `SERVER_FOLDER_KEYS` setting a conf table states, beside what the conf says (T169).
+
+    `found` is the conf's own answer (`conf_setting()`): None when there is no
+    conf to ask, `""` when it says nothing or `""` -- upstream's default, which
+    writes into `bin/` inside the container -- and otherwise the value somebody
+    chose. `folder` is what is bound for it: the table's folder unless the conf
+    names one, and None when the one it names cannot be bound, which `why` says.
+    """
+
+    conf: str
+    key: str
+    stated: str
+    """The table's value as the catalog spells it, quotes and all: what an install writes."""
+    found: str | None
+    folder: ServerFolder | None
+    why: str = ""
+
+    @property
+    def unset(self) -> bool:
+        """The conf is there and leaves the setting at upstream's empty default."""
+        return self.found == ""
+
+
+def conf_setting(text: str, key: str) -> str | None:
+    """What a CMaNGOS server reads `key` as from this conf text; None when no line sets it (T169).
+
+    `Config::Reload()` in `src/shared/Config/Config.cpp`, identical at the TBC and
+    Vanilla pins (read 2026-09-28), rule for rule: each line is left-trimmed; an
+    empty line or one starting `#` or `[` says nothing; the key is the trimmed text
+    before the first `=`, compared lower-cased; the value is trimmed and then
+    stripped of `"`; and a later line overwrites an earlier one. Not
+    `tuning.conf_value()`, which is AzerothCore's first-wins reader. Split on
+    `\n` alone, as `std::getline` is, and the `\r` a CRLF line keeps is
+    whitespace the trims remove.
+    """
+    wanted = key.lower()
+    found: str | None = None
+    for raw in text.split("\n"):
+        line = raw.lstrip()
+        if not line or line[0] in "#[":
+            continue
+        head, sep, tail = line.partition("=")
+        if sep and head.strip().lower() == wanted:
+            found = tail.strip().strip('"')
+    return found
+
+
+def _unquoted(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def _folder_at(core: PurePosixPath, value: str) -> tuple[str, ServerFolder | None]:
+    """Where `value` lands from the working directory, and its folder when one can be bound.
+
+    It must land on a folder directly under the core's prefix, named so it can be
+    spliced into YAML unquoted -- letters, digits, `_` and `-` -- and not one of the
+    prefix's own (`bin`, `etc`, `data`).
+    """
+    target = posixpath.normpath(str(core / SERVER_WORKING_DIR / value))
+    folder = PurePosixPath(target)
+    if (
+        folder.parent != core
+        or not _FOLDER_NAME.match(folder.name)
+        or folder.name in _CORE_OWN_FOLDERS
+    ):
+        return target, None
+    return target, ServerFolder(folder.name, target)
+
+
+def folder_settings(
+    entry: CatalogEntry, confs: Mapping[str, str] | None = None, conf_file: str | None = None
+) -> tuple[FolderSetting, ...]:
+    """Each folder setting `entry`'s conf table states, and the folder bound for it (T165, T169).
+
+    `confs` maps a table file name to that conf's text, for the files the server
+    folder has; a file it lacks is answered from the table alone -- every file of
+    a fresh install, whose compose file is rendered before the conf stage runs.
+
+    A conf that says nothing, or `""`, is one the install or a Repair sets to the
+    table's value, so the table's folder is bound. A conf that names a folder --
+    the player's, or the table's own in another spelling -- has THAT folder bound
+    when it is one of the server's own (`_folder_at()`), and nothing when it is
+    not, with the reason in `why`: the player's value is kept either way, and a
+    bind on a folder the server does not write into would only be a folder
+    that stays empty.
+
+    Raises:
+        ComposeGenError: a value the TABLE states is not a folder this engine can
+            bind -- a catalog bug; a conf's own value never raises.
+    """
+    native = _native_of(entry)
+    if native.cmangos is None:
+        return ()
+    core = PurePosixPath(native.cmangos.conf.source_dir).parent
+    texts = confs or {}
+    found: list[FolderSetting] = []
+    for name, patch in native.cmangos.conf.files.items():
+        if conf_file is not None and name != conf_file:
+            continue
+        text = texts.get(name)
+        for key in SERVER_FOLDER_KEYS:
+            raw = patch.keys.get(key)
+            if raw is None:
+                continue
+            target, folder = _folder_at(core, _unquoted(raw))
+            if folder is None:
+                raise ComposeGenError(
+                    f"{entry.id}'s {name} sets {key} = {raw}, which is {target} in the "
+                    f"container: not a folder of the server's own directly under {core}, so "
+                    "it cannot be bound out to the server folder."
+                )
+            # A conf with no such line leaves it at upstream's default, which is `""`.
+            value = None if text is None else (conf_setting(text, key) or "")
+            if not value:
+                found.append(FolderSetting(name, key, raw, value, folder))
+                continue
+            target, theirs = _folder_at(core, value)
+            why = (
+                ""
+                if theirs is not None
+                else (
+                    f'{SERVER_CONF_DIR}/{name} sets {key} = "{value}", which is {target} in '
+                    f"the container: not a folder of the server's own directly under {core}, so "
+                    "Yu'lon leaves it as it is and binds nothing for it. What the server writes "
+                    f"there stays inside the container and is lost when it is recreated; {key} "
+                    f"= {raw} keeps it in the server folder."
+                )
+            )
+            found.append(FolderSetting(name, key, raw, value, theirs, why))
+    return tuple(found)
+
+
+def conf_texts(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
+    """The text of each conf in `server_dir` whose table states a folder setting, if readable.
+
+    For `render()`, which must not fail on a conf: one that is missing or cannot
+    be read is left out and answered from the table. T106's check reads them
+    strictly itself, and refuses on one it cannot read.
+    """
+    native = _native_of(entry)
+    if native.cmangos is None:
+        return {}
+    texts: dict[str, str] = {}
+    for name, patch in native.cmangos.conf.files.items():
+        if any(key in patch.keys for key in SERVER_FOLDER_KEYS):
+            text = _read_if_there(server_dir / SERVER_CONF_DIR / name)
+            if text is not None:
+                texts[name] = text
+    return texts
+
+
+def server_folders(
+    entry: CatalogEntry, conf_file: str | None = None, *, server_dir: Path | None = None
+) -> tuple[ServerFolder, ...]:
     """The folders `conf_file`'s table says the server writes into; every conf's when None.
 
     Read off the catalog's conf table, which is what the install leaves in the
     conf: a `SERVER_FOLDER_KEYS` value, relative to `SERVER_WORKING_DIR` unless it
     is absolute, must land on a folder directly under the core's prefix, and the
     host side is the server folder's folder of the same name. An entry whose
-    table names none -- TBC's and Vanilla's keep upstream's `LogsDir = ""`, which
-    writes into `bin/` -- has none, and its compose file does not change.
+    table names none has none, and its compose file does not change.
+
+    With `server_dir`, the confs already there have their say (T169,
+    `folder_settings()`): a folder the player set is bound instead of the
+    table's, and one that cannot be bound is not. Without it -- or with no conf
+    there yet, as on a fresh install -- the table alone answers.
 
     The name is spliced into YAML unquoted, so it is held to letters, digits,
     `_` and `-`; anything else, or a folder outside the prefix or one of its own
     (`bin`, `etc`, `data`), is refused rather than bound.
 
     Raises:
-        ComposeGenError: a stated folder is not one this engine can bind out.
+        ComposeGenError: a folder the table states is not one this engine can bind out.
     """
-    native = _native_of(entry)
-    if native.cmangos is None:
-        return ()
-    core = PurePosixPath(native.cmangos.conf.source_dir).parent
-    workdir = core / SERVER_WORKING_DIR
+    confs = conf_texts(entry, server_dir) if server_dir is not None else None
     found: dict[str, ServerFolder] = {}
-    for name, patch in native.cmangos.conf.files.items():
-        if conf_file is not None and name != conf_file:
-            continue
-        for key in SERVER_FOLDER_KEYS:
-            raw = patch.keys.get(key)
-            if raw is None:
-                continue
-            value = raw.strip()
-            if len(value) >= 2 and value[0] == value[-1] == '"':
-                value = value[1:-1]
-            target = posixpath.normpath(str(workdir / value))
-            folder = PurePosixPath(target)
-            if (
-                folder.parent != core
-                or not _FOLDER_NAME.match(folder.name)
-                or folder.name in _CORE_OWN_FOLDERS
-            ):
-                raise ComposeGenError(
-                    f"{entry.id}'s {name} sets {key} = {raw}, which is {target} in the "
-                    f"container: not a folder of the server's own directly under {core}, so "
-                    "it cannot be bound out to the server folder."
-                )
-            found.setdefault(folder.name, ServerFolder(folder.name, target))
+    for setting in folder_settings(entry, confs, conf_file):
+        if setting.folder is not None:
+            found.setdefault(setting.folder.name, setting.folder)
     return tuple(found.values())
 
 
-def _folder_binds(entry: CatalogEntry, bind_label: str) -> dict[str, str]:
+def _folder_binds(entry: CatalogEntry, bind_label: str, server_dir: Path) -> dict[str, str]:
     """`SERVER_FOLDER_CONFS`'s tokens: one `- ./<name>:<target><label>` line per folder.
 
     Each value starts with its own newline, so the token sits at the end of the
@@ -943,7 +1147,7 @@ def _folder_binds(entry: CatalogEntry, bind_label: str) -> dict[str, str]:
     return {
         token: "".join(
             f"\n      - ./{folder.name}:{folder.target}{bind_label}"
-            for folder in server_folders(entry, conf)
+            for folder in server_folders(entry, conf, server_dir=server_dir)
         )
         for token, conf in SERVER_FOLDER_CONFS.items()
     }

@@ -163,8 +163,11 @@ a sentence safe.
 DATA_DIR = "data"
 """Where extraction lands, relative to the server dir; the template binds it to /opt/*/data."""
 
-ETC_DIR = "etc"
-"""Where the patched `.conf` files live, relative to the server dir."""
+ETC_DIR = composegen.SERVER_CONF_DIR
+"""Where the patched `.conf` files live, relative to the server dir.
+
+`composegen`'s name since T169: a render reads the confs there, to bind the
+folder they name, and composegen cannot import this module."""
 
 DB_DATA_VOLUME = "db-data"
 """The named volume key in `catalog/installers/shared/cmangos/base.yml.tmpl`.
