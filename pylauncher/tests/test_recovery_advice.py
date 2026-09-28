@@ -1,35 +1,38 @@
-"""Advice that sends the player to a press names a press that recovers, proved by pressing it.
+"""One press recovers each state a failed press leaves, proved by pressing it (T163, T164, T170).
 
 T163 and T164 had one shape. A sentence on a path that has already gone wrong
 told the player to press "Rebuild the server…", and on exactly the state that
-sentence is said in, Rebuild does not recover it:
+sentence is said in, Rebuild did not recover it:
 
-* **T163, WotLK.** "Update the server to latest…" failed, the sources went
-  back, and Yu'lon's `docker-compose.yml` could not be written into the
-  checkout again, so the repository's own file is there. `rebuild()`'s guard
-  refuses a compose file Yu'lon did not write.
-* **T163, CMaNGOS.** The same press, and the carried source patch could not be
+* **WotLK.** "Update the server to latest…" failed, the sources went back, and
+  Yu'lon's `docker-compose.yml` could not be written into the checkout again,
+  so the repository's own file is there. `rebuild()`'s guard refuses a compose
+  file Yu'lon did not write.
+* **CMaNGOS.** The same press, and the carried source patch could not be
   written again. Rebuild does NOT refuse there: it compiles the unpatched
   source, which is the defect the patch exists to stop.
-* **T164.** "Reset to default" found the server's image gone and said "rebuild
-  the server first, then reset". `rebuild()` keeps the image it is about to
-  compile over as a rollback, and with no image there it refuses.
+* **An image gone.** "Reset to default" found the server's image gone and said
+  "rebuild the server first, then reset", and `rebuild()` refused without a
+  build to keep as a rollback.
 
-What recovers each is pressed here too: the install, resumed into the same
-folder, for the compose file and the missing image; and the same Server build
-press again for the patch, because that press writes the patch before it
-compiles and again when it puts the sources back. The way to the install is
-most of the advice (`native.install_again_here()`), and each of its shapes is
-driven: a server Yu'lon knows (its tile is greyed, so "Remove from Yu'lon…"
-comes first), a second server of the same game listed (the tile stays greyed
-until that one goes too -- driven through the real Catalog view), and a
-server inside a WSL distro (Yu'lon on Windows cannot install there at all; the
-Yu'lon inside the distro that built it can).
+T163/T164 sent the first and the third to "Remove from Yu'lon…" and an install
+into the same folder, two presses and a trip through the Catalog. T170 (the
+owner's "Repair + Rebuild both", 2026-09-28) makes each one press:
 
-Every test drives the whole sequence through the real engine: the press that
-failed, the sentence it said, the press the old sentence named and what it
-really does on that state, and the press the new sentence names. Unit-tested
-only; no box was driven.
+* **Repair server files…** replaces the repository's untouched file with
+  Yu'lon's, by the install's own `replaceable` rule, keeps a backup and offers
+  Recreate -- and still refuses a file somebody changed, or one in a folder
+  Yu'lon's record does not say it built there;
+* **Rebuild the server…** compiles when the images are gone, after a
+  confirmation that says there is no build to keep as a rollback, and says what
+  a failure then leaves.
+
+The patch keeps its own press (the same Server build entry again).
+
+Every test drives the sequence through the real engine and the real wiring,
+with only docker and git doubled (`tests.support_native.Recorder`): the press
+that failed, the sentence it said, and the press that sentence names, on the
+state it is said in. Unit-tested only; no box was driven.
 """
 
 from __future__ import annotations
@@ -37,31 +40,35 @@ from __future__ import annotations
 import errno
 import os
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QMenu
+from PySide6.QtWidgets import QMessageBox
 
-from tests.conftest import pump_until
 from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
+from tests.test_controller_view import _Ps, _services
 from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import client_folder
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
-from yulon import forgetting, install_wiring, platform, reset_defaults, server_build_presses
+from yulon import install_wiring, platform, reset_defaults, runner, server_build_presses
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.docker import AttachedRun
+from yulon.ui import controller_view as controller_view_module
+from yulon.ui.controller_view import ControllerView
+from yulon.ui.widgets.job import run_inline
 
 OLD = "a" * 40
 NEW = "b" * 40
 DISTRO = "Ubuntu"
 INSIDE = "/home/pk/wow-wotlk"
 """Where the WotLK fixture lives as the distro sees it; `_in_wsl()` maps the tmp folder here."""
+
+REBUILD = server_build_presses.under_server_build(server_build_presses.REBUILD)
 
 
 @pytest.fixture(autouse=True)
@@ -85,11 +92,6 @@ def _said(run: Iterable[str]) -> tuple[list[str], InstallerError | None]:
     except InstallerError as exc:
         return lines, exc
     return lines, None
-
-
-def _stopped(container: str) -> bool:
-    """The world is down: "Remove from Yu'lon…" stops the server before it lets go of it."""
-    return False
 
 
 class _DiskThatFills:
@@ -161,7 +163,7 @@ def _update_that_cannot_write_compose_back(
     rec.build_result = AttachedRun(0, ("built",))
     assert disk.writes >= 2, "the disk never filled"
     assert rec.heads[server_dir] == OLD
-    assert base.read_text(encoding="utf-8") == upstream, "not git's file: the resume would refuse"
+    assert base.read_text(encoding="utf-8") == upstream, "not git's file: the Repair would refuse"
     return said
 
 
@@ -180,96 +182,234 @@ def _in_wsl(monkeypatch: pytest.MonkeyPatch, server_dir: Path) -> None:
     monkeypatch.setattr(platform, "wsl_location", location)
 
 
-def _windows_install_is_refused(rec: Recorder) -> None:
-    """Both installs Yu'lon on Windows has refuse a folder inside the distro, before writing.
+def _wired_to(monkeypatch: pytest.MonkeyPatch, make: Any) -> None:
+    """The app's wiring builds its engine through `make`: the real engine over the doubles.
 
-    The Catalog's (default seams: `platform.server_dir_problem()` names the WSL
-    share) and the WSL engine's (`Seams.in_wsl()` refuses every install-only
-    seam). The folder is the UNC spelling the Windows app would hold.
+    `installer_for_app()` is the one place the wiring makes an engine, and its
+    default seams are the real docker and git. Everything between the tab and
+    the engine -- the route, the press, its arguments -- is the shipped code.
     """
-    unc = platform.wsl_unc_path(DISTRO, INSIDE)
-    assert unc is not None
-    with pytest.raises(InstallerError, match="is inside WSL"):
-        list(engine(rec).run(InstallOptions(server_dir=unc)))
-    with pytest.raises(InstallerError, match="does not install into it"):
-        list(
-            install_wiring.installer_for_app(ENTRY, wsl_distro=DISTRO).run(
-                InstallOptions(server_dir=unc)
-            )
-        )
-    assert not unc.exists(), "a refused install wrote into the folder"
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **kw: make())
 
 
-# -- T163: the update that could not write Yu'lon's own files back ------------
+def _backups(server_dir: Path) -> list[Path]:
+    return sorted(server_dir.glob(composegen.BASE_FILE + ".*" + native.REPAIR_BACKUP_SUFFIX))
 
 
-def test_a_compose_file_the_full_disk_kept_out_names_the_install_and_it_recovers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _answer_yes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every question the tab asks is answered Yes; returns what each one said."""
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> int:
+        asked.append(text)
+        return int(QMessageBox.StandardButton.Yes.value)
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(question))
+    return asked
+
+
+# -- T170 (a): the repository's own compose file, one Repair press ------------
+
+
+def test_a_failed_update_is_mended_by_repair_then_recreate_and_rebuild_works(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The advice, then every press it concerns, on the state it is said in.
+    """The whole sequence, on the WotLK Server tab the app builds, wired as the app wires it.
 
-    1. Rebuild -- what the sentence named until T163 -- REFUSES that folder.
-    2. The install, run into the same folder as the new sentence says,
-       finishes, puts Yu'lon's compose back, and compiles nothing. It can only
-       because the full disk left git's own file whole (`write_plan()` replaces
-       whole since T163); a cut-off file would be refused here too.
-    3. Rebuild now builds.
+    1. The update fails and says to press Repair server files…, not Rebuild
+       and not the Remove + Install route T163 named.
+    2. Rebuild still refuses the folder -- which is why the sentence may not
+       name it -- and compiles nothing.
+    3. The tab asks again when the press ends, and its banner offers the
+       Repair for the repository's file; the press asks, writes Yu'lon's file,
+       keeps the repository's as a backup byte for byte, and offers Recreate.
+    4. Recreate removes and starts the containers.
+    5. Rebuild, through the app's own Rebuild route, now compiles.
     """
     rec, server_dir = _wotlk_ready(tmp_path)
+    _wired_to(monkeypatch, lambda: engine(rec))
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
+    monkeypatch.setattr(runner, "run", _Ps())
+    services = _services(_Ps(), server_dir, [])
+    services.repair_compose = install_wiring.repair_compose_for_app(ENTRY, server_dir)
+    assert services.repair_compose is not None, "WotLK is not wired the Repair"
+    view = ControllerView(ENTRY, services, status_poll_ms=0)
+    assert view.compose_banner.isHidden(), "a healthy WotLK install was offered a Repair"
+
+    base = server_dir / composegen.BASE_FILE
+    upstream = rec.tracked[base]
+    view._rebuild_moves_sources = True  # what the Update press sets before it runs
     said, raised = _update_that_cannot_write_compose_back(rec, server_dir, monkeypatch)
+    view._rebuild_finished(False, str(raised))
 
     assert raised is not None and native.SOURCES_PUT_BACK_NOTE in str(raised)
     advice = next(line for line in said if "back on their old commits, but" in line)
-    assert server_build_presses.REBUILD not in advice, f"it names the press that refuses: {advice}"
-    assert native.install_again_here(ENTRY.name, server_dir) in advice, advice
-    assert "WSL" not in advice
+    assert f"“{native.REPAIR_FILES_LABEL}” on the Server tab" in advice, advice
+    assert f"“{native.RECREATE_CONTAINERS_LABEL}”" in advice, advice
+    assert "Remove from Yu'lon" not in advice and "WSL" not in advice, advice
 
     rec.calls.clear()
-    with pytest.raises(InstallerError) as refused:
+    with pytest.raises(InstallerError, match="not written by Yu'lon"):
         list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    assert "not written by Yu'lon" in str(refused.value)
     assert "build" not in rec.calls, "the refused rebuild compiled anyway"
 
-    list(engine(rec).run(InstallOptions(server_dir=server_dir)))
-    base = server_dir / composegen.BASE_FILE
-    assert composegen.GENERATED_MARKER in base.read_text(encoding="utf-8")
-    assert "build" not in rec.calls, "the install compiled a server whose images are all there"
+    assert not view.compose_banner.isHidden(), "the tab did not ask again after the update"
+    assert view.compose_banner_label.text() == controller_view_module.REPAIR_FILES_UPSTREAM_BANNER
+    asked = _answer_yes(monkeypatch)
+    view.compose_banner_button.click()
+    assert len(asked) == 1 and "came with the server's source code" in asked[0], asked
+    assert composegen.is_marker_line(base.read_text(encoding="utf-8")), "not Yu'lon's file"
+    (backup,) = _backups(server_dir)
+    assert backup.read_text(encoding="utf-8") == upstream, "the backup is not git's file"
+    assert view.compose_banner_button.text() == controller_view_module.TUNING_RECREATE_LABEL
+    assert backup.name in view.compose_banner_label.text()
 
-    _, raised = _said(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    removed: list[int] = []
+    started: list[int] = []
+    view.services.controller.remove = lambda: removed.append(1) or True  # type: ignore[method-assign]
+    view.services.controller.start = lambda: started.append(1)  # type: ignore[method-assign,assignment,return-value]
+    view.compose_banner_button.click()
+    assert (removed, started) == ([1], [1]), "the banner's Recreate did not recreate"
+    assert view.compose_banner.isHidden(), "the banner outlived the recreate"
+
+    rec.calls.clear()
+    _, raised = _said(install_wiring.rebuild_for_app(ENTRY, server_dir)(None))
     assert raised is None, raised
-    assert "build" in rec.calls
+    assert "build" in rec.calls and "recreate" in rec.calls, rec.calls
 
 
-def test_on_a_wsl_server_the_advice_sends_the_player_into_the_distro_and_that_recovers(
+def test_on_a_wsl_server_the_advice_names_the_repair_in_the_distro_and_that_mends_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex, round 2: the same failure on a server Yu'lon on Windows manages inside a distro.
+    """The same failure on a server Yu'lon on Windows manages inside a distro.
 
-    Nothing on Windows mends it: Rebuild refuses, and both installs refuse the
-    folder. The advice says so and names the distro and the folder's Linux
-    path; the install run there -- by the Yu'lon for Linux that built the
-    server, on the folder as the distro sees it -- mends it.
+    Yu'lon on Windows offers no Repair there (its engine renders for this
+    host), so the sentence sends the player to the Yu'lon inside the distro,
+    naming the distro and the folder's Linux path. That Yu'lon -- the wiring
+    without a distro, the folder a Linux folder -- repairs it.
     """
     rec, server_dir = _wotlk_ready(tmp_path)
     _in_wsl(monkeypatch, server_dir)
     said, _ = _update_that_cannot_write_compose_back(rec, server_dir, monkeypatch)
 
     advice = next(line for line in said if "back on their old commits, but" in line)
-    assert native.install_again_here(ENTRY.name, server_dir) in advice, advice
-    assert f"WSL distro {DISTRO}" in advice and f"choose {INSIDE}" in advice, advice
-    assert "Yu'lon on Windows cannot" in advice
-    assert "in the Catalog and choose" not in advice, "it names the Windows-side route"
-
-    with pytest.raises(InstallerError, match="not written by Yu'lon"):
-        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    _windows_install_is_refused(rec)
+    assert f"WSL distro {DISTRO}" in advice and f"({INSIDE})" in advice, advice
+    assert "Yu'lon on Windows cannot" in advice, advice
+    assert f"“{native.REPAIR_FILES_LABEL}” on its Server tab" in advice, advice
+    assert "on the Server tab" not in advice, "it names the Windows-side tab"
+    assert install_wiring.repair_compose_for_app(ENTRY, server_dir, wsl_distro=DISTRO) is None
 
     monkeypatch.undo()  # inside the distro, the folder is a Linux folder
+    _wired_to(monkeypatch, lambda: engine(rec))
+    route = install_wiring.repair_compose_for_app(ENTRY, server_dir)
+    assert route is not None and route.check().state == "upstream"
+    route.repair()
+    assert route.check().state == "current"
     rec.calls.clear()
-    list(engine(rec).run(InstallOptions(server_dir=server_dir)))
+    _, raised = _said(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert raised is None and "build" in rec.calls, raised
+
+
+def _upstream_in_place(tmp_path: Path) -> tuple[Recorder, Path, str]:
+    """A finished WotLK install whose base file is the repository's own again, as git has it."""
+    rec, server_dir = _wotlk_ready(tmp_path)
     base = server_dir / composegen.BASE_FILE
-    assert composegen.GENERATED_MARKER in base.read_text(encoding="utf-8")
-    assert "build" not in rec.calls
+    base.write_text(rec.tracked[base], encoding="utf-8")
+    return rec, server_dir, rec.tracked[base]
+
+
+def test_the_repositorys_untouched_file_is_offered_and_replaced(tmp_path: Path) -> None:
+    """The positive case the refusals below each break one rule of."""
+    rec, server_dir, upstream = _upstream_in_place(tmp_path)
+    made = engine(rec)
+    check = made.base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "upstream" and check.added > 0, check
+    repaired = made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert repaired.backup is not None
+    assert repaired.backup.read_text(encoding="utf-8") == upstream
+    assert made.base_compose_check(InstallOptions(server_dir=server_dir)).state == "current"
+
+
+def test_a_modified_repository_file_is_still_refused(tmp_path: Path) -> None:
+    """One line changed: git says modified, so it is somebody's own file, and it stays."""
+    rec, server_dir, upstream = _upstream_in_place(tmp_path)
+    base = server_dir / composegen.BASE_FILE
+    edited = upstream + "  # my own change\n"
+    base.write_text(edited, encoding="utf-8")
+    made = engine(rec)
+    check = made.base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "foreign", check
+    with pytest.raises(InstallerError, match="somebody's own file"):
+        made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert base.read_text(encoding="utf-8") == edited and _backups(server_dir) == []
+
+
+def test_the_repositorys_file_in_a_folder_yulon_has_no_record_of_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Git's own file, untouched, but no record: a checkout somebody else set up."""
+    rec, server_dir, upstream = _upstream_in_place(tmp_path)
+    (server_dir / native.STATE_FILE).unlink()
+    made = engine(rec)
+    assert made.base_compose_check(InstallOptions(server_dir=server_dir)).state == "foreign"
+    with pytest.raises(InstallerError, match="somebody's own file"):
+        made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == upstream
+
+
+def test_the_repositorys_file_in_a_moved_folder_is_refused(tmp_path: Path) -> None:
+    """Git's own file, untouched, with the record of another folder: its volumes are not here.
+
+    The file names no compose project, so the record's install id is what
+    says where the characters are; a Yu'lon file written for THIS folder would
+    start the server as a new project beside an empty database volume.
+    """
+    rec, server_dir, upstream = _upstream_in_place(tmp_path)
+    record = native.read_state(server_dir, valid=())
+    assert record is not None
+    native.write_state(server_dir, replace(record, install_id="0" * len(record.install_id)))
+    made = engine(rec)
+    check = made.base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "moved" and "database volume" in check.why, check
+    with pytest.raises(InstallerError, match="moved or copied"):
+        made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == upstream
+
+
+def test_yulons_own_wotlk_file_that_differs_is_still_left_to_update(tmp_path: Path) -> None:
+    """T106's choice kept: WotLK's own file follows the app on Update, so Repair leaves it."""
+    rec, server_dir = _wotlk_ready(tmp_path)
+    base = server_dir / composegen.BASE_FILE
+    stale = base.read_text(encoding="utf-8") + "x-mine: 1\n"
+    base.write_text(stale, encoding="utf-8")
+    made = engine(rec)
+    check = made.base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "follows", check
+    assert server_build_presses.UPDATE_TO_LATEST in check.why
+    with pytest.raises(InstallerError):
+        made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert base.read_text(encoding="utf-8") == stale
+
+
+def test_the_selinux_label_comes_from_the_override_not_from_the_host(tmp_path: Path) -> None:
+    """Installed with `:z`; the host says no label today: the file written still carries it.
+
+    The base file is the repository's, so it carries no label to read; the
+    override beside it is Yu'lon's and does.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "server"
+    install(rec, server_dir, selinux_enforcing=lambda: True, fs_type=lambda path: "xfs")
+    override = (server_dir / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert composegen.bind_label_of(override) == ":z"
+    base = server_dir / composegen.BASE_FILE
+    base.write_text(rec.tracked[base], encoding="utf-8")
+    made = engine(rec, selinux_enforcing=lambda: False)
+    made.repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert composegen.bind_label_of(base.read_text(encoding="utf-8")) == ":z"
+
+
+# -- the CMaNGOS half of T163: the carried patch, its own press ----------------
 
 
 def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_recovers(
@@ -345,7 +485,7 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     assert {path: path.read_bytes() for path in patched} == patched_bytes
 
 
-# -- T164: Reset to default with the server's image gone ----------------------
+# -- T170 (b): the images gone, one Rebuild press -----------------------------
 
 
 def _reset_seams(rec: Recorder, copies: list[str]) -> reset_defaults.Seams:
@@ -366,22 +506,28 @@ def _reset_seams(rec: Recorder, copies: list[str]) -> reset_defaults.Seams:
     )
 
 
-def test_an_image_gone_names_the_install_and_the_install_brings_it_back(tmp_path: Path) -> None:
-    """Reset → image gone → the advice → Rebuild (refuses) → the install (compiles) → Reset reads.
-
-    One daemon double answers both questions, so the image Reset finds gone is
-    an image the Rebuild refuses without: `conf_image_ref()` is asserted to be
-    among `image_refs_at()`, the refs the rollback is kept for.
-    """
+def _tbc_images_gone(tmp_path: Path) -> tuple[Recorder, Path, Path]:
+    """A finished TBC install whose images are no longer on the daemon under their tags."""
     rec = Recorder()
     server_dir = tmp_path / "tbc"
     client = client_folder(tmp_path)
     tbc_install(rec, server_dir, client)
     rec.calls.clear()
+    rec.images = False
+    return rec, server_dir, client
+
+
+def test_reset_with_the_image_gone_names_rebuild_and_rebuild_brings_it_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reset → image gone → the advice → Rebuild (the app's route) compiles → Reset reads.
+
+    One daemon double answers both questions, so the image Reset finds gone is
+    one the Rebuild finds gone too: `conf_image_ref()` is among `image_refs_at()`.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
     made = tbc_engine(rec)
     assert made.conf_image_ref(server_dir) in made.image_refs_at(server_dir)
-    rec.images = False
-    route = native.install_again_here(TBC.name, server_dir)
 
     files = reset_defaults.core_files(TBC)
     copies: list[str] = []
@@ -390,136 +536,121 @@ def test_an_image_gone_names_the_install_and_the_install_brings_it_back(tmp_path
     )
     assert texts == {} and set(reasons) == set(files) and copies == []
     advice = reasons[files[0]]
-    assert "rebuild" not in advice.lower(), f"it names the press that refuses: {advice}"
-    assert route in advice, advice
+    assert f"Press {REBUILD} first" in advice, advice
+    assert "Remove from Yu'lon" not in advice and "Install" not in advice, advice
 
-    with pytest.raises(InstallerError) as refused:
-        list(tbc_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    assert "not all on the daemon" in str(refused.value)
-    assert "build" not in rec.calls, "the refused rebuild compiled anyway"
-    assert route in str(refused.value), "Rebuild's own refusal disagrees"
-
-    list(
-        tbc_engine(rec, world_running=_stopped).run(
-            InstallOptions(server_dir=server_dir, client_dir=client)
-        )
-    )
-    assert "build" in rec.calls, "the install skipped the compile of a missing image"
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
+    said, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is None, raised
+    assert native.NO_ROLLBACK_KEPT in said
+    assert "build" in rec.calls and "recreate" in rec.calls, rec.calls
 
     rec.images = True  # what the compile it just ran leaves on the daemon
     reset_defaults.default_texts(TBC, server_dir, files, seams=_reset_seams(rec, copies))
     assert copies == [made.conf_image_ref(server_dir)], "Reset still stopped short of the image"
 
 
-def test_on_a_wsl_server_an_image_gone_sends_the_player_into_the_distro(
+def test_with_the_images_gone_rebuild_says_so_first_then_compiles_and_comes_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Rebuild's own refusal, on a server inside a distro: the route is the distro's.
+    """The confirmation says it, the press says it again, and nothing is tagged or removed.
 
-    Reset never says IMAGE_GONE there (`IN_WSL` answers first, asserted
-    below), so the refusal is the one sentence on this state that must carry
-    the WSL route, and the install it names is the one that compiles.
+    The confirmation asks no daemon (it is composed on the GUI thread), so the
+    no-rollback sentence is in every one; what matters is that the dialog the
+    player says Yes to does not promise a rollback the press then cannot keep.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    assert native.NO_ROLLBACK_CONFIRMATION in rebuild_confirmation(TBC, server_dir)
+
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
+    said, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is None, raised
+    compiled = next(i for i, line in enumerate(said) if "compiling" in line)
+    assert said.index(native.NO_ROLLBACK_KEPT) < compiled, said
+    assert not [c for c in rec.calls if c.startswith(("tag:", "rmi"))], rec.calls
+    assert rec.calls.index("build") < rec.calls.index("recreate"), rec.calls
+    assert said[-1] == f"{TBC.name} was rebuilt and is running in {server_dir}"
+
+
+def test_a_compile_that_fails_with_no_rollback_says_the_server_is_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No build was kept, nothing was replaced: the failure says so, and the record keeps it."""
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    rec.build_result = AttachedRun(2, ("error: no",))
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
+    _, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is not None and native.NO_ROLLBACK_NOT_BUILT in str(raised), raised
+    assert "recreate" not in rec.calls, rec.calls
+    assert not [c for c in rec.calls if c.startswith(("tag:", "rmi"))], rec.calls
+    record = native.read_state(server_dir, valid=())
+    assert record is not None and native.NO_ROLLBACK_NOT_BUILT in record.last_error
+
+
+def test_a_new_build_that_does_not_come_up_with_no_rollback_says_nothing_was_put_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compiled, the containers replaced, the world never ready: no restore is tried."""
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    _wired_to(monkeypatch, lambda: tbc_engine(rec, wait_ready=lambda spec, ready: False))
+    _, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is not None and native.NO_ROLLBACK_BUILT in str(raised), raised
+    assert rec.calls.count("recreate") == 1, "a restore was attempted with nothing to restore"
+    assert not [c for c in rec.calls if c.startswith(("tag:", "rmi"))], rec.calls
+
+
+def test_a_finished_compile_whose_recreate_refused_says_the_containers_are_as_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compiled, then the daemon would not answer before the replace: no container moved."""
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    # The recreate's own preflight is the one `docker_ready()` a rebuild asks.
+    _wired_to(monkeypatch, lambda: tbc_engine(rec, docker_ready=lambda: False))
+    _, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is not None and native.NO_ROLLBACK_UNTOUCHED in str(raised), raised
+    assert "build" in rec.calls and "recreate" not in rec.calls, rec.calls
+
+
+def test_a_rebuild_without_the_press_s_consent_still_refuses_and_names_rebuild(
+    tmp_path: Path,
+) -> None:
+    """`update_to_latest()` calls `rebuild()` without `missing_images_ok`: that refusal remains.
+
+    Its sentence names the one press that compiles missing images now, and
+    nothing is compiled or tagged.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    with pytest.raises(InstallerError) as refused:
+        list(tbc_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    said = str(refused.value)
+    assert "not all on the daemon" in said and f"Press {REBUILD} first" in said, said
+    assert "Remove from Yu'lon" not in said
+    assert "build" not in rec.calls and not [c for c in rec.calls if c.startswith("tag:")]
+
+
+def test_on_a_wsl_server_the_rebuild_from_windows_compiles_the_missing_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rebuild runs for a WSL server from Windows (T125), so the same press mends it there.
+
+    The wiring's WSL half -- the distro check, the engine built for the
+    distro -- is the shipped code; the engine it builds is doubled like the rest.
     """
     rec, server_dir = _wotlk_ready(tmp_path)
     _in_wsl(monkeypatch, server_dir)
     rec.images = False
     rec.calls.clear()
+    asked: list[object] = []
 
-    with pytest.raises(InstallerError) as refused:
-        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    said = str(refused.value)
-    assert native.install_again_here(ENTRY.name, server_dir) in said
-    assert f"WSL distro {DISTRO}" in said and "in the Catalog and choose" not in said, said
-    assert "build" not in rec.calls
-    _windows_install_is_refused(rec)
-    _, reasons = reset_defaults.default_texts(
-        TBC, tmp_path, ["etc/mangosd.conf"], wsl_distro=DISTRO, seams=_reset_seams(rec, [])
+    def made(**kw: object) -> Any:
+        return engine(rec)
+
+    monkeypatch.setattr(
+        install_wiring,
+        "installer_for_app",
+        lambda entry, **kw: asked.append(kw.get("wsl_distro")) or made(),
     )
-    assert "inside the WSL distro" in reasons["etc/mangosd.conf"]
-
-    monkeypatch.undo()
-    list(engine(rec).run(InstallOptions(server_dir=server_dir)))
-    assert "build" in rec.calls, "the install in the distro skipped the missing image"
-
-
-# -- the way to the install: the Catalog as it really is ------------------------
-
-
-def test_with_a_second_server_of_the_game_listed_the_install_is_reached_as_the_advice_says(
-    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Cold review SF2, through the real Catalog view: two WotLK servers, one to mend.
-
-    Removing only the one to mend leaves the tile "Installed" and greyed, and
-    its menu without "Install Server…" -- the press the advice names cannot be
-    reached. Removing the other as well (the advice's second sentence) gives
-    the tile back; Install then takes the folder, and "Use existing…" brings
-    the other back.
-    """
-    from tests.test_catalog_view import _FakeInstaller
-    from yulon.ui import catalog_view
-    from yulon.ui.catalog_view import CatalogView
-    from yulon.ui.widgets.log_panel import LogPanel
-
-    catalog = load_catalog()
-    wotlk = catalog.get("wow-wotlk")
-    mend, other = tmp_path / "mend", tmp_path / "other"
-    for folder in (mend, other):
-        folder.mkdir()
-        (folder / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
-    advice = native.install_again_here(wotlk.name, mend)
-    assert f"another {wotlk.name} server" in advice and native.USE_EXISTING_LABEL in advice
-
-    picks = [mend, other]
-    made: list[_FakeInstaller] = []
-
-    def make(entry: Any) -> _FakeInstaller:
-        made.append(_FakeInstaller(entry, []))
-        return made[-1]
-
-    view = CatalogView(
-        catalog,
-        make,
-        LogPanel(),
-        pick_dir=lambda *_: picks.pop(0),
-        ask_suggestion=lambda *_: False,
-        home=tmp_path,
-        installed_games={"wow-wotlk": other},
-    )
-    menus: list[list[str]] = []
-
-    class RecordingMenu(QMenu):
-        """The tile's own menu, built by the view; `exec` records it instead of blocking."""
-
-        def exec(self, *_args: object) -> None:  # type: ignore[override]
-            menus.append([action.text() for action in self.actions()])
-
-    monkeypatch.setattr(catalog_view, "QMenu", RecordingMenu)
-
-    def menu() -> list[str]:
-        view._show_tile_context_menu(QPoint(0, 0), wotlk, view)
-        return menus[-1]
-
-    view.forget_installed("wow-wotlk", {"wow-wotlk": other})  # the one to mend goes
-    assert view.button_for("wow-wotlk").isEnabled() is False
-    assert "Install Server…" not in menu(), "the tile offers Install with another listed"
-
-    view.forget_installed("wow-wotlk", {})  # ...and the other one too
-    assert view.button_for("wow-wotlk").isEnabled() is True
-    assert "Install Server…" in menu()
-    assert view.start_install(wotlk) is True
-    pump_until(lambda: bool(made and made[-1].ran_with), "the install into the folder")
-    assert made[-1].ran_with[0].server_dir == mend
-
-    assert view.existing_button_for("wow-wotlk").text() == native.USE_EXISTING_LABEL
-    pump_until(lambda: view.existing_button_for("wow-wotlk").isEnabled(), "the tile to unlock")
-    assert view.attach_existing(wotlk) is True, "the other server did not come back"
-
-
-def test_the_route_names_the_removal_and_the_way_back_by_their_labels(tmp_path: Path) -> None:
-    """The presses are named as the app labels them, and the sentence says what stays."""
-    advice = native.install_again_here("WoW WotLK", tmp_path / "wow")
-    assert f"\u201c{forgetting.BUTTON_LABEL}\u201d" in advice
-    assert "keeps the folder, the database and the images" in advice
-    assert f"choose {tmp_path / 'wow'}" in advice
-    assert f"\u201c{native.USE_EXISTING_LABEL}\u201d" in advice
+    said, raised = _said(install_wiring.rebuild_for_app(ENTRY, server_dir, wsl_distro=DISTRO)(None))
+    assert raised is None, raised
+    assert asked == [DISTRO], "the engine was not built for the distro"
+    assert native.NO_ROLLBACK_KEPT in said and "build" in rec.calls

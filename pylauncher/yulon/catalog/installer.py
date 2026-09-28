@@ -377,7 +377,9 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
       back by itself (`native.ROLLBACK_TAG_SUFFIX`; owner answer 2, 2026-09-08),
       said here because it is the difference between "an hour and a working
       server either way" and "an hour and maybe no server", and only the first
-      is a question a person can say yes to without a spare evening;
+      is a question a person can say yes to without a spare evening -- and,
+      since T170, what happens when there is no old one to keep, because the
+      images are gone (`native.NO_ROLLBACK_CONFIRMATION`);
     * *what saying no costs* — nothing at all, said in as many words. A
       confirmation that does not say so is answered by the people who are
       unsure, and the unsure ones are the ones who most need to be able to
@@ -429,6 +431,9 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
     that has to be tested, and this one has assertions on it in
     `test_rebuild.py` that a Qt-less environment still runs.
     """
+    # Local import, for `cancelled_install_message()`'s reason: a cycle otherwise.
+    from yulon.catalog import native
+
     native_block = entry.install.native
     recipe = (
         "Before it compiles, the build recipe in that folder — the Dockerfile and the "
@@ -456,6 +461,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
         f"not come up, the old one is put back automatically and the server is started on it "
         f"again. That rollback covers the server build only: anything the new build writes "
         f"into the database on its first start is not put back.\n\n"
+        f"{native.NO_ROLLBACK_CONFIRMATION}\n\n"
         f"Say no and nothing happens at all — the server you have now keeps running, exactly "
         f"as it is."
     )
@@ -831,9 +837,14 @@ class InstallEngine(Protocol):
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
+        missing_images_ok: bool = False,
     ) -> Iterator[str]: ...
 
     """Recompile an install this app made and restart it on the result.
+
+    `missing_images_ok` is the Rebuild press's (T170): with the images gone
+    there is no rollback to keep, and its confirmation says it compiles anyway
+    (`native.NO_ROLLBACK_CONFIRMATION`).
 
     No `ask`: a rebuild provisions nothing, so there is no question for it to
     forward. That is not an omission to be filled in later — a stage that turns

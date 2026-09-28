@@ -43,7 +43,7 @@ from tests.test_families_cmangos import ENTRY as CM_ENTRY
 from tests.test_families_cmangos import client_folder
 from tests.test_families_cmangos import engine as cm_engine
 from tests.test_families_cmangos import install as cm_install
-from yulon import docker
+from yulon import docker, server_build_presses
 from yulon.apply import CLONE_DIRS, Applier
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
@@ -621,13 +621,15 @@ def test_the_failure_names_it_when_the_old_build_does_not_come_up_either(
 def test_a_rebuild_with_images_missing_refuses_rather_than_compiling_without_a_rollback(
     tmp_path: Path,
 ) -> None:
-    """Nothing to keep is a refusal, not a warning. Owner answer 2 says ALWAYS.
+    """Nothing to keep is a refusal, not a warning, unless the press agreed to it.
 
     Until the adversarial review of 2026-09-08 this pressed on with a sentence
     saying no rollback was kept -- which contradicted the confirmation the
     user had just agreed to, and made the one press with no safety net the one
-    that looked most like the others. A finished install whose images are
-    gone is Install's to repair (its resume rebuilds them), not this button's.
+    that looked most like the others. Since T170 the Rebuild press passes
+    `missing_images_ok`, because its confirmation now says it compiles without
+    a rollback when the images are gone (`test_recovery_advice.py`). Without
+    it -- `update_to_latest()`'s call -- this still refuses, and names that press.
     """
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
@@ -636,8 +638,8 @@ def test_a_rebuild_with_images_missing_refuses_rather_than_compiling_without_a_r
         list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert "build" not in rec.calls, rec.calls
     assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
-    assert "Nothing was started" in str(raised.value)
-    assert "Install" in str(raised.value), str(raised.value)
+    assert "Nothing was compiled" in str(raised.value)
+    assert server_build_presses.REBUILD in str(raised.value), str(raised.value)
 
 
 def test_a_daemon_that_will_not_say_whether_the_images_exist_is_a_refusal_too(

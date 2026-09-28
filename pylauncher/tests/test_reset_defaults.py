@@ -25,7 +25,15 @@ from typing import Any
 
 import pytest
 
-from yulon import channel_setup, dbsecret, platform, reset_defaults, resources, tuning
+from yulon import (
+    channel_setup,
+    dbsecret,
+    platform,
+    reset_defaults,
+    resources,
+    server_build_presses,
+    tuning,
+)
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import azerothcore, conf
@@ -383,13 +391,14 @@ def test_the_override_takes_the_bind_label_the_install_would_take_here(tmp_path:
 # -- every reason a CMaNGOS default cannot be built ----------------------------
 
 
-def test_an_image_no_longer_on_the_machine_says_install_again_into_this_folder(
+def test_an_image_no_longer_on_the_machine_says_to_press_rebuild_first(
     tmp_path: Path,
 ) -> None:
-    """T164: not "rebuild the server first" -- Rebuild refuses without its image.
+    """T170: Rebuild compiles a server whose image is gone, so the advice names it again.
 
-    The whole sequence, Rebuild's refusal and the install that compiles, is
-    pressed in `test_recovery_advice.py`.
+    (T164 had named Remove + Install, while Rebuild refused.) The whole
+    sequence, the Rebuild that compiles and the Reset that then reads the
+    image, is pressed in `test_recovery_advice.py`.
     """
     server, _ = _server(tmp_path, "wow-tbc")
     files = reset_defaults.core_files(TBC)
@@ -397,8 +406,8 @@ def test_an_image_no_longer_on_the_machine_says_install_again_into_this_folder(
         TBC, server, files, seams=_seams(_never, image_present=lambda refs: False)
     )
     assert texts == {} and set(reasons) == set(files)
-    route = native.install_again_here(TBC.name, server)
-    assert all(route in reason for reason in reasons.values())
+    press = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert all(f"Press {press} first" in reason for reason in reasons.values())
 
 
 def test_docker_not_answering_is_its_own_reason(tmp_path: Path) -> None:

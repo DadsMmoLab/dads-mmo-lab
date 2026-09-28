@@ -7266,7 +7266,7 @@ def test_a_world_a_wsl_rebuild_brought_up_is_held_by_the_next_status_poll(
     spec = WOTLK.container_spec()
 
     class _Engine:
-        def rebuild(self, options: object, *, cancel: object = None) -> Iterator[str]:
+        def rebuild(self, options: object, *, cancel: object = None, **kw: object) -> Iterator[str]:
             running.update({spec.db, spec.auth, spec.world})
             yield "WoW WotLK was rebuilt and is running"
 
