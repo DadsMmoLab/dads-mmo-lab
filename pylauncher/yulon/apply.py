@@ -46,7 +46,8 @@ from yulon.git import (
     BehindReader,
     CloneSpec,
     ContainerGit,
-    FetchedReader,
+    Counted,
+    CountedReader,
     Git,
     GitError,
     HeadReader,
@@ -4804,7 +4805,7 @@ class ModuleUpdate:
         it (T147, `git._behind_after_fetch()`), so a row git could not prove
         says there is an update and prints no number at all -- unless GitHub's
         compare counted it, when `behind` is GitHub's number, the one a full
-        clone would have given (T148, `_settled_by_github()`). A release row
+        clone would have given (T148, `_question()`). A release row
         whose checkout is not under the release says where it is instead, and
         that there is no update (T150, `_NOT_UNDER_RELEASE`).
         """
@@ -4912,14 +4913,13 @@ def module_updates(
         logger.debug(f"no {CLONE_DIRS[kind]} folder to list under {server_dir}: {exc}")
         return ()
     github = _github_counts(server_dir, compare_commits, now)
-    rows = tuple(
+    rows = [
         _module_update(
             path, kind, git, branch_of.get(path.name), release_of.get(path.name), resolve, github
         )
         for path in entries
-    )
-    github.save()
-    return rows
+    ]
+    return tuple(github.settle(rows))
 
 
 def _module_update(
@@ -4933,45 +4933,32 @@ def _module_update(
 ) -> ModuleUpdate:
     """One clone's row: counted against its branch, or against its newest release (T126).
 
-    Then settled by GitHub where the shallow checkout could not settle it (T148).
+    A row git could not settle is posed to `github`, which the caller settles
+    once every row is counted (T148).
     """
     checkout = (path / ".git").is_dir()
     if not checkout:
         return ModuleUpdate(key=path.name, path=path, is_checkout=False, behind=None, family=kind)
     if slug is None:
+        counted = _counted(git, path, branch, release=False)
+        question = _question(counted, path, kind, git, slug=None, release=False)
+        if question is not None:
+            github.pose(question)
         return ModuleUpdate(
-            key=path.name,
-            path=path,
-            is_checkout=True,
-            behind=_settled_by_github(
-                git.commits_behind(path, branch),
-                path,
-                kind,
-                git,
-                release_sha=None,
-                slug=None,
-                github=github,
-            ),
-            family=kind,
+            key=path.name, path=path, is_checkout=True, behind=counted.behind, family=kind
         )
     release = resolve(slug)
+    counted = (
+        _counted(git, path, release.sha, release=True) if release is not None else Counted(None)
+    )
+    question = _question(counted, path, kind, git, slug=slug, release=True)
+    if question is not None:
+        github.pose(question)
     return ModuleUpdate(
         key=path.name,
         path=path,
         is_checkout=True,
-        behind=(
-            _settled_by_github(
-                git.commits_behind(path, release.sha, release=True),
-                path,
-                kind,
-                git,
-                release_sha=release.sha,
-                slug=slug,
-                github=github,
-            )
-            if release is not None
-            else None
-        ),
+        behind=counted.behind,
         family=kind,
         release=release.tag if release is not None else "",
         installed_release=clone_release(path, item_id=path.name),
@@ -5043,7 +5030,7 @@ def cached_module_updates(
             github,
         )
         rows.append(replace(row, head=head or "", checked_unix=clock))
-    github.save()
+    rows = github.settle(rows)
     if asked:
         _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
     return tuple(rows)
@@ -5169,21 +5156,39 @@ class _Asked:
     checked_unix: int
 
 
+@dataclass(frozen=True)
+class _Question:
+    """What one row would ask GitHub: a repository, from HEAD to the commit git counted (T148)."""
+
+    family: str
+    key: str
+    slug: str
+    head: str
+    ref: str
+    release: bool
+
+
 class _GitHubCounts:
     """GitHub's compare for the rows a shallow checkout could not count, for one press (T148).
 
-    What it enforces, and nothing more:
+    Rows are posed first (`pose()`) and asked together (`settle()`), so the
+    press can choose WHICH to ask. What it enforces, and nothing more:
 
     - **An answer is kept for as long as the same question is asked.** The
-      question is exact -- one repository, HEAD, and the commit the count's
-      own fetch brought (or the release's commit) -- and GitHub's answer to
-      two fixed commits cannot change. An upstream that moved or rewrote its
-      history is a new fetched commit, and so a new question, at once.
+      question is exact -- one repository, HEAD, and the commit the count was
+      taken against (`git.Counted`) -- and GitHub's answer to two fixed
+      commits cannot change. An upstream that moved or rewrote its history is
+      a new fetched commit, and so a new question, at once.
     - **"No answer" is kept `upstream.RETRY_SECONDS`** (T124's hour): offline,
       a HEAD GitHub has never seen, a refusal. Not a request per press.
     - **At most `GITHUB_ASKS_PER_PRESS` asks, and none after a refusal.** A
       row either rule leaves out was not asked: it keeps git's answer and is
       NOT recorded, so a later press asks it.
+    - **Never-asked questions first, then failures by oldest attempt**, name
+      order only between equals (Codex, round 3): with more rows than the
+      budget that keep failing, every row is asked within
+      ceil(rows / budget) presses an hour apart, instead of the first ones by
+      name forever.
 
     There is no record of a refusal beyond this press: T124's and T126's
     GitHub reads keep none to share (`upstream.Refused`), and this does not
@@ -5196,40 +5201,82 @@ class _GitHubCounts:
         self._now = now
         self._kept = _read_compares(self._path)
         self._asked: dict[tuple[str, str], _Asked] = {}
-        self._refused = False
+        self._said: dict[tuple[str, str], upstream.Comparison] = {}
+        self._posed: list[tuple[_Question, _Asked | None]] = []
+        self._release: dict[tuple[str, str], bool] = {}
 
-    def compare(
-        self, family: str, key: str, slug: str, head: str, ref: str
-    ) -> upstream.Comparison | None:
-        old = self._kept.get((family, key))
-        if old is not None and (old.slug, old.head, old.ref) == (slug, head, ref):
+    def pose(self, question: _Question) -> None:
+        """Serve `question` from the file if it can be; otherwise queue it for `settle()`."""
+        at = (question.family, question.key)
+        self._release[at] = question.release
+        old = self._kept.get(at)
+        same = old is not None and (old.slug, old.head, old.ref) == (
+            question.slug,
+            question.head,
+            question.ref,
+        )
+        if old is not None and same:
             if old.said is not None:
-                return old.said
+                self._said[at] = old.said
+                return
             if 0 <= self._now - old.checked_unix < upstream.RETRY_SECONDS:
-                return None
-        if self._refused or len(self._asked) >= GITHUB_ASKS_PER_PRESS:
-            logger.debug(f"not asking GitHub about {key} in this press; a later one will")
-            return None
-        said = self._compare(slug, head, ref)
-        if isinstance(said, upstream.Refused):
-            self._refused = True
-            said = None
-        self._asked[(family, key)] = _Asked(slug, head, ref, said, self._now)
-        return said
+                return
+        self._posed.append((question, old if same else None))
 
-    def save(self) -> None:
-        """Merge this press's answers into the file, if it asked anything."""
+    def settle(self, rows: Sequence[ModuleUpdate]) -> list[ModuleUpdate]:
+        """`rows` with GitHub's answer where it has one, after asking what this press may."""
+        self._ask()
         if self._asked:
-            _write_github_counts(self._path, self._asked, self._now)
+            _write_github_counts(self._path, self._asked)
+        settled: list[ModuleUpdate] = []
+        for row in rows:
+            at = (row.family, row.key)
+            said = self._said.get(at)
+            placed = None if said is None else _github_placed(said, release=self._release[at])
+            if placed is None:
+                settled.append(row)
+                continue
+            logger.debug(
+                f"GitHub counted {row.key}, which its shallow checkout could not: {placed}"
+            )
+            settled.append(replace(row, behind=placed))
+        return settled
+
+    def _ask(self) -> None:
+        def turn(posed: tuple[_Question, _Asked | None]) -> tuple[int, int, str, str]:
+            question, failed = posed
+            if failed is None:
+                return (0, 0, question.family, question.key)
+            return (1, failed.checked_unix, question.family, question.key)
+
+        for question, _failed in sorted(self._posed, key=turn):
+            if len(self._asked) >= GITHUB_ASKS_PER_PRESS:
+                logger.debug(
+                    f"not asking GitHub about {question.key} in this press; a later one will"
+                )
+                continue
+            said = self._compare(question.slug, question.head, question.ref)
+            refused = isinstance(said, upstream.Refused)
+            answer = said if isinstance(said, upstream.Comparison) else None
+            at = (question.family, question.key)
+            self._asked[at] = _Asked(question.slug, question.head, question.ref, answer, self._now)
+            if answer is not None:
+                self._said[at] = answer
+            if refused:
+                logger.info("GitHub refused; the rest of this press's rows wait for a later one")
+                break
 
 
-def _write_github_counts(path: Path, asked: Mapping[tuple[str, str], _Asked], now: int) -> None:
-    """This press's answers, merged onto the file AS IT IS NOW. Best-effort, logged (T148).
+def _write_github_counts(path: Path, asked: Mapping[tuple[str, str], _Asked]) -> None:
+    """This press's answers, merged onto the file as it is when written. Best-effort, logged (T148).
 
-    Read again here rather than when the press began, so a row another press
-    wrote while this one was asking GitHub is kept. Presses are serialised by
-    the view's busy lock and a second app by T152, so no lock is taken. A
-    "no answer" past its hour is dropped; answers stay while their row does.
+    Read again here rather than when the press began, so the rows of any
+    write that landed while this press was asking GitHub are kept. No lock is
+    taken: writers are serialised by T152's single-instance guard and the
+    view's busy lock (`_set_busy`), not by anything here. Nothing is dropped:
+    one row per clone, replaced when it is asked again, and a "no answer" past
+    its hour still says WHEN it was tried, which is how the next press picks
+    the oldest (`_GitHubCounts`).
     """
     rows = {**_read_compares(path), **asked}
     _replace_json(
@@ -5249,7 +5296,6 @@ def _write_github_counts(path: Path, asked: Mapping[tuple[str, str], _Asked], no
                     "checked_unix": row.checked_unix,
                 }
                 for (family, key), row in rows.items()
-                if row.said is not None or 0 <= now - row.checked_unix < upstream.RETRY_SECONDS
             ],
         },
         "GitHub's module counts",
@@ -5272,7 +5318,7 @@ def _github_counts(
 
 
 def _read_compares(path: Path) -> dict[tuple[str, str], _Asked]:
-    """Every answer `_GitHubCounts.save()` kept, by `(family, key)`. Empty on any damage (T148)."""
+    """Every answer `_write_github_counts()` kept, by `(family, key)`; {} on any damage (T148)."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload["version"] != 1:
@@ -5325,47 +5371,45 @@ def _github_placed(said: upstream.Comparison, *, release: bool) -> BehindCount:
     return Behind.AHEAD_OF_RELEASE if said.ahead == 0 else Behind.OFF_RELEASE
 
 
-def _settled_by_github(
-    counted: BehindCount,
+def _question(
+    counted: Counted,
     path: Path,
     kind: ManifestType,
     git: BehindReader,
     *,
-    release_sha: str | None,
     slug: str | None,
-    github: _GitHubCounts,
-) -> BehindCount:
-    """`counted`, or GitHub's answer where a shallow checkout could not settle the row (T148).
+    release: bool,
+) -> _Question | None:
+    """What this row would ask GitHub, or None where it asks nothing (T148).
 
-    Only `_ASKS_GITHUB` asks. The base is HEAD, read locally, and the other
-    end is the very commit git counted against: the release's, or the one
-    the count's own fetch brought (`FETCH_HEAD`) -- never the branch's NAME,
-    whose answer would change under a cached one (cold review, round 2). The
-    repository
-    is `slug` for a release row (the manifest's, which the release was
-    resolved in) and otherwise `origin` -- the repository the count's own
-    fetch asked, and the only one a module no manifest covers has (WotLK's
-    mod-playerbots, cloned by the server install). Any origin that is not on
-    GitHub, a HEAD, fetched commit or origin git will not read, or no answer,
-    keeps git's "Update available".
+    Only `_ASKS_GITHUB` asks, and only about the two commits the count itself
+    was taken between (`git.Counted`: HEAD and the commit its own fetch
+    brought, read in the same operation as the count) -- never a later read
+    of `FETCH_HEAD`, which a fetch in between would have moved (Codex, round
+    3), and never the branch's NAME, whose answer changes under a kept one
+    (cold review, round 2). The repository is `slug` for a release row (the
+    manifest's, which the release was resolved in) and otherwise `origin` --
+    the repository the count's own fetch asked, and the only one a module no
+    manifest covers has (WotLK's mod-playerbots, cloned by the server
+    install). A reader that cannot say the two commits, an origin not on
+    GitHub, or one git will not read asks nothing, and the row keeps git's
+    "Update available".
     """
-    if counted not in _ASKS_GITHUB:
-        return counted
-    head = git.head_sha(path) if isinstance(git, HeadReader) else None
-    ref = release_sha
-    if ref is None:
-        ref = git.fetched_sha(path) if isinstance(git, FetchedReader) else None
+    if counted.behind not in _ASKS_GITHUB or counted.head is None or counted.fetched is None:
+        return None
     if slug is None and isinstance(git, RemoteReader):
         url = git.remote_url(path)
         slug = upstream.github_slug(url) if url else None
-    if head is None or ref is None or slug is None:
-        return counted
-    said = github.compare(kind, path.name, slug, head, ref)
-    placed = _github_placed(said, release=release_sha is not None) if said is not None else None
-    if placed is None:
-        return counted
-    logger.debug(f"GitHub counted {path.name}, which its shallow checkout could not: {placed}")
-    return placed
+    if slug is None:
+        return None
+    return _Question(kind, path.name, slug, counted.head, counted.fetched, release)
+
+
+def _counted(git: BehindReader, path: Path, ref: str | None, *, release: bool) -> Counted:
+    """The count with its two commits where the reader says them, the figure alone otherwise."""
+    if isinstance(git, CountedReader):
+        return git.counted_behind(path, ref, release=release)
+    return Counted(git.commits_behind(path, ref, release=release))
 
 
 def cached_module_update(server_dir: Path, family: str, key: str) -> ModuleUpdate | None:

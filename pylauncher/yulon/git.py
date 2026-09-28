@@ -646,16 +646,34 @@ class HeadReader(Protocol):
     def head_sha(self, dest: Path) -> str | None: ...
 
 
-@runtime_checkable
-class FetchedReader(Protocol):
-    """ "Which commit did the last fetch bring?" -- `FETCH_HEAD`'s full id, read locally (T148).
+@dataclass(frozen=True)
+class Counted:
+    """`commits_behind()`'s answer with the two commits it is an answer ABOUT (T148).
 
-    What `commits_behind()` just counted against, so the Modules tab can ask
-    GitHub the same question about the same two commits when the checkout
-    could not answer it. A one-method Protocol for `BehindReader`'s reason.
+    `head` and `fetched` are read in the same `git rev-parse` that starts the
+    count, and the count's ranges name `fetched` by its id rather than as
+    `FETCH_HEAD` -- so the figure, and the question the Modules tab hands
+    GitHub when the figure is `Behind.UNCOUNTED`, are about exactly these two
+    commits, whatever fetches into the checkout later. Both `None` when git
+    could not be asked.
     """
 
-    def fetched_sha(self, dest: Path) -> str | None: ...
+    behind: BehindCount
+    head: str | None = None
+    fetched: str | None = None
+
+
+@runtime_checkable
+class CountedReader(Protocol):
+    """ "How far behind, and between which two commits?" -- `commits_behind()`, whole (T148).
+
+    A one-method Protocol for `BehindReader`'s reason: the fakes that answer
+    only the figure keep narrowing to `BehindReader` and are never asked this.
+    """
+
+    def counted_behind(
+        self, dest: Path, branch: str | None, *, release: bool = False
+    ) -> Counted: ...
 
 
 class VersionReader(Protocol):
@@ -741,47 +759,49 @@ def _parse_count(raw: str) -> int | None:
         return None
 
 
-_SHALLOW_AND_HEAD = ["rev-parse", "--is-shallow-repository", "HEAD"]
-"""One question, two answers: is this checkout shallow, and which commit is HEAD (T147)."""
+_SHALLOW_HEAD_AND_FETCHED = ["rev-parse", "--is-shallow-repository", "HEAD", "FETCH_HEAD"]
+"""One question, three answers: is this checkout shallow, HEAD, and what the fetch brought.
 
-_FETCHED = ["rev-parse", "--verify", "FETCH_HEAD"]
-"""What `fetched_sha()` asks both back ends (T148).
-
-`--verify` because a fetch that failed removes `FETCH_HEAD` (measured,
-2026-09-28), and a bare `rev-parse FETCH_HEAD` then prints the NAME back on
-stdout beside its error.
+Shallow and HEAD since T147. The fetched commit since T148, in the SAME
+command, so the count below can name it by its id: a fetch into the checkout
+after this line -- another ref, another program -- moves `FETCH_HEAD` and no
+longer changes what the answer is about (Codex, T148 round 3). A fetch that
+failed removes `FETCH_HEAD`, and this then fails as a whole (measured,
+2026-09-28).
 """
 
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
-def _fetched_id(said: str) -> str | None:
-    """`_FETCHED`'s answer as a full commit id, or None: it is handed to GitHub as one."""
-    said = said.strip()
-    return said if _COMMIT_ID.fullmatch(said) else None
+def _behind_count(fetched: str) -> list[str]:
+    """The figure for a FULL checkout, where the range is the truth as it stands."""
+    return ["rev-list", "--count", f"HEAD..{fetched}"]
 
 
-_BEHIND_COUNT = ["rev-list", "--count", "HEAD..FETCH_HEAD"]
-"""The figure for a FULL checkout, where the range is the truth as it stands."""
+def _release_sides(fetched: str) -> list[str]:
+    """What HEAD has that the release does not, and the other way round: for a release (T150).
 
-_RELEASE_SIDES = ["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"]
-"""What HEAD has that the release does not, and the other way round -- asked for a release (T150).
-
-On a shallow checkout a zero on either side is still proof: a graft only ever
-CUTS an edge, so what the walk from one end reaches is really below it. It is a
-count that is not zero that a graft can make up.
-"""
-
-_BEHIND_WALK = ["rev-list", "--parents", "--boundary", "HEAD..FETCH_HEAD"]
-"""The same range for a SHALLOW checkout, listed so the count can be proved first (T147).
-
-Each counted commit on a line with its parents -- none shown for a root or a
-graft -- and, prefixed `-`, every commit the walk stopped at.
-"""
+    On a shallow checkout a zero on either side is still proof: a graft only ever
+    CUTS an edge, so what the walk from one end reaches is really below it. It is a
+    count that is not zero that a graft can make up.
+    """
+    return ["rev-list", "--left-right", "--count", f"HEAD...{fetched}"]
 
 
-def _behind_after_fetch(ask: Callable[[list[str]], str], *, release: bool = False) -> BehindCount:
-    """`commits_behind()` once its fetch has landed: `ask` runs one read-only git argv.
+def _behind_walk(fetched: str) -> list[str]:
+    """The same range for a SHALLOW checkout, listed so the count can be proved first (T147).
+
+    Each counted commit on a line with its parents -- none shown for a root or a
+    graft -- and, prefixed `-`, every commit the walk stopped at.
+    """
+    return ["rev-list", "--parents", "--boundary", f"HEAD..{fetched}"]
+
+
+def _behind_after_fetch(ask: Callable[[list[str]], str], *, release: bool = False) -> Counted:
+    """`counted_behind()` once its fetch has landed: `ask` runs one read-only git argv.
+
+    The two commits come first, in one question (`_SHALLOW_HEAD_AND_FETCHED`),
+    and every range after it names the fetched one by its id (T148).
 
     One body for both implementations, because a caller narrowing to
     `BehindReader` never learns which it got and the figure is read by a person
@@ -822,20 +842,31 @@ def _behind_after_fetch(ask: Callable[[list[str]], str], *, release: bool = Fals
     (`no_local_commits()`) refuses; so a branch row is counted exactly as
     above. A release is a fixed commit, the update resets to it and that guard
     asks against the BRANCH -- so a HEAD past the release, which the guard
-    lets through, would be reset back to it. `_RELEASE_SIDES` answers it: no
+    lets through, would be reset back to it. `_release_sides()` answers it: no
     commit of HEAD's missing from the release is "under it", and counted as
     above; none of the release's missing from HEAD is `AHEAD_OF_RELEASE`;
     both, on a full checkout, is `OFF_RELEASE`. On a shallow one "both" can be
     a graft's doing, and `_release_lacks_head()` decides it.
     """
-    said = ask(_SHALLOW_AND_HEAD).split()
-    if len(said) != 2 or said[0] not in ("true", "false"):
-        logger.debug(f"git rev-parse did not say whether this is shallow and where HEAD is: {said}")
-        return None
-    shallow, head = said[0] == "true", said[1]
+    said = ask(_SHALLOW_HEAD_AND_FETCHED).split()
+    if (
+        len(said) != 3
+        or said[0] not in ("true", "false")
+        or not all(_COMMIT_ID.fullmatch(sha) for sha in said[1:])
+    ):
+        logger.debug(f"git rev-parse did not say shallow, HEAD and the fetched commit: {said}")
+        return Counted(None)
+    shallow, head, fetched = said[0] == "true", said[1], said[2]
+    return Counted(_behind(ask, shallow, head, fetched, release=release), head, fetched)
+
+
+def _behind(
+    ask: Callable[[list[str]], str], shallow: bool, head: str, fetched: str, *, release: bool
+) -> BehindCount:
+    """`_behind_after_fetch()`'s figure, from `HEAD` to `fetched`, by the rules above."""
     mine = 0
     if release:
-        sides = [_parse_count(side) for side in ask(_RELEASE_SIDES).split()]
+        sides = [_parse_count(side) for side in ask(_release_sides(fetched)).split()]
         counts = [side for side in sides if side is not None]
         if len(sides) != 2 or len(counts) != 2:
             logger.debug(f"git rev-list --left-right did not answer with two counts: {sides}")
@@ -848,11 +879,11 @@ def _behind_after_fetch(ask: Callable[[list[str]], str], *, release: bool = Fals
         if not mine and not shallow:
             return theirs
     if not shallow:
-        return _parse_count(ask(_BEHIND_COUNT))
+        return _parse_count(ask(_behind_count(fetched)))
     counted = 0
     parentless: list[str] = []
     stopped_elsewhere = False
-    for line in ask(_BEHIND_WALK).splitlines():
+    for line in ask(_behind_walk(fetched)).splitlines():
         ids = line.split()
         if not ids:
             continue
@@ -1227,21 +1258,6 @@ class RunnerGit:
         said = proc.stdout.strip()
         return said or None
 
-    def fetched_sha(self, dest: Path) -> str | None:
-        """The full id of the commit the last fetch into `dest` brought, or None (T148).
-
-        Local, like `head_sha()`. Read straight after `commits_behind()`, it
-        is the commit that count was taken against.
-        """
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = _run_git(["git", *_FETCHED], cwd=dest)
-        except (GitError, OSError) as exc:
-            logger.debug(f"could not read what the last fetch into {dest} brought: {exc}")
-            return None
-        return _fetched_id(proc.stdout)
-
     def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
         """Tracked files in `dest` that differ from HEAD, minus `ignoring`. None = cannot ask.
 
@@ -1392,8 +1408,12 @@ class RunnerGit:
         and no working tree is changed. It does cost a network round trip, so it
         belongs behind a control the user pressed and not on a timer.
         """
+        return self.counted_behind(dest, branch, release=release).behind
+
+    def counted_behind(self, dest: Path, branch: str | None, *, release: bool = False) -> Counted:
+        """`commits_behind()` with the two commits it counted between (T148, `Counted`)."""
         if not (dest / ".git").is_dir():
-            return None
+            return Counted(None)
         ref = _fetch_ref(branch)
         try:
             _run_git(
@@ -1404,14 +1424,14 @@ class RunnerGit:
             logger.debug(
                 f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
             )
-            return None
+            return Counted(None)
         try:
             return _behind_after_fetch(
                 lambda argv: _run_git(["git", *argv], cwd=dest).stdout, release=release
             )
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
-            return None
+            return Counted(None)
 
     def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
         """Clone or update `spec`. With `clear_only`, stop once the destination is ready.
@@ -1989,17 +2009,6 @@ class ContainerGit:
         said = proc.stdout.strip()
         return said or None
 
-    def fetched_sha(self, dest: Path) -> str | None:
-        """`RunnerGit.fetched_sha()`, containerised, through the read-only container (T148)."""
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = self._capture(dest, _FETCHED, writes=False)
-        except GitError as exc:
-            logger.debug(f"could not read what the last fetch into {dest} brought: {exc}")
-            return None
-        return _fetched_id(proc.stdout)
-
     def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
         """`RunnerGit.local_edits()`, containerised. Both must answer identically.
 
@@ -2124,8 +2133,12 @@ class ContainerGit:
         answer from the objects that fetch just landed -- since T147 two of them
         (is it shallow, then the count or the walk), each its own reader.
         """
+        return self.counted_behind(dest, branch, release=release).behind
+
+    def counted_behind(self, dest: Path, branch: str | None, *, release: bool = False) -> Counted:
+        """`RunnerGit.counted_behind()`, containerised: the same answer, the same two commits."""
         if not (dest / ".git").is_dir():
-            return None
+            return Counted(None)
         ref = _fetch_ref(branch)
         try:
             self._capture(dest, ["fetch", "origin", ref], writes=True)
@@ -2133,14 +2146,14 @@ class ContainerGit:
             logger.debug(
                 f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
             )
-            return None
+            return Counted(None)
         try:
             return _behind_after_fetch(
                 lambda argv: self._capture(dest, argv, writes=False).stdout, release=release
             )
         except GitError as exc:
             logger.debug(f"could not ask git how far behind {dest} is: {exc}")
-            return None
+            return Counted(None)
 
     def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
         """See `RunnerGit.clone()` for what `clear_only` is and why it exists."""

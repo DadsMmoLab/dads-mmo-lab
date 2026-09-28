@@ -10764,7 +10764,7 @@ class ControllerView(QWidget):
         a number the view re-formatted would be a second place for it to change.
         Where a shallow checkout makes that range wrong (T147) the row carries
         no figure, only that an update is there -- or GitHub's figure, when its
-        compare API answered for that row (T148, `apply._settled_by_github()`).
+        compare API answered for that row (T148, `apply._question()`).
         """
         route = self.services.module_updates
         if route is None:

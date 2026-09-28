@@ -383,8 +383,6 @@ def test_a_read_only_git_question_mounts_read_only_and_keeps_nothing_it_does_not
     for dest, ask in (
         (tmp_path / "read-remote", lambda impl, path: impl.remote_url(path)),
         (tmp_path / "read-status", lambda impl, path: impl.is_unmodified(path, "x")),
-        # T148: what the last fetch brought is a read of `.git` like the others.
-        (tmp_path / "read-fetched", lambda impl, path: impl.fetched_sha(path)),
     ):
         (dest / ".git").mkdir(parents=True)
         ask(git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=_labelling_fs), dest)
@@ -2006,65 +2004,7 @@ def test_a_source_pinned_on_a_named_branch_clones_the_branch_and_still_pins_by_h
 
 
 HEAD_SHA = "d" * 40
-
-
-@pytest.mark.parametrize(
-    "impl",
-    [
-        git.RunnerGit(),
-        git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"),
-    ],
-    ids=["host", "containerized"],
-)
-def test_fetched_sha_reads_the_commit_the_last_fetch_brought(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.FetchedReader
-) -> None:
-    """T148: `FETCH_HEAD`'s full id, asked the same way by both back ends, and nothing else.
-
-    `--verify`, so a checkout whose last fetch failed -- which removes
-    `FETCH_HEAD`, measured -- answers None rather than git echoing the name
-    back; and anything that is not a full commit id is None too, because it
-    is handed to GitHub as one.
-    """
-    dest = tmp_path / "mod-aoe-loot"
-    (dest / ".git").mkdir(parents=True)
-    answers: list[subprocess.CompletedProcess[str]] = []
-    seen_argv: list[list[str]] = []
-
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        seen_argv.append(argv)
-        return answers.pop(0)
-
-    monkeypatch.setattr(runner, "run", fake_run)
-
-    answers.append(_completed(stdout=f"{HEAD_SHA}\n"))
-    assert impl.fetched_sha(dest) == HEAD_SHA
-    assert seen_argv[-1][-3:] == ["rev-parse", "--verify", "FETCH_HEAD"]
-    answers.append(_completed(stdout="FETCH_HEAD\n"))
-    assert impl.fetched_sha(dest) is None
-    answers.append(_completed(returncode=128, stderr="fatal: Needed a single revision"))
-    assert impl.fetched_sha(dest) is None
-    assert impl.fetched_sha(tmp_path / "not-a-checkout") is None
-    assert not answers
-
-
-@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
-def test_fetched_sha_is_the_commit_commits_behind_counted_against(tmp_path: Path) -> None:
-    """The real read, after the real count: the upstream tip the fetch brought, and none after
-    a fetch that failed."""
-    up = _Upstream(tmp_path)
-    up.commits("c", 3)
-    up.publish()
-    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
-    impl = git.RunnerGit()
-    impl.clone(spec)
-    up.commits("new", 2)
-    tip = up.publish()
-
-    assert impl.commits_behind(spec.dest, None) == 2
-    assert impl.fetched_sha(spec.dest) == tip
-    assert impl.commits_behind(spec.dest, "no-such-branch") is None
-    assert impl.fetched_sha(spec.dest) is None
+FETCHED_SHA = "5" * 40
 
 
 @pytest.mark.parametrize(
@@ -2104,14 +2044,18 @@ def test_commits_behind_counts_what_the_update_would_bring_in(
 
     monkeypatch.setattr(runner, "run", fake_run)
 
-    full = _completed(stdout=f"false\n{HEAD_SHA}\n")
+    full = _completed(stdout=f"false\n{HEAD_SHA}\n{FETCHED_SHA}\n")
     answers += [_completed(), full, _completed(stdout="7\n")]
     assert impl.commits_behind(dest, "wotlk") == 7
     assert seen_argv[-3][-3:] == ["fetch", "origin", "wotlk"]
     # T147: which commit HEAD is and whether the checkout is shallow, in one
     # question, asked AFTER the fetch -- a full checkout is counted as before.
-    assert seen_argv[-2][-3:] == ["rev-parse", "--is-shallow-repository", "HEAD"]
-    assert seen_argv[-1][-3:] == ["rev-list", "--count", "HEAD..FETCH_HEAD"]
+    # T148: the same question says which commit the fetch brought, and the
+    # range names THAT commit, so a later fetch cannot change what was counted.
+    assert seen_argv[-2][-4:] == ["rev-parse", "--is-shallow-repository", "HEAD", "FETCH_HEAD"]
+    assert seen_argv[-1][-3:] == ["rev-list", "--count", f"HEAD..{FETCHED_SHA}"]
+    answers += [_completed(), full, _completed(stdout="7\n")]
+    assert impl.counted_behind(dest, "wotlk") == git.Counted(7, HEAD_SHA, FETCHED_SHA)
     assert not [arg for arg in seen_argv[-3] if arg.startswith("--depth")]
 
     # Up to date is 0, and 0 is a real answer — never None, which means "could
@@ -2123,11 +2067,11 @@ def test_commits_behind_counts_what_the_update_would_bring_in(
     # A SHALLOW checkout is walked instead, and both back-ends read the walk
     # the same way: straight on top of HEAD is counted; a walk that stopped
     # anywhere else is behind by a number nobody can prove.
-    shallow = _completed(stdout=f"true\n{HEAD_SHA}\n")
+    shallow = _completed(stdout=f"true\n{HEAD_SHA}\n{FETCHED_SHA}\n")
     straight = f"{'b' * 40} {'a' * 40}\n{'a' * 40} {HEAD_SHA}\n-{HEAD_SHA}\n"
     answers += [_completed(), shallow, _completed(stdout=straight)]
     assert impl.commits_behind(dest, None) == 2
-    assert seen_argv[-1][-4:] == ["rev-list", "--parents", "--boundary", "HEAD..FETCH_HEAD"]
+    assert seen_argv[-1][-4:] == ["rev-list", "--parents", "--boundary", f"HEAD..{FETCHED_SHA}"]
     elsewhere = f"{'a' * 40} {'c' * 40}\n-{'c' * 40}\n"
     answers += [_completed(), shallow, _completed(stdout=elsewhere)]
     assert impl.commits_behind(dest, None) is git.Behind.UNCOUNTED
@@ -2150,11 +2094,15 @@ def test_commits_behind_counts_what_the_update_would_bring_in(
     assert impl.commits_behind(dest, None) is None
     answers += [_completed(), _completed(stdout="true\n")]
     assert impl.commits_behind(dest, None) is None
+    answers += [_completed(), _completed(stdout=f"true\n{HEAD_SHA}\nFETCH_HEAD\n")]
+    assert impl.counted_behind(dest, None) == git.Counted(None)
     answers += [_completed(), _completed(returncode=128, stderr="broken")]
     assert impl.commits_behind(dest, None) is None
     answers += [_completed(), shallow, _completed(returncode=128, stderr="broken")]
     assert impl.commits_behind(dest, None) is None
     assert impl.commits_behind(tmp_path / "not-a-checkout", None) is None
+    answers.append(_completed(returncode=128, stderr="Could not resolve host"))
+    assert impl.counted_behind(dest, None) == git.Counted(None)
 
 
 @pytest.mark.parametrize(
@@ -2186,8 +2134,8 @@ def test_commits_behind_asked_as_a_release_places_head_before_counting(
 
     monkeypatch.setattr(runner, "run", fake_run)
     rel = "e" * 40
-    full = _completed(stdout=f"false\n{HEAD_SHA}\n")
-    shallow = _completed(stdout=f"true\n{HEAD_SHA}\n")
+    full = _completed(stdout=f"false\n{HEAD_SHA}\n{rel}\n")
+    shallow = _completed(stdout=f"true\n{HEAD_SHA}\n{rel}\n")
 
     def sides(mine: int, theirs: int) -> subprocess.CompletedProcess[str]:
         return _completed(stdout=f"{mine}\t{theirs}\n")
@@ -2196,7 +2144,7 @@ def test_commits_behind_asked_as_a_release_places_head_before_counting(
     answers += [_completed(), full, sides(0, 4)]
     assert impl.commits_behind(dest, rel, release=True) == 4
     assert seen_argv[-3][-3:] == ["fetch", "origin", rel]
-    assert seen_argv[-1][-4:] == ["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"]
+    assert seen_argv[-1][-4:] == ["rev-list", "--left-right", "--count", f"HEAD...{rel}"]
     answers += [_completed(), full, sides(0, 0)]
     assert impl.commits_behind(dest, rel, release=True) == 0
     # Past it, on either shape, and off its line on a full one.
@@ -2211,7 +2159,7 @@ def test_commits_behind_asked_as_a_release_places_head_before_counting(
     straight = f"{'b' * 40} {HEAD_SHA}\n-{HEAD_SHA}\n"
     answers += [_completed(), shallow, sides(0, 1), _completed(stdout=straight)]
     assert impl.commits_behind(dest, rel, release=True) == 1
-    assert seen_argv[-1][-4:] == ["rev-list", "--parents", "--boundary", "HEAD..FETCH_HEAD"]
+    assert seen_argv[-1][-4:] == ["rev-list", "--parents", "--boundary", f"HEAD..{rel}"]
 
     # Shallow and not under it: a parentless commit decides, by its own object.
     walk = f"{rel} {'a' * 40}\n{'a' * 40}\n"
@@ -2469,6 +2417,22 @@ def test_a_merge_forked_under_the_graft_is_not_counted_after_an_update(tmp_path:
     assert _by_hand(spec.dest) == 10
     assert _counted_have_parents(spec.dest), "not the shape this test is about"
     assert said is git.Behind.UNCOUNTED, said
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_counted_behind_names_the_two_real_commits_it_counted_between(tmp_path: Path) -> None:
+    """T148: HEAD and the upstream tip the count's own fetch brought, beside its figure."""
+    up = _Upstream(tmp_path)
+    up.commits("c", 3)
+    installed = up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    up.commits("new", 2)
+    tip = up.publish()
+
+    assert impl.counted_behind(spec.dest, None) == git.Counted(2, installed, tip)
+    assert impl.counted_behind(spec.dest, "no-such-branch") == git.Counted(None)
 
 
 @pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
