@@ -478,7 +478,7 @@ def corrections_for_app(
     """T129's "Apply database corrections…" for this install, or None when it has none.
 
     Offered where the entry's plan marks at least one step `reapply_when_changed`
-    (`native.correction_phases()`, read off the catalog: TBC and Vanilla today),
+    (`native.correction_phases()`, read off the catalog: TBC, Vanilla and Tortoise),
     because nothing could ever be offered anywhere else. None as well for a
     server inside a WSL distro, `repair_compose_for_app()`'s reason: these seams
     address this host's Docker, not the distro's.

@@ -292,6 +292,7 @@ def test_a_phase_digest_moves_with_its_files_gzip_and_per_schema_globs() -> None
         {"on_error": "warn"},
         {"reapply_when_changed": False},
         {"assert_update_level": False},
+        {"same_columns": (("a_copy", "a_table"),)},
     ],
 )
 def test_a_phase_digest_does_not_move_with_what_only_describes_or_governs_it(
@@ -328,7 +329,9 @@ def test_the_only_phases_offered_again_are_the_ones_whose_text_proves_them_idemp
 
     `spell_template hotfix` is six `ADD COLUMN IF NOT EXISTS` in one `ALTER` --
     applying it to a table that already has them changes nothing, which can be
-    read off the JSON alone. Every other shipped phase is a dump (which drops and
+    read off the JSON alone. Tortoise's `character_inventory_copy table` (T159)
+    is one `CREATE TABLE IF NOT EXISTS`, which leaves a table that is there --
+    rows and all -- as it was. Every other shipped phase is a dump (which drops and
     re-creates its tables), a chain of updates, a file in a clone this tree does
     not hold, or a statement that overwrites a value a person may have changed
     since (`UPDATE account SET expansion = 1`, the realm row).
@@ -345,6 +348,7 @@ def test_the_only_phases_offered_again_are_the_ones_whose_text_proves_them_idemp
     assert flagged == {
         ("wow-tbc", "spell_template hotfix"),
         ("wow-vanilla", "spell_template hotfix"),
+        ("wow-tortoise", "character_inventory_copy table"),
     }
     for game, name in flagged:
         entry = CATALOG.get(game)
@@ -352,6 +356,9 @@ def test_the_only_phases_offered_again_are_the_ones_whose_text_proves_them_idemp
         phase = next(p for p in entry.install.native.cmangos.sql.phases if p.name == name)
         assert not phase.files, "a file's idempotence cannot be read off the catalog"
         for statement in phase.statements:
+            assert ";" not in statement, "one statement per entry, or the check reads half of it"
+            if statement.startswith("CREATE TABLE IF NOT EXISTS "):
+                continue
             clauses = re.split(
                 r",\s*(?=ADD )", statement.removeprefix("ALTER TABLE spell_template ")
             )
@@ -389,13 +396,16 @@ def test_the_release_table_covers_every_plan_a_public_release_marked_an_install_
 EXPECTED_FOR_RELEASED_INSTALLS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "wow-tbc": ((), ()),
     "wow-vanilla": ((), ()),
-    "wow-tortoise": ((), ()),
+    "wow-tortoise": (("character_inventory_copy table",), ()),
 }
 """(offered, withheld) for an install any public release made, against the plan shipped now.
 
-Empty today: nothing has been corrected since the releases, so no such install
-sees a banner. This is the table to change -- deliberately, in the same change
--- when a shipped phase is corrected.
+TBC and Vanilla are empty: nothing in their plans has changed since the
+releases, so no such install sees a banner. Tortoise's is the first entry that
+is not (T159): a step ADDED since, which makes the table the core's weekly honor
+maintenance truncates, and every Tortoise server a release installed is offered
+exactly that one step. This is the table to change -- deliberately, in the same
+change -- when a shipped phase is corrected or added.
 """
 
 
@@ -405,9 +415,9 @@ def test_what_an_install_from_a_public_release_is_offered_is_what_this_file_expe
 ) -> None:
     """The release table read against the shipped plan, through the comparison the tab uses.
 
-    Today both lists are empty, which also proves the table was generated from
-    the plans it names: one digest over the wrong fields, or from the wrong
-    plan, would put that phase in one of them. There is no skip: the day a
+    Every list but Tortoise's offer is empty, which also proves the table was
+    generated from the plans it names: one digest over the wrong fields, or from
+    the wrong plan, would put that phase in one of them. There is no skip: the day a
     shipped phase is corrected this fails, and the message says what to do.
 
     Catches a table entry that disagrees with its plan, and a correction to a
@@ -699,7 +709,7 @@ def test_the_confirmation_names_the_phase_its_steps_and_the_stopped_server(tmp_p
     )
     assert "hotfix" in text
     assert "statement 1" in text, "the steps the press streams are not listed"
-    assert "STOPPED" in text
+    assert "STOPS" in text, "the dialog does not say the press stops the world (T159)"
     assert "marker" in text
 
 
@@ -709,12 +719,17 @@ def test_a_press_while_the_world_is_up_or_unreadable_sends_nothing(
 ) -> None:
     """Owner answer 7, through the spine's own guard: nothing is written under a live world.
 
+    Since T159 a world that reads as running is STOPPED by the press; this
+    world goes on reading as running after the stop (the Recorder's stop does
+    nothing), so the reading right before the import still refuses it.
+    `test_tortoise_inventory_copy.py` drives a world the stop does take down.
+
     Catches the press built without `_refuse_writes_into_a_running_world()`.
     """
     db = _Mariadb(tmp_path)
     imported_with(db, OLD, tmp_path)
     sent_before = len(db.scripts)
-    with pytest.raises(InstallerError, match="Press Stop|could not tell"):
+    with pytest.raises(InstallerError, match="Nothing was applied"):
         pressed(an_engine(CORRECTED, db, world=world), tmp_path)
     assert db.scripts[sent_before:] == []
     assert "hotfix_v2" not in db.tables("mangos")
@@ -845,11 +860,13 @@ def test_a_second_press_of_the_same_dialog_is_refused_and_sends_nothing(tmp_path
 
 
 def test_a_game_whose_plan_declares_no_reappliable_phase_refuses_the_press(tmp_path: Path) -> None:
-    """Tortoise and WotLK: nothing could ever be offered, so the press is refused before anything.
+    """WotLK: nothing could ever be offered, so the press is refused before anything.
+
+    Tortoise was here too until T159 gave its plan a step to offer.
 
     Catches the spine handing the press to a family that does not read it.
     """
-    for game in ("wow-tortoise", "wow-wotlk"):
+    for game in ("wow-wotlk",):
         from yulon.catalog.installer import installer_for
 
         with pytest.raises(InstallerError, match="nothing for this to apply"):
@@ -862,7 +879,7 @@ def test_a_game_whose_plan_declares_no_reappliable_phase_refuses_the_press(tmp_p
 def test_the_games_whose_plans_mark_a_step_are_wired_the_control_and_no_others(
     tmp_path: Path,
 ) -> None:
-    """Read off the catalog: TBC and Vanilla today, and a server in a WSL distro never.
+    """Read off the catalog: TBC, Vanilla and (since T159) Tortoise, and a WSL distro never.
 
     Catches the route wired for every entry, the reader keyed to an id, and the
     distro test dropped.
@@ -873,7 +890,7 @@ def test_the_games_whose_plans_mark_a_step_are_wired_the_control_and_no_others(
     for game, offered in [
         ("wow-tbc", True),
         ("wow-vanilla", True),
-        ("wow-tortoise", False),
+        ("wow-tortoise", True),
         ("wow-wotlk", False),
     ]:
         entry = CATALOG.get(game)
@@ -1235,8 +1252,10 @@ def test_a_world_that_starts_after_the_first_reading_is_still_refused(tmp_path: 
     )
     sent_before = len(db.scripts)
     check = engine.correction_check(folder(tmp_path))
-    with pytest.raises(InstallerError, match="Press Stop"):
+    with pytest.raises(InstallerError, match="it stops the world server first") as caught:
         pressed(engine, tmp_path, check)
+    # T159: "Press Stop" here would take the database down, and the banner with it.
+    assert "Press Stop" not in str(caught.value)
     assert db.scripts[sent_before:] == []
 
 

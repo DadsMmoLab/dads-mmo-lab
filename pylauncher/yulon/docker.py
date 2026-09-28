@@ -1492,6 +1492,17 @@ at this constant. The two are meant to agree, and nothing enforces that they do
 holding them together is that both cite the same three measured shutdowns.
 """
 
+STOP_PROCESS_DEADLINE_SECONDS = STOP_GRACE_SECONDS + 60
+"""How long the corrections press's `docker stop` may take before it is given up on (T159).
+
+The grace and then a minute: docker sends SIGKILL when the grace ends, and a
+killed container is gone in seconds, so a stop still running a minute later is
+a daemon that is not answering rather than a server still saving. Longer than
+the grace by construction, so it can never cut a save short that the grace
+would have allowed. A command past it is reported as a stop whose outcome is
+unknown, never as one that failed or one that worked.
+"""
+
 
 DatabaseImport = Literal["absent", "partial", "imported", "populated", "unreadable"]
 """What a probe found in the databases the one-shot import is supposed to fill.
@@ -2368,7 +2379,9 @@ takes it as done. The stricter, older reading of `_NO_SUCH_CONTAINER`'s answer, 
 exactly as it was; a test pins that the regex matches it, so the two cannot drift (T95)."""
 
 
-def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
+def _run_docker_stop(
+    container: str, *, wsl_distro: str | None = None, deadline: float | None = None
+) -> None:
     """`docker stop <container>`, blocking until that one container has exited.
 
     One call per container on purpose. `docker stop a b c` looks ordered and is
@@ -2386,6 +2399,14 @@ def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
 
     A container that has vanished since it was listed is not an error: the goal
     state is "not running", and it is already there.
+
+    **`deadline` bounds the command itself**, for the one caller that asks
+    (T159's corrections press, `STOP_PROCESS_DEADLINE_SECONDS`): without it a
+    daemon that stops answering holds that press, and the panel showing it,
+    for ever (Codex, T159). Past it the stop's outcome is not known -- docker
+    may yet finish it -- and the error says exactly that. None, the default,
+    is every other stop's: `test_the_stop_paths_impose_no_subprocess_deadline_of_their_own`
+    holds why `stop_staged()`'s fallback takes none.
     """
     # `-t` and not `--timeout`. Docker renamed the long form: through 27.x the
     # flag is spelled `-t, --time`, and `--timeout` only became valid in CLI
@@ -2393,9 +2414,18 @@ def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
     # every version this project can meet, so it is the only spelling that is
     # safe here — `--timeout` would exit 125 with `unknown flag` on any older
     # daemon, turning a working by-name stop into a hard failure (review).
-    proc = _docker(["stop", "-t", str(STOP_GRACE_SECONDS), container], wsl_distro=wsl_distro)
+    proc = _docker(
+        ["stop", "-t", str(STOP_GRACE_SECONDS), container],
+        timeout=deadline,
+        wsl_distro=wsl_distro,
+    )
     if proc.returncode == 0:
         return
+    if deadline is not None and proc.returncode == _TIMEOUT_RETURNCODE:
+        raise DockerCommandError(
+            f"docker stop {container} did not return within {deadline:.0f} seconds, so whether "
+            f"{container} stopped is not known"
+        )
     if _STOP_SAYS_GONE in proc.stderr:
         logger.debug(f"docker stop {container}: already gone")
         return
@@ -2564,6 +2594,12 @@ WORLD_STOPPED_ANYWAY = (
 )
 """Said when "Stop now anyway" ends the wait of a world not seen able to hear the stop (T158)."""
 
+WORLD_RESTARTED_STOPPING = (
+    "The world server restarted while this waited for it to load, so it is crash-looping: "
+    "stopping it now rather than waiting for a load that does not finish."
+)
+"""Said when `StopControl.restart_ends_the_wait` ends a wait on a new run (T159)."""
+
 LOAD_WAIT_LINES = frozenset({WORLD_STILL_LOADING, WORLD_LOAD_UNCHECKED})
 """The sentences said while a stop is WAITING: the ones "Stop now anyway" is offered beside."""
 
@@ -2629,6 +2665,20 @@ class StopControl:
     anyway: threading.Event = field(default_factory=threading.Event)
     abandon: threading.Event = field(default_factory=threading.Event)
     also_anyway: tuple[threading.Event, ...] = ()
+    restart_ends_the_wait: bool = False
+    """A world seen to RESTART during the wait is stopped at once, not waited on again (T159).
+
+    Off for every stop T158 wrote: there, a world that died mid-load and was
+    brought back is loading again and is waited for in its turn. On for the
+    corrections press, which exists to end a crash loop: measured on a Linux
+    gate box 2026-09-28 (Tortoise, missing `character_inventory_copy`), each
+    cycle ran ~20 s -- `running`, deaf, the whole time -- and read `restarting`
+    for about one second, so a wait that stops only on `restarting` can miss
+    it look after look. A new run is the loop showing itself; the stop sent
+    then is not a mid-load kill of a world that would have loaded, because
+    this one dies at the same statement every time (measured: `docker stop`
+    on it returned in 11.9-20.2 s, at the cycle's own crash, never at SIGKILL).
+    """
 
     def forced(self) -> bool:
         """Has anyone asked for the stop regardless?"""
@@ -2711,7 +2761,9 @@ def wait_for_the_world_to_load(
     line, an `inspect` that does not answer -- is neither "able to hear" nor
     "gone"; the wait says `WORLD_LOAD_UNCHECKED` and goes on looking. A NEW run
     (`StartedAt` changed: `restart: unless-stopped` brought a dead one back) is
-    loading again, deaf again, and is waited for in its turn.
+    loading again, deaf again, and is waited for in its turn -- unless
+    `control.restart_ends_the_wait` (T159), where a new run is a crash loop and
+    the stop goes at once.
 
     **There is no time limit.** A cap would send, at a moment chosen by a
     number, the very signal this exists to hold back -- and a measured valid
@@ -2763,6 +2815,10 @@ def world_load_steps(
         caught: bool | None = None
         if state.settled:
             if run and state.started_at != run:
+                if control.restart_ends_the_wait:
+                    logger.info(f"{world} restarted while it was waited on; stopping it at once")
+                    yield WORLD_RESTARTED_STOPPING
+                    return
                 logger.info(f"{world} restarted while it was waited on; waiting on its new run")
             run = state.started_at
             proc = exec_output(
@@ -2793,6 +2849,7 @@ def stop_containers(
     wsl_distro: str | None = None,
     known: Sequence[ContainerSpec] = (),
     control: StopControl | None = None,
+    deadline: float | None = None,
 ) -> None:
     """Stop these containers, the worldserver-ish ones first.
 
@@ -2811,6 +2868,9 @@ def stop_containers(
     that game's `wait_for_the_world_to_load()` before its stop, because the
     server holding the ports may be one that was started a minute ago and is
     still loading (T158). A name nobody knows is stopped as before.
+
+    `deadline` bounds each `docker stop` command (`_run_docker_stop()`), never
+    the load wait before it, which T158 leaves to the person.
     """
 
     def rank(name: str) -> int:
@@ -2826,7 +2886,7 @@ def stop_containers(
             if spec.world == name:
                 wait_for_the_world_to_load(spec, control, wsl_distro=wsl_distro)
                 break
-        _run_docker_stop(name, wsl_distro=wsl_distro)
+        _run_docker_stop(name, wsl_distro=wsl_distro, deadline=deadline)
 
 
 def kill_container(container: str, *, wsl_distro: str | None = None) -> None:

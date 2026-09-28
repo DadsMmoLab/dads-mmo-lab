@@ -85,6 +85,7 @@ from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
+    CORRECTIONS_BUTTON_LABEL,
     CORRECTIONS_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
@@ -1857,6 +1858,32 @@ class CmangosInstaller(StagedInstaller):
             raise InstallerError(
                 f"The corrected steps ran and these databases are not at the level they leave "
                 f"behind: {', '.join(failing)}. Nothing was recorded, so they are offered again."
+            )
+        # T159 (Codex): a `CREATE TABLE IF NOT EXISTS` lands over a table that is
+        # already there whatever it looks like, so the step is not called landed
+        # until the table is the one it describes. Its own sentence, because
+        # the remedy is the person's -- rename or drop what is there -- and not
+        # another press. Asked on this route only: an import creates the table
+        # in the same run, into schemas that were empty or that its `partial`
+        # arm has just dropped, so there is nothing already there to be wrong,
+        # and no `rerun_on_marked` phase carries `same_columns`.
+        try:
+            mismatched = sqlplan.check_same_columns(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                sql_query=self._query_seam(),
+            )
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The corrected steps ran but their tables could not be checked "
+                f"({type(exc).__name__}: {exc}). Nothing was recorded, so they are offered again."
+            ) from exc
+        if mismatched:
+            raise InstallerError(
+                f"The corrected steps ran, but {'; '.join(mismatched)}. Nothing was recorded, "
+                f'so this is offered again: press "{CORRECTIONS_BUTTON_LABEL}" once that is done.'
             )
         landed = tuple(phase for phase in chosen if phase.name not in refused)
         if landed:

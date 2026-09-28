@@ -11213,7 +11213,8 @@ class ControllerView(QWidget):
             f"This version of Yu'lon corrects {', '.join(check.offered)} in this server's install "
             f"plan, and these databases were imported before that. "
             f"{native.CORRECTIONS_BUTTON_LABEL} applies it — it asks first, names every step, "
-            f"and needs the server stopped. Nothing changes until you press it.{held}"
+            f"and stops the world server first if it is up. Nothing changes until you "
+            f"press it.{held}"
         )
         self.corrections_banner.setVisible(True)
 
@@ -11258,12 +11259,14 @@ class ControllerView(QWidget):
         ):
             logger.info(f"database corrections for {self.entry.id} declined at the confirmation")
             return False
-        cancel = threading.Event()
+        # The panel's Cancel, with its "Stop now anyway" riding on it: the press
+        # stops a running world first (T159), through T158's load wait.
+        cancel = self._rebuild_cancel()
         self._rebuild_is_compile = False
         # The check itself, not its names: the press is bound to the reading the
         # dialog was composed from, and refuses if the databases moved since.
         started = self.rebuild_log.run(
-            lambda: route.press(check, cancel),
+            lambda: self._watch_for_load_wait(route.press(check, cancel)),
             title=f"Applying database corrections to {self.entry.name}",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -11396,6 +11399,7 @@ class ControllerView(QWidget):
             if line in docker.LOAD_WAIT_LINES or line in (
                 docker.WORLD_FINISHED_LOADING,
                 docker.WORLD_STOPPED_ANYWAY,
+                docker.WORLD_RESTARTED_STOPPING,
             ):
                 self._rebuild_wait_relay.emit_line(line)
             yield line

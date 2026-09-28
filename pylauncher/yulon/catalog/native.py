@@ -576,13 +576,14 @@ CORRECTIONS_BUTTON_LABEL = "Apply database corrections…"
 """T129's press, here for `UPDATES_BUTTON_LABEL`'s reason: the engine's refusals name it."""
 
 CORRECTIONS_OPENING_NOTE = (
-    "You can stop this at any time. This does two things and nothing else: it starts this "
-    "install's database on its own if it is down, and it applies the install-plan steps this "
-    "version of Yu'lon has corrected since these databases were imported — only the ones "
-    "marked safe to apply to a server that already has data -- recording each one that lands. "
-    "It does not start the world server, compile, fetch, or re-run the rest of the install, and "
-    "the completion marker is left as it is. If these databases do not carry that marker, this "
-    "stops and says so rather than importing them."
+    "You can stop this at any time. This does three things and nothing else: it stops this "
+    "install's world server if it is running or restarting, it starts the database on its own "
+    "if it is down, and it applies the install-plan steps this version of Yu'lon has corrected "
+    "since these databases were imported — only the ones marked safe to apply to a server that "
+    "already has data -- recording each one that lands. It does not start the world server, "
+    "compile, fetch, or re-run the rest of the install, and the completion marker is left as it "
+    "is. If these databases do not carry that marker, this stops and says so rather than "
+    "importing them."
 )
 """What a corrections press costs, said before the first stage; `UPDATES_OPENING_NOTE`'s rule."""
 
@@ -1121,9 +1122,10 @@ def correctable_phases(plan: SqlPlan) -> tuple[SqlPhase, ...]:
 def correction_phases(entry: CatalogEntry) -> tuple[SqlPhase, ...]:
     """`correctable_phases()` for an entry; empty means the control is not offered at all.
 
-    Read off the catalog, `update_phases()`'s way: today `wow-tbc` and
-    `wow-vanilla` answer `spell_template hotfix` and the other two answer
-    nothing, and a test enumerates the catalog so that stays a fact about data.
+    Read off the catalog, `update_phases()`'s way: `wow-tbc` and `wow-vanilla`
+    answer `spell_template hotfix`, `wow-tortoise` its `character_inventory_copy
+    table` (T159) and WotLK nothing, and a test enumerates the catalog so that
+    stays a fact about data.
     """
     native_block = entry.install.native
     block = native_block.cmangos if native_block is not None else None
@@ -1169,10 +1171,12 @@ def corrections_confirmation(
         f"they now have, so a step is not offered again once it has landed. Your characters, "
         f"accounts and world are not otherwise written.\n\n"
         f"{held}"
-        f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
-        f"until this has finished. A running world server holds these tables in memory and "
-        f"writes back over whatever it finds in them, so this press refuses while it is up. The "
-        f"database alone is started if it is down; the world server is never started by this.\n\n"
+        f"If the world server is running -- or restarting over and over after a crash -- this "
+        f"press STOPS it first, before anything is written: a running world server holds these "
+        f"tables in memory and writes back over whatever it finds in them. Anyone playing is "
+        f"disconnected, and it saves as it does on Stop. It is left stopped: press Start on the "
+        f"Server tab when this has finished. The database alone is started if it is down; the "
+        f"world server is never started by this.\n\n"
         f"If a step is refused, a step whose plan says to stop on errors stops the press there; "
         f"one whose plan says to warn and carry on does so. Either way a step that did not land "
         f"whole is not recorded, and is offered again."
@@ -1305,6 +1309,14 @@ can answer the rest. A closing line that promised the module was "fully
 installed" would be repeating, one layer up, the mistake this whole feature
 exists to fix — telling a user something took effect when nobody checked.
 """
+
+CORRECTIONS_WAIT_HINT = (
+    'Stop ends this here and applies nothing: the world keeps running. "Stop now anyway" '
+    "stops the world regardless and goes on with the corrections; it may then be force-stopped "
+    "and lose what happened since its last save."
+)
+"""Said once under a load wait in the corrections press (T159): `REBUILD_WAIT_HINT`'s shape,
+for the press whose stop comes before anything is touched."""
 
 REBUILD_WAIT_HINT = (
     "Stop ends the rebuild here and replaces nothing: the server keeps running the build it "
@@ -3039,9 +3051,55 @@ SQL" is a sentence and `Apply module SQL` is a thing to press.
 """
 
 
-def _missing_table_hint(words: str) -> str:
-    """`MODULE_SQL_HINT` when the server's dying words name a table that is not there."""
-    return MODULE_SQL_HINT if _MISSING_TABLE.search(words) else ""
+def _missing_table_hint(words: str, entry: CatalogEntry) -> str:
+    """The remedy for a server whose dying words name a table that is not there.
+
+    `_corrections_hint()` when a step `entry` offers to installs already
+    imported creates exactly that table (T159) -- the T63 remedy would send the
+    person to a Modules tab that has nothing to do with it -- else
+    `MODULE_SQL_HINT`.
+    """
+    if not _MISSING_TABLE.search(words):
+        return ""
+    return _corrections_hint(entry, words) or MODULE_SQL_HINT
+
+
+_MISSING_TABLE_NAMED = re.compile(r"[Tt]able\s+'([^'\s]+)'\s+(?:doesn't|does not) exist")
+"""`_MISSING_TABLE` with the name captured, as MySQL quotes it: `'<schema>.<table>'`."""
+
+
+def _corrections_hint(entry: CatalogEntry, words: str) -> str:
+    """Name T129's button when a step it would offer creates the table the server died on (T159).
+
+    Read off the catalog, never off a table name in code: the step is one of
+    `correction_phases(entry)` whose statement is a `CREATE TABLE` of exactly
+    that table. The table a statement merely mentions does not count --
+    Tortoise's `character_inventory_copy` step names `character_inventory` as
+    the table it copies, and a server missing THAT has a different problem.
+    Empty when nothing matches, so every other game and every other table keeps
+    the sentence it had.
+
+    Not proof that THIS install is offered the step -- a server imported with
+    it cannot be missing the table it makes -- and the button is on the Server
+    tab only while it is; the sentence names both, so it cannot send anyone to
+    a button that is not there without saying where to look.
+    """
+    for found in _MISSING_TABLE_NAMED.finditer(words):
+        table = found.group(1).rsplit(".", 1)[-1]
+        creates = re.compile(
+            rf"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?{re.escape(table)}`?(?![\w$])",
+            flags=re.IGNORECASE,
+        )
+        for phase in correction_phases(entry):
+            if any(creates.search(statement) for statement in phase.statements):
+                return (
+                    f" That table is made by the install-plan step {phase.name!r}, which this "
+                    f"server's databases were imported without. Press "
+                    f'"{CORRECTIONS_BUTTON_LABEL}" in the banner on the Server tab -- it stops '
+                    f"the world server, adds the table and leaves the world stopped -- then press "
+                    f"Start."
+                )
+    return ""
 
 
 def watch_after_ready(
@@ -3473,6 +3531,21 @@ class Seams:
     to touch, and a stop that reached for the stack anyway would be a second
     promise this press has no business making).
     """
+    stop_world: Callable[..., None] = docker.stop_containers
+    """Stop the world server by name. Used by ONE press: T129's corrections, since T159.
+
+    `Callable[...]` for `recreate`'s reason: it is called with `known=` (the
+    install's spec, so T158's load wait applies), the stop's `control=` and a
+    `deadline=` for the `docker stop` command itself.
+
+    Its own field and not `stop_db` pointed at another container, for
+    `db_running`'s reason: the two are asked for opposite reasons -- one puts
+    back a database a press started, the other takes down a world a press is
+    about to write under -- and a test that could not tell them apart could
+    not see the order. `docker.stop_containers()` for `stop_db`'s reason too:
+    one container, never the compose project, because `stop_staged()` takes the
+    database down with it and the press needs the database.
+    """
 
     def ask_world_running(self, container: str) -> bool | None:
         """The world's state, through the seam if one was given, else `docker`'s own."""
@@ -3581,6 +3654,7 @@ class Seams:
             world_running=on(docker.world_running, wsl_distro=distro),
             db_running=on(docker.world_running, wsl_distro=distro),
             stop_db=on(docker.stop_containers, wsl_distro=distro),
+            stop_world=on(docker.stop_containers, wsl_distro=distro),
             install_id=recorded_install_id,
         )
 
@@ -4098,7 +4172,9 @@ class StagedInstaller:
         ctx = self._update_context(server_dir, cancel)
         yield from self._staged(stages, ctx)
 
-    def _guard_then(self, stage: Stage, button: str) -> Callable[[StageContext], Iterator[str]]:
+    def _guard_then(
+        self, stage: Stage, button: str, *, remedy: str = ""
+    ) -> Callable[[StageContext], Iterator[str]]:
         """`stage`, with the world read once more immediately before its body runs.
 
         `button` is the label the refusal tells the user to press again; see
@@ -4108,12 +4184,12 @@ class StagedInstaller:
         """
 
         def run(ctx: StageContext) -> Iterator[str]:
-            self._refuse_writes_into_a_running_world(button)
+            self._refuse_writes_into_a_running_world(button, remedy=remedy)
             yield from stage.run(ctx)
 
         return run
 
-    def _refuse_writes_into_a_running_world(self, button: str) -> None:
+    def _refuse_writes_into_a_running_world(self, button: str, *, remedy: str = "") -> None:
         """Owner answer 7 at this engine's own enforcement point. Fails closed.
 
         A second enforcement point for one rule, not a second rule, and the
@@ -4134,6 +4210,11 @@ class StagedInstaller:
         reading *press "Apply pending database updates…" again* would be an
         instruction that does the wrong thing when followed, which is the
         defect T7's ticket is titled after rather than a cosmetic one.
+
+        `remedy` replaces the running branch's "Press Stop" advice, for the one
+        press whose own first step is the stop (T159): on the corrections press
+        that advice does the wrong thing when followed -- the Server tab's Stop
+        takes the database down too, and the banner goes with it.
         """
         container = self.entry.container_spec().world
         why = ""
@@ -4164,9 +4245,14 @@ class StagedInstaller:
         raise InstallerError(
             f"{self.entry.name}'s world server is running, and it holds these databases in "
             f"memory and writes back over whatever it finds in them. Nothing was applied. "
-            f"Press Stop on the Server tab, then press "
-            f'"{button}" again — the database is started '
-            f"on its own for it, and the world server stays down."
+            + (
+                remedy
+                or (
+                    f"Press Stop on the Server tab, then press "
+                    f'"{button}" again — the database is started '
+                    f"on its own for it, and the world server stays down."
+                )
+            )
         )
 
     # -- corrected install-plan steps for an install already imported (T129) ---
@@ -4234,15 +4320,19 @@ class StagedInstaller:
         `update_databases()`'s route with a different consent: the database
         started alone, then `import` with `ctx.corrections` set, which the family
         reads before `stage_import()` so neither import arm is reachable. The
-        world is read before anything and again right before the import stage,
-        and both readings refuse on anything but an explicit `False` (owner
-        answer 7). No marker is written; the family records each phase that
-        landed.
+        world is read before anything: a world that reads as running is STOPPED
+        (T159, `_stop_the_world_for_corrections()` says why a refusal there was a
+        dead end), and one that cannot be read is refused. It is read again right
+        before the import stage, and that reading refuses on anything but an
+        explicit `False` (owner answer 7). No marker is written; the family
+        records each phase that landed. A world this press stopped is left
+        stopped, and the last line says so.
 
         Raises:
             InstallerError: the entry's plan offers no phase this could apply,
-                the world is up or unreadable, the databases carry no marker, a
-                step failed, or the press was stopped.
+                the world is unreadable, could not be stopped or is up again at
+                the second reading, the offer no longer stands, the databases
+                carry no marker, a step failed, or the press was stopped.
         """
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
@@ -4254,27 +4344,128 @@ class StagedInstaller:
             )
         yield f"Applying corrected install-plan steps for {self.entry.name} in {server_dir}"
         yield CORRECTIONS_OPENING_NOTE
+        # `updates_only` is left as `_update_context()` sets it, True: see
+        # `StageContext.corrections` for the family that ignores this field.
+        ctx = replace(self._update_context(server_dir, cancel), corrections=check)
         # FIRST, before the database is started: `update_databases()`'s order,
         # for its reason -- a refused press leaves the stack as it found it.
-        self._refuse_writes_into_a_running_world(CORRECTIONS_BUTTON_LABEL)
+        stopped = yield from self._stop_the_world_for_corrections(check, opts, ctx)
         self._check_cancel(cancel)
+        again = f'Press "{CORRECTIONS_BUTTON_LABEL}" again: it stops the world server first.'
         stages = tuple(
             (
                 replace(
                     stage,
                     recorded=False,
                     cancel_note=CORRECTIONS_CANCEL_NOTE,
-                    run=self._guard_then(stage, CORRECTIONS_BUTTON_LABEL),
+                    run=self._guard_then(stage, CORRECTIONS_BUTTON_LABEL, remedy=again),
                 )
                 if stage.name == "import"
                 else stage
             )
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
-        # `updates_only` is left as `_update_context()` sets it, True: see
-        # `StageContext.corrections` for the family that ignores this field.
-        ctx = replace(self._update_context(server_dir, cancel), corrections=check)
         yield from self._staged(stages, ctx)
+        if stopped:
+            yield (
+                f"The world server was stopped for this and is still stopped. Press Start on "
+                f"the Server tab to bring {self.entry.name} back up."
+            )
+
+    def _stop_the_world_for_corrections(
+        self, check: CorrectionCheck, options: InstallOptions, ctx: StageContext
+    ) -> Generator[str, None, bool]:
+        """Owner answer 7 for the corrections press: stop the world rather than refuse (T159).
+
+        Returns whether it stopped one. Until T159 this press refused a world
+        that read as running, and on the Server tab that refusal could not be
+        got past: the banner is taken each time the DATABASE comes up and
+        dropped when it goes down, the Server tab's Stop takes the database
+        down with the world, and a crash-looping world -- the Tortoise install
+        whose honor maintenance truncates a missing table, the case T159 is
+        about -- always reads as running (`docker.world_running()` counts
+        `restarting` as up, and each cycle spends its first seconds `running`).
+        So the stop is this press's own first step, and the dialog the person
+        said Yes to says so.
+
+        **Only an explicit running is stopped.** `None` is still the refusal it
+        always was: a stop sent on "could not ask" is a guess about Docker.
+
+        **The offer is read again BEFORE the stop**, and a press whose dialog no
+        longer describes these databases is refused with the world left up. The
+        family reads the record again anyway and refuses the same press; this
+        reading exists so that the one thing such a press did is not stopping a
+        server somebody is playing on. It is taken only on this branch, where
+        the world is up and so is the database.
+
+        **The stop is T158's**: `stop_containers(known=(spec,))` waits for a
+        CMaNGOS world that is still loading -- it cannot hear SIGTERM until it
+        has, and would be SIGKILLed mid-load at the end of the grace -- and
+        stops at once a world that is not running (`restarting` is not), which
+        is where a crash-looping one spends each backoff. The wait's sentences
+        reach the panel as it waits (`_speaking`); the press's Cancel gives the
+        stop up with nothing sent (`abandon`), and "Stop now anyway" forces it
+        (`_stop_control(rollback=False)`, the rebuild's own reading of a Cancel
+        before anything is touched). The by-name stop has a process deadline
+        (`docker.STOP_PROCESS_DEADLINE_SECONDS`); past it the outcome is not
+        known, and the refusal says the world may still be running.
+
+        The world is not read again here after the stop: the import stage's own
+        guard (`_guard_then`) is that reading, right before the first write, and
+        a container that is back up by then is refused there with nothing sent.
+        """
+        container = self.entry.container_spec().world
+        try:
+            running: bool | None = self._seams.ask_world_running(container)
+        except Exception:  # noqa: BLE001 - the guard below says it in words
+            running = None
+        if running is False:
+            return False
+        if running is None:
+            # The spine's own refusal, words and all; it asks once more, and a
+            # world that reads as down by then goes on to the import's guard.
+            self._refuse_writes_into_a_running_world(CORRECTIONS_BUTTON_LABEL)
+            return False
+        if self.correction_check(options) != check:
+            raise InstallerError(
+                f"{self.entry.name}'s databases have changed since the confirmation was shown, so "
+                f"there may be nothing left for this to apply. Nothing was stopped and nothing "
+                f"was applied: the world server is still running. Press Refresh on the Server "
+                f"tab and look again."
+            )
+        yield (
+            f"The world server ({container}) is running or restarting; stopping it before "
+            f"anything is written. It saves as it does on Stop, which can take a few minutes on "
+            f"a populated world."
+        )
+        spec = self.entry.container_spec()
+        # A world that restarts while it is waited on is the crash loop this press
+        # exists to end, and it never finishes loading (T159, the live gate).
+        control = replace(_stop_control(ctx, rollback=False), restart_ends_the_wait=True)
+
+        def stop_it(say: docker.OutputSink) -> None:
+            self._seams.stop_world(
+                [container],
+                known=(spec,),
+                control=replace(control, say=say),
+                deadline=docker.STOP_PROCESS_DEADLINE_SECONDS,
+            )
+
+        try:
+            yield from _with_hint(_speaking(stop_it, control.abandon), CORRECTIONS_WAIT_HINT)
+        except docker.StopAbandoned as exc:
+            raise InstallerError(
+                f"This was stopped while {self.entry.name}'s world server was still loading, so "
+                f"the world server was not stopped and nothing was applied. It is still running."
+            ) from exc
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"Yu'lon could not stop {self.entry.name}'s world server ({exc}). Nothing was "
+                f"applied, and the world server may still be running. Check that Docker is "
+                f'answering, then press "{CORRECTIONS_BUTTON_LABEL}" again.'
+            ) from exc
+        yield "The world server is stopped."
+        return True
 
     # -- adopting an install this app did not make (T19) ----------------------
 
@@ -7727,7 +7918,7 @@ class StagedInstaller:
                     f"ready marker and was gone again inside "
                     f"{_spell_seconds(READY_GRACE_SECONDS)}, so the server is not running "
                     f"even though it started. {logs} has the rest."
-                    f"{_missing_table_hint(after.words)}{said}"
+                    f"{_missing_table_hint(after.words, self.entry)}{said}"
                 )
             now = self._seams.world_output(spec)
             first_restarts = _restart_baseline(first_restarts, now)
@@ -7739,7 +7930,7 @@ class StagedInstaller:
                 raise InstallerError(
                     f"{never_ready}: {container} restarted {detail} times while this waited, "
                     f"which is a crash loop and not a slow start. {logs} has what it printed "
-                    f"before each one."
+                    f"before each one.{_corrections_hint(self.entry, now.text)}"
                 )
             if verdict == "gone":
                 raise InstallerError(
@@ -7750,7 +7941,7 @@ class StagedInstaller:
             if verdict == "fatal":
                 raise InstallerError(
                     f"{never_ready}. It printed a line that means it never will: "
-                    f"{detail!r}. {logs} has the rest."
+                    f"{detail!r}. {logs} has the rest.{_corrections_hint(self.entry, now.text)}"
                 )
             if verdict == "quiet":
                 silent_for = self._seams.monotonic() - window_started

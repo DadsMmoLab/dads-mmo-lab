@@ -582,6 +582,23 @@ class SqlPhase(_Strict):
         ),
     )
 
+    same_columns: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description=(
+            "`(table, original)` pairs: after this phase, each `table` in the phase's `into` "
+            "schema must have exactly `original`'s columns, in the same order: name, type, "
+            "nullability, charset, collation and `extra` (`sqlplan.COLUMN_FIELDS`). Asked by "
+            "the corrections press before it records the step; a step whose check fails is "
+            "not recorded, and the press says which table and what to do. Not with "
+            "`rerun_on_marked`, whose route does not ask it. For a `CREATE TABLE IF NOT "
+            "EXISTS ... LIKE` step, which leaves a "
+            "table that is already there as it is -- including one somebody made by hand that "
+            "`INSERT ... SELECT *` from the original would then fail on (Codex, T159). Not in "
+            "`digest()`: it governs whether the step is called landed, not what it applies. "
+            "Pairs rather than a mapping because a phase is hashed, and a dict is not."
+        ),
+    )
+
     def digest(self) -> str:
         """16 hex of sha256 over what this phase APPLIES, and nothing else (T129).
 
@@ -634,6 +651,16 @@ class SqlPhase(_Strict):
                 f"phase {self.name!r}: `assert_update_level` reads the name of the last file "
                 "applied, so it cannot be set on a `statements` phase"
             )
+        if self.same_columns and self.rerun_on_marked:
+            # T11's route re-runs the step on every press and records nothing, so
+            # there is no landing for the check to withhold; it is not asked there.
+            raise ValueError(
+                f"phase {self.name!r}: `same_columns` is asked by the corrections press only, "
+                "and `rerun_on_marked` is not that press"
+            )
+        if self.same_columns and self.into is None:
+            # The tables are named without a schema; `into` is the one they are in.
+            raise ValueError(f"phase {self.name!r}: `same_columns` needs `into`")
         if self.into is not None and self.into_each is not None:
             raise ValueError(f"phase {self.name!r}: `into` and `into_each` are alternatives")
         if self.into_each is not None:
