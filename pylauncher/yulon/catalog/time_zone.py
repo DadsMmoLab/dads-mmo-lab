@@ -58,6 +58,7 @@ imports nothing that imports `composegen`.
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -479,49 +480,131 @@ def lay_over(text: str, entry: CatalogEntry, lines: Mapping[str, Line], *, label
     return "\n".join(out)
 
 
+def _parts(zone: str) -> list[str]:
+    """`zone` as path parts, refusing anything that could leave the folder it is joined under.
+
+    The names come from the database's own list, so this never fires on one;
+    it is the rule written down rather than trusted (Codex, round 3).
+    """
+    parts = zone.split("/")
+    # An absolute name splits with an empty first part, so the one rule covers it.
+    if "\\" in zone or any(part in ("", ".", "..") or ":" in part for part in parts):
+        raise TimeZoneError(f"{zone!r} is not a zone name Yu'lon writes a file for")
+    return parts
+
+
+def _no_link(path: Path, *, folder: bool) -> None:
+    """Refuse `path` when it is a link, or is there but is not what it should be."""
+    if path.is_symlink():
+        raise TimeZoneError(f"{path} is a link, so no zone file was written through it")
+    if path.exists() and path.is_dir() != folder:
+        raise TimeZoneError(
+            f"{path} is not the {'folder' if folder else 'file'} Yu'lon made, so no zone "
+            "file was written there"
+        )
+
+
+def _write_one(root: Path, parts: list[str], data: bytes) -> Path | None:
+    """Write one zone file under `root`; `None` when it already holds exactly these bytes.
+
+    Every component from `root` down to the file is checked as it is reached,
+    and made when missing: a link at any of them -- `zoneinfo`, `Europe`, the
+    file -- is refused, never followed, so nothing is ever written outside the
+    server's own `zoneinfo/`. The new bytes go to a fresh temporary name
+    (`mkstemp`: created exclusively, so an old link at a temporary name is never
+    written through), are flushed to disk, and are renamed onto the file only
+    after the folder is checked again to still resolve inside `root`.
+    """
+    _no_link(root, folder=True)
+    root.mkdir(exist_ok=True)
+    parent = root
+    for part in parts[:-1]:
+        parent = parent / part
+        _no_link(parent, folder=True)
+        parent.mkdir(exist_ok=True)
+    target = parent / parts[-1]
+    _no_link(target, folder=False)
+    try:
+        if target.read_bytes() == data:
+            return None
+    except FileNotFoundError:
+        pass
+    handle, name = tempfile.mkstemp(prefix=f".{parts[-1]}.", suffix=".yulon-tmp", dir=parent)
+    partial = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        if not parent.resolve().is_relative_to(root.resolve()):
+            raise TimeZoneError(f"{parent} is no longer inside {root}; the zone file was not put")
+        os.replace(partial, target)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def place(entry: CatalogEntry, server_dir: Path, override: str) -> tuple[Path, ...]:
     """Copy each zone the override names into the server's `zoneinfo/`, from the app's `tzdata`.
 
-    CMaNGOS only (`needs_files`). Copied again whenever it differs, so a rule
-    a Yu'lon update brings reaches the server at the next writer's press. A
-    file already equal is left alone (its mtime does not move). Each file is
-    written beside itself and renamed into place, so an interrupted copy
-    leaves the old one whole. Returns the files it wrote.
+    CMaNGOS only (`needs_files`). Copied again whenever it differs -- missing,
+    cut short, or from an older Yu'lon -- so a rule an update brings reaches
+    the server at the next press that places it, and every Start does
+    (`refresh`). A file already equal is left alone (its mtime does not move).
+    Returns the files it wrote.
 
     Raises:
-        OSError: the folder or a file could not be written; nothing after it was.
-        TimeZoneError: `zoneinfo` in the server folder is a link or a file,
-            which is not the folder Yu'lon made; nothing is written through it.
+        OSError: a folder or a file could not be written; nothing after it was.
+        TimeZoneError: a link or a stray file sits where a folder or the zone
+            file belongs, or a name would leave `zoneinfo/`; nothing is written
+            through it.
     """
     if not needs_files(entry):
         return ()
     names = sorted(
         {line.value for line in carried(override, entry).values() if line.value in zones()}
     )
-    if not names:
-        return ()
     root = server_dir / FOLDER
-    if root.is_symlink() or (root.exists() and not root.is_dir()):
-        raise TimeZoneError(
-            f"{root} is not a folder Yu'lon made, so no zone file was written into it"
-        )
     written: list[Path] = []
     for name in names:
+        parts = _parts(name)
         data = zone_file(name)
         if data is None:
             continue
-        target = root.joinpath(*name.split("/"))
-        try:
-            if target.read_bytes() == data:
-                continue
-        except OSError:
-            pass
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(f".{target.name}.yulon-tmp")
-        partial.write_bytes(data)
-        os.replace(partial, target)
-        written.append(target)
+        made = _write_one(root, parts, data)
+        if made is not None:
+            written.append(made)
     return tuple(written)
+
+
+RUNS_AS_UTC = (
+    "the time zone file {folder}/{zone} could not be put back ({exc}), so this server runs on "
+    "UTC until it is. Press Repair, or Apply on the Tuning tab's Server time zone, once the "
+    "cause is fixed."
+)
+
+
+def refresh(entry: CatalogEntry, server_dir: Path, override: str | None) -> str | None:
+    """Before a Start: put back every zone file the override names. The warning, or `None`.
+
+    A deleted, cut-short or outdated `zoneinfo/<Area>/<City>` would otherwise
+    start a CMaNGOS server on UTC without a word (Codex, round 3). Never a
+    reason to refuse the Start: the server runs, on UTC, and the sentence says
+    so and names the two presses that bring the file back.
+    """
+    if override is None:
+        return None
+    try:
+        place(entry, server_dir, override)  # nothing at all off CMaNGOS (`needs_files`)
+    except (OSError, TimeZoneError) as exc:
+        zone = next(
+            (line.value for line in carried(override, entry).values() if line.value in zones()),
+            "",
+        )
+        logger.warning(f"{entry.id}: the zone file could not be put back before Start: {exc}")
+        return RUNS_AS_UTC.format(folder=FOLDER, zone=zone, exc=exc)
+    return None
 
 
 def ready(entry: CatalogEntry, server_dir: Path, zone: str) -> bool:

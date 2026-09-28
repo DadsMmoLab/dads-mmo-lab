@@ -453,6 +453,10 @@ class Dashboard:
             )
             return
         yield "Restarted. The world takes a few minutes to come up; the bots show on the map then."
+        # T171: the one thing a restart does not refuse over, said where it ran.
+        said = getattr(self.controller, "zone_problem", None)
+        if isinstance(said, str) and said:
+            yield f"Note: {said}"
 
     # -- helpers ----------------------------------------------------------
 

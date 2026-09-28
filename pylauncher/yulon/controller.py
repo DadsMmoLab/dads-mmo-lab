@@ -22,8 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import docker, wsl
-from yulon.catalog import native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog import composegen, native, time_zone
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -37,6 +37,15 @@ _START_DB_HEALTH_TIMEOUT = 120.0
 def _catalog_specs() -> tuple[docker.ContainerSpec, ...]:
     """Every catalogue game's `ContainerSpec`, for naming another install's containers (T158)."""
     return tuple(entry.container_spec() for entry in load_catalog().games)
+
+
+def _entry_for(spec: docker.ContainerSpec) -> CatalogEntry | None:
+    """The catalogue game whose containers these are, by the world's and the login's names."""
+    for entry in load_catalog().games:
+        own = entry.container_spec()
+        if own.world == spec.world and own.auth == spec.auth:
+            return entry
+    return None
 
 
 class PortConflictError(RuntimeError):
@@ -156,6 +165,11 @@ class Controller:
         # shows this install, after both exist; its `say` is called on the
         # stop's worker thread, so it must be something that can cross threads.
         self.stop_control: docker.StopControl | None = None
+        # What the last `start()` could not put right about the server's time
+        # zone (T171): `None` when nothing. Read by the tab after any job that
+        # starts, since `start()` is the one door every Start, Restart and
+        # recreate goes through.
+        self.zone_problem: str | None = None
 
     # -- queries ---------------------------------------------------------
 
@@ -274,6 +288,7 @@ class Controller:
         if conflicts:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
+        self.zone_problem = self._put_back_the_zone_file()
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
@@ -284,6 +299,29 @@ class Controller:
             # would otherwise stop 15-25 s after this app's last call into it,
             # killing the server it just started (T132, `wsl.hold()`).
             self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+
+    def _put_back_the_zone_file(self) -> str | None:
+        """T171: a CMaNGOS server's zone file, put back before every start; the warning if not.
+
+        The images carry no zone files, so a `zoneinfo/<Area>/<City>` deleted,
+        cut short or left from an older Yu'lon would start the server on UTC
+        without a word. `time_zone.refresh()` copies it again only when the
+        bytes differ. A failure never stops the Start: the server comes up on
+        UTC and the sentence says so. WotLK's image has its own tzdata, so
+        nothing is done there, and a game this catalogue does not know is left
+        alone.
+        """
+        entry = _entry_for(self.spec)
+        if entry is None or not time_zone.needs_files(entry):
+            return None
+        try:
+            with (self.server_dir / composegen.OVERRIDE_FILE).open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                override = handle.read()
+        except (OSError, UnicodeDecodeError):
+            return None  # no override to name a zone; compose says what is wrong with it
+        return time_zone.refresh(entry, self.server_dir, override)
 
     def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
         """Where each blocking container came from, best effort and never fatal."""

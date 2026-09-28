@@ -5127,6 +5127,9 @@ class StagedInstaller:
             if rollback
             else "Replacing the running containers so the new build is what starts."
         )
+        warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
         spec = self.entry.container_spec()
         # The replace begins with a stop, and a world still loading cannot hear
         # it (T158). `recreate_staged()` waits for it right before that stop --
@@ -7689,6 +7692,22 @@ class StagedInstaller:
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
 
+    def _put_back_the_zone_file(self, server_dir: Path) -> str | None:
+        """T171: the zone file `Controller.start()` puts back, before this engine's own starts.
+
+        The install's `up` and a rebuild's recreate start containers without
+        the controller; the same `time_zone.refresh()`, the same rule: copied
+        only when the bytes differ, and a failure is said, never a refusal.
+        """
+        try:
+            with (server_dir / composegen.OVERRIDE_FILE).open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                override = handle.read()
+        except (OSError, UnicodeDecodeError):
+            return None
+        return time_zone.refresh(self.entry, server_dir, override)
+
     def _make_server_folders(self, server_dir: Path) -> tuple[Path, ...]:
         """Make each folder the compose file binds for the server to write into (T165).
 
@@ -8618,6 +8637,9 @@ class StagedInstaller:
         warns about in as many words.
         """
         yield "Starting the server."
+        warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
         try:
             self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:

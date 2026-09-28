@@ -462,3 +462,72 @@ def test_a_four_space_file_gets_four_space_blocks() -> None:
         '    ac-authserver:\n        environment:\n            TZ: "Europe/Oslo"\n'
     )
     assert _tz(after, WOTLK) == {"ac-authserver": OSLO, "ac-worldserver": OSLO}
+
+
+# -- round 3: nothing is written through a link ------------------------------------
+
+
+def test_a_linked_area_folder_is_refused_and_nothing_is_written_outside(tmp_path: Path) -> None:
+    server, outside = tmp_path / "server", tmp_path / "outside"
+    (server / "zoneinfo").mkdir(parents=True)
+    outside.mkdir()
+    (server / "zoneinfo" / "Europe").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(time_zone.TimeZoneError, match=r"zoneinfo/Europe is a link"):
+        time_zone.place(TBC, server, _tbc_override())
+
+    assert list(outside.iterdir()) == []
+
+
+def test_a_linked_zoneinfo_folder_is_refused(tmp_path: Path) -> None:
+    server, outside = tmp_path / "server", tmp_path / "outside"
+    server.mkdir()
+    outside.mkdir()
+    (server / "zoneinfo").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(time_zone.TimeZoneError, match=r"server/zoneinfo is a link"):
+        time_zone.place(TBC, server, _tbc_override())
+
+    assert list(outside.iterdir()) == []
+
+
+def test_a_link_where_the_zone_file_belongs_is_refused_not_followed(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"not yours")
+    (tmp_path / "zoneinfo" / "Europe").mkdir(parents=True)
+    (tmp_path / "zoneinfo" / "Europe" / "Oslo").symlink_to(outside)
+
+    with pytest.raises(time_zone.TimeZoneError, match=r"Europe/Oslo is a link"):
+        time_zone.place(TBC, tmp_path, _tbc_override())
+
+    assert outside.read_bytes() == b"not yours"
+
+
+def test_a_link_left_at_an_old_temporary_name_is_not_followed(tmp_path: Path) -> None:
+    """Round 2 wrote `.Oslo.yulon-tmp` by name; a link planted there would have been written."""
+    outside = tmp_path / "outside.txt"
+    folder = tmp_path / "zoneinfo" / "Europe"
+    folder.mkdir(parents=True)
+    (folder / ".Oslo.yulon-tmp").symlink_to(outside)
+
+    assert time_zone.place(TBC, tmp_path, _tbc_override()) == (folder / "Oslo",)
+
+    assert not outside.exists(), "the link's target was written"
+    assert (folder / "Oslo").read_bytes() == time_zone.zone_file(OSLO)
+    assert sorted(p.name for p in folder.iterdir()) == [".Oslo.yulon-tmp", "Oslo"]
+
+
+@pytest.mark.parametrize("name", ["../evil", "Europe/../../evil", "/etc/evil", "Europe//Oslo"])
+def test_a_name_that_would_leave_the_folder_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Names come from the database's own list; the rule holds even if one did not."""
+    monkeypatch.setattr(time_zone, "zones", lambda: frozenset({name}))
+    monkeypatch.setattr(time_zone, "zone_file", lambda zone: b"TZif2 planted")
+    (tmp_path / "server").mkdir()
+    override = f'services:\n  tbc-mangosd:\n    environment:\n      TZ: "{name}"\n'
+
+    with pytest.raises(time_zone.TimeZoneError, match="not a zone name"):
+        time_zone.place(TBC, tmp_path / "server", override)
+
+    assert not (tmp_path / "evil").exists() and not (tmp_path / "server" / "zoneinfo").exists()

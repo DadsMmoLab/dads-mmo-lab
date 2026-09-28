@@ -6451,8 +6451,23 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
+        self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+
+    def _say_zone_problem(self) -> str | None:
+        """T171: what the last Start could not put right about the zone file, on the Server tab.
+
+        `Controller.start()` is the one door every Start, Restart and recreate
+        goes through, and it never refuses over the zone file: the server runs
+        on UTC, and this line says so and names the presses that fix it.
+        """
+        said = getattr(self.services.controller, "zone_problem", None)
+        if isinstance(said, str) and said:
+            text = f"The server started, but {said}"
+            self.problem_label.setText(text)
+            return text
+        return None
 
     def _check_the_channel(self) -> None:
         """Ask whether the saved credential still works, off the GUI thread.
@@ -12703,7 +12718,8 @@ class ControllerView(QWidget):
         if job == "recreate":
             self._tuning_owed.pop("recreate", None)
         self._refresh_tuning_owed()
-        self.tuning_report.setPlainText(f"{job}: done.")
+        zone = self._say_zone_problem()
+        self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
         self.refresh_status()
 
     @Slot(object)

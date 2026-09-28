@@ -259,3 +259,47 @@ def test_reset_to_default_keeps_the_zone_the_lists_show(
     assert server_time_zone.read(WOTLK, tmp_path).zone == OSLO
     view.reload_tuning()
     assert (_where(view), view.time_zone_place.currentData()) == ("Europe", OSLO)
+
+
+def _tbc_view_with_a_broken_zone_folder(
+    ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> ControllerView:
+    """A TBC server whose zone file cannot be put back: a file where `zoneinfo/` belongs."""
+    import shutil
+
+    from yulon import docker
+    from yulon.controller import Controller
+
+    _tbc_installed(tmp_path)
+    server_time_zone.write(TBC, tmp_path, OSLO)
+    shutil.rmtree(tmp_path / "zoneinfo")
+    (tmp_path / "zoneinfo").write_text("not a folder", encoding="utf-8")
+    monkeypatch.setattr(docker, "start_staged", lambda *a, **k: True)
+    monkeypatch.setattr(Controller, "port_conflicts", lambda self: [])
+    monkeypatch.setattr(Controller, "remove", lambda self: True)
+    view = _view(ps, tmp_path, TBC)
+    object.__setattr__(view.services, "controller", Controller(TBC.container_spec(), tmp_path))
+    return view
+
+
+def test_start_says_the_server_runs_on_utc_when_its_zone_file_cannot_be_put_back(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = _tbc_view_with_a_broken_zone_folder(ps, tmp_path, monkeypatch)
+
+    view.start_server()
+
+    said = view.problem_label.text()
+    assert "started" in said and "UTC" in said and "Repair" in said
+
+
+def test_the_tuning_recreate_says_it_too(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = _tbc_view_with_a_broken_zone_folder(ps, tmp_path, monkeypatch)
+    _reset_yes(monkeypatch)
+
+    view.recreate_containers()
+
+    report = view.tuning_report.toPlainText()
+    assert report.startswith("recreate: done.") and "UTC" in report

@@ -413,3 +413,35 @@ def test_a_hand_written_name_on_a_tbc_server_starts_to_count_at_the_next_repair(
 
     assert _zones(tmp_path, TBC)[TBC.container_spec().world] == OSLO
     assert server_time_zone.read(TBC, tmp_path).note is None
+
+
+# -- round 3: the engine's own starts put the file back too ------------------------
+
+
+def test_the_installs_up_puts_a_deleted_zone_file_back(tmp_path: Path) -> None:
+    _generate_tbc(tmp_path)
+    _tab_set(tmp_path, TBC)
+    (tmp_path / "zoneinfo" / "Europe" / "Oslo").unlink()
+
+    said = list(cm_engine(Recorder()).stage_up(cm_context(tmp_path)))
+
+    assert time_zone.ready(TBC, tmp_path, OSLO)
+    assert said == ["Starting the server."]
+
+
+def test_a_rebuilds_recreate_puts_the_zone_file_back_and_says_when_it_cannot(
+    tmp_path: Path,
+) -> None:
+    _generate_tbc(tmp_path)
+    _tab_set(tmp_path, TBC)
+    placed = tmp_path / "zoneinfo" / "Europe" / "Oslo"
+    placed.write_bytes(b"TZif2 an older rule")
+    engine = cm_engine(Recorder(), docker_ready=lambda: True, recreate=lambda *a, **k: True)
+
+    list(engine.stage_recreate(cm_context(tmp_path)))
+    assert placed.read_bytes() == time_zone.zone_file(OSLO)
+
+    shutil.rmtree(tmp_path / "zoneinfo")
+    (tmp_path / "zoneinfo").write_text("not a folder", encoding="utf-8")
+    said = list(engine.stage_recreate(cm_context(tmp_path)))
+    assert any("UTC" in line and "Repair" in line for line in said), said
