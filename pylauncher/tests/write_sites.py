@@ -57,6 +57,8 @@ _PATH_METHODS = {
     "chmod",
 }
 _SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker", "record_phases"}
+_WINDOWS_ACL_WRITES = {"SetNamedSecurityInfoW"}
+"""A `ctypes` call that changes who may read a path: Windows' `chmod` (T151, `winacl`)."""
 _QUALIFIED = {
     ("os", "open"),
     ("os", "write"),
@@ -254,6 +256,8 @@ def _callee(node: ast.Call) -> str | None:
         if (owner, func.attr) in _QUALIFIED:
             return f"{owner}.{func.attr}"
         if func.attr in _PATH_METHODS or func.attr in _SQL_WRITE_METHODS:
+            return func.attr
+        if func.attr in _WINDOWS_ACL_WRITES:
             return func.attr
         if func.attr == "open":
             mode = _mode_of(node)

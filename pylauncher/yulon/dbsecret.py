@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from yulon import platform
+from yulon import platform, winacl
 from yulon.log import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - a type, not a dependency
@@ -68,7 +68,8 @@ SECRET_MODE = 0o600
 Same reasoning as `channel_setup.CREDENTIAL_MODE`: a chmod afterwards is a
 second step and the window before it is exactly when the file is world-readable.
 On Windows the mode argument is ignored, which is why the test asserts the flags
-the file was CREATED with rather than reading the mode back.
+the file was CREATED with rather than reading the mode back; there the file is
+private by `db-secrets/`'s own owner-only DACL instead (`winacl`, T151).
 """
 
 
@@ -144,6 +145,9 @@ def remember(
     """
     path = secret_path(game, install_id, config_dir=config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Before the file is created, so on Windows it is born under the folder's
+    # owner-only DACL rather than the profile's; a refusal is a warning (T151).
+    winacl.secure_folder(path.parent)
     payload = json.dumps({"volume": volume, "password": password}, indent=2)
     # `O_TRUNC` and not `O_EXCL`: a second uninstall of the same folder has to
     # be able to land on top of the first one's copy.
@@ -163,6 +167,8 @@ def recall(game: str, install_id: str, *, config_dir: Path | None = None) -> Kep
     on its own evidence, not on this one's silence.
     """
     path = secret_path(game, install_id, config_dir=config_dir)
+    # A copy kept before T151 gets its folder's owner-only DACL on this read.
+    winacl.secure_folder(path.parent)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         password = str(raw["password"])
