@@ -76,15 +76,15 @@ def _wsl_listing(*args: str) -> tuple[str, ...] | None:
     None for no wsl.exe, a raise (the timeout among them) and a failure: the
     caller that must not mistake "no answer" for "nothing" can tell them apart.
 
-    **A `--running` listing that says nothing runs is empty, whatever its exit
-    code (T133 review).** Whether `wsl -l -q --running` exits non-zero when no
-    distro runs was not captured by T132 (its gate logged the empty output,
-    not the exit code), and if it does, reading that as "no answer" makes
-    every stopped distro "unknown" in the one case the gate exists for. So the
-    sentence wsl.exe prints for it decides (`_says_none_running()`), in either
-    stream. A non-zero exit WITHOUT it -- an empty one included -- stays no
-    answer: read as "none running", it would let `known_stopped()` skip a stop
-    of a running server (T95's fail-closed rule).
+    **Nothing running is exit 0 and no output (measured, T133).** On
+    yulon-win11 (2026-09-28) `wsl -l -q --running` with every distro stopped
+    exited 0 with 0 bytes on stdout and stderr, from the desktop session and
+    over SSH alike; the sentence "There are no running distributions." and
+    exit -1 come only WITHOUT `-q`. So the common case is the plain one. The
+    sentence is still recognised, in either stream and whatever the exit code
+    (`_says_none_running()`), should a wsl.exe print it with `-q`. A non-zero
+    exit WITHOUT it stays no answer: read as "none running", it would let
+    `known_stopped()` skip a stop of a running server (T95's fail-closed rule).
     """
     launcher = platform._which(platform.WSL_PROGRAM)
     if launcher is None:
@@ -119,12 +119,13 @@ def _wsl_listing(*args: str) -> tuple[str, ...] | None:
 
 
 _NO_RUNNING_DISTROS = "There are no running distributions"
-"""What wsl.exe says for `--running` when nothing runs, in English.
+"""What wsl.exe says for `--running` when nothing runs, in English -- measured WITHOUT `-q`.
 
-It is translated, like every sentence wsl.exe prints. On a Windows in another
-language a non-zero "none running" therefore reads as no answer: the distro is
-`unknown`, its readings wait and the tab says WSL did not answer -- the safe
-side for both a reading and a stop, until the translated answer is measured.
+With `-q`, which is how this module asks, nothing running measured as exit 0
+and no output at all (T133, yulon-win11), so this is a second line of
+defence, not the path taken. It is translated, like every sentence wsl.exe
+prints: a translated one with a non-zero exit would read as no answer (the
+distro `unknown`, its readings waiting), the safe side for a reading and a stop.
 """
 
 

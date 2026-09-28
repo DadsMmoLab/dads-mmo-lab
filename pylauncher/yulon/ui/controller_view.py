@@ -5321,6 +5321,10 @@ class ControllerView(QWidget):
         self._distro = state
         self._show_the_distro()
         if state != "running":
+            # The last verdict ("up -- 0 players…") described a world this
+            # distro no longer runs, and it sat above "world down" and the
+            # stopped line (T133 live gate). The next one waits for `running`.
+            self._clear_the_verdict()
             return
         waiting = list(self._waiting_on_distro.values())
         self._waiting_on_distro.clear()
@@ -5408,11 +5412,22 @@ class ControllerView(QWidget):
     @Slot(object)
     def _verdict_ready(self, result: object) -> None:
         self._verdict_pending = False
+        if result is None or self._distro != "running":
+            # None is `_world_reading()` finding the distro stopped on the
+            # worker; a verdict landing after a poll said stopped is as old.
+            # Neither may leave an earlier verdict standing (T133).
+            self._clear_the_verdict()
+            return
         if not isinstance(result, dashboard_module.Verdict):
             return
         self.verdict_label.setText(dashboard_module.line(result))
         self.verdict_label.setVisible(True)
         self.enable_channel_button.setEnabled(_press_is_allowed(result))
+
+    def _clear_the_verdict(self) -> None:
+        """No verdict line: the distro is not known to run, so no world to describe (T133)."""
+        self.verdict_label.setText("")
+        self.verdict_label.setVisible(False)
 
     @Slot(object)
     def _verdict_failed(self, exc: object) -> None:

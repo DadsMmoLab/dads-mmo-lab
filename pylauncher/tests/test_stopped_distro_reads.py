@@ -508,6 +508,40 @@ def test_the_later_settle_on_its_worker_does_not_start_a_distro_stopped_since_th
         view.shutdown()
 
 
+def test_a_distro_stopped_from_outside_takes_the_last_verdict_off_the_server_tab(
+    qapp: object, disk: _DistroDisk
+) -> None:
+    """T133 live gate: after `wsl -t`, "up — 0 players, 0 bots" stayed above "world down"
+    and the stopped line. The poll that says stopped clears it, and so does a verdict
+    the worker skipped, or one that lands after that poll."""
+    from yulon import dashboard
+
+    entry = _entry("wow-wotlk")
+    disk.stopped = False
+    services = ControllerServices.for_entry(entry, Path(disk.root), None, DISTRO)
+    services.dashboard = lambda: dashboard.Verdict("up", players=0, bots=0)
+    view = ControllerView(entry, services)
+    try:
+        _poll(view)
+        assert not view.verdict_label.isHidden() and view.verdict_label.text().startswith("up")
+
+        disk.stopped = True  # `wsl -t` from outside
+        _poll(view)
+        assert view.verdict_label.isHidden() and view.verdict_label.text() == ""
+        assert not view.distro_label.isHidden()
+
+        view._verdict_ready(dashboard.Verdict("up", players=0, bots=0))
+        assert view.verdict_label.isHidden(), "a verdict landing after the stop was drawn"
+        disk.stopped = False
+        _poll(view)
+        assert view.verdict_label.text().startswith("up"), "the verdict did not come back"
+        view._verdict_ready(None)
+        assert view.verdict_label.isHidden(), "a verdict the worker skipped left the old one"
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
 # -- the pieces the gate is made of --------------------------------------------------------
 
 
@@ -574,7 +608,7 @@ class _Listed:
         "the sentence, exit 0",
         "nothing, exit 1: no answer (T95)",
         "the sentence, exit 1",
-        "translated, exit -1: no answer until measured",
+        "translated, exit -1: no answer",
         "the sentence on stderr in UTF-8",
         "a failure with its code",
         "a failure's code on stderr in UTF-8",
@@ -583,9 +617,9 @@ class _Listed:
 def test_a_running_listing_that_says_none_runs_is_empty_whatever_its_exit_code(
     monkeypatch: pytest.MonkeyPatch, listed: _Listed, means: tuple[str, ...] | None
 ) -> None:
-    """T133 review: whether `--running` exits non-zero when nothing runs is not measured,
-    so the sentence it prints for that decides, in either stream and either encoding.
-    A non-zero exit without it stays no answer: T95's stop must not skip on a guess."""
+    """Measured with `-q` (T133 live gate): nothing running is exit 0 and no output. The
+    sentence -- printed only without `-q` -- is still read as "none", in either stream and
+    either encoding. A non-zero exit without it stays no answer: T95's stop must not skip."""
     monkeypatch.setattr(platform, "_which", lambda name, path=None: NO_WSL_EXE)
     monkeypatch.setattr(wsl.subprocess, "run", listed)
     assert wsl._wsl_listing("--running") == means

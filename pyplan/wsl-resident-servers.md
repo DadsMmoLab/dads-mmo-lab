@@ -229,12 +229,12 @@ to the SQL seams as a reader (`apply.RootPassword`), read at the first database 
 starts the distro anyway, and kept only once a read found it. `install_wiring`'s own
 readings ask `wsl.may_read()` too.
 
-**`wsl -l -q --running` when nothing runs.** T132's gate logged its output (empty) but not
-its exit code. The listing is therefore read off what it prints: the sentence "There are no
-running distributions" means none, whatever the exit code and in either stream; a non-zero
-exit without it is no answer, because reading it as "none running" would let
-`known_stopped()` skip a stop of a running server (T95). The sentence is translated, so on a
-Windows in another language a non-zero "none" reads as unknown until it is measured.
+**`wsl -l -q --running` when nothing runs** was measured on yulon-win11 (2026-09-28, T133
+live gate): exit 0, 0 bytes on stdout and stderr, from the desktop session and over SSH. The
+sentence "There are no running distributions." and exit -1 appear only WITHOUT `-q`. The
+parser takes the empty answer as "none running"; it still recognises the sentence in either
+stream whatever the exit code, and a non-zero exit without it stays no answer, because reading
+that as "none running" would let `known_stopped()` skip a stop of a running server (T95).
 
 Presses are not gated: Start, Stop, Repair, the updates, and every other button may start
 the distro, because the player asked for them. **The Logs tab is a press too, by decision:**
