@@ -18,7 +18,8 @@ population, and SOAP once the channel is switched on -- are container
 environment in `docker-compose.override.yml`, which wins over the conf. That
 file's default is what the install's compose stage renders (owner decision 4,
 2026-09-23: a player broke it editing the timezone and could not log in), plus
-the channel's own keys while its press is live.
+the channel's own keys while its press is live. The time zone is kept (owner,
+2026-09-28, T171): the render lays the file's own `TZ` lines over the new one.
 
 **Only the server's own files.** A game's set is exactly its install conf
 table, or for WotLK `AZEROTHCORE_CORE_FILES` plus the override. A module's own
@@ -1331,8 +1332,9 @@ def question(
     if composegen.OVERRIDE_FILE in files and composegen.OVERRIDE_FILE not in facts.foreign:
         parts.append(
             f"{composegen.OVERRIDE_FILE} holds the containers' own settings (the bot population, "
-            "and the command channel if it is on). Anything added to it by hand is dropped, and "
-            "the containers have to be RECREATED before it counts."
+            "and the command channel if it is on). Anything added to it by hand is dropped, but "
+            "the server's time zone is kept, and the containers have to be RECREATED before it "
+            "counts."
         )
     parts.append(
         'A backup of each file that is on disk is made first, and "Undo the last reset" in this '

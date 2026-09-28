@@ -11,3 +11,8 @@ pygame>=2.5
 # not verify desktop.docker.com there (measured 2026-08-22) — see
 # yulon/platform.py's downloads section.
 certifi>=2024.7.4
+# The IANA time zone database as data (T171): the server time zone list, and
+# the POSIX rule each zone's file ends with, which the CMaNGOS images need
+# because they carry no zone files. Windows has no database Python can read, so
+# the app ships this one on every host rather than one list per OS.
+tzdata>=2024.1

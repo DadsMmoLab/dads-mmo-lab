@@ -86,7 +86,7 @@ from yulon import (
     runner,
     server_build_presses,
 )
-from yulon.catalog import bot_count, composegen, preflight, upstream
+from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -3630,6 +3630,13 @@ class Seams:
     and no split to fix -- only the same latent trap, recorded in §27 rather
     than changed for no measured defect.
     """
+    host_zone: Callable[[], str] | None = None
+    """This computer's time zone, which a NEW install's override gets (T171). Read via `ask_zone()`.
+
+    A late lookup for `selinux_enforcing`'s reason: the suite pins
+    `time_zone.host_zone` (conftest) so no render depends on the zone of the
+    box running it, and a default bound at import would slip past that pin.
+    """
     monotonic: Callable[[], float] = time.monotonic
     """The clock `wait_for_ready()` reports its own durations from.
 
@@ -3791,6 +3798,11 @@ class Seams:
         """The filesystem under `path`, through the seam if one was given, else the host."""
         ask = self.fs_type
         return (ask if ask is not None else platform.filesystem_type)(path)
+
+    def ask_zone(self) -> str:
+        """This computer's time zone, through the seam if one was given, else the host (T171)."""
+        ask = self.host_zone
+        return (ask if ask is not None else time_zone.host_zone)()
 
     @classmethod
     def in_wsl(cls, distro: str) -> Seams:
@@ -7737,6 +7749,10 @@ class StagedInstaller:
             bind_label=label,
             platform_id=self._seams.platform_id,
             install_id=self._install_id(server_dir),
+            # T171: a new server's clock is this computer's (owner, 2026-09-28).
+            # Asked on every render and used only when the folder has no install
+            # yet; an installed server's zone is carried off its own override.
+            new_install_zone=self._seams.ask_zone(),
         )
 
     def _base_compose_facts(

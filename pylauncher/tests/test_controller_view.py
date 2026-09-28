@@ -17475,7 +17475,9 @@ def test_yes_resets_everything_asks_for_a_recreate_and_undo_brings_it_back(
 
     assert {f: (tmp_path / f).read_bytes() for f in defaults} == defaults
     override = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
-    assert "TZ" not in override and "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS" in override
+    assert "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS" in override
+    # The player's zone is kept (owner, 2026-09-28, T171), laid over the file made again.
+    assert 'TZ: "Europe/Oslo"' in override and "ac-authserver" not in override
     assert view.tuning_banner.isHidden() is False
     assert composegen.OVERRIDE_FILE in view.tuning_banner_label.text()
     assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL

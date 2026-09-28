@@ -61,7 +61,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from yulon import bot_population, commands, platform, soap
-from yulon.catalog import bot_count, composegen
+from yulon.catalog import bot_count, composegen, time_zone
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
 from yulon.log import get_logger
@@ -573,19 +573,33 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
 
 
 def _keep_the_bot_count(entry: CatalogEntry, now: str, restored: str) -> str:
-    """The pre-press file to put back, carrying the bot count `now` holds (T117).
+    """The pre-press file to put back, with the bot count (T117) and zone (T171) `now` holds.
 
     The backup is the override before the FIRST press, so it holds the count
     from then: one changed on the Bots tab while the channel was on would go
     back with the channel. Only the two values move; a backup without the two
     lines, or a `now` without a usable pair, is put back as it was.
     """
+    restored = _keep_the_time_zone(entry, now, restored)
     kept = bot_count.in_override_text(now, entry)
     if not kept:
         return restored
     try:
         return bot_population.patch_env(restored, entry, composegen.OVERRIDE_FILE, kept)
     except bot_population.BotCountError:
+        return restored
+
+
+def _keep_the_time_zone(entry: CatalogEntry, now: str, restored: str) -> str:
+    """The pre-press file with the time zone `now` holds laid over it (T171).
+
+    For the bot count's reason above: a zone set on the Tuning tab while the
+    channel was on would otherwise go back with the channel. Only the `TZ`
+    lines move; a backup whose shape takes none is put back as it was.
+    """
+    try:
+        return time_zone.lay_over(restored, entry, time_zone.carried(now, entry))
+    except time_zone.TimeZoneError:
         return restored
 
 
