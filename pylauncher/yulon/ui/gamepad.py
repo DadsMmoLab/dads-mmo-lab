@@ -311,7 +311,14 @@ def _iter_focusable(root: QWidget) -> Iterable[QWidget]:
     A widget qualifies when it has `TabFocus` in its policy, is enabled, is
     visible to `root`, and is not a read-only text surface that would swallow
     the D-pad (a read-only `QPlainTextEdit`/`QTextEdit` still consumes arrow
-    keys to move its cursor, which is a dead-end for navigation).
+    keys to move its cursor, which is a dead-end for navigation), and does not
+    hand its focus to a proxy (T172). The navigator aims at a widget's centre,
+    and `setFocus()` on one with a focus proxy lands on the proxy instead,
+    somewhere else: a `QTabWidget` was scored at the middle of its page and
+    put the focus on its tab bar, so Down from a page's top row went UP to the
+    bar, and Left from a `QSpinBox` aimed at its own editor, whose proxy is the
+    spinbox, and did nothing. The proxy is a stop of its own, at its own place,
+    when it qualifies -- the tab bar is still where Up from the top row goes.
     """
     from PySide6.QtWidgets import QPlainTextEdit, QTextEdit
 
@@ -320,6 +327,9 @@ def _iter_focusable(root: QWidget) -> Iterable[QWidget]:
         if w is not root and (policy & Qt.FocusPolicy.TabFocus) and w.isEnabled() and w.isVisible():
             # read-only multi-line text is a D-pad trap; skip it.
             if isinstance(w, (QPlainTextEdit, QTextEdit)) and w.isReadOnly():
+                pass
+            elif w.focusProxy() is not None:
+                # Its focus goes to the proxy, not to where it is (T172).
                 pass
             else:
                 yield w
