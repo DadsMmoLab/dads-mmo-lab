@@ -15,10 +15,12 @@ case it was wrong about was a mock. Both run against local repositories only:
 from __future__ import annotations
 
 import ast
+import dataclasses
 import re
 import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1342,6 +1344,175 @@ def test_an_ordinary_containerised_update_still_lands_and_stays_shallow(
     assert impl.no_local_commits(dest, None) is True
 
 
+def _checkout_fails_once(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The next `git checkout` meets a real `index.lock`; every other command runs as it would.
+
+    Only the TIMING is arranged: the lock appears for that one command and is
+    gone after it, so the fetches before it and the update after it run
+    against a clean `.git`. The failure itself is git's own. Both bodies reach
+    git through `_run_git` here -- `RunnerGit` directly, the container through
+    `_container_git_over_host_git()` -- so one wrapper times both.
+    """
+    real = git._run_git
+    failed: list[list[str]] = []
+
+    def run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        if "checkout" in argv and not failed and cwd is not None:
+            failed.append(argv)
+            lock = cwd / ".git" / "index.lock"
+            lock.touch()
+            try:
+                return real(argv, cwd=cwd)
+            finally:
+                lock.unlink()
+        return real(argv, cwd=cwd)
+
+    monkeypatch.setattr(git, "_run_git", run)
+    return failed
+
+
+def _impl(name: str, monkeypatch: pytest.MonkeyPatch) -> git.RunnerGit | git.ContainerGit:
+    return git.RunnerGit() if name == "host" else _container_git_over_host_git(monkeypatch)
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("update", _UPDATES.values(), ids=_UPDATES.keys())
+@pytest.mark.parametrize("name", ["host", "container"])
+def test_a_release_update_whose_checkout_fails_stays_on_the_release_it_had(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+    update: Callable[[Any, git.CloneSpec], object],
+) -> None:
+    """T166: a failed pin used to leave the clone on the BRANCH TIP, past both releases.
+
+    A module that follows its releases is updated by `clone()` with `rev` set
+    to the new release. Until T149 round 2 that was two moves: `reset --hard`
+    onto the branch tip, then `checkout --detach` onto the release. When the
+    checkout failed the clone was left on the tip, AHEAD of the release, and
+    T150's guard -- rightly, for a clone somebody moved there -- refused every
+    later Update as "ahead of the newest release". Measured before the fix,
+    both bodies: HEAD on the tip, `commits_behind(release=True)` answering
+    `AHEAD_OF_RELEASE`.
+
+    Now a pinned update moves HEAD once, onto the pin, so a failed checkout
+    leaves it on the release it was on; the pin's fetch carries no depth, so
+    no graft is left either. What the next Update's guard reads there is
+    T150's ordinary shallow release update, `UNPLACED` (GitHub is asked), and
+    the Update after the failure lands.
+    """
+    upstream, commit = _upstream(tmp_path)
+    old = commit("r1.txt")
+    commit("past-r1.txt")
+    spec = git.CloneSpec(url=upstream.as_uri(), dest=tmp_path / "mod-example", rev=old)
+    git.RunnerGit().clone(spec)  # the install: tip at depth 1, then the release
+    dest = spec.dest
+    assert _rev(dest, "HEAD") == old
+    grafts = git._shallow_roots(dest)
+    commit("c4.txt")
+    newer = commit("r2.txt")
+    commit("past-r2.txt")
+    moving = dataclasses.replace(spec, rev=newer)
+    impl = _impl(name, monkeypatch)
+    failed = _checkout_fails_once(monkeypatch)
+
+    with pytest.raises(git.GitError, match="index.lock"):
+        update(impl, moving)
+    assert failed, "no checkout was attempted, so nothing here was tested"
+    assert _rev(dest, "HEAD") == old, "a failed pin left the clone somewhere else"
+    assert git._shallow_roots(dest) == grafts, "the failed pin left a graft behind"
+    assert impl.no_local_commits(dest, None) is True
+    placed = impl.commits_behind(dest, newer, release=True)
+    assert placed is git.Behind.UNPLACED, f"the next Update's guard would read {placed}"
+
+    update(impl, moving)
+    assert _rev(dest, "HEAD") == newer
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("update", _UPDATES.values(), ids=_UPDATES.keys())
+@pytest.mark.parametrize("name", ["host", "container"])
+def test_a_pinned_update_still_lands_over_a_file_this_app_changed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+    update: Callable[[Any, git.CloneSpec], object],
+) -> None:
+    """The pin's checkout discards what the `reset --hard` it replaced discarded (T166).
+
+    This app writes into its own checkouts -- a carried patch, a compose
+    file -- and a file changed in the working tree that ALSO changed between
+    the two commits makes a plain `git checkout` refuse ("Your local changes
+    would be overwritten"). The reset used to throw that change away first;
+    with the reset gone for a pin, `--force` is what does, and the update
+    guards have already refused anything that was not this app's own.
+    """
+    upstream, commit = _upstream(tmp_path)
+    old = commit("r1.txt")
+    spec = git.CloneSpec(url=upstream.as_uri(), dest=tmp_path / "mod-example", rev=old)
+    git.RunnerGit().clone(spec)
+    dest = spec.dest
+    (dest / "a.txt").write_text("patched by the app\n", encoding="utf-8")
+    (upstream / "a.txt").write_text("upstream moved\n", encoding="utf-8")
+    subprocess.run(["git", *_AUTHOR, "commit", "-qam", "a moves"], cwd=upstream, check=True)
+    newer = _rev(upstream, "HEAD")
+
+    update(_impl(name, monkeypatch), dataclasses.replace(spec, rev=newer))
+
+    assert _rev(dest, "HEAD") == newer
+    assert (dest / "a.txt").read_text(encoding="utf-8") == "upstream moved\n"
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("orphaned", [False, True], ids=["on-a-release-branch", "on-no-branch"])
+@pytest.mark.parametrize("update", _UPDATES.values(), ids=_UPDATES.keys())
+@pytest.mark.parametrize("name", ["host", "container"])
+def test_a_failed_pin_above_the_tip_leaves_no_graft_the_branch_can_walk_into(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+    update: Callable[[Any, git.CloneSpec], object],
+    orphaned: bool,
+) -> None:
+    """The review's case: a pin OFF the branch, newer than HEAD, whose checkout fails.
+
+    A release tagged on a release branch forked from the tip -- or a pin left
+    on no branch at all, as the TortoiseBots pin was on 2026-09-25 -- is not
+    under the branch tip, so it can lie ABOVE a HEAD that is not a graft. Its
+    depth-1 fetch then put it in `.git/shallow` without moving HEAD. That is
+    harmless until the branch moves THROUGH it (measured: a fast-forward of
+    the release into the branch), and then it is T149's shape and
+    `no_local_commits()` answers False for good. Measured before the fix, both
+    bodies: True straight after the failure, False after the fast-forward.
+    """
+    spec, commit = _updated_by_host_git(tmp_path)
+    upstream = Path(spec.url.removeprefix("file://"))
+    dest = spec.dest
+    head = _rev(dest, "HEAD")
+    grafts = git._shallow_roots(dest)
+    # GitHub serves a commit by its id wherever it lives; git's own server
+    # only does when told to.
+    subprocess.run(["git", "config", "uploadpack.allowAnySHA1InWant", "true"], cwd=upstream)
+    subprocess.run(["git", "checkout", "-q", "-b", "release"], cwd=upstream, check=True)
+    commit("rc.txt")
+    above = commit("release.txt")
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=upstream, check=True)
+    if orphaned:
+        subprocess.run(["git", "branch", "-q", "-D", "release"], cwd=upstream, check=True)
+    impl = _impl(name, monkeypatch)
+    failed = _checkout_fails_once(monkeypatch)
+
+    with pytest.raises(git.GitError, match="index.lock"):
+        update(impl, dataclasses.replace(spec, rev=above))
+    assert failed, "no checkout was attempted, so nothing here was tested"
+    assert _rev(dest, "HEAD") == head
+    assert git._shallow_roots(dest) == grafts, "the failed pin left a graft behind"
+
+    subprocess.run(["git", "merge", "-q", "--ff-only", above], cwd=upstream, check=True)
+    commit("next.txt")
+    assert impl.no_local_commits(dest, None) is True
+
+
 def test_both_git_implementations_check_out_the_same_sparse_tree(
     seen: list[list[str]], tmp_path: Path
 ) -> None:
@@ -1574,15 +1745,46 @@ def test_an_unpinned_source_never_checks_anything_out(
     assert not any("checkout" in argv for argv in seen)
 
 
-def test_updating_a_pinned_clone_re_applies_the_pin(seen: list[list[str]], tmp_path: Path) -> None:
-    """The update path resets to FETCH_HEAD (the tip); the pin must win afterwards."""
-    dest = tmp_path / "core"
-    (dest / ".git").mkdir(parents=True)
-    git.RunnerGit().clone(git.CloneSpec(url="https://example/repo.git", dest=dest, rev=PIN))
-    reset = next(index for index, argv in enumerate(seen) if "reset" in argv)
-    checkout = next(index for index, argv in enumerate(seen) if "checkout" in argv)
-    assert reset < checkout
-    assert seen[checkout][-3:] == ["checkout", "--detach", PIN]
+@pytest.mark.parametrize(
+    "impl", [git.RunnerGit(), git.ContainerGit()], ids=["host", "containerized"]
+)
+def test_updating_a_pinned_clone_moves_it_once_onto_the_pin(
+    seen: list[list[str]], tmp_path: Path, impl: git.RunnerGit | git.ContainerGit
+) -> None:
+    """A pinned update is ONE move, onto the pin, and its fetch writes no graft (T149, T166).
+
+    It used to reset onto the branch tip and then check the pin out on top, so
+    a failed checkout left the clone on the tip -- past the release, where
+    T150's guard refuses every later Update. And the pin was fetched at the
+    clone's depth, which grafts a pin above a HEAD that is not one. The real
+    shapes are the real-git tests above; this pins the argv on both bodies,
+    for every depth a source can carry.
+    """
+    for depth in (1, None):
+        seen.clear()
+        dest = tmp_path / f"core{depth}"
+        (dest / ".git").mkdir(parents=True)
+        impl.clone(git.CloneSpec(url="https://example/repo.git", dest=dest, rev=PIN, depth=depth))
+        assert not any("reset" in argv for argv in seen), "a stop on the branch tip first"
+        assert not any("--depth" in arg for argv in seen for arg in argv), depth
+        fetch = next(index for index, argv in enumerate(seen) if argv[-1] == PIN)
+        checkout = next(index for index, argv in enumerate(seen) if "checkout" in argv)
+        assert seen[fetch][-3:] == ["fetch", "origin", PIN]
+        assert seen[checkout][-4:] == ["checkout", "--detach", "--force", PIN]
+        assert fetch < checkout
+
+
+def test_an_unpinned_update_still_resets_onto_the_tip(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """The reset is left out for a PIN only: a branch update is the reset (T166)."""
+    for impl in (git.RunnerGit(), git.ContainerGit()):
+        seen.clear()
+        dest = tmp_path / type(impl).__name__
+        (dest / ".git").mkdir(parents=True)
+        impl.clone(git.CloneSpec(url="https://example/repo.git", dest=dest))
+        assert seen[-1][-3:] == ["reset", "--hard", "FETCH_HEAD"]
+        assert not any("checkout" in argv for argv in seen)
 
 
 def test_container_git_pins_the_same_way(seen: list[list[str]], tmp_path: Path) -> None:
