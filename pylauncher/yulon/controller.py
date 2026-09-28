@@ -23,6 +23,7 @@ from pathlib import Path
 
 from yulon import docker, wsl
 from yulon.catalog import native
+from yulon.catalog.catalog import load_catalog
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -31,6 +32,11 @@ logger = get_logger(__name__)
 # auth/world. Shorter than a first-boot import (that path goes through
 # `compose up` instead): this is a restart of containers that already exist.
 _START_DB_HEALTH_TIMEOUT = 120.0
+
+
+def _catalog_specs() -> tuple[docker.ContainerSpec, ...]:
+    """Every catalogue game's `ContainerSpec`, for naming another install's containers (T158)."""
+    return tuple(entry.container_spec() for entry in load_catalog().games)
 
 
 class PortConflictError(RuntimeError):
@@ -137,6 +143,12 @@ class Controller:
         # nothing of this install running. Separate from `_hold`, which the
         # status poll forgets the moment it sees the world down.
         self._release_owed = False
+        # How a stop of this install is heard and steered while it waits for
+        # a loading world (T158, `docker.StopControl`): its sentences, "Stop
+        # now anyway", and the app's own give-up at exit. Set by the tab that
+        # shows this install, after both exist; its `say` is called on the
+        # stop's worker thread, so it must be something that can cross threads.
+        self.stop_control: docker.StopControl | None = None
 
     # -- queries ---------------------------------------------------------
 
@@ -310,7 +322,13 @@ class Controller:
                 if candidate not in to_stop:
                     to_stop.append(candidate)
         logger.info(f"stopping the server(s) holding {self.spec.ports}: {to_stop}")
-        docker.stop_containers(to_stop, wsl_distro=self.wsl_distro)
+        self._fresh_stop()
+        # The catalogue's specs, so a blocker that is another game's world is
+        # waited for if it is still loading (T158): a server started a minute
+        # ago is the likeliest one to be holding the ports.
+        docker.stop_containers(
+            to_stop, wsl_distro=self.wsl_distro, known=_catalog_specs(), control=self.stop_control
+        )
         if self.wsl_distro is not None:
             # That server's hold is keyed by ITS world container, which is one
             # of these and cannot be told from the others by name alone; a key
@@ -357,7 +375,10 @@ class Controller:
             logger.debug(f"{self.wsl_distro} is not running; nothing to stop")
             return False
         self._save_evidence()
-        stopped = docker.stop_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        self._fresh_stop()
+        stopped = docker.stop_staged(
+            self.spec, self.server_dir, wsl_distro=self.wsl_distro, control=self.stop_control
+        )
         self._let_the_distro_go(stopped)
         return stopped
 
@@ -373,9 +394,22 @@ class Controller:
             there was nothing of it to remove.
         """
         self._save_evidence()
-        removed = docker.remove_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+        self._fresh_stop()
+        removed = docker.remove_staged(
+            self.spec, self.server_dir, wsl_distro=self.wsl_distro, control=self.stop_control
+        )
         self._let_the_distro_go(removed)
         return removed
+
+    def _fresh_stop(self) -> None:
+        """Forget a "Stop now anyway" pressed for an earlier stop, as this one begins (T158).
+
+        The wait never clears the event itself -- a rebuild's rollback hands it
+        events that are ALREADY set on purpose -- so the owner of the event does,
+        at the start of each of its own stops.
+        """
+        if self.stop_control is not None:
+            self.stop_control.anyway.clear()
 
     def _let_the_distro_go(self, ours_went_down: bool) -> None:
         """End the hold `start()` put on this server's distro, once the server is down.

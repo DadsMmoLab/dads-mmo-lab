@@ -825,6 +825,22 @@ class NativeInstall(_Strict):
     )
     db: DbFacts
     ready: ReadyMarkers
+    stop_waits_for_world_load: bool = Field(
+        default=False,
+        description=(
+            "True: this game's world server cannot hear a stop while it loads, so every stop "
+            "first waits until it can (T158, `docker.wait_for_the_world_to_load()`). A fact "
+            "about the server binary, not the family, so it is data. CMaNGOS's mangosd "
+            '(Vanilla, TBC, Tortoise) is the container\'s PID 1 (`CMD ["./mangosd"]`, no '
+            "init) and calls `_HookSignals()` only after `SetInitialWorldSettings()`, and Linux "
+            "drops a signal a namespace's init has no handler for. Measured on Vanilla, "
+            "2026-09-27: SigCgt `0000000100000000` throughout the load, `0000000100004002` "
+            "once loaded; a SIGTERM 15 s into the load was ignored and the world was SIGKILLed "
+            "280.5 s later, exit 137, while a loaded one stopped in 22.2 s, exit 0. "
+            "AzerothCore's worldserver installs its SIGINT/SIGTERM `signal_set` before it "
+            "loads, so WotLK leaves this false."
+        ),
+    )
     azerothcore: AzerothCoreData | None = Field(
         default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
     )
@@ -1696,6 +1712,9 @@ class CatalogEntry(_Strict):
             ports=(self.ports.auth, self.ports.world),
             services=self.containers.services or (),
             import_service=self.containers.db_import or "",
+            stop_waits_for_load=(
+                self.install.native is not None and self.install.native.stop_waits_for_world_load
+            ),
         )
 
 

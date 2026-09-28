@@ -1296,6 +1296,99 @@ installed" would be repeating, one layer up, the mistake this whole feature
 exists to fix — telling a user something took effect when nobody checked.
 """
 
+REBUILD_WAIT_HINT = (
+    "Stop ends the rebuild here and replaces nothing: the server keeps running the build it "
+    'had. "Stop now anyway" stops the world regardless and goes on with the replace; the '
+    "world may then be force-stopped and lose what happened since its last save."
+)
+"""Said once under a load wait before the replace (T158): what each of the panel's two
+controls does at this point. Stop is the panel's Cancel."""
+
+ROLLBACK_STOPPING = (
+    "The new build did not come up; stopping it (it may be force-stopped) and putting the "
+    "previous build back\u2026"
+)
+"""The rollback's first line once the containers were replaced (T158, round 3, the lead's words).
+
+The failed build is stopped before any tag moves back, and it may be force-stopped: if its world
+is still loading, the rollback waits and a press stops it regardless.
+"""
+
+ROLLBACK_WAIT_HINT = (
+    "The new build's world is still loading and cannot be stopped cleanly yet. Yu'lon waits "
+    'for it; "Stop now anyway" or Stop stops it regardless -- it may then be force-stopped '
+    "-- and the previous build is put back once it is down."
+)
+"""Said once under a load wait in the rollback (T158): there, Stop does not give up the stop --
+the rollback's job is to replace a build that already failed -- it forces it."""
+
+
+def _stop_control(ctx: StageContext, *, rollback: bool) -> docker.StopControl:
+    """The load wait's controls for a stop the engine makes, from the job's Cancel (T158).
+
+    The panel's "Stop now anyway" rides on the Cancel (`docker.CancelWithForce`).
+    What the Cancel itself means depends on where the stop is:
+
+    * before the replace, it GIVES UP the stop (`abandon`): nothing has been
+      touched yet, and the server keeps the build it had;
+    * in a rollback, it FORCES the stop (`also_anyway`): the build being
+      stopped has already failed, and giving up would leave it running with
+      the tags half-way.
+    """
+    cancel = ctx.cancel
+    force = cancel.anyway if isinstance(cancel, docker.CancelWithForce) else threading.Event()
+    if rollback:
+        return docker.StopControl(anyway=force, also_anyway=() if cancel is None else (cancel,))
+    return docker.StopControl(anyway=force, abandon=cancel or threading.Event())
+
+
+def _speaking(
+    work: Callable[[docker.OutputSink], object], abandon: threading.Event
+) -> Iterator[str]:
+    """Run a blocking stop on a thread, yielding what it says as it says it (T158).
+
+    A stage is a generator and its lines are the panel's output, while the
+    load wait lives inside `docker`'s blocking stop functions. This joins the
+    two: the stop's `say` is a queue this reads, so the wait is heard while it
+    waits. A reader that goes away mid-wait (the generator closed) sets
+    `abandon`, so the wait ends with nothing sent, and is waited for.
+    Whatever the work raised is raised here.
+    """
+    lines: queue.Queue[str] = queue.Queue()
+    failed: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            work(lines.put)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the reading side
+            failed.append(exc)
+
+    thread = threading.Thread(target=run, name="yulon-stop-wait", daemon=True)
+    thread.start()
+    try:
+        while thread.is_alive() or not lines.empty():
+            try:
+                yield lines.get(timeout=0.25)
+            except queue.Empty:
+                continue
+    finally:
+        if thread.is_alive():
+            abandon.set()
+            thread.join()
+    if failed:
+        raise failed[0]
+
+
+def _with_hint(lines: Iterator[str], hint: str) -> Iterator[str]:
+    """Pass `lines` through, and say `hint` once, under the first sentence of a load wait."""
+    hinted = False
+    for line in lines:
+        yield line
+        if line in docker.LOAD_WAIT_LINES and not hinted:
+            hinted = True
+            yield hint
+
+
 BUILD_CANCEL_NOTE = (
     "Stopping now leaves Docker finishing the build step it is already on, in the background. "
     "That is deliberate: the work it has done is kept, and starting this install again picks up "
@@ -3168,7 +3261,7 @@ class Seams:
     # return this seam's own fakes do not have to produce.
     start_db: Callable[[docker.ContainerSpec, Path], object] = docker.start_database
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
-    recreate: Callable[[docker.ContainerSpec, Path], bool] = docker.recreate_staged
+    recreate: Callable[..., bool] = docker.recreate_staged
     """`start` with `--force-recreate`, and the rebuild's only reason to exist as a seam.
 
     A separate field rather than a keyword on `start`, because the two are
@@ -3177,6 +3270,16 @@ class Seams:
     binary running behind an hour of perfectly correct compiler output.
     `docker.staged_up_argv()` holds why the force is asked for rather than left
     to compose.
+
+    `Callable[...]` since T158: `stage_recreate()` passes `control=` (the load
+    wait's `docker.StopControl`, carrying the rebuild's Cancel) and
+    `before_signal=` (the moment past which something may have been touched).
+    """
+    stop_servers: Callable[..., None] = docker.stop_servers_staged
+    """The rollback's stop of the FAILED build's servers, before any tag moves back (T158).
+
+    `Callable[...]` for `recreate`'s reason: it is called with the stop's
+    `control=` (`docker.StopControl`), whose load wait may hold it.
     """
     tag_image: Callable[[str, str], str] = docker.tag_image
     remove_image: Callable[..., str] = docker.remove_image
@@ -3448,6 +3551,7 @@ class Seams:
             start_db=on(docker.start_database, wsl_distro=distro),
             start=on(docker.start_staged, wsl_distro=distro),
             recreate=on(docker.recreate_staged, wsl_distro=distro),
+            stop_servers=on(docker.stop_servers_staged, wsl_distro=distro),
             tag_image=on(docker.tag_image, wsl_distro=distro),
             remove_image=on(docker.remove_image, wsl_distro=distro),
             wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
@@ -4540,7 +4644,11 @@ class StagedInstaller:
         )
 
     def stage_recreate(
-        self, ctx: StageContext, *, before_replace: Callable[[], None] | None = None
+        self,
+        ctx: StageContext,
+        *,
+        before_replace: Callable[[], None] | None = None,
+        rollback: bool = False,
     ) -> Iterator[str]:
         """Replace the long-running containers so the binary just built is the one running.
 
@@ -4574,12 +4682,39 @@ class StagedInstaller:
                 "you have is still the one that was running before this rebuild. Nothing was "
                 "touched. Check the docker daemon is up, then press Rebuild again."
             )
-        yield "Replacing the running containers so the new build is what starts."
+        yield (
+            "Replacing the containers so the build from before this rebuild is what starts."
+            if rollback
+            else "Replacing the running containers so the new build is what starts."
+        )
         spec = self.entry.container_spec()
-        if before_replace is not None:
-            before_replace()
+        # The replace begins with a stop, and a world still loading cannot hear
+        # it (T158). `recreate_staged()` waits for it right before that stop --
+        # the one check, with nothing between it and the signal -- and runs on
+        # a thread here so the wait's sentences reach the panel as it waits.
+        # `before_replace` is its `before_signal`: past it, something may have
+        # been touched; a Cancel before it leaves nothing touched.
+        control = _stop_control(ctx, rollback=rollback)
+
+        def replace_them(say: docker.OutputSink) -> bool:
+            return self._seams.recreate(
+                spec,
+                ctx.server_dir,
+                control=replace(control, say=say),
+                before_signal=before_replace,
+            )
+
         try:
-            self._seams.recreate(spec, ctx.server_dir)
+            yield from _with_hint(
+                _speaking(replace_them, control.abandon),
+                ROLLBACK_WAIT_HINT if rollback else REBUILD_WAIT_HINT,
+            )
+        except docker.StopAbandoned as exc:
+            raise InstallerError(
+                "The rebuild was cancelled while the world was still loading, so its "
+                "containers were not replaced -- the server you have is still the one that was "
+                "running before this rebuild. Nothing was touched."
+            ) from exc
         except docker.DockerCommandError as exc:
             raise InstallerError(
                 f"The server was rebuilt, but its containers could not be replaced, so the "
@@ -5647,7 +5782,29 @@ class StagedInstaller:
         if touched:
             printed = self._seams.world_output(spec).text.strip().splitlines()
             last_words = "\n".join(printed[-5:])
-        yield "Putting the build from before this rebuild back."
+            # T158, round 3: the failed build's servers go down BEFORE a single tag
+            # moves back -- a tag moved under a running container names a binary
+            # it is not running. Its world may still be loading and deaf; then
+            # this waits, says so, and the Cancel that brought us here (or "Stop
+            # now anyway") means "stop it regardless": rollback's job is to
+            # replace a build that has already failed.
+            yield ROLLBACK_STOPPING
+            control = _stop_control(ctx, rollback=True)
+
+            def stop_it(say: docker.OutputSink) -> None:
+                self._seams.stop_servers(spec, ctx.server_dir, control=replace(control, say=say))
+
+            try:
+                yield from _with_hint(_speaking(stop_it, control.abandon), ROLLBACK_WAIT_HINT)
+            except docker.DockerCommandError as exc:
+                return (
+                    f"{failure} Putting the build from before this rebuild back was not "
+                    f"attempted, because the new build's servers could not be stopped ({exc}); "
+                    f"the tags still name the new build, all of them. The old images are on "
+                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                )
+        else:
+            yield "Putting the build from before this rebuild back."
         # The new build gets its own name FIRST, so a retag that fails part-way
         # can be undone onto it (`FAILED_TAG_SUFFIX`). If even that fails,
         # nothing has moved yet and the sentence below is already true.
@@ -5709,7 +5866,7 @@ class StagedInstaller:
             "the old build is running on the database as the new one left it."
         )
         try:
-            yield from self.stage_recreate(ctx)
+            yield from self.stage_recreate(ctx, rollback=True)
             # The `-failed` names again, and the second attempt is the one that
             # can work. The first ran while the containers made FROM the new
             # build were still there, and docker refuses to remove a name whose

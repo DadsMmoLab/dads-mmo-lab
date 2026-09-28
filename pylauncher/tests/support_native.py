@@ -161,6 +161,12 @@ class Recorder:
     db_started: bool = False
     db_start_error: str = ""
     db_healthy: bool = True
+    load_lines: tuple[str, ...] = ()
+    """What `recreate`'s wait for a loading world says (T158); nothing, as a loaded world does."""
+    on_recreate: Callable[[docker.StopControl | None], None] | None = None
+    """Called inside `recreate` BEFORE its `before_signal`: where a test gives the wait up."""
+    on_stop_servers: Callable[[docker.StopControl | None], None] | None = None
+    """Called inside the rollback's `stop_servers`: where a test holds a world in its load."""
     ready: bool = True
     tag_problem: str = ""
     """What `docker tag` answers when it refuses, or empty when it tags.
@@ -718,6 +724,10 @@ class Recorder:
             start_db=self.start_db,
             start=self.start,
             recreate=self.recreate,
+            # T158: the rollback's stop of the failed build. Bound like T64's six:
+            # its default asks `docker exec`, and a world that loads on a script is
+            # `test_stop_waits_for_the_world.py`'s.
+            stop_servers=self.stop_servers,
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=self.wait_ready,
             world_output=lambda spec: self.world_output,
@@ -792,7 +802,26 @@ class Recorder:
         self.calls.append(f"rmi -f:{ref}" if force else f"rmi:{ref}")
         return ""
 
-    def recreate(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
+    def stop_servers(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        control: docker.StopControl | None = None,
+        before_signal: Callable[[], None] | None = None,
+    ) -> None:
+        """`docker.stop_servers_staged()`: recorded, with whether the stop was forced (T158)."""
+        if self.on_stop_servers is not None:
+            self.on_stop_servers(control)
+        forced = control is not None and control.forced()
+        self.calls.append("stop_servers:forced" if forced else "stop_servers")
+
+    def recreate(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        control: docker.StopControl | None = None,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
         """`docker.recreate_staged()` — `start` with `--force-recreate`.
 
         Recorded under its OWN name, never as `start`. The two are different
@@ -800,7 +829,18 @@ class Recorder:
         pre-rebuild containers running, which is the defect the whole rebuild
         control exists for, and a double that logged both as "start" could not
         tell that apart from a correct run.
+
+        T158: says `load_lines` through the stop's `control`, runs `on_recreate`
+        (a test's give-up), then `before_signal`, as the real one does around
+        its wait.
         """
+        if control is not None and control.say is not None:
+            for line in self.load_lines:
+                control.say(line)
+        if self.on_recreate is not None:
+            self.on_recreate(control)
+        if before_signal is not None:
+            before_signal()
         self.calls.append("recreate")
         return True
 
