@@ -15908,6 +15908,11 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     minimum window went up to hold the wrapped bar and the card whole with one on
     screen, and without one the smallest window now fits with the list at its
     full `MODULE_LIST_MIN_HEIGHT`.
+
+    Since T153 the card's one-line form is a rung of its own, between the boxes
+    and the list, and it is what gives at the smallest window now: the list
+    keeps its whole floor there. The list's own rung is still asserted, on a tab
+    shorter than any window the app allows -- see the second half.
     """
     import main
 
@@ -15922,35 +15927,58 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     _at(window, main.MINIMUM_WINDOW_SIZE)
     assert view.rebuild_log.collapsed, "the log is open at the smallest window"
     assert view.module_report_strip.collapsed, "the report is open at the smallest window"
-    assert view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT, (
-        "both boxes are folded and the tab STILL does not fit at this size -- the action bar "
-        "takes two lines, the card needs 136px of wrapped sentence and the banner 62 -- so the "
-        f"list's floor is the one thing left to give: it is still "
+    assert (
+        view.custom_module_line.isVisible()
+    ), "the card still has its sentence at the smallest window: it is not on one line"
+    assert view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+        "both boxes are folded and the card is on one line, so the tab no longer spends its "
+        "wrapped sentence and frame -- and the list's floor should not have given: it is "
         f"{view.modules_panel.minimumHeight()} of {controller_view_module.MODULE_LIST_MIN_HEIGHT}"
     )
-    # Strictly less, and that is a claim about the shipped catalog and theme at
-    # this one size rather than about the rule. If a future theme makes the
-    # smallest window fit outright this goes red, and that is the right red: the
-    # ladder's last rung would no longer be exercised anywhere, and this is the
-    # test that says so rather than quietly covering nothing.
-    #
-    # `_LIST_FLOOR_FLOOR` and NOT the list's own `minimumSizeHint()`, which is
-    # what this asserted until T85 on the belief that Qt ignores a minimum under
-    # a widget's hint. It does not -- `qSmartMinSize` prefers an explicit
-    # `minimumHeight()` at any value above zero -- and the hint was 70 where the
-    # ladder needed 40, so the last rung was 30px shorter than it reads and the
-    # shortfall went on to the toolbar and the card instead.
-    assert view.modules_panel.minimumHeight() >= controller_view_module._LIST_FLOOR_FLOOR, (
-        f"the floor was lowered to {view.modules_panel.minimumHeight()}, under the "
-        f"{controller_view_module._LIST_FLOOR_FLOOR} that is the bottom of this ladder -- "
-        "below it the honest answer is a tab that scrolls, not a shorter list"
-    )
+
+    # The list's own rung, which no window the app allows reaches any more with
+    # the shipped catalog and theme (T153): the window's minimum lifted, and the
+    # tab made 60px shorter than the smallest it can really be. That is the
+    # state this rung exists for -- a height somebody else's number got wrong --
+    # and asserting it here keeps the ladder's last step exercised somewhere
+    # rather than quietly covering nothing.
+    window.setMinimumSize(0, 0)
+    try:
+        _at(window, (main.MINIMUM_WINDOW_SIZE[0], main.MINIMUM_WINDOW_SIZE[1] - 60))
+        assert view.rebuild_log.collapsed and view.module_report_strip.collapsed
+        assert (
+            view.custom_module_line.isVisible()
+        ), "the card still has its sentence on a tab shorter than allowed"
+        floor = controller_view_module.MODULE_LIST_MIN_HEIGHT
+        assert view.modules_panel.minimumHeight() < floor, (
+            "both boxes folded and the card on one line, on a tab 60px shorter than the smallest "
+            "window, and the list's floor did not give: it is "
+            f"{view.modules_panel.minimumHeight()} of {floor}"
+        )
+        #
+        # `_LIST_FLOOR_FLOOR` and NOT the list's own `minimumSizeHint()`, which is
+        # what this asserted until T85 on the belief that Qt ignores a minimum under
+        # a widget's hint. It does not -- `qSmartMinSize` prefers an explicit
+        # `minimumHeight()` at any value above zero -- and the hint was 70 where the
+        # ladder needed 40, so the last rung was 30px shorter than it reads and the
+        # shortfall went on to the toolbar and the card instead.
+        assert view.modules_panel.minimumHeight() >= controller_view_module._LIST_FLOOR_FLOOR, (
+            f"the floor was lowered to {view.modules_panel.minimumHeight()}, under the "
+            f"{controller_view_module._LIST_FLOOR_FLOOR} that is the bottom of this ladder -- "
+            "below it the honest answer is a tab that scrolls, not a shorter list"
+        )
+    finally:
+        window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
 
     _a_rebuild_is_not_owed(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
 
     assert not view.rebuild_log.collapsed, "the log never came back at the default window"
     assert not view.module_report_strip.collapsed, "the report never came back"
+    # T80/T85's shot at the size the app opens at, and T153 does not change it:
+    # the list there is under two rows with both boxes open, and the card keeps
+    # its sentence because folding the boxes would give the list its rows.
+    assert view.custom_module_card.isVisible(), "the card lost its sentence at the default window"
     assert view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT, (
         f"the list's floor is still {view.modules_panel.minimumHeight()} at a window with "
         f"room for the {controller_view_module.MODULE_LIST_MIN_HEIGHT} it asks for"
@@ -15965,6 +15993,10 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
                 f"folded={view.rebuild_log.collapsed}, report "
                 f"folded={view.module_report_strip.collapsed}"
             )
+            # And the card's rung before it (T153).
+            assert (
+                view.custom_module_line.isVisible()
+            ), f"at {width}px the list gave height while the card still had its sentence"
 
 
 THE_WRAPPED_WIDTHS = tuple(range(960, 1120, 10))
@@ -16005,8 +16037,15 @@ def _cut_on_the_modules_tab(view: ControllerView, tab: Any) -> list[str]:
     layout and lets the children hang out of the bottom of the frame, which is
     what gate round 6 photographed -- two buttons below the card's own edge, on a
     card whose height on its own looked only a little short.
+
+    Every button the tab is SHOWING, outside the list, against the widget it is
+    drawn in, and no longer the buttons of every `QGroupBox` (T153). The card
+    now has a one-line form that is not a group box, and a hidden card keeps
+    whatever geometry it last had -- so the old loop both missed the buttons the
+    user can see and judged the ones nobody can. The list's own rows are exempt
+    for the first question's reason.
     """
-    from PySide6.QtWidgets import QGroupBox, QPushButton
+    from PySide6.QtWidgets import QPushButton
 
     cut = [
         why
@@ -16015,13 +16054,20 @@ def _cut_on_the_modules_tab(view: ControllerView, tab: Any) -> list[str]:
     ]
     cut += [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
     cut += _bar_holds_every_line(view)
-    for card in tab.findChildren(QGroupBox):
-        for button in card.findChildren(QPushButton):
-            if button.y() < 0 or button.y() + button.height() > card.height():
-                cut.append(
-                    f"{button.text()!r} ends at {button.y() + button.height()}px of the "
-                    f"{card.height()}px card {card.title()!r}"
-                )
+    for button in tab.findChildren(QPushButton):
+        if not button.isVisible() or view.modules_panel.isAncestorOf(button):
+            continue
+        if view.module_actions.isAncestorOf(button):
+            continue  # asked above, by `_bar_holds_every_line` and `_clipped`
+        holder = button.parentWidget()
+        if button.y() < 0 or button.y() + button.height() > holder.height():
+            cut.append(
+                f"{button.text()!r} ends at {button.y() + button.height()}px of the "
+                f"{holder.height()}px {type(holder).__name__} it is drawn in"
+            )
+        clipped = _clipped(button)
+        if clipped is not None:
+            cut.append(clipped)
     return cut
 
 
@@ -16076,6 +16122,512 @@ def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild
     # Not at any one width (see `THE_WRAPPED_WIDTHS`), but somewhere: a sweep of
     # nothing but one-line bars never measured the hard case at all.
     assert wrapped, f"the action bar was one line at every width in {THE_WRAPPED_WIDTHS}"
+
+
+# ---------------------------------------------------------------------------
+# T153: the list at the smallest window, on an install built past its pins.
+#
+# Photographed live on the T89 gate at 960x640: the version lines above the list
+# (T64/T77) are two lines the T85 budget for this window never had, and the
+# list under them was down to its header -- "C++ modules" and "Installed (1)"
+# and not one row. Measured themed offscreen in the same state: the list was
+# 66px with no row whole, and with a rebuild owed as well the ladder ran out and
+# Qt cut the custom-module card (its buttons ending at 109px of a 100px card)
+# and the wrapped action bar (100 of its 106).
+
+ROWS_AT_THE_SMALLEST_WINDOW = 2
+"""Whole module rows the list must show at 960x640, on its pins or past them.
+
+Zero before T153. Spelled here and not read out of `controller_view`, for
+`READABLE_REPORT_LINES`' reason: an assertion that takes its number from the
+constant that sizes the thing agrees with itself whatever that constant says.
+Two and not the three the ticket floated, because three does not fit this window
+with the version lines on it -- see `MODULE_LIST_ROWS_HEIGHT`.
+"""
+
+
+def _past_its_pin(
+    ps: _Ps, tmp_path: Path, custom_route: bool = False, **kwargs: Any
+) -> ControllerView:
+    """The Modules tab of an install built from past its pins: two version lines.
+
+    Through `_refresh_source_version()` and the route's own reading, the way the
+    tab draws them, rather than a `setText()` on the label: the lines are only
+    on screen because a route answered, and that is the state being measured.
+
+    `custom_route` wires the custom-module seams, for the tests that press the
+    card's buttons; off by default because it also swaps the manifest store,
+    which is the list whose rows the layout tests count.
+    """
+    services, spy = _latest(ps, tmp_path)
+    if custom_route:
+        _with_custom_route(services)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, **kwargs)
+    spy.revs = (
+        native.SourceRev("mod-playerbots/azerothcore-wotlk", "7f12e89 · 2026-09-20", pin=_PIN),
+        native.SourceRev(
+            "mod-playerbots/mod-playerbots", "7bae1b5 · 2026-09-20", pin=_PIN, ahead=2
+        ),
+    )
+    view._refresh_source_version()
+    assert len(view.source_version_label.text().splitlines()) == 2, "not the two-line state"
+    return view
+
+
+@pytest.mark.parametrize("past_the_pins", [True, False], ids=["past-the-pins", "on-the-pins"])
+def test_the_module_list_keeps_two_rows_at_the_smallest_window(
+    qapp: object, ps: _Ps, tmp_path: Path, past_the_pins: bool
+) -> None:
+    """The state the T89 gate photographed: the list was its header and nothing else.
+
+    Past the pins is that state, with the two version lines on screen. On the
+    pins is the same window without them, and it is here because it fails
+    differently: the tab has 34px more, the card whole leaves the list 100px --
+    a header and ONE row -- and a card that gave its sentence only when the
+    list was under `MODULE_LIST_MIN_HEIGHT` would keep it there.
+
+    Swept across `THE_WRAPPED_WIDTHS` at the minimum height, because the worst
+    case is at the wide end of where the bar wraps (T85) and not at 960.
+
+    Two assertions, and the second is what stops the first being bought the way
+    this tab used to buy height: rows on screen, AND nothing else on the tab
+    drawn under its minimum -- a list given its rows by cutting the card or the
+    bar is the bug from underneath.
+    """
+    import main
+
+    if past_the_pins:
+        view = _past_its_pin(ps, tmp_path)
+    else:
+        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+
+    wrapped: list[int] = []
+    for width in THE_WRAPPED_WIDTHS:
+        _at(window, (width, main.MINIMUM_WINDOW_SIZE[1]))
+        assert (
+            view.source_version_label.isVisible() is past_the_pins
+        ), f"the version lines are not in the state under test at {width}px"
+        if len({b.y() for b in _module_toolbar_buttons(view)}) > 1:
+            wrapped.append(width)
+        whole = _whole_rows_on_screen(view.modules_panel)
+        assert whole >= ROWS_AT_THE_SMALLEST_WINDOW, (
+            f"{whole} whole rows on screen at {width}x{main.MINIMUM_WINDOW_SIZE[1]}, in a list "
+            f"{view.modules_panel.height()}px tall"
+        )
+        assert _cut_on_the_modules_tab(view, tab) == [], (
+            f"something on the Modules tab is cut at {width}x{main.MINIMUM_WINDOW_SIZE[1]}: "
+            f"{_cut_on_the_modules_tab(view, tab)}"
+        )
+    assert wrapped, f"the action bar was one line at every width in {THE_WRAPPED_WIDTHS}"
+
+
+def test_past_its_pins_with_a_rebuild_owed_nothing_on_the_modules_tab_is_cut(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The state the ticket was filed from: version lines AND the banner, at 960x640.
+
+    Measured before T153: `Install from link…` ended at 109px of a 100px card and
+    the wrapped bar was drawn 100 of its 106, because the version lines' 34px
+    were more than the 6px `MINIMUM_WINDOW_SIZE` was measured to spare with the
+    banner up, and `_TabFit`'s ladder had already given everything it had.
+
+    And the list is at its FULL floor, not at the ladder's last rung: that is the
+    difference between a tab that fits and one that fits by taking the list to a
+    scrollbar.
+    """
+    import main
+
+    view = _past_its_pin(ps, tmp_path)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _a_rebuild_is_owed(view)
+
+    for width in THE_WRAPPED_WIDTHS:
+        _at(window, (width, main.MINIMUM_WINDOW_SIZE[1]))
+        assert view.rebuild_banner.isVisible(), f"the banner left at {width}px"
+        assert _cut_on_the_modules_tab(view, tab) == [], (
+            f"something on the Modules tab is cut at {width}x{main.MINIMUM_WINDOW_SIZE[1]} "
+            f"with a rebuild owed: {_cut_on_the_modules_tab(view, tab)}"
+        )
+        assert view.modules_panel.height() >= controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+            f"the list is {view.modules_panel.height()}px at {width}px: the tab fits only "
+            "by taking the list under its floor"
+        )
+
+
+def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """What the card gives up is its sentence, and only where the list needs it.
+
+    * At the size the app opens at, the card is whole -- title, sentence and both
+      buttons -- because the list has its rows there without it.
+    * At 960x640 it is one line, and that line still carries BOTH presses and
+      they are the same presses: each opens the same dialog the card's own
+      button opens. A fold that hid a press behind a handle would leave a small
+      window that cannot install a module from a link at all (see
+      `_TabFit`'s docstring for why this is a line and not a strip).
+    * And the window made big again brings the sentence back: not a one-way door.
+    """
+    import main
+
+    asked: list[str] = []
+    view = _past_its_pin(
+        ps,
+        tmp_path,
+        custom_route=True,
+        link_asker=lambda parent, title: asked.append(title),
+        folder_asker=lambda parent, title: asked.append(title),
+    )
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+    assert view.custom_module_card.isVisible(), "the card is not whole at the default window"
+    assert view.custom_module_line.isHidden(), "the one-line card is on screen beside the card"
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.custom_module_card.isHidden(), "the card kept its sentence at the smallest window"
+    assert view.custom_module_line.isVisible(), "neither form of the card is on screen"
+    line_buttons = (view.module_link_line_button, view.module_folder_line_button)
+    assert [b.text() for b in line_buttons] == [
+        view.module_link_button.text(),
+        view.module_folder_button.text(),
+    ]
+    for button in line_buttons:
+        assert button.isVisible() and button.isEnabled(), f"{button.text()!r} is not pressable"
+        _click(button)
+    assert asked == [
+        controller_view_module.MODULE_LINK_DIALOG_TITLE,
+        controller_view_module.MODULE_FOLDER_DIALOG_TITLE,
+    ], f"the one-line card's presses opened {asked}"
+
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+    assert view.custom_module_card.isVisible(), "the sentence never came back"
+    assert view.custom_module_line.isHidden(), "the one-line card stayed"
+
+
+def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """ONE gate for both forms of each press, and a dead one does nothing.
+
+    The line's buttons are relays of the card's: they grey when the card's grey,
+    carry the card's tooltip (which is where a greyed button says why), and a
+    press on one is a press on the card's -- so the two gates that grey these
+    buttons (`_set_custom_module_buttons` and the busy lock) need not know the
+    line exists, and a third one added later cannot forget it.
+    """
+    import main
+
+    asked: list[str] = []
+    services, spy = _latest(ps, tmp_path)
+    _with_custom_route(services)
+    services.module_from_link = None
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: asked.append(title),
+        folder_asker=lambda parent, title: asked.append(title),
+    )
+    spy.revs = (native.SourceRev("a/b", "7bae1b5 · 2026-09-20", pin=_PIN, ahead=2),)
+    view._refresh_source_version()
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.custom_module_line.isVisible(), "the one-line card is not what is on screen"
+
+    link, folder = view.module_link_line_button, view.module_folder_line_button
+    assert not link.isEnabled(), "the line offers a link install the game has no route for"
+    assert (
+        link.toolTip()
+        == view.module_link_button.toolTip()
+        == (controller_view_module.MODULE_CUSTOM_NO_ROUTE)
+    )
+    assert folder.isEnabled() and folder.toolTip() == view.module_folder_button.toolTip()
+    _click(link)
+    assert asked == [], "a greyed line button still opened the dialog"
+
+    # The busy lock, which greys the card's buttons by name and nothing else.
+    view._set_busy(True)
+    process_events()
+    assert not folder.isEnabled(), "the busy lock greyed the card's button and not the line's"
+    view.module_folder_button.setEnabled(True)
+    process_events()
+    assert folder.isEnabled(), "the line did not follow its card's button back"
+
+
+THE_HEIGHTS_A_DRAG_CROSSES = tuple(range(640, 901, 10))
+"""Every height from `main.MINIMUM_WINDOW_SIZE`'s to past the 800 the app opens at.
+
+Ten pixels a step, for `THE_WRAPPED_WIDTHS`' reason: a fold width is a pixel,
+and a twenty-pixel step once stepped over the one that mattered.
+"""
+
+
+@pytest.mark.parametrize("width", [960, 1280])
+@pytest.mark.parametrize(
+    "state", ["past-the-pins-with-a-rebuild-owed", "past-the-pins-after-a-job", "on-the-pins"]
+)
+def test_a_taller_window_never_takes_back_what_a_shorter_one_showed(
+    qapp: object, ps: _Ps, tmp_path: Path, width: int, state: str
+) -> None:
+    """Once the card is whole at a height, it is whole at every greater height -- and the boxes.
+
+    The cold review's probe, past the pins with a rebuild owed and a report in the
+    box: at 1280x740 and 1280x760 the card was whole and the report folded, and
+    at 1280x800 the report was open and the card on one line. A player dragging
+    the window taller watched the card's sentence go away. The card was decided
+    AFTER the boxes and from their answer, so a taller window that could keep
+    the report open had less left over for the list, and the card paid.
+
+    Asked of all three things that fold, because the same shape can come back in
+    any of them: whatever is shown at one height is shown at every height above
+    it, at a fixed width, with nobody pressing anything. Three states, because
+    each puts a different rung under load: the banner and a report (the probe),
+    a job's log and a report with no banner (T80's), and nothing at all.
+    """
+    view = _past_its_pin(ps, tmp_path) if state != "on-the-pins" else None
+    if view is None:
+        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    if state == "past-the-pins-with-a-rebuild-owed":
+        _a_rebuild_is_owed(view)
+    elif state == "past-the-pins-after-a-job":
+        _ran_a_job(view)
+        view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+        process_events()
+
+    shown: dict[str, int] = {}
+    for height in THE_HEIGHTS_A_DRAG_CROSSES:
+        _at(window, (width, height))
+        now = {
+            "the card's sentence": view.custom_module_card.isVisible(),
+            "the report": not view.module_report_strip.collapsed,
+            "the log": not view.rebuild_log.collapsed,
+        }
+        # And where the card kept its sentence with both boxes folded, the list
+        # has the rows the sentence was kept against: that is the claim the
+        # card's rung makes, and a `card_minimum()` that under-counts the card
+        # breaks it by exactly the pixels it missed.
+        if now["the card's sentence"] and not now["the report"] and not now["the log"]:
+            rows = controller_view_module.MODULE_LIST_ROWS_HEIGHT
+            assert view.modules_panel.height() >= rows, (
+                f"the card is whole at {width}x{height} over a list of "
+                f"{view.modules_panel.height()}px, under the {rows} it gives its sentence for"
+            )
+        for what, is_shown in now.items():
+            if is_shown:
+                shown.setdefault(what, height)
+            elif what in shown:
+                pytest.fail(
+                    f"{what} was shown at {width}x{shown[what]} and is gone again at "
+                    f"{width}x{height} in the {state} state"
+                )
+
+
+def _pad_routes(nav: Any, start: Any) -> dict[Any, list[Any]]:
+    """Every widget the D-pad reaches from `start`, each with the presses that reach it.
+
+    A breadth-first walk through the real `Navigator`: from each widget reached,
+    one press in each of the four directions, and whatever it focused is reached
+    too. Asked of the navigator the pad drives and not of `_iter_focusable()`,
+    because what is under test is the navigator's own idea of what exists -- a
+    cache of it, which a fresh walk of the tree would not see.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction
+
+    routes: dict[Any, list[Any]] = {start: []}
+    frontier = [start]
+    while frontier:
+        here = frontier.pop(0)
+        for direction in Direction:
+            here.setFocus()
+            nav.navigate(direction)
+            landed = QApplication.focusWidget()
+            if landed is not None and landed not in routes:
+                routes[landed] = [*routes[here], direction]
+                frontier.append(landed)
+    return routes
+
+
+def _press_a_on(nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]]) -> None:
+    """Walk the pad from `start` to `target` along its route, then press A."""
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Action
+
+    assert target in routes, f"the pad cannot reach {target.text()!r}"
+    start.setFocus()
+    for direction in routes[target]:
+        nav.navigate(direction)
+    assert QApplication.focusWidget() is target, f"the route did not end on {target.text()!r}"
+    nav.perform(Action.CONFIRM)
+    process_events()
+
+
+def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The Steam Deck's route to the card's two presses, across the card's change of form.
+
+    Through the real `Navigator`, primed at the window the app opens at -- which
+    is what fills its cache of focusable widgets -- then the window made small
+    enough that the card goes to one line. The navigator caches that list per
+    window and filters it only when it is built, so a card that changes form
+    under a primed navigator leaves it holding the hidden buttons and never
+    finding the relays: the one-line card's presses would be on screen and out
+    of the pad's reach.
+
+    Then the window grown again, and the whole card's buttons must be reachable
+    once more -- the change is not a one-way door for the pad either.
+    """
+    import main
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    asked: list[str] = []
+    view = _past_its_pin(
+        ps,
+        tmp_path,
+        custom_route=True,
+        link_asker=lambda parent, title: asked.append(title),
+        folder_asker=lambda parent, title: asked.append(title),
+    )
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    start = view.refresh_modules_button
+    try:
+        assert view.custom_module_card.isVisible(), "the card is on one line at 1280x800"
+        reached = set(_pad_routes(nav, start))
+        assert {
+            view.module_link_button,
+            view.module_folder_button,
+        } <= reached, "the whole card's buttons are out of the pad's reach before anything changed"
+
+        _at(window, main.MINIMUM_WINDOW_SIZE)
+        assert view.custom_module_line.isVisible(), "the card did not go to one line"
+        routes = _pad_routes(nav, start)
+        reached = set(routes)
+        line = [view.module_link_line_button, view.module_folder_line_button]
+        assert (
+            set(line) <= reached
+        ), "the one-line card's presses are on screen and the pad cannot reach them"
+        hidden = {view.module_link_button, view.module_folder_button} & reached
+        assert not hidden, f"the pad still lands on the hidden card's buttons: {hidden}"
+        for button in line:
+            _press_a_on(nav, start, button, routes)
+        assert asked == [
+            controller_view_module.MODULE_LINK_DIALOG_TITLE,
+            controller_view_module.MODULE_FOLDER_DIALOG_TITLE,
+        ], f"A on the one-line card opened {asked}"
+
+        _at(window, main.DEFAULT_WINDOW_SIZE)
+        assert view.custom_module_card.isVisible(), "the card stayed on one line"
+        reached = set(_pad_routes(nav, start))
+        assert {
+            view.module_link_button,
+            view.module_folder_button,
+        } <= reached, "the whole card came back and the pad cannot reach its buttons"
+        assert not set(line) & reached, "the pad still lands on the hidden line's buttons"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def _shows_and_hides(widget: Any) -> list[str]:
+    """Record every `Show` and `Hide` event on `widget`: each is a frame the user sees.
+
+    The filter object is kept alive by being parented to `widget`.
+    """
+    from PySide6.QtCore import QEvent, QObject
+
+    seen: list[str] = []
+
+    class _Counting(QObject):
+        def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802  (Qt's own name)
+            if event.type() == QEvent.Type.Show:
+                seen.append("show")
+            elif event.type() == QEvent.Type.Hide:
+                seen.append("hide")
+            return False
+
+    widget.installEventFilter(_Counting(widget))
+    return seen
+
+
+def test_the_card_changes_form_at_most_once_per_step_of_a_drag(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fold is decided from the card WHOLE, so its own fold cannot undo it.
+
+    Were the decision read off the tab as it is -- card folded, room over -- the
+    card would unfold, find no room, and fold: two transitions per settle, which
+    is the flash `test_a_restyle_at_an_unchanged_width_folds_nothing` catches in
+    the log. Zero at an unchanged width, at most one per step across a sweep
+    that crosses the fold width, and at least one somewhere so the bound is a
+    bound on something.
+    """
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    view = _past_its_pin(ps, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (960, 640))
+    seen = _shows_and_hides(view.custom_module_card)
+    apply_dadcraft_theme(window, width=window.width())
+    process_events()
+    assert seen == [], f"a restyle at an unchanged size moved the card {seen}"
+
+    worst: list[str] = []
+    moved = 0
+    for width in range(960, 1301, 10):
+        seen.clear()
+        window.resize(width, 700)
+        apply_dadcraft_theme(window, width=window.width())
+        process_events()
+        moved += len(seen)
+        if len(seen) > 1:
+            worst.append(f"{width}: {seen}")
+    assert worst == [], f"the card flickered during a drag at {worst[:3]}"
+    assert moved, "the card never changed form in the sweep, so the bound is on nothing"
+
+
+def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`_TabFit` asks the card what it needs WHOLE while it is folded -- that is the question.
+
+    The log's `open_minimum()` scar (T85) in a third widget: a derivation that is
+    light opens the card into a tab that cannot hold it. Asserted as an equality
+    between `_TabFit`'s figure, taken with the card hidden, and Qt's own
+    laid-out answer for the same card shown at the same width -- with the fit's
+    event filter off for the second reading, or it would fold the card again
+    before it could be read.
+    """
+    import main
+
+    view = _past_its_pin(ps, tmp_path)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.custom_module_card.isHidden(), "the card is whole here, so nothing is derived"
+    derived = view.modules_fit.card_minimum()
+
+    tab.removeEventFilter(view.modules_fit)
+    try:
+        view.custom_module_line.setVisible(False)
+        view.custom_module_card.setVisible(True)
+        process_events()
+        box = tab.layout()
+        item = box.itemAt(_index_of(tab, view.custom_module_card))
+        margins = box.contentsMargins()
+        really = item.minimumHeightForWidth(tab.width() - margins.left() - margins.right())
+    finally:
+        tab.installEventFilter(view.modules_fit)
+    assert (
+        derived == really
+    ), f"folded, the fit said the card needs {derived}px whole; shown, it needs {really}"
 
 
 def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
