@@ -3292,6 +3292,30 @@ STEAMOS_DOCKER_GONE_HELP = (
 )
 """What a Start that found no `docker` says on a Deck, in place of `DOCKER_CLI_MISSING_HELP`."""
 
+STEAMOS_DOCKER_REPAIR_NOT_STEAMOS = (
+    "Nothing was changed: this machine is not running SteamOS, and this repair is only for a "
+    "Steam Deck whose Docker a SteamOS update removed."
+)
+
+STEAMOS_DOCKER_REPAIR_DOCKER_PRESENT = (
+    "Nothing was changed: the docker command is on this Deck, so there is no Docker for this "
+    "repair to put back. Press Refresh, then Start."
+)
+
+STEAMOS_DOCKER_REPAIR_BUSY = (
+    "Nothing was changed: Docker is already being reinstalled from another server's tab. "
+    "Wait for that to finish, then press Refresh."
+)
+
+STEAMOS_DOCKER_REPAIR_STOPPED_EARLY = (
+    "You stopped the reinstall before anything ran, so nothing was changed."
+)
+
+STEAMOS_DOCKER_REPAIR_STOPPED_AT = (
+    'You stopped the reinstall. It stopped before "{step}"; nothing from there on ran, and '
+    "Docker is not back yet."
+)
+
 STEAMOS_DOCKER_REPAIR_DECLINED_STEP = (
     "You said no, so nothing was changed. Docker is still missing, and the server cannot start "
     f'until it is back: press "{STEAMOS_DOCKER_REPAIR_LABEL}" when you are ready.'
@@ -3314,7 +3338,9 @@ the answer unmasked; the two questions after it carry no such token, so
 `is_secret()` masks them.
 """
 
-STEAMOS_NEW_PASSWORD_QUESTION = "Choose the new password for {user}:"
+STEAMOS_NEW_PASSWORD_QUESTION = (
+    "Choose the new password for {user}. A very short one may be refused by this Deck:"
+)
 STEAMOS_NEW_PASSWORD_AGAIN = "Type the new password for {user} again:"
 STEAMOS_PASSWORDS_DIFFER = "The two passwords were not the same. "
 """Put in front of the first question again when the two answers differ."""
@@ -3426,6 +3452,13 @@ class PasswordChange:
 
     ok: bool
     said: tuple[str, ...] = ()
+    interrupted: bool = False
+    """`passwd` was stopped part way — its time ran out, or the repair was stopped.
+
+    Which is the one case where `ok` cannot say whether the password changed:
+    `passwd` may have written it just before it was stopped. The caller asks
+    `passwd -S` rather than guessing (T160 review).
+    """
 
 
 PasswordSetter = Callable[[str], PasswordChange]
@@ -3456,6 +3489,7 @@ def set_own_password(
     *,
     command: Iterable[str] = ("passwd",),
     timeout: float = _PASSWD_SECONDS,
+    cancel: threading.Event | None = None,
 ) -> PasswordChange:
     """Set this account's password with `passwd`, on a terminal, answering its prompts (T160).
 
@@ -3476,7 +3510,8 @@ def set_own_password(
     is what a quality check that refused the password does — is not answered
     again: the run is stopped and reported, with `passwd`'s own words, rather
     than typing the same refused password into it until it gives up. A prompt
-    nobody recognises is left alone and the run ends at `timeout`.
+    nobody recognises is left alone and the run ends at `timeout`, or sooner
+    when `cancel` is set (the Server tab's Stop): both are `interrupted`.
 
     The password is never logged and never kept: it reaches `passwd` on the
     terminal and nowhere else, and any output line that should somehow carry
@@ -3505,8 +3540,21 @@ def set_own_password(
 
     said: list[str] = []
     ok = False
-    watchdog = threading.Timer(timeout, stop.set)
-    watchdog.daemon = True
+    interrupted = threading.Event()
+    finished = threading.Event()
+
+    def watch() -> None:
+        # One stop for `interact()` to read, fed by three causes: a prompt this
+        # function refused to answer again (`respond`), the deadline, and the
+        # caller's own cancel. Only the last two are `interrupted`.
+        deadline = time.monotonic() + timeout
+        while not finished.wait(0.05):
+            if (cancel is not None and cancel.is_set()) or time.monotonic() >= deadline:
+                interrupted.set()
+                stop.set()
+                return
+
+    watchdog = threading.Thread(target=watch, daemon=True)
     watchdog.start()
     try:
         for line in runner.interact(
@@ -3524,9 +3572,10 @@ def set_own_password(
         logger.info(f"passwd could not be run: {exc}")
         said.append(f"passwd could not be run: {exc}")
     finally:
-        watchdog.cancel()
+        finished.set()
+        watchdog.join(timeout=1.0)
     logger.info(f"setting the account password: {'done' if ok else 'failed'}")
-    return PasswordChange(ok, tuple(said))
+    return PasswordChange(ok, tuple(said), interrupted.is_set())
 
 
 def _sudo_needs_password(do: RunCmd) -> bool:
@@ -3537,6 +3586,17 @@ def _sudo_needs_password(do: RunCmd) -> bool:
         logger.info(f"sudo could not be asked: {exc}")
         return False
     return proc.returncode != 0 and _needs_password(proc.stderr)
+
+
+def _password_status(do: RunCmd) -> str | None:
+    """The status field of `passwd -S` for this account (`P`, `NP`, `L`), or None."""
+    try:
+        proc = do(["passwd", "-S"])
+    except OSError as exc:
+        logger.info(f"passwd -S could not be run: {exc}")
+        return None
+    fields = proc.stdout.split()
+    return fields[1] if proc.returncode == 0 and len(fields) >= 2 else None
 
 
 def _has_no_password(do: RunCmd) -> bool:
@@ -3550,13 +3610,7 @@ def _has_no_password(do: RunCmd) -> bool:
     either — `passwd` refuses it ("The password for %s cannot be changed") —
     so offering to would promise a change that fails.
     """
-    try:
-        proc = do(["passwd", "-S"])
-    except OSError as exc:
-        logger.info(f"passwd -S could not be run: {exc}")
-        return False
-    fields = proc.stdout.split()
-    return proc.returncode == 0 and len(fields) >= 2 and fields[1] == "NP"
+    return _password_status(do) == "NP"
 
 
 def _new_password_from(ask: runner.Prompter, user: str) -> str | None:
@@ -3580,12 +3634,18 @@ def _set_a_password_first(
     session: SudoSession,
     user: str,
     set_password: PasswordSetter,
+    do: RunCmd,
 ) -> tuple[bool, tuple[str, ...]]:
     """Offer to set the missing sudo password, set it, and hand it to `session`.
 
     Returns whether the session now holds a verified password, and what to tell
     the user when it does not. The password lives in this frame and in the
     session's closure only: it is not returned, logged or stored.
+
+    A `passwd` that was stopped part way may still have written the password,
+    so the account is asked (`passwd -S`) rather than told it has none: `P`
+    means it was set, and the repair goes on with it exactly as after a clean
+    run; anything else is reported as not set.
     """
     if not _explicit_yes(ask(STEAMOS_SET_PASSWORD_QUESTION.format(user=user))):
         return False, ()
@@ -3593,7 +3653,14 @@ def _set_a_password_first(
     if password is None:
         return False, ()
     change = set_password(password)
-    if not change.ok:
+    if not change.ok and change.interrupted and _password_status(do) == "P":
+        logger.info("passwd was stopped part way, and the account now has a password")
+    elif not change.ok and change.interrupted:
+        return False, (
+            "Setting the password was stopped before passwd finished, and the Deck does not show "
+            "a password set for this account.",
+        )
+    elif not change.ok:
         said = "; ".join(change.said) or "passwd gave no reason"
         return False, (f"Setting the password did not work — passwd said: {said}",)
     if not session.adopt(password):
@@ -3602,6 +3669,39 @@ def _set_a_password_first(
             "Try the password with sudo in Konsole.",
         )
     return True, ()
+
+
+_STEAMOS_REPAIR_LOCK = threading.Lock()
+"""One repair at a time in this process, whichever tab pressed it (T160 review).
+
+Two servers on one Deck are two tabs, each with its own button. Two repairs
+at once would delete and rebuild the keyring under a pacman the other one is
+running, so the second press is refused before it asks anything.
+"""
+
+
+def steamos_docker_repair_running() -> bool:
+    """Is a repair running in this process? What the other tabs read to refuse their press."""
+    return _STEAMOS_REPAIR_LOCK.locked()
+
+
+def _steamos_repair_refusal(find: Callable[[str], str | None]) -> str | None:
+    """Why this machine is not one to repair, or None: SteamOS, and no `docker` command.
+
+    The repair deletes the keyring, so it re-checks the machine itself rather
+    than trusting the button that started it. Asked before the first question
+    and again just before the keyring is deleted: Docker that appeared in
+    between (installed by hand in Konsole while the dialogs were open) means
+    there is nothing to put back, and the destructive step must not run.
+    """
+    if not is_steamos():
+        return STEAMOS_DOCKER_REPAIR_NOT_STEAMOS
+    if find("docker") is not None:
+        return STEAMOS_DOCKER_REPAIR_DOCKER_PRESENT
+    return None
+
+
+_KEYRING_DELETION = ["rm", "-rf", "/etc/pacman.d/gnupg"]
 
 
 def repair_docker_after_steamos_update(
@@ -3634,17 +3734,54 @@ def repair_docker_after_steamos_update(
     `ask` is required: this is only ever run from the Server tab's button, and
     headless `--provision` never reaches it, so the password is never offered
     to a run with nobody there.
+
+    Refused without running anything when another repair holds
+    `_STEAMOS_REPAIR_LOCK`, and when `_steamos_repair_refusal()` says this is
+    not a Deck whose Docker is gone — checked before the first question and
+    again just before the keyring is deleted.
     """
+    if not _STEAMOS_REPAIR_LOCK.acquire(blocking=False):
+        logger.info("steamos docker repair: refused, another one is running")
+        return ProvisionReport(
+            "linux", manual_steps=(STEAMOS_DOCKER_REPAIR_BUSY,), docker_group="not-asked"
+        )
+    try:
+        return _repair_docker_after_steamos_update(
+            ask, run, which, run_input, set_password, user, wait_seconds, cancel
+        )
+    finally:
+        _STEAMOS_REPAIR_LOCK.release()
+
+
+def _repair_docker_after_steamos_update(
+    ask: runner.Prompter,
+    run: RunCmd | None,
+    which: Callable[[str], str | None] | None,
+    run_input: RunWithInput | None,
+    set_password: PasswordSetter | None,
+    user: str | None,
+    wait_seconds: float,
+    cancel: threading.Event | None,
+) -> ProvisionReport:
+    """`repair_docker_after_steamos_update()`'s body, run while it holds the lock."""
     do: RunCmd = run if run is not None else _DefaultRunner(_c_locale_env())
     find = which if which is not None else _which
     who = _linux_user(user)
+    refusal = _steamos_repair_refusal(find)
+    if refusal is not None:
+        logger.info(f"steamos docker repair: refused before asking: {refusal}")
+        return ProvisionReport("linux", manual_steps=(refusal,), docker_group="not-asked")
     if not _may_open_a_dialog(False, cancel):
         return ProvisionReport("linux", docker_group="not-asked")
     if not _explicit_yes(ask(STEAMOS_DOCKER_REPAIR_QUESTION)):
-        logger.info("steamos docker repair: declined")
-        return ProvisionReport(
-            "linux", manual_steps=(STEAMOS_DOCKER_REPAIR_DECLINED_STEP,), docker_group="not-asked"
+        stopped_early = cancel is not None and cancel.is_set()
+        logger.info(f"steamos docker repair: {'stopped' if stopped_early else 'declined'}")
+        said = (
+            STEAMOS_DOCKER_REPAIR_STOPPED_EARLY
+            if stopped_early
+            else (STEAMOS_DOCKER_REPAIR_DECLINED_STEP)
         )
+        return ProvisionReport("linux", manual_steps=(said,), docker_group="not-asked")
     consent = _settle_docker_group(do, who, False, cancel, ask)
     session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
     # What HAPPENED to the group, as `_ensure_docker_linux()` reports it: a yes
@@ -3652,9 +3789,12 @@ def repair_docker_after_steamos_update(
     outcome: DockerGroupOutcome = "join-failed" if consent == "granted" else consent
 
     if _sudo_needs_password(do) and _has_no_password(do):
-        elevated, why = _set_a_password_first(
-            ask, session, who, set_password if set_password is not None else set_own_password
+        setter: PasswordSetter = (
+            set_password
+            if set_password is not None
+            else (lambda password: set_own_password(password, cancel=cancel))
         )
+        elevated, why = _set_a_password_first(ask, session, who, setter, do)
         if not elevated:
             return ProvisionReport(
                 "linux",
@@ -3666,10 +3806,16 @@ def repair_docker_after_steamos_update(
     skipped: list[str] = []
     stopped: str | None = None
     commands = steamos_docker_repair_commands(devmode=find("steamos-devmode") is not None)
+    refused_late: str | None = None
     for cmd, tolerated in commands:
         if cancel is not None and cancel.is_set():
             stopped = f"{' '.join(cmd)}: stopped before it ran"
             break
+        if cmd == _KEYRING_DELETION:
+            refused_late = _steamos_repair_refusal(find)
+            if refused_late is not None:
+                logger.info(f"steamos docker repair: refused before the keyring: {refused_late}")
+                break
         ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
         done += ran
         skipped += failed
@@ -3677,7 +3823,7 @@ def repair_docker_after_steamos_update(
             stopped = failed[0]
             break
 
-    if stopped is None and consent == "granted":
+    if stopped is None and refused_late is None and consent == "granted":
         joined, refused = _run_steps(
             do, [["usermod", "-aG", "docker", who]], sudo=True, dry_run=False, session=session
         )
@@ -3688,7 +3834,11 @@ def repair_docker_after_steamos_update(
 
     manual: list[str] = []
     ready = False
-    if stopped is not None and session.outcome in ("declined", "refused", "unavailable"):
+    if refused_late is not None:
+        manual.append(refused_late)
+    elif stopped is not None and stopped.endswith(": stopped before it ran"):
+        manual.append(STEAMOS_DOCKER_REPAIR_STOPPED_AT.format(step=_step_command(stopped)))
+    elif stopped is not None and session.outcome in ("declined", "refused", "unavailable"):
         # Stopped by sudo, not by the step: "check that the Deck is online" is
         # the wrong advice for a password that was left empty or mistyped.
         manual.append(
@@ -3708,7 +3858,7 @@ def repair_docker_after_steamos_update(
                 manual.append(STEAMOS_DOCKER_SESSION_STEP)
         else:
             manual.append(STEAMOS_DOCKER_NOT_STARTED_STEP)
-    if outcome == "join-failed" and stopped is None:
+    if outcome == "join-failed" and stopped is None and refused_late is None:
         manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=who))
     if "steamos-readonly disable" in done:
         manual.append(STEAMOS_READONLY_LEFT_OFF_STEP)

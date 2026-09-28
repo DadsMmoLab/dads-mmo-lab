@@ -118,12 +118,12 @@ class Facts:
     Defaults to False, the plain Linux box, so a fact nobody established can
     never invent a Docker Desktop on a machine that has none.
     """
-    steamos: bool = False
-    """Is this Linux a Steam Deck's SteamOS? (T160) Asked only on Linux; False is "no" or "unasked".
+    steamos_docker_gone: bool = False
+    """SteamOS, and no `docker` command: a Deck a SteamOS update took Docker from (T160).
 
-    Read by the dead-daemon remedy alone: on a Deck, Docker that stopped
-    answering is most often Docker that a SteamOS update removed, and the
-    Server tab has the button that puts it back.
+    `platform.steamos_docker_removed()`, the same question that shows the
+    Server tab's reinstall button, so the dead-daemon remedy names that button
+    only when it is on screen. Asked only on Linux; False is "no" or "unasked".
     """
     compose_ready: bool | None = None
     """Whether `docker compose` works. `None` = not asked, because with no
@@ -325,7 +325,7 @@ def gather(
     ask_wsl = in_wsl if in_wsl is not None else platform.in_wsl
     wsl = ask_wsl() if here == "linux" else False
     # T160, resolved late like the three above so one patch of `platform` is seen here.
-    steamos = platform.is_steamos() if here == "linux" else False
+    docker_gone = platform.steamos_docker_removed() if here == "linux" else False
     # The server folder is probed here rather than inside the `Facts(...)` call
     # below, so that the two bind probes run in the order they are reported.
     # Left inline it would be the client that goes first: the client block sits
@@ -362,7 +362,7 @@ def gather(
         platform_id=here,
         docker_ready=ready,
         in_wsl=wsl,
-        steamos=steamos,
+        steamos_docker_gone=docker_gone,
         compose_ready=compose,
         vm=facts_vm,
         data_root=root,
@@ -681,14 +681,13 @@ def _daemon_remedy(facts: Facts) -> str:
         "docker` — and try again. If it is already running, your user may not be allowed to "
         "talk to it: `sudo usermod -aG docker $USER`, then log out and back in."
     )
-    if facts.steamos:
+    if facts.steamos_docker_gone:
         # T160. After a SteamOS update there is no service to start: the update
-        # took the package. The tab of any server already installed here offers
-        # the repair.
+        # took the package, and the tab of any server already installed here
+        # shows the button that puts it back.
         return (
-            "On a Steam Deck, a SteamOS update removes Docker: if this Deck has updated since "
-            f'Docker last worked, press "{platform.STEAMOS_DOCKER_REPAIR_LABEL}" on a server\'s '
-            "tab to put it back. Otherwise: " + engine
+            "This Steam Deck has no docker command: a SteamOS update removes Docker. Press "
+            f'"{platform.STEAMOS_DOCKER_REPAIR_LABEL}" on a server\'s tab to put it back.'
         )
     return engine
 

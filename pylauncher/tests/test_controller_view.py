@@ -8985,6 +8985,80 @@ def test_pressing_the_reinstall_runs_the_repair_with_a_prompter_and_shows_its_re
     assert view.start_button.isEnabled() or view.stop_button.isEnabled()
 
 
+def test_another_tabs_running_repair_greys_this_button_and_refuses_its_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two servers on one Deck are two buttons; one keyring (T160 review)."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    ran: list[object] = []
+    monkeypatch.setattr(
+        yulon_platform, "repair_docker_after_steamos_update", lambda **kw: ran.append(kw)
+    )
+
+    assert yulon_platform._STEAMOS_REPAIR_LOCK.acquire(blocking=False)
+    try:
+        view.refresh_status()
+        assert not view.reinstall_docker_button.isHidden()
+        assert not view.reinstall_docker_button.isEnabled(), "live while another tab repairs"
+        view.reinstall_docker()
+        assert ran == [], "a second repair was started beside the first"
+        assert view.problem_label.text() == yulon_platform.STEAMOS_DOCKER_REPAIR_BUSY
+    finally:
+        yulon_platform._STEAMOS_REPAIR_LOCK.release()
+
+    view.refresh_status()
+    assert view.reinstall_docker_button.isEnabled(), "still grey after the other one finished"
+
+
+def test_the_button_is_the_stop_while_its_repair_runs_and_the_cancel_reaches_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer: a stuck prompt must not hold the tab with no way out."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    seen: dict[str, object] = {}
+
+    def repair(**kw: object) -> yulon_platform.ProvisionReport:
+        # The job runner is synchronous here, so "during the run" is inside this call.
+        seen["label"] = view.reinstall_docker_button.text()
+        seen["enabled"] = view.reinstall_docker_button.isEnabled()
+        seen["title"] = view._docker_prompter._title  # type: ignore[union-attr]
+        view.reinstall_docker()  # the second press: Stop
+        cancel = kw["cancel"]
+        assert isinstance(cancel, threading.Event)
+        seen["cancelled"] = cancel.is_set()
+        return yulon_platform.ProvisionReport(
+            "linux", manual_steps=(yulon_platform.STEAMOS_DOCKER_REPAIR_STOPPED_EARLY,)
+        )
+
+    monkeypatch.setattr(yulon_platform, "repair_docker_after_steamos_update", repair)
+
+    view.reinstall_docker()
+
+    assert seen == {
+        "label": controller_view_module.STOP_DOCKER_REINSTALL,
+        "enabled": True,
+        "title": controller_view_module.DOCKER_REINSTALL_PROMPT_TITLE,
+        "cancelled": True,
+    }
+    assert view.reinstall_docker_button.text() == yulon_platform.STEAMOS_DOCKER_REPAIR_LABEL
+    assert view._docker_repair_cancel is None
+    assert view.problem_label.text() == yulon_platform.STEAMOS_DOCKER_REPAIR_STOPPED_EARLY
+
+
+def test_closing_the_tab_stops_a_repair_that_is_waiting(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    cancel = threading.Event()
+    view._docker_repair_cancel = cancel
+    view.shutdown()
+    assert cancel.is_set()
+
+
 def test_a_running_docker_this_session_cannot_reach_offers_the_restart(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

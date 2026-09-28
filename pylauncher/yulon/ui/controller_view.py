@@ -2888,6 +2888,16 @@ wrapped problem label.
 
 REPAIR_IDLE = "Repair: finish the database import…"
 
+STOP_DOCKER_REINSTALL = "Stop reinstalling Docker"
+"""The reinstall button's label while its repair runs: pressing it again stops it (T160)."""
+
+STOPPING_DOCKER_REINSTALL = (
+    "Stopping the Docker reinstall. The step running now finishes first; nothing after it runs."
+)
+
+DOCKER_REINSTALL_PROMPT_TITLE = "Reinstalling Docker"
+"""The question dialogs' title for the repair, in place of "The installer needs an answer"."""
+
 DASHBOARD_SWITCH_OFF = "Bot dashboard: Off"
 DASHBOARD_SWITCH_ON = "Bot dashboard: On"
 DASHBOARD_ABOUT = (
@@ -4868,6 +4878,8 @@ class ControllerView(QWidget):
         self.reinstall_docker_button.setProperty("primary", True)
         self.reinstall_docker_button.setVisible(False)
         self._docker_prompter: InputPrompter | None = None
+        # The running repair's cancel; None when this tab is not running one.
+        self._docker_repair_cancel: threading.Event | None = None
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -5077,6 +5089,10 @@ class ControllerView(QWidget):
         """Stop this tab's timers and join its background jobs (called before teardown)."""
         self._closed = True
         self._timer.stop()
+        if self._docker_repair_cancel is not None:
+            # T160: a repair waiting on a question stops rather than holding
+            # the join below for as long as nobody answers.
+            self._docker_repair_cancel.set()
         for panel in self.log_panels():
             panel.stop()
             panel.wait(5000)
@@ -6040,32 +6056,68 @@ class ControllerView(QWidget):
         could not ask it, and a Start that had no CLI to run. Stateless, as
         `platform.steamos_docker_removed()` explains, and cheap enough for the
         GUI thread. Withdrawn by the first poll Docker answers.
+
+        Greyed while a repair runs from ANOTHER tab: two servers on one Deck
+        are two buttons, and the process allows one repair at a time
+        (`platform.steamos_docker_repair_running()`). This tab's own running
+        repair keeps it live, because then it is the Stop.
         """
         offered = platform.steamos_docker_removed()
         self.reinstall_docker_button.setVisible(offered)
+        if self._docker_repair_cancel is None:
+            self.reinstall_docker_button.setEnabled(
+                not self._busy and not platform.steamos_docker_repair_running()
+            )
         return offered
 
     @Slot()
     def reinstall_docker(self) -> None:
-        """Run the SteamOS Docker repair off the GUI thread, its questions asked here (T160)."""
+        """Run the SteamOS Docker repair off the GUI thread, or stop the one running (T160).
+
+        While it runs the button is the way out: a question left open, or a
+        `passwd` waiting on something nobody recognised, would otherwise hold
+        the tab until its own deadline. The press sets the job's cancel, which
+        the repair reads between steps, the prompter reads while it waits, and
+        `set_own_password()` reads while `passwd` runs.
+        """
+        if self._docker_repair_cancel is not None:
+            self._docker_repair_cancel.set()
+            self.reinstall_docker_button.setEnabled(False)
+            self.problem_label.setText(STOPPING_DOCKER_REINSTALL)
+            return
+        if platform.steamos_docker_repair_running():
+            self.problem_label.setText(platform.STEAMOS_DOCKER_REPAIR_BUSY)
+            self.reinstall_docker_button.setEnabled(False)
+            return
+        cancel = threading.Event()
+        self._docker_repair_cancel = cancel
         self._disarm_actions()
         self._set_busy(True)
+        self.reinstall_docker_button.setText(STOP_DOCKER_REINSTALL)
+        self.reinstall_docker_button.setEnabled(True)
         self.problem_label.setText(
             "Reinstalling Docker. Answer the questions as they come; this can take a few minutes."
         )
         if self._docker_prompter is None:
-            self._docker_prompter = InputPrompter(self)
+            self._docker_prompter = InputPrompter(self, title=DOCKER_REINSTALL_PROMPT_TITLE)
+        self._docker_prompter.bind_cancel(cancel)
         ask = self._docker_prompter.ask
         self._run(
-            lambda: platform.repair_docker_after_steamos_update(ask=ask),
+            lambda: platform.repair_docker_after_steamos_update(ask=ask, cancel=cancel),
             self._docker_reinstalled,
             self._docker_reinstall_failed,
         )
 
+    def _end_docker_reinstall(self) -> None:
+        """The button is the reinstall again, and this tab's busy lock is lifted."""
+        self._docker_repair_cancel = None
+        self.reinstall_docker_button.setText(platform.STEAMOS_DOCKER_REPAIR_LABEL)
+        self._set_busy(False)
+
     @Slot(object)
     def _docker_reinstalled(self, result: object) -> None:
         """Say what the repair did, and offer the restart that picks up the group."""
-        self._set_busy(False)
+        self._end_docker_reinstall()
         if not isinstance(result, platform.ProvisionReport):
             return
         self.problem_label.setText("\n".join(result.manual_steps))
@@ -6089,7 +6141,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _docker_reinstall_failed(self, exc: object) -> None:
-        self._set_busy(False)
+        self._end_docker_reinstall()
         self.problem_label.setText(f"Reinstalling Docker stopped: {exc}")
         self.refresh_status()
 

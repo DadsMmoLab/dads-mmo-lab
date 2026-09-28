@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +29,12 @@ USER = "deck"
 PASSWORD = "c0rrect-horse"
 
 _REQUIRED = "sudo: a password is required\n"
+
+
+@pytest.fixture(autouse=True)
+def _on_steamos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test here is on a Deck unless it says otherwise: the repair re-checks (T160 review)."""
+    monkeypatch.setattr(platform, "is_steamos", lambda: True)
 
 
 class _Deck:
@@ -615,3 +622,208 @@ def test_a_missing_passwd_is_not_ok(tmp_path: Path) -> None:
         PASSWORD, command=[str(tmp_path / "no-such-passwd")], timeout=5.0
     )
     assert not change.ok
+
+
+# ------------------------------------------------ preconditions and the lock (round 2)
+
+
+def test_a_host_that_is_not_steamos_is_refused_before_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex [high]: the repair checks the machine itself, not only the button."""
+    monkeypatch.setattr(platform, "is_steamos", lambda: False)
+    deck = _Deck()
+    asked, ask = _answers()
+
+    report = _repair(deck, ask)
+
+    assert asked == [] and deck.calls == [] and deck.feeds == []
+    assert report.manual_steps == (platform.STEAMOS_DOCKER_REPAIR_NOT_STEAMOS,)
+
+
+def test_a_deck_that_has_docker_is_refused_before_anything() -> None:
+    deck = _Deck()
+    asked, ask = _answers()
+
+    def which(name: str) -> str | None:
+        return "/usr/bin/docker" if name == "docker" else None
+
+    report = platform.repair_docker_after_steamos_update(
+        ask=ask, run=deck, which=which, run_input=deck.feed, user=USER, wait_seconds=0.0
+    )
+
+    assert asked == [] and deck.calls == []
+    assert report.manual_steps == (platform.STEAMOS_DOCKER_REPAIR_DOCKER_PRESENT,)
+
+
+def test_docker_appearing_after_the_yes_stops_the_run_before_the_keyring_is_deleted() -> None:
+    """Checked again just before the destructive step, with a machine that changed in between."""
+    deck = _Deck()
+
+    def which(name: str) -> str | None:
+        # Docker "installed by hand in Konsole" once the unlock has run.
+        if name == "docker" and "steamos-readonly disable" in deck.steps:
+            return "/usr/bin/docker"
+        return None
+
+    report = platform.repair_docker_after_steamos_update(
+        ask=_answers("y")[1],
+        run=deck,
+        which=which,
+        run_input=deck.feed,
+        user=USER,
+        wait_seconds=0.0,
+    )
+
+    assert deck.steps == ["steamos-readonly disable"], "the keyring was deleted anyway"
+    assert report.manual_steps[0] == platform.STEAMOS_DOCKER_REPAIR_DOCKER_PRESENT
+    assert platform.STEAMOS_READONLY_LEFT_OFF_STEP in report.manual_steps
+    assert not report.docker_ready
+
+
+def test_a_second_repair_while_one_runs_is_refused_without_a_question() -> None:
+    """Reviewer: two tabs, one keyring. The second press is refused before it asks."""
+    deck = _Deck()
+    inner: list[platform.ProvisionReport] = []
+    running: list[bool] = []
+
+    def ask(question: str) -> str | None:
+        if question == platform.STEAMOS_DOCKER_REPAIR_QUESTION and not inner:
+            running.append(platform.steamos_docker_repair_running())
+            second_deck = _Deck()
+            inner.append(_repair(second_deck, _answers()[1]))
+            assert second_deck.calls == [] and second_deck.feeds == []
+        return "y"
+
+    first = _repair(deck, ask)
+
+    assert running == [True]
+    assert inner[0].manual_steps == (platform.STEAMOS_DOCKER_REPAIR_BUSY,)
+    assert first.docker_ready, "the first repair was disturbed by the refused one"
+    assert not platform.steamos_docker_repair_running(), "the lock outlived the repair"
+
+
+def test_the_lock_is_given_back_when_the_repair_raises() -> None:
+    def boom(_question: str) -> str | None:
+        raise RuntimeError("the dialog broke")
+
+    with pytest.raises(RuntimeError):
+        _repair(_Deck(), boom)
+    assert not platform.steamos_docker_repair_running()
+
+
+def test_a_stop_between_steps_says_the_user_stopped_it() -> None:
+    deck = _Deck()
+    cancel = threading.Event()
+
+    def ask(question: str) -> str | None:
+        return "y"
+
+    original = deck._step
+
+    def step_then_stop(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        proc = original(cmd)
+        if cmd == ["pacman-key", "--init"]:
+            cancel.set()
+        return proc
+
+    deck._step = step_then_stop  # type: ignore[method-assign]
+    report = platform.repair_docker_after_steamos_update(
+        ask=ask,
+        run=deck,
+        which=_devmode(True),
+        run_input=deck.feed,
+        user=USER,
+        wait_seconds=0.0,
+        cancel=cancel,
+    )
+
+    assert deck.steps == SCRIPT_ORDER[:3]
+    assert report.manual_steps[0] == platform.STEAMOS_DOCKER_REPAIR_STOPPED_AT.format(
+        step="pacman-key --populate archlinux holo"
+    )
+    assert "online" not in report.manual_steps[0]
+
+
+# ------------------------------------------------------ passwd that is stopped part way
+
+
+def test_an_interrupted_passwd_that_did_set_the_password_carries_on_with_it() -> None:
+    """`passwd -S` decides, not the interruption: `P` means it was written (T160 review)."""
+    deck = _Deck(sudo_needs_password=True, passwd_status="NP")
+
+    def set_then_hang(_password: str) -> platform.PasswordChange:
+        deck.passwd_status = "P"
+        return platform.PasswordChange(False, (), interrupted=True)
+
+    report = _repair(deck, _answers("y", "y", PASSWORD, PASSWORD)[1], set_password=set_then_hang)
+
+    assert deck.steps == SCRIPT_ORDER
+    assert report.docker_ready
+
+
+def test_an_interrupted_passwd_that_set_nothing_falls_back_to_konsole() -> None:
+    deck = _Deck(sudo_needs_password=True, passwd_status="NP")
+
+    def hangs(_password: str) -> platform.PasswordChange:
+        return platform.PasswordChange(False, (), interrupted=True)
+
+    report = _repair(deck, _answers("y", "y", PASSWORD, PASSWORD)[1], set_password=hangs)
+
+    assert deck.steps == [] and deck.feeds == []
+    assert "stopped before passwd finished" in report.manual_steps[0]
+    assert report.manual_steps[-1] == platform.STEAMOS_SET_PASSWORD_BY_HAND_STEP.format(user=USER)
+
+
+_UNRECOGNISED = """\
+printf 'Enter the magic word: '
+IFS= read -r a < /dev/tty
+echo "$a" > "{out}"
+"""
+
+
+@needs_tty
+def test_a_prompt_nobody_recognises_is_left_alone_and_the_watchdog_ends_it(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "answered"
+    started = time.monotonic()
+    change = platform.set_own_password(
+        PASSWORD, command=_passwd(tmp_path, _UNRECOGNISED.format(out=out)), timeout=1.0
+    )
+    took = time.monotonic() - started
+
+    assert not change.ok and change.interrupted
+    assert not out.exists(), "an unrecognised prompt was answered"
+    assert 0.9 <= took < 6.0, took
+
+
+@needs_tty
+def test_a_cancel_stops_passwd_long_before_its_deadline(tmp_path: Path) -> None:
+    out = tmp_path / "answered"
+    cancel = threading.Event()
+    threading.Timer(0.5, cancel.set).start()
+    started = time.monotonic()
+    change = platform.set_own_password(
+        PASSWORD,
+        command=_passwd(tmp_path, _UNRECOGNISED.format(out=out)),
+        timeout=30.0,
+        cancel=cancel,
+    )
+    assert not change.ok and change.interrupted
+    assert time.monotonic() - started < 6.0
+
+
+@needs_tty
+def test_a_clean_passwd_run_is_not_interrupted(tmp_path: Path) -> None:
+    out = tmp_path / "set-to"
+    change = platform.set_own_password(
+        PASSWORD, command=_passwd(tmp_path, _PAM_BLANK.format(out=out)), timeout=10.0
+    )
+    assert change.ok and not change.interrupted
+
+
+def test_the_new_password_question_warns_that_a_short_one_may_be_refused() -> None:
+    question = platform.STEAMOS_NEW_PASSWORD_QUESTION.format(user=USER)
+    assert "very short one may be refused" in question
+    assert is_secret(question)
