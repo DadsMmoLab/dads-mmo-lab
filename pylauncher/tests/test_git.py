@@ -17,7 +17,7 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -117,8 +117,11 @@ def test_update_of_an_existing_clone_fetches_and_resets(
     ]
 
 
+@pytest.mark.parametrize(
+    "impl", [git.RunnerGit(), git.ContainerGit()], ids=["host", "containerized"]
+)
 def test_update_never_changes_the_depth_of_an_existing_clone(
-    seen: list[list[str]], tmp_path: Path
+    seen: list[list[str]], tmp_path: Path, impl: git.RunnerGit | git.ContainerGit
 ) -> None:
     """`git fetch --depth=1` TRUNCATES a full clone; the update path must not do that.
 
@@ -128,12 +131,19 @@ def test_update_never_changes_the_depth_of_an_existing_clone(
     was never issued. Either way the spec's `depth` would be decided by whatever
     the last update happened to do, and for AzerothCore a shallow clone makes
     CMake bake the wrong revision into a three-hour build.
+
+    Both bodies (T149). `ContainerGit` passed the clone's depth on this fetch
+    until then, and on a shallow clone that is not harmless either: it puts the
+    fetched tip in `.git/shallow` before the reset, so a reset that then fails
+    leaves a graft above HEAD that the next update's own guard reads as the
+    user's commits (the real-git tests below `_updated_by_host_git()`).
     """
     for depth in (1, None, 50):
         seen.clear()
         dest = tmp_path / f"clone{depth}"
         (dest / ".git").mkdir(parents=True)
-        git.RunnerGit().clone(git.CloneSpec(url="https://example/m.git", dest=dest, depth=depth))
+        impl.clone(git.CloneSpec(url="https://example/m.git", dest=dest, depth=depth))
+        assert any("fetch" in argv for argv in seen), "no update fetch was run at all"
         assert not any("--depth" in arg for argv in seen for arg in argv), depth
         assert not any("--unshallow" in arg for argv in seen for arg in argv), depth
 
@@ -1152,6 +1162,184 @@ def test_a_shallow_pin_behind_the_tip_is_not_a_commit_of_the_users(tmp_path: Pat
     subprocess.run([*["git", *author], "commit", "-qm", "mine"], cwd=dest, check=True)
 
     assert impl.no_local_commits(dest, None) is False
+
+
+_AUTHOR = ["-c", "user.email=t@example", "-c", "user.name=t"]
+
+
+def _upstream(tmp_path: Path) -> tuple[Path, Callable[[str], str]]:
+    """A real `git init` upstream with one commit, and a function that adds one more."""
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=upstream, check=True)
+
+    def commit(name: str) -> str:
+        (upstream / name).write_text(f"{name}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+        subprocess.run(["git", *_AUTHOR, "commit", "-qm", name], cwd=upstream, check=True)
+        return _rev(upstream, "HEAD")
+
+    commit("a.txt")
+    return upstream, commit
+
+
+def _rev(repo: Path, rev: str) -> str:
+    done = subprocess.run(
+        ["git", "rev-parse", rev], cwd=repo, check=True, capture_output=True, text=True
+    )
+    return done.stdout.strip()
+
+
+def _updated_by_host_git(tmp_path: Path) -> tuple[git.CloneSpec, Callable[[str], str]]:
+    """A depth-1 module clone that host git has updated once: HEAD is NOT a graft (T149).
+
+    Host git's `_update()` fetches without a depth, so the new tip arrives with
+    the edge down to the commit the clone was made at, and HEAD walks to it.
+    That is the half of the stranded shape an ordinary update makes; the other
+    half is a graft ABOVE this HEAD. Asserted rather than assumed, because a
+    fixture that started on a grafted HEAD would pass every test below for a
+    reason that has nothing to do with them.
+    """
+    upstream, commit = _upstream(tmp_path)
+    spec = git.CloneSpec(url=upstream.as_uri(), dest=tmp_path / "mod-example")
+    assert spec.depth == 1
+    host = git.RunnerGit()
+    host.clone(spec)
+    commit("b.txt")
+    host.clone(spec)
+    head = _rev(spec.dest, "HEAD")
+    assert git._shallow_roots(spec.dest), "not a shallow clone"
+    assert head not in git._shallow_roots(spec.dest), "not the shape: HEAD is a graft"
+    return spec, commit
+
+
+def _container_git_over_host_git(monkeypatch: pytest.MonkeyPatch) -> git.ContainerGit:
+    """`ContainerGit`, with only its transport swapped: each argv it picks runs as host git.
+
+    The container adds a mount and a user and changes nothing about what git
+    does with the argv, and the argv is what T149 is about -- which fetch the
+    update runs before its reset. Everything above the transport is the real
+    `clone()` / `clone_lines()`, fallback included.
+    """
+
+    def capture(
+        self: git.ContainerGit, dest: Path, git_args: list[str], *, writes: bool
+    ) -> subprocess.CompletedProcess[str]:
+        return git._run_git(["git", *git_args], cwd=dest)
+
+    def streamed(
+        self: git.ContainerGit, dest: Path, git_args: list[str], *, stage: str
+    ) -> Iterator[str]:
+        yield from git._streamed_git(["git", *git_args], stage=stage, cwd=dest)
+
+    monkeypatch.setattr(git.ContainerGit, "_capture", capture)
+    monkeypatch.setattr(git.ContainerGit, "_streamed_capture", streamed)
+    return git.ContainerGit()
+
+
+_UPDATES: dict[str, Callable[[git.ContainerGit, git.CloneSpec], object]] = {
+    "clone": lambda impl, spec: impl.clone(spec),
+    "clone_lines": lambda impl, spec: list(impl.clone_lines(spec)),
+}
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_graft_above_a_head_that_is_not_one_still_reads_as_the_users(tmp_path: Path) -> None:
+    """T149's shape, made by hand: the guard cannot see through it, and fails CLOSED.
+
+    HEAD is not a graft, and a depth-1 fetch has put the new tip in
+    `.git/shallow` without moving HEAD. Walking down from that tip stops at
+    once, so HEAD and every commit under it down to the old graft are "not on
+    the tip", and none of them is a graft for `_only_grafts()` to excuse.
+    Nothing local tells that apart from commits of the user's own without
+    deepening -- which is why the fix is that no update makes this shape, not a
+    guard that guesses. This pins the direction the guard fails in if something
+    else ever makes it: a refusal, never a reset over somebody's work.
+    """
+    spec, commit = _updated_by_host_git(tmp_path)
+    commit("c.txt")
+    dest = spec.dest
+    subprocess.run(["git", "fetch", "-q", "--depth=1", "origin", "HEAD"], cwd=dest, check=True)
+    assert _rev(dest, "FETCH_HEAD") in git._shallow_roots(dest), "the depth-1 fetch grafted no tip"
+
+    assert git.RunnerGit().no_local_commits(dest, None) is False
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("update", _UPDATES.values(), ids=_UPDATES.keys())
+def test_a_failed_containerised_update_leaves_nothing_the_next_update_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    update: Callable[[git.ContainerGit, git.CloneSpec], object],
+) -> None:
+    """The fetch succeeded, the reset did not, and host git is not there to retry (T149).
+
+    Until T149 `ContainerGit`'s update fetched at the clone's depth, which
+    puts the fetched tip in `.git/shallow` BEFORE the reset. When the reset
+    then failed, on a HEAD host git had once updated, that left the shape
+    above, and every later Update refused the module with "carries commits the
+    upstream does not" though nobody had committed anything. Host git's
+    `_update()` has never passed a depth there, for its own reason; with both
+    fetching the same way, a failed reset leaves the graft file exactly as it
+    was.
+
+    The reset is failed by a real `index.lock`, which is what a git that
+    crashed mid-command leaves behind, and removed once the update has failed,
+    as a person would. `git_available` is False so the host-git fallback cannot
+    run the reset a second time.
+
+    The last lines are what keeps this honest: one commit of the user's own on
+    that same HEAD is still refused.
+    """
+    spec, commit = _updated_by_host_git(tmp_path)
+    dest = spec.dest
+    head = _rev(dest, "HEAD")
+    grafts = git._shallow_roots(dest)
+    tip = commit("c.txt")
+    monkeypatch.setattr(git, "git_available", lambda: False)
+    impl = _container_git_over_host_git(monkeypatch)
+    lock = dest / ".git" / "index.lock"
+    lock.touch()
+    with pytest.raises(git.GitError, match="index.lock"):
+        update(impl, spec)
+    lock.unlink()
+    assert _rev(dest, "FETCH_HEAD") == tip, "the fetch has to have succeeded for this to be T149"
+    assert _rev(dest, "HEAD") == head, "the reset failed, so HEAD cannot have moved"
+    assert git._shallow_roots(dest) == grafts, "the failed update left a graft behind"
+
+    assert impl.no_local_commits(dest, None) is True
+
+    (dest / "mine.txt").write_text("three evenings\n", encoding="utf-8")
+    subprocess.run(["git", "add", "mine.txt"], cwd=dest, check=True)
+    subprocess.run(["git", *_AUTHOR, "commit", "-qm", "mine"], cwd=dest, check=True)
+    assert impl.no_local_commits(dest, None) is False
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("update", _UPDATES.values(), ids=_UPDATES.keys())
+def test_an_ordinary_containerised_update_still_lands_and_stays_shallow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    update: Callable[[git.ContainerGit, git.CloneSpec], object],
+) -> None:
+    """T149's fetch without a depth still updates, and does not deepen the clone.
+
+    `_update()`'s rule, now on both bodies: a shallow clone fetched without
+    `--depth` stays shallow, so the update keeps the clone the shape it was
+    made. The clone's first graft is still there afterwards and HEAD is the
+    tip.
+    """
+    spec, commit = _updated_by_host_git(tmp_path)
+    dest = spec.dest
+    grafts = git._shallow_roots(dest)
+    tip = commit("c.txt")
+    impl = _container_git_over_host_git(monkeypatch)
+
+    update(impl, spec)
+
+    assert _rev(dest, "HEAD") == tip
+    assert git._shallow_roots(dest) == grafts, "the update changed the clone's shape"
+    assert impl.no_local_commits(dest, None) is True
 
 
 def test_both_git_implementations_check_out_the_same_sparse_tree(

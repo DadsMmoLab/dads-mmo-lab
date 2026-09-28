@@ -1224,8 +1224,8 @@ def test_a_shallow_clone_answers_could_not_count_rather_than_one_commit(
     """Nine of the ten shipped sources are `depth: 1`, and the count lies on every one.
 
     `Source.depth` defaults to 1 and only AzerothCore's core overrides it, and
-    `ContainerGit.clone()` — the production seam — passes that depth on its
-    update fetch. HEAD's parents are then cut at the graft while the old pin's
+    `_pin()` fetches at that depth (as `ContainerGit.clone()`'s update fetch
+    did until T149). HEAD's parents are then cut at the graft while the old pin's
     object is still in the store (the checkout was on it a moment ago), so
     `rev-list --count <pin>..HEAD` walks HEAD, finds no parent and answers **1**
     whatever the real distance is. "1 commit past the tested pin" after a year

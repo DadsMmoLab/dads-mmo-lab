@@ -1242,11 +1242,15 @@ class RunnerGit:
         **A SHALLOW clone is refused outright, and that is what makes the number
         trustworthy at all.** Nine of the ten sources this app ships are
         `depth: 1` (`Source.depth` defaults to 1, and only AzerothCore's core
-        overrides it), and `ContainerGit.clone()` -- the production seam --
-        passes that depth on its update fetch, so HEAD's parents are cut at the
-        graft. The old pin's object is still in the store, because the checkout
-        was sitting on it a moment ago, so `rev-list --count <pin>..HEAD` walks
-        HEAD, finds no parent, and answers **1** whatever the real distance is.
+        overrides it), and a checkout whose HEAD is a graft -- `_pin()`'s
+        depth-1 fetch makes one, and `ContainerGit.clone()` made one on every
+        update until T149 -- has HEAD's parents cut. The old pin's object is
+        still in the store, because the checkout was sitting on it a moment
+        ago, so `rev-list --count <pin>..HEAD` walks HEAD, finds no parent, and
+        answers **1** whatever the real distance is. A HEAD whose history IS
+        connected is no safer: a branch merged from under the graft is handed
+        in down to the root and counted, and `_behind_after_fetch()` (T147)
+        records why a count across a graft lies in both directions.
         A version line reading "1 commit past the tested pin" after a year of
         upstream history is a figure with nothing behind it (cold review,
         2026-09-16), and it is exactly the class this file has already recorded
@@ -1848,10 +1852,12 @@ class ContainerGit:
         """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
 
         The shallow refusal is asked here too, and this is the transport it was
-        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
-        on its update fetch, so a `depth: 1` source stays grafted and the count
-        would answer 1 for any distance. Both bodies must answer identically --
-        a caller never learns which it got, and the figure is read by a person.
+        MEASURED against: `clone()` above passed `_pull_depth_args(spec.depth)`
+        on its update fetch until T149, so a `depth: 1` source stayed grafted
+        and the count would answer 1 for any distance. `RunnerGit`'s docstring
+        carries why a shallow HEAD that is not a graft is refused as well. Both
+        bodies must answer identically -- a caller never learns which it got,
+        and the figure is read by a person.
         """
         if not (dest / ".git").is_dir():
             return None
@@ -1971,10 +1977,21 @@ class ContainerGit:
             if clear_only:
                 return
             try:
-                self._run(
-                    spec,
-                    ["fetch", *_pull_depth_args(spec.depth), "origin", _fetch_ref(spec.branch)],
-                )
+                # No depth, for `RunnerGit._update()`'s reason and one of this
+                # body's own (T149). At a depth the fetch writes the tip into
+                # `.git/shallow` BEFORE the reset, so a reset that then failed
+                # left a graft above HEAD, and on a HEAD that is not a graft
+                # itself `no_local_commits()` reads everything under it as the
+                # user's commits: every later Update refused, over nothing.
+                # Without one the fetch leaves `.git/shallow` as it was, and a
+                # failed update leaves the checkout exactly as the next one
+                # found it. On an Update it downloads nothing the guard's own
+                # fetch has not just downloaded: `update()`, `install()` over a
+                # checkout and "Update to latest" all ask `no_local_commits()`
+                # first, and that fetch has never carried a depth. The one other
+                # road here, an install finishing a clone a previous run left
+                # part-way, brings a clone minutes old up to date.
+                self._run(spec, ["fetch", "origin", _fetch_ref(spec.branch)])
                 self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
                 if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
@@ -2332,15 +2349,11 @@ class ContainerGit:
         """
         if (spec.dest / ".git").is_dir():
             try:
+                # No depth, for `clone()`'s T149 reason: a depth writes a graft
+                # before the reset, and a failed reset then strands the clone.
                 yield from self._streamed_capture(
                     spec.dest,
-                    [
-                        "fetch",
-                        "--progress",
-                        *_pull_depth_args(spec.depth),
-                        "origin",
-                        _fetch_ref(spec.branch),
-                    ],
+                    ["fetch", "--progress", "origin", _fetch_ref(spec.branch)],
                     stage=stage,
                 )
                 self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
