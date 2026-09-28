@@ -7212,6 +7212,9 @@ class StagedInstaller:
             plan = self._render_compose(ctx.server_dir, ctx.secrets, label)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
+        made = self._make_server_folders(ctx.server_dir)
+        for path in made:
+            yield f"Made {path.name}/ for the server to write into."
         replaceable = self._replaceable_compose(ctx.server_dir)
         if replaceable:
             yield (
@@ -7244,6 +7247,45 @@ class StagedInstaller:
                 f"{ctx.server_dir} could not be relabelled for containers (chcon); if the "
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
+
+    def _make_server_folders(self, server_dir: Path) -> tuple[Path, ...]:
+        """Make each folder the compose file binds for the server to write into (T165).
+
+        `composegen.server_folders()` names them: on Tortoise `logs`, `honor` and
+        `pdump`. Made HERE, by the app, before a compose file that binds them is
+        written, because the alternative maker is Docker: a bind whose host folder
+        is missing is created by the daemon, which on Linux is root, and a
+        root-owned folder holds files the player cannot delete and that stop an
+        uninstall's removal of the server folder. Made by the app, the folder is
+        the player's; the files a root container writes into it are still
+        deletable, since removing a file is a right on the folder.
+
+        Never emptied and never replaced: a folder that is there is left as it
+        is, and a file where a folder belongs is refused rather than moved.
+        Returns the folders it made.
+
+        Raises:
+            InstallerError: a folder could not be made; nothing after it was written.
+        """
+        try:
+            folders = composegen.server_folders(self.entry)
+        except composegen.ComposeGenError as exc:
+            raise InstallerError(str(exc)) from exc
+        made: list[Path] = []
+        for folder in folders:
+            path = server_dir / folder.name
+            if path.is_dir():
+                continue
+            try:
+                path.mkdir()
+            except OSError as exc:
+                raise InstallerError(
+                    f"{path} could not be made as a folder for the server to write its "
+                    f"{folder.name} into ({exc}), so the compose file that binds it was not "
+                    "written. If something else is at that name, move it aside and try again."
+                ) from exc
+            made.append(path)
+        return tuple(made)
 
     def _bind_label(self, server_dir: Path) -> str:
         """`:z` or nothing, for this folder on this host; see `stage_generate_compose`."""
@@ -7402,7 +7444,10 @@ class StagedInstaller:
         the player chooses when, the file is backed up first, and nothing else is
         touched -- not the override, not the build file, not `.env`, not a
         container. The running containers keep the file they were created from
-        until they are recreated, which the Server tab then offers.
+        until they are recreated, which the Server tab then offers. The one
+        addition (T165) is a folder the new file binds and the folder lacks,
+        made empty first by `_make_server_folders()` so Docker does not make it
+        as root; one that is there is left as it is.
 
         Asked again here rather than trusting the tab's earlier reading, because the
         folder can change between the two. Writes only on `stale`: `current` writes
@@ -7431,6 +7476,13 @@ class StagedInstaller:
             f"{path} changed while it was being repaired, so it was not replaced and is "
             "left as it is now. Check again (Refresh) and press Repair once more."
         )
+        # T165: the folders the new file binds, made before it can name them.
+        # Only on `stale`, so a refused repair makes nothing either; the check's
+        # `fresh` was rendered from the same table, so these are its binds.
+        try:
+            self._make_server_folders(server_dir)
+        except InstallerError as exc:
+            raise InstallerError(f"{exc} {path} is as it was, and no backup was made.") from exc
         try:
             backup = _backup_beside(path, now or datetime.now())
         except OSError as exc:
