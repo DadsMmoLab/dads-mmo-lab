@@ -949,6 +949,104 @@ def check_update_levels(
     return tuple(failed)
 
 
+def _columns(
+    schema: str,
+    table: str,
+    *,
+    container: str,
+    client: str,
+    password: str,
+    sql_query: SqlQuery,
+    wsl_distro: str | None,
+) -> tuple[tuple[str, str], ...]:
+    """`(name, type)` of each column of `schema`.`table`, in order; empty when there is no table."""
+    query = (
+        "SELECT column_name, column_type FROM information_schema.columns WHERE table_schema="
+        f"{_quoted(schema)} AND table_name={_quoted(table)} ORDER BY ordinal_position"
+    )
+    answer = sql_query(container, client, password, schema, query, wsl_distro=wsl_distro)
+    rows = [line.split("\t") for line in answer.splitlines() if line.strip()]
+    return tuple((row[0].strip(), row[1].strip() if len(row) > 1 else "") for row in rows)
+
+
+def check_same_columns(
+    runs: Sequence[PhaseRun],
+    *,
+    container: str,
+    client: str,
+    password: str,
+    sql_query: SqlQuery,
+    wsl_distro: str | None = None,
+) -> tuple[str, ...]:
+    """Ask whether each `same_columns` table these runs' phases name is built like its original.
+
+    T159, from Codex: `CREATE TABLE IF NOT EXISTS copy LIKE original` succeeds
+    over a `copy` that is already there whatever it looks like, so a step
+    judged by its statement alone is called landed over a table the core's
+    `INSERT INTO copy SELECT * FROM original` then fails on. The question is
+    the one that copy asks: the same columns, of the same types, in the same
+    order (`information_schema.columns`, by `ordinal_position`).
+
+    Returns one sentence per table that is not, naming it and the first place
+    it differs and saying what to do; empty when every one checks out. A table
+    that cannot be asked is a failure and never a pass, `check_update_levels()`'s
+    rule.
+    """
+    failed: list[str] = []
+    seen: dict[tuple[str, str], SqlPhase] = {}
+    for run in runs:
+        if run.phase.same_columns and run.schema is not None:
+            seen.setdefault((run.phase.name, run.schema), run.phase)
+    for (_name, schema), phase in seen.items():
+        for table, original in phase.same_columns:
+            try:
+                mine, theirs = (
+                    _columns(
+                        schema,
+                        name,
+                        container=container,
+                        client=client,
+                        password=password,
+                        sql_query=sql_query,
+                        wsl_distro=wsl_distro,
+                    )
+                    for name in (table, original)
+                )
+            except docker.DockerCommandError as exc:
+                failed.append(
+                    f"{schema}.{table}: its columns could not be read to compare them with "
+                    f"{original}'s ({_redact(str(exc), password)})"
+                )
+                continue
+            if not theirs:
+                failed.append(
+                    f"{schema}.{original} has no columns to compare {table} with -- the table "
+                    f"it is a copy of is not there"
+                )
+            elif mine != theirs:
+                failed.append(
+                    f"{schema}.{table} is already there but is not built like {original} "
+                    f"({_first_difference(mine, theirs, original)}), so it cannot hold a copy of "
+                    f"it. It was probably made by hand or by an older server. Rename it (for "
+                    f"example `RENAME TABLE {schema}.{table} TO {schema}.{table}_old`) or drop "
+                    f"it, and this step makes it again"
+                )
+    return tuple(failed)
+
+
+def _first_difference(
+    mine: Sequence[tuple[str, str]], theirs: Sequence[tuple[str, str]], original: str
+) -> str:
+    """Where two column lists first part, in words: position, name and type on each side."""
+    for position, (have, want) in enumerate(zip(mine, theirs, strict=False), start=1):
+        if have != want:
+            return (
+                f"column {position} is `{have[0]} {have[1]}` where {original} has "
+                f"`{want[0]} {want[1]}`"
+            )
+    return f"it has {len(mine)} columns where {original} has {len(theirs)}"
+
+
 def _quoted(value: str) -> str:
     """A single-quoted SQL literal for a name this module controls.
 

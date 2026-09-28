@@ -292,6 +292,7 @@ def test_a_phase_digest_moves_with_its_files_gzip_and_per_schema_globs() -> None
         {"on_error": "warn"},
         {"reapply_when_changed": False},
         {"assert_update_level": False},
+        {"same_columns": (("a_copy", "a_table"),)},
     ],
 )
 def test_a_phase_digest_does_not_move_with_what_only_describes_or_governs_it(

@@ -756,7 +756,9 @@ class Recorder:
             volume_exists=self.volume_exists,
             # T159: the corrections press stops a running world by name. Bound
             # for the T64 reason above -- the default is the real `docker stop`.
-            stop_world=lambda containers: self.calls.append(f"stop-world:{','.join(containers)}"),
+            stop_world=lambda containers, **_kw: self.calls.append(
+                f"stop-world:{','.join(containers)}"
+            ),
         )
         for key, value in overrides.items():
             setattr(seams, key, value)

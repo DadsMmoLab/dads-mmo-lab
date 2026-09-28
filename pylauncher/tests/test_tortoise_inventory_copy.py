@@ -92,6 +92,10 @@ class _TortoiseDb(_Mariadb):
     """
 
     _LIKE = re.compile(r"CREATE TABLE IF NOT EXISTS (`?\w+`?) LIKE (`?\w+`?)", flags=re.IGNORECASE)
+    _COLUMNS = re.compile(
+        r"SELECT column_name, column_type FROM information_schema\.columns WHERE "
+        r"table_schema='(\w+)' AND table_name='(\w+)' ORDER BY ordinal_position"
+    )
 
     def __init__(self, root: Path) -> None:
         super().__init__(root, SCHEMAS)
@@ -129,6 +133,30 @@ class _TortoiseDb(_Mariadb):
             container, argv, io.BytesIO(text.encode("utf-8")), env=env, wsl_distro=wsl_distro
         )
 
+    def query(
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        """`information_schema.columns` as sqlite has it: `PRAGMA table_info`, in `cid` order.
+
+        The second translation this stand-in makes, and the same kind as the
+        first: the question `sqlplan.check_same_columns()` asks, answered off
+        the tables sqlite really holds (name and declared type, in order).
+        """
+        asked = self._COLUMNS.fullmatch(statement)
+        if asked is None:
+            return super().query(
+                container, client, password, schema, statement, wsl_distro=wsl_distro
+            )
+        rows = self.rows(asked.group(1), f"PRAGMA table_info({asked.group(2)})")
+        return "".join(f"{row[1]}\t{row[2]}\n" for row in rows)
+
 
 def marked_by_a_release(db: _TortoiseDb) -> None:
     """The marker a v0.8.4-v0.8.90 import wrote: the row, in `tw_world`, and nothing beside it."""
@@ -161,8 +189,9 @@ class _LoopingWorld:
         self.asked += 1
         return not self.stopped
 
-    def stop(self, containers: list[str]) -> None:
+    def stop(self, containers: list[str], **kwargs: object) -> None:
         self.events.append(f"stop:{','.join(containers)}")
+        self.kwargs = kwargs
         self.stopped = self.obeys
 
 
@@ -375,7 +404,7 @@ def test_a_world_that_cannot_be_stopped_is_refused_and_nothing_is_sent(tmp_path:
     db = _TortoiseDb(tmp_path)
     marked_by_a_release(db)
 
-    def refuses(containers: list[str]) -> None:
+    def refuses(containers: list[str], **_kwargs: object) -> None:
         raise docker.DockerCommandError("Error response from daemon: cannot stop container")
 
     engine = an_engine(db, world_running=lambda container: True, stop_world=refuses)
@@ -585,3 +614,306 @@ def test_the_banner_and_its_press_do_not_wait_for_the_world_to_be_down(
         "the corrections press's output reached the panel",
     )
     assert len(route.pressed) == 1
+
+
+# -- a copy table that is already there, and not the right one (Codex, T159) ---
+
+
+@pytest.mark.parametrize(
+    "made_by_hand",
+    [
+        "CREATE TABLE character_inventory_copy (guid INT, item INT);\n",
+        "CREATE TABLE character_inventory_copy (item INT PRIMARY KEY, guid INT, bag INT, slot INT, "
+        "item_template INT);\n",
+    ],
+    ids=["other-columns", "same-columns-other-order"],
+)
+def test_a_copy_table_not_built_like_the_original_is_not_recorded_and_the_press_says_what_to_do(
+    tmp_path: Path, made_by_hand: str
+) -> None:
+    """`IF NOT EXISTS` lands over it; the check after it does not call the step landed.
+
+    Each fixture violates one rule: the first has other columns, the second the
+    right columns in another order -- which `INSERT ... SELECT *` fills wrongly
+    or refuses just the same.
+
+    Catches the step recorded on its statement alone, and a check that compares
+    column sets rather than the ordered list.
+    """
+    db = _TortoiseDb(tmp_path)
+    marked_by_a_release(db)
+    db.exec_stdin_raw("tw_char", made_by_hand)
+    engine = an_engine(db)
+    options = folder(tmp_path)
+    with pytest.raises(InstallerError) as caught:
+        list(engine.apply_corrections(engine.correction_check(options), options))
+    message = str(caught.value)
+    assert "tw_char.character_inventory_copy is already there but is not built like" in message
+    assert "RENAME TABLE tw_char.character_inventory_copy TO" in message
+    assert "Nothing was recorded" in message
+    assert engine.correction_check(options).offered == (PHASE,), "the step was recorded"
+
+
+def test_once_the_wrong_copy_is_renamed_the_next_press_makes_the_right_one(tmp_path: Path) -> None:
+    """The remedy the refusal names, followed: the step lands and is recorded."""
+    db = _TortoiseDb(tmp_path)
+    marked_by_a_release(db)
+    db.exec_stdin_raw("tw_char", "CREATE TABLE character_inventory_copy (guid INT, item INT);\n")
+    engine = an_engine(db)
+    options = folder(tmp_path)
+    with pytest.raises(InstallerError):
+        list(engine.apply_corrections(engine.correction_check(options), options))
+    db.exec_stdin_raw(
+        "tw_char", "ALTER TABLE character_inventory_copy RENAME TO character_inventory_copy_old;\n"
+    )
+    list(engine.apply_corrections(engine.correction_check(options), options))
+    assert engine.correction_check(options).state == "current"
+    db.exec_stdin_raw("tw_char", BACKUP)
+
+
+# -- the stop is T158's: a loading world is waited for, a looping one is not ----
+
+
+@pytest.fixture
+def fast_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T158's `_fast`: no real pause between the load wait's looks."""
+    monkeypatch.setattr(docker, "_cwd_is_missing", lambda cwd: False)
+    monkeypatch.setattr(docker, "_LOAD_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(docker.time, "sleep", lambda _seconds: None)
+
+
+def _through_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, frames: list[object], fake_class: type = None  # type: ignore[assignment]
+) -> tuple[object, _TortoiseDb, CmangosInstaller]:
+    """The shipped engine whose world stop is the REAL `docker.stop_containers`, over T158's fake.
+
+    Only `runner.run` is faked for the stop, as `test_stop_waits_for_the_world.py`
+    fakes it: a docker whose world state and signal mask the frames script,
+    recording every look and the stop in order.
+    """
+    from tests.test_stop_waits_for_the_world import _Docker
+    from yulon import runner
+
+    fake = (fake_class or _Docker)(TORTOISE.container_spec(), frames)
+    monkeypatch.setattr(runner, "run", fake)
+    db = _TortoiseDb(tmp_path)
+    marked_by_a_release(db)
+    engine = an_engine(
+        db,
+        world_running=lambda container: container in fake.running,
+        stop_world=docker.stop_containers,
+    )
+    return fake, db, engine
+
+
+def test_a_healthy_world_still_loading_is_waited_for_then_stopped_cleanly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fast_waits: None
+) -> None:
+    """T158's wait, through this press: no stop while mangosd cannot hear SIGTERM.
+
+    Catches the press stopping by name without `known=` (the world would be
+    signalled mid-load and SIGKILLed when the grace ends), and the wait's lines
+    not reaching the panel.
+    """
+    from tests.test_stop_waits_for_the_world import LOADED, LOADED_MASK, LOADING, LOADING_MASK
+
+    fake, db, engine = _through_docker(
+        monkeypatch,
+        tmp_path,
+        [("running", LOADING, LOADING_MASK), ("running", LOADED, LOADED_MASK)],
+    )
+    options = folder(tmp_path)
+    said = list(engine.apply_corrections(engine.correction_check(options), options))
+    assert fake.events == ["look 1", "look 2", "stop"], fake.events  # type: ignore[attr-defined]
+    assert docker.WORLD_STILL_LOADING in said and docker.WORLD_FINISHED_LOADING in said, said
+    assert native.CORRECTIONS_WAIT_HINT in said
+    assert "character_inventory_copy" in db.tables("tw_char")
+
+
+def test_a_crash_looping_world_is_stopped_without_waiting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fast_waits: None
+) -> None:
+    """In restart backoff there is no process to wait for: one look, then the stop.
+
+    Catches a wait that held a crash-looping world as if it were loading.
+    """
+    fake, db, engine = _through_docker(monkeypatch, tmp_path, [("restarting", "", None)])
+    options = folder(tmp_path)
+    said = list(engine.apply_corrections(engine.correction_check(options), options))
+    assert fake.events == ["look 1", "stop"], fake.events  # type: ignore[attr-defined]
+    assert docker.WORLD_STILL_LOADING not in said
+    assert "character_inventory_copy" in db.tables("tw_char")
+
+
+def test_stop_pressed_while_the_world_loads_sends_nothing_and_applies_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fast_waits: None
+) -> None:
+    """The press's Cancel is the wait's `abandon`: nothing touched, the world left running.
+
+    Catches the Cancel not wired into the stop's control (the wait would run on
+    until the load ended and then stop a world the person had asked to keep).
+    """
+    from tests.test_stop_waits_for_the_world import LOADING, LOADING_MASK
+
+    fake, db, engine = _through_docker(monkeypatch, tmp_path, [("running", LOADING, LOADING_MASK)])
+    cancel = docker.CancelWithForce()
+    fake.on_look = cancel.set  # type: ignore[attr-defined]
+    options = folder(tmp_path)
+    sent_before = len(db.scripts)
+    with pytest.raises(InstallerError, match="still loading") as caught:
+        list(engine.apply_corrections(engine.correction_check(options), options, cancel=cancel))
+    assert "nothing was applied" in str(caught.value)
+    assert "stop" not in fake.events  # type: ignore[attr-defined]
+    assert db.scripts[sent_before:] == []
+
+
+def test_stop_now_anyway_stops_the_loading_world_and_goes_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fast_waits: None
+) -> None:
+    """The panel's "Stop now anyway" rides on the Cancel (`CancelWithForce.anyway`)."""
+    from tests.test_stop_waits_for_the_world import LOADING, LOADING_MASK
+
+    fake, db, engine = _through_docker(monkeypatch, tmp_path, [("running", LOADING, LOADING_MASK)])
+    cancel = docker.CancelWithForce()
+    fake.on_look = cancel.anyway.set  # type: ignore[attr-defined]
+    options = folder(tmp_path)
+    said = list(engine.apply_corrections(engine.correction_check(options), options, cancel=cancel))
+    assert docker.WORLD_STOPPED_ANYWAY in said
+    assert fake.events[-1] == "stop"  # type: ignore[attr-defined]
+    assert "character_inventory_copy" in db.tables("tw_char")
+
+
+def test_a_stop_that_does_not_return_is_given_up_and_nothing_is_applied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fast_waits: None
+) -> None:
+    """Codex [high]: the by-name stop has a process deadline past the grace, and past it the
+    outcome is unknown -- said so, and nothing written.
+
+    Catches the stop run with no deadline (the press would hang with the daemon), one shorter
+    than the grace (a slow save would be cut off), and a timeout read as a stop that worked.
+    """
+    from tests.test_stop_waits_for_the_world import _completed, _Docker
+
+    deadlines: list[float | None] = []
+
+    class _Wedged(_Docker):  # type: ignore[misc]
+        def __call__(self, cmd: list[str], cwd: Path | None = None, timeout: float | None = None):  # type: ignore[no-untyped-def]
+            if cmd[1:2] == ["stop"]:
+                deadlines.append(timeout)
+                return subprocess.CompletedProcess(cmd, 124, "", f"timed out after {timeout}s")
+            return super().__call__(cmd, cwd, timeout)
+
+    del _completed
+    fake, db, engine = _through_docker(
+        monkeypatch, tmp_path, [("restarting", "", None)], fake_class=_Wedged
+    )
+    options = folder(tmp_path)
+    sent_before = len(db.scripts)
+    with pytest.raises(InstallerError, match="may still be running") as caught:
+        list(engine.apply_corrections(engine.correction_check(options), options))
+    assert "not known" in str(caught.value)
+    assert deadlines and deadlines[0] is not None
+    assert deadlines[0] > docker.STOP_GRACE_SECONDS
+    assert db.scripts[sent_before:] == []
+
+
+def test_a_crash_loop_caught_mid_start_is_stopped_at_its_first_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fast_waits: None
+) -> None:
+    """The live shape (2026-09-28): `running` and deaf for ~20 s a cycle, `restarting` ~1 s.
+
+    Every look finds it running its start-up without a SIGTERM handler; the
+    second finds a new run. The press stops it there instead of waiting on the
+    new run as T158's other stops do, because this world never finishes loading.
+
+    Catches the corrections stop left on T158's default (it would wait on run
+    after run until a look happened to land in the one-second backoff).
+    """
+    from tests.test_stop_waits_for_the_world import (
+        LOADING,
+        LOADING_MASK,
+        RESTARTED,
+        STARTED,
+        _Docker,
+    )
+
+    class _Looping(_Docker):  # type: ignore[misc]
+        def __init__(self, spec: docker.ContainerSpec, frames: list[object]) -> None:
+            super().__init__(spec, frames, started=[STARTED, RESTARTED, "2026-09-27T18:37:00Z"])
+
+    fake, db, engine = _through_docker(
+        monkeypatch, tmp_path, [("running", LOADING, LOADING_MASK)], fake_class=_Looping
+    )
+    options = folder(tmp_path)
+    said = list(engine.apply_corrections(engine.correction_check(options), options))
+    assert fake.events == ["look 1", "look 2", "stop"], fake.events  # type: ignore[attr-defined]
+    assert docker.WORLD_RESTARTED_STOPPING in said
+    assert "character_inventory_copy" in db.tables("tw_char")
+
+
+def test_the_other_stops_still_wait_on_a_restarted_world(
+    monkeypatch: pytest.MonkeyPatch, fast_waits: None
+) -> None:
+    """T158's rule is unchanged where the flag is off: a new run is waited on in its turn."""
+    from tests.test_stop_waits_for_the_world import (
+        LOADED,
+        LOADED_MASK,
+        LOADING,
+        LOADING_MASK,
+        RESTARTED,
+        STARTED,
+        _Docker,
+    )
+    from yulon import runner
+
+    fake = _Docker(
+        TORTOISE.container_spec(),
+        [
+            ("running", LOADING, LOADING_MASK),
+            ("running", LOADING, LOADING_MASK),
+            ("running", LOADED, LOADED_MASK),
+        ],
+        started=[STARTED, RESTARTED, RESTARTED],
+    )
+    monkeypatch.setattr(runner, "run", fake)
+    docker.stop_containers([WORLD], known=(TORTOISE.container_spec(),))
+    assert fake.events == ["look 1", "look 2", "look 3", "stop"], fake.events
+
+
+def test_a_column_check_is_refused_where_nothing_would_ask_it() -> None:
+    """`same_columns` on a phase T11's route re-runs: that route records nothing and asks nothing.
+
+    Catches the validator dropped, which would let the catalog promise a check
+    no press makes.
+    """
+    with pytest.raises(ValueError, match="corrections press only"):
+        SqlPhase(
+            name="copy",
+            into="tw_char",
+            statements=(STATEMENT,),
+            rerun_on_marked=True,
+            same_columns=(("character_inventory_copy", "character_inventory"),),
+        )
+    with pytest.raises(ValueError, match="needs `into`"):
+        SqlPhase(
+            name="copy",
+            statements=(STATEMENT,),
+            same_columns=(("character_inventory_copy", "character_inventory"),),
+        )
+
+
+def test_a_copy_whose_columns_cannot_be_read_is_not_called_built_right(tmp_path: Path) -> None:
+    """A question nobody answered is a failure, never a pass (`check_update_levels()`'s rule).
+
+    Catches the unreadable case falling through to "no difference".
+    """
+    from yulon.catalog.families import sqlplan
+
+    def refuses(*_args: object, **_kwargs: object) -> str:
+        raise docker.DockerCommandError("Error response from daemon: container is restarting")
+
+    run = sqlplan.PhaseRun(_phase(), "tw_char", None, STATEMENT, False, "statement 1")
+    failed = sqlplan.check_same_columns(
+        (run,), container="tortoise-db", client="mariadb", password="pw", sql_query=refuses
+    )
+    assert len(failed) == 1 and "could not be read" in failed[0]

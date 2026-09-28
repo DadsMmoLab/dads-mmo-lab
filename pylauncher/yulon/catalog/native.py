@@ -1310,6 +1310,14 @@ installed" would be repeating, one layer up, the mistake this whole feature
 exists to fix — telling a user something took effect when nobody checked.
 """
 
+CORRECTIONS_WAIT_HINT = (
+    'Stop ends this here and applies nothing: the world keeps running. "Stop now anyway" '
+    "stops the world regardless and goes on with the corrections; it may then be force-stopped "
+    "and lose what happened since its last save."
+)
+"""Said once under a load wait in the corrections press (T159): `REBUILD_WAIT_HINT`'s shape,
+for the press whose stop comes before anything is touched."""
+
 REBUILD_WAIT_HINT = (
     "Stop ends the rebuild here and replaces nothing: the server keeps running the build it "
     'had. "Stop now anyway" stops the world regardless and goes on with the replace; the '
@@ -3523,8 +3531,12 @@ class Seams:
     to touch, and a stop that reached for the stack anyway would be a second
     promise this press has no business making).
     """
-    stop_world: Callable[[list[str]], None] = docker.stop_containers
+    stop_world: Callable[..., None] = docker.stop_containers
     """Stop the world server by name. Used by ONE press: T129's corrections, since T159.
+
+    `Callable[...]` for `recreate`'s reason: it is called with `known=` (the
+    install's spec, so T158's load wait applies), the stop's `control=` and a
+    `deadline=` for the `docker stop` command itself.
 
     Its own field and not `stop_db` pointed at another container, for
     `db_running`'s reason: the two are asked for opposite reasons -- one puts
@@ -4332,9 +4344,12 @@ class StagedInstaller:
             )
         yield f"Applying corrected install-plan steps for {self.entry.name} in {server_dir}"
         yield CORRECTIONS_OPENING_NOTE
+        # `updates_only` is left as `_update_context()` sets it, True: see
+        # `StageContext.corrections` for the family that ignores this field.
+        ctx = replace(self._update_context(server_dir, cancel), corrections=check)
         # FIRST, before the database is started: `update_databases()`'s order,
         # for its reason -- a refused press leaves the stack as it found it.
-        stopped = yield from self._stop_the_world_for_corrections(check, opts)
+        stopped = yield from self._stop_the_world_for_corrections(check, opts, ctx)
         self._check_cancel(cancel)
         again = f'Press "{CORRECTIONS_BUTTON_LABEL}" again: it stops the world server first.'
         stages = tuple(
@@ -4350,9 +4365,6 @@ class StagedInstaller:
             )
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
-        # `updates_only` is left as `_update_context()` sets it, True: see
-        # `StageContext.corrections` for the family that ignores this field.
-        ctx = replace(self._update_context(server_dir, cancel), corrections=check)
         yield from self._staged(stages, ctx)
         if stopped:
             yield (
@@ -4361,7 +4373,7 @@ class StagedInstaller:
             )
 
     def _stop_the_world_for_corrections(
-        self, check: CorrectionCheck, options: InstallOptions
+        self, check: CorrectionCheck, options: InstallOptions, ctx: StageContext
     ) -> Generator[str, None, bool]:
         """Owner answer 7 for the corrections press: stop the world rather than refuse (T159).
 
@@ -4385,6 +4397,18 @@ class StagedInstaller:
         reading exists so that the one thing such a press did is not stopping a
         server somebody is playing on. It is taken only on this branch, where
         the world is up and so is the database.
+
+        **The stop is T158's**: `stop_containers(known=(spec,))` waits for a
+        CMaNGOS world that is still loading -- it cannot hear SIGTERM until it
+        has, and would be SIGKILLed mid-load at the end of the grace -- and
+        stops at once a world that is not running (`restarting` is not), which
+        is where a crash-looping one spends each backoff. The wait's sentences
+        reach the panel as it waits (`_speaking`); the press's Cancel gives the
+        stop up with nothing sent (`abandon`), and "Stop now anyway" forces it
+        (`_stop_control(rollback=False)`, the rebuild's own reading of a Cancel
+        before anything is touched). The by-name stop has a process deadline
+        (`docker.STOP_PROCESS_DEADLINE_SECONDS`); past it the outcome is not
+        known, and the refusal says the world may still be running.
 
         The world is not read again here after the stop: the import stage's own
         guard (`_guard_then`) is that reading, right before the first write, and
@@ -4414,8 +4438,26 @@ class StagedInstaller:
             f"anything is written. It saves as it does on Stop, which can take a few minutes on "
             f"a populated world."
         )
+        spec = self.entry.container_spec()
+        # A world that restarts while it is waited on is the crash loop this press
+        # exists to end, and it never finishes loading (T159, the live gate).
+        control = replace(_stop_control(ctx, rollback=False), restart_ends_the_wait=True)
+
+        def stop_it(say: docker.OutputSink) -> None:
+            self._seams.stop_world(
+                [container],
+                known=(spec,),
+                control=replace(control, say=say),
+                deadline=docker.STOP_PROCESS_DEADLINE_SECONDS,
+            )
+
         try:
-            self._seams.stop_world([container])
+            yield from _with_hint(_speaking(stop_it, control.abandon), CORRECTIONS_WAIT_HINT)
+        except docker.StopAbandoned as exc:
+            raise InstallerError(
+                f"This was stopped while {self.entry.name}'s world server was still loading, so "
+                f"the world server was not stopped and nothing was applied. It is still running."
+            ) from exc
         except docker.DockerCommandError as exc:
             raise InstallerError(
                 f"Yu'lon could not stop {self.entry.name}'s world server ({exc}). Nothing was "
