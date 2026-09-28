@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import party
+from yulon import party, serverlock
 from yulon.catalog import bot_dashboard, native
 from yulon.catalog.families import azerothcore
 from yulon.controller_wow_tbc import accounts as tbc_accounts
@@ -559,6 +559,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # own (`AiPlayerbot.RandomBotPoolReset`), which no other game's bot
         # module reads, so the seam is Tortoise's alone, the reference included.
         unrebuilt = set() if game == "wow-tortoise" else {"bot_pool_rebuild"}
+        # T174's folder lock, decided by the PLATFORM rather than the game: only a
+        # Windows folder has a DACL to lock, so every game has it there, the
+        # reference included, and none has it anywhere else.
+        unlocked = set() if serverlock.applies() else {"lock_folder"}
         allowed = (
             unrepaired
             | unconfed
@@ -579,6 +583,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unpaired
             | unrebuilt
             | uncorrectable
+            | unlocked
         )
         if game == "wow-wotlk":
             reference = (
@@ -591,6 +596,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 | unpaired
                 | unrebuilt
                 | uncorrectable
+                | unlocked
             )
             assert (
                 set(absent) == reference

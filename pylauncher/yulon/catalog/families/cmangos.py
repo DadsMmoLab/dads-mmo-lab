@@ -2569,12 +2569,11 @@ def _write_secret(path: Path, value: str) -> None:
     `test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows`
     pins both halves; the Windows half goes red if that ever changes.
 
-    **Open: Windows ACLs.** Making this owner-only on Windows means an explicit
-    DACL (`pywin32`, or `icacls /inheritance:r /grant:r`) on a file the user may
-    move, copy or restore from a backup — a new dependency or a new subprocess,
-    on every path that touches the file. Not attempted here; it is a decision
-    about the app's Windows security posture, not about this stage, and
-    `conf.py` writes the same password into `*.conf` under the same limitation.
+    **Windows: the folder, not the file (T174).** No DACL is set on this file:
+    the install locks the whole server folder to this account before each
+    stage (`serverlock.py`), and the file, created in it with no security
+    attributes of its own, inherits that. So `icacls` on it still shows only
+    inherited entries, and they are the owner-only ones on a locked folder.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, SECRET_FILE_MODE)
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:

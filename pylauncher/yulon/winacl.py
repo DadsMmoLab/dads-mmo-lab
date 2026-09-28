@@ -51,14 +51,12 @@ is exactly as private as it was before T151, and the warning names the
 folder. A profile on a network share can refuse `WRITE_DAC`, which is the
 likeliest way this happens.
 
-**What it does not cover**, and why: a secret written into a SERVER folder
-(`.env`, `.db_password`, a conf holding the database password, and the
-`.bak`/`.repair.bak` copies of one). That folder is where the person put the
-server, its ACL is theirs, and the containers read the confs in it through
-Docker Desktop's file sharing -- whether a protected DACL there leaves them
-readable is unmeasured. Narrowing only the copies while the conf beside them
-holds the same password would protect nothing, so that is a decision of its
-own rather than a corner of this one.
+**What it does not cover**: a secret written into a SERVER folder (`.env`,
+`.db_password`, a conf holding the database password, and the
+`.bak`/`.repair.bak` copies of one). Narrowing only the copies while the conf
+beside them holds the same password would protect nothing, so that was a
+decision of its own: T174 made it, and locks the whole server folder with this
+module's DACL (`serverlock.py`, measured first against Docker Desktop).
 """
 
 from __future__ import annotations

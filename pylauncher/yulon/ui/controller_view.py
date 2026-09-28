@@ -79,6 +79,7 @@ from yulon import (
     resources,
     server_build_presses,
     server_time_zone,
+    serverlock,
     tuning,
     useraccounts,
     wsl,
@@ -1010,6 +1011,13 @@ class ControllerServices:
     `confs_from_dist` (WotLK's `playerbots.conf`). `None` means no check.
     """
 
+    lock_folder: serverlock.FolderLockRoute | None = None
+    """T174's third half of the same button: lock the server folder to this Windows account.
+
+    `serverlock.route_for_app()` answers: Windows only, and never a server inside
+    a WSL distro. `None` means no check.
+    """
+
     corrections: native.CorrectionRoute | None = None
     """T129's "Apply database corrections…" for this install; None where it is not offered.
 
@@ -1524,6 +1532,9 @@ def _assemble(
         # T137. Here for T106's reason: which installs are offered it is a fact
         # of `catalog.json` (`confs_from_dist`), answered in `install_wiring`.
         repair_confs=install_wiring.repair_confs_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T174. Here for T106's reason, and offered to every game: whether a
+        # folder has a DACL to lock is a fact of the platform and the distro.
+        lock_folder=serverlock.route_for_app(server_dir, wsl_distro=wsl_distro),
         # T129. Here for the same reason: which steps may be offered again is a
         # fact of `catalog.json`, and the distro one of the install.
         corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
@@ -4426,6 +4437,37 @@ REPAIR_FILES_UPSTREAM_CONFIRM = (
 REPAIR_FILES_OFFERED = ("stale", "upstream")
 """The `ComposeCheck` states the Server tab offers Repair server files… on (T106, T170)."""
 
+LOCK_FOLDER_BANNER = (
+    "This server's folder, {folder}, is not locked to your Windows account: it takes its "
+    "permissions from the folder above it, and a folder made directly on a drive such as C:\\ "
+    "lets every account on this computer read what is in it, the database password among it. "
+    "Repair server files… locks it to your account. Nothing changes until you press it."
+)
+"""T174's banner, for a Windows install made before the install locked its folder."""
+
+LOCK_FOLDER_CONFIRM = (
+    "Lock this server's folder to your Windows account?\n\n{folder} takes its permissions "
+    "from the folder above it. Yu'lon gives it its own instead: full control for your account, "
+    "SYSTEM and Administrators, and nothing for anyone else, handed down to every file and "
+    "folder inside it. The .env file, the settings files and their backups hold the database "
+    "password, so after this the computer's other accounts cannot read them.\n\nNothing is "
+    "moved or rewritten, and nothing needs restarting: the server keeps running, and Docker "
+    "Desktop reads and writes the folder as before. On a large server folder this can take a "
+    "minute."
+)
+
+LOCK_FOLDER_DONE = (
+    "{folder} is locked to your Windows account: only you, SYSTEM and Administrators can open it "
+    "or anything in it."
+)
+
+LOCK_FOLDER_ALREADY = "{folder} was already locked to your Windows account; nothing was changed."
+
+LOCK_FOLDER_FAILED = (
+    "The server folder was not locked: {reason}. Its files keep the permissions they had, and "
+    "the server runs as before."
+)
+
 REPAIR_CONFS_BANNER = (
     "This server has no {files}, only the {dists} it is made from, so the bots run on their "
     "built-in settings and My Party, the bot prefix and the Tuning tab have no file to read. "
@@ -5131,6 +5173,9 @@ class ControllerView(QWidget):
         self._confs_missing: tuple[str, ...] = ()
         self._confs_written: tuple[str, ...] = ()
         self._confs_pending = False
+        # T174: what the last folder-lock check said, and whether one is out.
+        self._lock_state: serverlock.LockState | None = None
+        self._lock_pending = False
         # T129: what the last corrections check said. Taken once each time the
         # database comes up (`_ask_about_the_import`), dropped when it goes.
         self._corrections: native.CorrectionCheck | None = None
@@ -12415,24 +12460,44 @@ class ControllerView(QWidget):
     @Slot()
     def check_server_files(self) -> None:
         """Ask, off the GUI thread, whether docker-compose.yml is what this version writes,
-        and (T137) whether a module conf the install writes is missing.
+        (T137) whether a module conf the install writes is missing, and (T174)
+        whether the server folder is locked to this Windows account.
 
-        Each only where its route is wired (the CMaNGOS family; WotLK). Neither is
-        queued behind itself: a check already out answers for this one too.
+        Each only where its route is wired (the CMaNGOS family; WotLK; Windows).
+        None is queued behind itself: a check already out answers for this one too.
         """
-        # T133 first: both checks read the install's folder, so on a stopped
-        # distro neither runs until it is up.
+        # T133 first: the checks read the install's folder, so on a stopped
+        # distro none runs until it is up (T174's is never wired for a distro).
         if self._waits_for_the_distro("server files", self.check_server_files):
             return
         confs = self.services.repair_confs
         if confs is not None and not self._confs_pending:
             self._confs_pending = True
             self._run(confs.check, self._server_confs_checked, self._server_confs_check_failed)
+        folder = self.services.lock_folder
+        if folder is not None and not self._lock_pending:
+            self._lock_pending = True
+            self._run(folder.check, self._server_folder_checked, self._server_folder_check_failed)
         route = self.services.repair_compose
         if route is None or self._compose_pending:
             return
         self._compose_pending = True
         self._run(route.check, self._server_files_checked, self._server_files_check_failed)
+
+    @Slot(object)
+    def _server_folder_checked(self, result: object) -> None:
+        self._lock_pending = False
+        if isinstance(result, serverlock.FolderLockCheck):
+            self._lock_state = result.state
+            if result.state == "unknown":
+                logger.info(f"{self.entry.id}: no folder lock offered: {result.why}")
+        self._refresh_compose_banner()
+
+    @Slot(object)
+    def _server_folder_check_failed(self, exc: object) -> None:
+        """`check` never raises by contract; if it does, the banner stays as it was."""
+        self._lock_pending = False
+        logger.warning(f"{self.entry.id}: the folder lock check failed: {exc}")
 
     @Slot(object)
     def _server_confs_checked(self, result: object) -> None:
@@ -12485,6 +12550,9 @@ class ControllerView(QWidget):
         same button, and the compose file goes first. Since T170 one game can be
         offered both: WotLK names `confs_from_dist` and is offered the repair of
         the repository's own compose file (`upstream`) a failed update leaves.
+        The folder lock (T174) is offered on Windows to every game, so it comes
+        last: a press mends the first thing owed, and the check after it offers
+        the next.
         """
         restart_owed = self._tuning_owed.get("restart", set())
         written = [file for file in self._confs_written if file in restart_owed]
@@ -12513,6 +12581,11 @@ class ControllerView(QWidget):
             self.compose_banner_label.setText(REPAIR_CONFS_BANNER.format(**names))
             self.compose_banner_button.setText(REPAIR_FILES_LABEL)
             self.compose_banner.setVisible(True)
+        elif self._lock_state == "open" and self.services.lock_folder is not None:
+            folder = self.services.lock_folder.folder
+            self.compose_banner_label.setText(LOCK_FOLDER_BANNER.format(folder=folder))
+            self.compose_banner_button.setText(REPAIR_FILES_LABEL)
+            self.compose_banner.setVisible(True)
         else:
             self.compose_banner.setVisible(False)
 
@@ -12539,6 +12612,9 @@ class ControllerView(QWidget):
             return
         if self._compose_state not in REPAIR_FILES_OFFERED and self._confs_missing:
             self._repair_confs()
+            return
+        if self._compose_state != "stale" and self._lock_state == "open":
+            self._lock_server_folder()
             return
         route = self.services.repair_compose
         if route is None:
@@ -12628,6 +12704,40 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_confs_repair_failed(self, exc: object) -> None:
         self.problem_label.setText(f"The server files were not repaired: {exc}")
+        self._set_busy(False)
+        self.check_server_files()
+
+    def _lock_server_folder(self) -> None:
+        """Ask, then lock the server folder to this Windows account in a job (T174).
+
+        The compose repair's rule: the player chooses when, and the question says
+        what changes and that nothing needs restarting (measured: Docker Desktop
+        reads and writes a locked folder, so the running containers keep working).
+        """
+        route = self.services.lock_folder
+        if route is None:
+            return
+        if not self._confirm(REPAIR_FILES_LABEL, LOCK_FOLDER_CONFIRM.format(folder=route.folder)):
+            return
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self._run(route.lock, self._server_folder_locked, self._server_folder_lock_failed)
+
+    @Slot(object)
+    def _server_folder_locked(self, result: object) -> None:
+        self._lock_state = None
+        if self.services.lock_folder is not None:
+            self.problem_label.setText(
+                (LOCK_FOLDER_DONE if result is True else LOCK_FOLDER_ALREADY).format(
+                    folder=self.services.lock_folder.folder
+                )
+            )
+        self._set_busy(False)
+        self.check_server_files()
+
+    @Slot(object)
+    def _server_folder_lock_failed(self, exc: object) -> None:
+        self.problem_label.setText(LOCK_FOLDER_FAILED.format(reason=exc))
         self._set_busy(False)
         self.check_server_files()
 
