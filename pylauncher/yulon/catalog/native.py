@@ -6233,7 +6233,8 @@ class StagedInstaller:
         * no whole build can be named that way -- refused unless `missing_ok`,
           and the sentence names the press that compiles them: Rebuild, which
           is `missing_ok` (T170);
-        * docker will not say whether they are there -- refused. `None` is
+        * docker will not say whether they are there, or (round 3) what build
+          the containers run -- refused. `None` is
           "could not ask", and destructive work on an unanswered question
           fails closed.
 
@@ -6314,6 +6315,15 @@ class StagedInstaller:
         a ref neither a container nor a name answers for, two containers made
         from one ref running different images, or an id the daemon no longer
         has. Then there is no build to keep, which `_keep_rollback()` says.
+
+        Measured on a test box with a compose stand-in (2026-09-28): after
+        `docker rmi` of the tag, `docker inspect <container>` still gives the
+        ref as `.Config.Image` and the `sha256:` id as `.Image`, the id is still
+        on the daemon, and `docker tag <id> <ref>-rollback` works.
+
+        Raises:
+            InstallerError: Docker would not say what the containers run
+                (`None`, not `()`): nothing has been tagged or started yet.
         """
         project = composegen.project_name(
             self.entry.id,
@@ -6322,8 +6332,18 @@ class StagedInstaller:
             install_id=self._install_id(ctx.server_dir),
         )
         found = self._seams.project_container_images(project)
+        if found is None:
+            # Codex, round 3: "could not ask" is not "no containers". Those
+            # containers may hold the build the server runs, and a compile with
+            # no rollback on an unanswered question would overwrite it.
+            raise InstallerError(
+                "Docker would not say which build this server's containers run, so the "
+                "rebuild did not start; nothing was changed. Press "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "again once Docker answers."
+            )
         if not found:
-            logger.info(f"{project}: no containers to keep a rollback from ({found!r})")
+            logger.info(f"{project}: no containers to keep a rollback from")
             return None
         held: dict[str, set[str]] = {}
         for _container, made_from, image_id in found:

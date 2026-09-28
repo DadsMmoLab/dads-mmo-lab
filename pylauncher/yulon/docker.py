@@ -620,7 +620,9 @@ def folder_projects(folder: Path, *, wsl_distro: str | None = None) -> tuple[str
     whose project label reads empty is left out.
 
     Compose writes the working dir as the absolute folder it was run in, so the
-    filter is asked with the folder as given. `None` when Docker could not be
+    filter is asked with the folder as given -- measured on a test box with a
+    compose stand-in (2026-09-28): the filter answers with the project for the
+    folder spelled as it was brought up from. `None` when Docker could not be
     asked: a caller that would write on "no containers" must not read it that way.
     """
     fmt = '{{.Label "' + PROJECT_LABEL + '"}}'
@@ -640,7 +642,8 @@ def project_container_images(
     What a rebuild keeps as its rollback when this install's image NAMES are
     gone (moved aside by a retag, removed with `-f`) and its containers still
     exist: a container holds its image by id whatever happened to the name, and
-    `.Config.Image` says which of the install's refs it was made from. Two
+    `.Config.Image` says which of the install's refs it was made from (measured
+    on a test box, 2026-09-28: both still read after `docker rmi` of the tag). Two
     calls: `docker ps -a` filtered on `PROJECT_LABEL` for the names, then one
     `docker inspect` of them all. `None` when either could not be asked, or its
     answer could not be read.

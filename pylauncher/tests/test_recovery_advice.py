@@ -895,3 +895,24 @@ def test_the_confirmation_names_reset_to_default_only_where_it_reads_the_image()
     for entry in (TBC, ENTRY):
         said = native.no_rollback_confirmation(entry)
         assert "leave the server as it is now" in said and "has replaced the containers" in said
+
+
+def test_a_docker_that_will_not_say_what_the_containers_run_refuses_the_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 3: "could not ask" is not "no containers". Nothing is tagged or built.
+
+    The containers may still hold the build the server runs; compiling without
+    a rollback on an unanswered question would overwrite it with nothing kept.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    made = tbc_engine(rec)
+    project = composegen.project_name(TBC.id, server_dir, install_id=made._install_id(server_dir))
+    rec.project_images[project] = None
+    _wired_to(monkeypatch, lambda: tbc_engine(rec))
+    said, raised = _said(install_wiring.rebuild_for_app(TBC, server_dir)(None))
+    assert raised is not None, "it compiled on an unanswered question"
+    assert "Docker would not say which build" in str(raised), raised
+    assert "nothing was changed" in str(raised), raised
+    assert native.NO_ROLLBACK_KEPT not in said
+    assert "build" not in rec.calls and not [c for c in rec.calls if c.startswith("tag:")]
