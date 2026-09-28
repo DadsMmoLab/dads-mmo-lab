@@ -1429,6 +1429,94 @@ def test_a_release_update_whose_checkout_fails_stays_on_the_release_it_had(
     assert _rev(dest, "HEAD") == newer
 
 
+def _recording_git(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], list[str]]]:
+    """Every git argv both bodies run, each with the lines it streamed (none for a plain run)."""
+    ran: list[tuple[list[str], list[str]]] = []
+    plain, streamed = git._run_git, git._streamed_git
+
+    def run(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        ran.append((argv, []))
+        return plain(argv, cwd=cwd)
+
+    def stream(argv: list[str], *, stage: str, cwd: Path | None = None) -> Iterator[str]:
+        said: list[str] = []
+        ran.append((argv, said))
+        for line in streamed(argv, stage=stage, cwd=cwd):
+            said.append(line)
+            yield line
+
+    monkeypatch.setattr(git, "_run_git", run)
+    monkeypatch.setattr(git, "_streamed_git", stream)
+    return ran
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("update", _UPDATES.values(), ids=_UPDATES.keys())
+@pytest.mark.parametrize("name", ["host", "container"])
+def test_return_to_the_pin_after_an_update_fetches_nothing_for_the_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+    update: Callable[[Any, git.CloneSpec], object],
+) -> None:
+    """The common way back is free: the pin is the commit the install grafted (T149 round 3).
+
+    Installed at a pin behind the tip, updated to the branch, then sent back
+    to the pin: the pin's object has been in the store since the install, so
+    `_has_commit()` says so and nothing names it on a fetch. Measured the same
+    way before this was written (the pin present locally, straight after
+    Update to latest).
+    """
+    upstream, commit = _upstream(tmp_path)
+    pin = commit("pin.txt")
+    commit("past-the-pin.txt")
+    spec = git.CloneSpec(url=upstream.as_uri(), dest=tmp_path / "server-source", rev=pin)
+    git.RunnerGit().clone(spec)
+    commit("newer.txt")
+    impl = _impl(name, monkeypatch)
+    update(impl, dataclasses.replace(spec, rev=None))  # Update to latest
+    assert _rev(spec.dest, "HEAD") != pin
+    ran = _recording_git(monkeypatch)
+
+    update(impl, spec)  # Return to the tested pin
+
+    assert _rev(spec.dest, "HEAD") == pin
+    assert not [argv for argv, _ in ran if "fetch" in argv and pin in argv], "the pin was fetched"
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("name", ["host", "container"])
+def test_a_pin_older_than_the_clone_is_fetched_where_the_panel_can_see_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    """The one pin that costs a download streams its progress, and lands (T149 round 3).
+
+    A pin OLDER than the commit the clone was made at -- a catalog pin moved
+    backwards -- is not in the store, and its fetch without a depth brings
+    its history down to the root (`_pin_args()`: 150 of 633 objects on the
+    measured fixture). Run silently after a streamed branch fetch, that
+    looked like a hang; through `clone_lines()` it is git's own progress, in
+    the lines the panel shows.
+    """
+    upstream, commit = _upstream(tmp_path)
+    old = commit("old.txt")
+    for n in range(5):
+        commit(f"later-{n}.txt")
+    spec = git.CloneSpec(url=upstream.as_uri(), dest=tmp_path / "server-source")
+    git.RunnerGit().clone(spec)
+    assert old not in git._shallow_roots(spec.dest)
+    impl = _impl(name, monkeypatch)
+    ran = _recording_git(monkeypatch)
+
+    said = list(impl.clone_lines(dataclasses.replace(spec, rev=old)))
+
+    assert _rev(spec.dest, "HEAD") == old
+    pinned = [lines_ for argv, lines_ in ran if "fetch" in argv and old in argv]
+    assert len(pinned) == 1, "the pin was not fetched once"
+    assert pinned[0], "the pin's fetch was run where nothing it said could be seen"
+    assert all(line in said for line in pinned[0])
+
+
 @pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
 @pytest.mark.parametrize("update", _UPDATES.values(), ids=_UPDATES.keys())
 @pytest.mark.parametrize("name", ["host", "container"])
@@ -1745,21 +1833,34 @@ def test_an_unpinned_source_never_checks_anything_out(
     assert not any("checkout" in argv for argv in seen)
 
 
+@pytest.mark.parametrize("held", [False, True], ids=["pin-not-held", "pin-held"])
 @pytest.mark.parametrize(
     "impl", [git.RunnerGit(), git.ContainerGit()], ids=["host", "containerized"]
 )
 def test_updating_a_pinned_clone_moves_it_once_onto_the_pin(
-    seen: list[list[str]], tmp_path: Path, impl: git.RunnerGit | git.ContainerGit
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    impl: git.RunnerGit | git.ContainerGit,
+    held: bool,
 ) -> None:
     """A pinned update is ONE move, onto the pin, and its fetch writes no graft (T149, T166).
 
     It used to reset onto the branch tip and then check the pin out on top, so
     a failed checkout left the clone on the tip -- past the release, where
     T150's guard refuses every later Update. And the pin was fetched at the
-    clone's depth, which grafts a pin above a HEAD that is not one. The real
-    shapes are the real-git tests above; this pins the argv on both bodies,
-    for every depth a source can carry.
+    clone's depth, which grafts a pin above a HEAD that is not one. A pin the
+    store already holds is not fetched at all (T149 round 3). The real shapes
+    are the real-git tests above; this pins the argv on both bodies, for every
+    depth a source can carry.
     """
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        asks = "cat-file" in argv
+        return _completed(returncode=1 if asks and not held else 0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
     for depth in (1, None):
         seen.clear()
         dest = tmp_path / f"core{depth}"
@@ -1767,11 +1868,16 @@ def test_updating_a_pinned_clone_moves_it_once_onto_the_pin(
         impl.clone(git.CloneSpec(url="https://example/repo.git", dest=dest, rev=PIN, depth=depth))
         assert not any("reset" in argv for argv in seen), "a stop on the branch tip first"
         assert not any("--depth" in arg for argv in seen for arg in argv), depth
-        fetch = next(index for index, argv in enumerate(seen) if argv[-1] == PIN)
+        asked = next(index for index, argv in enumerate(seen) if "cat-file" in argv)
+        assert seen[asked][-3:] == ["cat-file", "-e", f"{PIN}^{{commit}}"]
+        fetches = [index for index, argv in enumerate(seen) if argv[-1] == PIN and "fetch" in argv]
         checkout = next(index for index, argv in enumerate(seen) if "checkout" in argv)
-        assert seen[fetch][-3:] == ["fetch", "origin", PIN]
         assert seen[checkout][-4:] == ["checkout", "--detach", "--force", PIN]
-        assert fetch < checkout
+        if held:
+            assert fetches == [], "a pin the store holds was fetched anyway"
+        else:
+            assert [seen[index][-3:] for index in fetches] == [["fetch", "origin", PIN]]
+            assert asked < fetches[0] < checkout
 
 
 def test_an_unpinned_update_still_resets_onto_the_tip(
