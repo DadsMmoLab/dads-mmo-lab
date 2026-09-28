@@ -383,6 +383,8 @@ def test_a_read_only_git_question_mounts_read_only_and_keeps_nothing_it_does_not
     for dest, ask in (
         (tmp_path / "read-remote", lambda impl, path: impl.remote_url(path)),
         (tmp_path / "read-status", lambda impl, path: impl.is_unmodified(path, "x")),
+        # T148: what the last fetch brought is a read of `.git` like the others.
+        (tmp_path / "read-fetched", lambda impl, path: impl.fetched_sha(path)),
     ):
         (dest / ".git").mkdir(parents=True)
         ask(git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=_labelling_fs), dest)
@@ -2004,6 +2006,65 @@ def test_a_source_pinned_on_a_named_branch_clones_the_branch_and_still_pins_by_h
 
 
 HEAD_SHA = "d" * 40
+
+
+@pytest.mark.parametrize(
+    "impl",
+    [
+        git.RunnerGit(),
+        git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"),
+    ],
+    ids=["host", "containerized"],
+)
+def test_fetched_sha_reads_the_commit_the_last_fetch_brought(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.FetchedReader
+) -> None:
+    """T148: `FETCH_HEAD`'s full id, asked the same way by both back ends, and nothing else.
+
+    `--verify`, so a checkout whose last fetch failed -- which removes
+    `FETCH_HEAD`, measured -- answers None rather than git echoing the name
+    back; and anything that is not a full commit id is None too, because it
+    is handed to GitHub as one.
+    """
+    dest = tmp_path / "mod-aoe-loot"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+
+    answers.append(_completed(stdout=f"{HEAD_SHA}\n"))
+    assert impl.fetched_sha(dest) == HEAD_SHA
+    assert seen_argv[-1][-3:] == ["rev-parse", "--verify", "FETCH_HEAD"]
+    answers.append(_completed(stdout="FETCH_HEAD\n"))
+    assert impl.fetched_sha(dest) is None
+    answers.append(_completed(returncode=128, stderr="fatal: Needed a single revision"))
+    assert impl.fetched_sha(dest) is None
+    assert impl.fetched_sha(tmp_path / "not-a-checkout") is None
+    assert not answers
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_fetched_sha_is_the_commit_commits_behind_counted_against(tmp_path: Path) -> None:
+    """The real read, after the real count: the upstream tip the fetch brought, and none after
+    a fetch that failed."""
+    up = _Upstream(tmp_path)
+    up.commits("c", 3)
+    up.publish()
+    spec = git.CloneSpec(url=up.url, dest=tmp_path / "mod-example")
+    impl = git.RunnerGit()
+    impl.clone(spec)
+    up.commits("new", 2)
+    tip = up.publish()
+
+    assert impl.commits_behind(spec.dest, None) == 2
+    assert impl.fetched_sha(spec.dest) == tip
+    assert impl.commits_behind(spec.dest, "no-such-branch") is None
+    assert impl.fetched_sha(spec.dest) is None
 
 
 @pytest.mark.parametrize(

@@ -646,6 +646,18 @@ class HeadReader(Protocol):
     def head_sha(self, dest: Path) -> str | None: ...
 
 
+@runtime_checkable
+class FetchedReader(Protocol):
+    """ "Which commit did the last fetch bring?" -- `FETCH_HEAD`'s full id, read locally (T148).
+
+    What `commits_behind()` just counted against, so the Modules tab can ask
+    GitHub the same question about the same two commits when the checkout
+    could not answer it. A one-method Protocol for `BehindReader`'s reason.
+    """
+
+    def fetched_sha(self, dest: Path) -> str | None: ...
+
+
 class VersionReader(Protocol):
     """ "What is this checkout AT?" — the fifth read-only question, and the cheapest.
 
@@ -731,6 +743,23 @@ def _parse_count(raw: str) -> int | None:
 
 _SHALLOW_AND_HEAD = ["rev-parse", "--is-shallow-repository", "HEAD"]
 """One question, two answers: is this checkout shallow, and which commit is HEAD (T147)."""
+
+_FETCHED = ["rev-parse", "--verify", "FETCH_HEAD"]
+"""What `fetched_sha()` asks both back ends (T148).
+
+`--verify` because a fetch that failed removes `FETCH_HEAD` (measured,
+2026-09-28), and a bare `rev-parse FETCH_HEAD` then prints the NAME back on
+stdout beside its error.
+"""
+
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _fetched_id(said: str) -> str | None:
+    """`_FETCHED`'s answer as a full commit id, or None: it is handed to GitHub as one."""
+    said = said.strip()
+    return said if _COMMIT_ID.fullmatch(said) else None
+
 
 _BEHIND_COUNT = ["rev-list", "--count", "HEAD..FETCH_HEAD"]
 """The figure for a FULL checkout, where the range is the truth as it stands."""
@@ -1197,6 +1226,21 @@ class RunnerGit:
             return None
         said = proc.stdout.strip()
         return said or None
+
+    def fetched_sha(self, dest: Path) -> str | None:
+        """The full id of the commit the last fetch into `dest` brought, or None (T148).
+
+        Local, like `head_sha()`. Read straight after `commits_behind()`, it
+        is the commit that count was taken against.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *_FETCHED], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read what the last fetch into {dest} brought: {exc}")
+            return None
+        return _fetched_id(proc.stdout)
 
     def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
         """Tracked files in `dest` that differ from HEAD, minus `ignoring`. None = cannot ask.
@@ -1944,6 +1988,17 @@ class ContainerGit:
             return None
         said = proc.stdout.strip()
         return said or None
+
+    def fetched_sha(self, dest: Path) -> str | None:
+        """`RunnerGit.fetched_sha()`, containerised, through the read-only container (T148)."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, _FETCHED, writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what the last fetch into {dest} brought: {exc}")
+            return None
+        return _fetched_id(proc.stdout)
 
     def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
         """`RunnerGit.local_edits()`, containerised. Both must answer identically.
