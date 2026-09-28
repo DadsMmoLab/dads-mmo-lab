@@ -78,7 +78,6 @@ from typing import Any, ClassVar, Literal, Protocol
 from yulon import (
     dbsecret,
     docker,
-    forgetting,
     git,
     module_answers,
     networking,
@@ -233,6 +232,85 @@ deleted. Half a broken build kept for ever under a name documented as transient
 is not a state anybody chose, so `_restore_rollback` asks again after its own
 recreate, which is the thing that frees them.
 """
+
+
+def no_rollback_confirmation(entry: CatalogEntry) -> str:
+    """The confirmation's half of T170: what Rebuild does when the images' names are gone.
+
+    Said in EVERY Rebuild confirmation (`installer.rebuild_confirmation()`), and
+    conditionally, because the dialog is composed on the GUI thread and asks no
+    daemon: the reading that would make it unconditional is a `docker image
+    inspect` per image -- on a server inside a WSL distro, a boot of the distro --
+    for a question the player may decline. The engine says which case it met,
+    unconditionally, the moment it applies (`_keep_rollback()`, `NO_ROLLBACK_KEPT`).
+    Until the owner's decision of 2026-09-28 this case was refused; the
+    adversarial review of 2026-09-08 had found the press going ahead against a
+    confirmation that promised a rollback, and this is what lets it go ahead
+    without contradicting the dialog the player said yes to.
+
+    Reset to default is named only where it reads the image (the CMaNGOS
+    family, `reset_defaults._from_image()`): WotLK's defaults are not in its
+    image, so there it never says the image is gone. What each failure leaves
+    is said separately, because a compile that fails, or a replace Docker
+    refuses, leaves the server as it is, and only a new build that has replaced
+    the containers leaves it down (cold review, T170 round 2).
+    """
+    block = entry.install.native
+    says = (
+        " (Reset to default says so when it finds the image gone)"
+        if block is not None and block.family == "cmangos"
+        else ""
+    )
+    return (
+        f"If this server's images have lost their names on this machine{says}, the build its "
+        "containers are running is kept as the rollback instead, found by its image. If there "
+        "are no such containers either, there is no build to keep, and this compiles without a "
+        "rollback: a compile that fails or is stopped, or containers Docker will not replace, "
+        "leave the server as it is now; a new build that has replaced the containers and does "
+        "not come up cannot be put back, and the server stays down until a rebuild comes up."
+    )
+
+
+NO_ROLLBACK_KEPT = (
+    "This install's images are not all on the daemon under their tags, and no container of this "
+    "install still holds a whole build, so there is no build to keep as a rollback: this rebuild "
+    "compiles without one, as its confirmation said. If the compile fails or is stopped, or "
+    "Docker will not replace the containers, they stay as they are now. If the new build "
+    "replaces them and its server does not come up, there is no build from before to put back, "
+    "and the server stays down until a rebuild comes up."
+)
+"""What a Rebuild says when it goes ahead with the images gone (T170), before the compile.
+
+The owner's decision of 2026-09-28 ("Repair + Rebuild both"): after a confirm,
+Rebuild compiles when the image is missing instead of refusing. The confirmation
+said it first (`installer.rebuild_confirmation()`); this is the same fact at the
+moment it applies, in the panel the rest of the press is read in, and it says
+what each failure leaves -- the three sentences below are those failures'."""
+
+NO_ROLLBACK_NOT_BUILT = (
+    "No build was kept as a rollback, because this install's images were not all on the daemon. "
+    "The containers were not replaced, so they are as they were before this rebuild, and its "
+    "images are still not all there. Once the reason is fixed, press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} again."
+)
+"""T170: a compile with no rollback that failed, or was stopped, before it finished."""
+
+NO_ROLLBACK_UNTOUCHED = (
+    "No build was kept as a rollback, because this install's images were not all on the daemon. "
+    "The compile finished and its images are on the daemon under this install's tags, but the "
+    "containers were not replaced, so they are as they were before this rebuild. Once the "
+    "reason is fixed, press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} again."
+)
+"""T170: the compile finished and the recreate refused before it touched a container."""
+
+NO_ROLLBACK_BUILT = (
+    "No build was kept as a rollback, because this install's images were not all on the daemon, "
+    "so there was none to put back: the containers now run the new build, and the server is "
+    "down until it comes up. The log above says what stopped it."
+)
+"""T170: the containers were replaced with the new build and its server did not come up."""
+
 
 _MUST_BE_FORCED = "must be forced"
 """The daemon's own words for "the only thing in the way is a stopped container".
@@ -643,22 +721,28 @@ class CorrectionRoute:
     press: Callable[[CorrectionCheck, threading.Event | None], Iterator[str]]
 
 
-ComposeState = Literal["current", "stale", "foreign", "moved", "mixed", "missing", "error"]
+ComposeState = Literal[
+    "current", "stale", "upstream", "follows", "foreign", "moved", "mixed", "missing", "error"
+]
 
 
 @dataclass(frozen=True)
 class ComposeCheck:
     """This install's `docker-compose.yml` beside what this version of Yu'lon renders (T106).
 
-    `stale` is the one state the Server tab offers "Repair server files…" on.
+    `stale` and `upstream` are the states the Server tab offers "Repair server
+    files…" on. `upstream` (T170) is a WotLK checkout's own file, tracked and
+    unmodified, in a folder Yu'lon's record says it built -- what a failed
+    "Update the server to latest…" leaves when it cannot write Yu'lon's back.
     Every other state but `current` carries `why`, the sentence a refused
-    repair says: a file that is not Yu'lon's (`foreign`), one that names
-    another folder's project (`moved`), one whose host binds disagree about
-    SELinux's `:z` (`mixed`), no file at all (`missing`), or a render or read
-    that failed (`error`).
+    repair says: Yu'lon's own file differing on a server whose Update rewrites
+    it (`follows`, WotLK), a file that is not Yu'lon's (`foreign`), one that
+    names another folder's project (`moved`), one whose host binds disagree
+    about SELinux's `:z` (`mixed`), no file at all (`missing`), or a render or
+    read that failed (`error`).
 
     `added`/`removed` count the lines a repair would add and take away, for the
-    confirmation; both are 0 on anything but `stale`.
+    confirmation; both are 0 on anything but `stale` and `upstream`.
 
     `settings` and `kept` are T169's, and only on `stale`: each conf line the same
     repair sets so the server writes into a folder it binds (`LogsDir =
@@ -1737,65 +1821,55 @@ when a restore failed: a user who sees that line and this sentence has the
 contradiction in front of them rather than only the comfortable half.
 """
 
-USE_EXISTING_LABEL = "Use existing…"
-"""The Catalog tile's button that brings a removed server back (`catalog_view`, T95)."""
+REPAIR_FILES_LABEL = "Repair server files…"
+"""The Server tab's T106/T137 press, here because the engine's own sentences name it (T170).
+
+`controller_view` draws the button from this string, and `_restore_the_folder()`
+sends a player to it: one spelling, so a rename moves both."""
+
+RECREATE_CONTAINERS_LABEL = "Recreate containers…"
+"""The Tuning tab's press that the Repair banner offers next (T170), for the same reason."""
 
 
-def install_again_here(game: str, server_dir: Path) -> str:
-    """How to reach the one press that mends what Rebuild will not, as sentences (T163, T164).
+def compose_back_advice(server_dir: Path, *, once_fixed: bool = True) -> str:
+    """The press that puts Yu'lon's compose file back over the repository's own (T170).
 
-    Rebuild refuses two states its own advice used to send players into:
-    compose files Yu'lon did not write (`_refuse_unless_rebuildable()`) and
-    images that are gone (`_keep_rollback()`). The install's resume mends both
-    -- `generate-compose` re-runs and may replace the repository's untouched
-    `docker-compose.yml`, and `build` compiles when the images are not all
-    there. Nothing else does: Repair server files refuses a compose file that
-    is not Yu'lon's, and the owner ruled (2026-09-28) that the advice is made
-    true for today's presses rather than the presses changed.
+    Said when "Update the server to latest…" put a WotLK checkout back on its
+    old commit and could not write Yu'lon's `docker-compose.yml` into it
+    again: `checkout --force` has left the repository's own file there, tracked
+    and unmodified. Rebuild refuses that folder (`_refuse_unless_rebuildable()`)
+    and so does the same Update press, which starts with that guard. Repair
+    server files does not, since T170: it replaces exactly that file, by the
+    install's own `replaceable` rule (`_upstream_compose_facts()`), and then
+    offers Recreate as it always does.
 
-    **The way to that press is most of the sentence, and it has three shapes.**
+    **Where the press is depends on where the server lives.** Yu'lon on
+    Windows offers no Repair for a server inside a WSL distro
+    (`install_wiring.repair_compose_for_app()` answers None there: its seams
+    render for this host, and the folder's id and SELinux answers are the
+    distro's). The Yu'lon inside the distro that built the server renders for
+    it, on the folder's Linux path, and its Server tab offers the Repair.
 
-    * On a server Yu'lon knows, the Catalog tile reads "Installed" and is
-      greyed, so "press Install" alone named a button nobody could press.
-      Removing first is T95's own route back (it keeps the folder, the
-      database and the images), and since T112 the resume is not refused for
-      disk space it will not spend.
-    * With a SECOND server of the same game listed, the tile stays greyed after
-      the first is removed (`catalog_view.forget_installed()`), and its menu
-      hides "Install Server…" -- so that one has to go too, and comes back
-      through "Use existing…". The engine cannot see the app's list, so the
-      sentence says it conditionally.
-    * A server inside a WSL distro cannot take that press from Windows at all:
-      the install preflight refuses a `\\\\wsl.localhost` folder
-      (`platform.server_dir_problem()`) and `Seams.in_wsl()` refuses every
-      install-only seam. The server was built by Yu'lon for Linux inside the
-      distro, and that is where the same route runs, on the folder's Linux path.
+    `once_fixed` is False where nothing failed to be fixed first: Rebuild's own
+    refusal of such a folder (`_refuse_unless_rebuildable()`).
     """
-    keeps = (
-        f"(\u201c{forgetting.BUTTON_LABEL}\u201d on its Server tab keeps the folder, the database "
-        "and the images)"
-    )
-    resumes = (
-        "the install resumes there, writes back the files it owns and compiles only what is missing"
-    )
-    other = (
-        f"If {{who}} also lists another {game} server, the {game} tile stays greyed until that one "
-        f"is removed too; bring it back afterwards with \u201c{USE_EXISTING_LABEL}\u201d on the "
-        "same tile."
+    press = f"press \u201c{REPAIR_FILES_LABEL}\u201d on"
+    when = "Once the reason is fixed, " if once_fixed else ""
+    then = (
+        ": it writes Yu'lon's file over the repository's untouched one and keeps that one beside "
+        f"it as a backup. Then press \u201c{RECREATE_CONTAINERS_LABEL}\u201d, which it offers "
+        f"next; {server_build_presses.under_server_build(server_build_presses.REBUILD)} works "
+        "again from then on."
     )
     found = platform.wsl_location(server_dir)
     if found is None:
-        return (
-            f"Remove this server from Yu'lon {keeps}, then press Install on the {game} tile in "
-            f"the Catalog and choose {server_dir}: {resumes}. " + other.format(who="Yu'lon")
-        )
+        return f"{when or 'To mend it, '}{press} the Server tab{then}"
     distro, inside = found
     return (
-        f"Yu'lon on Windows cannot do that for this server: it rebuilds and updates a server "
-        f"inside the WSL distro {distro}, but it does not install into one. Do it in the Yu'lon "
-        f"inside {distro} that built this server: remove the server there if that Yu'lon lists "
-        f"it {keeps}, then press Install on the {game} tile and choose {inside}: {resumes}. "
-        + other.format(who="that Yu'lon")
+        f"Yu'lon on Windows cannot write Yu'lon's file there: it rebuilds and updates a server "
+        f"inside the WSL distro {distro}, but it does not rewrite its compose files. {when}"
+        f"{'o' if when else 'O'}pen this server ({inside}) in the Yu'lon inside {distro} that "
+        f"built it and {press} its Server tab{then}"
     )
 
 
@@ -3452,6 +3526,21 @@ class Seams:
     on (T32). Read only after `container_project` has already answered with a
     real, non-`UNREADABLE` owner — see `_refuse_foreign_containers()`.
     """
+    folder_projects: Callable[[Path], tuple[str, ...] | None] = docker.folder_projects
+    """The compose project of each container brought up from a folder (T170).
+
+    What Repair server files asks before it offers to write Yu'lon's compose
+    file over the repository's own: containers of this folder under another
+    project are where the characters are (`_upstream_compose_facts()`).
+    """
+    project_container_images: Callable[[str], tuple[tuple[str, str, str], ...] | None] = (
+        docker.project_container_images
+    )
+    """(container, image ref it was made from, image id) for a project's containers (T170).
+
+    What a rebuild keeps as its rollback when the image names are gone and the
+    containers still hold the build by id (`_keep_rollback()`).
+    """
     # `object` rather than `None`: `start_database()` has said since T7 whether
     # it HAD to start the container, for `apply.Applier`'s report line. This
     # stage ignores that -- it wants the database up, and it is up either way --
@@ -3761,6 +3850,8 @@ class Seams:
             container_exists=on(docker.container_exists, wsl_distro=distro),
             container_project=on(docker.container_project, wsl_distro=distro),
             container_working_dir=on(docker.container_working_dir, wsl_distro=distro),
+            folder_projects=on(docker.folder_projects, wsl_distro=distro),
+            project_container_images=on(docker.project_container_images, wsl_distro=distro),
             start_db=on(docker.start_database, wsl_distro=distro),
             start=on(docker.start_staged, wsl_distro=distro),
             recreate=on(docker.recreate_staged, wsl_distro=distro),
@@ -5064,6 +5155,7 @@ class StagedInstaller:
         options: InstallOptions | None = None,
         *,
         cancel: threading.Event | None = None,
+        missing_images_ok: bool = False,
     ) -> Iterator[str]:
         """Recompile this install and restart it on what was compiled. Yields output live.
 
@@ -5133,6 +5225,22 @@ class StagedInstaller:
         with `-f` where the only thing in the way is a stopped container -- the
         leak the round-3 gate found, and the reason the table above was written
         down rather than assumed.
+
+        **With the images gone there is no rollback to keep (T170).** Names
+        gone is not always that: when this install's containers still hold a
+        whole build by image id, `_keep_rollback()` keeps THAT, and the press
+        is an ordinary one (round 2). With no such build it is refused by
+        default, as owner answer 2 has it. `missing_images_ok` is the
+        "Rebuild the server…" press's own answer, given because its
+        confirmation says, before the player agrees, that a server whose images
+        are gone is compiled without one (`installer.rebuild_confirmation()`;
+        the owner's decision of 2026-09-28). Then `_keep_rollback()` keeps
+        nothing and says so, and every failure says what it leaves: a compile
+        that fails or is stopped leaves the containers as they were and the
+        images still missing, and a new build that does not come up stays on
+        the containers with nothing to put back. "Update the server to
+        latest…" does not pass it, so it still refuses there -- its
+        confirmation promises the build you have keeps running.
 
         Raises:
             InstallerError: any refusal (see `_refuse_unless_rebuildable`), any
@@ -5241,7 +5349,7 @@ class StagedInstaller:
                 f"started."
             )
         refs = self.built_image_refs(ctx)
-        kept = yield from self._keep_rollback(ctx, refs)
+        kept = yield from self._keep_rollback(ctx, refs, missing_ok=missing_images_ok)
         try:
             state = yield from self._staged(stages, ctx)
         except InstallerError as exc:
@@ -5253,13 +5361,17 @@ class StagedInstaller:
             # `_restore_rollback` owns what happens next.
             if not touched:
                 yield from self._put_recipe_back(ctx, ground)
-            if not kept:
-                raise
             if not built:
                 # A compile that failed or was stopped leaves the live tags on
                 # the build that is running: the second name is a duplicate.
                 yield from self._release(kept)
-                raise
+                if kept:
+                    raise
+                # T170: no rollback was kept, because there was no build to
+                # keep. Nothing was replaced, so nothing needed putting back.
+                message = f"{exc} {NO_ROLLBACK_NOT_BUILT}"
+                self._record_error(server_dir, ctx.state, message)
+                raise InstallerError(message) from exc
             if isinstance(exc, WorldStoppedAfterReadyError):
                 # The owner's answer, 2026-09-16: keep the new build and report
                 # the abort. The compile finished, the containers were replaced,
@@ -5282,6 +5394,12 @@ class StagedInstaller:
                 )
                 self._record_error(server_dir, ctx.state, kept_build)
                 raise WorldStoppedAfterReadyError(kept_build) from exc
+            if not kept:
+                # T170: the compile finished with no build from before to go
+                # back to. `touched` says whether the containers run it yet.
+                message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
+                self._record_error(server_dir, ctx.state, message)
+                raise InstallerError(message) from exc
             message = yield from self._restore_rollback(ctx, refs, kept, touched, str(exc))
             self._record_error(server_dir, ctx.state, message)
             raise InstallerError(message) from exc
@@ -5305,10 +5423,15 @@ class StagedInstaller:
             # throw it away -- they are kept, and the log says where they are.
             if not built:
                 self._let_go(kept)
-            else:
+            elif kept:
                 logger.error(
                     f"rebuild of {self.entry.id} ended unexpectedly after the compile; the "
                     f"build from before it is still on the daemon as {', '.join(kept)}"
+                )
+            else:
+                logger.error(
+                    f"rebuild of {self.entry.id} ended unexpectedly after the compile; no build "
+                    "from before it was kept, because its images were not all there (T170)"
                 )
             raise
         yield from self._release(kept)
@@ -5453,11 +5576,19 @@ class StagedInstaller:
         contributions have never overlapped -- which is why this is a mapping
         per `dest` rather than one list.
         """
-        return {
-            source.dest: composegen.COMPOSE_FILES
-            for source in self.entry.emulator.sources
-            if source.dest == "." and COMPOSE_STAGE in self.stage_names()
-        }
+        return {".": composegen.COMPOSE_FILES} if self._checkout_is_the_server_dir() else {}
+
+    def _checkout_is_the_server_dir(self) -> bool:
+        """Is a source cloned into the server folder itself, with this app's compose over it?
+
+        AzerothCore's core (`dest: "."`) is; no CMaNGOS source is. The spine's
+        half of `app_written_paths()`, and T170's test for whether the folder
+        can hold the repository's own `docker-compose.yml` at all -- asked on
+        its own because a CMaNGOS family adds its patch paths to that mapping.
+        """
+        return COMPOSE_STAGE in self.stage_names() and any(
+            source.dest == "." for source in self.entry.emulator.sources
+        )
 
     def _rewrite_what_we_own(
         self, server_dir: Path, opts: InstallOptions, state: InstallState
@@ -5939,13 +6070,12 @@ class StagedInstaller:
         # T163: each half names the press that mends IT, and neither is
         # Rebuild. Upstream's compose file in the folder is one Rebuild refuses
         # (`_refuse_unless_rebuildable()`) and so does this same press, which
-        # starts with that guard; only the install's resume writes over it, and
-        # only because the file is still git's own: `composegen.write_plan()`
-        # replaces a compose file whole, so a disk that fills part-way leaves
-        # the old file untouched. Until T163 it truncated first, and a full disk
-        # left a cut-off file that is neither git's nor Yu'lon's and that the
-        # resume refuses as well. A server inside a WSL distro takes that route
-        # in the distro, not here (`install_again_here()`). An
+        # starts with that guard. Repair server files writes over it since
+        # T170 (`compose_back_advice()`), and only because the file is still
+        # git's own: `composegen.write_plan()` replaces a compose file whole, so
+        # a disk that fills part-way leaves the old file untouched. Until T163
+        # it truncated first, and a full disk left a cut-off file that is
+        # neither git's nor Yu'lon's and that the Repair refuses as well. An
         # unpatched tree is one Rebuild compiles as it stands -- the defect the
         # patch is carried for -- and the install refuses (its build would be
         # skipped); this same press writes the patch before it compiles. Neither
@@ -5955,11 +6085,27 @@ class StagedInstaller:
             yield from self._rewrite_what_we_own(server_dir, opts, state)
         except (InstallerError, OSError) as exc:
             logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
+            if self._checkout_is_the_server_dir():
+                yield (
+                    f"The source folders are back on their old commits, but Yu'lon's own compose "
+                    f"files could not be written into them again ({exc}), so "
+                    f"{composegen.BASE_FILE} is the repository's own. "
+                    f"{compose_back_advice(server_dir)}"
+                )
+                return
+            # Cold review, T170 round 2: a CMaNGOS folder is not a checkout, so
+            # the fetch never touched its compose files; the rewrite runs there
+            # only because the patch paths make `app_written_paths()` non-empty
+            # (T173). Each file is replaced whole, so each is still Yu'lon's --
+            # the Repair would read `current` and never be offered. What this
+            # failure did cost is the patch, which is written after it.
+            again = server_build_presses.under_server_build(press)
             yield (
-                f"The source folders are back on their old commits, but Yu'lon's own compose "
-                f"files could not be written into them again ({exc}). Once the reason is "
-                f"fixed, the install puts them back. "
-                f"{install_again_here(self.entry.name, server_dir)}"
+                f"The source folders are back on their old commits, but Yu'lon's compose files "
+                f"in {server_dir} could not be written again ({exc}). Each is written whole, so "
+                "each is still Yu'lon's, as it was or new; but the source patch Yu'lon carries "
+                "is written after them, and was not written back either. Once the reason is "
+                f"fixed, press {again} again: it writes both before it compiles."
             )
             return
         try:
@@ -6063,12 +6209,16 @@ class StagedInstaller:
         write_state(server_dir, replace(fresh, source_revs=tuple(sorted(merged, key=_by_repo))))
 
     def _keep_rollback(
-        self, ctx: StageContext, refs: Sequence[str]
+        self, ctx: StageContext, refs: Sequence[str], *, missing_ok: bool = False
     ) -> Generator[str, None, tuple[str, ...]]:
         """Give every image the compile will overwrite its `-rollback` name, or say why not.
 
         One answer and three refusals, all before the compile (owner answer 2:
-        ALWAYS keep a rollback):
+        ALWAYS keep a rollback), and since T170 a second answer: with
+        `missing_ok` -- the Rebuild press, whose confirmation said so -- images
+        that are not all there keep NOTHING, say so, and the compile goes on.
+        Not all there is not a build: a rollback of three images out of four
+        could not bring a server back, so none is kept of a partial set either.
 
         * the images are all there and all tagged -- the rollback is kept;
         * the images are there and docker will not tag one -- refused, with
@@ -6076,10 +6226,15 @@ class StagedInstaller:
           overwrite the only copy of the running build with the rollback the
           owner asked for unkept. Docker's words are in the sentence:
           "read-only layer store" is a different evening from "no such image";
-        * the images are not all there -- refused, and the sentence names the
-          button that repairs that: Install's resume rebuilds missing images,
-          this one only replaces present ones;
-        * docker will not say whether they are there -- refused. `None` is
+        * the images' names are not all there, and this install's containers
+          still hold a whole build by image id (a retag moved a name away, an
+          `rmi -f` took it off) -- that build is kept, by id, and it is an
+          ordinary rebuild with a rollback (`_old_build_by_id()`, T170 round 2);
+        * no whole build can be named that way -- refused unless `missing_ok`,
+          and the sentence names the press that compiles them: Rebuild, which
+          is `missing_ok` (T170);
+        * docker will not say whether they are there, or (round 3) what build
+          the containers run -- refused. `None` is
           "could not ask", and destructive work on an unanswered question
           fails closed.
 
@@ -6088,7 +6243,8 @@ class StagedInstaller:
         confirmation the user had just agreed to and made the one press with
         no safety net look exactly like the others.
 
-        Returns the rollback names kept -- never empty on a return.
+        Returns the rollback names kept -- empty only when `missing_ok` found
+        no whole build to keep.
         """
         present = self._seams.images_built(refs)
         if present is None:
@@ -6100,22 +6256,31 @@ class StagedInstaller:
                 f"under \u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab "
                 "again."
             )
-        if not present:
+        # T170 round 2: names gone is not a build gone. A retag or an `rmi -f`
+        # takes the NAME off an image a container still holds by id, and that
+        # container is the build the server runs -- so it is kept by its id.
+        sources = {ref: ref for ref in refs} if present else self._old_build_by_id(ctx, refs)
+        if sources is None and missing_ok:
+            logger.info(f"rebuild of {self.entry.id}: no build to keep as a rollback (T170)")
+            yield NO_ROLLBACK_KEPT
+            return ()
+        if sources is None:
             raise InstallerError(
-                "This install's images are not all on the daemon under their tags, so there "
-                "is no build to keep as a rollback, and a rebuild does not run without one. "
-                # T164: the resume is the press that compiles missing images,
-                # and on a server Yu'lon knows it is reached by removing first.
-                "Nothing was started. The install compiles missing images. "
-                f"{install_again_here(self.entry.name, ctx.server_dir)} "
-                # T155: the press by its label and its menu, not "Rebuild".
-                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
-                "works from then on."
+                "This install's images are not all on the daemon under their tags, and no "
+                "container of this install still holds a whole build, so there is no build to "
+                "keep as a rollback, and this press does not compile without one. Nothing was "
+                "compiled. "
+                # T170: Rebuild compiles missing images since then (T164 sent
+                # the player to remove and install again). T155: the press by
+                # its label and its menu. It runs for a WSL server too.
+                f"Press {server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "first: with the images gone it compiles them without a rollback, and its "
+                "confirmation says so before it starts. Then press this one again."
             )
         kept: list[str] = []
         for ref in refs:
             back = ref + ROLLBACK_TAG_SUFFIX
-            problem = self._seams.tag_image(ref, back)
+            problem = self._seams.tag_image(sources[ref], back)
             if problem:
                 self._let_go(kept)
                 raise InstallerError(
@@ -6124,12 +6289,84 @@ class StagedInstaller:
                     f"is running exactly as it was."
                 )
             kept.append(back)
+        by_id = [ref for ref in refs if sources[ref] != ref]
+        found = (
+            f" {len(by_id)} of them had lost their names, so they were kept by the image their "
+            "containers are running."
+            if by_id
+            else ""
+        )
+        if by_id:
+            logger.info(f"rebuild of {self.entry.id}: rollback kept by image id for {by_id}")
         yield (
             f"Kept the build you have now as a rollback ({len(kept)} images tagged "
-            f"{ROLLBACK_TAG_SUFFIX}). If the new build does not come up it is put back "
+            f"{ROLLBACK_TAG_SUFFIX}).{found} If the new build does not come up it is put back "
             f"automatically."
         )
         return tuple(kept)
+
+    def _old_build_by_id(self, ctx: StageContext, refs: Sequence[str]) -> dict[str, str] | None:
+        """What to tag as each ref's rollback when the names are not all there, or None (T170).
+
+        Each ref's source is the image id this install's containers were made
+        from it with (`Seams.project_container_images`), or the ref itself
+        when no container holds it and its name is still on the daemon. None
+        when no whole, consistent build can be named that way: no containers,
+        a ref neither a container nor a name answers for, two containers made
+        from one ref running different images, or an id the daemon no longer
+        has. Then there is no build to keep, which `_keep_rollback()` says.
+
+        Measured on a test box with a compose stand-in (2026-09-28): after
+        `docker rmi` of the tag, `docker inspect <container>` still gives the
+        ref as `.Config.Image` and the `sha256:` id as `.Image`, the id is still
+        on the daemon, and `docker tag <id> <ref>-rollback` works.
+
+        Raises:
+            InstallerError: Docker would not say what the containers run
+                (`None`, not `()`): nothing has been tagged or started yet.
+        """
+        project = composegen.project_name(
+            self.entry.id,
+            ctx.server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(ctx.server_dir),
+        )
+        found = self._seams.project_container_images(project)
+        if found is None:
+            # Codex, round 3: "could not ask" is not "no containers". Those
+            # containers may hold the build the server runs, and a compile with
+            # no rollback on an unanswered question would overwrite it.
+            raise InstallerError(
+                "Docker would not say which build this server's containers run, so the "
+                "rebuild did not start; nothing was changed. Press "
+                f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
+                "again once Docker answers."
+            )
+        if not found:
+            logger.info(f"{project}: no containers to keep a rollback from")
+            return None
+        held: dict[str, set[str]] = {}
+        for _container, made_from, image_id in found:
+            if made_from in refs:
+                held.setdefault(made_from, set()).add(image_id)
+        sources: dict[str, str] = {}
+        for ref in refs:
+            ids = held.get(ref, set())
+            if len(ids) > 1:
+                logger.info(f"{project}: {ref}'s containers run {sorted(ids)}; no one build")
+                return None
+            if ids:
+                (image_id,) = ids
+                if self._seams.images_built([image_id]) is not True:
+                    logger.info(f"{project}: {ref}'s image {image_id} is not on the daemon")
+                    return None
+                sources[ref] = image_id
+            elif self._seams.images_built([ref]) is True:
+                sources[ref] = ref
+            else:
+                logger.info(f"{project}: nothing holds {ref}, by name or by a container")
+                return None
+        return sources
 
     def _restore_rollback(
         self,
@@ -6502,6 +6739,22 @@ class StagedInstaller:
             )
         ours = generated_compose_files(server_dir)
         missing = [name for name in composegen.COMPOSE_FILES if name not in ours]
+        if (
+            missing == [composegen.BASE_FILE]
+            and self._checkout_is_the_server_dir()
+            and self._replaceable_compose(server_dir)
+        ):
+            # T170 cold review SF2: the repository's own file, untouched, beside
+            # Yu'lon's other two -- what a failed Update leaves. Git is asked
+            # (a container) because this runs on the press's worker, never the
+            # GUI thread. The Repair makes its own checks of the record and the
+            # containers; this names it, and it may still refuse.
+            raise InstallerError(
+                f"{server_dir / composegen.BASE_FILE} is the one that came with the server's "
+                "source code, not Yu'lon's -- an update that could not finish leaves it there "
+                "-- and Yu'lon does not build or start this server from it. Nothing was started. "
+                f"{compose_back_advice(server_dir, once_fixed=False)}"
+            )
         if missing:
             raise InstallerError(
                 f"{server_dir} is missing the compose files Yu'lon builds with, or they were "
@@ -7532,6 +7785,14 @@ class StagedInstaller:
                 (),
             )
         ours = text is not None and composegen.is_marker_line(text)
+        if text is not None and not ours:
+            upstream = self._upstream_compose_facts(server_dir, text)
+            if upstream is not None:
+                # No conf edits: T169's are the CMaNGOS family's (`_conf_edits()`
+                # answers nothing for a tree with no `cmangos` block), and this
+                # state is only ever a checkout's -- WotLK's.
+                check, fresh_base, on_disk = upstream
+                return check, fresh_base, on_disk, ()
         label: str | None = None
         if text is not None and ours:
             try:
@@ -7600,6 +7861,23 @@ class StagedInstaller:
             )
         if composegen.same_compose(text, fresh):
             return ComposeCheck("current"), fresh, text, ()
+        if self._checkout_is_the_server_dir():
+            # T170 keeps T106's choice for WotLK: its own file follows the app
+            # on Update, which writes it again (`_rewrite_what_we_own()`), so
+            # the Repair it gained is for the repository's file alone.
+            update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+            return (
+                ComposeCheck(
+                    "follows",
+                    f"{path} is Yu'lon's own and differs from what this version writes; on "
+                    f"this server {update} writes it again, and {REPAIR_FILES_LABEL} is "
+                    "offered only for the file that came with the repository. Nothing was "
+                    "written.",
+                ),
+                fresh,
+                text,
+                (),
+            )
         try:
             edits, kept = self._conf_edits(server_dir, text)
         except InstallerError as exc:
@@ -7698,6 +7976,150 @@ class StagedInstaller:
                 edits.append(_ConfEdit(paths[name], before, after, tuple(done)))
         return tuple(edits), tuple(kept)
 
+    def _upstream_compose_facts(
+        self, server_dir: Path, text: str
+    ) -> tuple[ComposeCheck, str | None, str | None] | None:
+        """`_base_compose_facts()` for the repository's own file in a server Yu'lon built (T170).
+
+        None when `text` is not that file -- it is then `foreign`, as before.
+        It is that file only where all three hold:
+
+        * the checkout IS the server folder (`_checkout_is_the_server_dir()`), so
+          the repository ships a `docker-compose.yml` there at all -- and git is
+          asked nothing on a CMaNGOS folder, which has no checkout at its root;
+        * git says it is tracked and unmodified: `_replaceable_compose()`, the
+          very rule the install's `generate-compose` stage replaces it by. An
+          edited file, or one git cannot be asked about, stays somebody's own;
+        * the folder's record says Yu'lon built this game here. The file names
+          no compose project, so the project is read off the record instead:
+          an install id that is not this folder's is a folder moved or copied
+          after it was made (`moved`), and no record at all is a checkout
+          somebody else set up, whose volumes a Yu'lon project would not find;
+        * and no container brought up from this folder runs under another
+          compose project (`_projects_brought_up_here()`). The record and the
+          path travel with the folder -- restored at the same path on another
+          machine, or brought up once with the repository's own stack, the
+          characters are under the project those containers carry (Codex,
+          T170 round 2). With no containers at all, the record decides.
+
+        **The SELinux label is read off the override**, Yu'lon's own file
+        beside it, which the reset left alone (it is untracked): `bind_label_of()`
+        for the reason `_base_compose_facts()` gives. The host is asked only
+        when that file is not Yu'lon's or has no host bind.
+        """
+        if not self._checkout_is_the_server_dir() or not self._replaceable_compose(server_dir):
+            return None
+        record = read_state(server_dir, valid=())
+        if record is None or record.game_id != self.entry.id:
+            return None
+        path = server_dir / composegen.BASE_FILE
+        if record.install_id != self._install_id(server_dir):
+            return (
+                ComposeCheck(
+                    "moved",
+                    f"{path} is the one that came with the repository, and this folder's "
+                    f"{STATE_FILE} was written for another folder: the install was moved or "
+                    "copied here after it was made. A file written for this folder would start "
+                    "the server as a new project, away from its characters' database volume, so "
+                    "nothing was written.",
+                ),
+                None,
+                text,
+            )
+        owners = self._projects_brought_up_here(server_dir, path, text)
+        if owners is not None:
+            return owners
+        override = server_dir / composegen.OVERRIDE_FILE
+        label: str | None = None
+        if override.is_file() and composegen.is_ours(override):
+            try:
+                label = composegen.bind_label_of(override.read_text(encoding="utf-8"))
+            except composegen.MixedBindLabels as exc:
+                return (
+                    ComposeCheck(
+                        "mixed",
+                        f"{override}: {exc}, so Yu'lon cannot tell which way this install was "
+                        f"made and does not write {path}. Nothing was written.",
+                    ),
+                    None,
+                    text,
+                )
+            except (OSError, UnicodeDecodeError) as exc:
+                return (
+                    ComposeCheck(
+                        "error", f"{override} could not be read ({exc}). Nothing was written."
+                    ),
+                    None,
+                    text,
+                )
+        if label is None:
+            label = self._bind_label(server_dir)
+        try:
+            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
+        except (composegen.ComposeGenError, InstallerError) as exc:
+            return (
+                ComposeCheck(
+                    "error",
+                    f"Yu'lon could not work out what {composegen.BASE_FILE} should say for this "
+                    f"install: {exc} Nothing was written.",
+                ),
+                None,
+                text,
+            )
+        added, removed = _lines_changed(text, fresh)
+        return ComposeCheck("upstream", added=added, removed=removed), fresh, text
+
+    def _projects_brought_up_here(
+        self, server_dir: Path, path: Path, text: str
+    ) -> tuple[ComposeCheck, str | None, str | None] | None:
+        """Refuse the `upstream` repair when this folder's containers are another project's (T170).
+
+        Asked of the containers' compose labels (`Seams.folder_projects`), not
+        of their names: the repository's own compose file may name them
+        anything. None when every container brought up from this folder is
+        Yu'lon's project, or there are none -- then the record has decided.
+        Only ever asked by the off-thread reading and the press after it.
+        """
+        ours = composegen.project_name(
+            self.entry.id,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
+        )
+        folders = dict.fromkeys((server_dir, server_dir.resolve()))
+        found: list[str] = []
+        for folder in folders:
+            projects = self._seams.folder_projects(folder)
+            if projects is None:
+                return (
+                    ComposeCheck(
+                        "error",
+                        f"Docker would not say which containers were brought up from {server_dir}, "
+                        "so Yu'lon cannot tell whether this server's characters are under its own "
+                        f"compose project, and does not write {path}. Nothing was written. Check "
+                        "the docker daemon is up, then press Refresh.",
+                    ),
+                    None,
+                    text,
+                )
+            found.extend(projects)
+        others = sorted({project for project in found if project != ours})
+        if not others:
+            return None
+        return (
+            ComposeCheck(
+                "foreign",
+                f"{path} is the one that came with the repository, and the containers brought up "
+                f"from this folder run as the compose project {', '.join(others)}, not {ours}, "
+                "the one Yu'lon writes for it. This server's characters are under "
+                f"{others[0]}: a file of Yu'lon's would start the server as {ours}, beside an "
+                "empty database volume, so nothing was written. Start this server the way those "
+                "containers were made.",
+            ),
+            None,
+            text,
+        )
+
     def base_compose_check(self, options: InstallOptions | None = None) -> ComposeCheck:
         """Is this install's `docker-compose.yml` what this version of Yu'lon writes? (T106)
 
@@ -7732,8 +8154,11 @@ class StagedInstaller:
         set names it and its backup, and says to press Repair again first.
 
         Asked again here rather than trusting the tab's earlier reading, because the
-        folder can change between the two. Writes only on `stale`: `current` writes
-        nothing and says so with `backup=None`; every other state refuses.
+        folder can change between the two. Writes only on `stale` and, since T170,
+        `upstream` -- the repository's own file a failed Update left in a WotLK
+        folder, replaced by the install's own rule and backed up the same way:
+        `current` writes nothing and says so with `backup=None`; every other state
+        refuses.
 
         The write: a stamped `.repair.bak` copy first (`copy2`, so it keeps the old
         mode and mtime), checked to hold exactly the text that was validated; then
@@ -7752,7 +8177,7 @@ class StagedInstaller:
         check, fresh, text, edits = self._base_compose_facts(server_dir)
         if check.state == "current":
             return ComposeRepaired(path, None)
-        if check.state != "stale" or fresh is None or text is None:
+        if check.state not in ("stale", "upstream") or fresh is None or text is None:
             raise InstallerError(check.why)
         changed = (
             f"{path} changed while it was being repaired, so it was not replaced and is "
@@ -7775,8 +8200,9 @@ class StagedInstaller:
             backup.unlink(missing_ok=True)
             raise InstallerError(changed)
         # T165: the folders the new file binds, made before it can name them.
-        # Only on `stale`, so a refused repair makes nothing either; the check's
-        # `fresh` was rendered from the same table, so these are its binds. A
+        # Only on an offered state, so a refused repair makes nothing either;
+        # the check's `fresh` was rendered from the same table, so these are its
+        # binds. A
         # folder that cannot be made takes the backup just made with it: nothing
         # was changed, so it would record nothing.
         try:

@@ -609,6 +609,70 @@ def container_working_dir(container: str, *, wsl_distro: str | None = None) -> s
     return proc.stdout.strip() or None
 
 
+def folder_projects(folder: Path, *, wsl_distro: str | None = None) -> tuple[str, ...] | None:
+    """The compose project of every container brought up from `folder`, running or not (T170).
+
+    Asked of the containers' own labels -- `docker ps -a` filtered on
+    `WORKING_DIR_LABEL`, printing `PROJECT_LABEL` -- and not of their names,
+    because the question is about a folder whose compose file is not Yu'lon's:
+    the repository's own may name its containers anything. One entry per
+    container, so a project appears as often as it has containers; a container
+    whose project label reads empty is left out.
+
+    Compose writes the working dir as the absolute folder it was run in, so the
+    filter is asked with the folder as given -- measured on a test box with a
+    compose stand-in (2026-09-28): the filter answers with the project for the
+    folder spelled as it was brought up from. `None` when Docker could not be
+    asked: a caller that would write on "no containers" must not read it that way.
+    """
+    fmt = '{{.Label "' + PROJECT_LABEL + '"}}'
+    argv = ["ps", "-a", "--filter", f"label={WORKING_DIR_LABEL}={folder}", "--format", fmt]
+    proc = _docker(argv, wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        logger.warning(f"could not list the containers brought up from {folder}: {proc.stderr}")
+        return None
+    return tuple(line.strip() for line in proc.stdout.splitlines() if line.strip())
+
+
+def project_container_images(
+    project: str, *, wsl_distro: str | None = None
+) -> tuple[tuple[str, str, str], ...] | None:
+    """`(container, image it was created from, image id)` for every container of `project` (T170).
+
+    What a rebuild keeps as its rollback when this install's image NAMES are
+    gone (moved aside by a retag, removed with `-f`) and its containers still
+    exist: a container holds its image by id whatever happened to the name, and
+    `.Config.Image` says which of the install's refs it was made from (measured
+    on a test box, 2026-09-28: both still read after `docker rmi` of the tag). Two
+    calls: `docker ps -a` filtered on `PROJECT_LABEL` for the names, then one
+    `docker inspect` of them all. `None` when either could not be asked, or its
+    answer could not be read.
+    """
+    listed = _docker(
+        ["ps", "-a", "--filter", f"label={PROJECT_LABEL}={project}", "--format", "{{.Names}}"],
+        wsl_distro=wsl_distro,
+    )
+    if listed.returncode != 0:
+        logger.warning(f"could not list the containers of {project}: {listed.stderr}")
+        return None
+    names = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if not names:
+        return ()
+    fmt = "{{.Name}}\t{{.Config.Image}}\t{{.Image}}"
+    proc = _docker(["inspect", "--format", fmt, *names], wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        logger.warning(f"could not read the images of {project}'s containers: {proc.stderr}")
+        return None
+    found: list[tuple[str, str, str]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) != 3 or not all(parts):
+            logger.warning(f"could not read a container of {project} from {line!r}")
+            return None
+        found.append((parts[0].lstrip("/"), parts[1], parts[2]))
+    return tuple(found)
+
+
 def install_project(
     spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
 ) -> str | None:

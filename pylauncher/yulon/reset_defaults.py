@@ -44,13 +44,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from yulon import dbsecret, docker, platform, resources, tuning
+from yulon import dbsecret, docker, platform, resources, server_build_presses, tuning
 from yulon.catalog import bot_dashboard, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
-from yulon.catalog.native import Secrets, install_again_here
+from yulon.catalog.native import Secrets
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -107,11 +107,15 @@ NO_PASSWORD = (
 )
 IMAGE_GONE = (
     "the server's image ({image}) is not on this machine any more, and the default files are "
-    "read out of it. The install builds it again. {again} Then reset"
+    "read out of it. Press "
+    + server_build_presses.under_server_build(server_build_presses.REBUILD)
+    + " first: with the image gone it compiles the server again without keeping a rollback, "
+    "and its confirmation says so before it starts. Then reset"
 )
-"""T164: not "rebuild the server first" -- Rebuild keeps the image it compiles over
-as a rollback and refuses when it is gone (`native._keep_rollback()`). `{again}` is
-`native.install_again_here()`. A server inside a WSL distro never reaches this one:
+"""T170: the Rebuild press compiles a server whose images are gone, after a
+confirmation that says there is no build to keep (`native.NO_ROLLBACK_KEPT`).
+T164 had sent the player to remove the server and install it again, because
+Rebuild refused then. A server inside a WSL distro never reaches this one:
 `IN_WSL` is returned before the image is asked about."""
 DOCKER_SILENT = (
     "Docker did not answer, so the server's image could not be read. Start Docker and try again"
@@ -459,9 +463,7 @@ def _from_image(
         return every(str(exc))
     present = seams.image_present([image])
     if present is False:
-        return every(
-            IMAGE_GONE.format(image=image, again=install_again_here(entry.name, server_dir))
-        )
+        return every(IMAGE_GONE.format(image=image))
     if present is None:
         return every(DOCKER_SILENT)
     source = table.source_dir.rstrip("/")

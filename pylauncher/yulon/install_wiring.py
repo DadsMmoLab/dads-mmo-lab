@@ -273,7 +273,11 @@ def rebuild_for_app(
         if wsl_distro is not None:
             _refuse_unless_in_the_distro(server_dir, wsl_distro)
         engine = installer_for_app(entry, wsl_distro=wsl_distro)
-        yield from engine.rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
+        # T170: this press compiles a server whose images are gone, without a
+        # rollback -- its confirmation says so (`native.no_rollback_confirmation()`).
+        yield from engine.rebuild(
+            InstallOptions(server_dir=server_dir), cancel=cancel, missing_images_ok=True
+        )
 
     return rebuild
 
@@ -407,16 +411,19 @@ def repair_compose_for_app(
 ) -> ComposeRepairRoute | None:
     """T106's "Repair server files…" for this install, or None when it has none.
 
-    Offered to the CMaNGOS family (TBC, Vanilla, Tortoise) and nothing else, read
-    off `install.native.family`. Those installs keep the `docker-compose.yml`
-    they were installed with: `rebuild_stages()` leaves generate-compose out on
-    purpose, and Update-to-latest rewrites a compose file only for a source whose
-    `dest` is the server dir (`app_written_paths()`), which is WotLK's alone. So
-    WotLK is not offered it -- its base file already follows the app on Update,
-    and its override is the Tuning tab's (T94/T101) -- and a family added later
-    is not offered it until somebody decides it should be. WotLK's Server tab
-    does show the same button for a missing module conf: that is
-    `repair_confs_for_app()` (T137), a different press.
+    Offered to the CMaNGOS family (TBC, Vanilla, Tortoise) and, since T170, to
+    AzerothCore (WotLK), read off `install.native.family`. The CMaNGOS installs
+    keep the `docker-compose.yml` they were installed with: `rebuild_stages()`
+    leaves generate-compose out on purpose, and Update-to-latest rewrites a
+    compose file only for a source whose `dest` is the server dir
+    (`app_written_paths()`), which is WotLK's alone. So WotLK's own file is
+    still not offered a repair -- it follows the app on Update (the engine says
+    `follows`), and its override is the Tuning tab's (T94/T101). What WotLK is
+    offered is the repository's own file, untouched, which a failed Update's
+    restore leaves in its place (`upstream`, T170): the one state its Update
+    and Rebuild both refuse. A family added later is not offered it until
+    somebody decides it should be. WotLK's Server tab shows the same button for
+    a missing module conf too: that is `repair_confs_for_app()` (T137).
 
     None as well for a server inside a WSL distro, for `rebuild_for_app()`'s
     reason: the engine's seams address this host, so the folder it would render
@@ -427,7 +434,7 @@ def repair_compose_for_app(
     if wsl_distro is not None:
         return None
     block = entry.install.native
-    if block is None or block.family != "cmangos":
+    if block is None or block.family not in ("cmangos", "azerothcore"):
         return None
     options = InstallOptions(server_dir=server_dir)
     return ComposeRepairRoute(

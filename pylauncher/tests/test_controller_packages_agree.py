@@ -523,15 +523,15 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # key fails this until its tab offers the switch. Absent on the
         # reference too.
         undashboarded = set() if bot_dashboard.conf_file(entry) else {"bot_dashboard"}
-        # T106's compose repair, absent on the REFERENCE by decision: it exists
-        # for the family whose base compose nothing rewrites after the install
-        # (CMaNGOS), while WotLK's follows the app at Update-to-latest. Read off
-        # the family the wiring reads, so a family that gains it fails this
-        # until its tab offers it, and a CMaNGOS game that loses it fails too.
+        # T106's compose repair: the family whose base compose nothing rewrites
+        # after the install (CMaNGOS), and since T170 the reference too, for the
+        # repository's own file a failed Update leaves in a WotLK checkout. Read
+        # off the family the wiring reads, so a family that gains it fails this
+        # until its tab offers it, and a game that loses it fails too.
         native_block = entry.install.native
         unrepaired = (
             set()
-            if native_block is not None and native_block.family == "cmangos"
+            if native_block is not None and native_block.family in ("cmangos", "azerothcore")
             else {"repair_compose"}
         )
 

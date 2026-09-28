@@ -393,9 +393,13 @@ def test_every_cmangos_install_is_wired_a_repair(tmp_path: Path, entry: CatalogE
     assert repair_compose_for_app(entry, tmp_path) is not None
 
 
-def test_wotlk_is_left_alone(tmp_path: Path) -> None:
-    """WotLK's compose is rewritten by Update-to-latest; its override is T94/T101's."""
-    assert repair_compose_for_app(WOTLK, tmp_path) is None
+def test_wotlk_is_wired_a_repair_for_the_repositorys_own_file(tmp_path: Path) -> None:
+    """T170: WotLK is wired the route, for the repository's own file a failed update leaves.
+
+    Its OWN file that differs is still not offered (`follows`: Update rewrites
+    it) -- pressed through the real engine in `test_recovery_advice.py`.
+    """
+    assert repair_compose_for_app(WOTLK, tmp_path) is not None
 
 
 def test_a_server_inside_a_wsl_distro_is_not_offered_it(tmp_path: Path) -> None:
@@ -428,7 +432,7 @@ class _Route:
 
     def check(self) -> native.ComposeCheck:
         self.checks += 1
-        counts = (62, 0) if self.state == "stale" else (0, 0)
+        counts = (62, 0) if self.state in ("stale", "upstream") else (0, 0)
         return native.ComposeCheck(self.state, added=counts[0], removed=counts[1])  # type: ignore[arg-type]
 
     def repair(self) -> native.ComposeRepaired:
@@ -483,7 +487,7 @@ def test_a_stale_compose_shows_the_banner(qapp: object, ps: _Ps, tmp_path: Path)
     assert "backup" in view.compose_banner_label.text()
 
 
-@pytest.mark.parametrize("state", ["current", "foreign", "moved", "missing", "error"])
+@pytest.mark.parametrize("state", ["current", "follows", "foreign", "moved", "missing", "error"])
 def test_anything_but_stale_gets_no_banner(
     qapp: object, ps: _Ps, tmp_path: Path, state: str
 ) -> None:
@@ -557,3 +561,60 @@ def test_refresh_asks_again(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     view.recheck()
     assert route.checks == 2
     assert not view.compose_banner.isHidden()
+
+
+def test_the_repositorys_own_file_gets_its_own_banner_and_question_before_a_missing_conf(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T170 on WotLK, which can now be offered both: the compose file goes first.
+
+    `upstream` has its own banner and its own question (nothing in it is a
+    hand edit to warn about), the press is the compose repair and not T137's
+    conf write, and the banner after it does not say the containers run the
+    file it replaced -- they never ran the repository's file.
+    """
+    route = _Route("upstream")
+    confs: list[int] = []
+    services = _services(ps, tmp_path, [])
+    services.repair_compose = route.route()
+    services.repair_confs = native.ConfRepairRoute(
+        check=lambda: native.ConfCheck(missing=("env/dist/etc/modules/playerbots.conf",)),
+        repair=lambda: confs.append(1) or native.ConfRepaired(),  # type: ignore[func-returns-value]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.compose_banner_label.text() == controller_view_module.REPAIR_FILES_UPSTREAM_BANNER
+    asked = _answer(monkeypatch, yes=True)
+    view.compose_banner_button.click()
+    assert asked == [
+        controller_view_module.REPAIR_FILES_UPSTREAM_CONFIRM.format(
+            backup=f"{composegen.BASE_FILE}.<date>{native.REPAIR_BACKUP_SUFFIX}",
+            counts=" (it adds 62 lines and removes 0)",
+        )
+    ]
+    assert (route.repairs, confs) == (1, []), "the press was not the compose repair"
+    assert view.compose_banner_button.text() == TUNING_RECREATE_LABEL
+    assert "still run the old file" not in view.compose_banner_label.text()
+    assert "Yu'lon's again" in view.compose_banner_label.text()
+
+
+def test_an_update_that_ends_while_a_check_is_out_asks_once_more(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Cold review round 2: a check already out read the folder before the press ended.
+
+    Its answer is dropped for one asked after it, so the banner shows what the
+    update left rather than what was there before.
+    """
+    route = _Route("current")
+    view = _view(ps, tmp_path, route)
+    assert route.checks == 1
+    view._compose_pending = True  # a check is out, as when the tab opened a moment ago
+    view._rebuild_moves_sources = True
+    route.state = "upstream"  # what the failed update left
+    view._rebuild_finished(False, "failed")
+    assert route.checks == 1, "asked while one was out"
+    view._server_files_checked(native.ComposeCheck("current"))  # the stale answer arrives
+    assert route.checks == 2, "the stale answer was taken as the last word"
+    assert view._compose_state == "upstream", "the stale answer overwrote the fresh one"
+    assert not view.compose_banner.isHidden()
+    assert view.compose_banner_label.text() == controller_view_module.REPAIR_FILES_UPSTREAM_BANNER

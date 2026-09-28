@@ -995,8 +995,9 @@ class ControllerServices:
     repair_compose: native.ComposeRepairRoute | None = None
     """T106's "Repair server files…" for this install; None where it is not offered.
 
-    `install_wiring.repair_compose_for_app()` answers: the CMaNGOS family only,
-    and never a server inside a WSL distro. `None` means no banner and no check.
+    `install_wiring.repair_compose_for_app()` answers: the CMaNGOS family, and
+    WotLK for the repository's own file a failed update leaves (T170), never a
+    server inside a WSL distro. `None` means no banner and no check.
     """
 
     repair_confs: native.ConfRepairRoute | None = None
@@ -4292,7 +4293,7 @@ something the schema does not say.
 
 TUNING_RELOAD_LABEL = "Reload from disk"
 TUNING_REVERT_ALL_LABEL = "Revert all changes"
-TUNING_RECREATE_LABEL = "Recreate containers…"
+TUNING_RECREATE_LABEL = native.RECREATE_CONTAINERS_LABEL
 TUNING_RESTART_LABEL = "Restart server…"
 """The Tuning tab's action bar (T44 item 7). Both ellipses are this app's own
 convention for "this opens a dialog first", and both of these take the server
@@ -4340,9 +4341,10 @@ DISTRO_UNKNOWN = (
 )
 """The same line when WSL's listing did not answer (T133 review): no permission to read."""
 
-REPAIR_FILES_LABEL = "Repair server files…"
+REPAIR_FILES_LABEL = native.REPAIR_FILES_LABEL
 """T106's press: re-render this install's docker-compose.yml from the current template.
-T137's, on the same button: write a module conf the install writes from its `.dist`."""
+T137's, on the same button: write a module conf the install writes from its `.dist`.
+Spelled in `native` since T170, whose engine sentences send players to it."""
 
 REPAIR_FILES_OWED = composegen.BASE_FILE
 """What a repair adds to the tab's owed-a-recreate set, and the banner looks for."""
@@ -4377,6 +4379,39 @@ REPAIR_FILES_DONE = (
     "the old file until they are recreated: press Recreate containers… (the server goes down "
     "and comes back up; your characters are kept)."
 )
+
+REPAIR_FILES_UPSTREAM_BANNER = (
+    "This server's docker-compose.yml is the one that came with the server's source code, not "
+    "the one Yu'lon writes for it — an update that could not finish leaves it there — so "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} and "
+    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} refuse "
+    "this folder. Repair server files… writes Yu'lon's file over it and keeps it as a backup. "
+    "Nothing changes until you press it."
+)
+"""T170: the banner for `upstream`, the repository's own file in a WotLK folder."""
+
+REPAIR_FILES_UPSTREAM_DONE = (
+    "docker-compose.yml is Yu'lon's again; the one that came with the source code is kept as "
+    "{backup}. Press Recreate containers… so the containers are made from Yu'lon's file (the "
+    "server goes down and comes back up; your characters are kept)."
+)
+"""T170: `REPAIR_FILES_DONE` for `upstream`. Its containers never ran the file that was
+replaced, so "they still run the old file" would not be true of them."""
+
+REPAIR_FILES_UPSTREAM_CONFIRM = (
+    "Repair this server's files now?\n\ndocker-compose.yml in this folder is the one that came "
+    "with the server's source code, unchanged from what git has — the file an update puts back "
+    "when it cannot finish — and not the one Yu'lon writes for this server. Yu'lon writes its "
+    "own again, the way this version installs it, with this install's own project name, ports "
+    "and SELinux labels{counts}. The file as it is now is kept beside it as a backup "
+    "({backup}).\n\nNothing else changes: not your characters, not your .conf settings, not "
+    "docker-compose.override.yml or .env. Recreate containers…, which Yu'lon offers next, "
+    "starts the containers from Yu'lon's file."
+)
+"""T170: the confirmation for `upstream`. Nothing in it is a hand edit to warn about."""
+
+REPAIR_FILES_OFFERED = ("stale", "upstream")
+"""The `ComposeCheck` states the Server tab offers Repair server files… on (T106, T170)."""
 
 REPAIR_CONFS_BANNER = (
     "This server has no {files}, only the {dists} it is made from, so the bots run on their "
@@ -5043,7 +5078,11 @@ class ControllerView(QWidget):
         self._compose_state: str | None = None
         self._compose_check: native.ComposeCheck | None = None
         self._compose_backup: Path | None = None
+        # T170: whether that backup is the repository's own file, for the banner,
+        # and whether a check is owed once the one out answers.
+        self._compose_backup_upstream = False
         self._compose_pending = False
+        self._compose_again = False
         # T137: the module confs the last check found missing, the ones the
         # last repair wrote (until the restart that loads them), and whether a
         # check is out.
@@ -11672,6 +11711,17 @@ class ControllerView(QWidget):
         self._forget_the_corrections_reading()
         compiled, self._rebuild_is_compile = self._rebuild_is_compile, False
         moved, self._rebuild_moves_sources = self._rebuild_moves_sources, False
+        if moved:
+            # T170: an update press writes docker-compose.yml, and one that could
+            # not write it back leaves the repository's own, which the message
+            # it ends on sends the player to Repair server files… for. Asked
+            # again here so the banner is there when the message is read -- and
+            # asked AGAIN after a check already out, which read the folder
+            # before the press ended (cold review, round 2).
+            if self._compose_pending:
+                self._compose_again = True
+            else:
+                self.check_server_files()
         if ok and moved and not self.rebuild_log.cancelled:
             # T146, on `_rebuild_owed`'s terms below: only a press that finished
             # and was not stopped. A failed one puts every source back on the
@@ -12062,11 +12112,17 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_files_checked(self, result: object) -> None:
         self._compose_pending = False
+        if self._compose_again:
+            # T170: this answer read the folder before an update press ended, so
+            # it is dropped for the one asked now, which draws the banner.
+            self._compose_again = False
+            self.check_server_files()
+            return
         if not isinstance(result, native.ComposeCheck):
             return
         self._compose_state = result.state
         self._compose_check = result
-        if result.state not in ("current", "stale"):
+        if result.state != "current" and result.state not in REPAIR_FILES_OFFERED:
             # Not offered, and not a problem of anything the player pressed: said
             # in the log rather than over `problem_label`.
             logger.info(f"{self.entry.id}: no compose repair offered: {result.why}")
@@ -12077,6 +12133,9 @@ class ControllerView(QWidget):
         """`check` never raises by contract; if it does, the banner stays as it was."""
         self._compose_pending = False
         logger.warning(f"{self.entry.id}: the compose check failed: {exc}")
+        if self._compose_again:
+            self._compose_again = False
+            self.check_server_files()
 
     def _refresh_compose_banner(self) -> None:
         """Draw T106's banner from what it answers: a job owed, a stale file, a missing conf.
@@ -12085,23 +12144,30 @@ class ControllerView(QWidget):
         current, and what is left to do is apply it -- a recreate for the compose
         file, a restart for a module conf (T137), which the world reads when it
         starts. The stale compose file and the missing conf are offered by the
-        same button; no game is offered both today (the CMaNGOS family has no
-        `confs_from_dist`, WotLK no compose repair), and the compose file would
-        go first.
+        same button, and the compose file goes first. Since T170 one game can be
+        offered both: WotLK names `confs_from_dist` and is offered the repair of
+        the repository's own compose file (`upstream`) a failed update leaves.
         """
         restart_owed = self._tuning_owed.get("restart", set())
         written = [file for file in self._confs_written if file in restart_owed]
         if REPAIR_FILES_OWED in self._tuning_owed.get("recreate", set()):
             backup = self._compose_backup.name if self._compose_backup else "a .repair.bak"
-            self.compose_banner_label.setText(REPAIR_FILES_DONE.format(backup=backup))
+            done = (
+                REPAIR_FILES_UPSTREAM_DONE if self._compose_backup_upstream else REPAIR_FILES_DONE
+            )
+            self.compose_banner_label.setText(done.format(backup=backup))
             self.compose_banner_button.setText(TUNING_RECREATE_LABEL)
             self.compose_banner.setVisible(True)
         elif written:
             self.compose_banner_label.setText(REPAIR_CONFS_DONE.format(**_conf_names(written)))
             self.compose_banner_button.setText(TUNING_RESTART_LABEL)
             self.compose_banner.setVisible(True)
-        elif self._compose_state == "stale":
-            self.compose_banner_label.setText(REPAIR_FILES_BANNER)
+        elif self._compose_state in REPAIR_FILES_OFFERED:
+            self.compose_banner_label.setText(
+                REPAIR_FILES_UPSTREAM_BANNER
+                if self._compose_state == "upstream"
+                else REPAIR_FILES_BANNER
+            )
             self.compose_banner_button.setText(REPAIR_FILES_LABEL)
             self.compose_banner.setVisible(True)
         elif self._confs_missing:
@@ -12133,7 +12199,7 @@ class ControllerView(QWidget):
         """
         if self._busy:
             return
-        if self._compose_state != "stale" and self._confs_missing:
+        if self._compose_state not in REPAIR_FILES_OFFERED and self._confs_missing:
             self._repair_confs()
             return
         route = self.services.repair_compose
@@ -12143,7 +12209,7 @@ class ControllerView(QWidget):
         last = self._compose_check
         counts = (
             f" (it adds {last.added} lines and removes {last.removed})"
-            if last is not None and last.state == "stale"
+            if last is not None and last.state in REPAIR_FILES_OFFERED
             else ""
         )
         # T169: the conf lines the same press sets, and any it leaves as the player has them.
@@ -12152,9 +12218,14 @@ class ControllerView(QWidget):
         confs = REPAIR_FILES_CONFS.format(settings=" and ".join(settings)) if settings else ""
         confs += "".join(f"\n\n{why}" for why in kept)
         others = "any other .conf setting" if settings else "your .conf settings"
-        question = REPAIR_FILES_CONFIRM.format(
-            backup=backup, counts=counts, confs=confs, others=others
+        # T170: the repository's own file has its own question; T169's conf lines
+        # are the CMaNGOS family's, so `settings` and `kept` are empty there.
+        confirm = (
+            REPAIR_FILES_UPSTREAM_CONFIRM
+            if last is not None and last.state == "upstream"
+            else REPAIR_FILES_CONFIRM
         )
+        question = confirm.format(backup=backup, counts=counts, confs=confs, others=others)
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
@@ -12164,9 +12235,11 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_files_repaired(self, result: object) -> None:
         if isinstance(result, native.ComposeRepaired):
+            last = self._compose_check
             self._compose_state = "current"
             if result.backup is not None:
                 self._compose_backup = result.backup
+                self._compose_backup_upstream = last is not None and last.state == "upstream"
                 self._note_tuning_owed_recreate(REPAIR_FILES_OWED)
             else:
                 self.problem_label.setText(
