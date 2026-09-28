@@ -42,12 +42,16 @@ secret, kept in `.env` beside the password.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import secrets
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from yulon import platform
 from yulon.catalog.catalog import CatalogEntry, ConfPatch, ConfPatchTable
 from yulon.log import get_logger
 
@@ -90,10 +94,17 @@ REBUILD_OWED_FILE = ".yulon-bot-dashboard-rebuild-owed"
 """Beside `docker-compose.yml`: the dashboard is stopped until it is rebuilt (T162).
 
 Written when the rebuild after an update that moved the bots module failed.
-The old image speaks the old module's datagram protocol, so the container was
-removed rather than left running on it; this file holds why, in one line, for
-the Bots tab, and keeps the server's Start from bringing the old image back.
-It means something only while the block is there: the block is the switch."""
+The old image speaks the old module's datagram protocol, so the container is
+removed rather than left running on it; this file holds why, for the Bots tab,
+and keeps the server's Start from bringing the old image back. It means
+something only while the block is there: the block is the switch."""
+
+REBUILD_OWED_FALLBACK_DIR = "bot-dashboard-rebuild-owed"
+"""Under `platform.config_dir()`: where the record goes when the server folder refuses it.
+
+One file per install, named by a hash of the folder's path. The record has to
+land somewhere that outlives the app, or the next Start after a restart of
+Yu'lon brings the old protocol back (Codex, T162 round 2)."""
 
 BEGIN = (
     "  # >>> Yu'lon: the bot dashboard (T127). The Bots tab's switch adds and removes this block."
@@ -106,6 +117,18 @@ class DashboardError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Debt:
+    """A rebuild the dashboard owes (T162), as its record says."""
+
+    why: str
+    """Why the rebuild failed, in one line."""
+    old_may_run: bool = True
+    """The out-of-date container may still be running: false only once a read said it is not."""
+    where: str = "server"
+    """`"server"`, `"config"` (the fallback) or `"memory"` (neither would take it)."""
+
+
+@dataclass(frozen=True)
 class State:
     """What this install's files say about the dashboard. Read off the GUI thread."""
 
@@ -113,10 +136,16 @@ class State:
     lan: bool = False
     problem: str = ""
     """Why the state could not be read; `on`/`lan` are then meaningless."""
-    rebuild_owed: bool = False
-    """On, but stopped until "Rebuild the bot dashboard" succeeds (T162)."""
-    rebuild_why: str = ""
-    """Why the last rebuild failed, when `rebuild_owed`."""
+    rebuild: Debt | None = None
+    """On, but kept stopped until "Rebuild the bot dashboard" succeeds (T162)."""
+
+    @property
+    def rebuild_owed(self) -> bool:
+        return self.rebuild is not None
+
+    @property
+    def rebuild_why(self) -> str:
+        return "" if self.rebuild is None else self.rebuild.why
 
 
 # -- names, read off the entry ------------------------------------------------
@@ -338,8 +367,7 @@ def state(server_dir: Path) -> State:
         if has_half_a_block(text):
             return State(problem=f"{path.name} has half a bot dashboard block in it")
         return State()
-    why = rebuild_owed(server_dir)
-    return State(on=True, lan=lan_of(found), rebuild_owed=why is not None, rebuild_why=why or "")
+    return State(on=True, lan=lan_of(found), rebuild=rebuild_owed(server_dir))
 
 
 def is_on(server_dir: Path) -> bool:
@@ -349,31 +377,104 @@ def is_on(server_dir: Path) -> bool:
 # -- a rebuild owed (T162) ----------------------------------------------------
 
 
-def rebuild_owed(server_dir: Path) -> str | None:
-    """Why the dashboard is stopped until it is rebuilt, or None when it is not. Never raises.
+_UNRECORDED: dict[str, Debt] = {}
+"""Debts neither file would take, for as long as this process lives (T162).
 
-    A record that is there but cannot be read counts as owed: the cost of a
-    wrong "owed" is one press, and of a wrong "not owed" a Start that brings
-    the old protocol back.
-    """
-    path = server_dir / REBUILD_OWED_FILE
+The last resort, and it says so: the tab's line tells the player that closing
+Yu'lon forgets it. Keyed like the fallback file."""
+_UNRECORDED_LOCK = threading.Lock()
+
+
+def _key(server_dir: Path) -> str:
+    return os.path.abspath(server_dir)
+
+
+def fallback_path(server_dir: Path, *, config_dir: Path | None = None) -> Path:
+    """The fallback record's path for this install, under Yu'lon's own config dir."""
+    root = config_dir if config_dir is not None else platform.config_dir()
+    name = hashlib.sha256(_key(server_dir).encode("utf-8")).hexdigest()[:24]
+    return root / REBUILD_OWED_FALLBACK_DIR / f"{name}.json"
+
+
+def _read_record(path: Path, where: str) -> Debt | None:
+    """One record, or None when it is not there. Unreadable counts as owed, old maybe running."""
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
-        return f"{path.name} could not be read: {exc}"
-    return text or "the last rebuild failed"
+        return Debt(f"{path.name} could not be read: {exc}", True, where)
+    try:
+        data = json.loads(text)
+        why = str(data["why"]).strip() or "the last rebuild failed"
+        may_run = data.get("old_may_run") is not False
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return Debt(" ".join(text.split()) or "the last rebuild failed", True, where)
+    return Debt(why, may_run, where)
 
 
-def owe_rebuild(server_dir: Path, why: str) -> None:
-    """Record that the dashboard needs rebuilding, and why. Raises `OSError`."""
-    (server_dir / REBUILD_OWED_FILE).write_text(" ".join(why.split()) + "\n", encoding="utf-8")
+def rebuild_owed(server_dir: Path) -> Debt | None:
+    """The rebuild this install's dashboard owes, or None. Never raises.
+
+    The server folder's record, then the fallback, then this process's memory:
+    any one of them is enough. A record that is there but cannot be read counts
+    as owed, with the old container possibly running: the cost of a wrong
+    "owed" is one press, and of a wrong "not owed" a Start that brings the old
+    protocol back.
+    """
+    for path, where in (
+        (server_dir / REBUILD_OWED_FILE, "server"),
+        (fallback_path(server_dir), "config"),
+    ):
+        found = _read_record(path, where)
+        if found is not None:
+            return found
+    with _UNRECORDED_LOCK:
+        return _UNRECORDED.get(_key(server_dir))
+
+
+def owe_rebuild(server_dir: Path, why: str, *, old_may_run: bool) -> tuple[str, str]:
+    """Record the debt: `(where, what went wrong on the way)`. Never raises.
+
+    The server folder first, beside the compose file the switch lives in; then
+    Yu'lon's own config dir; then this process's memory, which is the answer
+    `"memory"` and must be said to the player, because it does not outlive the app.
+    """
+    text = json.dumps({"why": " ".join(why.split()), "old_may_run": old_may_run}) + "\n"
+    problems: list[str] = []
+    for path, where in (
+        (server_dir / REBUILD_OWED_FILE, "server"),
+        (fallback_path(server_dir), "config"),
+    ):
+        try:
+            if where == "config":
+                path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            logger.warning(f"could not record the bot dashboard's rebuild in {path}: {exc}")
+            problems.append(f"{path}: {exc}")
+            continue
+        return where, "; ".join(problems)
+    with _UNRECORDED_LOCK:
+        _UNRECORDED[_key(server_dir)] = Debt(" ".join(why.split()), old_may_run, "memory")
+    return "memory", "; ".join(problems)
 
 
 def forget_rebuild(server_dir: Path) -> None:
-    """The dashboard runs an image built from the module there now, or is off. Raises `OSError`."""
-    (server_dir / REBUILD_OWED_FILE).unlink(missing_ok=True)
+    """Every record of the debt, gone: the dashboard runs a current image, or is off.
+
+    Each place is tried; raises `OSError` for the first that would not go.
+    """
+    with _UNRECORDED_LOCK:
+        _UNRECORDED.pop(_key(server_dir), None)
+    failure: OSError | None = None
+    for path in (server_dir / REBUILD_OWED_FILE, fallback_path(server_dir)):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            failure = failure or exc
+    if failure is not None:
+        raise failure
 
 
 # -- the conf -----------------------------------------------------------------

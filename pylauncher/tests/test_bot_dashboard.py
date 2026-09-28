@@ -79,6 +79,11 @@ class _Docker:
         self.world_up = world_up
         self.build_code = 0
         self.up_error: str | None = None
+        self.rm_error: str | None = None
+        self.stop_error: str | None = None
+        self.kill_error: str | None = None
+        self.state_after = docker.ContainerState(missing=True)
+        """What `container_state` reads (T162): gone, by default, as after a removal."""
         self.ips = iter(["10.0.0.5", "10.0.0.5"])
         monkeypatch.setattr(docker, "build_image", self.build_image)
         monkeypatch.setattr(docker, "compose_up_service", self.compose_up_service)
@@ -86,6 +91,9 @@ class _Docker:
         monkeypatch.setattr(docker, "world_running", self.world_running)
         monkeypatch.setattr(docker, "remove_image", self.remove_image)
         monkeypatch.setattr(docker, "container_ip", self.container_ip)
+        monkeypatch.setattr(docker, "stop_containers", self.stop_containers)
+        monkeypatch.setattr(docker, "kill_container", self.kill_container)
+        monkeypatch.setattr(docker, "container_state", self.container_state)
 
     def build_image(
         self, context: Path, tag: str, *, sink: Callable[[str], None] | None = None, **_kw: object
@@ -106,6 +114,22 @@ class _Docker:
         # The block must still name the service when compose is asked to remove it.
         assert files.block_in(files.base_path(server_dir).read_text(encoding="utf-8"))
         self.calls.append(f"rm {service}")
+        if self.rm_error:
+            raise docker.DockerCommandError(self.rm_error)
+
+    def stop_containers(self, containers: list[str], **_kw: object) -> None:
+        self.calls.append(f"stop {' '.join(containers)}")
+        if self.stop_error:
+            raise docker.DockerCommandError(self.stop_error)
+
+    def kill_container(self, container: str, **_kw: object) -> None:
+        self.calls.append(f"kill {container}")
+        if self.kill_error:
+            raise docker.DockerCommandError(self.kill_error)
+
+    def container_state(self, container: str, **_kw: object) -> docker.ContainerState:
+        self.calls.append(f"inspect {container}")
+        return self.state_after
 
     def world_running(self, container: str, **_kw: object) -> bool | None:
         return self.world_up
@@ -1149,10 +1173,11 @@ def test_a_rebuild_that_fails_after_the_update_moved_the_module_stops_the_dashbo
     assert fake.calls == [
         f"build observability {image}",
         "rm tortoise-observability",
+        "inspect tortoise-observability",
     ], "the old dashboard must not be left running on the old protocol"
     assert (_base(server_dir), _conf(server_dir).read_text(encoding="utf-8")) == on_disk
     state = files.state(server_dir)
-    assert state.on and state.rebuild_owed
+    assert state.on and state.rebuild == files.Debt(state.rebuild_why, False, "server")
     assert "exit 1" in state.rebuild_why
     assert any(botdash.REBUILD_PRESS in line for line in said), said
     assert lifecycle == []
@@ -1301,7 +1326,7 @@ def test_switching_on_over_a_leftover_debt_clears_it(
     """An Off that stopped between the block and the record leaves the record behind alone."""
     server_dir = _install(tmp_path)
     _Docker(monkeypatch)
-    files.owe_rebuild(server_dir, "left over")
+    files.owe_rebuild(server_dir, "left over", old_may_run=False)
 
     list(_switch(server_dir).switch_on(lan=False))
 
@@ -1316,7 +1341,8 @@ class _OwedSeam(_Seam):
 
     def state(self) -> files.State:
         self._note("state")
-        return files.State(on=self.on, rebuild_owed=self.owed, rebuild_why="exit 1")
+        debt = files.Debt("exit 1", old_may_run=False) if self.owed else None
+        return files.State(on=self.on, rebuild=debt)
 
     def rebuild(self, cancel: threading.Event | None = None) -> Iterator[str]:
         self._note("rebuild")
@@ -1371,3 +1397,274 @@ def test_the_tab_rereads_the_dashboard_when_a_server_update_finishes(
     pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update finished")
 
     assert not view.rebuild_dashboard_button.isHidden()
+
+
+# -- T162 round 2: the quarantine fails closed ----------------------------------------------
+
+
+def _failed_update(
+    server_dir: Path, monkeypatch: pytest.MonkeyPatch, fake: _Docker
+) -> tuple[botdash.Dashboard, list[str]]:
+    """Switch on, then an update press that moves the module and whose rebuild fails."""
+    heads = _heads(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.calls.clear()
+    fake.build_code = 1
+    return switch, list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+
+
+def _start_brings_up(server_dir: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """What the Tortoise controller's real Start does next, in order."""
+    order: list[str] = []
+    monkeypatch.setattr(tortoise_controller.TortoiseController, "port_conflicts", lambda _self: [])
+    monkeypatch.setattr(docker, "start_staged", lambda *_a, **_kw: order.append("start_staged"))
+    monkeypatch.setattr(
+        docker, "compose_up_service", lambda *_a, **_kw: order.append("dashboard up")
+    )
+    tortoise_controller.controller_for(server_dir).start()
+    return order
+
+
+def _tab_line(qapp: object, tmp_path: Path, switch: botdash.Dashboard) -> str:
+    """The Bots tab's line, read through the real seam and the tab's own state reader."""
+    view_dir = tmp_path / "view"
+    view_dir.mkdir(exist_ok=True)
+    view = _view(qapp, view_dir, switch)  # type: ignore[arg-type]
+    view.refresh_bot_dashboard()
+    assert not view.dashboard_stale.isHidden()
+    assert not view.rebuild_dashboard_button.isHidden()
+    return view.dashboard_stale.text()
+
+
+@pytest.fixture
+def _read_only() -> Iterator[Callable[[Path], None]]:
+    """Make a directory refuse new files for the test, and give it back afterwards."""
+    if os.geteuid() == 0:  # pragma: no cover - root writes through a 0555 directory
+        pytest.skip("root ignores directory permissions")
+    made: list[Path] = []
+
+    def lock(directory: Path) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o555)
+        made.append(directory)
+
+    yield lock
+    for directory in made:
+        directory.chmod(0o755)
+
+
+def test_a_server_folder_that_refuses_the_record_puts_it_in_yulons_own_settings(
+    qapp: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _read_only: Callable[[Path], None],
+) -> None:
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    heads = _heads(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = 1
+    _read_only(server_dir)
+
+    said = list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+
+    assert not (server_dir / files.REBUILD_OWED_FILE).exists()
+    assert files.fallback_path(server_dir).is_file()
+    debt = files.state(server_dir).rebuild
+    assert debt is not None and debt.where == "config" and not debt.old_may_run
+    assert any("its own settings" in line for line in said), said
+    assert _start_brings_up(server_dir, monkeypatch) == ["start_staged"]
+    assert "is switched on but stopped" in _tab_line(qapp, tmp_path, switch)
+
+    # And the press that pays the debt clears it from where it was kept.
+    server_dir.chmod(0o755)
+    _Docker(monkeypatch)
+    list(switch.rebuild(None))
+    assert not files.fallback_path(server_dir).exists()
+    assert not files.state(server_dir).rebuild_owed
+
+
+def test_a_record_nothing_on_disk_would_take_is_kept_in_memory_and_said_plainly(
+    qapp: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _read_only: Callable[[Path], None],
+) -> None:
+    monkeypatch.setattr(files, "_UNRECORDED", {})
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    heads = _heads(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.build_code = 1
+    _read_only(server_dir)
+    _read_only(files.fallback_path(server_dir).parent)
+
+    said = list(botdash.after_update(_moving_update(heads), None, dashboard=switch))
+
+    debt = files.state(server_dir).rebuild
+    assert debt is not None and debt.where == "memory" and not debt.old_may_run
+    assert any("could not be saved anywhere" in line for line in said), said
+    assert _start_brings_up(server_dir, monkeypatch) == ["start_staged"]
+    line = _tab_line(qapp, tmp_path, switch)
+    assert "could not be saved to disk" in line and "once Yu'lon is closed" in line
+
+    _Docker(monkeypatch)
+    list(switch.rebuild(None))
+    assert not files.state(server_dir).rebuild_owed, "a paid debt is forgotten in memory too"
+
+
+def test_a_container_compose_will_not_remove_is_stopped_by_name_and_read_back(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    fake.rm_error = "compose: no such service"
+    fake.state_after = docker.ContainerState(status="exited")
+
+    switch, _said = _failed_update(server_dir, monkeypatch, fake)
+
+    assert fake.calls[1:] == [
+        "rm tortoise-observability",
+        "stop tortoise-observability",
+        "inspect tortoise-observability",
+    ]
+    debt = files.state(server_dir).rebuild
+    assert debt is not None and debt.where == "server" and not debt.old_may_run
+    assert _start_brings_up(server_dir, monkeypatch) == ["start_staged"]
+    assert "is switched on but stopped" in _tab_line(qapp, tmp_path, switch)
+
+
+@pytest.mark.parametrize(
+    "read",
+    [docker.ContainerState(status="running"), docker.ContainerState()],
+    ids=["still-running", "unreadable"],
+)
+def test_an_old_dashboard_that_would_not_stop_is_recorded_as_maybe_running(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: docker.ContainerState
+) -> None:
+    """Compose, stop and kill all refused; the read says running, or nothing at all."""
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    fake.rm_error = "compose broke"
+    fake.stop_error = "stop broke"
+    fake.kill_error = "kill broke"
+    fake.state_after = read
+
+    switch, said = _failed_update(server_dir, monkeypatch, fake)
+
+    assert fake.calls[1:] == [
+        "rm tortoise-observability",
+        "stop tortoise-observability",
+        "kill tortoise-observability",
+        "inspect tortoise-observability",
+    ]
+    debt = files.state(server_dir).rebuild
+    assert debt is not None and debt.old_may_run
+    assert any("may still be running" in line for line in said), said
+    assert _start_brings_up(server_dir, monkeypatch) == ["start_staged"]
+    line = _tab_line(qapp, tmp_path, switch)
+    assert "may still be running" in line and "switched on but stopped" not in line
+
+
+def test_a_kill_that_works_after_a_refused_stop_reads_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    fake.rm_error = "compose broke"
+    fake.stop_error = "stop broke"
+    fake.state_after = docker.ContainerState(status="exited")
+
+    _failed_update(server_dir, monkeypatch, fake)
+
+    assert "kill tortoise-observability" in fake.calls
+    debt = files.state(server_dir).rebuild
+    assert debt is not None and not debt.old_may_run
+
+
+def test_a_module_head_nobody_could_read_counts_as_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """None before and after is not "the same commit": the rebuild's failure stops it."""
+    from yulon.controller_wow_tortoise import botpool
+
+    monkeypatch.setattr(botpool, "head_sha", lambda _dest, **_kw: None)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.calls.clear()
+    fake.build_code = 1
+
+    list(botdash.after_update(_update, None, dashboard=switch))
+
+    assert "rm tortoise-observability" in fake.calls
+    assert files.state(server_dir).rebuild_owed
+
+
+@pytest.mark.parametrize(
+    ("read", "says"),
+    [
+        (docker.ContainerState(status="running"), "still running"),
+        (docker.ContainerState(missing=True), "not running now"),
+        (docker.ContainerState(), "would not say"),
+    ],
+    ids=["running", "gone", "unreadable"],
+)
+def test_a_recreate_that_fails_after_a_good_build_of_the_same_module_reads_the_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read: docker.ContainerState,
+    says: str,
+) -> None:
+    """Not "keeps running the version it had": the recreate may have removed it."""
+    _heads(monkeypatch)
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.up_error = "port is already allocated"
+    fake.state_after = read
+
+    said = list(botdash.after_update(_update, None, dashboard=switch))
+
+    assert not any("keeps running" in line for line in said), said
+    assert says in said[-1]
+    assert not files.state(server_dir).rebuild_owed, "the same module: nothing to quarantine"
+
+
+def test_the_rebuild_button_is_grey_while_another_job_holds_the_tab(
+    qapp: object, tmp_path: Path
+) -> None:
+    seam = _OwedSeam()
+    view = _view(qapp, tmp_path, seam)
+    view.refresh_bot_dashboard()
+    assert view.rebuild_dashboard_button.isEnabled()
+
+    view._set_busy(True)
+    assert not view.rebuild_dashboard_button.isEnabled()
+    view.refresh_bot_dashboard()
+    assert not view.rebuild_dashboard_button.isEnabled(), "a re-read while busy keeps it grey"
+
+    view._set_busy(False)
+    assert view.rebuild_dashboard_button.isEnabled()
+
+
+def test_kill_container_is_one_docker_kill_and_raises_on_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    def fake(argv: list[str], *_a: object, **_kw: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "Error response from daemon: nope")
+
+    monkeypatch.setattr(docker, "_docker", fake)
+    with pytest.raises(docker.DockerCommandError):
+        docker.kill_container("tortoise-observability")
+    assert seen == [["kill", "tortoise-observability"]]

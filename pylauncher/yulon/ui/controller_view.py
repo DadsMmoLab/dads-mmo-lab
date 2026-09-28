@@ -2988,13 +2988,30 @@ DASHBOARD_REBUILD_QUESTION = (
 )
 
 
-def dashboard_stale_text(why: str) -> str:
-    """The Bots tab's line for a dashboard stopped until it is rebuilt (T162)."""
-    return (
-        "The bot dashboard is switched on but stopped: after the server update it could not be "
-        "rebuilt from the new bots module, and the old one was made for the module as it was "
-        f"before ({why}). Press {tortoise_botdash.REBUILD_PRESS} to try again."
-    )
+def dashboard_stale_text(debt: bot_dashboard.Debt) -> str:
+    """The Bots tab's line for a dashboard that owes a rebuild (T162).
+
+    It says the worse thing unless a read proved the better one: a container
+    that would not go, or could not be read back, may still be running.
+    """
+    if debt.old_may_run:
+        text = (
+            "The bot dashboard could not be rebuilt after the server update, and the old one, "
+            "made for the bots module as it was before, may still be running and showing wrong "
+            f"bot telemetry ({debt.why})."
+        )
+    else:
+        text = (
+            "The bot dashboard is switched on but stopped: after the server update it could not "
+            "be rebuilt from the new bots module, and the old one was made for the module as it "
+            f"was before ({debt.why})."
+        )
+    if debt.where == "memory":
+        text += (
+            " This could not be saved to disk, so once Yu'lon is closed the next server Start "
+            "brings the old dashboard back."
+        )
+    return f"{text} Press {tortoise_botdash.REBUILD_PRESS} to fix it."
 
 
 DASHBOARD_RESTART_QUESTION = (
@@ -6047,6 +6064,9 @@ class ControllerView(QWidget):
             # a recreate is reading), and its owed-job button is the banner's.
             self._set_bot_count_controls()
             self.bot_count_owed_button.setEnabled(False)
+            # T162: the dashboard's rebuild restarts the world like the rest.
+            if self.dashboard_log is not None:
+                self.rebuild_dashboard_button.setEnabled(False)
         else:
             self.compose_banner_button.setEnabled(True)
             self.refresh_button.setEnabled(True)
@@ -6112,6 +6132,9 @@ class ControllerView(QWidget):
             # half of it: a job of ours finishing must not hand back a control
             # that the reading never armed.
             self._set_adopt_button()
+            # T162: back to what the dashboard's files last said, never unconditionally.
+            if self.dashboard_log is not None:
+                self._set_rebuild_dashboard_button()
 
     @Slot()
     def start_server(self) -> None:
@@ -8645,6 +8668,7 @@ class ControllerView(QWidget):
         self.dashboard_switch.setEnabled(False)
         self.dashboard_lan.setEnabled(False)
         self._dashboard_job = ""
+        self._dashboard_owed = False
         return group
 
     @Slot()
@@ -8660,14 +8684,15 @@ class ControllerView(QWidget):
         problem = getattr(state, "problem", "")
         on = bool(getattr(state, "on", False))
         running = self.dashboard_log is not None and self.dashboard_log.running
-        owed = on and bool(getattr(state, "rebuild_owed", False))
+        found = getattr(state, "rebuild", None) if on else None
+        debt = found if isinstance(found, bot_dashboard.Debt) else None
+        owed = debt is not None
         self._show_dashboard_switch(on)
-        self.dashboard_stale.setText(
-            dashboard_stale_text(str(getattr(state, "rebuild_why", ""))) if owed else ""
-        )
+        self.dashboard_stale.setText("" if debt is None else dashboard_stale_text(debt))
         self.dashboard_stale.setVisible(owed and not problem)
         self.rebuild_dashboard_button.setVisible(owed and not problem)
-        self.rebuild_dashboard_button.setEnabled(owed and not running)
+        self._dashboard_owed = owed and not problem
+        self._set_rebuild_dashboard_button()
         if problem:
             self.dashboard_report.setText(f"Could not tell whether the dashboard is on: {problem}")
             self.dashboard_switch.setEnabled(False)
@@ -8735,6 +8760,14 @@ class ControllerView(QWidget):
             lambda: seam.switch_off(cancel),
             title="Switching the bot dashboard off",
             cancel=cancel,
+        )
+
+    def _set_rebuild_dashboard_button(self) -> None:
+        """Live only while a rebuild is owed and nothing else of this tab's is running."""
+        log = self.dashboard_log
+        running = log is not None and log.running
+        self.rebuild_dashboard_button.setEnabled(
+            self._dashboard_owed and not running and not self._busy
         )
 
     @Slot()
