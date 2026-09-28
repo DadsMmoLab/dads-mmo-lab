@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -89,6 +90,7 @@ from yulon.ui.controller_view import (
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import ThreadedJobRunner, run_inline
+from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import REMEMBERED_NOTE, ManifestPromptDialog
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
@@ -6917,6 +6919,118 @@ def test_a_rebuild_that_ends_mid_wait_takes_its_stop_now_anyway_away(
     wait_for_panel(view.rebuild_log)
     process_events()
     assert view.rebuild_stop_anyway_button.isHidden()
+
+
+def _declared(cls: type, kind: str) -> dict[str, tuple[str, ...]]:
+    """What `cls` itself declares as `kind` ("Slot" or "Signal"): name -> Qt parameter types."""
+    from PySide6.QtCore import QMetaMethod
+
+    meta = cast(Any, cls).staticMetaObject
+    methods = (meta.method(i) for i in range(meta.methodOffset(), meta.methodCount()))
+    return {
+        bytes(m.name().data()).decode(): tuple(bytes(t.data()).decode() for t in m.parameterTypes())
+        for m in methods
+        if m.methodType() == getattr(QMetaMethod.MethodType, kind)
+    }
+
+
+def test_every_slot_the_controller_view_declares_takes_the_arguments_it_declares() -> None:
+    """T167: T158 slid `_rebuild_cancel` in between `@Slot(bool, str)` and `_rebuild_finished`.
+
+    The decorator then described a method that takes nothing and returns a
+    Cancel. Measured on PySide6 6.11.2 it changed no delivery -- an undecorated
+    receiver still gets a queued cross-thread call, with its arguments, on the
+    GUI thread -- so this is the guard that notices the next one: a slot whose
+    declared arguments the method it sits on cannot take.
+    """
+    wrong = []
+    for name, types in _declared(ControllerView, "Slot").items():
+        params = [
+            p
+            for p in list(inspect.signature(getattr(ControllerView, name)).parameters.values())[1:]
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        required = sum(1 for p in params if p.default is p.empty)
+        if not required <= len(types) <= len(params):
+            wrong.append(f"{name}{types}")
+    assert wrong == []
+
+
+def test_the_rebuild_panels_finish_lands_on_a_slot_declared_with_its_own_signature() -> None:
+    """T167: the receiver of `run_finished` is declared as the (bool, str) the panel sends."""
+    sent = _declared(LogPanel, "Signal")["run_finished"]
+    assert _declared(ControllerView, "Slot").get("_rebuild_finished") == sent == ("bool", "QString")
+
+
+def test_a_rebuild_refused_on_its_worker_thread_reaches_the_view_with_its_message(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T167: the finish crosses from the panel's worker to `_rebuild_finished` as (False, msg)."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    ran_on: list[threading.Thread] = []
+
+    def refuses(cancel: object = None) -> Iterator[str]:
+        ran_on.append(threading.current_thread())
+        yield "--- build"
+        raise InstallerError("that compose file was not written by Yu'lon")
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = refuses
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    heard: list[tuple[str, threading.Thread]] = []
+    view.action_failed.connect(lambda message: heard.append((message, threading.current_thread())))
+    assert view.rebuild_server() is True
+    wait_for_panel(view.rebuild_log)
+    pump_until(lambda: bool(heard), "the refusal to reach the view")
+
+    assert len(ran_on) == 1 and ran_on[0] is not threading.main_thread(), "ran on the GUI thread"
+    assert heard == [
+        ("InstallerError: that compose file was not written by Yu'lon", threading.main_thread())
+    ]
+    view.refresh_status()
+    assert view.rebuild_action.isEnabled() is True
+
+
+def test_a_rebuild_stopped_from_its_panel_is_stopped_through_the_cancel_it_was_handed(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T167: `_rebuild_cancel` still hands the job the Cancel the panel's Stop sets,
+    and the stopped job's finish unlocks the tab without a refusal."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    handed: list[object] = []
+
+    def waits(cancel: object = None) -> Iterator[str]:
+        handed.append(cancel)
+        yield "--- build"
+        assert isinstance(cancel, docker.CancelWithForce)
+        assert cancel.wait(HANG_BOUND), "the panel's Stop never reached the rebuild"
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = waits
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    assert view.rebuild_server() is True
+    pump_until(lambda: "--- build" in view.rebuild_log.text(), "the rebuild to start")
+    view.rebuild_log.stop()
+    wait_for_panel(view.rebuild_log)
+    process_events()
+
+    (cancel,) = handed
+    assert isinstance(cancel, docker.CancelWithForce) and cancel.is_set()
+    assert not cancel.anyway.is_set(), "a Stop is not a Stop now anyway"
+    assert failures == []
+    assert view.rebuild_log.cancelled
+    view.refresh_status()
+    assert view.rebuild_action.isEnabled() is True
 
 
 def test_the_modules_tab_offers_a_rebuild_beside_the_sentence_that_demands_one(

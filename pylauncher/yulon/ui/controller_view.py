@@ -11601,7 +11601,6 @@ class ControllerView(QWidget):
     def _rebuild_started(self) -> None:
         self._set_busy(True)
 
-    @Slot(bool, str)
     def _rebuild_cancel(self) -> docker.CancelWithForce:
         """The Cancel a rebuild-panel job gets, with the panel's "Stop now anyway" riding on it."""
         cancel = docker.CancelWithForce()
@@ -11638,6 +11637,7 @@ class ControllerView(QWidget):
         if self._rebuild_force is not None:
             self._rebuild_force.set()
 
+    @Slot(bool, str)
     def _rebuild_finished(self, ok: bool, message: str) -> None:
         """Unlock, and put a refusal where the user is looking.
 
