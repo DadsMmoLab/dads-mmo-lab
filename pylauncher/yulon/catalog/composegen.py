@@ -892,6 +892,62 @@ class ServerFolder:
     name: str
     target: str
 
+    @property
+    def spec(self) -> str:
+        """`./<name>:<target>`: the bind as a compose file spells it, label left off (T169)."""
+        return f"./{self.name}:{self.target}"
+
+
+SERVER_CONF_SERVICE: Mapping[str, str] = {
+    conf: token.removesuffix("_FOLDERS").lower() for token, conf in SERVER_FOLDER_CONFS.items()
+}
+"""Each conf, and the service (after `{{CONTAINER_PREFIX}}`) whose binary reads it (T169).
+
+Read off `SERVER_FOLDER_CONFS`' token names, so the two cannot disagree."""
+
+_SERVICE_KEY = re.compile(r"^  ([^\s#:][^:#]*):\s*(#.*)?$")
+
+
+def bound_folders(entry: CatalogEntry, text: str, conf: str) -> frozenset[str]:
+    """Each `ServerFolder.spec` the compose `text` binds on the service that reads `conf` (T169).
+
+    Per service, not per file (cold review, T169 round 2): a `./logs` bound on
+    mangosd says nothing about where realmd writes. Read by line rather than as
+    YAML -- the app ships no YAML parser, and this is Yu'lon's own file, marker
+    and all: a two-space service key under the top-level `services:`, and its
+    `- ./` items. A conf no service reads, or a service the file lacks, binds nothing.
+    """
+    role = SERVER_CONF_SERVICE.get(conf)
+    if role is None:
+        return frozenset()
+    wanted = f"{_container_prefix(entry)}{role}"
+    service: str | None = None
+    in_services = False
+    found: set[str] = set()
+    for line in text.splitlines():
+        if line[:1] not in ("", " ", "#"):
+            in_services = line.rstrip() == "services:"
+            service = None
+            continue
+        key = _SERVICE_KEY.match(line) if in_services else None
+        if key is not None:
+            service = key.group(1).strip()
+            continue
+        item = line.strip()
+        if service == wanted and item.startswith("- ./"):
+            source, _sep, rest = item[2:].partition(":")
+            found.add(f"{source}:{rest.split(':', 1)[0]}")
+    return frozenset(found)
+
+
+def folder_target(entry: CatalogEntry, value: str) -> str:
+    """Where a `*Dir` value lands in the container, read from the servers' working directory."""
+    native = _native_of(entry)
+    if native.cmangos is None:
+        return value
+    core = PurePosixPath(native.cmangos.conf.source_dir).parent
+    return _folder_at(core, _unquoted(value))[0]
+
 
 @dataclass(frozen=True)
 class FolderSetting:

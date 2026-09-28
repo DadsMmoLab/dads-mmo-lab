@@ -27,7 +27,7 @@ import pytest
 
 from yulon import channel_setup, dbsecret, platform, reset_defaults, resources, tuning
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
@@ -210,6 +210,23 @@ def _fresh_install(game: str, server: Path, image: FakeImage) -> dict[str, bytes
     password = (server / ".db_password").read_text(encoding="utf-8").strip()
     list(engine._conf(_context(server, password, entry)))
     return {file: (server / file).read_bytes() for file in reset_defaults.core_files(entry)}
+
+
+def _cmangos_compose(server: Path, entry: CatalogEntry = TBC) -> None:
+    """The base compose file the install's OWN generate-compose stage writes into `server`.
+
+    Since T169 a reset puts a folder setting (`LogsDir`) back only where this
+    file binds its folder, so a test comparing a reset with a fresh install
+    needs the fresh install's compose file too.
+    """
+    engine = CmangosInstaller(
+        entry,
+        seams=native.Seams(
+            platform_id=_linux, selinux_enforcing=lambda: False, fs_type=lambda path: "ext4"
+        ),
+    )
+    password = (server / ".db_password").read_text(encoding="utf-8").strip()
+    list(engine.stage_generate_compose(_context(server, password, entry)))
 
 
 def _wotlk_stack(server: Path, *, channel: bool = False) -> bytes:
@@ -1480,6 +1497,7 @@ def test_a_missing_cmangos_conf_is_made_again_owner_only_and_the_rest_reset(
     tmp_path: Path,
 ) -> None:
     server, _, installed, _ = _tuned_tbc(tmp_path)
+    _cmangos_compose(server)  # T169: it binds ./logs, so LogsDir is made as installed
     (server / "etc/realmd.conf").unlink()
     report = reset_defaults.reset(
         TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
@@ -1799,6 +1817,7 @@ def test_a_file_back_or_a_compose_file_replaced_after_the_question_refuses_too(
 
 def test_unchanged_confirmed_facts_let_the_press_through(tmp_path: Path) -> None:
     server, _, installed, _ = _tuned_tbc(tmp_path)
+    _cmangos_compose(server)  # T169: it binds ./logs, so LogsDir is made as installed
     (server / "etc/realmd.conf").unlink()
     files = reset_defaults.core_files(TBC)
     confirmed = reset_defaults.press_facts(TBC, server, files)

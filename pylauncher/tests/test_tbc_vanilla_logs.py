@@ -36,7 +36,9 @@ from tests.test_repair_server_files import (  # noqa: F401 - `ps` is the Server 
     make_old,
     ps,
 )
+from tests.test_reset_defaults import TEMPLATES, FakeImage, _fresh_install, _seams
 from tests.test_server_folders import SERVICE_CONF, host_binds, render_base, service, table
+from yulon import reset_defaults
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import InstallerError, InstallOptions
@@ -509,3 +511,180 @@ def test_without_a_setting_the_question_still_says_the_confs_are_not_touched(
     view.compose_banner_button.click()
     assert "not your .conf settings" in asked[0], asked[0]
     assert "LogsDir" not in asked[0]
+
+
+# -- round 2: each service's own binds (cold review) ------------------------------
+
+
+def test_a_bind_on_mangosd_only_still_gets_realmd_its_setting_and_its_bind(tmp_path: Path) -> None:
+    """`./logs` on mangosd says nothing about realmd, which writes where ITS conf says."""
+    server_dir = installed(tmp_path)
+    path = server_dir / composegen.BASE_FILE
+    fresh = path.read_text(encoding="utf-8")
+    lines = fresh.split("\n")
+    realmd = next(i for i, line in enumerate(lines) if line.strip().startswith("- ./logs:"))
+    path.write_text("\n".join(lines[:realmd] + lines[realmd + 1 :]), encoding="utf-8")
+    base = path.read_text(encoding="utf-8")
+    assert "/opt/mangos/logs" not in host_binds(service(base, TBC, "realmd"))
+    assert "/opt/mangos/logs" in host_binds(service(base, TBC, "mangosd"))
+    paths = write_confs(server_dir)
+
+    check = engine().base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.settings == ('LogsDir = "../logs" in etc/realmd.conf',), check
+    engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+
+    one_line_changed(REALMD_DIST, paths["realmd.conf"].read_text(encoding="utf-8"), SET)
+    assert paths["mangosd.conf"].read_text(encoding="utf-8") == MANGOSD_DIST
+    assert path.read_text(encoding="utf-8") == fresh
+
+
+# -- round 2: what a stopped repair says (Codex) ----------------------------------
+
+
+def test_a_compose_backup_that_fails_writes_nothing_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Taken and checked before any conf is touched, so "Nothing was written" is true."""
+    server_dir, _fresh, paths = an_old_install(tmp_path)
+    real = native._backup_beside
+
+    def refuse_compose(path: Path, when: object) -> Path:
+        if path.name == composegen.BASE_FILE:
+            raise OSError(28, "No space left on device")
+        return real(path, when)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(native, "_backup_beside", refuse_compose)
+    with pytest.raises(InstallerError, match="Nothing was written"):
+        engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+    for name, conf_path in paths.items():
+        assert conf_path.read_text(encoding="utf-8") == DISTS[name], f"{name} was changed"
+        assert conf_backups(conf_path) == [], f"{name} was backed up"
+
+
+def test_a_compose_write_that_fails_after_the_confs_names_them_and_the_next_press_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fresh, paths = an_old_install(tmp_path)
+    base = server_dir / composegen.BASE_FILE
+    old = base.read_bytes()
+    real = native.os.replace
+
+    def refuse_compose(src: object, dst: object) -> None:
+        if Path(str(dst)).name == composegen.BASE_FILE:
+            raise OSError(28, "No space left on device")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(native.os, "replace", refuse_compose)
+    with pytest.raises(InstallerError) as raised:
+        engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+    said = str(raised.value)
+    assert base.read_bytes() == old
+    for name, conf_path in paths.items():
+        one_line_changed(DISTS[name], conf_path.read_text(encoding="utf-8"), SET)
+        [backup] = conf_backups(conf_path)
+        assert name in said and backup.name in said, said
+    assert "Repair server files… again before restarting" in said, said
+    assert "Nothing was written" not in said, said
+
+    monkeypatch.setattr(native.os, "replace", real)
+    check = engine().base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "stale" and check.settings == (), check
+    engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert base.read_text(encoding="utf-8") == fresh
+    assert engine().base_compose_check(InstallOptions(server_dir=server_dir)).state == "current"
+
+
+# -- round 2: Reset to default does not set what nothing binds (Codex) -------------
+
+
+def reset_templates() -> dict[str, str]:
+    """TBC's image templates, with upstream's real `LogsDir = ""` lines in the two confs."""
+    return {
+        **TEMPLATES["wow-tbc"],
+        "mangosd.conf.dist": MANGOSD_DIST,
+        "realmd.conf.dist": REALMD_DIST,
+    }
+
+
+def an_install_to_reset(tmp_path: Path, *, bound: bool) -> tuple[Path, dict[str, bytes]]:
+    """A TBC install whose confs say `LogsDir = ""` as before T169, then tuned by hand.
+
+    `bound`: its compose file already links `./logs` (a repaired or post-T169
+    install); otherwise it is the base file from before T169. Returns the server
+    folder and each conf's text before the hand tuning.
+    """
+    server_dir = installed(tmp_path)
+    if not bound:
+        before_t169(server_dir)
+    written = _fresh_install("wow-tbc", server_dir, FakeImage(reset_templates()))
+    untuned: dict[str, bytes] = {}
+    for file, data in written.items():
+        text = data.decode("utf-8").replace(SET, 'LogsDir = ""')
+        untuned[file] = text.encode("utf-8")
+        (server_dir / file).write_bytes(untuned[file] + b"Tuned.By.Hand = 7\n")
+    return server_dir, untuned
+
+
+def test_a_reset_keeps_logs_dir_where_nothing_binds_the_folder_and_names_repair(
+    tmp_path: Path,
+) -> None:
+    server_dir, untuned = an_install_to_reset(tmp_path, bound=False)
+    report = reset_defaults.reset(
+        TBC,
+        server_dir,
+        reset_defaults.core_files(TBC),
+        seams=_seams(FakeImage(reset_templates())),
+    )
+    assert [r.outcome for r in report.results] == ["reset"] * 4, report.lines()
+    for file, text in untuned.items():
+        # Every other key back as installed, the hand tuning gone, LogsDir kept.
+        assert (server_dir / file).read_bytes() == text, file
+    for name in DISTS:
+        conf_text = (server_dir / "etc" / name).read_text(encoding="utf-8")
+        assert composegen.conf_setting(conf_text, "LogsDir") == "", name
+    last = report.lines()[-1]
+    assert "Repair server files…" in last and "Server tab" in last, last
+    assert "LogsDir in mangosd.conf and LogsDir in realmd.conf" in last, last
+
+
+def test_a_reset_of_an_install_that_binds_the_folder_writes_the_tables_logs_dir(
+    tmp_path: Path,
+) -> None:
+    server_dir, _untuned = an_install_to_reset(tmp_path, bound=True)
+    report = reset_defaults.reset(
+        TBC,
+        server_dir,
+        reset_defaults.core_files(TBC),
+        seams=_seams(FakeImage(reset_templates())),
+    )
+    for name in DISTS:
+        conf_text = (server_dir / "etc" / name).read_text(encoding="utf-8")
+        assert composegen.conf_setting(conf_text, "LogsDir") == "../logs", name
+    assert not any("Repair server files" in line for line in report.lines()), report.lines()
+
+
+def test_a_reset_keeps_a_folder_the_player_chose_and_says_so(tmp_path: Path) -> None:
+    """Unbound and set to their own folder: kept, and the report says why."""
+    server_dir, untuned = an_install_to_reset(tmp_path, bound=False)
+    mangosd = server_dir / "etc" / "mangosd.conf"
+    mangosd.write_bytes(mangosd.read_bytes().replace(b'LogsDir = ""', b'LogsDir = "../mylogs"'))
+    report = reset_defaults.reset(
+        TBC, server_dir, ["etc/mangosd.conf"], seams=_seams(FakeImage(reset_templates()))
+    )
+    text = mangosd.read_text(encoding="utf-8")
+    assert composegen.conf_setting(text, "LogsDir") == "../mylogs"
+    assert "Tuned.By.Hand" not in text
+    assert "LogsDir in mangosd.conf left as it is" in report.lines()[-1], report.lines()
+
+
+def test_a_conf_made_again_by_a_reset_takes_upstreams_empty_logs_dir_until_bound(
+    tmp_path: Path,
+) -> None:
+    """realmd.conf deleted, compose from before T169: remade as installed but for `LogsDir`."""
+    server_dir, untuned = an_install_to_reset(tmp_path, bound=False)
+    (server_dir / "etc" / "realmd.conf").unlink()
+    report = reset_defaults.reset(
+        TBC, server_dir, ["etc/realmd.conf"], seams=_seams(FakeImage(reset_templates()))
+    )
+    assert [r.outcome for r in report.results] == ["recreated"], report.lines()
+    assert (server_dir / "etc" / "realmd.conf").read_bytes() == untuned["etc/realmd.conf"]

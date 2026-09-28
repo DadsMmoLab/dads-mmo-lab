@@ -804,15 +804,20 @@ def _replace_if_unchanged(path: Path, text: str, expected: str, *, exact: bool =
         raise
 
 
-def _host_binds(text: str) -> frozenset[str]:
-    """Every `./<folder>:<target>` a compose file's `- ./` lines bind, label dropped (T169)."""
-    binds: set[str] = set()
-    for line in text.splitlines():
-        item = line.strip()
-        if item.startswith("- ./"):
-            source, _sep, rest = item[2:].partition(":")
-            binds.add(f"{source}:{rest.split(':', 1)[0]}")
-    return frozenset(binds)
+def _confs_already(done: Sequence[tuple[Path, Path]]) -> str:
+    """The sentence a repair stopped after its conf edits ends with (T169, Codex round 2).
+
+    Those confs stay set -- each with its old text in the named backup -- and
+    the compose file is still `stale`, so the next press finishes the job; a
+    restart before it would run the server with the setting and no bind.
+    """
+    if not done:
+        return ""
+    names = ", ".join(f"{conf.name} (its old text is {backup.name})" for conf, backup in done)
+    return (
+        f" Already changed: {names}. Press Repair server files… again before restarting "
+        "the server, and it finishes the rest."
+    )
 
 
 def _read_exact(path: Path) -> str:
@@ -7601,8 +7606,9 @@ class StagedInstaller:
         folder, it still leaves the key at upstream's `""` (a value somebody chose
         is never overwritten; `composegen.folder_settings()` binds it instead, or
         says in `kept` why it cannot), and the file on disk does not already bind
-        the folder -- the setting rides with its bind, so a player who puts `""`
-        back on an install that has the bind is not offered it again.
+        the folder on the service that reads that conf (`composegen.bound_folders()`)
+        -- the setting rides with its bind, so a player who puts `""` back on an
+        install that has the bind is not offered it again.
 
         Only that key's line changes, through the conf stage's own patcher
         (`conf.patch()`, byte-preserving everywhere else), and the result is read
@@ -7641,17 +7647,19 @@ class StagedInstaller:
             settings = composegen.folder_settings(self.entry, texts)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
-        bound = _host_binds(text)
         kept = [setting.why for setting in settings if setting.why]
         edits: list[_ConfEdit] = []
         for name, before in texts.items():
+            # The binds of the service that reads THIS conf (cold review): a
+            # `./logs` on mangosd is not realmd's.
+            bound = composegen.bound_folders(self.entry, text, name)
             after = before
             done: list[str] = []
             for setting in settings:
                 folder = setting.folder
                 if setting.conf != name or not setting.unset or folder is None:
                     continue
-                if f"./{folder.name}:{folder.target}" in bound:
+                if folder.spec in bound:
                     continue
                 trial = conf.patch(after, ConfPatch(keys={setting.key: setting.stated}), {})
                 if composegen.conf_setting(trial, setting.key) != setting.stated.strip('"'):
@@ -7695,10 +7703,13 @@ class StagedInstaller:
         as root; one that is there is left as it is. The other (T169) is the one
         conf line that makes the server write into such a folder, where the conf
         still leaves it at upstream's `""` (`_conf_edits()`): backed up and
-        written the same way, and BEFORE the compose file, so a press stopped
-        between the two leaves a compose file still `stale` and the next press
-        finishes -- the other way round, a file already binding the folder would
-        read `current` and the conf it needs would never be offered again.
+        written the same way, after the compose file's own backup is taken and
+        checked (so a backup that fails has truly written nothing) and BEFORE the
+        compose file is replaced, so a press stopped between the two leaves a
+        compose file still `stale` and the next press finishes -- the other way
+        round, a file already binding the folder would read `current` and the
+        conf it needs would never be offered again. A refusal after a conf was
+        set names it and its backup, and says to press Repair again first.
 
         Asked again here rather than trusting the tab's earlier reading, because the
         folder can change between the two. Writes only on `stale`: `current` writes
@@ -7735,9 +7746,8 @@ class StagedInstaller:
         except InstallerError as exc:
             raise InstallerError(f"{exc} {path} is as it was, and no backup was made.") from exc
         when = now or datetime.now()
-        confs: list[Path] = []
-        for index, edit in enumerate(edits):
-            confs.append(self._set_conf(edit, when, path, [e.path for e in edits[:index]]))
+        # The compose file's backup first, and checked, BEFORE any conf is edited
+        # (Codex, T169 round 2): a backup that fails then truly leaves nothing written.
         try:
             backup = _backup_beside(path, when)
         except OSError as exc:
@@ -7749,41 +7759,50 @@ class StagedInstaller:
             # The copy is not of the file that was checked: it changed in between.
             backup.unlink(missing_ok=True)
             raise InstallerError(changed)
+        done: list[tuple[Path, Path]] = []
+        for edit in edits:
+            done.append((edit.path, self._set_conf(edit, when, path, backup, done)))
         try:
             _replace_if_unchanged(path, fresh, text)
         except ComposeChangedError as exc:
-            raise InstallerError(f"{changed} Its backup from before is {backup.name}.") from exc
+            raise InstallerError(
+                f"{changed} Its backup from before is {backup.name}.{_confs_already(done)}"
+            ) from exc
         except OSError as exc:
             raise InstallerError(
                 f"{path} could not be written ({exc}). The old file is still in place, and its "
-                f"backup is {backup.name}."
+                f"backup is {backup.name}.{_confs_already(done)}"
             ) from exc
         logger.info(f"repaired {path}; the old file is {backup.name}")
-        return ComposeRepaired(path, backup, tuple(confs))
+        return ComposeRepaired(path, backup, tuple(conf_backup for _conf, conf_backup in done))
 
     @staticmethod
-    def _set_conf(edit: _ConfEdit, when: datetime, compose: Path, done: Sequence[Path]) -> Path:
+    def _set_conf(
+        edit: _ConfEdit,
+        when: datetime,
+        compose: Path,
+        compose_backup: Path,
+        done: Sequence[tuple[Path, Path]],
+    ) -> Path:
         """Write one conf edit of a repair (T169), backed up first; return the backup.
 
         The compose file's rule, byte for byte: a stamped `.repair.bak` beside it
         (`copy2`, so the owner-only mode of a file holding the database password
         is kept), checked to hold exactly what was read, then
         `_replace_if_unchanged(exact=True)`. `done` are the confs this press
-        already set, which a refusal names: they stay set, and the compose file
-        is still `stale`, so pressing Repair again finishes the rest.
+        already set, with their backups, which a refusal names: they stay set,
+        and the compose file is still `stale`, so pressing Repair again finishes
+        the rest. `compose_backup` is the copy already taken of the compose file.
 
         Raises:
             InstallerError: the backup or the write failed, or the conf changed
                 since it was read; the conf is as it was.
         """
         path = edit.path
-        after = (
-            f" {', '.join(p.name for p in done)} already had its setting written, with a backup "
-            "beside it; pressing Repair again finishes the rest."
-            if done
-            else ""
+        untouched = (
+            f"{compose.name} was not repaired (a copy of it was already taken, "
+            f"{compose_backup.name}).{_confs_already(done)}"
         )
-        untouched = f"{compose.name} was not repaired.{after}"
         try:
             backup = _backup_beside(path, when)
         except OSError as exc:
