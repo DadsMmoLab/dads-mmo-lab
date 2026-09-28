@@ -3170,6 +3170,70 @@ def test_a_row_whose_upstream_moved_is_a_never_asked_question_again(tmp_path: Pa
     assert len(second) == cap
 
 
+def _kept_rows(server: Path) -> list[tuple[str, str, int]]:
+    """`(family, key, checked_unix)` of every row the compare file holds, in file order."""
+    said = json.loads((server / apply_module.MODULE_COMPARE_FILE).read_text(encoding="utf-8"))
+    return [(row["family"], row["key"], row["checked_unix"]) for row in said["rows"]]
+
+
+def test_a_removed_clone_s_failure_is_pruned_and_the_rest_keep_their_turn(tmp_path: Path) -> None:
+    """Only the clones on disk keep a row (Codex, round 4); the others keep their timestamps.
+
+    Press one asks the budget's worth and all fail; mod-03 is then removed.
+    Press two asks the two never-asked rows and writes: mod-03's row is gone,
+    and the failures that stay still say T0. Press three, an hour on, asks
+    those failures in the same order as before, without mod-03.
+    """
+    cap = apply_module.GITHUB_ASKS_PER_PRESS
+    names = _many_modules(tmp_path, cap + 2)
+    github = _AskedGitHub(None)
+    git = _ShallowGit(per_folder=True)
+
+    apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0)
+    removed = names[3]
+    shutil.rmtree(tmp_path / "modules" / removed)
+    apply_module.module_updates(tmp_path, git=git, compare_commits=github, now=_T0 + 60)
+
+    kept = {key: at for _family, key, at in _kept_rows(tmp_path)}
+    assert removed not in kept, kept
+    assert kept == {
+        **{name: _T0 for name in names[:cap] if name != removed},
+        **{name: _T0 + 60 for name in names[cap:]},
+    }
+
+    before = len(github.asked)
+    apply_module.module_updates(
+        tmp_path, git=git, compare_commits=github, now=_T0 + upstream.RETRY_SECONDS
+    )
+    third = [ref for _slug, _base, ref in github.asked[before:]]
+    assert third == [_fetched_for(name) for name in names[:cap] if name != removed], third
+
+
+def test_a_removed_clone_s_answer_is_pruned_too(tmp_path: Path) -> None:
+    """An answer outlives nothing but its clone: renamed or removed, its row goes at the next write.
+
+    Rows of the OTHER family (a Tortoise press's addon, in the same folder)
+    are not this press's to judge and stay.
+    """
+    _one_module(tmp_path, "mod-a")
+    _one_module(tmp_path, "mod-b")
+    addon = tmp_path / apply_module.CLONE_DIRS["mod"] / "tortoise-gm-manager"
+    (addon / ".git").mkdir(parents=True)
+    github = _AskedGitHub(_behind_by(1), _behind_by(2), _behind_by(3), _behind_by(4))
+
+    apply_module.module_updates(tmp_path, git=_ShallowGit(), compare_commits=github, now=_T0)
+    apply_module.module_updates(
+        tmp_path, git=_ShallowGit(), kind="mod", compare_commits=github, now=_T0
+    )
+    shutil.rmtree(tmp_path / "modules" / "mod-a")
+    apply_module.module_updates(
+        tmp_path, git=_ShallowGit(head="c" * 40), compare_commits=github, now=_T0 + 60
+    )
+
+    kept = [(family, key) for family, key, _at in _kept_rows(tmp_path)]
+    assert sorted(kept) == [("mod", "tortoise-gm-manager"), ("module", "mod-b")], kept
+
+
 @pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
 def test_a_fetch_between_the_count_and_the_ask_does_not_change_what_is_asked(
     tmp_path: Path,

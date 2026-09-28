@@ -28,7 +28,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
@@ -5227,7 +5227,8 @@ class _GitHubCounts:
         """`rows` with GitHub's answer where it has one, after asking what this press may."""
         self._ask()
         if self._asked:
-            _write_github_counts(self._path, self._asked)
+            live = {(row.family, row.key) for row in rows}
+            _write_github_counts(self._path, self._asked, live)
         settled: list[ModuleUpdate] = []
         for row in rows:
             at = (row.family, row.key)
@@ -5267,18 +5268,29 @@ class _GitHubCounts:
                 break
 
 
-def _write_github_counts(path: Path, asked: Mapping[tuple[str, str], _Asked]) -> None:
+def _write_github_counts(
+    path: Path, asked: Mapping[tuple[str, str], _Asked], live: Set[tuple[str, str]]
+) -> None:
     """This press's answers, merged onto the file as it is when written. Best-effort, logged (T148).
 
     Read again here rather than when the press began, so the rows of any
     write that landed while this press was asking GitHub are kept. No lock is
     taken: writers are serialised by T152's single-instance guard and the
-    view's busy lock (`_set_busy`), not by anything here. Nothing is dropped:
-    one row per clone, replaced when it is asked again, and a "no answer" past
-    its hour still says WHEN it was tried, which is how the next press picks
-    the oldest (`_GitHubCounts`).
+    view's busy lock (`_set_busy`), not by anything here.
+
+    One row per clone on disk: `live` is every clone this press listed, and a
+    row of the same family for any other -- removed, renamed -- is dropped
+    (Codex, round 4), answer or failure, so the file follows the folder and
+    not the history of the catalog. Another family's rows are that family's
+    press's to judge and stay. A live row keeps its timestamp: a "no answer"
+    past its hour still says WHEN it was tried, which is how the next press
+    picks the oldest (`_GitHubCounts`).
     """
-    rows = {**_read_compares(path), **asked}
+    families = {family for family, _key in live}
+    rows = {
+        at: row for at, row in _read_compares(path).items() if at[0] not in families or at in live
+    }
+    rows.update(asked)
     _replace_json(
         path,
         {
