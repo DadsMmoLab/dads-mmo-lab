@@ -136,6 +136,7 @@ from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
     COLOR_TEXT_GOLD,
+    COLOR_TEXT_MUTED,
     COLOR_TEXT_WARNING,
     SERVER_BUILD_BUTTON,
 )
@@ -3236,10 +3237,33 @@ shortfall like that across every widget -- five pixels off the bottom of
 `Rebuild the server…` and twenty-one off the custom-module card).
 """
 
+MODULE_LIST_ROWS_HEIGHT = 145
+"""The list height the custom-module card gives its sentence up to keep (T153).
+
+A family card's header and two whole rows under it, measured themed: the second
+row's bottom edge is 139px into the viewport at 960 wide and 143 at 1280, where
+the font is larger, plus the scroll area's 2px frame. Below this the list is a
+header and a row -- the T89 gate photographed it at less than that, the header
+alone, on an install past its pins at 960x640 -- and the card's sentence is the
+cheapest height on the tab to buy the second row with.
+
+A second floor, above `MODULE_LIST_MIN_HEIGHT` and defended by a different rung
+of `_TabFit`: the log and the report fold to keep THAT one, and only the card
+goes to its one line to keep this. Raising `MODULE_LIST_MIN_HEIGHT` instead
+would fold the log and the report at the 1280x800 the app opens at, which T80
+and T85 measured and the gates photographed open.
+
+Two rows and not the three the ticket floated, because three is 185px and the
+tab does not have it: at 960x640, past the pins and with the bar wrapped, the
+list is 152px with the card on one line and the log and the report already
+folded -- everything left above and below it is a toolbar line, the version
+lines, or a strip whose only way of being shorter is to cut its words.
+"""
+
 _LIST_FLOOR_FLOOR = 40
 """The list's floor when even `MODULE_LIST_MIN_HEIGHT` is more than the tab has.
 
-Step 3 of `_TabFit`'s order, and a floor under the floor rather than nothing: a
+Step 4 of `_TabFit`'s order (3 until T153), and a floor under the floor rather than nothing: a
 list drawn at zero is a tab with a gap in it, and the honest answer below this
 is a tab that scrolls as a whole -- which it does not do today, and which is a
 ticket rather than something to fake here. Forty is a scrollbar's length: enough
@@ -3488,6 +3512,40 @@ class _ReportStrip(CollapseHandle):
             self._adjusting = False
 
 
+class _RelayButton(QPushButton):
+    """A second face for a button that lives elsewhere: its words, its gate, its press (T153).
+
+    The custom-module card's one-line form carries the card's two presses, and
+    these ARE those presses rather than two more buttons to keep in step. The
+    enabled state and the tooltip -- which is where a greyed button says why --
+    are copied off the source whenever it changes, so the gates that grey the
+    card's buttons (`_set_custom_module_buttons`, the busy lock) never need to
+    know this form exists. And a press is `source.click()`, which Qt makes a
+    no-op on a disabled button: a relay whose greying lagged still could not
+    reach a slot its source's gate has closed.
+    """
+
+    def __init__(self, source: QPushButton, parent: QWidget | None = None) -> None:
+        super().__init__(source.text(), parent)
+        self._source = source
+        self.clicked.connect(source.click)
+        source.installEventFilter(self)
+        self._follow()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802  (Qt's own name)
+        """The source's greying or its tooltip moved: take the new one."""
+        if watched is self._source and event.type() in (
+            QEvent.Type.EnabledChange,
+            QEvent.Type.ToolTipChange,
+        ):
+            self._follow()
+        return bool(super().eventFilter(watched, event))
+
+    def _follow(self) -> None:
+        self.setEnabled(self._source.isEnabled())
+        self.setToolTip(self._source.toolTip())
+
+
 _WHEN_A_MINIMUM_MOVES = (
     QEvent.Type.Polish,
     QEvent.Type.PolishRequest,
@@ -3550,14 +3608,37 @@ class _TabFit(QObject):
        the elapsed clock and Stop, with the output one click away.
     2. the REPORT BOX folds to its strip. Same shape, less of it, and the strip
        names what is behind it.
-    3. the LIST's floor gives. It scrolls, so it is complete at any height; every
+    3. the CUSTOM-MODULE CARD goes to its one-line form (T153): its title and
+       its two buttons on one line, without the sentence that explains them.
+       Taken whenever the list would otherwise be under
+       `MODULE_LIST_ROWS_HEIGHT` -- a higher floor than the one steps 1 and 2
+       defend, and the rung only the card stands on: the card gives its
+       sentence for the list's ROWS, and never folds or opens a panel.
+    4. the LIST's floor gives. It scrolls, so it is complete at any height; every
        pixel taken from it is a pixel of a row somebody can still scroll to.
 
-    **And what never gives: a toolbar line, and the custom-module card.** Those
-    are the two whose only way of being smaller is to cut the words inside them,
+    **And what never gives: a toolbar line, and the card's buttons.** Those are
+    the things whose only way of being smaller is to cut the words inside them,
     which is the defect this whole ticket is about. The list is last rather than
     first for the same reason the log is first: order by what a shortfall COSTS
     the reader, not by what is easiest to shrink.
+
+    **Why the card goes to a LINE and not to a strip like the two panels (T153).**
+    A strip hides what is behind it until it is pressed, and a press is a
+    request this object may refuse: at 960x640 with the version lines, the
+    banner and the wrapped bar all on screen, the card whole does not fit even
+    with the list at `_LIST_FLOOR_FLOOR`, so a folded card's strip would be a
+    handle that does nothing and a small window with no way to install a module
+    from a link. The line costs 50px where a strip would cost 14, and it keeps
+    both presses on screen at every size the window can be.
+
+    **Why steps 1 and 2 bill the card WHOLE.** The card is decided after them and
+    from their answer, and it is decided from the card whole rather than from
+    whichever form is showing. Read off the form on screen, a folded card leaves
+    room over, the room says "unfold", and the unfolded card says "fold" -- two
+    transitions per settle, the log's flicker (T83) in a third widget. And
+    decided before them, the card's line would move the widths at which the log
+    and the report fold, which T85's presses are measured against.
 
     **One thing reorders it: a press on a handle (T85).** Steps 1 and 2 are a
     guess at which of the two panels the reader would rather keep, and a user who
@@ -3595,6 +3676,9 @@ class _TabFit(QObject):
         report: _ReportStrip,
         listing: QWidget,
         floor: int,
+        card: QWidget,
+        card_line: QWidget,
+        rows_floor: int,
     ) -> None:
         super().__init__(tab)
         self._tab = tab
@@ -3602,6 +3686,11 @@ class _TabFit(QObject):
         self._report = report
         self._listing = listing
         self._floor = floor
+        # T153's rung: the card whole, its one-line form, and the list height
+        # the card gives its sentence up to keep.
+        self._card = card
+        self._card_line = card_line
+        self._rows_floor = rows_floor
         self._settling = False
         # The panel a PERSON last asked to see, and the whole of T85's second
         # half. It is not a flag about a fold -- the bug T83's round 3 was
@@ -3728,8 +3817,17 @@ class _TabFit(QObject):
             report_room = open_now[self._report]
             self._log.set_room(log_room)
             self._report.set_room(report_room)
-            spare = height - self._owed(log_open=log_room, report_open=report_room)
-            # Step 3: the list gives what is still missing, and never below a
+            # Step 3 (T153): what the list would have with the card whole, the
+            # list billed at nothing so the answer is the list's whole share.
+            # Asked with the card WHOLE whichever form is showing -- see the
+            # class docstring -- so the answer cannot depend on its own result.
+            rows = height - self._owed(log_open=log_room, report_open=report_room, list_floor=0)
+            card_whole = rows >= self._rows_floor
+            self._show_the_card(whole=card_whole)
+            spare = height - self._owed(
+                log_open=log_room, report_open=report_room, card_whole=card_whole
+            )
+            # Step 4: the list gives what is still missing, and never below a
             # scrollbar's worth -- under that it is not a list at all, and the
             # honest end of this ladder is a tab that scrolls (which it does not
             # today, and which is a ticket rather than a silent cut here).
@@ -3753,7 +3851,56 @@ class _TabFit(QObject):
         finally:
             self._settling = False
 
-    def _owed(self, log_open: bool, report_open: bool, list_floor: int | None = None) -> int:
+    def _show_the_card(self, whole: bool) -> None:
+        """Put the card whole, or its one line, on screen -- only on a change (T153).
+
+        A `setVisible()` that repeats the state it is in is cheap, but this runs
+        on every settle and each real change asks for a layout; the check keeps
+        the event filter's round trip to the one that matters.
+        """
+        if self._card.isHidden() == (not whole):
+            return
+        self._card.setVisible(whole)
+        self._card_line.setVisible(not whole)
+
+    def _inner_width(self) -> int:
+        """The width the tab's layout gives its children: the tab less its margins."""
+        box = self._tab.layout()
+        if box is None:
+            return self._tab.width()
+        margins = box.contentsMargins()
+        return self._tab.width() - margins.left() - margins.right()
+
+    def card_minimum(self) -> int:
+        """What the card needs WHOLE at the tab's width now, shown or not (T153).
+
+        Asked while the card is HIDDEN -- that is when step 3 is deciding whether
+        to bring it back -- and a hidden widget's layout item answers nothing
+        (its `minimumHeightForWidth()` is -1 and its `minimumSize()` 0), so the
+        card's own layout is asked instead. The sentence in it wraps, which makes
+        this a function of the width: `minimumSizeHint()` alone is the
+        under-count `_owed()`'s comment records (122 said, 136 needed at
+        1000x700). Both halves and the explicit minimum, for `box_minimum()`'s
+        reason.
+        """
+        need = max(self._card.minimumSizeHint().height(), self._card.minimumHeight())
+        layout = self._card.layout()
+        if layout is not None:
+            need = max(need, layout.totalMinimumHeightForWidth(self._inner_width()))
+        return int(need)
+
+    def _card_line_minimum(self) -> int:
+        """What the card's one-line form needs. One row of buttons; it does not wrap."""
+        line = self._card_line
+        return int(max(line.minimumSizeHint().height(), line.minimumHeight()))
+
+    def _owed(
+        self,
+        log_open: bool,
+        report_open: bool,
+        list_floor: int | None = None,
+        card_whole: bool = True,
+    ) -> int:
         """The height this tab needs with the log and the report in those states.
 
         Arithmetic over the children rather than a trial layout, because a trial
@@ -3775,6 +3922,11 @@ class _TabFit(QObject):
         this tab keeps when it is not short. `settle()` passes the bottom of the
         ladder instead in the one case where the list may be spent in advance:
         answering a press.
+
+        `card_whole` is which form of the custom-module card to bill (T153):
+        exactly one of the two is on the tab, and each is counted in the state
+        asked about rather than the one it is in -- the card through
+        `card_minimum()`, the line through its own hint.
         """
         if list_floor is None:
             list_floor = self._floor
@@ -3783,12 +3935,24 @@ class _TabFit(QObject):
             return 0
         margins = box.contentsMargins()
         owed = margins.top() + margins.bottom()
-        inner = self._tab.width() - margins.left() - margins.right()
+        inner = self._inner_width()
+        # Whether the card's slot is on screen at all, read off either form: a
+        # tab that is not showing has nothing visible, and every other widget
+        # below is skipped by the same test.
+        card_on_screen = self._card.isVisible() or self._card_line.isVisible()
         shown = 0
         for index in range(box.count()):
             item = box.itemAt(index)
             widget = None if item is None else item.widget()
             if item is None or widget is None:
+                continue
+            if widget is self._card or widget is self._card_line:
+                if not card_on_screen or widget is not (
+                    self._card if card_whole else self._card_line
+                ):
+                    continue
+                shown += 1
+                owed += self.card_minimum() if card_whole else self._card_line_minimum()
                 continue
             if widget is self._report.box():
                 if not report_open:
@@ -3816,6 +3980,9 @@ class _TabFit(QObject):
                 # and the card was drawn 109. `heightForWidth()` is the other
                 # way wrong: it is the PREFERRED height, which over-counts, and
                 # a tab that thinks it is short folds things it did not need to.
+                # (The card itself is counted above since T153, by
+                # `card_minimum()`, which asks its own layout the same question
+                # because a hidden card's item answers nothing.)
                 need = item.minimumSize().height()
                 if item.hasHeightForWidth():
                     need = max(need, item.minimumHeightForWidth(inner))
@@ -4496,6 +4663,16 @@ MODULE_FOLDER_BUTTON_LABEL = "Install from folder…"
 No prior art at all — `origin/rust-main` had a URL route and nothing else,
 grepped 2026-09-08.
 """
+
+CUSTOM_MODULE_CARD_TITLE = "A module this app does not ship"
+"""The custom-module card's title, and the first words of its one-line form (T153)."""
+
+CUSTOM_MODULE_CARD_NOTE = (
+    "Paste a repository link, or point at a folder on this computer. Yu'lon derives "
+    "a manifest from it and installs it the same way as any row above."
+)
+"""The card's sentence: drawn in the card whole, and the line's tooltip (T153)."""
+
 
 MODULE_LINK_TIP = (
     "Paste an https link to a module repository on github.com, gitlab.com or codeberg.org. "
@@ -9534,13 +9711,10 @@ class ControllerView(QWidget):
         # in the catalog and not on disk yet. Its own box with a sentence,
         # because a link the user pastes is the only control here that can fail
         # before anything runs.
-        custom = QGroupBox("A module this app does not ship", tab)
+        custom = QGroupBox(CUSTOM_MODULE_CARD_TITLE, tab)
+        self.custom_module_card = custom
         custom_box = QVBoxLayout(custom)
-        custom_note = QLabel(
-            "Paste a repository link, or point at a folder on this computer. Yu'lon derives "
-            "a manifest from it and installs it the same way as any row above.",
-            custom,
-        )
+        custom_note = QLabel(CUSTOM_MODULE_CARD_NOTE, custom)
         custom_note.setWordWrap(True)
         custom_box.addWidget(custom_note)
         custom_row = QHBoxLayout()
@@ -9548,6 +9722,31 @@ class ControllerView(QWidget):
         custom_row.addWidget(self.module_folder_button)
         custom_row.addStretch(1)
         custom_box.addLayout(custom_row)
+        # T153: the same card on one line -- its title, then its two presses --
+        # for the windows where the list needs the height its sentence takes.
+        # `_TabFit` decides which of the two is on screen (step 3 of its order);
+        # the line starts hidden because every tab starts with the card whole.
+        # The buttons on it are relays of the card's own (`_RelayButton`), so
+        # the greying and the press are the card's, whichever form is showing.
+        self.custom_module_line = QWidget(tab)
+        line_box = QHBoxLayout(self.custom_module_line)
+        line_box.setContentsMargins(0, 0, 0, 0)
+        line_title = QLabel(f"{CUSTOM_MODULE_CARD_TITLE}:", self.custom_module_line)
+        line_title.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-weight: bold;")
+        # The sentence the line leaves out, for a pointer that asks. Not the only
+        # place it is: the card whole says it wherever the window has the room.
+        line_title.setToolTip(CUSTOM_MODULE_CARD_NOTE)
+        self.module_link_line_button = _RelayButton(
+            self.module_link_button, self.custom_module_line
+        )
+        self.module_folder_line_button = _RelayButton(
+            self.module_folder_button, self.custom_module_line
+        )
+        line_box.addWidget(line_title)
+        line_box.addWidget(self.module_link_line_button)
+        line_box.addWidget(self.module_folder_line_button)
+        line_box.addStretch(1)
+        self.custom_module_line.setVisible(False)
 
         # T73: ONE stretching widget on this tab, and it is the list. Everything
         # under it is as tall as it has something to say -- the report a line
@@ -9567,6 +9766,7 @@ class ControllerView(QWidget):
         box.addWidget(self.rebuild_banner)
         box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
+        box.addWidget(self.custom_module_line)
         box.addWidget(self.module_report_strip)
         box.addWidget(self.module_report)
         box.addWidget(self.rebuild_stop_anyway_button)
@@ -9581,6 +9781,9 @@ class ControllerView(QWidget):
             self.module_report_strip,
             self.modules_panel,
             MODULE_LIST_MIN_HEIGHT,
+            custom,
+            self.custom_module_line,
+            MODULE_LIST_ROWS_HEIGHT,
         )
         self._add_panel_tab(tab, "modules", "Modules")
         # The first reading, taken once the widgets it writes into exist. One
