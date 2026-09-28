@@ -16651,6 +16651,220 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
         gamepad.stop()
 
 
+# ---------------------------------------------------------------------------
+# T172: after a bumper switches a sub-tab, the first press goes into the page.
+#
+# Seen live at 960x640: RB from Modules to Tuning, then Down, and the focus went
+# UP to the sub-tab bar. The navigator's pick was the sub-tabs' `QTabWidget`,
+# scored at the centre of the whole widget -- the middle of the page, straight
+# below the Tuning tab's short strip at the top -- and a `QTabWidget` hands its
+# focus to its tab bar. The window's own sidebar `QTabWidget` did the same with
+# the rail. A second Down entered the page.
+
+PAD_WINDOW_SIZES = [(960, 640), (1280, 800)]
+"""The smallest window the app allows, and the Steam Deck's screen, which it opens at."""
+
+
+def _pad_press(window: Any, key: Any) -> Any:
+    """Press `key` at the window, as the platform delivers it, and return the new focus.
+
+    At the `QWindow`, so the app's `KeyboardSource` filter sees it the way it
+    sees a Steam Deck's keyboard-emulated pad.
+    """
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    QTest.keyClick(window.windowHandle(), key)
+    process_events()
+    return QApplication.focusWidget()
+
+
+def _centre(widget: Any, window: Any) -> Any:
+    from PySide6.QtCore import QPoint
+
+    return widget.mapTo(window, QPoint(widget.width() // 2, widget.height() // 2))
+
+
+def _in_page(page: Any) -> list[Any]:
+    """The widgets on `page` a pad can stop on, from the tree as it is drawn now."""
+    from yulon.ui.gamepad import _iter_focusable
+
+    return list(_iter_focusable(page))
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("bumper", ["RB", "LB"])
+def test_after_a_bumper_the_first_down_or_right_goes_into_the_new_page(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int], bumper: str
+) -> None:
+    """From every sub-tab, RB or LB, then ONE Down or Right: the focus is on the new page.
+
+    Wherever the new page has a widget ahead of the focus in that direction --
+    a page whose widgets are all on one row has nowhere Down to go, and the
+    navigator's edge rule is not what is under test. Real keys (R, L and the
+    arrows) through the app's own filter, in the real window, so the bumper's
+    tab switch and the focus Qt moves onto the new page are the app's own.
+
+    Measured before T172, offscreen: Down after RB from Modules to Tuning at
+    960x640 -- the press the live check made -- and after RB from Maintenance or
+    LB from Tuning, both to Modules, at 1280x800, each went to the sub-tab bar.
+    No Right was wrong; it is asked so that a fix for Down cannot move the
+    same trap sideways.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QTabBar
+
+    from yulon.ui.gamepad import _accepts_typing as accepts_typing
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    key = Qt.Key.Key_R if bumper == "RB" else Qt.Key.Key_L
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    _nav, keyboard, gamepad = install_gamepad_navigation(window)
+    sub = view._tabs
+    wrong: list[str] = []
+    checked = 0
+    try:
+        for index in range(sub.count()):
+            for arrow in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+                sub.setCurrentIndex(index)
+                process_events()
+                # A start the bumper key is not typed into (T139).
+                start = next(
+                    (w for w in _in_page(sub.widget(index)) if not accepts_typing(w)), None
+                )
+                if start is None:
+                    continue
+                start.setFocus()
+                process_events()
+                focus = _pad_press(window, key)
+                page = sub.currentWidget()
+                assert page is not sub.widget(index), f"{bumper} did not switch the sub-tab"
+                assert page.isAncestorOf(focus), "the bumper left the focus off the new page"
+                here = _centre(focus, window)
+                ahead = [
+                    w
+                    for w in _in_page(page)
+                    if w is not focus
+                    and (
+                        _centre(w, window).y() > here.y()
+                        if arrow == Qt.Key.Key_Down
+                        else _centre(w, window).x() > here.x()
+                    )
+                ]
+                if not ahead:
+                    continue
+                checked += 1
+                landed = _pad_press(window, arrow)
+                if not page.isAncestorOf(landed):
+                    what = "a tab bar" if isinstance(landed, QTabBar) else type(landed).__name__
+                    wrong.append(
+                        f"{sub.tabText(index)} -> {bumper} -> {sub.tabText(sub.currentIndex())}, "
+                        f"{'Down' if arrow == Qt.Key.Key_Down else 'Right'}: {what}"
+                    )
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+    assert checked, "no bumper press had anywhere on the new page to go, so nothing was asked"
+    assert wrong == [], f"the first press after a bumper left the new page at {size}: {wrong}"
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """The way OUT of a page is kept: Up from its top row lands on a tab bar (T172).
+
+    On every sub-tab, from every widget with nothing of its page above it. And
+    both tab bars -- the sub-tabs' and the sidebar rail -- are still reached by
+    the pad from every widget on every sub-tab. T172 stops the pad aiming at a
+    tab widget's middle; the bars themselves stay stops at their own places,
+    and a fix that dropped them as well would pass the test above.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QTabBar, QTabWidget
+
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    sub = view._tabs
+    rail = window.findChild(QTabWidget, "sidebar-tabs").tabBar()
+    stuck: list[str] = []
+    unreached: list[str] = []
+    top_rows = 0
+    try:
+        for index in range(sub.count()):
+            sub.setCurrentIndex(index)
+            process_events()
+            page = sub.widget(index)
+            widgets = _in_page(page)
+            for widget in widgets:
+                y = _centre(widget, window).y()
+                if any(_centre(w, window).y() < y for w in widgets if w is not widget):
+                    continue
+                top_rows += 1
+                widget.setFocus()
+                process_events()
+                landed = _pad_press(window, Qt.Key.Key_Up)
+                if not isinstance(landed, QTabBar):
+                    stuck.append(f"{sub.tabText(index)}: Up went to {type(landed).__name__}")
+            for widget in widgets:
+                reached = set(_pad_routes(nav, widget))
+                for bar, name in ((sub.tabBar(), "the sub-tab bar"), (rail, "the rail")):
+                    if bar not in reached:
+                        unreached.append(f"{sub.tabText(index)}: {name}")
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+    assert top_rows, "no sub-tab had a top row to press Up from"
+    assert stuck == [], f"Up from a page's top row did not reach a tab bar at {size}: {stuck}"
+    assert unreached == [], f"a tab bar is out of the pad's reach at {size}: {unreached[:5]}"
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_the_bumpers_still_switch_the_main_windows_tabs_from_the_rail(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """The window's own tabs, Catalog and the server's, are driven as before (T172).
+
+    The rail is the tab bar of the window's `sidebar-tabs` `QTabWidget`, the
+    other tab widget the pad no longer aims at: from the Catalog page the pad
+    still reaches the rail, and there R and L still move between the Catalog
+    and the server's tab.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QTabWidget
+
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
+    rail = main_tabs.tabBar()
+    try:
+        main_tabs.setCurrentIndex(0)
+        process_events()
+        catalog = _in_page(main_tabs.widget(0))
+        assert catalog, "nothing on the Catalog page for the pad to start from"
+        assert rail in _pad_routes(nav, catalog[0]), "the rail is out of the pad's reach"
+
+        rail.setFocus()
+        process_events()
+        _pad_press(window, Qt.Key.Key_R)
+        assert main_tabs.currentWidget() is view, "R on the rail did not open the server's tab"
+        _pad_press(window, Qt.Key.Key_L)
+        assert main_tabs.currentIndex() == 0, "L on the rail did not go back to the Catalog"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
 def _shows_and_hides(widget: Any) -> list[str]:
     """Record every `Show` and `Hide` event on `widget`: each is a frame the user sees.
 

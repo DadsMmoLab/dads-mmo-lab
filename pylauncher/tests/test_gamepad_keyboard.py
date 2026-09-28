@@ -484,3 +484,104 @@ def test_the_pad_follows_a_widget_shown_hidden_greyed_or_ungreyed_and_a_bumper(
         win.close()
         win.deleteLater()
         process_events()
+
+
+def test_down_from_a_tab_pages_top_row_enters_the_page_and_up_still_leaves_it(
+    qapp: object,
+) -> None:
+    """A tab widget is not a place the pad goes: its tab bar and its page are (T172).
+
+    A `QTabWidget` takes `TabFocus`, so it was a candidate, scored at the centre
+    of the whole widget -- the middle of its page -- while `setFocus()` on it
+    lands on its tab bar, which Qt makes its focus proxy. From a page's top row
+    that centre is straight below, so Down aimed into the page and the focus
+    went up to the tab bar: seen live at 960x640 after RB to the Tuning tab.
+
+    Built so the two answers differ: the top button is centred over the tab
+    widget's middle, and the only button below it is far to the left. And Up
+    from the top row still reaches the tab bar, which is walked in its own
+    right, at its own place.
+    """
+    from PySide6.QtWidgets import QApplication, QHBoxLayout
+
+    win = QWidget()
+    tabs = QTabWidget(win)
+    first = QWidget()
+    column = QVBoxLayout(first)
+    top_row = QHBoxLayout()
+    top = QPushButton("Top", first)
+    top_row.addStretch(1)
+    top_row.addWidget(top)
+    top_row.addStretch(1)
+    bottom_row = QHBoxLayout()
+    bottom = QPushButton("Bottom", first)
+    bottom_row.addWidget(bottom)
+    bottom_row.addStretch(1)
+    column.addLayout(top_row)
+    column.addStretch(1)
+    column.addLayout(bottom_row)
+    tabs.addTab(first, "one")
+    tabs.addTab(QWidget(), "two")
+    QVBoxLayout(win).addWidget(tabs)
+    win.resize(600, 400)
+    _navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    win.show()
+    win.activateWindow()
+    process_events()
+    try:
+        top.setFocus()
+        process_events()
+        _press(win, Qt.Key.Key_Down)
+        landed = QApplication.focusWidget()
+        assert (
+            landed is bottom
+        ), f"Down from the page's top row went to {type(landed).__name__}, not into the page"
+
+        top.setFocus()
+        process_events()
+        _press(win, Qt.Key.Key_Up)
+        assert QApplication.focusWidget() is tabs.tabBar(), "Up from the top row lost the tab bar"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_left_from_a_spinbox_reaches_the_button_beside_it(qapp: object) -> None:
+    """A spinbox's own editor is not a separate stop for the pad (T172).
+
+    The editor inside a `QSpinBox` has the spinbox as its focus proxy, and its
+    centre is left of the spinbox's -- so Left from the spinbox aimed at its own
+    editor, the focus stayed where it was, and the press was dead. Through
+    `navigate()`, the call a pad's D-pad makes (`GamepadSource`); the keyboard's
+    Left is the spinbox's caret key (T139) and never gets this far.
+    """
+    from PySide6.QtWidgets import QApplication, QHBoxLayout
+
+    from yulon.ui.gamepad import Direction
+
+    win = QWidget()
+    row = QHBoxLayout(win)
+    before = QPushButton("Before", win)
+    spin = QSpinBox(win)
+    row.addWidget(before)
+    row.addWidget(spin)
+    navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    win.show()
+    win.activateWindow()
+    process_events()
+    try:
+        spin.setFocus()
+        process_events()
+        assert QApplication.focusWidget() is spin
+        navigator.navigate(Direction.LEFT)
+        landed = QApplication.focusWidget()
+        assert landed is before, f"Left from the spinbox stayed on {type(landed).__name__}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
