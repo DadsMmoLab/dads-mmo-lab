@@ -223,6 +223,8 @@ def test_a_render_failure_writes_nothing(tmp_path: Path) -> None:
     make_old(server_dir)
     path = server_dir / composegen.BASE_FILE
     before = path.read_bytes()
+    # T169: the install's own `logs/` is there too, made by generate-compose.
+    assert (server_dir / "logs").is_dir()
     broken = engine(installers_root=tmp_path / "no-templates-here")
     check = broken.base_compose_check(InstallOptions(server_dir=server_dir))
     assert check.state == "error", check
@@ -232,7 +234,7 @@ def test_a_render_failure_writes_nothing(tmp_path: Path) -> None:
     assert repair_backups(server_dir) == []
     assert sorted(p.name for p in server_dir.iterdir()) == sorted(
         [composegen.BASE_FILE, composegen.OVERRIDE_FILE, composegen.BUILD_FILE]
-        + [composegen.DOTENV_FILE, TBC.install.password.file or ""]
+        + [composegen.DOTENV_FILE, TBC.install.password.file or "", "logs"]
     )
 
 

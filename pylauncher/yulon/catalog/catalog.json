@@ -292,12 +292,14 @@
                     "SOAP.Enabled": "1",
                     "SOAP.IP": "0.0.0.0",
                     "SOAP.Port": "7878",
-                    "Ra.Enable": "0"
+                    "Ra.Enable": "0",
+                    "LogsDir": "\"../logs\""
                   }
                 },
                 "realmd.conf": {
                   "keys": {
-                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\""
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                    "LogsDir": "\"../logs\""
                   }
                 },
                 "aiplayerbot.conf": {
@@ -711,12 +713,14 @@
                     "SOAP.Enabled": "1",
                     "SOAP.IP": "0.0.0.0",
                     "SOAP.Port": "7878",
-                    "Ra.Enable": "0"
+                    "Ra.Enable": "0",
+                    "LogsDir": "\"../logs\""
                   }
                 },
                 "realmd.conf": {
                   "keys": {
-                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\""
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                    "LogsDir": "\"../logs\""
                   }
                 },
                 "aiplayerbot.conf": {

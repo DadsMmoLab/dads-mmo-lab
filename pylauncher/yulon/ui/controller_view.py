@@ -4359,11 +4359,18 @@ REPAIR_FILES_CONFIRM = (
     "Yu'lon writes for this server, either because another version wrote it or because it was "
     "edited by hand. Yu'lon writes it again the way this version installs it, with this "
     "install's own project name, ports and SELinux labels{counts}. Any hand edits in it are "
-    "replaced; the file as it is now is kept beside it as a backup ({backup}).\n\nNothing else "
-    "changes: not your characters, not your .conf settings, not docker-compose.override.yml or "
-    ".env. The running containers keep the old file until they are recreated, which Yu'lon "
+    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}\n\n"
+    "Nothing else changes: not your characters, not {others}, not docker-compose.override.yml "
+    "or .env. The running containers keep the old file until they are recreated, which Yu'lon "
     "offers next."
 )
+
+REPAIR_FILES_CONFS = (
+    "\n\nIt also sets {settings}, so the server writes its log files into the server folder, "
+    "where you can read them and a recreate keeps them. Only that line changes, and each file "
+    "is kept beside itself as a backup too."
+)
+"""T169's paragraph in the question, when the same repair sets a conf's folder setting."""
 
 REPAIR_FILES_DONE = (
     "docker-compose.yml was repaired; the old one is kept as {backup}. The containers still run "
@@ -12138,7 +12145,15 @@ class ControllerView(QWidget):
             if last is not None and last.state == "stale"
             else ""
         )
-        question = REPAIR_FILES_CONFIRM.format(backup=backup, counts=counts)
+        # T169: the conf lines the same press sets, and any it leaves as the player has them.
+        settings = last.settings if last is not None and last.state == "stale" else ()
+        kept = last.kept if last is not None and last.state == "stale" else ()
+        confs = REPAIR_FILES_CONFS.format(settings=" and ".join(settings)) if settings else ""
+        confs += "".join(f"\n\n{why}" for why in kept)
+        others = "any other .conf setting" if settings else "your .conf settings"
+        question = REPAIR_FILES_CONFIRM.format(
+            backup=backup, counts=counts, confs=confs, others=others
+        )
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")

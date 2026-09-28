@@ -659,12 +659,19 @@ class ComposeCheck:
 
     `added`/`removed` count the lines a repair would add and take away, for the
     confirmation; both are 0 on anything but `stale`.
+
+    `settings` and `kept` are T169's, and only on `stale`: each conf line the same
+    repair sets so the server writes into a folder it binds (`LogsDir =
+    "../logs" in etc/mangosd.conf`), and why a folder setting is left as the
+    player has it. The confirmation names both.
     """
 
     state: ComposeState
     why: str = ""
     added: int = 0
     removed: int = 0
+    settings: tuple[str, ...] = ()
+    kept: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -673,6 +680,18 @@ class ComposeRepaired:
 
     path: Path
     backup: Path | None
+    confs: tuple[Path, ...] = ()
+    """The backup of each conf the repair set a folder setting in (T169), in table order."""
+
+
+@dataclass(frozen=True)
+class _ConfEdit:
+    """One conf a repair sets folder settings in (T169): its exact text as read, and as written."""
+
+    path: Path
+    before: str
+    after: str
+    settings: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -744,7 +763,7 @@ class ComposeChangedError(OSError):
     """The file changed between the press's check and its write; it was left as it is."""
 
 
-def _replace_if_unchanged(path: Path, text: str, expected: str) -> None:
+def _replace_if_unchanged(path: Path, text: str, expected: str, *, exact: bool = False) -> None:
     """Put `text` at `path` in one step, with `path`'s mode -- only if it still says `expected`.
 
     `expected` is the text the press checked and backed up. The target is read
@@ -759,6 +778,10 @@ def _replace_if_unchanged(path: Path, text: str, expected: str) -> None:
     BEFORE the rename (no moment at the umask default), and removed on every
     failure. `newline="\\n"`, as `composegen.write_plan()` writes every compose file.
 
+    `exact` (T169, a conf): written and compared without newline translation,
+    as the conf patcher reads and writes, so a CRLF conf stays CRLF and a check
+    that read it exactly is not read back translated and called changed.
+
     Raises:
         ComposeChangedError: the file no longer says `expected`.
         OSError: the temp file could not be written or renamed.
@@ -767,17 +790,35 @@ def _replace_if_unchanged(path: Path, text: str, expected: str) -> None:
     fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".yulon-new", dir=path.parent)
     tmp = Path(name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="" if exact else "\n") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, mode)
-        if path.read_text(encoding="utf-8") != expected:
+        now = _read_exact(path) if exact else path.read_text(encoding="utf-8")
+        if now != expected:
             raise ComposeChangedError(f"{path.name} changed after it was checked")
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _host_binds(text: str) -> frozenset[str]:
+    """Every `./<folder>:<target>` a compose file's `- ./` lines bind, label dropped (T169)."""
+    binds: set[str] = set()
+    for line in text.splitlines():
+        item = line.strip()
+        if item.startswith("- ./"):
+            source, _sep, rest = item[2:].partition(":")
+            binds.add(f"{source}:{rest.split(':', 1)[0]}")
+    return frozenset(binds)
+
+
+def _read_exact(path: Path) -> str:
+    """The file's text with its line endings as they are: the conf patcher's read (T169)."""
+    with path.open(encoding="utf-8", newline="") as handle:
+        return handle.read()
 
 
 def _lines_changed(old: str, new: str) -> tuple[int, int]:
@@ -7349,8 +7390,10 @@ class StagedInstaller:
         """Make each folder the compose file binds for the server to write into (T165).
 
         `composegen.server_folders()` names them: on Tortoise `logs`, `honor` and
-        `pdump`. Made HERE, by the app, before a compose file that binds them is
-        written, because the alternative maker is Docker: a bind whose host folder
+        `pdump`, on TBC and Vanilla `logs` (T169) -- or the folder the install's
+        conf names instead, once there is a conf to ask. Made HERE, by the app,
+        before a compose file that binds them is written, because the
+        alternative maker is Docker: a bind whose host folder
         is missing is created by the daemon, which on Linux is root, and a
         root-owned folder holds files the player cannot delete and that stop an
         uninstall's removal of the server folder. Made by the app, the folder is
@@ -7365,7 +7408,7 @@ class StagedInstaller:
             InstallerError: a folder could not be made; nothing after it was written.
         """
         try:
-            folders = composegen.server_folders(self.entry)
+            folders = composegen.server_folders(self.entry, server_dir=server_dir)
         except composegen.ComposeGenError as exc:
             raise InstallerError(str(exc)) from exc
         made: list[Path] = []
@@ -7418,7 +7461,9 @@ class StagedInstaller:
             install_id=self._install_id(server_dir),
         )
 
-    def _base_compose_facts(self, server_dir: Path) -> tuple[ComposeCheck, str | None, str | None]:
+    def _base_compose_facts(
+        self, server_dir: Path
+    ) -> tuple[ComposeCheck, str | None, str | None, tuple[_ConfEdit, ...]]:
         """What the base file is now, and what this version renders for it (T106).
 
         Only `docker-compose.yml`. The override and the build file are left to the
@@ -7439,9 +7484,14 @@ class StagedInstaller:
         the file on disk, and the host is asked only when there is no Yu'lon file to
         read one from. A file whose binds disagree is refused (`mixed`).
 
-        Returns the check, the fresh render (None when it could not be made) and
-        the text on disk (None when there is none): the snapshot a repair backs up
-        and must find unchanged before it writes.
+        **A conf rides with its bind** (T169). On `stale`, the confs whose folder
+        setting the fresh render binds and the file on disk does not are read
+        exactly (`_conf_edits()`), and the setting each still leaves at upstream's
+        `""` is what the same repair sets; a conf that cannot be read is `error`.
+
+        Returns the check, the fresh render (None when it could not be made), the
+        text on disk (None when there is none) -- the snapshot a repair backs up
+        and must find unchanged before it writes -- and the conf edits.
         """
         path = server_dir / composegen.BASE_FILE
         name = composegen.BASE_FILE
@@ -7454,6 +7504,7 @@ class StagedInstaller:
                 ComposeCheck("error", f"{path} could not be read ({exc}). Nothing was written."),
                 None,
                 None,
+                (),
             )
         ours = text is not None and composegen.is_marker_line(text)
         label: str | None = None
@@ -7470,6 +7521,7 @@ class StagedInstaller:
                     ),
                     None,
                     text,
+                    (),
                 )
         if label is None:
             label = self._bind_label(server_dir)
@@ -7484,6 +7536,7 @@ class StagedInstaller:
                 ),
                 None,
                 text,
+                (),
             )
         if text is None:
             return (
@@ -7493,6 +7546,7 @@ class StagedInstaller:
                 ),
                 fresh,
                 None,
+                (),
             )
         if not ours:
             return (
@@ -7503,6 +7557,7 @@ class StagedInstaller:
                 ),
                 fresh,
                 text,
+                (),
             )
         has, wants = composegen.project_of(text), composegen.project_of(fresh)
         if has != wants:
@@ -7516,18 +7571,111 @@ class StagedInstaller:
                 ),
                 fresh,
                 text,
+                (),
             )
         if composegen.same_compose(text, fresh):
-            return ComposeCheck("current"), fresh, text
+            return ComposeCheck("current"), fresh, text, ()
+        try:
+            edits, kept = self._conf_edits(server_dir, text)
+        except InstallerError as exc:
+            return ComposeCheck("error", f"{exc} Nothing was written."), fresh, text, ()
+        for why in kept:
+            logger.info(f"{self.entry.id}: {why}")
         added, removed = _lines_changed(text, fresh)
-        return ComposeCheck("stale", added=added, removed=removed), fresh, text
+        settings = tuple(line for edit in edits for line in edit.settings)
+        check = ComposeCheck("stale", added=added, removed=removed, settings=settings, kept=kept)
+        return check, fresh, text, edits
+
+    def _conf_edits(
+        self, server_dir: Path, text: str
+    ) -> tuple[tuple[_ConfEdit, ...], tuple[str, ...]]:
+        """The folder settings a repair sets in the install's confs, and why any is kept (T169).
+
+        The owner's decision (2026-09-28): an install made before its game's table
+        stated `LogsDir` -- TBC's and Vanilla's, which keep upstream's `""` and
+        write their logs into `bin/` inside the container -- is offered the bind
+        AND the setting, by one Repair. Nothing re-applies a conf table to a
+        finished install, so without the setting the new bind would stay empty.
+
+        A setting is set only where all three hold: the conf is in the server
+        folder, it still leaves the key at upstream's `""` (a value somebody chose
+        is never overwritten; `composegen.folder_settings()` binds it instead, or
+        says in `kept` why it cannot), and the file on disk does not already bind
+        the folder -- the setting rides with its bind, so a player who puts `""`
+        back on an install that has the bind is not offered it again.
+
+        Only that key's line changes, through the conf stage's own patcher
+        (`conf.patch()`, byte-preserving everywhere else), and the result is read
+        back the way the server reads it (`composegen.conf_setting()`): a later
+        spelling the patcher does not rewrite -- an indented or lower-case one,
+        which the server reads last -- would leave the edit without effect, so it
+        is not made and `kept` says why.
+
+        Raises:
+            InstallerError: a conf that is there could not be read.
+        """
+        # Local, as `_rollback_ground()` imports `dockerfile`: `families` imports this module.
+        from yulon.catalog.catalog import ConfPatch
+        from yulon.catalog.families import conf
+
+        native_block = self.entry.install.native
+        if native_block is None or native_block.cmangos is None:
+            return (), ()
+        texts: dict[str, str] = {}
+        paths: dict[str, Path] = {}
+        for name, patch in native_block.cmangos.conf.files.items():
+            if not any(key in patch.keys for key in composegen.SERVER_FOLDER_KEYS):
+                continue
+            path = server_dir / composegen.SERVER_CONF_DIR / name
+            try:
+                texts[name] = _read_exact(path)
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeDecodeError) as exc:
+                raise InstallerError(
+                    f"{path} could not be read ({exc}), so Yu'lon cannot tell which folder the "
+                    "server writes into."
+                ) from exc
+            paths[name] = path
+        try:
+            settings = composegen.folder_settings(self.entry, texts)
+        except composegen.ComposeGenError as exc:
+            raise InstallerError(str(exc)) from exc
+        bound = _host_binds(text)
+        kept = [setting.why for setting in settings if setting.why]
+        edits: list[_ConfEdit] = []
+        for name, before in texts.items():
+            after = before
+            done: list[str] = []
+            for setting in settings:
+                folder = setting.folder
+                if setting.conf != name or not setting.unset or folder is None:
+                    continue
+                if f"./{folder.name}:{folder.target}" in bound:
+                    continue
+                trial = conf.patch(after, ConfPatch(keys={setting.key: setting.stated}), {})
+                if composegen.conf_setting(trial, setting.key) != setting.stated.strip('"'):
+                    kept.append(
+                        f"{composegen.SERVER_CONF_DIR}/{name} sets {setting.key} on more than "
+                        "one line, and the server reads a later one Yu'lon would not change, so "
+                        f"it is left as it is. {setting.key} = {setting.stated} as the last such "
+                        "line keeps what the server writes there in the server folder."
+                    )
+                    continue
+                after = trial
+                done.append(
+                    f"{setting.key} = {setting.stated} in {composegen.SERVER_CONF_DIR}/{name}"
+                )
+            if done:
+                edits.append(_ConfEdit(paths[name], before, after, tuple(done)))
+        return tuple(edits), tuple(kept)
 
     def base_compose_check(self, options: InstallOptions | None = None) -> ComposeCheck:
         """Is this install's `docker-compose.yml` what this version of Yu'lon writes? (T106)
 
         A reading: it never raises and never writes. See `ComposeCheck` for the states.
         """
-        check, _fresh, _text = self._base_compose_facts(
+        check, _fresh, _text, _edits = self._base_compose_facts(
             self.server_dir(options or InstallOptions())
         )
         return check
@@ -7544,7 +7692,13 @@ class StagedInstaller:
         until they are recreated, which the Server tab then offers. The one
         addition (T165) is a folder the new file binds and the folder lacks,
         made empty first by `_make_server_folders()` so Docker does not make it
-        as root; one that is there is left as it is.
+        as root; one that is there is left as it is. The other (T169) is the one
+        conf line that makes the server write into such a folder, where the conf
+        still leaves it at upstream's `""` (`_conf_edits()`): backed up and
+        written the same way, and BEFORE the compose file, so a press stopped
+        between the two leaves a compose file still `stale` and the next press
+        finishes -- the other way round, a file already binding the folder would
+        read `current` and the conf it needs would never be offered again.
 
         Asked again here rather than trusting the tab's earlier reading, because the
         folder can change between the two. Writes only on `stale`: `current` writes
@@ -7564,7 +7718,7 @@ class StagedInstaller:
         """
         server_dir = self.server_dir(options or InstallOptions())
         path = server_dir / composegen.BASE_FILE
-        check, fresh, text = self._base_compose_facts(server_dir)
+        check, fresh, text, edits = self._base_compose_facts(server_dir)
         if check.state == "current":
             return ComposeRepaired(path, None)
         if check.state != "stale" or fresh is None or text is None:
@@ -7580,8 +7734,12 @@ class StagedInstaller:
             self._make_server_folders(server_dir)
         except InstallerError as exc:
             raise InstallerError(f"{exc} {path} is as it was, and no backup was made.") from exc
+        when = now or datetime.now()
+        confs: list[Path] = []
+        for index, edit in enumerate(edits):
+            confs.append(self._set_conf(edit, when, path, [e.path for e in edits[:index]]))
         try:
-            backup = _backup_beside(path, now or datetime.now())
+            backup = _backup_beside(path, when)
         except OSError as exc:
             raise InstallerError(
                 f"{path} could not be backed up ({exc}), so it was not repaired. "
@@ -7601,7 +7759,55 @@ class StagedInstaller:
                 f"backup is {backup.name}."
             ) from exc
         logger.info(f"repaired {path}; the old file is {backup.name}")
-        return ComposeRepaired(path, backup)
+        return ComposeRepaired(path, backup, tuple(confs))
+
+    @staticmethod
+    def _set_conf(edit: _ConfEdit, when: datetime, compose: Path, done: Sequence[Path]) -> Path:
+        """Write one conf edit of a repair (T169), backed up first; return the backup.
+
+        The compose file's rule, byte for byte: a stamped `.repair.bak` beside it
+        (`copy2`, so the owner-only mode of a file holding the database password
+        is kept), checked to hold exactly what was read, then
+        `_replace_if_unchanged(exact=True)`. `done` are the confs this press
+        already set, which a refusal names: they stay set, and the compose file
+        is still `stale`, so pressing Repair again finishes the rest.
+
+        Raises:
+            InstallerError: the backup or the write failed, or the conf changed
+                since it was read; the conf is as it was.
+        """
+        path = edit.path
+        after = (
+            f" {', '.join(p.name for p in done)} already had its setting written, with a backup "
+            "beside it; pressing Repair again finishes the rest."
+            if done
+            else ""
+        )
+        untouched = f"{compose.name} was not repaired.{after}"
+        try:
+            backup = _backup_beside(path, when)
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} could not be backed up ({exc}), so it was not changed and {untouched}"
+            ) from exc
+        changed = (
+            f"{path} changed while it was being repaired, so it was not changed and "
+            f"{untouched} Check again (Refresh) and press Repair once more."
+        )
+        if _read_exact(backup) != edit.before:
+            backup.unlink(missing_ok=True)
+            raise InstallerError(changed)
+        try:
+            _replace_if_unchanged(path, edit.after, edit.before, exact=True)
+        except ComposeChangedError as exc:
+            raise InstallerError(f"{changed} Its backup from before is {backup.name}.") from exc
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} could not be written ({exc}), so it is as it was and {untouched} Its "
+                f"backup is {backup.name}."
+            ) from exc
+        logger.info(f"set {', '.join(edit.settings)}; the old file is {backup.name}")
+        return backup
 
     def built_image_refs(self, ctx: StageContext) -> tuple[str, ...]:
         """The image references this install's build produces, fully qualified.

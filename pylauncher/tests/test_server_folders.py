@@ -33,8 +33,6 @@ from yulon.install_wiring import repair_compose_for_app
 
 CATALOG = load_catalog()
 TORTOISE = CATALOG.get("wow-tortoise")
-TBC = CATALOG.get("wow-tbc")
-VANILLA = CATALOG.get("wow-vanilla")
 
 UPSTREAM_TORTOISE_DIRS = {
     "mangosd.conf": {"LogsDir": "../logs", "HonorDir": "../honor", "PDumpDir": "../pdump"},
@@ -52,9 +50,6 @@ character dumps (World.cpp `AutoPDumpWorker`)."""
 SERVICE_CONF = {"realmd": "realmd.conf", "mangosd": "mangosd.conf"}
 """Which conf each CMaNGOS server binary reads: the template's `command:` runs
 `./realmd` and `./mangosd`, which read these two from the bound `etc/`."""
-
-OLD_BIND_COUNT = {"realmd": 1, "mangosd": 2}
-"""`./etc` on realmd; `./etc` and `./data` on mangosd -- the base file before T165."""
 
 
 def services(text: str) -> dict[str, Any]:
@@ -157,21 +152,6 @@ def test_tortoisebots_own_log_lands_in_a_bound_folder(tmp_path: Path) -> None:
     printed = "../logs/bot_events.csv"
     folder = posixpath.dirname(posixpath.normpath(posixpath.join(str(svc["working_dir"]), printed)))
     assert folder in host_binds(svc), (folder, host_binds(svc))
-
-
-@pytest.mark.parametrize("entry", [TBC, VANILLA], ids=lambda e: e.id)
-def test_a_game_whose_confs_state_no_folder_gets_no_new_bind(
-    tmp_path: Path, entry: CatalogEntry
-) -> None:
-    """TBC and Vanilla keep upstream's `LogsDir = ""` (their logs land in `bin/`): no new binds.
-
-    A guard, not a red test: their base file stays what it was, so no TBC or
-    Vanilla install is offered a Repair by this change.
-    """
-    base = render_base(entry, tmp_path)
-    for role, count in OLD_BIND_COUNT.items():
-        assert len(host_binds(service(base, entry, role))) == count, role
-    assert "./logs" not in base
 
 
 def test_the_new_binds_carry_the_installs_selinux_label(tmp_path: Path) -> None:

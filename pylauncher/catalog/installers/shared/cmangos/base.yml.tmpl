@@ -140,10 +140,11 @@ services:
       # NOT loopback-pinned (unlike the DB port).
       - "${DOCKER_AUTH_EXTERNAL_PORT:-{{AUTH_PORT}}}:3724"
     # The REALMD_FOLDERS token after ./etc (T165) adds a bind for every folder
-    # realmd.conf's catalog table says the server writes into -- LogsDir on
-    # Tortoise, a folder its image does not have -- from the server folder's
-    # own folder of the same name, label included, and nothing for a game
-    # whose table names none. composegen.server_folders() is the rule.
+    # realmd.conf's catalog table says the server writes into -- LogsDir, on
+    # Tortoise and (T169) TBC and Vanilla, a folder their images do not have,
+    # or the one the install's realmd.conf names instead -- from the server
+    # folder's own folder of the same name, label included, and nothing for a
+    # game whose table names none. composegen.server_folders() is the rule.
     volumes:
       - ./etc:{{CORE_DIR}}/etc{{BIND_LABEL}}{{REALMD_FOLDERS}}
     depends_on:
@@ -178,7 +179,8 @@ services:
       # and what DataDir in mangosd.conf points at inside the container.
       # The MANGOSD_FOLDERS token after ./data is the same rule over
       # mangosd.conf's table (T165): on Tortoise the file logs, the weekly
-      # honor report and the automatic character dumps.
+      # honor report and the automatic character dumps; on TBC and Vanilla
+      # the file logs (T169).
       - ./etc:{{CORE_DIR}}/etc{{BIND_LABEL}}
       - ./data:{{CORE_DIR}}/data{{BIND_LABEL}}{{MANGOSD_FOLDERS}}
     depends_on:
