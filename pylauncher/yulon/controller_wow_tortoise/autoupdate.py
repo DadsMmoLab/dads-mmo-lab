@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -540,17 +540,13 @@ def _with_note(report: ApplyReport, note: str) -> ApplyReport:
     tell "checked and safe" from "never ran" — which is how a guard comes to be
     believed while its own bug is live. So the permitted case says what it saw
     too, in `done`, next to the steps it permitted.
+
+    `replace()`, not a report rebuilt field by field (T130). The rebuilt one
+    dropped every field added to `ApplyReport` after it was written, on this
+    game alone: T62's `left_behind`, so a Remove here never said what it could
+    not take back, and T130's `world_stopped`.
     """
-    return ApplyReport(
-        action=report.action,
-        item_id=report.item_id,
-        family=report.family,
-        done=(*report.done, note),
-        skipped=report.skipped,
-        rebuild_required=report.rebuild_required,
-        restart_recommended=report.restart_recommended,
-        pending_sql=report.pending_sql,
-    )
+    return replace(report, done=(*report.done, note))
 
 
 def guarded_applier(

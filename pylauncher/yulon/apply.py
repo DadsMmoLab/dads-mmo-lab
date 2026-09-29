@@ -1490,6 +1490,19 @@ class ApplyReport:
     copy, no game client folder to reach, or an addon folder, which is never
     deleted because the game can be told to ignore it instead.
     """
+    world_stopped: bool = False
+    """This run's running-world guard asked, and was told explicitly "not running" (T130).
+
+    Only ever set from a reading, never from the manifest. `False` covers three
+    things that are not the same: "running" and "could not ask" (both refuse,
+    so no report exists) and "never asked" -- no seam, no SQL runner, or no
+    direct step into `WORLD_HELD_DBS` -- which says nothing about the world.
+
+    It is what lets the report's closing line name the one press still owed.
+    `bug-checklist §46`'s compliant sequence is *Stop, Install selected, Start*,
+    and after the Install the report said *"Press Stop and then Start"* to a
+    player whose world this run had just read as stopped.
+    """
 
 
 @dataclass
@@ -1507,6 +1520,9 @@ class _Log:
     # which on a remove replace the ones `_left_behind()` reads off the manifest).
     client_copies: list[ClientCopy] = field(default_factory=list)
     client_left_behind: list[str] = field(default_factory=list)
+    # T130. Set by `_sql()` when the running-world guard's own reading was an
+    # explicit "not running"; see `ApplyReport.world_stopped`.
+    world_stopped: bool = False
 
 
 class _NoAdoption(Enum):
@@ -3536,7 +3552,8 @@ class Applier:
         first.
         """
         plan = self._plan_sql(manifest, clone, vals, when)
-        self._refuse_direct_sql_into_a_running_world(manifest, when)
+        if self._refuse_direct_sql_into_a_running_world(manifest, when):
+            log.world_stopped = True
         # Second, and never first: a press against a live world is refused above
         # having started nothing. Starting containers under a world this guard
         # is about to refuse would undo the guard's own advice on a stack the
@@ -3561,7 +3578,8 @@ class Applier:
             # run started is left up and unmentioned. That is the safe side of
             # the trade: a container that is running when it need not be, rather
             # than rows written under a live world.
-            self._refuse_direct_sql_into_a_running_world(manifest, when)
+            if self._refuse_direct_sql_into_a_running_world(manifest, when):
+                log.world_stopped = True
         if (
             when in ("install", "remove")
             and reapplies_on_top(manifest)
@@ -3587,8 +3605,12 @@ class Applier:
             self._run_sql(step, clone, vals, log, plan.get(index))
             self._verify_sql(manifest, step, log)
 
-    def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> None:
+    def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> bool:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
+
+        Returns whether it ASKED and was told "not running" (T130), which is
+        `ApplyReport.world_stopped`'s only source. Every early return below is
+        `False`, because none of them read anything about the world.
 
         Owner answer 7 (`phase8-parity-decisions.md:44`) is the rule — *no
         direct writes to `characters`/`world` while running; reads are fine* —
@@ -3653,7 +3675,7 @@ class Applier:
         it cannot read.
         """
         if self._world_running is None:
-            return  # no seam: the behaviour every existing caller has today
+            return False  # no seam: the behaviour every existing caller has today
         at_risk = [
             step
             for step in manifest.sql
@@ -3663,7 +3685,7 @@ class Applier:
         # says so per step. Refusing here would be a refusal about a write that
         # was never going to happen, and it would replace that message.
         if not at_risk or self.sql is None:
-            return
+            return False
         why = ""
         try:
             running: bool | None = self._world_running()
@@ -3671,18 +3693,28 @@ class Applier:
             logger.warning(f"could not tell whether the world is running: {exc}")
             running, why = None, f"{type(exc).__name__}: {exc}"
         if running is False:
-            return
+            return True
         # Named as the manifest spells them, and unrendered for `_pending_sql`'s
         # reason: `_render()` raises for a value this run has not got, and a
         # refusal that dies while composing its own sentence names nothing.
         steps = ", ".join(_step_name(step) for step in at_risk)
         dbs = ", ".join(sorted({step.db for step in at_risk}))
         if running is None:
+            # T176: the remedy names Start first. `docker.world_running()` gives
+            # `None` both for a world container that is not there -- removed, and
+            # not created again by a Start -- and for a daemon that will not
+            # answer, and this seam cannot tell the two apart. The sentence said
+            # only "Stop the server", which cannot create a container, so on a
+            # stack a recreate left without its world every second press met
+            # this same refusal. Still a refusal: *could not tell* is not *no*.
             raise ApplyError(
                 f"{manifest.id}: could not tell whether the world server is running "
                 f"({why or 'the seam gave no answer'}), and a running one holds {dbs} in memory "
                 f"and writes back over whatever it finds there. No SQL was run and no rows were "
-                f"written: {steps}. Stop the server, then {when} again."
+                f"written: {steps}. If the world server's container is not there yet, press "
+                f"Start once on the Server tab (it creates it), then Stop, then {when} again. "
+                f"If Docker itself is not answering, start it, then Stop the server and {when} "
+                f"again."
             )
         raise ApplyError(
             f"{manifest.id}: the world server is running, and it holds {dbs} in memory and writes "
@@ -4501,6 +4533,7 @@ class Applier:
             left_behind=(
                 _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
             ),
+            world_stopped=log.world_stopped,
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "

@@ -51,18 +51,25 @@ is named here rather than quietly grandfathered; 8.7 is where the applier's
 guard lands.
 
 **The applier's guard landed on 2026-09-09**, and the two `_run_sql` rows below
-now say something narrower than "guarded", because that is what is true. Three
-things a reader has to carry away from them:
+say what it covers and what it does not rather than "guarded", because that is
+what is true. Three things a reader has to carry away from them:
 
-* **The guard is a capability, not yet a defence.** `Applier` takes a
-  `world_running` seam and `_refuse_direct_sql_into_a_running_world()` refuses
-  the whole action — before the first statement, so the *no rows written* half
-  of `checklist.md:2501` is true of the action and not merely of the step that
-  tripped it. But **no shipped caller passes the seam yet**: the four
-  `controller_<acronym>/modules.py` appliers are built without it, and with the
-  seam absent the behaviour is byte for byte what it was
-  (`phase8-designs/c-operators-risk.md:345` requires exactly that). Until a
-  caller wires it, every row below still reads "yes" in practice.
+* **The guard was a capability for one day, and a defence since T7.** `Applier`
+  takes a `world_running` seam and `_refuse_direct_sql_into_a_running_world()`
+  refuses the whole action — before the first statement, so the *no rows
+  written* half of `checklist.md:2501` is true of the action and not merely of
+  the step that tripped it. When it landed no shipped caller passed the seam,
+  and with the seam absent the behaviour is byte for byte what it was
+  (`phase8-designs/c-operators-risk.md:345` requires exactly that). T7
+  (2026-09-09) wired it into every applier the app builds, on all four games,
+  together with the `start_database` seam that starts the database alone when
+  the world is stopped: the app's Stop takes the database down too, so without
+  it the refusal's own *"Press Stop, then install again"* died on `container
+  ... is not running` (`bug-checklist §46`). `test_apply.py` enumerates the
+  call sites. T130 (2026-09-29) measured both halves on the three CMaNGOS games
+  through the Modules tab's own wiring (`test_controller_view.py`, *a CMaNGOS
+  SQL mod with the world stopped*); this paragraph and the two rows below read
+  "no caller passes that seam yet" until then.
 * **`db-import` is a different route with a different guard.** Those steps write
   nothing here; they are resolved into `ApplyReport.pending_sql` and applied by
   `docker.apply_module_sql()`, which has had the running-world refusal all along
@@ -209,7 +216,7 @@ descriptions are written by hand.
 | `apply.py::_deploy::shutil.copytree` | a deployed module directory into the server dir | yes |
 | `apply.py::_rm::rmtree.remove_tree` | a directory a manifest's `rm` step names | yes |
 | `apply.py::_rm::unlink` | a file a manifest's `rm` step names | yes |
-| `apply.py::_run_sql::run_file` | a module manifest's `.sql` file, into the database its step names | **guardable since 8.7a, and unguarded for every caller shipped today** — `_refuse_direct_sql_into_a_running_world()` refuses the action when a `world_running` seam says the world is up (or cannot say) and any of the action's direct steps names `characters`, `world` or `playerbots`; no caller passes that seam yet, so in the app as it ships this is still **yes**. `auth` and `acore_ale` are outside the guard. A crash still leaves a multi-file step half applied — the refusal prevents starting, not tearing |
+| `apply.py::_run_sql::run_file` | a module manifest's `.sql` file, into the database its step names | **no — refused while the world is running, on every shipped applier since T7** — `_refuse_direct_sql_into_a_running_world()` refuses the action when the `world_running` seam says the world is up (or cannot say) and any of the action's direct steps names `characters`, `world` or `playerbots`; with the world stopped the database is started alone and the world is left stopped (`start_database`). `auth` and `acore_ale` are outside the guard. A crash still leaves a multi-file step half applied — the refusal prevents starting, not tearing |
 | `apply.py::_run_sql::run_statement` | a module manifest's inline SQL, into the database its step names | **as the row above** — the refusal is a pre-pass over the action's steps, so an inline statement that is FIRST never reaches the runner either; this is the site 8.7a's clause is written about, and `all-stackables` sends three of these to `world` on one install |
 | `apply.py::_run_transaction::run_statement` | a `then` step's files (`path` first, then each `then` file), concatenated as ONE text inside `START TRANSACTION; ... COMMIT;`, into the database its step names — T100, `hearthstone-cd`'s reset + chosen cooldown | **as the two rows above** — behind the same running-world refusal; unlike a multi-file `path` step it cannot be left half applied by a failing file: `mysql` stops at the first error and the closed session rolls the open transaction back (InnoDB `item_template`, measured on m910q 2026-09-24), and every file of every step of the press is read and put through an allowlist (row changes, reads and user-variable `SET` only, per statement) by `_plan_sql()` before anything is sent |
 | `apply.py::_run_relative::run_statement` | **new (T115)** a relative mod's install or remove (`reapplies_on_top()`: Baby, Nerf, Buff and Extreme Buff Mobs) as ONE text inside `START TRANSACTION; ... COMMIT;` into `world`. On a re-install it is the manifest's own remove statements rendered with the APPLIED record's values, then its install statements with the new ones, so `creature_template` lands on base × new instead of compounding (whole-number columns such as attack time may be off by 1) | **as the three rows above** — reached from `_sql()` only after the same running-world refusal and database start; it cannot be left half applied (`mysql` stops at the first error and the closed session rolls back; `creature_template` is InnoDB, read on m910q 2026-09-25). `reapply_steps_problem()` keeps it to inline direct statements on one database. The record is marked `pending` immediately before this call and resolved after it, so an app killed around it leaves a record that is refused, not one that is wrong |

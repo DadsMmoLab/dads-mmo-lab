@@ -3786,7 +3786,7 @@ from the manifests rather than asked. Proved live on a WotLK server through the 
 
 ---
 
-### 46. On CMaNGOS there is no compliant way to install a SQL mod at all — 2026-09-08, OPEN
+### 46. On CMaNGOS there is no compliant way to install a SQL mod at all — 2026-09-08, **FIXED by T7, measured by T130**
 
 Owner answer 7 (2026-09-06, quoted in [`write-ledger.md`](write-ledger.md)): *no Phase 8 feature
 writes `characters` or `world` while the world server is up.* The ledger's row for
@@ -3840,6 +3840,41 @@ Two things have to be true for the feature to work, and neither is today:
 Nothing was written by the failed press: `stackable > 1` stayed at 3471, `stackable = 200` at its
 ground 121, and `yulon_stackable_backup` was never created. The failure is clean, which is the only
 good news in the entry.
+
+**Fixed by T7 (2026-09-09); this entry read OPEN until T130 (2026-09-29) measured it.** T7 took the
+first bullet's other road: the guard still asks about the world, and the applier gained a second
+seam, `start_database`, that starts the database container alone (`compose up -d --no-deps
+<db>`) when the world is read as stopped, and never the world. Both seams are wired into every
+applier the app builds, on all four games, and `test_apply.py` enumerates the call sites. So the
+sequence above now exists: **Stop**, **Install selected**, **Start**. With the world running the
+press is refused before anything is started or sent, and the refusal says *"Press Stop, then
+install again"*, which now works (on Tortoise the updater guard of checklist 2504 refuses first,
+and its sentence says to stop the world too); the raw daemon error is gone because the call it came from is
+no longer reached with the database down. T130 found this entry and `write-ledger.md` still saying
+no caller passes the seam, measured both branches through the Modules tab's own wiring on TBC,
+Vanilla and Tortoise (the real `docker.world_running()`, `docker.start_database()` and `DockerSql`
+over a Docker double that keeps state), and changed one thing the measurement showed: the report
+after a stopped-world install said *"Press Stop and then Start"*, and now says *"The world server
+was stopped when this ran; press Start ... (if it has been started since, press Stop and then
+Start)"* when the run itself read the world as stopped (on every game, so mod-arac's report on
+WotLK changed with it). It is worded as history because the reading was taken before the SQL ran
+and the report asks Docker nothing more (Codex, round 2). Tortoise's `GuardedApplier` rebuilt the report field by field and dropped both
+that reading and T62's `left_behind`; it now copies the report and adds its note. Pinned by
+`test_a_cmangos_sql_mod_applies_with_the_world_stopped_and_the_report_says_press_start` and
+`test_a_cmangos_sql_mod_is_refused_with_the_world_running_and_touches_nothing`, with
+`test_the_report_says_the_world_is_stopped_only_when_the_guard_read_it_so` and
+`test_the_subclass_keeps_every_field_of_the_engines_report` beside them.
+
+**T176, fixed on the same branch.** A world container that does not EXIST (removed, and not yet
+created again by a Start) reads as *could not tell*, and the press was refused with *"Stop the
+server, then install again"*; pressing Stop does not create a container, so the second press met
+the same refusal, and only Start got past it. It is still refused, because *could not tell* is not
+*no*, and the sentence now names the press that works: *"If the world server's container is not
+there yet, press Start once on the Server tab (it creates it), then Stop, then install again. If
+Docker itself is not answering, start it, then Stop the server and install again."* Both causes are
+named because `docker.world_running()` answers `None` for a missing container and for a daemon that
+will not answer alike, and the applier's seam carries nothing more. Pinned by
+`test_a_missing_world_container_is_refused_with_the_press_that_creates_it`.
 ---
 
 ## Found by the 8.7c / 8.9b live gates on m910q, 2026-09-08

@@ -215,7 +215,16 @@ def test_the_app_s_own_applier_puts_the_dbcs_into_the_data_volume(
     assert f"server_dbc {step} → data/dbc/" in report.done
     assert not any("server_dbc" in s for s in report.skipped), report.skipped
     assert report.restart_recommended
-    assert "Press Stop and then Start on the Server tab" in _format_report(report)
+    # T130: the closing line names Start alone only where this run READ the
+    # world as stopped. mod-arac's world SQL puts the question to the guard,
+    # which the seam above answers "not running"; the keg sends nothing into a
+    # world-held database, so nothing about the world was read.
+    if rel == ARAC:
+        assert report.world_stopped is True
+        assert "The world server was stopped when this ran; press Start" in _format_report(report)
+    else:
+        assert report.world_stopped is False
+        assert "Press Stop and then Start on the Server tab" in _format_report(report)
 
 
 def test_arac_s_client_patch_and_sql_go_where_they_go_beside_the_dbcs(

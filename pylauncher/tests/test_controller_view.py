@@ -7605,6 +7605,213 @@ def test_a_paused_world_refuses_direct_sql_on_the_wotlk_modules_tab(
     assert asked == [WOTLK.container_spec().world], "asked about THIS install's world container"
 
 
+# ------------------------- a CMaNGOS SQL mod with the world stopped, end to end (T130)
+#
+# `bug-checklist §46` was filed against these three games: the app's Stop takes
+# the database down with the world, and Bigger Stacks then died on `container
+# ... is not running`. T7 wired the two seams that close it, and until T130 the
+# only proof on these games was each package's factory handed two lambdas. The
+# tests below go through what `for_entry()` really builds instead: the real
+# `docker.world_running()` and `docker.start_database()` over a Docker double
+# that keeps state, and the real `DockerSql`, whose `docker exec` fails the way
+# the daemon's does while the database container is down.
+
+CMANGOS_SQL_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
+
+
+class _CmangosStack:
+    """One install's three containers, as the docker CLI and `docker exec mysql` see them.
+
+    State, not a script: `compose up --no-deps <service>` starts exactly what it
+    names, `docker ps` and `docker inspect` answer from what is running, and a
+    `mysql` sent while the database is down gets the daemon's own sentence. A
+    double that answered every exec with success could not tell a press that
+    started the database from one that did not.
+    """
+
+    def __init__(
+        self, entry: CatalogEntry, running: set[str], missing: frozenset[str] = frozenset()
+    ) -> None:
+        self.spec = entry.container_spec()
+        self.running = set(running)
+        # Containers Docker has no record of at all: removed, and not created
+        # again by a Start. `docker inspect` then answers the daemon's own
+        # "No such object", which is not the same as a container that exited.
+        self.missing = set(missing)
+        self.compose: list[list[str]] = []
+        self.sql: list[tuple[str, str]] = []
+
+    def __call__(
+        self, cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["docker", "compose"]:
+            self.compose.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            names = "".join(f"{name}\n" for name in sorted(self.running))
+            return subprocess.CompletedProcess(cmd, 0, names, "")
+        if cmd[:2] == ["docker", "inspect"] and cmd[2] in self.missing:
+            return subprocess.CompletedProcess(cmd, 1, "", f"Error: No such object: {cmd[2]}\n")
+        if cmd[:2] == ["docker", "inspect"] and "{{.State.Health.Status}}" in cmd:
+            healthy = "healthy\n" if cmd[2] in self.running else "\n"
+            return subprocess.CompletedProcess(cmd, 0, healthy, "")
+        if cmd[:2] == ["docker", "inspect"] and "{{.State.Status}}" in cmd[-1]:
+            status = "running" if cmd[2] in self.running else "exited"
+            return subprocess.CompletedProcess(cmd, 0, f"{status}\t2026-09-29T00:00:00Z\t0\n", "")
+        if cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"]:
+            self.running.update(cmd[5:])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def mysql(self, db: str, statement: str | None) -> subprocess.CompletedProcess[str]:
+        if self.spec.db not in self.running:
+            return subprocess.CompletedProcess(
+                [], 1, "", f"Error response from daemon: container {'f' * 64} is not running"
+            )
+        self.sql.append((db, statement or ""))
+        return subprocess.CompletedProcess([], 0, "", "")
+
+
+def _cmangos_stack(
+    game: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    world_up: bool,
+    world_missing: bool = False,
+) -> tuple[_CmangosStack, ControllerServices, Manifest]:
+    """The shipped services over a stack whose world is up, or which the app's Stop left.
+
+    `world_missing` is the third state: the world container is not there at all.
+    """
+    entry = load_catalog().get(game)
+    spec = entry.container_spec()
+    stack = _CmangosStack(
+        entry,
+        {spec.db, spec.auth, spec.world} if world_up else set(),
+        frozenset({spec.world}) if world_missing else frozenset(),
+    )
+    monkeypatch.setattr(runner, "run", stack)
+    monkeypatch.setattr(
+        DockerSql,
+        "_mysql",
+        lambda self, db, *, stdin=None, statement=None, extra=(): stack.mysql(db, statement),
+    )
+    server_dir = tmp_path / game
+    server_dir.mkdir()
+    services = ControllerServices.for_entry(entry, server_dir)
+    assert services.applier is not None
+    path = Path(__file__).resolve().parents[1] / "manifests" / game / "mods" / "all-stackables.json"
+    return stack, services, parse_manifest(json.loads(path.read_text(encoding="utf-8")))
+
+
+@pytest.mark.parametrize("action", ["install", "remove"])
+@pytest.mark.parametrize("game", CMANGOS_SQL_GAMES)
+def test_a_cmangos_sql_mod_applies_with_the_world_stopped_and_the_report_says_press_start(
+    game: str, action: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§46's compliant sequence -- Stop, Install selected, Start -- through the shipped wiring.
+
+    The stack is what the app's Stop leaves: all three containers exited. The
+    press starts the database ALONE (one `compose up --no-deps` naming only
+    it), sends every statement to the world schema, leaves the world stopped,
+    and the report's closing line names the one press still owed. Until T130
+    that line read *"Press Stop and then Start"*, to a player whose world the
+    run had just read as stopped. The reading is from before the SQL ran, so
+    the line says when it was taken and what to press if the world has been
+    started since (Codex, T130 round 2) -- the tab asks Docker nothing more.
+
+    Catches `start_database` dropped from this game's factory (the SQL fails on
+    `container ... is not running`, §46's own failure), the world started with
+    the database, and the report's reading of the world lost between the guard
+    and the tab -- on Tortoise, through `GuardedApplier`'s rebuilt report.
+    """
+    stack, services, manifest = _cmangos_stack(game, tmp_path, monkeypatch, world_up=False)
+    spec = stack.spec
+    press = services.applier.install if action == "install" else services.applier.remove
+
+    report = press(manifest, None)
+
+    assert stack.compose == [["docker", "compose", "up", "-d", "--no-deps", spec.db]]
+    assert stack.running == {spec.db}, "the world (and auth) must be left stopped"
+    assert [db for db, _ in stack.sql] == ["world"] * (3 if action == "install" else 2)
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert report.world_stopped is True
+    text = controller_view_module._format_report(report)
+    assert text.splitlines()[-1] == (
+        "  ⚠ The world server was stopped when this ran; press Start on the Server tab to apply "
+        "this (if it has been started since, press Stop and then Start)."
+    ), "a reading taken before the SQL ran is told as history, not as the world's state now"
+    assert "Press Stop and then Start on the Server tab" not in text
+
+
+@pytest.mark.parametrize("action", ["install", "remove"])
+@pytest.mark.parametrize("game", CMANGOS_SQL_GAMES)
+def test_a_cmangos_sql_mod_is_refused_with_the_world_running_and_touches_nothing(
+    game: str, action: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other branch of §46's fork, on the same wiring: refused, and nothing started or sent.
+
+    Tortoise meets its OTHER guard first, measured here rather than assumed:
+    `GuardedApplier`'s updater check (checklist 2504) runs before the engine's,
+    and with the updater's state unreadable it refuses a restart-asking item
+    while the world is up. Its sentence says to stop the world too, so the
+    player is sent to the same press either way.
+
+    Catches `world_running` dropped from this game's factory (the statements
+    would land in a live world) and a database start moved ahead of the guard.
+    """
+    stack, services, manifest = _cmangos_stack(game, tmp_path, monkeypatch, world_up=True)
+    press = services.applier.install if action == "install" else services.applier.remove
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        press(manifest, None)
+
+    if game == "wow-tortoise":
+        assert "refused while the world is up" in str(raised.value)
+        assert "Stop the world first" in str(raised.value)
+    else:
+        assert "the world server is running" in str(raised.value)
+        assert f"Press Stop, then {action} again" in str(raised.value)
+    assert stack.compose == [] and stack.sql == []
+
+
+@pytest.mark.parametrize("action", ["install", "remove"])
+@pytest.mark.parametrize("game", CMANGOS_SQL_GAMES)
+def test_a_missing_world_container_is_refused_with_the_press_that_creates_it(
+    game: str, action: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Still refused, and the refusal now names Start, the one press that gets past it (T176).
+
+    A world container that does not exist -- removed, and not yet created again
+    by a Start -- reads as *could not tell* through `docker.world_running()`,
+    which is right: the guard fails closed. But its sentence said *"Stop the
+    server, then install again"*, and Stop cannot create a container, so the
+    second press met the same refusal. `docker.world_running()` gives the
+    same `None` for a daemon that will not answer, so the sentence names both
+    causes, the missing container first.
+
+    Catches the refusal loosened into a permit (the statements would land, or
+    the database would be started, under a world nothing read), and the old
+    sentence put back.
+    """
+    stack, services, manifest = _cmangos_stack(
+        game, tmp_path, monkeypatch, world_up=False, world_missing=True
+    )
+    press = services.applier.install if action == "install" else services.applier.remove
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        press(manifest, None)
+
+    message = str(raised.value)
+    assert "could not tell whether the world server is running" in message
+    assert (
+        "If the world server's container is not there yet, press Start once on the Server tab "
+        f"(it creates it), then Stop, then {action} again." in message
+    )
+    assert "Stop the server, then" not in message, "Stop alone cannot create the container"
+    assert stack.compose == [] and stack.sql == []
+
+
 # ------------------------------------ the pending-database-updates button (T14)
 #
 # T11 built the route that applies a phase declared `rerun_on_marked` to an
