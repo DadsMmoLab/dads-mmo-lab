@@ -377,6 +377,20 @@
                   "on_error": "warn"
                 },
                 {
+                  "name": "instance updates",
+                  "into": "mangos",
+                  "files": [
+                    "src/tbc-db/Updates/Instances/[0-9]*.sql"
+                  ],
+                  "sort": "natural",
+                  "on_error": "fail",
+                  "notes": [
+                    "tbc-db's InstallFullDB.sh applies Updates/Instances/[0-9]*.sql straight after Updates/[0-9]*.sql and before the world core updates, dbc data and ACID, stopping on the first error; this phase sits in that same place (T141). At ba4755de that is 55 files, 000_setup.sql first, and this phase's natural order was measured equal to bash's glob order over them.",
+                    "000_setup.sql deletes every creature and gameobject spawn on the instance maps from 36 tables and the files after it put them back, so the set is one rebuild and a failure part way leaves dungeons and raids short. It cannot be one transaction: the setup creates and drops real tables (DDL commits), and creature, gameobject, pool_template and most of the others are MyISAM in the Full_DB dump. So `fail`, which writes no marker, and the next press's `partial` arm drops the schemas and imports again.",
+                    "Nothing in these files records that they ran: no db_version column, no ledger. New installs only, by the owner's decision of 2026-09-29: no `reapply_when_changed`, so a server imported before this phase existed reads it as withheld."
+                  ]
+                },
+                {
                   "name": "ACID",
                   "into": "mangos",
                   "files": [
@@ -800,6 +814,20 @@
                   ],
                   "sort": "natural",
                   "on_error": "warn"
+                },
+                {
+                  "name": "instance updates",
+                  "into": "mangos",
+                  "files": [
+                    "src/classic-db/Updates/Instances/[0-9]*.sql"
+                  ],
+                  "sort": "natural",
+                  "on_error": "fail",
+                  "notes": [
+                    "classic-db's InstallFullDB.sh applies Updates/Instances/[0-9]*.sql straight after Updates/[0-9]*.sql and before the world core updates and ACID, stopping on the first error; this phase sits in that same place (T141). At ec4f5961 that is 30 files, 000_setup.sql first, and this phase's natural order was measured equal to bash's glob order over them. The Full_DB dump dates from January 2024, and 52 commits to these files have landed since; only this phase brings them.",
+                    "000_setup.sql deletes every creature and gameobject spawn on the instance maps from 36 tables and the files after it put them back, so the set is one rebuild and a failure part way leaves dungeons and raids short. It cannot be one transaction: the setup creates and drops real tables (DDL commits), and creature, gameobject, pool_template and most of the others are MyISAM in the Full_DB dump. So `fail`, which writes no marker, and the next press's `partial` arm drops the schemas and imports again.",
+                    "Nothing in these files records that they ran: no db_version column, no ledger. New installs only, by the owner's decision of 2026-09-29: no `reapply_when_changed`, so a server imported before this phase existed reads it as withheld."
+                  ]
                 },
                 {
                   "name": "ACID",
