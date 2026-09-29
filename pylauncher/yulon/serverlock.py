@@ -95,6 +95,15 @@ class FolderLockError(OSError):
     """The folder could not be locked; the message says why, in Windows' own words."""
 
 
+class FolderLockRefused(FolderLockError):
+    """`SetNamedSecurityInfoW` itself refused, or took the DACL and did not keep it.
+
+    The one failure an install remembers (`InstallLock`, round 4): it is what
+    costs a walk of the whole folder, and the same folder answers it the same
+    way. A token, a read or a name that failed is asked again at the next stage.
+    """
+
+
 BROAD_GROUPS: dict[str, str] = {
     "S-1-1-0": "Everyone",
     "S-1-2-0": "LOCAL",
@@ -278,22 +287,30 @@ def lock(folder: Path) -> bool:
     Windows answering success is not the same as the folder being locked.
 
     Raises:
-        FolderLockError: Windows refused, or accepted and did not keep it. Any
-            failure of the calls is wrapped, `ctypes.ArgumentError` included,
-            for `winacl.secure_folder`'s reason.
+        FolderLockRefused: the apply refused, or was accepted and did not keep.
+        FolderLockError: anything before or after it -- the token, a read, a
+            name. Any failure of the calls is wrapped, `ctypes.ArgumentError`
+            included, for `winacl.secure_folder`'s reason.
     """
     try:
         user_sid = winacl._user_sid()
         before = winacl._read_dacl(folder)
         if _owner_only(before, user_sid):
             return False
-        winacl._apply_dacl(folder, winacl.owner_only_sddl(user_sid))
-        after = winacl._read_dacl(folder)
-        kept = _owner_only(after, user_sid)
+        sddl = winacl.owner_only_sddl(user_sid)
     except Exception as exc:  # noqa: BLE001 - every failure is the same sentence
         raise FolderLockError(f"{type(exc).__name__}: {exc}") from exc
+    try:
+        winacl._apply_dacl(folder, sddl)
+    except Exception as exc:  # noqa: BLE001 - as above
+        raise FolderLockRefused(f"{type(exc).__name__}: {exc}") from exc
+    try:
+        after = winacl._read_dacl(folder)
+        kept = _owner_only(after, user_sid)
+    except Exception as exc:  # noqa: BLE001 - as above
+        raise FolderLockError(f"{type(exc).__name__}: {exc}") from exc
     if not kept:
-        raise FolderLockError(f"Windows accepted the change and the folder still reads {after}")
+        raise FolderLockRefused(f"Windows accepted the change and the folder still reads {after}")
     logger.info(f"locked {folder} to this account (T174); it was {before}")
     return True
 
@@ -326,12 +343,16 @@ class InstallLock:
     made again by its clone -- is logged only. A folder that grants somebody
     specific is left, and said once.
 
-    A failure is said once and remembered against the folder's IDENTITY
-    (`_identity()`), and asked again only when a later stage finds a different
-    folder at the path (round 3, Codex). The same folder refuses the same way,
-    and each attempt costs `SetNamedSecurityInfoW`'s walk of everything in it;
-    a folder WotLK's clone made anew is a new folder, and may not refuse
-    (round 2). A lock that held is checked again with one read, as before.
+    A failure is said once. A REFUSAL of the apply (`FolderLockRefused`) is
+    remembered against the folder's IDENTITY (`_identity()`), and asked again
+    only when a later stage finds a different folder at the path (round 3,
+    Codex): the same folder refuses the same way, and each attempt costs
+    `SetNamedSecurityInfoW`'s walk of everything in it, while a folder WotLK's
+    clone made anew is a new folder, and may not refuse (round 2). Any other
+    failure -- the token, a read, a name -- costs next to nothing and is asked
+    again at the next stage, the same folder included (round 4, Codex): a
+    one-off read that failed must not leave the folder unlocked for the rest of
+    the install. A lock that held is checked again with one read, as before.
     """
 
     def __init__(self, folder: Path) -> None:
@@ -370,7 +391,8 @@ class InstallLock:
                 return
             changed = lock(self.folder)
         except Exception as exc:  # noqa: BLE001 - a lock never costs the install
-            self._refused_by = identity
+            if isinstance(exc, FolderLockRefused):
+                self._refused_by = identity
             if "failed" not in self._said:
                 logger.warning(f"could not lock {self.folder} to this account: {exc}")
             yield from self._once("failed", NOT_LOCKED_LINE.format(folder=self.folder, reason=exc))

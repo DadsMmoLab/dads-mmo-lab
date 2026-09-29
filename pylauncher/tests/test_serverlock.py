@@ -101,6 +101,8 @@ class FakeWindows:
         self.refusals: list[OSError] = []
         """What the next applies RAISE, one each, before they start to succeed."""
         self.refuse_read: OSError | None = None
+        self.read_failures: list[OSError] = []
+        """What the next reads RAISE, one each, before they start to answer."""
         self.generation: dict[Path, int] = {}
         """How many times each folder was made anew: what its NTFS file id tells apart."""
 
@@ -116,6 +118,8 @@ class FakeWindows:
         self.reads.append(folder)
         if self.refuse_read is not None:
             raise self.refuse_read
+        if self.read_failures:
+            raise self.read_failures.pop(0)
         return self.dacls.get(folder, self.initial)
 
     def apply_dacl(self, folder: Path, sddl: str) -> None:
@@ -271,15 +275,23 @@ def test_the_built_in_administrator_s_folder_reads_as_locked_after_the_lock(
 
 def test_a_refused_press_says_windows_reason(windows: FakeWindows, tmp_path: Path) -> None:
     windows.refusals = [PermissionError(5, "Access is denied")]
-    with pytest.raises(serverlock.FolderLockError, match="Access is denied"):
+    with pytest.raises(serverlock.FolderLockRefused, match="Access is denied"):
         serverlock.lock(tmp_path)
+
+
+def test_a_read_that_fails_is_not_a_refusal(windows: FakeWindows, tmp_path: Path) -> None:
+    windows.read_failures = [OSError(21, "The device is not ready")]
+    with pytest.raises(serverlock.FolderLockError, match="not ready") as failed:
+        serverlock.lock(tmp_path)
+    assert not isinstance(failed.value, serverlock.FolderLockRefused)
+    assert windows.applied == []
 
 
 def test_a_press_windows_accepted_and_did_not_keep_is_a_failure(
     windows: FakeWindows, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(winacl, "_apply_dacl", lambda folder, sddl: None)
-    with pytest.raises(serverlock.FolderLockError, match="still reads"):
+    with pytest.raises(serverlock.FolderLockRefused, match="still reads"):
         serverlock.lock(tmp_path)
 
 
@@ -472,6 +484,25 @@ def test_a_refusal_is_remembered_for_that_folder_and_forgotten_when_the_folder_i
     reads = len(windows.reads)
     assert list(folder_lock.ensure()) == [] and len(windows.applied) == 3
     assert len(windows.reads) == reads + 1, "a lock that held was not checked with one read"
+
+
+def test_a_read_that_failed_once_is_asked_again_on_the_same_folder_before_the_first_secret(
+    windows: FakeWindows, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 4 (Codex): only a refused apply is remembered; a read is cheap and asked again."""
+    server_dir = tmp_path / "srv"
+    windows.read_failures = [OSError(21, "The device is not ready")]
+    seen = _watch_secrets(monkeypatch, windows, server_dir)
+    lines = install_tbc(Recorder(), server_dir, client_folder(tmp_path))
+    assert [folder for folder, _ in windows.applied] == [server_dir]
+    assert windows.generation.get(server_dir, 0) == 0, "the folder was not the same one"
+    warned = [line for line in lines if line.startswith("Could not lock ")]
+    assert len(warned) == 1 and "not ready" in warned[0], warned
+    locked = serverlock.LOCKED_LINE.format(folder=server_dir)
+    assert lines.index(warned[0]) < lines.index("--- patch-sources") < lines.index(locked)
+    assert lines.index(locked) < lines.index("--- db-password")
+    assert ".db_password" in [name for name, _ in seen]
+    assert all(was_locked for _, was_locked in seen), seen
 
 
 def test_a_folder_s_identity_is_the_folder_not_the_path(tmp_path: Path) -> None:
