@@ -274,9 +274,34 @@ def test_the_built_in_administrator_s_folder_reads_as_locked_after_the_lock(
 
 
 def test_a_refused_press_says_windows_reason(windows: FakeWindows, tmp_path: Path) -> None:
-    windows.refusals = [PermissionError(5, "Access is denied")]
+    windows.refusals = [winacl.DaclRefused(13, "SetNamedSecurityInfoW: Access is denied")]
     with pytest.raises(serverlock.FolderLockRefused, match="Access is denied"):
         serverlock.lock(tmp_path)
+
+
+def test_a_descriptor_that_could_not_be_built_is_not_a_refusal(
+    windows: FakeWindows, tmp_path: Path
+) -> None:
+    """Round 5 (Codex): only `SetNamedSecurityInfoW`'s own answer is a refusal."""
+    windows.refusals = [OSError(1336, "ConvertStringSecurityDescriptorToSecurityDescriptorW")]
+    with pytest.raises(serverlock.FolderLockError) as failed:
+        serverlock.lock(tmp_path)
+    assert not isinstance(failed.value, serverlock.FolderLockRefused)
+
+
+def test_a_descriptor_that_failed_once_is_built_again_and_the_same_folder_locked(
+    windows: FakeWindows, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = tmp_path / "srv"
+    windows.refusals = [OSError(1336, "ConvertStringSecurityDescriptorToSecurityDescriptorW")]
+    seen = _watch_secrets(monkeypatch, windows, server_dir)
+    lines = install_tbc(Recorder(), server_dir, client_folder(tmp_path))
+    assert [folder for folder, _ in windows.applied] == [server_dir, server_dir]
+    assert windows.generation.get(server_dir, 0) == 0, "the folder was not the same one"
+    assert windows.locked(server_dir)
+    locked = serverlock.LOCKED_LINE.format(folder=server_dir)
+    assert lines.index("--- patch-sources") < lines.index(locked) < lines.index("--- db-password")
+    assert all(was_locked for _, was_locked in seen), seen
 
 
 def test_a_read_that_fails_is_not_a_refusal(windows: FakeWindows, tmp_path: Path) -> None:
@@ -437,7 +462,7 @@ def test_a_lock_refused_before_the_clone_is_asked_again_and_lands_before_generat
     """Codex, round 2: a refusal is said once and never ends the asking."""
     server_dir = tmp_path / "wow"
     rec = Recorder()
-    windows.refusals = [PermissionError(5, "Access is denied")]
+    windows.refusals = [winacl.DaclRefused(13, "SetNamedSecurityInfoW: Access is denied")]
     lines = install_wotlk(rec, server_dir, clone=_faithful_clone(rec, windows))
     assert [folder for folder, _ in windows.applied] == [server_dir, server_dir]
     assert windows.locked(server_dir)
@@ -453,7 +478,7 @@ def test_a_lock_windows_always_refuses_is_said_once_tried_once_and_the_install_c
 ) -> None:
     """Round 3 (Codex): the same folder is not walked again at every stage to refuse again."""
     server_dir = tmp_path / "srv"
-    windows.refusals = [PermissionError(5, "Access is denied")] * 100
+    windows.refusals = [winacl.DaclRefused(13, "SetNamedSecurityInfoW: Access is denied")] * 100
     seen = _watch_secrets(monkeypatch, windows, server_dir)
     lines = install_tbc(Recorder(), server_dir, client_folder(tmp_path))
     warned = [line for line in lines if line.startswith("Could not lock ")]
@@ -472,7 +497,7 @@ def test_a_refusal_is_remembered_for_that_folder_and_forgotten_when_the_folder_i
     folder_lock = serverlock.InstallLock(folder)
     assert list(folder_lock.ensure()) == [], "a folder that is not there was asked about"
     folder.mkdir()
-    windows.refusals = [PermissionError(5, "Access is denied")] * 2
+    windows.refusals = [winacl.DaclRefused(13, "SetNamedSecurityInfoW: Access is denied")] * 2
     assert len(list(folder_lock.ensure())) == 1
     assert list(folder_lock.ensure()) == [] and len(windows.applied) == 1
     windows.forget(folder)
@@ -646,7 +671,7 @@ def test_a_refused_lock_says_why_and_the_offer_stays(
     qapp: object, ps: _Ps, windows: FakeWindows, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     view = _view(ps, tmp_path)
-    windows.refusals = [PermissionError(5, "Access is denied")]
+    windows.refusals = [winacl.DaclRefused(13, "SetNamedSecurityInfoW: Access is denied")]
     _answer(monkeypatch, yes=True)
     view.compose_banner_button.click()
     assert "was not locked" in view.problem_label.text()

@@ -239,6 +239,17 @@ def _narrow(folder: Path) -> None:
 # `--platform win32`.
 
 
+class DaclRefused(OSError):
+    """`SetNamedSecurityInfoW` itself answered an error: Windows refused the new DACL (T174).
+
+    Raised only at that call, never by the preparation before it (building the
+    descriptor from SDDL, taking its DACL out), so a caller can tell a refusal --
+    which costs the walk of everything under the folder and which the same folder
+    gives again -- from a one-off failure worth asking again
+    (`serverlock.InstallLock`). `secure_folder` treats both alike.
+    """
+
+
 def _on_windows() -> bool:
     return sys.platform == "win32"
 
@@ -490,6 +501,7 @@ def _apply_dacl(folder: Path, sddl: str) -> None:  # pragma: no cover - Windows 
             None,
         )
         if code:
-            raise _failed("SetNamedSecurityInfoW", code)
+            refused = _failed("SetNamedSecurityInfoW", code)
+            raise DaclRefused(refused.errno, refused.strerror)
     finally:
         kernel32.LocalFree(descriptor)

@@ -96,7 +96,8 @@ class FolderLockError(OSError):
 
 
 class FolderLockRefused(FolderLockError):
-    """`SetNamedSecurityInfoW` itself refused, or took the DACL and did not keep it.
+    """`SetNamedSecurityInfoW` itself refused (`winacl.DaclRefused`), or took the DACL and
+    did not keep it. Not the preparation before that call (round 5, Codex).
 
     The one failure an install remembers (`InstallLock`, round 4): it is what
     costs a walk of the whole folder, and the same folder answers it the same
@@ -287,10 +288,12 @@ def lock(folder: Path) -> bool:
     Windows answering success is not the same as the folder being locked.
 
     Raises:
-        FolderLockRefused: the apply refused, or was accepted and did not keep.
-        FolderLockError: anything before or after it -- the token, a read, a
-            name. Any failure of the calls is wrapped, `ctypes.ArgumentError`
-            included, for `winacl.secure_folder`'s reason.
+        FolderLockRefused: `SetNamedSecurityInfoW` refused, or was accepted and
+            did not keep.
+        FolderLockError: anything else -- the token, a read, a name, or the
+            descriptor `_apply_dacl` builds before its call. Any failure of
+            the calls is wrapped, `ctypes.ArgumentError` included, for
+            `winacl.secure_folder`'s reason.
     """
     try:
         user_sid = winacl._user_sid()
@@ -302,8 +305,10 @@ def lock(folder: Path) -> bool:
         raise FolderLockError(f"{type(exc).__name__}: {exc}") from exc
     try:
         winacl._apply_dacl(folder, sddl)
-    except Exception as exc:  # noqa: BLE001 - as above
+    except winacl.DaclRefused as exc:
         raise FolderLockRefused(f"{type(exc).__name__}: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - as above
+        raise FolderLockError(f"{type(exc).__name__}: {exc}") from exc
     try:
         after = winacl._read_dacl(folder)
         kept = _owner_only(after, user_sid)
