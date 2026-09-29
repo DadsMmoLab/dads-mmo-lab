@@ -3854,19 +3854,27 @@ no longer reached with the database down. T130 found this entry and `write-ledge
 no caller passes the seam, measured both branches through the Modules tab's own wiring on TBC,
 Vanilla and Tortoise (the real `docker.world_running()`, `docker.start_database()` and `DockerSql`
 over a Docker double that keeps state), and changed one thing the measurement showed: the report
-after a stopped-world install said *"Press Stop and then Start"*, and now says *"press Start"*
-when the run itself read the world as stopped (on every game, so mod-arac's report on WotLK
-changed with it). Tortoise's `GuardedApplier` rebuilt the report field by field and dropped both
+after a stopped-world install said *"Press Stop and then Start"*, and now says *"The world server
+was stopped when this ran; press Start ... (if it has been started since, press Stop and then
+Start)"* when the run itself read the world as stopped (on every game, so mod-arac's report on
+WotLK changed with it). It is worded as history because the reading was taken before the SQL ran
+and the report asks Docker nothing more (Codex, round 2). Tortoise's `GuardedApplier` rebuilt the report field by field and dropped both
 that reading and T62's `left_behind`; it now copies the report and adds its note. Pinned by
 `test_a_cmangos_sql_mod_applies_with_the_world_stopped_and_the_report_says_press_start` and
 `test_a_cmangos_sql_mod_is_refused_with_the_world_running_and_touches_nothing`, with
 `test_the_report_says_the_world_is_stopped_only_when_the_guard_read_it_so` and
 `test_the_subclass_keeps_every_field_of_the_engines_report` beside them.
 
-One case is left, and it is the guard's three-valued rule rather than this entry: a world
-container that does not EXIST (removed, and not yet created again by a Start) reads as *could not
-tell*, so the press is refused with *"Stop the server, then install again"*, and pressing Stop does
-not change that; pressing Start once does. Filed by T130's report, not fixed here.
+**T176, fixed on the same branch.** A world container that does not EXIST (removed, and not yet
+created again by a Start) reads as *could not tell*, and the press was refused with *"Stop the
+server, then install again"*; pressing Stop does not create a container, so the second press met
+the same refusal, and only Start got past it. It is still refused, because *could not tell* is not
+*no*, and the sentence now names the press that works: *"If the world server's container is not
+there yet, press Start once on the Server tab (it creates it), then Stop, then install again. If
+Docker itself is not answering, start it, then Stop the server and install again."* Both causes are
+named because `docker.world_running()` answers `None` for a missing container and for a daemon that
+will not answer alike, and the applier's seam carries nothing more. Pinned by
+`test_a_missing_world_container_is_refused_with_the_press_that_creates_it`.
 ---
 
 ## Found by the 8.7c / 8.9b live gates on m910q, 2026-09-08

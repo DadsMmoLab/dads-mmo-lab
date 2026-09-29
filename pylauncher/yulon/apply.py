@@ -3700,11 +3700,21 @@ class Applier:
         steps = ", ".join(_step_name(step) for step in at_risk)
         dbs = ", ".join(sorted({step.db for step in at_risk}))
         if running is None:
+            # T176: the remedy names Start first. `docker.world_running()` gives
+            # `None` both for a world container that is not there -- removed, and
+            # not created again by a Start -- and for a daemon that will not
+            # answer, and this seam cannot tell the two apart. The sentence said
+            # only "Stop the server", which cannot create a container, so on a
+            # stack a recreate left without its world every second press met
+            # this same refusal. Still a refusal: *could not tell* is not *no*.
             raise ApplyError(
                 f"{manifest.id}: could not tell whether the world server is running "
                 f"({why or 'the seam gave no answer'}), and a running one holds {dbs} in memory "
                 f"and writes back over whatever it finds there. No SQL was run and no rows were "
-                f"written: {steps}. Stop the server, then {when} again."
+                f"written: {steps}. If the world server's container is not there yet, press "
+                f"Start once on the Server tab (it creates it), then Stop, then {when} again. "
+                f"If Docker itself is not answering, start it, then Stop the server and {when} "
+                f"again."
             )
         raise ApplyError(
             f"{manifest.id}: the world server is running, and it holds {dbs} in memory and writes "

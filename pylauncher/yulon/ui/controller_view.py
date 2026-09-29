@@ -13892,8 +13892,13 @@ def _format_report(report: ApplyReport) -> str:
         # so Start is the one press owed. "Stop and then Start" worked -- Stop
         # took down the database the run had started alone -- but it was a step
         # nobody needed, told to a player who had just been asked to press Stop.
+        # Told as what it is, a reading taken when the SQL ran (Codex, round 2):
+        # the world can be started between then and the moment this is read,
+        # and the report asks Docker nothing more, so the sentence carries the
+        # press for that case too rather than stating the world's state now.
         lines.append(
-            "  ⚠ The world server is stopped: press Start on the Server tab to apply this."
+            "  ⚠ The world server was stopped when this ran; press Start on the Server tab to "
+            "apply this (if it has been started since, press Stop and then Start)."
         )
     elif report.restart_recommended:
         lines.append("  ⚠ Press Stop and then Start on the Server tab to apply this.")

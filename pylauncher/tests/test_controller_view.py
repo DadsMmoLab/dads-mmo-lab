@@ -7629,9 +7629,15 @@ class _CmangosStack:
     started the database from one that did not.
     """
 
-    def __init__(self, entry: CatalogEntry, running: set[str]) -> None:
+    def __init__(
+        self, entry: CatalogEntry, running: set[str], missing: frozenset[str] = frozenset()
+    ) -> None:
         self.spec = entry.container_spec()
         self.running = set(running)
+        # Containers Docker has no record of at all: removed, and not created
+        # again by a Start. `docker inspect` then answers the daemon's own
+        # "No such object", which is not the same as a container that exited.
+        self.missing = set(missing)
         self.compose: list[list[str]] = []
         self.sql: list[tuple[str, str]] = []
 
@@ -7643,6 +7649,8 @@ class _CmangosStack:
         if cmd[:2] == ["docker", "ps"]:
             names = "".join(f"{name}\n" for name in sorted(self.running))
             return subprocess.CompletedProcess(cmd, 0, names, "")
+        if cmd[:2] == ["docker", "inspect"] and cmd[2] in self.missing:
+            return subprocess.CompletedProcess(cmd, 1, "", f"Error: No such object: {cmd[2]}\n")
         if cmd[:2] == ["docker", "inspect"] and "{{.State.Health.Status}}" in cmd:
             healthy = "healthy\n" if cmd[2] in self.running else "\n"
             return subprocess.CompletedProcess(cmd, 0, healthy, "")
@@ -7664,12 +7672,24 @@ class _CmangosStack:
 
 
 def _cmangos_stack(
-    game: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, world_up: bool
+    game: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    world_up: bool,
+    world_missing: bool = False,
 ) -> tuple[_CmangosStack, ControllerServices, Manifest]:
-    """The shipped services over a stack whose world is up, or which the app's Stop left."""
+    """The shipped services over a stack whose world is up, or which the app's Stop left.
+
+    `world_missing` is the third state: the world container is not there at all.
+    """
     entry = load_catalog().get(game)
     spec = entry.container_spec()
-    stack = _CmangosStack(entry, {spec.db, spec.auth, spec.world} if world_up else set())
+    stack = _CmangosStack(
+        entry,
+        {spec.db, spec.auth, spec.world} if world_up else set(),
+        frozenset({spec.world}) if world_missing else frozenset(),
+    )
     monkeypatch.setattr(runner, "run", stack)
     monkeypatch.setattr(
         DockerSql,
@@ -7696,7 +7716,9 @@ def test_a_cmangos_sql_mod_applies_with_the_world_stopped_and_the_report_says_pr
     it), sends every statement to the world schema, leaves the world stopped,
     and the report's closing line names the one press still owed. Until T130
     that line read *"Press Stop and then Start"*, to a player whose world the
-    run had just read as stopped.
+    run had just read as stopped. The reading is from before the SQL ran, so
+    the line says when it was taken and what to press if the world has been
+    started since (Codex, T130 round 2) -- the tab asks Docker nothing more.
 
     Catches `start_database` dropped from this game's factory (the SQL fails on
     `container ... is not running`, §46's own failure), the world started with
@@ -7715,8 +7737,11 @@ def test_a_cmangos_sql_mod_applies_with_the_world_stopped_and_the_report_says_pr
     assert "started the database alone; the world server was left stopped" in report.done
     assert report.world_stopped is True
     text = controller_view_module._format_report(report)
-    assert "The world server is stopped: press Start on the Server tab to apply this." in text
-    assert "Press Stop and then Start" not in text
+    assert text.splitlines()[-1] == (
+        "  ⚠ The world server was stopped when this ran; press Start on the Server tab to apply "
+        "this (if it has been started since, press Stop and then Start)."
+    ), "a reading taken before the SQL ran is told as history, not as the world's state now"
+    assert "Press Stop and then Start on the Server tab" not in text
 
 
 @pytest.mark.parametrize("action", ["install", "remove"])
@@ -7747,6 +7772,43 @@ def test_a_cmangos_sql_mod_is_refused_with_the_world_running_and_touches_nothing
     else:
         assert "the world server is running" in str(raised.value)
         assert f"Press Stop, then {action} again" in str(raised.value)
+    assert stack.compose == [] and stack.sql == []
+
+
+@pytest.mark.parametrize("action", ["install", "remove"])
+@pytest.mark.parametrize("game", CMANGOS_SQL_GAMES)
+def test_a_missing_world_container_is_refused_with_the_press_that_creates_it(
+    game: str, action: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Still refused, and the refusal now names Start, the one press that gets past it (T176).
+
+    A world container that does not exist -- removed, and not yet created again
+    by a Start -- reads as *could not tell* through `docker.world_running()`,
+    which is right: the guard fails closed. But its sentence said *"Stop the
+    server, then install again"*, and Stop cannot create a container, so the
+    second press met the same refusal. `docker.world_running()` gives the
+    same `None` for a daemon that will not answer, so the sentence names both
+    causes, the missing container first.
+
+    Catches the refusal loosened into a permit (the statements would land, or
+    the database would be started, under a world nothing read), and the old
+    sentence put back.
+    """
+    stack, services, manifest = _cmangos_stack(
+        game, tmp_path, monkeypatch, world_up=False, world_missing=True
+    )
+    press = services.applier.install if action == "install" else services.applier.remove
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        press(manifest, None)
+
+    message = str(raised.value)
+    assert "could not tell whether the world server is running" in message
+    assert (
+        "If the world server's container is not there yet, press Start once on the Server tab "
+        f"(it creates it), then Stop, then {action} again." in message
+    )
+    assert "Stop the server, then" not in message, "Stop alone cannot create the container"
     assert stack.compose == [] and stack.sql == []
 
 

@@ -221,9 +221,7 @@ def test_the_app_s_own_applier_puts_the_dbcs_into_the_data_volume(
     # world-held database, so nothing about the world was read.
     if rel == ARAC:
         assert report.world_stopped is True
-        assert "The world server is stopped: press Start on the Server tab" in _format_report(
-            report
-        )
+        assert "The world server was stopped when this ran; press Start" in _format_report(report)
     else:
         assert report.world_stopped is False
         assert "Press Stop and then Start on the Server tab" in _format_report(report)
