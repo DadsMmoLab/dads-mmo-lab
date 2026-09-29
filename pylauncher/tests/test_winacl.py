@@ -16,6 +16,7 @@ write path.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,7 @@ def windows(monkeypatch: pytest.MonkeyPatch) -> FakeWindows:
     monkeypatch.setattr(winacl, "_sid_of", windows_sid_of)
     # A launch of its own: what an earlier test's reads checked is not this one's.
     monkeypatch.setattr(winacl, "_checked_on_read", set())
+    monkeypatch.setattr(winacl, "_folder_locks", {})
     return fake
 
 
@@ -479,3 +481,74 @@ def test_a_kept_password_s_folder_is_checked_once_a_launch_on_read(
         assert dbsecret.recall("wow-tbc", "ab12cd34", config_dir=tmp_path) is not None
     assert len(windows.reads) == asked and asked > 0
     assert len(windows.applied) == 1
+
+
+# -- round 3: an alias Windows will not resolve, and two reads at once ------
+
+
+UNRESOLVABLE = f"D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{USER})(A;OICI;FA;;;ZZ)"
+"""Protected, and a fourth trustee spelt as an alias `ConvertStringSidToSidW` refuses."""
+
+
+def test_a_trustee_windows_cannot_resolve_makes_the_dacl_not_owner_only() -> None:
+    """Answered, not raised: an entry nobody can name is an entry for somebody else."""
+    assert not winacl.is_owner_only(UNRESOLVABLE, USER, sid_of=windows_sid_of)
+
+
+def test_a_folder_with_a_trustee_windows_cannot_resolve_is_narrowed(
+    tmp_path: Path, windows: FakeWindows, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Before round 3 the refusal escaped the check, became a warning, and nothing was repaired."""
+    windows.dacls[tmp_path] = UNRESOLVABLE
+    with caplog.at_level(logging.INFO, logger="yulon.winacl"):
+        winacl.secure_folder(tmp_path, reading=True)
+
+    assert [(folder, sddl) for folder, sddl, _ in windows.applied] == [
+        (tmp_path, winacl.owner_only_sddl(USER))
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], caplog.text
+
+
+def test_a_second_reader_waits_for_the_first_reader_s_check_to_finish(
+    tmp_path: Path, windows: FakeWindows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two reads at once: the second must not take a check still running for done.
+
+    The first reader is held inside its DACL read. Until round 3 the folder was
+    marked checked before the check began, so the second reader returned at
+    once while the folder was still loose -- and the credential was read from it.
+    """
+    inside = threading.Event()
+    release = threading.Event()
+    real_read = windows.read_dacl
+    held: list[bool] = []
+
+    def held_read(folder: Path) -> str:
+        if not held:
+            held.append(True)
+            inside.set()
+            assert release.wait(5), "the test never released the first read"
+        return real_read(folder)
+
+    monkeypatch.setattr(winacl, "_read_dacl", held_read)
+    first = threading.Thread(
+        target=winacl.secure_folder, args=(tmp_path,), kwargs={"reading": True}
+    )
+    second = threading.Thread(
+        target=winacl.secure_folder, args=(tmp_path,), kwargs={"reading": True}
+    )
+    first.start()
+    assert inside.wait(5), "the first reader never reached its DACL read"
+    second.start()
+    second.join(0.3)
+    try:
+        assert second.is_alive(), "the second reader returned while the first check was running"
+    finally:
+        release.set()
+        first.join(5)
+        second.join(5)
+
+    assert not first.is_alive() and not second.is_alive()
+    # The first reader's check narrowed it; the second found it checked and asked nothing.
+    assert [folder for folder, _, _ in windows.applied] == [tmp_path]
+    assert len(windows.reads) == 2

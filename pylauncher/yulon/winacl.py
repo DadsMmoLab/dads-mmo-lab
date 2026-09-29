@@ -125,6 +125,11 @@ def is_owner_only(sddl: str, user_sid: str, *, sid_of: Callable[[str], str] | No
     protected, exactly one allow entry of full control for each trustee, handed
     down to files and subfolders, and nothing else at all. Trustees are
     compared as SIDs, each turned into one by `sid_of` (`_sid_of` on Windows).
+
+    A trustee `sid_of` cannot resolve is an answer, not an error (round 3): an
+    entry nobody can name is an entry for somebody else, so the DACL is not
+    owner-only and `secure_folder` replaces it. Raised, it escaped the check,
+    became a warning, and the folder was never repaired.
     """
     resolve = sid_of if sid_of is not None else _alias_sid
     if not sddl.startswith("D:"):
@@ -141,7 +146,11 @@ def is_owner_only(sddl: str, user_sid: str, *, sid_of: Callable[[str], str] | No
         handed = {ace_flags[i : i + 2] for i in range(0, len(ace_flags), 2)}
         if kind != "A" or handed != _HANDED_DOWN or rights.upper() not in _FULL_CONTROL:
             return False
-        seen.append(resolve(trustee))
+        try:
+            seen.append(resolve(trustee))
+        except Exception as exc:  # noqa: BLE001 - whatever the lookup raised, it is not ours
+            logger.debug(f"a DACL entry names {trustee!r}, which is not resolvable: {exc}")
+            return False
     return sorted(seen) == sorted(trustees(user_sid))
 
 
@@ -153,9 +162,19 @@ channel on the GUI thread, so a read asks Windows about its folder only the
 first time in a launch. A write always asks again, since it is the moment the
 secret lands, and its answer counts for the reads after it. A failed attempt is
 remembered too: a profile that refuses `WRITE_DAC` warns once a launch, not on
-every press. Keyed by the absolute path."""
+every press. Keyed by the absolute path.
 
-_checked_lock = threading.Lock()
+Recorded only once an attempt has ENDED (round 3). It was recorded before the
+check began, so a second reader arriving meanwhile returned at once and read
+its credential out of a folder still being narrowed. Now each folder has its
+own lock (`_folder_locks`), held for the whole attempt, which is a handful of
+local calls: a second reader waits for the first one's answer."""
+
+_folder_locks: dict[str, threading.Lock] = {}
+"""One lock per folder, made on first use, so a check on one never waits for another's."""
+
+_locks_lock = threading.Lock()
+"""Guards `_folder_locks` itself."""
 
 
 def secure_folder(folder: Path, *, reading: bool = False) -> None:
@@ -177,10 +196,18 @@ def secure_folder(folder: Path, *, reading: bool = False) -> None:
     if not _on_windows() or not folder.is_dir():
         return
     key = str(folder.absolute())
-    with _checked_lock:
+    with _locks_lock:
+        lock = _folder_locks.setdefault(key, threading.Lock())
+    with lock:
         if reading and key in _checked_on_read:
             return
+        _narrow(folder)
+        # After, never before: success, or a failure that was said (see above).
         _checked_on_read.add(key)
+
+
+def _narrow(folder: Path) -> None:
+    """One attempt: read, apply if it differs, read back. Says what happened; never raises."""
     try:
         user_sid = _user_sid()
         before = _read_dacl(folder)
