@@ -66,7 +66,11 @@ defaults:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Measured 2026-09-29 over 19 runs: each leg took 10-14 minutes, most of
+    # them 13-14, and two were cancelled by a 15-minute limit with the suite
+    # already green (run 36552407445: "8250 passed" one second before the
+    # cancel). 25 leaves room for the suite to grow and for a slow runner.
+    timeout-minutes: 25
     # Two versions, not one. Pinning only 3.11 hid a red suite for a day:
     # `shutil.which` grew a `_winapi` call in 3.12, so tests that fake
     # sys.platform="win32" — which changes it for the whole stdlib, not just the
