@@ -7702,7 +7702,9 @@ class StagedInstaller:
         # T171: the zone the override names, copied again from this Yu'lon's
         # own `tzdata` before a compose file binds the folder -- so Docker never
         # makes it as root, and a rule change an update brings reaches the
-        # server at this Repair or Update. CMaNGOS only; nothing elsewhere.
+        # server at this install or Repair. (A CMaNGOS Update to latest no longer
+        # runs this stage -- T173 -- and refreshes the file in `stage_recreate`
+        # instead.) CMaNGOS only; nothing elsewhere.
         try:
             placed = time_zone.place(self.entry, ctx.server_dir, plan.override)
         except (OSError, time_zone.TimeZoneError) as exc:
