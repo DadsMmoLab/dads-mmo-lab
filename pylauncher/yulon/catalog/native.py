@@ -6895,8 +6895,9 @@ class StagedInstaller:
         Install only. A rebuild, an update or an adoption goes through
         `_staged()` without this: changing an existing folder's permissions is
         Repair server files…'s offer (`serverlock.route_for_app()`). Off Windows
-        the wrapper asks nothing. A lock that fails says so once, the stages run
-        as they did before T174, and the next stage asks again
+        the wrapper asks nothing. A lock that fails says so once and the stages
+        run as they did before T174; a later stage asks again only if it finds
+        a different folder there, as after WotLK's clone
         (`serverlock.InstallLock`).
 
         A resume locks the folder it resumes in, and so does a resume of an

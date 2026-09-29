@@ -62,11 +62,13 @@ three and is `private`, and nothing is offered for it: locking it would change
 nothing anyone could read.
 
 **A failure is a warning, never a stop** (T151's rule). An install that could
-not lock its folder writes the same files it wrote before T174, says so once,
-and asks again before the next stage (Codex, round 2): WotLK's clone makes the
-folder anew, and a folder that refused before the clone may not refuse after
-it. Repair's press says why it did not. Off Windows nothing here does anything:
-there the 0o600 modes are real.
+not lock its folder writes the same files it wrote before T174 and says so
+once. It asks again when a later stage finds a different folder at the path
+(Codex, rounds 2 and 3): WotLK's clone makes the folder anew, and a folder that
+refused before the clone may not refuse after it, while the same folder would
+only refuse again, paying for another walk of everything in it. Repair's
+press says why it did not. Off Windows nothing here does anything: there the
+0o600 modes are real.
 
 **Not a server inside a WSL distro.** That folder lives on the distro's own
 filesystem, whose permissions are Linux's and are not a Windows DACL; the
@@ -77,6 +79,7 @@ and an install never lands there (`platform.server_dir_problem()` refuses a
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -320,14 +323,21 @@ class InstallLock:
     """The lock one install run keeps on its folder: asked before every stage, each line said once.
 
     The first lock that changes anything is said; a later one -- WotLK's folder,
-    made again by its clone -- is logged only. A failure is said once and asked
-    again before every later stage (round 2). A folder that grants somebody
+    made again by its clone -- is logged only. A folder that grants somebody
     specific is left, and said once.
+
+    A failure is said once and remembered against the folder's IDENTITY
+    (`_identity()`), and asked again only when a later stage finds a different
+    folder at the path (round 3, Codex). The same folder refuses the same way,
+    and each attempt costs `SetNamedSecurityInfoW`'s walk of everything in it;
+    a folder WotLK's clone made anew is a new folder, and may not refuse
+    (round 2). A lock that held is checked again with one read, as before.
     """
 
     def __init__(self, folder: Path) -> None:
         self.folder = folder
         self._said: set[str] = set()
+        self._refused_by: tuple[int, int] | None = None
 
     def _once(self, key: str, line: str) -> Iterator[str]:
         if key not in self._said:
@@ -339,9 +349,18 @@ class InstallLock:
         if not applies() or not self.folder.is_dir():
             return
         try:
+            identity = _identity(self.folder)
+        except OSError:
+            identity = None
+        if identity is not None and identity == self._refused_by:
+            return
+        try:
             user_sid = winacl._user_sid()
             dacl = winacl._read_dacl(self.folder)
-            others = () if _owner_only(dacl, user_sid) else readers(dacl, user_sid)
+            if _owner_only(dacl, user_sid):
+                self._refused_by = None
+                return
+            others = readers(dacl, user_sid)
             chosen = [sid for sid in others if sid not in BROAD_GROUPS]
             if chosen:
                 names = ", ".join(name_of(sid) for sid in chosen)
@@ -351,12 +370,26 @@ class InstallLock:
                 return
             changed = lock(self.folder)
         except Exception as exc:  # noqa: BLE001 - a lock never costs the install
+            self._refused_by = identity
             if "failed" not in self._said:
                 logger.warning(f"could not lock {self.folder} to this account: {exc}")
             yield from self._once("failed", NOT_LOCKED_LINE.format(folder=self.folder, reason=exc))
             return
+        self._refused_by = None
         if changed:
             yield from self._once("locked", LOCKED_LINE.format(folder=self.folder))
+
+
+def _identity(folder: Path) -> tuple[int, int]:
+    """Which folder this is, not where: its file id and its volume (`st_ino`, `st_dev`).
+
+    On Windows CPython fills them from the file's NTFS id and the volume's
+    serial number. An NTFS id carries the MFT record's sequence number, which
+    Windows bumps whenever the record is reused, so a folder removed and made
+    again at the same path -- what WotLK's clone does -- has a different id.
+    """
+    info = os.stat(folder)
+    return (info.st_ino, info.st_dev)
 
 
 def route_for_app(server_dir: Path, *, wsl_distro: str | None = None) -> FolderLockRoute | None:

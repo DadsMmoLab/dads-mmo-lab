@@ -101,6 +101,8 @@ class FakeWindows:
         self.refusals: list[OSError] = []
         """What the next applies RAISE, one each, before they start to succeed."""
         self.refuse_read: OSError | None = None
+        self.generation: dict[Path, int] = {}
+        """How many times each folder was made anew: what its NTFS file id tells apart."""
 
     @property
     def owner_only(self) -> str:
@@ -127,8 +129,16 @@ class FakeWindows:
         return self.dacls.get(folder) == self.owner_only
 
     def forget(self, folder: Path) -> None:
-        """The folder was removed: made again, it takes what its parent hands down."""
+        """The folder was removed: made again, it takes what its parent hands down.
+
+        And it is another folder, with another file id, though the path is the
+        same: which a Linux inode, reused at once, does not reliably show.
+        """
         self.dacls.pop(folder, None)
+        self.generation[folder] = self.generation.get(folder, 0) + 1
+
+    def identity(self, folder: Path) -> tuple[int, int]:
+        return (self.generation.get(folder, 0), hash(folder))
 
 
 def _stand_in(monkeypatch: pytest.MonkeyPatch, fake: FakeWindows, on_windows: bool) -> None:
@@ -138,6 +148,7 @@ def _stand_in(monkeypatch: pytest.MonkeyPatch, fake: FakeWindows, on_windows: bo
     monkeypatch.setattr(winacl, "_apply_dacl", fake.apply_dacl)
     monkeypatch.setattr(winacl, "_sid_of", sid_of)
     monkeypatch.setattr(serverlock, "_account_name", account_name)
+    monkeypatch.setattr(serverlock, "_identity", fake.identity)
 
 
 @pytest.fixture
@@ -425,21 +436,10 @@ def test_a_lock_refused_before_the_clone_is_asked_again_and_lands_before_generat
     assert lines.index(locked) < lines.index("--- generate-compose")
 
 
-def test_a_tbc_lock_refused_at_the_first_stage_lands_before_the_first_secret(
+def test_a_lock_windows_always_refuses_is_said_once_tried_once_and_the_install_carries_on(
     windows: FakeWindows, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    server_dir = tmp_path / "srv"
-    windows.refusals = [PermissionError(5, "Access is denied")]
-    seen = _watch_secrets(monkeypatch, windows, server_dir)
-    install_tbc(Recorder(), server_dir, client_folder(tmp_path))
-    assert len(windows.applied) == 2
-    assert ".db_password" in [name for name, _ in seen]
-    assert all(locked for _, locked in seen), seen
-
-
-def test_a_lock_windows_always_refuses_is_said_once_asked_every_stage_and_the_install_carries_on(
-    windows: FakeWindows, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    """Round 3 (Codex): the same folder is not walked again at every stage to refuse again."""
     server_dir = tmp_path / "srv"
     windows.refusals = [PermissionError(5, "Access is denied")] * 100
     seen = _watch_secrets(monkeypatch, windows, server_dir)
@@ -447,11 +447,40 @@ def test_a_lock_windows_always_refuses_is_said_once_asked_every_stage_and_the_in
     warned = [line for line in lines if line.startswith("Could not lock ")]
     assert len(warned) == 1 and "Access is denied" in warned[0], warned
     assert "Repair server files…" in warned[0]
-    stages = [line for line in lines if line.startswith("--- ")]
-    assert len(windows.applied) == len(stages), "a refusing folder was not asked at every stage"
+    assert len(windows.applied) == 1, "the folder that refused was asked again"
     assert ".db_password" in [name for name, _ in seen]
     assert (server_dir / ".db_password").is_file()
     assert lines[-1].endswith(f"is installed and running in {server_dir}")
+
+
+def test_a_refusal_is_remembered_for_that_folder_and_forgotten_when_the_folder_is_replaced(
+    windows: FakeWindows, tmp_path: Path
+) -> None:
+    folder = tmp_path / "srv"
+    folder_lock = serverlock.InstallLock(folder)
+    assert list(folder_lock.ensure()) == [], "a folder that is not there was asked about"
+    folder.mkdir()
+    windows.refusals = [PermissionError(5, "Access is denied")] * 2
+    assert len(list(folder_lock.ensure())) == 1
+    assert list(folder_lock.ensure()) == [] and len(windows.applied) == 1
+    windows.forget(folder)
+    assert list(folder_lock.ensure()) == [], "the second refusal was said again"
+    assert len(windows.applied) == 2, "the folder made anew was not tried"
+    windows.forget(folder)
+    assert list(folder_lock.ensure()) == [serverlock.LOCKED_LINE.format(folder=folder)]
+    assert windows.locked(folder)
+    reads = len(windows.reads)
+    assert list(folder_lock.ensure()) == [] and len(windows.applied) == 3
+    assert len(windows.reads) == reads + 1, "a lock that held was not checked with one read"
+
+
+def test_a_folder_s_identity_is_the_folder_not_the_path(tmp_path: Path) -> None:
+    """The real `_identity`: the same folder answers the same; another folder answers otherwise."""
+    one, other = tmp_path / "one", tmp_path / "other"
+    one.mkdir()
+    other.mkdir()
+    assert serverlock._identity(one) == serverlock._identity(one)
+    assert serverlock._identity(one) != serverlock._identity(other)
 
 
 def test_a_folder_that_grants_a_named_account_is_left_as_it_is_and_said_so(
