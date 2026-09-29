@@ -176,7 +176,9 @@ def context(
     )
 
 
-def lay_sql(server_dir: Path, plan: SqlPlan) -> Callable[[Path], None]:
+def lay_sql(
+    server_dir: Path, plan: SqlPlan, *, entry: CatalogEntry = ENTRY
+) -> Callable[[Path], None]:
     """An `on_clone` hook laying the files the real plan names under the source just cloned.
 
     Two files per glob so natural order is observable; gzip where the phase
@@ -184,7 +186,7 @@ def lay_sql(server_dir: Path, plan: SqlPlan) -> Callable[[Path], None]:
     (`src/mangos-tbc/src/modules/Bots/...`) is laid only by that nested clone,
     or the spine's own guard would refuse the nested checkout as "has files".
     """
-    dests = [source.dest for source in ENTRY.emulator.sources]
+    dests = [source.dest for source in entry.emulator.sources]
 
     def owner(pattern: str) -> str | None:
         return max((d for d in dests if pattern.startswith(d + "/")), key=len, default=None)
@@ -209,10 +211,10 @@ def lay_sql(server_dir: Path, plan: SqlPlan) -> Callable[[Path], None]:
     return on_clone
 
 
-def engine(rec: Recorder, **overrides: object) -> CmangosInstaller:
+def engine(rec: Recorder, *, entry: CatalogEntry = ENTRY, **overrides: object) -> CmangosInstaller:
     """An engine over `rec`, carrying the Recorder's probe/reset pair as its test gate."""
     eng = CmangosInstaller(
-        ENTRY,
+        entry,
         installers_root=resources.installers_dir(),
         seams=rec.seams(**{"platform_id": lambda: "linux", **overrides}),
     )
@@ -220,7 +222,7 @@ def engine(rec: Recorder, **overrides: object) -> CmangosInstaller:
     return eng
 
 
-def lay_sources(server_dir: Path) -> Callable[[Path], None]:
+def lay_sources(server_dir: Path, *, entry: CatalogEntry = ENTRY) -> Callable[[Path], None]:
     """`support_native.lay_patch_sources` for `ENTRY`: the extractor files the patch stage edits.
 
     Laid only under the dest the catalog says the patch applies to, for the
@@ -228,7 +230,7 @@ def lay_sources(server_dir: Path) -> Callable[[Path], None]:
     nested dest with files in it before that dest's own clone. `server_dir`
     is kept in the signature so a caller reads which tree it is about.
     """
-    hook = lay_patch_sources(ENTRY)
+    hook = lay_patch_sources(entry)
 
     def on_clone(dest: Path) -> None:
         assert dest.is_relative_to(server_dir), dest
@@ -237,9 +239,19 @@ def lay_sources(server_dir: Path) -> Callable[[Path], None]:
     return on_clone
 
 
-def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: object) -> list[str]:
-    sql = lay_sql(server_dir, SQL)
-    sources = lay_sources(server_dir)
+def install(
+    rec: Recorder,
+    server_dir: Path,
+    client_dir: Path,
+    *,
+    entry: CatalogEntry = ENTRY,
+    **overrides: object,
+) -> list[str]:
+    """A finished install of `entry` (TBC unless named) through the real `run()`."""
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None, entry.id
+    sql = lay_sql(server_dir, native_block.cmangos.sql, entry=entry)
+    sources = lay_sources(server_dir, entry=entry)
 
     def on_clone(dest: Path) -> None:
         sql(dest)
@@ -247,7 +259,9 @@ def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: obje
 
     rec.on_clone = on_clone
     return list(
-        engine(rec, **overrides).run(InstallOptions(server_dir=server_dir, client_dir=client_dir))
+        engine(rec, entry=entry, **overrides).run(
+            InstallOptions(server_dir=server_dir, client_dir=client_dir)
+        )
     )
 
 

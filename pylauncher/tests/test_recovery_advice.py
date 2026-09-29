@@ -561,17 +561,16 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     assert {path: path.read_bytes() for path in patched} == patched_bytes
 
 
-def test_a_tbc_update_that_cannot_write_compose_again_names_the_same_press_not_repair(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_tbc_update_that_fails_puts_the_sources_back_and_never_writes_its_compose_files(
+    tmp_path: Path,
 ) -> None:
-    """Cold review SF1: on CMaNGOS the Repair the WotLK sentence names would never appear.
+    """T173: a TBC folder is not a checkout, so neither the fetch nor the put-back touches compose.
 
-    A TBC folder is not a checkout, so the fetch never touched its compose
-    files; the put-back rewrites them anyway (T173) and here the disk is full
-    for it. Each file is written whole, so each is still Yu'lon's and the
-    Repair reads `current` -- the advice may not send the player there. What
-    the failure did cost is the patch, written after the compose files; the
-    same press again writes both, and that is what the sentence says.
+    T170's cold review (SF1) wrote a sentence for a put-back whose compose write
+    failed on TBC -- reachable then only because the rewrite ran there at all,
+    which was T173's defect. With the rewrite confined to WotLK, a failed press
+    puts the sources and the patch back and leaves every compose file as it
+    was: a player's own line survives it, and nothing is said about compose.
     """
     rec = Recorder()
     server_dir = tmp_path / "tbc"
@@ -580,44 +579,21 @@ def test_a_tbc_update_that_cannot_write_compose_again_names_the_same_press_not_r
         rec.heads[server_dir / source.dest] = OLD
         rec.upstream[server_dir / source.dest] = NEW
     rec.on_clone = None
-    core = server_dir / "src/mangos-tbc"
     base = server_dir / composegen.BASE_FILE
-    disk = _DiskThatFills()
-    monkeypatch.setattr(composegen, "os", disk)
-
-    def restore_then_fill_the_disk(dest: Path, rev: str) -> None:
-        rec.calls.append(f"restore:{dest.name}->{rev[:7]}")
-        rec.heads[dest] = rev
-        if dest == core:
-            # The file an older Yu'lon wrote, so the put-back has a write to make.
-            base.write_text(base.read_text(encoding="utf-8") + "# older\n", encoding="utf-8")
-            disk.armed = True
+    base.write_text(base.read_text(encoding="utf-8") + "# the player's own\n", encoding="utf-8")
+    kept = {name: (server_dir / name).read_bytes() for name in composegen.COMPOSE_FILES}
+    stamps = {name: (server_dir / name).stat().st_mtime_ns for name in composegen.COMPOSE_FILES}
 
     rec.build_result = AttachedRun(2, ("error: no",))
-    try:
-        said, raised = _said(
-            tbc_engine(rec, restore_rev=restore_then_fill_the_disk).update_to_latest(
-                InstallOptions(server_dir=server_dir)
-            )
-        )
-    finally:
-        disk.armed = False
-    assert disk.writes >= 2, "the disk never filled"
-    assert raised is not None and native.SOURCES_PUT_BACK_NOTE in str(raised)
-    advice = next(line for line in said if "back on their old commits, but" in line)
-    assert native.REPAIR_FILES_LABEL not in advice, advice
-    assert server_build_presses.REBUILD not in advice, advice
-    again = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
-    assert f"press {again} again" in advice, advice
-    assert composegen.is_marker_line(base.read_text(encoding="utf-8")), "not Yu'lon's any more"
-    check = tbc_engine(rec).base_compose_check(InstallOptions(server_dir=server_dir))
-    assert check.state not in ("stale", "upstream"), "the Repair is offered after all"
+    said, raised = _said(tbc_engine(rec).update_to_latest(InstallOptions(server_dir=server_dir)))
 
-    rec.build_result = AttachedRun(0, ("built",))
-    rec.on_clone = lay_patch_sources(TBC)
-    _, raised = _said(tbc_engine(rec).update_to_latest(InstallOptions(server_dir=server_dir)))
-    assert raised is None, raised
-    assert "# older" not in base.read_text(encoding="utf-8"), "the press again did not write it"
+    assert raised is not None and native.SOURCES_PUT_BACK_NOTE in str(raised)
+    assert all(rec.heads[server_dir / s.dest] == OLD for s in TBC.emulator.sources)
+    assert {name: (server_dir / name).read_bytes() for name in composegen.COMPOSE_FILES} == kept
+    assert {
+        name: (server_dir / name).stat().st_mtime_ns for name in composegen.COMPOSE_FILES
+    } == stamps
+    assert not any("compose" in line for line in said if "back on their old" in line), said
 
 
 # -- T170 (b): the images gone, one Rebuild press -----------------------------

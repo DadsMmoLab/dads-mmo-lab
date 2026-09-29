@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
@@ -38,7 +39,7 @@ from tests.test_families_cmangos import install as tbc_install
 from yulon import git, resources, rmtree, runner
 from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
-from yulon.catalog.catalog import EmulatorSource, load_catalog
+from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.docker import AttachedRun
@@ -646,6 +647,227 @@ def test_the_update_writes_this_apps_compose_back_over_the_one_the_fetch_restore
     assert composegen.GENERATED_MARKER in base.read_text(
         encoding="utf-8"
     ), "the fetch put upstream's compose back and nothing wrote ours again"
+
+
+# -- T173: a CMaNGOS update leaves the compose files alone --------------------
+
+CMANGOS_GAMES = [load_catalog().get(game) for game in ("wow-tbc", "wow-vanilla", "wow-tortoise")]
+"""Tortoise with the two games whose carried patch made the guard non-empty (T173)."""
+
+PLAYERS_ZONE = "    environment:\n      TZ: Europe/Oslo\n"
+"""What a player adds to the world service in the override by hand (T171's report)."""
+
+
+def _any_client(tmp_path: Path) -> Path:
+    """A client folder every CMaNGOS entry's `ClientSpec` accepts (TBC's, plus Vanilla's file)."""
+    client = tmp_path / "client"
+    (client / "Data" / "enUS").mkdir(parents=True)
+    for name in ("common", "expansion", "patch", "patch-2", "patch-3", "misc", "dbc"):
+        (client / "Data" / f"{name}.MPQ").write_bytes(b"MPQ\x1a")
+    (client / "Data" / "enUS" / "locale-enUS.MPQ").write_bytes(b"MPQ\x1a")
+    return client
+
+
+def _mmaps_as(rec: Recorder, entry: CatalogEntry) -> Callable[..., AttachedRun]:
+    """`rec.run_container`, with the map generator finishing on the entry's own success code.
+
+    Tortoise's MoveMapGen exits 1 when it is done (`mmaps.success_codes`), and
+    one `run_result` answers every container run, so the generator is answered
+    on its own here and every other tool as before.
+    """
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None, entry.id
+    mmaps = native_block.cmangos.mmaps
+    code = mmaps.success_codes[0]
+
+    def run(spec: Any, *args: Any, **kwargs: Any) -> AttachedRun:
+        if spec.argv[0] != mmaps.argv[0] or code == 0:
+            return rec.run_container(spec, *args, **kwargs)
+        saved = rec.run_result, rec.success_returncodes
+        rec.run_result, rec.success_returncodes = AttachedRun(code, ("done",)), (code,)
+        try:
+            return rec.run_container(spec, *args, **kwargs)
+        finally:
+            rec.run_result, rec.success_returncodes = saved
+
+    return run
+
+
+def _etc_of(rec: Recorder, entry: CatalogEntry) -> Callable[[str, str, Path], None]:
+    """`rec.copy_from_image`, laying every conf template `entry`'s table names, nested ones too.
+
+    The double lays TBC's four `.conf.dist` names; Tortoise's image holds
+    `aiplayerbot.conf` with no `.dist` and `modules/tortoise_bots.conf.dist`
+    (`conf.template_of()`), and the conf stage refuses an image without them.
+    """
+    from yulon.catalog.families import conf
+
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None, entry.id
+    templates = [
+        conf.template_of(name, patch) for name, patch in native_block.cmangos.conf.files.items()
+    ]
+
+    def copy(image: str, src: str, dest: Path) -> None:
+        rec.copy_from_image(image, src, dest)
+        if src.endswith(".conf.dist"):
+            return
+        for template in templates:
+            path = dest / template
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(rec.conf_dist.get(Path(template).name, ""), encoding="utf-8")
+
+    return copy
+
+
+def _counts_realms(rec: Recorder) -> Callable[..., str]:
+    """`rec.sql_query`, answering a COUNT of the realm table as a count (Tortoise's import check).
+
+    The double answers every `realmlist` statement with the realm row, which is
+    what the realm guard reads; Tortoise's plan also counts that table.
+    """
+
+    def query(
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        **kwargs: Any,
+    ) -> str:
+        answer = rec.sql_query(container, client, password, schema, statement, **kwargs)
+        return rec.query_answer if "COUNT(*) FROM realmlist" in statement else answer
+
+    return query
+
+
+def _cmangos(tmp_path: Path, entry: CatalogEntry) -> tuple[Recorder, Path, CmangosInstaller]:
+    """`_tbc()` for any CMaNGOS entry: finished through the real `run()`, `NEW` upstream."""
+    rec = Recorder()
+    server_dir = tmp_path / entry.id
+    tbc_install(
+        rec,
+        server_dir,
+        _any_client(tmp_path),
+        entry=entry,
+        run_container=_mmaps_as(rec, entry),
+        copy_from_image=_etc_of(rec, entry),
+        sql_query=_counts_realms(rec),
+    )
+    for source in entry.emulator.sources:
+        rec.heads[server_dir / source.dest] = OLD
+        rec.upstream[server_dir / source.dest] = NEW
+        if source.follow == "releases":
+            # T126: the newest release, and GitHub placing it ahead of `OLD`.
+            rec.releases[source.repo] = ("v-new", NEW)
+            rec.github[source.repo] = 1
+    rec.clones.clear()
+    rec.calls.clear()
+    rec.on_clone = None
+    return rec, server_dir, tbc_engine(rec, entry=entry)
+
+
+def _compose_on_disk(server_dir: Path) -> dict[str, tuple[bytes, int, int]]:
+    """Each compose file and `.env` as bytes, mtime and inode: a rewrite moves one of the three."""
+    from yulon.catalog import composegen
+
+    found: dict[str, tuple[bytes, int, int]] = {}
+    for name in (*composegen.COMPOSE_FILES, ".env"):
+        path = server_dir / name
+        if path.exists():
+            info = path.stat()
+            found[name] = (path.read_bytes(), info.st_mtime_ns, info.st_ino)
+    return found
+
+
+def _renders(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Every folder `stage_generate_compose` is run on from here on, in order."""
+    ran: list[Path] = []
+    real = CmangosInstaller.stage_generate_compose
+
+    def spy(self: CmangosInstaller, ctx: native.StageContext) -> Iterator[str]:
+        ran.append(ctx.server_dir)
+        yield from real(self, ctx)
+
+    monkeypatch.setattr(CmangosInstaller, "stage_generate_compose", spy, raising=True)
+    return ran
+
+
+@pytest.mark.parametrize("to_pin", [False, True], ids=["to-latest", "to-pin"])
+@pytest.mark.parametrize("entry", CMANGOS_GAMES, ids=lambda entry: entry.id)
+def test_a_cmangos_update_never_rewrites_the_compose_files_the_players_edit_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: CatalogEntry, to_pin: bool
+) -> None:
+    """No CMaNGOS source is cloned into the server folder, so no fetch can touch its compose.
+
+    `_rewrite_what_we_own()` asked `app_written_paths()` whether to render, and
+    on TBC and Vanilla that mapping carries the vmap-extractor patch's paths, so
+    both directions re-rendered all three compose files (T173): a player's own
+    line in the override was thrown away, and a pre-T169 install gained its
+    `./logs` bind without the `LogsDir` its Repair sets with it (the next test).
+    Tortoise carries no patch and was never touched -- measured live on the
+    T168 update, mtimes unchanged -- which is why it is here: the same answer
+    for all three.
+
+    The press must still finish, the sources must move, and the files must be
+    the same bytes, the same mtime and the same inode.
+    """
+    from yulon.catalog import composegen
+
+    rec, server_dir, made = _cmangos(tmp_path, entry)
+    override = server_dir / composegen.OVERRIDE_FILE
+    before = override.read_text(encoding="utf-8")
+    edited = before.replace("    ports:\n", PLAYERS_ZONE + "    ports:\n", 1)
+    assert edited != before, "the override has no ports block to add the player's line above"
+    override.write_text(edited, encoding="utf-8")
+    kept = _compose_on_disk(server_dir)
+    ran = _renders(monkeypatch)
+
+    said = list(made.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=to_pin))
+
+    assert any("is running on" in line for line in said), said
+    moving = made.sources_that_move()
+    assert {s.repo: rec.heads[server_dir / s.dest] for s in moving} == {
+        s.repo: (s.rev if to_pin else NEW) for s in moving
+    }
+    assert PLAYERS_ZONE in override.read_text(encoding="utf-8"), "the player's own line is gone"
+    assert _compose_on_disk(server_dir) == kept
+    assert ran == [], f"{entry.id}: the update rendered compose files it does not own a copy of"
+    assert not any(line.startswith("Wrote docker-compose") for line in said), said
+
+
+@pytest.mark.parametrize("entry", CMANGOS_GAMES[:2], ids=lambda entry: entry.id)
+def test_an_update_leaves_a_pre_t169_install_offered_the_repair_that_sets_logs_dir(
+    tmp_path: Path, entry: CatalogEntry
+) -> None:
+    """T169's Repair adds the `./logs` bind AND `LogsDir` together, and only it may.
+
+    A TBC or Vanilla install made before T169 has neither. The Update re-rendered
+    the compose file (T173) and so added the bind alone: the conf still said
+    `""`, the server kept writing into `bin/` inside the container, the folder
+    stayed empty -- and the Repair that would have set the conf read the file as
+    `current` and was never offered again, so nothing ever would.
+    """
+    from tests.test_tbc_vanilla_logs import before_t169, write_confs
+    from yulon.catalog import composegen
+
+    rec, server_dir, made = _cmangos(tmp_path, entry)
+    before_t169(server_dir)
+    confs = write_confs(server_dir)
+    old_confs = {name: path.read_bytes() for name, path in confs.items()}
+    base = server_dir / composegen.BASE_FILE
+    old_base = base.read_bytes()
+    assert made.base_compose_check(InstallOptions(server_dir=server_dir)).state == "stale"
+
+    list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+
+    assert base.read_bytes() == old_base, "the update added the bind without the setting"
+    assert not (server_dir / "logs").exists()
+    assert {name: path.read_bytes() for name, path in confs.items()} == old_confs
+    check = made.base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "stale", check
+    assert any("LogsDir" in line for line in check.settings), check
 
 
 # -- the restores -----------------------------------------------------------
