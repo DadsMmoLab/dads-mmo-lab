@@ -448,10 +448,10 @@ def _write(path: Path, text: str, *, mode: int = CONF_MODE) -> None:
     syscall, the same way `cmangos._write_secret` does. Corrected 2026-09-02; the window
     was read off the code rather than raced, so no timing measurement is claimed.
 
-    So this is a POSIX guarantee and a Windows no-op. Making it true on Windows needs an
-    explicit DACL (`pywin32`, or `icacls /inheritance:r /grant:r`) on every path that
-    touches the file — a decision about the app's Windows security posture, not about this
-    function, and `cmangos._write_secret` writes the same password under the same limit.
+    So this is a POSIX guarantee and a Windows no-op. On Windows the server FOLDER is what
+    keeps the conf private (T174): the install locks it to this account (`serverlock.py`),
+    and the temp, created beside the conf with no security attributes of its own, inherits
+    that DACL and keeps it through the same-volume rename.
 
     `UnicodeEncodeError` is caught beside `OSError` for the reason `_read` catches
     `UnicodeDecodeError`: it is a `ValueError` too, so the obvious `except OSError` misses

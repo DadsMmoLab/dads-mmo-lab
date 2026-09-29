@@ -2801,10 +2801,12 @@ def test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl
 
     So the mode is a POSIX guarantee and nothing more, and both halves are
     asserted here rather than only described. The Windows half turns red the
-    day `_write_secret` grows the explicit DACL its "Open: Windows ACLs" note
-    weighs, because an entry granted that way is not inherited and carries no
-    `(I)`. That red was produced rather than reasoned about, on a Windows laptop
-    on 2026-09-01: `icacls <file> /inheritance:r /grant:r <user>:(F)` over a
+    day `_write_secret` grows an explicit DACL of its own (its "Windows: the
+    folder, not the file" note says why it has none since T174, whose folder
+    lock this file inherits), because an entry granted that way is not
+    inherited and carries no `(I)`. That red was produced rather than reasoned
+    about, on a Windows laptop on 2026-09-01:
+    `icacls <file> /inheritance:r /grant:r <user>:(F)` over a
     file written exactly as this stage writes it left one entry,
     `LAPTOP\\user:(F)`, which this assertion rejects. It is recorded
     because Linux CI skips this branch and can never show it.

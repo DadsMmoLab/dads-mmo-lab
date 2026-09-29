@@ -51,14 +51,12 @@ is exactly as private as it was before T151, and the warning names the
 folder. A profile on a network share can refuse `WRITE_DAC`, which is the
 likeliest way this happens.
 
-**What it does not cover**, and why: a secret written into a SERVER folder
-(`.env`, `.db_password`, a conf holding the database password, and the
-`.bak`/`.repair.bak` copies of one). That folder is where the person put the
-server, its ACL is theirs, and the containers read the confs in it through
-Docker Desktop's file sharing -- whether a protected DACL there leaves them
-readable is unmeasured. Narrowing only the copies while the conf beside them
-holds the same password would protect nothing, so that is a decision of its
-own rather than a corner of this one.
+**What it does not cover**: a secret written into a SERVER folder (`.env`,
+`.db_password`, a conf holding the database password, and the
+`.bak`/`.repair.bak` copies of one). Narrowing only the copies while the conf
+beside them holds the same password would protect nothing, so that was a
+decision of its own: T174 made it, and locks the whole server folder with this
+module's DACL (`serverlock.py`, measured first against Docker Desktop).
 """
 
 from __future__ import annotations
@@ -239,6 +237,17 @@ def _narrow(folder: Path) -> None:
 # `platform._mapped_network_drive()` gives: naming them is an error under the
 # `mypy --platform linux` CI runs, and a `type: ignore` for it is an error under
 # `--platform win32`.
+
+
+class DaclRefused(OSError):
+    """`SetNamedSecurityInfoW` itself answered an error: Windows refused the new DACL (T174).
+
+    Raised only at that call, never by the preparation before it (building the
+    descriptor from SDDL, taking its DACL out), so a caller can tell a refusal --
+    which costs the walk of everything under the folder and which the same folder
+    gives again -- from a one-off failure worth asking again
+    (`serverlock.InstallLock`). `secure_folder` treats both alike.
+    """
 
 
 def _on_windows() -> bool:
@@ -492,6 +501,7 @@ def _apply_dacl(folder: Path, sddl: str) -> None:  # pragma: no cover - Windows 
             None,
         )
         if code:
-            raise _failed("SetNamedSecurityInfoW", code)
+            refused = _failed("SetNamedSecurityInfoW", code)
+            raise DaclRefused(refused.errno, refused.strerror)
     finally:
         kernel32.LocalFree(descriptor)

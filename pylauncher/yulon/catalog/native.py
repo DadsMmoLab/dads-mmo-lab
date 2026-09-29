@@ -85,6 +85,7 @@ from yulon import (
     resources,
     runner,
     server_build_presses,
+    serverlock,
 )
 from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
 from yulon.catalog.catalog import (
@@ -4053,7 +4054,11 @@ class StagedInstaller:
         # The failure record for anything in here is written by `_staged()`,
         # which is the only frame holding the state each finished stage
         # produced; see its docstring for what reading a stale copy cost.
-        state = yield from self._staged(self.stages(), ctx)
+        # Each stage first locks the folder to this account on Windows (T174),
+        # so no secret lands in a folder anyone else can read.
+        state = yield from self._staged(
+            self._locking(self.stages(), server_dir, started_empty), ctx
+        )
         # OUTSIDE the staged loop, and after the last stage, on purpose. Outside,
         # because everything in there is a reason to fail the install and this
         # is not one — a realm row that could not be written is a sentence, not
@@ -6873,6 +6878,56 @@ class StagedInstaller:
                 "writes first so it can recognise its own work if it is interrupted. Nothing "
                 "else was written. Pick a folder this app is allowed to write to."
             )
+
+    def _locking(
+        self, stages: Sequence[Stage], server_dir: Path, started_empty: bool
+    ) -> tuple[Stage, ...]:
+        """`stages`, each locking the server folder to this Windows account first (T174).
+
+        Before every stage rather than once after the claim: WotLK's
+        `clone-core` clones into the server folder, and both clone seams begin
+        by removing a destination with no `.git`, so the folder the claim was
+        locked on is gone by the second stage and the clone's is a new one. A
+        stage that finds the folder already locked costs one read. The first
+        secret -- CMaNGOS's `.db_password` in `db-password`, `.env` in
+        `generate-compose` -- is written inside a stage, and so after its lock.
+
+        Install only. A rebuild, an update or an adoption goes through
+        `_staged()` without this: changing an existing folder's permissions is
+        Repair server files…'s offer (`serverlock.route_for_app()`). Off Windows
+        the wrapper asks nothing. A lock that fails says so once and the stages
+        run as they did before T174; a later stage asks again only if it finds
+        a different folder there, as after WotLK's clone
+        (`serverlock.InstallLock`).
+
+        A resume locks the folder it resumes in, and so does a resume of an
+        install begun before T174: the folder holds its record, so its first
+        stage this time locks what is already there, the secrets an earlier run
+        wrote included (`serverlock.py`: the lock is carried onto what inherits).
+        A folder that grants a SPECIFIC account or group is left as it is and
+        said so (`serverlock.InstallLock`); Repair server files… offers it.
+
+        Only a folder that is ours: one the install `started_empty` in, or one
+        holding this install's record. The one other folder a stage meets is
+        somebody's own git checkout, which `_guard()` lets through so the clone
+        stage can say whose it is -- and refuses there, leaving it untouched
+        (`_claim_before_writing()`'s rule), so its permissions are left alone
+        too. A checkout the clone stage accepts as this install's gets the
+        record after that stage, and the lock before the next.
+        """
+        folder_lock = serverlock.InstallLock(server_dir)
+
+        def locked(
+            body: Callable[[StageContext], Iterator[str]],
+        ) -> Callable[[StageContext], Iterator[str]]:
+            def run(ctx: StageContext) -> Iterator[str]:
+                if started_empty or (server_dir / STATE_FILE).is_file():
+                    yield from folder_lock.ensure()
+                yield from body(ctx)
+
+            return run
+
+        return tuple(replace(stage, run=locked(stage.run)) for stage in stages)
 
     def _clear_error(self, server_dir: Path, state: InstallState) -> None:
         """Drop a previous run's failure sentence once this run has finished.
