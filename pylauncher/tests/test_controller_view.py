@@ -17118,6 +17118,671 @@ def test_the_bumpers_still_switch_the_main_windows_tabs_from_the_rail(
         gamepad.stop()
 
 
+# ---------------------------------------------------------------------------
+# T175: a D-pad press takes the nearest row (or column), and only what shows.
+#
+# Seen in the T172 live check: at 960x640 Down from the Tuning tab's conf list
+# went to the "Last action" strip at the bottom, past the three conf buttons
+# straight under the list, and at 1280x800 Down from the sub-tab bar went to the
+# same strip, past the whole page. The navigator ranked by how well centred a
+# candidate was before how near it was, and the full-width strip is centred
+# under everything. It also aimed at buttons scrolled out of their list.
+
+
+def _edges_in(widget: Any, window: Any) -> tuple[int, int, int, int]:
+    """`widget`'s left, top, right and bottom, in `window`'s coordinates."""
+    from PySide6.QtCore import QPoint
+
+    p = widget.mapTo(window, QPoint(0, 0))
+    return p.x(), p.y(), p.x() + widget.width(), p.y() + widget.height()
+
+
+def _on_screen(widget: Any, window: Any) -> tuple[int, int, int, int] | None:
+    """The part of `widget` that shows: cut by every scroll area it is in; None if none does."""
+    from PySide6.QtWidgets import QAbstractScrollArea
+
+    left, top, right, bottom = _edges_in(widget, window)
+    parent = widget.parentWidget()
+    while parent is not None and parent is not window:
+        area = parent.parentWidget()
+        if isinstance(area, QAbstractScrollArea) and area.viewport() is parent:
+            v_left, v_top, v_right, v_bottom = _edges_in(parent, window)
+            left, top = max(left, v_left), max(top, v_top)
+            right, bottom = min(right, v_right), min(bottom, v_bottom)
+        parent = parent.parentWidget()
+    return (left, top, right, bottom) if left < right and top < bottom else None
+
+
+def _passed_over(
+    start: Any, here: Any, landed: Any, others: list[Any], direction: Any
+) -> list[Any]:
+    """Which of `others` lie wholly between `here` (`start`'s edges) and `landed` along `direction`.
+
+    Rectangles as they show (`_on_screen`). For Up and Down across the WHOLE
+    width of the window: a stop anywhere on a row that lies entirely between
+    the two is a row the press went over, whether or not it was in `here`'s
+    column. Left and Right keep to `here`'s own row by design -- a column of
+    one small handle at the bottom of the page is not a column the rail's
+    Right should stop at -- so for them only a stop sharing part of that row
+    counts.
+
+    A press from a box the pad stops on -- the Modules list, the Catalog's
+    shelf -- starts at the box's leading edge for the stops inside it: Down
+    from the list goes past each of its showing rows between its top and
+    where it lands. Measured from the box's far edge, as from any other
+    widget, no row inside it could ever count as passed over.
+    """
+    from yulon.ui.gamepad import Direction
+
+    h_left, h_top, h_right, h_bottom = here
+    l_left, l_top, l_right, l_bottom = landed
+    over = []
+    for other, (o_left, o_top, o_right, o_bottom) in others:
+        if start.isAncestorOf(other):
+            # Entered from the edge the press leaves the box by the far side of.
+            s_left, s_top, s_right, s_bottom = h_right, h_bottom, h_left, h_top
+        else:
+            s_left, s_top, s_right, s_bottom = h_left, h_top, h_right, h_bottom
+        if direction is Direction.DOWN:
+            between = s_bottom <= o_top and o_bottom <= l_top
+        elif direction is Direction.UP:
+            between = o_bottom <= s_top and l_bottom <= o_top
+        else:
+            on_its_row = o_top < h_bottom and h_top < o_bottom
+            if direction is Direction.RIGHT:
+                between = on_its_row and s_right <= o_left and o_right <= l_left
+            else:
+                between = on_its_row and o_right <= s_left and l_right <= o_left
+        if between:
+            over.append(other)
+    return over
+
+
+def _list_of(widget: Any) -> Any:
+    """The innermost scroll area `widget` is scrolled inside, or None."""
+    from PySide6.QtWidgets import QAbstractScrollArea
+
+    parent = widget.parentWidget()
+    while parent is not None:
+        area = parent.parentWidget()
+        if isinstance(area, QAbstractScrollArea) and area.viewport() is parent:
+            return area
+        parent = area
+    return None
+
+
+def _scroll_home(window: Any) -> None:
+    """Every scroll area in `window` back at its top-left, as a page is first shown."""
+    from PySide6.QtWidgets import QAbstractScrollArea
+
+    for area in window.findChildren(QAbstractScrollArea):
+        area.verticalScrollBar().setValue(0)
+        area.horizontalScrollBar().setValue(0)
+    process_events()
+
+
+def _with_the_core_confs(tmp_path: Path) -> None:
+    """Put the install's own conf files on disk, so the Tuning tab lists its three buttons.
+
+    The live check's install had them, and the row they make is the one Down
+    went past.
+    """
+    for name in TUNING_CORE_FILES:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("# conf\nKey = 1\n")
+
+
+def _pad_describe(widget: Any, window: Any) -> str:
+    text = widget.text() if hasattr(widget, "text") and callable(widget.text) else ""
+    left, top, right, bottom = _edges_in(widget, window)
+    return (
+        f"{type(widget).__name__} {str(text)[:30]!r} ({left},{top} {right - left}x{bottom - top})"
+    )
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_no_press_of_the_pad_passes_over_a_whole_row_or_leaves_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """From every stop on screen, every way, on every sub-tab and the Catalog (T175).
+
+    Through the real `Navigator` in the real window, each page at rest (its
+    lists scrolled to the top) and one press from each stop the player can see
+    -- the tab bars too. Two things must hold of where it lands: it shows, and
+    no stop that shows lies wholly between -- for Up and Down anywhere across
+    the window, not only in the column pressed along, since a row passed over
+    is passed over wherever its buttons stand; for Left and Right on the
+    start's own row (`_passed_over`). A press that lands on a row scrolled in
+    from out of sight is measured by where that row was before the press, and
+    from row to row of one list only the list's own rows count.
+
+    Measured before T175, offscreen: at 960x640 Down from the Tuning tab's conf
+    list went to the strip past the conf buttons, and at 1280x800 Down from the
+    sub-tab bar went to the strip past the whole page; presses into the Modules
+    list and the Catalog's shelf landed on buttons scrolled out of sight. The
+    first cut of T175 fixed the first two and passed over others: Up from a
+    Modules chip went to the sub-tab bar past the toolbar.
+    """
+    from PySide6.QtWidgets import QApplication, QTabWidget
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    _with_the_core_confs(tmp_path)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
+    sub = view._tabs
+    pages: list[tuple[int, int | None]] = [(0, None)]
+    pages += [(main_tabs.indexOf(view), index) for index in range(sub.count())]
+    passed: list[str] = []
+    unseen: list[str] = []
+    presses = 0
+    try:
+        for main_index, sub_index in pages:
+            main_tabs.setCurrentIndex(main_index)
+            if sub_index is not None:
+                sub.setCurrentIndex(sub_index)
+            process_events()
+            _scroll_home(window)
+            name = sub.tabText(sub_index) if sub_index is not None else "Catalog"
+            stops = list(nav._focusable(nav._context_root()))
+            showing = [(w, e) for w in stops if (e := _on_screen(w, window)) is not None]
+            placed_at = {w: _edges_in(w, window) for w in stops}
+            for here, here_edges in showing:
+                for direction in Direction:
+                    _scroll_home(window)
+                    here.setFocus()
+                    process_events()
+                    nav.navigate(direction)
+                    process_events()
+                    landed = QApplication.focusWidget()
+                    presses += 1
+                    if landed is None or landed is here:
+                        continue
+                    what = (
+                        f"{name}: {direction.name} from {_pad_describe(here, window)} "
+                        f"to {_pad_describe(landed, window)}"
+                    )
+                    if _on_screen(landed, window) is None:
+                        unseen.append(what)
+                    # A row scrolled in from out of sight is measured where it
+                    # was before the press: skipping a row that showed for one
+                    # that did not is passing over it too.
+                    at_rest = dict(showing).get(landed, placed_at.get(landed))
+                    if at_rest is None:
+                        continue
+                    others = [(w, e) for w, e in showing if w is not here and w is not landed]
+                    in_list = _list_of(here)
+                    if in_list is not None and in_list is _list_of(landed):
+                        # From row to row of one list, the list keeps the focus
+                        # (T175, as a web page's scroll container does): what
+                        # stands outside it is not between two of its rows.
+                        others = [(w, e) for w, e in others if in_list.isAncestorOf(w)]
+                    over = _passed_over(here, here_edges, at_rest, others, direction)
+                    if over:
+                        passed.append(f"{what} over {_pad_describe(over[0], window)}")
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+    assert presses, "no press was made"
+    assert (
+        unseen == []
+    ), f"{len(unseen)} presses left the focus out of sight at {size}: {unseen[:4]}"
+    assert passed == [], f"{len(passed)} presses passed over a row at {size}: " + "; ".join(
+        passed[:6]
+    )
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_right_from_a_catalog_install_goes_to_the_next_tiles_install(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """One press from one game's Install to the next game's, as before T175.
+
+    The next tile is a stop of its own and its left edge is nearer than its
+    Install's, so the first cut of T175 went to the tile, and a second press
+    to its Install. The tile's Install shares the row pressed along; the tile
+    spans it and far more.
+    """
+    from PySide6.QtWidgets import QApplication, QPushButton, QTabWidget
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
+    try:
+        main_tabs.setCurrentIndex(0)
+        process_events()
+        _scroll_home(window)
+        start = window.findChild(QPushButton, "install-wow-wotlk")
+        beside = window.findChild(QPushButton, "install-wow-tbc")
+        assert start is not None and beside is not None, "the Catalog has no WotLK and TBC tiles"
+        start.setFocus()
+        process_events()
+        nav.navigate(Direction.RIGHT)
+        landed = QApplication.focusWidget()
+        assert (
+            landed is beside
+        ), f"Right from WotLK's Install went to {_pad_describe(landed, window)}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def _centre_in(widget: Any, window: Any) -> tuple[float, float]:
+    left, top, right, bottom = _edges_in(widget, window)
+    return (left + right) / 2, (top + bottom) / 2
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_box_the_pad_goes_into_can_be_left_by_pressing_on_the_same_way(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """From every stop in or of a box, one direction pressed again and again gets out of it (T175).
+
+    A box is a stop with stops inside it -- the Modules list, the Catalog's
+    shelf, a Catalog tile -- and a stop inside one belongs to the innermost
+    that holds it. From each such stop, on every sub-tab and the Catalog, each
+    direction is pressed up to 12 times. Before the focus lands on a stop
+    outside the box it must never land twice on the same one: that is a trap,
+    and the player pressing Left cannot get out. Stopping (nothing that way)
+    and wrapping round an edge (landing behind) end the walk without one.
+
+    Found in review of the third cut: Left from the Modules list entered it at
+    its right edge, at a module's Install; Left from there found nothing on
+    its row and went out to the list itself, which holds it, and the next Left
+    went in again -- the rail was never reached. The reach test cannot see
+    this: every stop was still reached, from somewhere.
+    """
+    from PySide6.QtWidgets import QApplication, QTabWidget
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    _with_the_core_confs(tmp_path)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
+    sub = view._tabs
+    pages: list[tuple[int, int | None]] = [(0, None)]
+    pages += [(main_tabs.indexOf(view), index) for index in range(sub.count())]
+    traps: list[str] = []
+    walks = 0
+    try:
+        for main_index, sub_index in pages:
+            main_tabs.setCurrentIndex(main_index)
+            if sub_index is not None:
+                sub.setCurrentIndex(sub_index)
+            process_events()
+            _scroll_home(window)
+            name = sub.tabText(sub_index) if sub_index is not None else "Catalog"
+            stops = list(nav._focusable(nav._context_root()))
+            for start in stops:
+                if _on_screen(start, window) is None:
+                    continue
+                if any(start.isAncestorOf(w) for w in stops if w is not start):
+                    box = start
+                else:
+                    holders = [w for w in stops if w is not start and w.isAncestorOf(start)]
+                    if not holders:
+                        continue
+                    box = min(holders, key=lambda w: sum(1 for h in holders if w.isAncestorOf(h)))
+                for direction in Direction:
+                    _scroll_home(window)
+                    start.setFocus()
+                    process_events()
+                    here, seen = start, [start]
+                    walks += 1
+                    for _press in range(12):
+                        nav.navigate(direction)
+                        process_events()
+                        landed = QApplication.focusWidget()
+                        if landed is None or landed is here:
+                            break
+                        if landed is not box and not box.isAncestorOf(landed):
+                            break
+                        cx, cy = _centre_in(landed, window)
+                        bx, by = _centre_in(here, window)
+                        ahead = {
+                            Direction.LEFT: cx < bx,
+                            Direction.RIGHT: cx > bx,
+                            Direction.UP: cy < by,
+                            Direction.DOWN: cy > by,
+                        }[direction]
+                        # Going into a box is never a wrap, wherever in it the
+                        # press lands; landing behind anything else is one.
+                        if not ahead and not here.isAncestorOf(landed):
+                            break
+                        if landed in seen:
+                            path = " -> ".join(_pad_describe(w, window) for w in [*seen, landed])
+                            traps.append(f"{name}: {direction.name} from {path}")
+                            break
+                        seen.append(landed)
+                        here = landed
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+    assert walks, "no stop is in or of a box"
+    assert traps == [], f"{len(traps)} walks were trapped at {size}: " + "; ".join(traps[:4])
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_left_from_the_modules_list_reaches_the_rail_in_a_few_presses(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Left from the Modules list reaches the rail in a few presses, never twice on one stop (T175).
+
+    The trap the test above is for, as the player met it: at 960x640 twelve
+    presses of Left from the list went Install, list, Install, list... and never
+    reached the rail. Held loosely, not to the exact walk -- which rests on the
+    list's top edge sharing a pixel row with the rail at 960x640 -- but to what
+    the player needs: at most four presses, each to a stop not landed on
+    before.
+    """
+    from PySide6.QtWidgets import QApplication, QTabWidget
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    rail = window.findChild(QTabWidget, "sidebar-tabs").tabBar()
+    area = view.modules_panel._area
+    try:
+        _scroll_home(window)
+        area.setFocus()
+        process_events()
+        walk = [area]
+        for _press in range(4):
+            nav.navigate(Direction.LEFT)
+            process_events()
+            landed = QApplication.focusWidget()
+            went = " -> ".join(_pad_describe(w, window) for w in [*walk, landed])
+            assert landed not in walk, f"Left from the list went round: {went}"
+            walk.append(landed)
+            if landed is rail:
+                break
+        assert walk[-1] is rail, f"Left from the list went: {went}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def _wholly_past(edges: Any, loop: list[Any], direction: Any) -> bool:
+    """Whether `edges` lies wholly past every one of `loop` along `direction`."""
+    from yulon.ui.gamepad import Direction
+
+    if direction is Direction.LEFT:
+        return bool(edges[2] <= min(e[0] for e in loop))
+    if direction is Direction.RIGHT:
+        return bool(edges[0] >= max(e[2] for e in loop))
+    if direction is Direction.UP:
+        return bool(edges[3] <= min(e[1] for e in loop))
+    return bool(edges[1] >= max(e[3] for e in loop))
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_pressing_one_way_never_goes_round_while_a_stop_lies_past_the_round(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """No run of one direction goes round in a loop that a stop further that way is past (T175).
+
+    From every stop that shows, on every sub-tab and the Catalog, each
+    direction pressed up to 20 times with nothing remembered between presses.
+    A walk may come round -- wrapping at an edge is how the pad reaches the far
+    side -- but a loop that stays short of a showing stop lying wholly past
+    all of it that way is a trap: the player pressing on can never get there.
+    Stricter than the box test above, which ends a walk at its first step
+    behind and so lets a loop with one backward step through; this looks at
+    the loop itself, whatever its steps. Found in review of the fourth cut, as
+    a probe: the third cut's Left loop between the Modules list and an Install,
+    with the rail beyond it, is such a loop.
+    """
+    from PySide6.QtWidgets import QApplication, QTabWidget
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    _with_the_core_confs(tmp_path)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
+    sub = view._tabs
+    pages: list[tuple[int, int | None]] = [(0, None)]
+    pages += [(main_tabs.indexOf(view), index) for index in range(sub.count())]
+    traps: list[str] = []
+    loops = 0
+    try:
+        for main_index, sub_index in pages:
+            main_tabs.setCurrentIndex(main_index)
+            if sub_index is not None:
+                sub.setCurrentIndex(sub_index)
+            process_events()
+            _scroll_home(window)
+            name = sub.tabText(sub_index) if sub_index is not None else "Catalog"
+            stops = list(nav._focusable(nav._context_root()))
+            showing = {w: e for w in stops if (e := _on_screen(w, window)) is not None}
+            for start in showing:
+                for direction in Direction:
+                    # No event loop between presses: focus and scrolling are
+                    # both synchronous, and 2000-odd walks a size stay quick.
+                    _scroll_home(window)
+                    start.setFocus()
+                    walk = [start]
+                    for _press in range(20):
+                        nav._last_move = None
+                        nav.navigate(direction)
+                        landed = QApplication.focusWidget()
+                        if landed is None or landed is walk[-1]:
+                            break
+                        if landed not in walk:
+                            walk.append(landed)
+                            continue
+                        loop = walk[walk.index(landed) :]
+                        loops += 1
+                        edges = [_edges_in(w, window) for w in loop]
+                        beyond = [
+                            w
+                            for w, e in showing.items()
+                            if w not in loop and _wholly_past(e, edges, direction)
+                        ]
+                        if beyond:
+                            round_ = " -> ".join(_pad_describe(w, window) for w in loop)
+                            traps.append(
+                                f"{name}: {direction.name} goes round {round_}, "
+                                f"short of {_pad_describe(beyond[0], window)}"
+                            )
+                        break
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+    assert loops, "no walk came round: the test proves nothing"
+    assert traps == [], f"{len(traps)} walks were trapped at {size}: " + "; ".join(traps[:4])
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_down_or_up_from_the_modules_list_enters_it_at_the_row_that_shows_first_that_way(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Down from the focused Modules list goes to its first showing row, Up to its last (T175).
+
+    Found in review of round 2: the list is entered before it is left, but the
+    row was chosen from the list's middle, most in line first, so at 960x640
+    Down went to a chip 100 px down, past the "Available" header and two rows
+    of Install, and Up to the header at the top, past the rows at the bottom.
+    Held as a property of what shows: nothing in the list that shows lies
+    wholly above where Down lands, or wholly below where Up lands.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    area = view.modules_panel._area
+    try:
+        _scroll_home(window)
+        stops = nav._focusable(nav._context_root())
+        assert area in stops, "the Modules list is not a stop of the pad"
+        rows = [(w, e) for w in stops if area.isAncestorOf(w) and (e := _on_screen(w, window))]
+        assert len(rows) >= 3, f"only {len(rows)} of the list's stops show"
+        for direction in (Direction.DOWN, Direction.UP):
+            _scroll_home(window)
+            area.setFocus()
+            process_events()
+            nav.navigate(direction)
+            process_events()
+            landed = QApplication.focusWidget()
+            at_rest = dict(rows).get(landed)
+            assert at_rest is not None, (
+                f"{direction.name} from the list went to {_pad_describe(landed, window)}, "
+                "not a row of it that shows"
+            )
+            if direction is Direction.DOWN:
+                over = [w for w, e in rows if e[3] <= at_rest[1]]
+            else:
+                over = [w for w, e in rows if e[1] >= at_rest[3]]
+            assert over == [], (
+                f"{direction.name} from the list went to {_pad_describe(landed, window)}, "
+                f"past {_pad_describe(over[0], window)}"
+            )
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+@pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_stop_on_every_page_is_in_the_pads_reach(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Whatever a press now prefers, nothing the pad can stop on is left out of its reach (T175).
+
+    On every sub-tab and the Catalog, every widget the navigator lists is
+    reached by some walk of presses from the page's first. Asked because
+    preferring the nearest row changes which presses lead where, and a widget
+    that was only ever reached by a press that now goes elsewhere is lost.
+    Measured before T175, offscreen: the Catalog's shelf was out of reach at
+    1280x800; a first cut of the T175 rule that never went into a focused box
+    lost the Modules list's "Available" header at 960x640, and one that passed
+    a box by for a stop inside it lost all four Catalog tiles at both sizes.
+    """
+    from PySide6.QtWidgets import QTabWidget
+
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    _with_the_core_confs(tmp_path)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    main_tabs = window.findChild(QTabWidget, "sidebar-tabs")
+    sub = view._tabs
+    pages: list[tuple[int, int | None]] = [(0, None)]
+    pages += [(main_tabs.indexOf(view), index) for index in range(sub.count())]
+    lost: list[str] = []
+    try:
+        for main_index, sub_index in pages:
+            main_tabs.setCurrentIndex(main_index)
+            if sub_index is not None:
+                sub.setCurrentIndex(sub_index)
+            process_events()
+            name = sub.tabText(sub_index) if sub_index is not None else "Catalog"
+            stops = list(nav._focusable(nav._context_root()))
+            reached = set(_pad_routes(nav, stops[0]))
+            lost += [f"{name}: {_pad_describe(w, window)}" for w in stops if w not in reached]
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+    assert lost == [], f"out of the pad's reach at {size}: {lost}"
+
+
+def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The live check's first press: 960x640, the conf list, Down (T175).
+
+    It lands on the conf button straight under the middle of the list --
+    `authserver.conf`, 2 px off the list's centre -- and not on the full-width
+    strip at the bottom of the tab, which is 0 px off it.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    _with_the_core_confs(tmp_path)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Tuning")
+    _at(window, (960, 640))
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        confs = view.tuning_panel.file_buttons()
+        assert [b.text().split(" ")[0] for b in confs] == [
+            "worldserver.conf",
+            "authserver.conf",
+            "playerbots.conf",
+        ], "the Tuning tab does not list the three core confs this press is about"
+        conf_list = view.tuning_panel._area
+        assert (
+            _edges_in(confs[1], window)[1] >= _edges_in(conf_list, window)[3]
+        ), "the conf buttons are not under the list at 960x640, so this is not the live layout"
+        conf_list.setFocus()
+        process_events()
+        nav.navigate(Direction.DOWN)
+        landed = QApplication.focusWidget()
+        assert (
+            landed is confs[1]
+        ), f"Down from the conf list went to {_pad_describe(landed, window)}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def test_down_from_the_sub_tab_bar_enters_tuning_at_its_top_row(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The live check's other press: 1280x800, the sub-tab bar on Tuning, Down (T175).
+
+    It lands on the page's top row -- nothing of the Tuning page starts above
+    where it lands -- and not on the "Last action" strip at the bottom.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    _with_the_core_confs(tmp_path)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, page = _controller_in_the_real_window(view, "Tuning")
+    _at(window, (1280, 800))
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        view._tabs.tabBar().setFocus()
+        process_events()
+        nav.navigate(Direction.DOWN)
+        landed = QApplication.focusWidget()
+        assert (
+            landed is not view.tuning_report_strip
+        ), "Down from the sub-tab bar went past the page"
+        assert page.isAncestorOf(landed), f"Down left the page: {_pad_describe(landed, window)}"
+        top = min(_edges_in(w, window)[1] for w in _in_page(page))
+        assert _edges_in(landed, window)[1] == top, (
+            f"Down from the sub-tab bar went to {_pad_describe(landed, window)}, "
+            f"not the page's top row at y={top}"
+        )
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
 def _shows_and_hides(widget: Any) -> list[str]:
     """Record every `Show` and `Hide` event on `widget`: each is a frame the user sees.
 

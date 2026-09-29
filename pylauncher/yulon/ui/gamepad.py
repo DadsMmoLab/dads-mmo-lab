@@ -49,12 +49,14 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, QThrea
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractScrollArea,
     QAbstractSpinBox,
     QApplication,
     QComboBox,
     QLineEdit,
     QMenu,
     QPlainTextEdit,
+    QScrollArea,
     QTabWidget,
     QTextEdit,
     QWidget,
@@ -340,6 +342,14 @@ def _iter_focusable(root: QWidget) -> Iterable[QWidget]:
     yield from walk(root)
 
 
+_OPPOSITE: dict[Direction, Direction] = {
+    Direction.UP: Direction.DOWN,
+    Direction.DOWN: Direction.UP,
+    Direction.LEFT: Direction.RIGHT,
+    Direction.RIGHT: Direction.LEFT,
+}
+"""The press that undoes a move (T175)."""
+
 # The keys an open `QMenu` reads its own items with, one per logical event (T89).
 _DIRECTION_TO_KEY: dict[Direction, Qt.Key] = {
     Direction.UP: Qt.Key.Key_Up,
@@ -384,6 +394,119 @@ def _center(w: QWidget, relative_to: QWidget) -> QPoint:
     return QPoint(top_left.x() + w.width() // 2, top_left.y() + w.height() // 2)
 
 
+_Edges = tuple[int, int, int, int]
+"""A widget's left, top, right and bottom, in some root's coordinates."""
+
+
+def _edges(w: QWidget, relative_to: QWidget) -> _Edges:
+    """The widget's left, top, right and bottom edges, in `relative_to`'s coordinate space."""
+    top_left = w.mapTo(relative_to, QPoint(0, 0))
+    return top_left.x(), top_left.y(), top_left.x() + w.width(), top_left.y() + w.height()
+
+
+def _visible_edges(w: QWidget, root: QWidget, current: QWidget | None) -> _Edges | None:
+    """The part of `w` a player can see, or None when none of it is on screen (T175).
+
+    A module's buttons in the Modules tab's list, a Catalog tile's Install, sit
+    inside a scroll area's viewport, and whatever is scrolled out of it is still
+    visible to Qt: aimed at by where it would be drawn, it was a target nobody
+    could see -- a chip 1655 px down a list 186 px tall at 960x640 was one
+    press away. So `w` is cut by the viewport of every scroll area it is in.
+
+    Except one the focus is in as well: in there, the next row is where the
+    player is going, and it is scrolled to when focused (`_scroll_into_view`).
+    Cut there too, the row under the last one showing would be nowhere, and the
+    pad could not walk down a list longer than its box.
+    """
+    left, top, right, bottom = _edges(w, root)
+    parent = w.parentWidget()
+    while parent is not None and parent is not root:
+        area = parent.parentWidget()
+        shared = current is not None and parent.isAncestorOf(current)
+        if isinstance(area, QAbstractScrollArea) and area.viewport() is parent and not shared:
+            v_left, v_top, v_right, v_bottom = _edges(parent, root)
+            left, top = max(left, v_left), max(top, v_top)
+            right, bottom = min(right, v_right), min(bottom, v_bottom)
+            if left >= right or top >= bottom:
+                return None
+        parent = parent.parentWidget()
+    return left, top, right, bottom
+
+
+def _shown_edges(w: QWidget, root: QWidget) -> _Edges:
+    """The part of `w` that shows, cut by every scroll area it is in; all of it if none does."""
+    return _visible_edges(w, root, None) or _edges(w, root)
+
+
+def _scrolled_box_of(w: QWidget) -> QWidget | None:
+    """The viewport of the innermost scroll area `w` is inside, or None (T175)."""
+    parent = w.parentWidget()
+    while parent is not None:
+        area = parent.parentWidget()
+        if isinstance(area, QAbstractScrollArea) and area.viewport() is parent:
+            return parent
+        parent = area
+    return None
+
+
+def _scroll_into_view(w: QWidget) -> None:
+    """Scroll every scroll area `w` is in until `w` shows, innermost first (T175).
+
+    The pad's focus moves with `setFocus()`, which scrolls nothing, so a row
+    below the last one showing took the focus out of sight. Qt's own margin is
+    kept: it brings part of the next row into view as well, which is what lets
+    the next press see it from outside the list. Only a `QScrollArea` can be
+    asked to; a list or table view (`_visible_edges` cuts by any scroll area)
+    holds no focusable widgets of its own in this app, so none is missed.
+    """
+    parent = w.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QScrollArea):
+            content = parent.widget()
+            if content is not None and content.isAncestorOf(w):
+                parent.ensureWidgetVisible(w)
+        parent = parent.parentWidget()
+
+
+def _row_ahead(here: _Edges, there: _Edges, direction: Direction) -> tuple[int, int, int]:
+    """`there` measured from `here` along `direction`: gap, depth, and distance aside (T175).
+
+    `gap` is the space from `here`'s leading edge to `there`'s near one --
+    negative when `there` starts before `here` ends, as a widget beside it on
+    the same row does. `depth` is how far `there` reaches along the direction,
+    to its far edge. `aside` is the space between the two across the
+    direction: 0 when they share part of a column (Up/Down) or a row
+    (Left/Right).
+    """
+    left, top, right, bottom = here
+    o_left, o_top, o_right, o_bottom = there
+    if direction in (Direction.UP, Direction.DOWN):
+        aside = max(0, o_left - right, left - o_right)
+        gap = o_top - bottom if direction is Direction.DOWN else top - o_bottom
+        depth = gap + (o_bottom - o_top)
+    else:
+        aside = max(0, o_top - bottom, top - o_bottom)
+        gap = o_left - right if direction is Direction.RIGHT else left - o_right
+        depth = gap + (o_right - o_left)
+    return gap, depth, aside
+
+
+def _entry_line(box: _Edges, direction: Direction) -> _Edges:
+    """The edge a press goes INTO a focused box by, as a line: its top for Down (T175).
+
+    Measured from there, every stop inside the box lies ahead of it, and the
+    nearest row is the first one that shows on that side.
+    """
+    left, top, right, bottom = box
+    if direction is Direction.DOWN:
+        return left, top, right, top
+    if direction is Direction.UP:
+        return left, bottom, right, bottom
+    if direction is Direction.RIGHT:
+        return left, top, left, bottom
+    return right, top, right, bottom
+
+
 class Navigator(QObject):
     """The directional focus engine: resolves movement and executes actions.
 
@@ -396,6 +519,8 @@ class Navigator(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._cache: dict[int, list[QWidget]] = {}
+        # The last move the pad made: from where, to where, which way (T175).
+        self._last_move: tuple[QWidget, QWidget, Direction] | None = None
         # The cache is a list of what was focusable WHEN it was walked, and a
         # widget shown, hidden, enabled or disabled since is a different list
         # (T153). Nothing that changes one of those calls `invalidate()` -- a
@@ -422,10 +547,16 @@ class Navigator(QObject):
 
         Cheap on purpose, because it sees every event in the application: a
         clear of an already-empty dict is skipped, and the walk it forces is
-        paid on the next D-pad press, not here.
+        paid on the next D-pad press, not here. The pad's last move is
+        forgotten likewise once the focus goes anywhere but where that move
+        put it -- a click, a Tab, a dialog -- so `_way_back` only ever undoes
+        the press just made (T175).
         """
         if self._cache and event.type() in self._TREE_CHANGES and isinstance(watched, QWidget):
             self._cache.clear()
+        last = self._last_move
+        if last is not None and event.type() == QEvent.Type.FocusIn and watched is not last[1]:
+            self._last_move = None
         return False
 
     # -- context ---------------------------------------------------------
@@ -506,16 +637,65 @@ class Navigator(QObject):
             # top-left-most focusable so there is a visible origin for both the
             # user's :focus ring and every later projection. Without this,
             # `origin` anchors at (0,0) and the first press can land arbitrarily.
-            current = self._top_left(candidates, root)
+            # Top-left of what SHOWS (T175): a list scrolled part way still has
+            # its rows above the box at their places, out of sight.
+            showing = [w for w in candidates if _visible_edges(w, root, None) is not None]
+            current = self._top_left(showing or candidates, root)
             current.setFocus(Qt.FocusReason.OtherFocusReason)
+            _scroll_into_view(current)
             return True
 
-        origin = _center(current, root) if current is not None else QPoint(0, 0)
-        target = self._pick(candidates, current, origin, direction, root)
+        origin = QPoint(0, 0)
+        if current is not None:
+            # From the part of it that shows (T175): a row cut off at the bottom
+            # of its list is measured from the list's edge, not from where the
+            # rest of it would be drawn.
+            left, top, right, bottom = _shown_edges(current, root)
+            origin = QPoint((left + right) // 2, (top + bottom) // 2)
+        target = self._way_back(candidates, current, direction, root)
+        if target is None:
+            target = self._pick(candidates, current, origin, direction, root)
         if target is None:
             return False
         target.setFocus(Qt.FocusReason.OtherFocusReason)
+        _scroll_into_view(target)
+        self._last_move = (current, target, direction) if current is not None else None
         return True
+
+    def _way_back(
+        self,
+        candidates: list[QWidget],
+        current: QWidget | None,
+        direction: Direction,
+        root: QWidget,
+    ) -> QWidget | None:
+        """Where the last move came from, when this press undoes it; else None (T175).
+
+        The nearest row is not a symmetric rule: Down from a narrow button onto
+        a wide list, and Up from the list goes to whichever button above is
+        best centred over it -- measured on the real window, about 460 of 1004
+        presses were not undone by the opposite one. The pad remembers its own
+        last move instead: the opposite press from where it landed goes back,
+        if the focus has not moved since by any other means and the widget it
+        came from is still a place the pad can stop that shows, and does not
+        hold the focus.
+        """
+        last = self._last_move
+        if last is None or current is None:
+            return None
+        came_from, went_to, went = last
+        if current is not went_to or direction is not _OPPOSITE[went]:
+            return None
+        if not shiboken6.isValid(came_from) or came_from not in candidates:
+            return None
+        if came_from.isAncestorOf(current):
+            # Nor back out to a box that holds the focus, any more than `_pick`
+            # goes there: Down from the Modules list to its top row and Up went
+            # back to the list, and the next Up entered it at its bottom row.
+            return None
+        if _visible_edges(came_from, root, current) is None:
+            return None
+        return came_from
 
     @staticmethod
     def _top_left(candidates: list[QWidget], root: QWidget) -> QWidget:
@@ -539,17 +719,49 @@ class Navigator(QObject):
         essential: `root` may be a popup or modal, not the top-level window, and
         measuring one in `root` space and the other in `window()` space would make
         the projection nonsense (a real defect that skewed navigation inside
-        dropdowns and dialogs).
+        dropdowns and dialogs). A candidate is measured by the part of it on
+        screen, and one with none on screen is not a candidate (T175,
+        `_visible_edges`); nor is a box that holds the focused widget.
 
-        Among ahead candidates, prefer the one in the same row/column (smallest
-        offset), then the nearest. When no candidate is ahead (an edge), wrap to
-        the nearest candidate by perpendicular offset.
+        Among ahead candidates, in order (T175):
+
+        1. A stop that shows inside the focused widget -- a module's row with
+           the Modules list focused, whichever way the press goes: the box is
+           entered before it is left, at the edge the press goes in by (its top
+           for Down, `_entry_line`), by the rule of 2 among its own stops.
+        2. The nearest row (Up/Down): of the candidates that start past the
+           focused widget's leading edge, those that start before the nearest
+           of them ENDS, so no row is ever wholly passed over, wherever its
+           stops stand. In that row, the one sharing the focused widget's
+           column, else the least far aside, then the best centred. Left and
+           Right do the same with the nearest column, but only among the
+           candidates that share the focused widget's row. With the focus in
+           a scrolled list, stops in that list come first; from outside a
+           list the pad can stop on, the list comes before the stops in it.
+           Nothing on the row: the same from each box that holds the focused
+           widget, innermost first, among the stops outside it.
+        3. Nothing qualifies: the old rule, the candidate most nearly in line
+           (smallest offset), then the nearest.
+
+        The old rule alone let Down jump whole rows: from the Tuning tab's conf
+        list at 960x640 it went to the full-width "Last action" strip at the
+        bottom, 0 px off-centre, past the three conf buttons straight under the
+        list, 2 px off. When no candidate is ahead (an edge), wrap to the
+        nearest candidate by perpendicular offset.
         """
-        scored: list[tuple[float, float, QWidget]] = []
+        scored: list[tuple[float, float, _Edges, QWidget]] = []
         for other in candidates:
-            if other is current:
+            if current is not None and other.isAncestorOf(current):
+                # Not the focused widget, nor a box that holds it (T175): a press
+                # goes past the box, never out to it. Taken as a candidate, the
+                # Modules list -- level with the row the focus was on -- was
+                # where Left went from its Install, and the next Left went back
+                # in: the rail was never reached.
                 continue
-            center = _center(other, root)
+            seen = _visible_edges(other, root, current)
+            if seen is None:
+                continue
+            center = QPoint((seen[0] + seen[2]) // 2, (seen[1] + seen[3]) // 2)
             dx = center.x() - origin.x()
             dy = center.y() - origin.y()
             if direction is Direction.RIGHT:
@@ -560,16 +772,53 @@ class Navigator(QObject):
                 proj, offset = float(dy), float(abs(dx))
             else:  # UP
                 proj, offset = float(-dy), float(abs(dx))
-            scored.append((proj, offset, other))
+            scored.append((proj, offset, seen, other))
 
         if not scored:
             return None
 
         ahead = [s for s in scored if s[0] > 0]
+        if current is not None:
+            here = _shown_edges(current, root)
+            inside = [(s[1], s[2], s[3]) for s in scored if current.isAncestorOf(s[3])]
+            if inside:
+                # The focused widget is a box with stops in it that show -- the
+                # Modules list, the Catalog's shelf or one of its tiles: it is
+                # entered before it is left, at its leading edge, by the same
+                # nearest-row rule as below. Down goes to the top row that
+                # shows, Up to the bottom one. Measured from the box's middle,
+                # most in line first, Down from the Modules list at 960x640
+                # went to a chip 100 px down, past the header and two rows.
+                entry = _entry_line(here, direction)
+                target = Navigator._nearest_row(inside, entry, direction, None)
+                if target is not None:
+                    return target
+            ahead_seen = [(s[1], s[2], s[3]) for s in ahead]
+            target = Navigator._nearest_row(ahead_seen, here, direction, _scrolled_box_of(current))
+            if target is not None:
+                return target
+            # Nothing that way on the focused widget's own row: from each box
+            # that holds it, innermost first, the nearest row past the box --
+            # Left from a module's Install with nothing beside it goes on past
+            # the Modules list to the rail beside the list.
+            box = current.parentWidget()
+            while box is not None and box is not root:
+                if isinstance(box, QAbstractScrollArea) or box in candidates:
+                    # Only what is outside the box. What shows inside it lies
+                    # behind its edge anyway; a row scrolled out of the list
+                    # the focus is in does not, and tier 2 above has already
+                    # taken any that lies that way.
+                    beyond = [(s[1], s[2], s[3]) for s in scored if not box.isAncestorOf(s[3])]
+                    target = Navigator._nearest_row(
+                        beyond, _shown_edges(box, root), direction, None
+                    )
+                    if target is not None:
+                        return target
+                box = box.parentWidget()
         if ahead:
             # Same row/column first, then nearest in the travel direction.
             ahead.sort(key=lambda s: (s[1], s[0]))
-            return ahead[0][2]
+            return ahead[0][3]
 
         # Edge: nothing is ahead, so wrap. The target is the candidate closest to
         # the row/column we are leaving (smallest perpendicular offset); when
@@ -578,7 +827,49 @@ class Navigator(QObject):
         # negative for all of these (none is ahead), so "smallest proj" means
         # "most negative" = furthest behind.
         scored.sort(key=lambda s: (s[1], s[0]))
-        return scored[0][2]
+        return scored[0][3]
+
+    @staticmethod
+    def _nearest_row(
+        seen: list[tuple[float, _Edges, QWidget]],
+        here: _Edges,
+        direction: Direction,
+        box: QWidget | None,
+    ) -> QWidget | None:
+        """The nearest row past `here` among `seen`, and the stop `_pick` takes in it (T175).
+
+        `seen` is (offset, visible edges, widget) for each candidate, `box` the
+        viewport of the scrolled list the focus is in, if any.
+        """
+        sideways = direction in (Direction.LEFT, Direction.RIGHT)
+        past = []
+        for offset, edges, other in seen:
+            gap, depth, aside = _row_ahead(here, edges, direction)
+            # Left and Right keep to the row: a nearest COLUMN taken across
+            # the whole height of the Modules list sent Left from one
+            # module's Install to a chip 900 px further down it.
+            if gap >= 0 and (sideways is False or aside == 0):
+                past.append((gap, depth, aside, offset, other))
+        if box is not None:
+            # The list the focus is in keeps it until nothing in the list
+            # lies that way (T175), as a web page's scroll container does:
+            # between two of the Modules list's groups the next group's
+            # first row is further than the strip under the list, which
+            # took Down out of the list and left half of it out of reach.
+            within = [s for s in past if box.isAncestorOf(s[4])]
+            past = within or past
+        if not past:
+            return None
+        row_ends = min(s[1] for s in past)
+        row = [s for s in past if s[0] < row_ends]
+        # A list the pad can stop on is entered from outside at the list, not
+        # past it at a row inside: whatever shows of a row in there starts no
+        # nearer than the list's own edge. Taken at the row, the Catalog's
+        # shelf was nobody's next stop at 1280x800 -- from the rail its first
+        # tile, 4 px nearer level, won the tie.
+        lists = [s[4] for s in row if isinstance(s[4], QAbstractScrollArea)]
+        row = [s for s in row if not any(a is not s[4] and a.isAncestorOf(s[4]) for a in lists)]
+        return min(row, key=lambda s: (s[2], s[3], s[0]))[4]
 
     # -- discrete actions -------------------------------------------------
 
