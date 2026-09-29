@@ -5572,10 +5572,12 @@ class StagedInstaller:
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
         """Paths inside a source's checkout that THIS APP wrote, per source `dest`.
 
-        What `local_edits()` is told to ignore, and what
-        `_rewrite_what_we_own()` puts back afterwards -- the two always travel
-        together, because a path this app overwrites is a path a `reset --hard`
-        restores to upstream's version.
+        What `local_edits()` is told to ignore, because a path this app
+        overwrites is a path a `reset --hard` restores to upstream's version and
+        a press then puts back: the spine's compose files by
+        `_rewrite_what_we_own()`, a family's carried patches by
+        `apply_carried_patches()`. Which of the two a path needs is not in this
+        mapping, so neither put-back reads it (T173).
 
         **The spine's own contribution is the compose files, and it was found by
         a test rather than reasoned about.** AzerothCore's core source has
@@ -5603,8 +5605,9 @@ class StagedInstaller:
 
         AzerothCore's core (`dest: "."`) is; no CMaNGOS source is. The spine's
         half of `app_written_paths()`, and T170's test for whether the folder
-        can hold the repository's own `docker-compose.yml` at all -- asked on
-        its own because a CMaNGOS family adds its patch paths to that mapping.
+        can hold the repository's own `docker-compose.yml` at all, and T173's
+        for whether an update writes the compose files back -- asked on its own
+        because a CMaNGOS family adds its patch paths to that mapping.
         """
         return COMPOSE_STAGE in self.stage_names() and any(
             source.dest == "." for source in self.entry.emulator.sources
@@ -5626,10 +5629,18 @@ class StagedInstaller:
         Nothing is written for a family whose sources all live in
         subdirectories -- the three CMaNGOS entries -- because a reset inside
         `src/mangos-tbc` cannot touch a file at the server dir. The condition is
-        `app_written_paths()`'s own, read off the same fact, so the guard's
-        exception and the restore cannot come apart.
+        `_checkout_is_the_server_dir()`, the fact the spine's half of
+        `app_written_paths()` is read off, and not that mapping itself: the
+        CMaNGOS family adds its carried patch's paths to it, so on TBC and
+        Vanilla it was never empty, and both directions of the press rendered
+        all three compose files over an install the fetch had not touched
+        (T173). That threw away a player's own line in the override, and gave a
+        TBC or Vanilla install made before T169 its `./logs` bind without the
+        `LogsDir` that T169's Repair sets with it -- the Repair then read the
+        file as current and was never offered again. Tortoise carries no patch
+        and was never rewritten.
         """
-        if not self.app_written_paths(server_dir):
+        if not self._checkout_is_the_server_dir():
             return
         yield from self.stage_generate_compose(
             StageContext(
@@ -5816,7 +5827,7 @@ class StagedInstaller:
             except (InstallerError, OSError) as exc:
                 # `OSError` as well, and not for symmetry: everything between the
                 # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
-                # renders three compose files, `apply_carried_patches()` writes into
+                # renders WotLK's three compose files, `apply_carried_patches()` writes into
                 # the checkout -- and a full disk or a read-only mount surfaces as a
                 # bare `OSError` that no `InstallerError` wraps. Skipping the
                 # restore on it would leave the folder ahead of the image for the
@@ -6105,27 +6116,14 @@ class StagedInstaller:
             yield from self._rewrite_what_we_own(server_dir, opts, state)
         except (InstallerError, OSError) as exc:
             logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
-            if self._checkout_is_the_server_dir():
-                yield (
-                    f"The source folders are back on their old commits, but Yu'lon's own compose "
-                    f"files could not be written into them again ({exc}), so "
-                    f"{composegen.BASE_FILE} is the repository's own. "
-                    f"{compose_back_advice(server_dir)}"
-                )
-                return
-            # Cold review, T170 round 2: a CMaNGOS folder is not a checkout, so
-            # the fetch never touched its compose files; the rewrite runs there
-            # only because the patch paths make `app_written_paths()` non-empty
-            # (T173). Each file is replaced whole, so each is still Yu'lon's --
-            # the Repair would read `current` and never be offered. What this
-            # failure did cost is the patch, which is written after it.
-            again = server_build_presses.under_server_build(press)
+            # Only a checkout-is-the-server-dir entry (WotLK) gets here: the
+            # rewrite writes nothing anywhere else (T173), so the CMaNGOS
+            # sentence T170's cold review added for this branch had no way in.
             yield (
-                f"The source folders are back on their old commits, but Yu'lon's compose files "
-                f"in {server_dir} could not be written again ({exc}). Each is written whole, so "
-                "each is still Yu'lon's, as it was or new; but the source patch Yu'lon carries "
-                "is written after them, and was not written back either. Once the reason is "
-                f"fixed, press {again} again: it writes both before it compiles."
+                f"The source folders are back on their old commits, but Yu'lon's own compose "
+                f"files could not be written into them again ({exc}), so "
+                f"{composegen.BASE_FILE} is the repository's own. "
+                f"{compose_back_advice(server_dir)}"
             )
             return
         try:
