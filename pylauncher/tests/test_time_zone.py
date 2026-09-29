@@ -597,3 +597,18 @@ def test_a_placed_zone_file_is_readable_by_every_user(tmp_path: Path) -> None:
     (placed,) = time_zone.place(TBC, tmp_path, _tbc_override())
 
     assert stat.S_IMODE(placed.stat().st_mode) == 0o644
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+def test_an_identical_owner_only_zone_file_is_opened_up_where_it_stands(tmp_path: Path) -> None:
+    """A copy round 3 placed 0600 matches byte for byte; it is chmodded, not rewritten."""
+    import stat
+
+    (placed,) = time_zone.place(TBC, tmp_path, _tbc_override())
+    placed.chmod(0o600)
+    inode = placed.stat().st_ino
+
+    assert time_zone.place(TBC, tmp_path, _tbc_override()) == (), "nothing was rewritten"
+
+    assert stat.S_IMODE(placed.stat().st_mode) == 0o644
+    assert placed.stat().st_ino == inode

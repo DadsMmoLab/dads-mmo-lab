@@ -568,6 +568,10 @@ def _write_one(root: Path, parts: list[str], data: bytes) -> Path | None:
     _no_link(target, folder=False)
     try:
         if target.read_bytes() == data:
+            # Same bytes, but maybe placed 0600 by round 3's `mkstemp` copy
+            # (on the test boxes): opened up where it stands, never rewritten.
+            if os.name == "posix" and stat.S_IMODE(target.stat().st_mode) != ZONE_FILE_MODE:
+                os.chmod(target, ZONE_FILE_MODE)
             return None
     except FileNotFoundError:
         pass
