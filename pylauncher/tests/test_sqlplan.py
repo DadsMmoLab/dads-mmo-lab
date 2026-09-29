@@ -681,6 +681,16 @@ TBC_TREE: dict[str, tuple[str, ...]] = {
         "z2817_02_mangos_9331_quest_template.sql",
         "z2800_01_mangos_9317_creature_template.sql",
     ),
+    # Real names from tbc-db's `Updates/Instances/` at the pin, README.txt and all:
+    # upstream ships it beside the SQL and the phase's glob must pass it by (T141).
+    "src/tbc-db/Updates/Instances": (
+        "557_mana_tombs.sql",
+        "README.txt",
+        "309_zulgurub.sql",
+        "000_setup.sql",
+        "449_450_Alliance_Horde_PVP_Barracks.sql",
+        "030_alterac_valley.sql",
+    ),
     "src/tbc-db/ACID": ("acid_tbc.sql",),
     "src/mangos-tbc/sql/base/dbc/original_data": (
         "spell_dbc.sql",
@@ -724,6 +734,11 @@ TBC_EXPECTED: list[tuple[str | None, str]] = [
     ("mangos", "src/tbc-db/Updates/z2817_02_mangos_9331_quest_template.sql"),
     ("mangos", "src/tbc-db/Updates/z2817_10_mangos_9339_npc_text.sql"),
     ("mangos", "src/tbc-db/Updates/z2818_01_mangos_9340_item_template.sql"),
+    ("mangos", "src/tbc-db/Updates/Instances/000_setup.sql"),
+    ("mangos", "src/tbc-db/Updates/Instances/030_alterac_valley.sql"),
+    ("mangos", "src/tbc-db/Updates/Instances/309_zulgurub.sql"),
+    ("mangos", "src/tbc-db/Updates/Instances/449_450_Alliance_Horde_PVP_Barracks.sql"),
+    ("mangos", "src/tbc-db/Updates/Instances/557_mana_tombs.sql"),
     ("mangos", "src/tbc-db/ACID/acid_tbc.sql"),
     ("mangos", "src/mangos-tbc/sql/base/dbc/original_data/areatrigger_template.sql"),
     ("mangos", "src/mangos-tbc/sql/base/dbc/original_data/item_template.sql"),
@@ -779,6 +794,42 @@ def test_the_shipped_tbc_plan_expands_over_a_realistic_tree_in_the_applying_orde
         "characters base",
         "logs base",
         "world content",
+    ]
+
+
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla"])
+def test_the_instance_phase_takes_only_upstreams_numbered_files_setup_first(
+    game: str, tmp_path: Path
+) -> None:
+    """`[0-9]*.sql`, upstream's loop, not `*.sql`: a file that loop passes by is not applied (T141).
+
+    `notes.sql` breaks one rule only -- it does not start with a digit -- so it
+    is the glob's first character that keeps it out, not its extension.
+    `000_setup.sql` has to run first, because every other file re-adds what it
+    deletes; applied after them it would leave every instance empty.
+    """
+    entry = load_catalog().get(game)
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None
+    plan = native_block.cmangos.sql
+    phases = [phase for phase in plan.phases if phase.name == "instance updates"]
+    assert phases, f"{game} applies no instance files"
+    (pattern,) = phases[0].files
+    folder = tmp_path.joinpath(*pattern.split("/")[:-1])
+    _touch(folder, "309_zulgurub.sql", "notes.sql", "000_setup.sql", "README.txt")
+    databases = entry.databases
+    assert databases is not None
+    schemas = {
+        name: name
+        for name in (databases.auth, databases.characters, databases.world, *databases.extra)
+    }
+    runs = sqlplan.expand(
+        plan.model_copy(update={"phases": tuple(phases)}), tmp_path, schemas, _shipped_tokens()
+    )
+    prefix = "/".join(pattern.split("/")[:-1])
+    assert [(r.schema, r.rel) for r in runs] == [
+        (databases.world, f"{prefix}/000_setup.sql"),
+        (databases.world, f"{prefix}/309_zulgurub.sql"),
     ]
 
 

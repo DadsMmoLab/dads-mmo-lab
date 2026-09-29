@@ -919,6 +919,49 @@ def test_tbc_carries_the_script_values_verbatim() -> None:
     assert cm.ready.regex is False, "a literal marker; the spine re.escapes it (A5)"
 
 
+UPSTREAM_AFTER_INSTANCES = ("core updates", "dbc data", "ACID")
+"""What upstream's `InstallFullDB.sh` applies AFTER `Updates/Instances/`, as Yu'lon names it.
+
+Read at the tbc-db and classic-db pins (T141): `apply_content_db` runs the
+Full_DB dump, `Updates/[0-9]*.sql`, then `Updates/Instances/[0-9]*.sql`, and
+`apply_full_content_db` goes on to the world core updates, the dbc data and
+ACID. `dbc data` is TBC's alone; Vanilla's plan has no such phase.
+"""
+
+
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla"])
+def test_a_new_install_applies_the_db_repos_instance_files_where_upstream_does(
+    game: str,
+) -> None:
+    """`instance updates`: upstream's numbered files, in upstream's place, all or nothing (T141).
+
+    Without it dungeon and raid spawns stay at the Full_DB release however far
+    the pin moves. The glob is upstream's own; the phase follows the content
+    updates directly and comes before everything upstream runs after it; and
+    it is `fail`, because its first file deletes every instance spawn. It is
+    not `reapply_when_changed` (owner, 2026-09-29): new installs only.
+    """
+    entry = load_catalog().get(game)
+    native = entry.install.native
+    assert native is not None and native.cmangos is not None and entry.databases is not None
+    names = [phase.name for phase in native.cmangos.sql.phases]
+    assert "instance updates" in names, f"{game} applies no instance files"
+    phases = dict(zip(names, native.cmangos.sql.phases, strict=True))
+    db_repo = next(s.dest for s in entry.emulator.sources if s.repo.endswith("-db"))
+    instances = phases["instance updates"]
+    assert instances.files == (f"{db_repo}/Updates/Instances/[0-9]*.sql",)
+    assert instances.into == entry.databases.world
+    assert instances.sort == "natural"
+    assert instances.on_error == "fail"
+    assert not instances.reapply_when_changed and not instances.rerun_on_marked
+    assert phases["content updates"].files == (f"{db_repo}/Updates/*.sql",)
+    assert names.index("instance updates") == names.index("content updates") + 1
+    after = [name for name in UPSTREAM_AFTER_INSTANCES if name in names]
+    assert "ACID" in after and "core updates" in after, after
+    for name in after:
+        assert names.index(name) > names.index("instance updates"), name
+
+
 def test_vanilla_and_tortoise_carry_their_deltas() -> None:
     vanilla = load_catalog().get("wow-vanilla").install.native
     assert vanilla is not None and vanilla.cmangos is not None

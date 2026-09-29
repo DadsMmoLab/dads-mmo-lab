@@ -394,18 +394,21 @@ def test_the_release_table_covers_every_plan_a_public_release_marked_an_install_
 
 
 EXPECTED_FOR_RELEASED_INSTALLS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "wow-tbc": ((), ()),
-    "wow-vanilla": ((), ()),
+    "wow-tbc": ((), ("instance updates",)),
+    "wow-vanilla": ((), ("instance updates",)),
     "wow-tortoise": (("character_inventory_copy table",), ()),
 }
 """(offered, withheld) for an install any public release made, against the plan shipped now.
 
-TBC and Vanilla are empty: nothing in their plans has changed since the
-releases, so no such install sees a banner. Tortoise's is the first entry that
-is not (T159): a step ADDED since, which makes the table the core's weekly honor
-maintenance truncates, and every Tortoise server a release installed is offered
-exactly that one step. This is the table to change -- deliberately, in the same
-change -- when a shipped phase is corrected or added.
+TBC and Vanilla offer nothing and withhold one step ADDED since (T141): the
+DB repository's instance files, whose first file deletes every dungeon and raid
+spawn over MyISAM tables that no transaction can put back. The owner's decision
+of 2026-09-29 is new installs only, so those servers read `held` -- logged, no
+banner -- and the dialog of any later offer names the step as not applied.
+Tortoise's (T159) is a step added since as well, which makes the table the
+core's weekly honor maintenance truncates, and every Tortoise server a release
+installed is offered exactly that one step. This is the table to change --
+deliberately, in the same change -- when a shipped phase is corrected or added.
 """
 
 
@@ -415,8 +418,9 @@ def test_what_an_install_from_a_public_release_is_offered_is_what_this_file_expe
 ) -> None:
     """The release table read against the shipped plan, through the comparison the tab uses.
 
-    Every list but Tortoise's offer is empty, which also proves the table was
-    generated from the plans it names: one digest over the wrong fields, or from
+    Every list but Tortoise's offer and the withheld `instance updates` of TBC
+    and Vanilla (T141) is empty, which also proves the table was generated
+    from the plans it names: one digest over the wrong fields, or from
     the wrong plan, would put that phase in one of them. There is no skip: the day a
     shipped phase is corrected this fails, and the message says what to do.
 
@@ -762,10 +766,14 @@ def test_an_install_from_a_released_plan_is_offered_nothing_today(tmp_path: Path
     """Every released TBC install, read through the release table against the shipped plan.
 
     The measured fact behind the ticket: no install is stale on the day this
-    ships, so the tab stays quiet for every one of them.
+    ships, so the tab stays quiet for every one of them. Since T141 it is
+    `held` rather than `current`: the instance files were added after every
+    release, and the owner's decision (2026-09-29) keeps them for new installs,
+    so the step is withheld -- logged, no banner, nothing to press.
 
     Catches the release table missing the hash (`unknown`) or disagreeing with
-    the shipped plan (`stale`).
+    the shipped plan (`stale`), and the instance step being offered to a
+    server that already has players.
     """
     db = _Mariadb(tmp_path)
     marked_before_t129(db, RELEASED["wow-tbc"])
@@ -776,7 +784,8 @@ def test_an_install_from_a_released_plan_is_offered_nothing_today(tmp_path: Path
         installers_root=resources.installers_dir(),
         seams=rec.seams(platform_id=lambda: "linux", exec_stdin=db.exec_stdin, sql_query=db.query),
     )
-    assert engine.correction_check(folder(tmp_path)).state == "current"
+    check = engine.correction_check(folder(tmp_path))
+    assert (check.state, check.offered, check.withheld) == ("held", (), ("instance updates",))
 
 
 def test_an_install_from_a_plan_nobody_released_is_offered_nothing(tmp_path: Path) -> None:

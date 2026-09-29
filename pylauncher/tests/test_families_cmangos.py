@@ -176,6 +176,16 @@ def context(
     )
 
 
+def concrete(pattern: str, n: int) -> str:
+    """The `n`th file name a plan glob is laid as: `*` and upstream's `[0-9]*` both become `000n`.
+
+    `[0-9]*` is the instance phase's glob, upstream's own (T141). Replacing only
+    the `*` in it would lay `[0-9]0001.sql`, a name that glob does not match, and
+    the phase would then be refused for finding nothing.
+    """
+    return pattern.replace("[0-9]*", "*").replace("*", f"{n:04d}")
+
+
 def lay_sql(
     server_dir: Path, plan: SqlPlan, *, entry: CatalogEntry = ENTRY
 ) -> Callable[[Path], None]:
@@ -199,7 +209,7 @@ def lay_sql(
                 if owner(pattern) != rel:
                     continue
                 for n in (1, 2):
-                    name = pattern.replace("*", f"{n:04d}")
+                    name = concrete(pattern, n)
                     path = server_dir / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     body = f"-- {name}\nSELECT {n};\n"
@@ -4150,7 +4160,7 @@ def plan_files_in_order() -> list[str]:
     for phase in SQL.phases:
         for pattern in list(phase.files) + list((phase.into_each or {}).values()):
             if "*" in pattern:
-                names = [pattern.replace("*", f"{n:04d}") for n in (1, 2)]
+                names = [concrete(pattern, n) for n in (1, 2)]
             else:
                 names = [pattern]
             order += [f"-- {name}" for name in names]
@@ -4839,6 +4849,30 @@ def test_a_fail_phase_failure_stops_the_import_and_leaves_no_marker(
     rec.failing_sql = f"-- {failing}"
     with pytest.raises(InstallerError, match=re.escape(failing)):
         list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_refused_instance_file_stops_the_import_there_and_leaves_no_marker(
+    tmp_path: Path,
+) -> None:
+    """T141: the instance files are one rebuild, so the first one refused ends the import.
+
+    `000_setup.sql` deletes every dungeon and raid spawn and the files after
+    it put them back, and the tables are MyISAM, so nothing rolls back. A
+    `warn` phase would carry on and write a completion marker over a world
+    with its instances half gone; `fail` stops at the file, streams nothing
+    after it -- not the rest of the set, not ACID -- and writes no marker, so
+    the next press finds `partial` and imports again from empty.
+    """
+    phases = {phase.name: phase for phase in SQL.phases}
+    assert "instance updates" in phases, "the TBC plan applies no instance files"
+    failing = concrete(phases["instance updates"].files[0], 1)
+    rec = ready_to_import(ABSENT)
+    rec.failing_sql = f"-- {failing}"
+    with pytest.raises(InstallerError, match=re.escape(failing)):
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    fed = [line for line in rec.sql_calls if line.startswith("-- ")]
+    assert fed[-1] == f"-- {failing}", fed[-3:]
     assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
 
 
