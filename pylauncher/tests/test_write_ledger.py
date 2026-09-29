@@ -270,6 +270,30 @@ def test_a_docker_read_is_not_a_write_even_when_it_shares_a_noun_with_one() -> N
     assert _sites_in(source) == set()
 
 
+def test_changing_a_windows_dacl_is_a_write_the_way_a_chmod_is() -> None:
+    """`advapi32.SetNamedSecurityInfoW(...)` -- `winacl._apply_dacl`, T151.
+
+    It changes who may read a folder of passwords, and the files already in it,
+    which is what `chmod` does on POSIX, and `chmod` has been in this walk's
+    vocabulary from the start. Spelt as a `ctypes` call it names no path method
+    and no module the walk knew, so without this the one Windows permission
+    change in the package would be invisible to its own audit.
+    """
+    source = (
+        "def f(advapi32, p, dacl):\n"
+        "    advapi32.SetNamedSecurityInfoW(p, 1, 4, None, None, dacl, None)\n"
+    )
+    assert _sites_in(source) == {"f::SetNamedSecurityInfoW"}
+
+
+def test_reading_a_windows_dacl_is_not_a_write() -> None:
+    source = (
+        "def f(advapi32, p):\n"
+        "    advapi32.GetNamedSecurityInfoW(p, 1, 4, None, None, None, None, None)\n"
+    )
+    assert _sites_in(source) == set()
+
+
 # -- the ledger, both directions -------------------------------------------
 
 

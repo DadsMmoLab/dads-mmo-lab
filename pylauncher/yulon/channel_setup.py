@@ -60,7 +60,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from yulon import bot_population, commands, platform, soap
+from yulon import bot_population, commands, platform, soap, winacl
 from yulon.catalog import bot_count, composegen, time_zone
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
@@ -683,11 +683,12 @@ the file is world-readable. On Windows the mode argument is ignored, which is
 why the test asserts the flags the file was CREATED with rather than reading the
 mode back — a read-back test would pass there for the wrong reason.
 
-**So "owner-only" is a POSIX fact, not a Windows one.** There the file takes the
-ACL it inherits from `%APPDATA%` in the user's profile -- by default the user,
-SYSTEM and Administrators -- and nothing here narrows it. That holds for the
-verified credential since 8.2a and for the pending record since T138; an
-owner-only DACL on the whole `credentials/` folder is T151.
+**So the mode is a POSIX fact, not a Windows one.** There the file takes the ACL
+of the folder it is created in, and since T151 that folder carries its own
+protected DACL -- this account, SYSTEM and Administrators, nothing inherited from
+`%APPDATA%` -- set by `winacl.secure_folder()` before the file is created. Until
+T151 it was the profile's inherited ACL, private by default and not in a profile
+someone loosened.
 """
 
 _ON_WINDOWS = os.name == "nt"
@@ -763,10 +764,14 @@ def save_credential(
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Put `text` at `path` whole or not at all, owner-only on POSIX (T138).
+    """Put `text` at `path` whole or not at all, and owner-only (T138, T151).
 
     Owner-only by the creation flags on POSIX, for `CREDENTIAL_MODE`'s reason;
-    on Windows the file keeps the profile's inherited ACL (see there). Whole by
+    on Windows by the folder's own DACL, checked and if need be set before the
+    sibling is created (`winacl.secure_folder`), so the sibling inherits it and
+    the rename keeps it. A folder Windows will not narrow is a warning, not a
+    refusal: the password is already the server's, and not saving it breaks the
+    channel (`winacl`'s docstring). Whole by
     writing a sibling, forcing it to disk, renaming it over `path` and then
     forcing the rename itself to disk: a power cut part-way leaves the file
     that was there, never a truncated one that reads as no credential and sends
@@ -781,6 +786,9 @@ def _write_private(path: Path, text: str) -> None:
     leftover as a credential.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Before the sibling is created, so it is born under the folder's owner-only
+    # DACL on Windows and the rename carries that DACL onto `path` (T151).
+    winacl.secure_folder(path.parent)
     temp = _temporary_path(path)
     handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, CREDENTIAL_MODE)
     try:
@@ -868,7 +876,8 @@ def save_pending(
     a later launch re-verify it instead of creating -- the latch, across a
     close. Written with the verified credential's care, because it is the same
     password a minute earlier: through `_write_private()`, owner-only on POSIX
-    and under the profile's ACL on Windows, exactly as that file is.
+    and under its folder's owner-only DACL on Windows (T151), exactly as that
+    file is.
     """
     path = pending_path(game, install_id, config_dir=config_dir)
     payload = json.dumps({"account": pending.account, "password": pending.password}, indent=2)
@@ -938,6 +947,10 @@ def load_credential(
     again, not a reason the app cannot open.
     """
     path = credential_path(game, install_id, config_dir=config_dir)
+    # A credential is rewritten only on a rotation, so one saved before T151
+    # gets its folder's owner-only DACL here, on the read every launch makes --
+    # asked once a launch, since `live_channel()` reads it on every GM press.
+    winacl.secure_folder(path.parent, reading=True)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return soap.Endpoint(
