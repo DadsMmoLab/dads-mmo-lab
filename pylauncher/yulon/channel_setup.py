@@ -61,7 +61,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from yulon import bot_population, commands, platform, soap
-from yulon.catalog import bot_count, composegen
+from yulon.catalog import bot_count, composegen, time_zone
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
 from yulon.log import get_logger
@@ -275,26 +275,23 @@ def install_bind_label(server_dir: Path) -> str:
 def _label_on_disk(override: Path) -> str | None:
     """The label the installed override's host binds carry, or None if it cannot say.
 
-    `":z"` when every `- ./` bind ends with it, `""` when none does. None when
+    `":z"` when every `- ./` bind carries it, `""` when none does. None when
     there is no file, the file is not this engine's (no generated marker), or
-    it has no host bind at all -- the CMaNGOS overrides have none -- and the
-    caller then asks the host. Binds that disagree are no install's rendering,
-    so that is a refusal rather than a guess.
+    it has no host bind at all -- a CMaNGOS override has none until a time
+    zone is set -- and the caller then asks the host. Binds that disagree are
+    no install's rendering, so that is a refusal rather than a guess.
+
+    `composegen.bind_label_of()` since T171, the fold both docstrings asked
+    for: the time zone's read-only bind is `:ro,z`, which a trailing-`:z` test
+    read as unlabelled, so an enforcing CMaNGOS install with a zone set would
+    have re-rendered its bind with no label and lost the zone.
     """
     if not override.is_file() or not composegen.is_ours(override):
         return None
-    binds = [
-        line.strip()
-        for line in override.read_text(encoding="utf-8").splitlines()
-        if line.strip().startswith("- ./")
-    ]
-    if not binds:
-        return None
-    labelled = [line.endswith(":z") for line in binds]
-    if all(labelled):
-        return ":z"
-    if not any(labelled):
-        return ""
+    try:
+        return composegen.bind_label_of(override.read_text(encoding="utf-8"))
+    except composegen.MixedBindLabels:
+        pass
     raise EnableRefused(
         f"{override.name} has some host folders labelled for SELinux (`:z`) and some not, "
         "which is not how Yu'lon writes it, so the command channel was not turned on and "
@@ -394,6 +391,14 @@ def enable(
     if plan.override == before:
         logger.info(f"{entry.id}'s command channel was already switched on in {target.name}")
         return Enabled(path=target, changed=conf_changed)
+    # T171: the zone the new file names, its file copied before a bind names it.
+    try:
+        time_zone.place(entry, server_dir, plan.override)
+    except (OSError, time_zone.TimeZoneError) as exc:
+        raise EnableRefused(
+            f"the server's time zone file could not be copied ({exc}), so the command channel "
+            "was not turned on and the override was not written."
+        ) from exc
     target.write_text(plan.override, encoding="utf-8", newline="\n")
     logger.info(f"wrote {entry.id}'s command channel into {target}")
     return Enabled(path=target, changed=True)
@@ -573,19 +578,34 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
 
 
 def _keep_the_bot_count(entry: CatalogEntry, now: str, restored: str) -> str:
-    """The pre-press file to put back, carrying the bot count `now` holds (T117).
+    """The pre-press file to put back, with the bot count (T117) and zone (T171) `now` holds.
 
     The backup is the override before the FIRST press, so it holds the count
     from then: one changed on the Bots tab while the channel was on would go
     back with the channel. Only the two values move; a backup without the two
     lines, or a `now` without a usable pair, is put back as it was.
     """
+    restored = _keep_the_time_zone(entry, now, restored)
     kept = bot_count.in_override_text(now, entry)
     if not kept:
         return restored
     try:
         return bot_population.patch_env(restored, entry, composegen.OVERRIDE_FILE, kept)
     except bot_population.BotCountError:
+        return restored
+
+
+def _keep_the_time_zone(entry: CatalogEntry, now: str, restored: str) -> str:
+    """The pre-press file with the time zone `now` holds laid over it (T171).
+
+    For the bot count's reason above: a zone set on the Tuning tab while the
+    channel was on would otherwise go back with the channel. Only the `TZ`
+    lines move; a backup whose shape takes none is put back as it was.
+    """
+    try:
+        label = composegen.bind_label_of(now) or ""
+        return time_zone.lay_over(restored, entry, time_zone.carried(now, entry), label=label)
+    except (time_zone.TimeZoneError, composegen.MixedBindLabels):
         return restored
 
 

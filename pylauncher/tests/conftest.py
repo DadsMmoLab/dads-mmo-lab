@@ -460,6 +460,21 @@ def _the_users_own_log_is_out_of_reach(
 
 
 @pytest.fixture(autouse=True)
+def _this_computer_is_in_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every render answers the same on any box: this computer's time zone is UTC (T171).
+
+    A new install's override gets the computer's zone, so without this a
+    compose file rendered by the suite would say `Europe/Oslo` on one box and
+    nothing on a UTC CI runner, and every byte-for-byte assertion on an
+    installed override would pass or fail on the box's clock. The tests of
+    `time_zone.host_zone()` itself take the real function back.
+    """
+    from yulon.catalog import time_zone
+
+    monkeypatch.setattr(time_zone, "host_zone", lambda: time_zone.UTC)
+
+
+@pytest.fixture(autouse=True)
 def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every argv assertion in the suite gets `docker` at argv[0], on any machine.
 

@@ -280,6 +280,8 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "copy_from_image": "install-only (conf templates); takes no distro, so it is refused instead",
     "verify_import": "install-only (the import stage); takes no distro",
     "install_id": "the id the install RECORDED (`recorded_install_id`), tested on its own",
+    "host_zone": "a new install's zone (T171); a rebuild or update of an installed server "
+    "carries its own off the override, and Windows is the computer the player sits at",
 }
 
 

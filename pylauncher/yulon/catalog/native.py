@@ -86,7 +86,7 @@ from yulon import (
     runner,
     server_build_presses,
 )
-from yulon.catalog import bot_count, composegen, preflight, upstream
+from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -3630,6 +3630,13 @@ class Seams:
     and no split to fix -- only the same latent trap, recorded in §27 rather
     than changed for no measured defect.
     """
+    host_zone: Callable[[], str] | None = None
+    """This computer's time zone, which a NEW install's override gets (T171). Read via `ask_zone()`.
+
+    A late lookup for `selinux_enforcing`'s reason: the suite pins
+    `time_zone.host_zone` (conftest) so no render depends on the zone of the
+    box running it, and a default bound at import would slip past that pin.
+    """
     monotonic: Callable[[], float] = time.monotonic
     """The clock `wait_for_ready()` reports its own durations from.
 
@@ -3791,6 +3798,11 @@ class Seams:
         """The filesystem under `path`, through the seam if one was given, else the host."""
         ask = self.fs_type
         return (ask if ask is not None else platform.filesystem_type)(path)
+
+    def ask_zone(self) -> str:
+        """This computer's time zone, through the seam if one was given, else the host (T171)."""
+        ask = self.host_zone
+        return (ask if ask is not None else time_zone.host_zone)()
 
     @classmethod
     def in_wsl(cls, distro: str) -> Seams:
@@ -5115,6 +5127,9 @@ class StagedInstaller:
             if rollback
             else "Replacing the running containers so the new build is what starts."
         )
+        warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
         spec = self.entry.container_spec()
         # The replace begins with a stop, and a world still loading cannot hear
         # it (T158). `recreate_staged()` waits for it right before that stop --
@@ -7631,6 +7646,19 @@ class StagedInstaller:
         made = self._make_server_folders(ctx.server_dir)
         for path in made:
             yield f"Made {path.name}/ for the server to write into."
+        # T171: the zone the override names, copied again from this Yu'lon's
+        # own `tzdata` before a compose file binds the folder -- so Docker never
+        # makes it as root, and a rule change an update brings reaches the
+        # server at this Repair or Update. CMaNGOS only; nothing elsewhere.
+        try:
+            placed = time_zone.place(self.entry, ctx.server_dir, plan.override)
+        except (OSError, time_zone.TimeZoneError) as exc:
+            raise InstallerError(
+                f"the server's time zone file could not be copied into "
+                f"{ctx.server_dir / time_zone.FOLDER}: {exc}. Nothing else was written."
+            ) from exc
+        for path in placed:
+            yield f"Copied the time zone file {path.relative_to(ctx.server_dir).as_posix()}."
         replaceable = self._replaceable_compose(ctx.server_dir)
         if replaceable:
             yield (
@@ -7663,6 +7691,22 @@ class StagedInstaller:
                 f"{ctx.server_dir} could not be relabelled for containers (chcon); if the "
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
+
+    def _put_back_the_zone_file(self, server_dir: Path) -> str | None:
+        """T171: the zone file `Controller.start()` puts back, before this engine's own starts.
+
+        The install's `up` and a rebuild's recreate start containers without
+        the controller; the same `time_zone.refresh()`, the same rule: copied
+        only when the bytes differ, and a failure is said, never a refusal.
+        """
+        try:
+            with (server_dir / composegen.OVERRIDE_FILE).open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                override = handle.read()
+        except (OSError, UnicodeDecodeError):
+            return None
+        return time_zone.refresh(self.entry, server_dir, override)
 
     def _make_server_folders(self, server_dir: Path) -> tuple[Path, ...]:
         """Make each folder the compose file binds for the server to write into (T165).
@@ -7737,6 +7781,10 @@ class StagedInstaller:
             bind_label=label,
             platform_id=self._seams.platform_id,
             install_id=self._install_id(server_dir),
+            # T171: a new server's clock is this computer's (owner, 2026-09-28).
+            # Asked on every render and used only when the folder has no install
+            # yet; an installed server's zone is carried off its own override.
+            new_install_zone=self._seams.ask_zone(),
         )
 
     def _base_compose_facts(
@@ -8589,6 +8637,9 @@ class StagedInstaller:
         warns about in as many words.
         """
         yield "Starting the server."
+        warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
         try:
             self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:

@@ -343,18 +343,20 @@ def test_a_missing_dist_is_a_reason_naming_it(tmp_path: Path) -> None:
 
 
 def test_the_wotlk_override_default_is_what_the_install_itself_wrote(tmp_path: Path) -> None:
+    """What the install wrote -- with the server's own time zone kept (owner, 2026-09-28, T171)."""
     installed = _wotlk_stack(tmp_path)
     (tmp_path / OVERRIDE).write_text(
-        'services:\n  ac-worldserver:\n    environment:\n      TZ: "Mars/Olympus"\n',
+        'services:\n  ac-worldserver:\n    environment:\n      TZ: "Mars/Olympus"\n'
+        '      MY_OWN: "x"\n',
         encoding="utf-8",
     )
     texts, reasons = reset_defaults.default_texts(
         WOTLK, tmp_path, [OVERRIDE], seams=_seams(image_present=_never)
     )
     assert reasons == {}
-    assert texts[OVERRIDE].encode("utf-8") == installed
+    assert texts[OVERRIDE].encode("utf-8") == installed + b'      TZ: "Mars/Olympus"\n'
     assert 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "500"' in texts[OVERRIDE]
-    assert "TZ" not in texts[OVERRIDE]
+    assert "MY_OWN" not in texts[OVERRIDE], "a hand line is dropped; the zone is not"
 
 
 def test_a_live_channel_press_is_reapplied_so_a_reset_never_turns_soap_off(
@@ -739,7 +741,8 @@ def test_a_wotlk_reset_all_writes_the_override_too_and_backs_it_up(tmp_path: Pat
     report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.core_files(WOTLK), seams=_seams())
 
     assert [r.outcome for r in report.results] == ["reset"] * 4
-    assert (tmp_path / OVERRIDE).read_bytes() == installed
+    # The file the install wrote, with the player's zone kept (owner, 2026-09-28, T171).
+    assert (tmp_path / OVERRIDE).read_bytes() == installed + b'      TZ: "Europe/Oslo"\n'
     override = next(r for r in report.results if r.file == OVERRIDE)
     assert override.backup is not None and override.backup.read_bytes() == broken
     reset_defaults.undo(tmp_path, report.written)

@@ -36,9 +36,11 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -76,6 +78,7 @@ from yulon import (
     reset_defaults,
     resources,
     server_build_presses,
+    server_time_zone,
     tuning,
     useraccounts,
     wsl,
@@ -94,7 +97,7 @@ from yulon.apply import (
     reapplies_on_top,
     required_prompts,
 )
-from yulon.catalog import bot_dashboard, composegen, native, preflight, upstream
+from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
@@ -1055,6 +1058,13 @@ class ControllerServices:
     included, to say which of its three sentences applies.
     """
 
+    time_zone: server_time_zone.TimeZoneRoute | None = None
+    """The Tuning tab's "Server time zone" (T171), bound to this install.
+
+    Wired in `_assemble` for every game whose compose files Yu'lon makes (a
+    catalog fact, `time_zone.services`). `None` leaves the tab without it.
+    """
+
     bot_population: botpop.BotPopulationRoute | None = None
     """The Bots tab's "Random bots" box (T99), bound to this install.
 
@@ -1520,6 +1530,9 @@ def _assemble(
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(entry, server_dir),
+        # T171. HERE for T99's reason: the file and the services are catalog
+        # facts, and it is files only, so a server inside a WSL distro is served.
+        time_zone=server_time_zone.time_zone_route(entry, server_dir),
     )
 
 
@@ -4578,6 +4591,25 @@ def _read_bot_count(route: botpop.BotPopulationRoute, generation: int) -> BotCou
         raise BotCountReadFailed(generation, str(exc)) from exc
 
 
+@dataclass(frozen=True)
+class TimeZoneAnswer:
+    """One read of the time zone, and which lookup asked (an older answer is dropped)."""
+
+    generation: int
+    reading: server_time_zone.Reading
+
+
+def _read_time_zone(route: server_time_zone.TimeZoneRoute, generation: int) -> TimeZoneAnswer:
+    """The Tuning tab's time zone read, as a job: it opens the compose override (T171).
+
+    Tagged on failure for `_read_bot_count`'s reason.
+    """
+    try:
+        return TimeZoneAnswer(generation, route.read())
+    except Exception as exc:  # boundary: an unreadable server folder must not kill the UI
+        raise BotCountReadFailed(generation, str(exc)) from exc
+
+
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
 """The install's own conf files, listed read-only beside the module ones.
 
@@ -4628,6 +4660,16 @@ BOT_COUNT_RUNNING = (
     "normally once it is done."
 )
 """The close guard's sentence while the Bots tab's write runs (`busy_reason()`)."""
+
+TIME_ZONE_TITLE = "Server time zone"
+TIME_ZONE_APPLY = "Apply…"
+TIME_ZONE_HOST = "Same as this computer ({zone})"
+TIME_ZONE_KEPT = "As written: {value}"
+TIME_ZONE_RUNNING = (
+    "Yu'lon is writing this server's time zone. It takes a moment; this window closes "
+    "normally once it is done."
+)
+"""T171. The close guard's sentence while the Tuning tab's time zone write runs."""
 
 TUNING_RESET_LABEL = "Reset to default"
 TUNING_RESET_ALL = "All server settings…"
@@ -5092,6 +5134,9 @@ class ControllerView(QWidget):
         # T129: what the last corrections check said. Taken once each time the
         # database comes up (`_ask_about_the_import`), dropped when it goes.
         self._corrections: native.CorrectionCheck | None = None
+        # T171: built before any tab, like T99's box, so `_set_busy()` can
+        # always reach it; the Tuning tab is what shows it.
+        self._build_time_zone_group()
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -5485,6 +5530,8 @@ class ControllerView(QWidget):
             return TUNING_RESET_RUNNING
         if self._bot_count_writing:
             return BOT_COUNT_RUNNING
+        if self._time_zone_writing:
+            return TIME_ZONE_RUNNING
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._module_sql_running:
@@ -6304,6 +6351,8 @@ class ControllerView(QWidget):
             # a recreate is reading), and its owed-job button is the banner's.
             self._set_bot_count_controls()
             self.bot_count_owed_button.setEnabled(False)
+            # T171: the zone is the compose override a recreate is reading.
+            self._set_time_zone_controls()
             # T162: the dashboard's rebuild restarts the world like the rest.
             if self.dashboard_log is not None:
                 self.rebuild_dashboard_button.setEnabled(False)
@@ -6335,6 +6384,7 @@ class ControllerView(QWidget):
             # Back to whether this tab HAS a route, never unconditionally.
             self._set_reset_button()
             self._set_bot_count_controls()
+            self._set_time_zone_controls()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
@@ -6401,8 +6451,23 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
+        self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+
+    def _say_zone_problem(self) -> str | None:
+        """T171: what the last Start could not put right about the zone file, on the Server tab.
+
+        `Controller.start()` is the one door every Start, Restart and recreate
+        goes through, and it never refuses over the zone file: the server runs
+        on UTC, and this line says so and names the presses that fix it.
+        """
+        said = getattr(self.services.controller, "zone_problem", None)
+        if isinstance(said, str) and said:
+            text = f"The server started, but {said}"
+            self.problem_label.setText(text)
+            return text
+        return None
 
     def _check_the_channel(self) -> None:
         """Ask whether the saved credential still works, off the GUI thread.
@@ -8712,6 +8777,275 @@ class ControllerView(QWidget):
         self.bot_count_report.setText(f"The bot count was NOT changed: {exc}")
         self.action_failed.emit(str(exc))
         self._look_up_bot_count()
+
+    # ------------------------------------------------- T171: server time zone
+
+    def _build_time_zone_group(self) -> None:
+        """ "Server time zone": [where ▾] [place ▾] / [Apply…] Now … (T171).
+
+        Two lists, not one of 400 zones: the first says "Same as this
+        computer", "UTC", a hand-written value kept as it is, or a region, and
+        the second the places in that region -- a short walk for a pad or the
+        keyboard (a closed list jumps to a typed letter). Never a text box: a
+        typed zone is how a player broke the file (owner decision 2026-09-28).
+        Dead until the read lands, while any job of ours runs, and while its
+        own write runs, as the bot count's box is.
+
+        It sits at the top of the Tuning tab's card column and scrolls with the
+        cards (`TuningPanel.set_header`), cold review round 2: as a row of its
+        own above the panel it cost 50px, and at 960x640 the panel's minimum
+        (360 of a 466px tab) left 12 to spare, so the panel was drawn under its
+        minimum; and one line of both lists and the press needs ~750px, which
+        the column does not have at 1280x800 (536). Compact inside: two lines,
+        the status a few words with the whole sentence as its tooltip, both
+        lists sized to a fixed number of characters (a long hand-written value
+        is elided, whole in the tooltip), and what a press did goes to the
+        tab's own report box.
+        """
+        self._time_zone_generation = 0
+        self._time_zone_reading: server_time_zone.Reading | None = None
+        self._time_zone_pending = False
+        self._time_zone_writing = False
+        self.time_zone_group = QGroupBox(TIME_ZONE_TITLE, self)
+        grid = QGridLayout(self.time_zone_group)
+        self.time_zone_where = QComboBox(self.time_zone_group)
+        self.time_zone_place = QComboBox(self.time_zone_group)
+        for box, chars in ((self.time_zone_where, 22), (self.time_zone_place, 16)):
+            box.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            box.setMinimumContentsLength(chars)
+        self.time_zone_apply_button = QPushButton(TIME_ZONE_APPLY, self.time_zone_group)
+        self.time_zone_apply_button.clicked.connect(self.apply_time_zone)
+        self.time_zone_note = QLabel("", self.time_zone_group)
+        self.time_zone_note.setWordWrap(False)
+        self.time_zone_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Two lines, so the column's width at 1280x800 (536px) holds both lists
+        # at a readable size: "Same as this computer (…)" on its own, then the
+        # place, the press, and the status.
+        grid.addWidget(self.time_zone_where, 0, 0, 1, 3, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(self.time_zone_place, 1, 0)
+        grid.addWidget(self.time_zone_apply_button, 1, 1)
+        grid.addWidget(self.time_zone_note, 1, 2)
+        grid.setColumnStretch(2, 1)
+        self._fill_time_zone_where(None)
+        self.time_zone_where.currentIndexChanged.connect(self._time_zone_where_changed)
+        self.time_zone_place.currentIndexChanged.connect(self._set_time_zone_controls)
+        self.time_zone_group.setVisible(self.services.time_zone is not None)
+        self._set_time_zone_controls()
+
+    def _say_time_zone(self, short: str, whole: str) -> None:
+        """The status after the button: a few words, and the whole sentence as the tooltip."""
+        self.time_zone_note.setText(short)
+        self.time_zone_note.setToolTip(whole)
+        self.time_zone_group.setToolTip(whole)
+
+    def _fill_time_zone_where(self, kept: str | None) -> None:
+        """The first list: this computer, UTC, a kept hand value, then every region."""
+        box = self.time_zone_where
+        box.blockSignals(True)
+        box.clear()
+        box.addItem(TIME_ZONE_HOST.format(zone=time_zone.host_zone()), "host:")
+        box.addItem(time_zone.UTC, f"zone:{time_zone.UTC}")
+        if kept is not None:
+            box.addItem(TIME_ZONE_KEPT.format(value=kept), f"kept:{kept}")
+        regions = sorted({zone.split("/", 1)[0] for zone in time_zone.picker_zones()})
+        for region in regions:
+            box.addItem(region, f"region:{region}")
+        box.blockSignals(False)
+        self._fill_time_zone_place()
+
+    def _fill_time_zone_place(self, zone: str | None = None) -> None:
+        """The second list: the places in the region the first names, or nothing."""
+        box = self.time_zone_place
+        box.blockSignals(True)
+        box.clear()
+        kind, region = self._time_zone_where_data()
+        if kind == "region":
+            for name in time_zone.picker_zones():
+                head, _, place = name.partition("/")
+                if head == region:
+                    box.addItem(place.replace("_", " "), name)
+            if zone is not None:
+                box.setCurrentIndex(max(0, box.findData(zone)))
+        box.blockSignals(False)
+        box.setEnabled(kind == "region")
+
+    def _time_zone_where_data(self) -> tuple[str, str]:
+        """What the first list names: `(kind, value)`, kept in the item as `kind:value` text."""
+        kind, _, value = str(self.time_zone_where.currentData() or "").partition(":")
+        return kind, value
+
+    @Slot()
+    def _time_zone_where_changed(self) -> None:
+        self._fill_time_zone_place()
+        self.time_zone_where.setToolTip(self.time_zone_where.currentText())
+        self._set_time_zone_controls()
+
+    def _chosen_time_zone(self) -> str | None:
+        """The zone the two lists name now; `None` for the kept hand value (nothing to set)."""
+        kind, value = self._time_zone_where_data()
+        if kind == "host":
+            return time_zone.host_zone()
+        if kind == "zone":
+            return str(value)
+        if kind == "region":
+            place = self.time_zone_place.currentData()
+            return str(place) if place else None
+        return None
+
+    def _show_time_zone(self, reading: server_time_zone.Reading) -> None:
+        """Point the two lists at what the file says: a hand value not in them is kept as it is."""
+        zone = reading.zone
+        host = time_zone.host_zone()
+        listed = set(time_zone.picker_zones())
+        known = zone is not None and (zone in (time_zone.UTC, host) or zone in listed)
+        kept = None if known else reading.shown
+        self._fill_time_zone_where(kept)
+        box = self.time_zone_where
+        if zone == time_zone.UTC:
+            box.setCurrentIndex(box.findData(f"zone:{time_zone.UTC}"))
+        elif zone == host:
+            box.setCurrentIndex(0)
+        elif kept is not None:
+            box.setCurrentIndex(box.findData(f"kept:{kept}"))
+        elif zone is not None:
+            box.blockSignals(True)
+            box.setCurrentIndex(box.findData(f"region:{zone.split('/', 1)[0]}"))
+            box.blockSignals(False)
+            self._fill_time_zone_place(zone)
+
+    def _set_time_zone_controls(self) -> None:
+        """Live with a readable zone, nothing of ours running, no read or write in flight.
+
+        Apply only when the lists name a zone other than the one the file has.
+        """
+        reading = self._time_zone_reading
+        live = (
+            self.services.time_zone is not None
+            and reading is not None
+            and reading.problem is None
+            and bool(time_zone.zones())
+            and not self._busy
+            and not self._time_zone_pending
+            and not self._time_zone_writing
+        )
+        self.time_zone_where.setEnabled(live)
+        kind = self._time_zone_where_data()[0]
+        self.time_zone_place.setEnabled(live and kind == "region")
+        chosen = self._chosen_time_zone()
+        self.time_zone_apply_button.setEnabled(
+            live and reading is not None and chosen is not None and chosen != reading.zone
+        )
+
+    def _look_up_time_zone(self) -> None:
+        """Read the time zone off the GUI thread."""
+        route = self.services.time_zone
+        if route is None or self._waits_for_the_distro("time zone", self._look_up_time_zone):
+            return
+        self._time_zone_generation += 1
+        self._time_zone_pending = True
+        self._set_time_zone_controls()
+        self._run(
+            partial(_read_time_zone, route, self._time_zone_generation),
+            self._time_zone_read,
+            self._time_zone_read_failed,
+        )
+
+    @Slot(object)
+    def _time_zone_read(self, answer: object) -> None:
+        """The lists and the line under them, from one read; a stale answer is dropped."""
+        if (
+            not isinstance(answer, TimeZoneAnswer)
+            or answer.generation != self._time_zone_generation
+        ):
+            return
+        self._time_zone_pending = False
+        reading = answer.reading
+        self._time_zone_reading = reading
+        if reading.problem is not None:
+            self._say_time_zone(
+                "Cannot be changed here", f"Cannot change the time zone here: {reading.problem}"
+            )
+        elif not time_zone.zones():
+            self._say_time_zone("No zone list", f"Cannot set a time zone: {time_zone.MISSING_DATA}")
+        else:
+            self._show_time_zone(reading)
+            self.time_zone_where.setToolTip(self.time_zone_where.currentText())
+            short = f"Now {reading.shown}" + (" (see note)" if reading.note else "")
+            self._say_time_zone(short, self._time_zone_now(reading))
+        self._set_time_zone_controls()
+
+    def _time_zone_now(self, reading: server_time_zone.Reading) -> str:
+        """What the line says the server is set to now."""
+        name = Path(reading.file).name
+        if reading.value is None:
+            said = f"Now UTC: {name} names no time zone, so the server keeps its image's own."
+        else:
+            said = f"Now {reading.shown} in {name}."
+        if reading.login is not None and reading.login != (reading.value or time_zone.UTC):
+            said += f" The login server says {reading.login}; Apply sets both."
+        if reading.note is not None:
+            said += f" Note: {reading.note}"
+        return said
+
+    @Slot(object)
+    def _time_zone_read_failed(self, exc: object) -> None:
+        """A read that raised: said, unless a newer read is pending (then it is dropped)."""
+        if getattr(exc, "generation", None) != self._time_zone_generation:
+            logger.warning(f"a stale or untagged time zone read failed: {exc}")
+            return
+        self._time_zone_pending = False
+        self._say_time_zone("Could not read", f"Could not read this server's time zone: {exc}")
+        self._set_time_zone_controls()
+
+    @Slot()
+    def apply_time_zone(self) -> None:
+        """Ask once, then write the chosen zone on the job runner (T171)."""
+        route = self.services.time_zone
+        reading = self._time_zone_reading
+        zone = self._chosen_time_zone()
+        if (
+            route is None
+            or reading is None
+            or reading.problem is not None
+            or zone is None
+            or self._busy
+            or self._time_zone_pending
+            or self._time_zone_writing
+        ):
+            return
+        if not self._confirm(TIME_ZONE_TITLE, server_time_zone.question(self.entry, reading, zone)):
+            return
+        self._time_zone_writing = True
+        self._set_time_zone_controls()
+        self._say_time_zone("Setting…", f"setting the time zone to {zone}…")
+        self._run(partial(route.write, zone), self._time_zone_written, self._time_zone_failed)
+
+    @Slot(object)
+    def _time_zone_written(self, result: object) -> None:
+        self._time_zone_writing = False
+        if isinstance(result, server_time_zone.Written):
+            name = Path(result.file).name
+            if result.backup is None:
+                said = f"{name} already says {result.after}, so nothing was written."
+            else:
+                self._note_tuning_owed(result.file, result.rule)
+                said = (
+                    f"Time zone set to {result.after} in {name}; the file as it was is beside it "
+                    f"at {result.backup.name}. " + server_time_zone.WHEN_IT_COUNTS
+                )
+            self.tuning_report.setPlainText(said)
+        # Read again: the lists say what the disk says.
+        self._look_up_time_zone()
+
+    @Slot(object)
+    def _time_zone_failed(self, exc: object) -> None:
+        """A refusal `write()` raised (it wrote nothing), or a bug: said, and read again."""
+        self._time_zone_writing = False
+        self.tuning_report.setPlainText(f"The time zone was NOT changed: {exc}")
+        self.action_failed.emit(str(exc))
+        self._look_up_time_zone()
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
         """My Party's panel, or the one line saying why this game has none (8.6).
@@ -11797,6 +12131,8 @@ class ControllerView(QWidget):
         tab = QWidget(self)
         box = QVBoxLayout(tab)
         self.tuning_panel = TuningPanel(tab)
+        # T171: the time zone, above the cards and scrolling with them.
+        self.tuning_panel.set_header(self.time_zone_group)
         self.tuning_panel.save_pressed.connect(self.save_tuning)
         self.tuning_panel.revert_pressed.connect(self.revert_tuning)
         self.tuning_panel.file_selected.connect(self.open_tuning_file)
@@ -11967,6 +12303,8 @@ class ControllerView(QWidget):
         # T99: the bot count and this tab's bot card, read again the same way:
         # a save of that card moves the Bots tab's box, and a reset moves both.
         self._look_up_bot_count()
+        # T171: and the time zone, which a reset keeps but a hand edit moves.
+        self._look_up_time_zone()
 
     def _all_tuning_rows(self) -> tuple[tuning.TuningRow, ...]:
         """The modules' rows, then the server's own bot keys (T99, CMaNGOS and Tortoise).
@@ -12380,7 +12718,8 @@ class ControllerView(QWidget):
         if job == "recreate":
             self._tuning_owed.pop("recreate", None)
         self._refresh_tuning_owed()
-        self.tuning_report.setPlainText(f"{job}: done.")
+        zone = self._say_zone_problem()
+        self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
         self.refresh_status()
 
     @Slot(object)

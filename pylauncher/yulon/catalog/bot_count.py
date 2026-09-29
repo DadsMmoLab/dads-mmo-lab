@@ -19,9 +19,10 @@ Anything else -- no file, an unreadable one, a pair the server would not honour
 One reader for both formats where they meet: the pair rule (`pair`). The two
 files differ only in how a value is found -- a `KEY: "value"` line in one
 compose service, a `Key = value` line read by `tuning.conf_value` -- and that
-line scanner is here too, shared with the Bots tab's own reader
-(`bot_population`). Nothing here imports Qt, and every public function but
-`pair` reads the disk.
+line scanner (`compose_env` since T171, still reachable here by its old names)
+is shared with the Bots tab's own reader (`bot_population`) and the server's
+time zone. Nothing here imports Qt, and every public function but `pair` reads
+the disk.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from yulon import tuning
-from yulon.catalog import composegen
+from yulon.catalog import compose_env, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatchTable
 
 MIN_KEY = "AiPlayerbot.MinRandomBots"
@@ -44,11 +45,6 @@ LARGEST = 2**31 - 1
 """The largest whole number the cores read these keys as (`GetIntDefault`, `GetOption<int32>`)."""
 
 _WHOLE = re.compile(r"[0-9]+")
-
-ENV_LINE = re.compile(
-    r"^(?P<head>[ \t]*(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s#]*)(?P<tail>.*)$"
-)
 
 
 def pair(low: str | None, high: str | None) -> tuple[str, str] | None:
@@ -68,55 +64,10 @@ def pair(low: str | None, high: str | None) -> tuple[str, str] | None:
     return str(lo), str(hi)
 
 
-def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" \t"))
-
-
-def _says_nothing(line: str) -> bool:
-    bare = line.strip()
-    return bare == "" or bare.startswith("#")
-
-
-def env_lines(lines: list[str], service: str) -> dict[str, list[int]]:
-    """Where each key of `service`'s `environment:` mapping is, by line index. Comments skipped.
-
-    A line scanner and not a YAML round trip, on purpose: a YAML writer drops
-    comments and restyles what it emits (the override template's own header
-    says so), and the Bots box must change two values and nothing else. The
-    shape it reads is the one the install writes -- `  <service>:` then
-    `    environment:` then `      KEY: "value"` lines; a block it cannot find
-    answers `{}`.
-    """
-    found: dict[str, list[int]] = {}
-    service_at: int | None = None
-    env_at: int | None = None
-    for index, raw in enumerate(lines):
-        line = raw.rstrip("\r")
-        if _says_nothing(line):
-            continue
-        depth = _indent(line)
-        if env_at is not None and depth <= env_at:
-            env_at = None
-        if service_at is not None and depth <= service_at:
-            service_at = None
-        if service_at is None:
-            if line.strip() == f"{service}:":
-                service_at = depth
-            continue
-        if env_at is None:
-            if line.strip() == "environment:":
-                env_at = depth
-            continue
-        match = ENV_LINE.match(line)
-        if match is not None:
-            found.setdefault(match.group("key"), []).append(index)
-    return found
-
-
-def env_value(line: str) -> str:
-    """The value of one `KEY: value` line, quotes stripped."""
-    match = ENV_LINE.match(line.rstrip("\r"))
-    return "" if match is None else match.group("value").strip("\"'")
+ENV_LINE = compose_env.ENV_LINE
+env_lines = compose_env.env_lines
+env_value = compose_env.env_value
+"""The scanner, moved to `compose_env` for T171 (the time zone reads the same lines)."""
 
 
 def _text(path: Path) -> str | None:

@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from yulon import platform, tuning
-from yulon.catalog import bot_dashboard
+from yulon.catalog import bot_dashboard, time_zone
 from yulon.catalog.catalog import CatalogEntry, NativeInstall
 from yulon.log import get_logger
 
@@ -470,6 +470,7 @@ def render(
     bind_label: str = "",
     platform_id: Callable[[], str] = platform.detect,
     install_id: str | None = None,
+    new_install_zone: str | None = None,
 ) -> ComposePlan:
     """Render this entry's three compose files for an install in `server_dir`.
 
@@ -486,6 +487,16 @@ def render(
     off SELinux the rendered files are byte-identical to before 7.1. Never on a
     named volume — the templates put the token only on bind lines, and
     `test_composegen.py` counts them.
+
+    The override keeps the server's time zone (T171): the `TZ` lines of the
+    override this replaces are laid over the new one, whoever renders --
+    install, Repair, Update to latest, the channel's presses, Reset to default.
+    `new_install_zone` is the zone a NEW install gets when the folder holds no
+    Yu'lon base file yet (the install's stage passes this computer's); an
+    installed server without a zone is never given one (`time_zone.for_render`).
+    On a CMaNGOS game the zone's line brings the bind of the server's own zone
+    files, labelled like every other bind; the files themselves are the
+    WRITER's to copy (`time_zone.place`), since a render is also only compared.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, a template is
@@ -590,6 +601,23 @@ def render(
             "CHANNEL_SERVICE": _channel_service(entry, base, server_dir),
         },
     )
+    installed = server_dir / BASE_FILE
+    try:
+        override = time_zone.lay_over(
+            override,
+            entry,
+            time_zone.for_render(
+                entry,
+                _read_if_there(server_dir / OVERRIDE_FILE),
+                installed=installed.is_file() and is_ours(installed),
+                new_zone=new_install_zone,
+            ),
+            label=bind_label,
+        )
+    except time_zone.TimeZoneError as exc:  # the template's own shape; a test pins it
+        raise ComposeGenError(
+            f"the time zone could not be written into the override: {exc}"
+        ) from exc
     build = fill(
         texts["build.yml.tmpl"],
         {
