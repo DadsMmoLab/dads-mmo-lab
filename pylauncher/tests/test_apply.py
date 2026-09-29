@@ -4483,6 +4483,71 @@ def test_the_stopped_world_path_starts_the_database_and_says_so(tmp_path: Path) 
     assert sql.files == [("world", "up.sql")]
 
 
+_AUTH_ONLY: dict[str, Any] = {
+    "id": "auth-only",
+    "name": "Auth Only",
+    "type": "mod",
+    "game": "wow-wotlk",
+    "build": {"rebuild": False, "restart": True},
+    "sql": [{"db": "auth", "statement": "UPDATE realmlist SET name = 'x';"}],
+}
+"""Direct SQL, restart asked for, and not one step into `WORLD_HELD_DBS`."""
+
+
+@pytest.mark.parametrize(
+    ("case", "manifest", "seam", "has_runner", "expected", "asks"),
+    [
+        # The one case that sets it: asked, and the answer was an explicit no.
+        # Twice, because consulting the database start re-asks (see `_sql()`).
+        ("asked, not running", STACKABLES, True, True, True, 2),
+        # No seam: nothing was read about the world at all.
+        ("no seam", STACKABLES, False, True, False, 0),
+        # A seam that WOULD answer "not running", never asked: no world-held step.
+        ("no world-held step", _AUTH_ONLY, True, True, False, 0),
+        # A seam that WOULD answer "not running", never asked: no SQL runner.
+        ("no runner", STACKABLES, True, False, False, 0),
+    ],
+)
+def test_the_report_says_the_world_is_stopped_only_when_the_guard_read_it_so(
+    tmp_path: Path,
+    case: str,
+    manifest: dict[str, Any],
+    seam: bool,
+    has_runner: bool,
+    expected: bool,
+    asks: int,
+) -> None:
+    """`ApplyReport.world_stopped` is a reading, and nothing but a reading sets it (T130).
+
+    The Modules tab turns it into *"press Start"* in place of *"Press Stop and
+    then Start"*, so a `True` that no reading stood behind would tell a player
+    with a running world that it is stopped. Every negative case here is handed
+    a seam that answers "not running", so the only thing keeping the flag down
+    is that the seam was not ASKED -- which is what the counted asks show.
+
+    Catches the flag set whenever a seam exists, set from the manifest's
+    `build.restart`, or set before the guard's own early returns.
+    """
+    asked: list[int] = []
+
+    def world_running() -> bool:
+        asked.append(1)
+        return False
+
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeSql() if has_runner else None,
+        world_running=world_running if seam else None,
+        start_database=_StartDb(started=False),
+    )
+
+    report = applier.install(parse_manifest(manifest))
+
+    assert report.world_stopped is expected, case
+    assert len(asked) == asks, case
+
+
 def test_a_database_that_is_already_up_puts_no_line_in_the_report(tmp_path: Path) -> None:
     """`start_database()` no-ops on a running database, and so must the sentence.
 

@@ -13887,6 +13887,14 @@ def _format_report(report: ApplyReport) -> str:
                 f'also under "{SERVER_BUILD_LABEL}"); until that has run it is on disk and '
                 "inert."
             )
+    elif report.restart_recommended and report.world_stopped:
+        # T130: this run read the world as stopped immediately before its SQL,
+        # so Start is the one press owed. "Stop and then Start" worked -- Stop
+        # took down the database the run had started alone -- but it was a step
+        # nobody needed, told to a player who had just been asked to press Stop.
+        lines.append(
+            "  ⚠ The world server is stopped: press Start on the Server tab to apply this."
+        )
     elif report.restart_recommended:
         lines.append("  ⚠ Press Stop and then Start on the Server tab to apply this.")
     if report.pending_sql:

@@ -744,6 +744,33 @@ def test_a_world_that_cannot_be_read_refuses_here_and_still_permits_the_updater_
     assert sql.statements == [] and sql.files == []
 
 
+def test_the_subclass_keeps_every_field_of_the_engines_report(tmp_path: Path) -> None:
+    """The guard's note is ADDED to the base's report; nothing of the base's is dropped (T130).
+
+    `_with_note()` rebuilt the report field by field, so every field added to
+    `ApplyReport` after it was written fell off on this game alone: T62's
+    `left_behind` (a Remove here never said what it could not take back) and
+    T130's `world_stopped` (the tab told a player with a stopped world to press
+    Stop first).
+
+    Catches `_with_note()` rebuilding by hand again: a Remove of a mod whose
+    world SQL has no undo must still name what it left behind, and an Install
+    with the world read as stopped must still say so.
+    """
+    server_dir = _server_dir_with_conf(tmp_path)
+    applier = tortoise_modules.applier(
+        server_dir, sql=_RecordingSql(), arming=lambda: _disarmed(), world_running=lambda: False
+    )
+    manifest = parse_manifest(_WORLD_SQL_MOD)
+
+    installed = applier.install(manifest)
+    removed = applier.remove(manifest)
+
+    assert installed.world_stopped is True
+    assert any(line.startswith("auto-update guard:") for line in installed.done)
+    assert removed.left_behind == ("what its SQL wrote into the world database",)
+
+
 # ------------------------------------------------- T30: the two client addons
 
 
