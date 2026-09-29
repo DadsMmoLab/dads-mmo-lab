@@ -361,7 +361,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "(.notes/gates/t136-tortoise-pins/). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "ad9d71fb3ede4794e65789d9f2283ab2bcde1721", (
+    assert module.rev == "6f4d18124a2373d1f312c74faf9be28421e19c54", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -371,10 +371,17 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "T126), installed fresh and booted with its bots online on `yulon-ubuntu` 2026-09-26 "
         "(.notes/gates/t136-tortoise-pins/); T143 moved it to 632e1b63, the commit "
         "release v2026-09-26 names: 11 commits, no conf key, SQL or build change, LFT fill "
-        "and BG auto-queue on by default; and since T161 it is ad9d71fb, the commit release "
+        "and BG auto-queue on by default; T161 moved it to ad9d71fb, the commit release "
         "v2026-09-27 names: 62 commits, seven new default-on AI keys the install does not "
         "write, `HireRequiresResting` renamed `HireAnywhere` (off: hire at a recruiter), and "
-        "the recruiter spawn migration rewritten with explicit guids"
+        "the recruiter spawn migration rewritten with explicit guids; and since T168 it is "
+        "6f4d1812, the commit release v2026-09-28 names at its last build, v9 (upstream "
+        "moves the day's tag with every build that day; it named facc01f5, build v2, when "
+        "the ticket was filed): 18 commits, no conf key, build or core change, the rewritten "
+        "recruiter migration restored to its first release's bytes and the explicit guids "
+        "moved to a new one, travel-planning speed-ups, ghosts reviving at the core's 39 yd, "
+        "bag audits for gear, and the dashboard's anomaly reports throttled with its "
+        "protocol still 5"
     )
     for source in sources:
         assert re.fullmatch(
@@ -790,6 +797,8 @@ def test_the_fatal_pattern_catches_the_shape_this_core_dies_in() -> None:
         "[DB Auto-Updater] Migration 20260918120000_world with hash "
         "0123456789abcdef0123456789abcdef01234567 for module TortoiseBots exists in DB but "
         "not as file, old migration?",
+        # T168's pin: the same start-up line on the v2026-09-28 build.
+        "TortoiseBots 2026-09-28-v9 (AI enabled)",
     ):
         assert not re.search(
             ready.fatal, healthy
