@@ -4438,23 +4438,52 @@ REPAIR_FILES_OFFERED = ("stale", "upstream")
 """The `ComposeCheck` states the Server tab offers Repair server files… on (T106, T170)."""
 
 LOCK_FOLDER_BANNER = (
-    "This server's folder, {folder}, is not locked to your Windows account: it takes its "
-    "permissions from the folder above it, and a folder made directly on a drive such as C:\\ "
-    "lets every account on this computer read what is in it, the database password among it. "
-    "Repair server files… locks it to your account. Nothing changes until you press it."
+    "{readers} can read this server's folder, {folder}, and with it the database password in its "
+    "files. Repair server files… locks it to your Windows account. Nothing changes until you "
+    "press it."
 )
-"""T174's banner, for a Windows install made before the install locked its folder."""
+"""T174's banner, for a Windows server folder somebody else can read (`exposed`)."""
 
 LOCK_FOLDER_CONFIRM = (
-    "Lock this server's folder to your Windows account?\n\n{folder} takes its permissions "
-    "from the folder above it. Yu'lon gives it its own instead: full control for your account, "
-    "SYSTEM and Administrators, and nothing for anyone else, handed down to every file and "
-    "folder inside it. The .env file, the settings files and their backups hold the database "
-    "password, so after this the computer's other accounts cannot read them.\n\nNothing is "
-    "moved or rewritten, and nothing needs restarting: the server keeps running, and Docker "
-    "Desktop reads and writes the folder as before. On a large server folder this can take a "
-    "minute."
+    "Lock this server's folder to your Windows account?\n\nToday {readers} can read {folder}. "
+    "Yu'lon gives it its own permissions instead: full control for your account, SYSTEM and "
+    "Administrators, and nothing for anyone else, handed down to every file and folder inside "
+    "it. The .env file, the settings files and their backups hold the database password, so "
+    "after this the computer's other accounts cannot read them.{chosen}\n\nNothing is moved or "
+    "rewritten, and nothing needs restarting: the server keeps running, and Docker Desktop "
+    "reads and writes the folder as before. On a large server folder this can take a minute."
 )
+
+LOCK_FOLDER_CHOSEN = (
+    "\n\n{names} {verb} access to this folder that somebody gave on this PC, and {loses} it "
+    "too. If {pronoun} still {needs} it, it has to be given back by hand afterwards."
+)
+"""The confirmation's paragraph for readers that are not a broad default group (round 2)."""
+
+
+def _and_list(names: Sequence[str]) -> str:
+    """`A`, `A and B`, `A, B and C`."""
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def lock_folder_question(folder: Path, check: serverlock.FolderLockCheck) -> str:
+    """The question before a lock, naming who can read the folder today and who loses access."""
+    chosen = ""
+    if check.chosen:
+        many = len(check.chosen) > 1
+        chosen = LOCK_FOLDER_CHOSEN.format(
+            names=_and_list(check.chosen),
+            verb="have" if many else "has",
+            loses="lose" if many else "loses",
+            pronoun="they" if many else "it",
+            needs="need" if many else "needs",
+        )
+    return LOCK_FOLDER_CONFIRM.format(
+        readers=_and_list(check.readers), folder=folder, chosen=chosen
+    )
+
 
 LOCK_FOLDER_DONE = (
     "{folder} is locked to your Windows account: only you, SYSTEM and Administrators can open it "
@@ -5175,6 +5204,7 @@ class ControllerView(QWidget):
         self._confs_pending = False
         # T174: what the last folder-lock check said, and whether one is out.
         self._lock_state: serverlock.LockState | None = None
+        self._lock_check: serverlock.FolderLockCheck | None = None
         self._lock_pending = False
         # T129: what the last corrections check said. Taken once each time the
         # database comes up (`_ask_about_the_import`), dropped when it goes.
@@ -12489,6 +12519,7 @@ class ControllerView(QWidget):
         self._lock_pending = False
         if isinstance(result, serverlock.FolderLockCheck):
             self._lock_state = result.state
+            self._lock_check = result
             if result.state == "unknown":
                 logger.info(f"{self.entry.id}: no folder lock offered: {result.why}")
         self._refresh_compose_banner()
@@ -12581,9 +12612,17 @@ class ControllerView(QWidget):
             self.compose_banner_label.setText(REPAIR_CONFS_BANNER.format(**names))
             self.compose_banner_button.setText(REPAIR_FILES_LABEL)
             self.compose_banner.setVisible(True)
-        elif self._lock_state == "open" and self.services.lock_folder is not None:
-            folder = self.services.lock_folder.folder
-            self.compose_banner_label.setText(LOCK_FOLDER_BANNER.format(folder=folder))
+        elif (
+            self._lock_state == "exposed"
+            and self._lock_check is not None
+            and self.services.lock_folder is not None
+        ):
+            self.compose_banner_label.setText(
+                LOCK_FOLDER_BANNER.format(
+                    readers=_and_list(self._lock_check.readers),
+                    folder=self.services.lock_folder.folder,
+                )
+            )
             self.compose_banner_button.setText(REPAIR_FILES_LABEL)
             self.compose_banner.setVisible(True)
         else:
@@ -12606,14 +12645,17 @@ class ControllerView(QWidget):
         The owner's decision: the player chooses when, and nothing changes behind
         their back. The dialog says what is written, what is kept and that the
         recreate comes next. With no stale compose file and a module conf
-        missing, the same press is T137's instead (`_repair_confs()`).
+        missing, the same press is T137's instead (`_repair_confs()`); with
+        neither, and a server folder somebody else can read, T174's lock
+        (`_lock_server_folder()`). A compose file on offer -- `stale`, or since
+        T170 `upstream` -- always goes first (cold review, round 2).
         """
         if self._busy:
             return
         if self._compose_state not in REPAIR_FILES_OFFERED and self._confs_missing:
             self._repair_confs()
             return
-        if self._compose_state != "stale" and self._lock_state == "open":
+        if self._compose_state not in REPAIR_FILES_OFFERED and self._lock_state == "exposed":
             self._lock_server_folder()
             return
         route = self.services.repair_compose
@@ -12715,9 +12757,10 @@ class ControllerView(QWidget):
         reads and writes a locked folder, so the running containers keep working).
         """
         route = self.services.lock_folder
-        if route is None:
+        last = self._lock_check
+        if route is None or last is None:
             return
-        if not self._confirm(REPAIR_FILES_LABEL, LOCK_FOLDER_CONFIRM.format(folder=route.folder)):
+        if not self._confirm(REPAIR_FILES_LABEL, lock_folder_question(route.folder, last)):
             return
         self.problem_label.setText("")
         self._set_busy(True)
@@ -12726,6 +12769,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_folder_locked(self, result: object) -> None:
         self._lock_state = None
+        self._lock_check = None
         if self.services.lock_folder is not None:
             self.problem_label.setText(
                 (LOCK_FOLDER_DONE if result is True else LOCK_FOLDER_ALREADY).format(

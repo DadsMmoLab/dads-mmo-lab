@@ -6895,8 +6895,16 @@ class StagedInstaller:
         Install only. A rebuild, an update or an adoption goes through
         `_staged()` without this: changing an existing folder's permissions is
         Repair server files…'s offer (`serverlock.route_for_app()`). Off Windows
-        the wrapper asks nothing. A lock that fails says so once and the stages
-        run as they did before T174 (`serverlock.InstallLock`).
+        the wrapper asks nothing. A lock that fails says so once, the stages run
+        as they did before T174, and the next stage asks again
+        (`serverlock.InstallLock`).
+
+        A resume locks the folder it resumes in, and so does a resume of an
+        install begun before T174: the folder holds its record, so its first
+        stage this time locks what is already there, the secrets an earlier run
+        wrote included (`serverlock.py`: the lock is carried onto what inherits).
+        A folder that grants a SPECIFIC account or group is left as it is and
+        said so (`serverlock.InstallLock`); Repair server files… offers it.
 
         Only a folder that is ours: one the install `started_empty` in, or one
         holding this install's record. The one other folder a stage meets is

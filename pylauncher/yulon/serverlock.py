@@ -39,18 +39,33 @@ Yu'lon writes no such file. Walking a large server folder (a WotLK checkout
 and its client data) takes as long as Windows needs to rewrite each file's
 descriptor; nothing else waits on it.
 
-**When.** At install, before each stage (`native.StagedInstaller.run()`),
-which is before the first byte of any secret; checked again before every
-stage, not only once, because WotLK's `clone-core` clones INTO the server
-folder and both clone seams begin by removing a destination with no `.git`
-(`as_the_clone_seam_does()` in the tests) -- the folder the clone leaves is a
-new one, with the inherited DACL. For an install made before this, Repair
-server files… offers it (`route_for_app()`), because changing an existing
-folder's permissions is the player's choice to make.
+**When, and which folders.** At install, before each stage
+(`native.StagedInstaller.run()`), which is before the first byte of any
+secret; checked again before every stage, not only once, because WotLK's
+`clone-core` clones INTO the server folder and both clone seams begin by
+removing a destination with no `.git` (`as_the_clone_seam_does()` in the
+tests) -- the folder the clone leaves is a new one, with the inherited DACL.
+
+The install narrows a folder on its own only when everything it takes away is
+a BROAD default group (`BROAD_GROUPS`: `Users`, `Authenticated Users`,
+`Everyone` and their like), which is what a folder under `C:\\` inherits and
+nobody chose. A folder that also grants a SPECIFIC account or group -- a
+person on this PC, a domain group, a backup service -- was set up that way by
+somebody, and is left as it is: the install says so, and Repair server files…
+offers the lock with a question that names who would lose access (the lead's
+decision, round 2).
+
+For an install made before this, Repair server files… offers it only when the
+folder is `exposed`: an account other than this one, SYSTEM and Administrators
+can read it (`check()`). A folder under the profile inherits exactly those
+three and is `private`, and nothing is offered for it: locking it would change
+nothing anyone could read.
 
 **A failure is a warning, never a stop** (T151's rule). An install that could
-not lock its folder writes the same files it wrote before T174, and says so;
-Repair's press says why it did not. Off Windows nothing here does anything:
+not lock its folder writes the same files it wrote before T174, says so once,
+and asks again before the next stage (Codex, round 2): WotLK's clone makes the
+folder anew, and a folder that refused before the clone may not refuse after
+it. Repair's press says why it did not. Off Windows nothing here does anything:
 there the 0o600 modes are real.
 
 **Not a server inside a WSL distro.** That folder lives on the distro's own
@@ -77,21 +92,120 @@ class FolderLockError(OSError):
     """The folder could not be locked; the message says why, in Windows' own words."""
 
 
-LockState = Literal["locked", "open", "unknown"]
+BROAD_GROUPS: dict[str, str] = {
+    "S-1-1-0": "Everyone",
+    "S-1-2-0": "LOCAL",
+    "S-1-2-1": "CONSOLE LOGON",
+    "S-1-5-2": "NETWORK",
+    "S-1-5-4": "INTERACTIVE",
+    "S-1-5-7": "ANONYMOUS LOGON",
+    "S-1-5-11": "Authenticated Users",
+    "S-1-5-32-545": "Users",
+    "S-1-5-32-546": "Guests",
+    "S-1-15-2-1": "ALL APPLICATION PACKAGES",
+    "S-1-15-2-2": "ALL RESTRICTED APPLICATION PACKAGES",
+}
+"""Well-known groups that mean "anybody", and the name each is shown by if Windows gives none.
+
+Every one is a fixed SID, the same on every PC, that Windows itself hands down
+(`C:\\` gives `Users` and `Authenticated Users`) rather than one a person adds
+for somebody. `Domain Users` is deliberately not here: its SID carries a
+domain's own number, so it cannot be told from a group somebody made, and a
+domain PC's folder is one an administrator may have set up on purpose."""
+
+_NOBODY_ELSE = frozenset({"S-1-3-0", "S-1-3-4"})
+"""`CREATOR OWNER` and `OWNER RIGHTS`: placeholders for whoever owns a file, not another reader."""
+
+_RIGHTS = {
+    "CC": 0x1,
+    "DC": 0x2,
+    "LC": 0x4,
+    "SW": 0x8,
+    "RP": 0x10,
+    "WP": 0x20,
+    "DT": 0x40,
+    "LO": 0x80,
+    "CR": 0x100,
+    "SD": 0x10000,
+    "RC": 0x20000,
+    "WD": 0x40000,
+    "WO": 0x80000,
+    "GA": 0x10000000,
+    "GX": 0x20000000,
+    "GW": 0x40000000,
+    "GR": 0x80000000,
+    "FA": 0x1F01FF,
+    "FR": 0x120089,
+    "FW": 0x120116,
+    "FX": 0x1200A0,
+}
+"""SDDL's two-letter rights, as the bits they stand for on a file. `CC` is `FILE_READ_DATA`."""
+
+_READS = 0x1 | 0x10000000 | 0x80000000
+"""`FILE_READ_DATA` (list, on a folder), `GENERIC_ALL`, `GENERIC_READ`: rights that show content."""
+
+
+def _can_read(rights: str) -> bool:
+    """Does this ACE's rights field let its trustee read a file's content? Unknown means yes."""
+    text = rights.upper()
+    if text.startswith("0X"):
+        try:
+            return bool(int(text, 16) & _READS)
+        except ValueError:
+            return True
+    tokens = [text[i : i + 2] for i in range(0, len(text), 2)]
+    if not tokens or any(token not in _RIGHTS for token in tokens):
+        return True
+    mask = 0
+    for token in tokens:
+        mask |= _RIGHTS[token]
+    return bool(mask & _READS)
+
+
+def readers(sddl: str, user_sid: str) -> tuple[str, ...]:
+    """Every trustee but this account, SYSTEM and Administrators that this DACL lets read.
+
+    As SIDs, in the DACL's order, each once. An allow entry counts whether it
+    applies to the folder or only to what is made inside it (`IO`): the secrets
+    are what is made inside. A deny entry takes access away and never counts.
+    A trustee Windows cannot turn into a SID is kept as it is spelt: somebody
+    nobody can name is somebody else.
+    """
+    mine = {*winacl.trustees(user_sid), *_NOBODY_ELSE}
+    seen: list[str] = []
+    for body in winacl._ACE.findall(sddl):
+        fields = body.split(";")
+        if len(fields) < 6 or fields[0] != "A" or not _can_read(fields[2]):
+            continue
+        try:
+            sid = winacl._sid_of(fields[5])
+        except Exception:  # noqa: BLE001 - an entry nobody can name is an answer
+            sid = fields[5]
+        if sid not in mine and sid not in seen:
+            seen.append(sid)
+    return tuple(seen)
+
+
+LockState = Literal["locked", "private", "exposed", "unknown"]
 
 
 @dataclass(frozen=True)
 class FolderLockCheck:
-    """Is this server folder locked to this account? A reading; never raises.
+    """Who can read this server folder today, beside this account. A reading; never raises.
 
-    `open` is the one state Repair server files… offers the lock on: the folder
-    takes its permissions from the folder above it, or has any other DACL than
-    the owner-only one. `unknown` carries `why` -- the folder is not there, or
-    Windows would not say -- and offers nothing.
+    `locked`: the owner-only DACL. `private`: not that DACL, but nobody beside
+    this account, SYSTEM and Administrators can read it -- a folder under the
+    profile, inherited. `exposed`, the one state Repair server files… offers the
+    lock on: `readers` names who else can read it, and `chosen` those of them
+    that are not a broad default group, whom somebody gave access on purpose.
+    `unknown` carries `why` -- the folder is not there, or Windows would not
+    say -- and offers nothing.
     """
 
     state: LockState
     why: str = ""
+    readers: tuple[str, ...] = ()
+    chosen: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,18 +227,25 @@ def applies() -> bool:
 
 
 def _owner_only(sddl: str, user_sid: str) -> bool:
-    """`winacl.is_owner_only`, the one place this module asks it.
+    """`winacl.is_owner_only`, with Windows' own alias table (`_sid_of`), as `secure_folder` asks.
 
-    Once `is_owner_only` takes T151 round 2's `sid_of`, this passes
-    `sid_of=winacl._sid_of` as `secure_folder` does; without it a folder of
-    this PC's built-in Administrator, which Windows spells `LA`, never reads
-    as locked and every stage would lock it again.
+    Without `sid_of` the check folds only `SY` and `BA`, so a folder of this
+    PC's built-in Administrator, whose entry Windows spells `LA`, never read as
+    locked, and every stage would have locked it again (cold review, round 2).
     """
-    return winacl.is_owner_only(sddl, user_sid)
+    return winacl.is_owner_only(sddl, user_sid, sid_of=winacl._sid_of)
+
+
+def name_of(sid: str) -> str:
+    """How the player knows a trustee: Windows' own account name, or a broad group's, or the SID."""
+    try:
+        return _account_name(sid)
+    except Exception:  # noqa: BLE001 - a name is a courtesy; the SID is still the truth
+        return BROAD_GROUPS.get(sid, sid)
 
 
 def check(folder: Path) -> FolderLockCheck:
-    """Read `folder`'s DACL and say whether it is the owner-only one. Never raises."""
+    """Read `folder`'s DACL and say who, beside this account, can read it. Never raises."""
     if not applies():
         return FolderLockCheck("unknown", "only a Windows folder has a DACL to lock")
     if not folder.is_dir():
@@ -132,9 +253,18 @@ def check(folder: Path) -> FolderLockCheck:
     try:
         user_sid = winacl._user_sid()
         dacl = winacl._read_dacl(folder)
+        if _owner_only(dacl, user_sid):
+            return FolderLockCheck("locked")
+        others = readers(dacl, user_sid)
     except Exception as exc:  # noqa: BLE001 - a reading must never cost the tab
         return FolderLockCheck("unknown", f"Windows would not say who may open {folder}: {exc}")
-    return FolderLockCheck("locked" if _owner_only(dacl, user_sid) else "open")
+    if not others:
+        return FolderLockCheck("private")
+    return FolderLockCheck(
+        "exposed",
+        readers=tuple(name_of(sid) for sid in others),
+        chosen=tuple(name_of(sid) for sid in others if sid not in BROAD_GROUPS),
+    )
 
 
 def lock(folder: Path) -> bool:
@@ -156,9 +286,10 @@ def lock(folder: Path) -> bool:
             return False
         winacl._apply_dacl(folder, winacl.owner_only_sddl(user_sid))
         after = winacl._read_dacl(folder)
+        kept = _owner_only(after, user_sid)
     except Exception as exc:  # noqa: BLE001 - every failure is the same sentence
         raise FolderLockError(f"{type(exc).__name__}: {exc}") from exc
-    if not _owner_only(after, user_sid):
+    if not kept:
         raise FolderLockError(f"Windows accepted the change and the folder still reads {after}")
     logger.info(f"locked {folder} to this account (T174); it was {before}")
     return True
@@ -171,42 +302,61 @@ LOCKED_LINE = (
 )
 
 NOT_LOCKED_LINE = (
-    "Could not lock {folder} to your Windows account ({reason}). The install carries on without "
-    "it: the files it writes there take the permissions the folder above hands down, and a "
-    "folder made directly on a drive such as C:\\ lets every account on this computer read "
-    "them. Once the server is installed, Repair server files… on its Server tab offers the lock "
-    "again."
+    "Could not lock {folder} to your Windows account ({reason}). The install carries on, and "
+    "tries again before each step; until it succeeds, the files it writes there take the "
+    "permissions the folder above hands down, and a folder made directly on a drive such as "
+    "C:\\ lets every account on this computer read them. Once the server is installed, Repair "
+    "server files… on its Server tab offers the lock again."
+)
+
+LEFT_LINE = (
+    "{folder} lets {chosen} read it, which somebody set up on this PC, so the install leaves "
+    "its permissions as they are. Repair server files… on the server's Server tab can lock it "
+    "to your Windows account, and says first who would lose access."
 )
 
 
 class InstallLock:
-    """The lock one install run keeps on its folder: asked before every stage, said once.
+    """The lock one install run keeps on its folder: asked before every stage, each line said once.
 
     The first lock that changes anything is said; a later one -- WotLK's folder,
-    made again by its clone -- is logged only. The first failure is said and
-    ends the asking for this run, so a folder that refuses is one warning, not
-    one per stage.
+    made again by its clone -- is logged only. A failure is said once and asked
+    again before every later stage (round 2). A folder that grants somebody
+    specific is left, and said once.
     """
 
     def __init__(self, folder: Path) -> None:
         self.folder = folder
-        self._said = False
-        self._gave_up = False
+        self._said: set[str] = set()
+
+    def _once(self, key: str, line: str) -> Iterator[str]:
+        if key not in self._said:
+            self._said.add(key)
+            yield line
 
     def ensure(self) -> Iterator[str]:
-        """Lock the folder if it is not locked; yield what the player should read, if anything."""
-        if self._gave_up or not applies() or not self.folder.is_dir():
+        """Lock the folder if it is not locked and may be; yield what the player should read."""
+        if not applies() or not self.folder.is_dir():
             return
         try:
+            user_sid = winacl._user_sid()
+            dacl = winacl._read_dacl(self.folder)
+            others = () if _owner_only(dacl, user_sid) else readers(dacl, user_sid)
+            chosen = [sid for sid in others if sid not in BROAD_GROUPS]
+            if chosen:
+                names = ", ".join(name_of(sid) for sid in chosen)
+                if "left" not in self._said:
+                    logger.info(f"left {self.folder} as it is: it also lets {names} read it")
+                yield from self._once("left", LEFT_LINE.format(folder=self.folder, chosen=names))
+                return
             changed = lock(self.folder)
-        except FolderLockError as exc:
-            self._gave_up = True
-            logger.warning(f"could not lock {self.folder} to this account: {exc}")
-            yield NOT_LOCKED_LINE.format(folder=self.folder, reason=exc)
+        except Exception as exc:  # noqa: BLE001 - a lock never costs the install
+            if "failed" not in self._said:
+                logger.warning(f"could not lock {self.folder} to this account: {exc}")
+            yield from self._once("failed", NOT_LOCKED_LINE.format(folder=self.folder, reason=exc))
             return
-        if changed and not self._said:
-            self._said = True
-            yield LOCKED_LINE.format(folder=self.folder)
+        if changed:
+            yield from self._once("locked", LOCKED_LINE.format(folder=self.folder))
 
 
 def route_for_app(server_dir: Path, *, wsl_distro: str | None = None) -> FolderLockRoute | None:
@@ -222,3 +372,47 @@ def route_for_app(server_dir: Path, *, wsl_distro: str | None = None) -> FolderL
         check=lambda: check(server_dir),
         lock=lambda: lock(server_dir),
     )
+
+
+def _account_name(sid: str) -> str:  # pragma: no cover - Windows only
+    """`DOMAIN\\name` for a SID string, from `LookupAccountSidW`; a well-known group has no domain.
+
+    Windows' own names, in the PC's language, which is how the player sees them
+    in the folder's Security tab.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32, kernel32 = winacl._dlls()
+    advapi32.LookupAccountSidW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    advapi32.LookupAccountSidW.restype = wintypes.BOOL
+    psid = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(sid, ctypes.byref(psid)):
+        raise winacl._failed(f"ConvertStringSidToSidW({sid})")
+    try:
+        name = ctypes.create_unicode_buffer(256)
+        domain = ctypes.create_unicode_buffer(256)
+        name_size = wintypes.DWORD(256)
+        domain_size = wintypes.DWORD(256)
+        use = ctypes.c_int()
+        if not advapi32.LookupAccountSidW(
+            None,
+            psid,
+            name,
+            ctypes.byref(name_size),
+            domain,
+            ctypes.byref(domain_size),
+            ctypes.byref(use),
+        ):
+            raise winacl._failed(f"LookupAccountSidW({sid})")
+        return f"{domain.value}\\{name.value}" if domain.value else name.value
+    finally:
+        kernel32.LocalFree(psid)
