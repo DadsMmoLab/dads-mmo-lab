@@ -2659,6 +2659,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "belong to a write still in flight in another copy of Yu'lon. It touches nothing of "
         "a server's and answers an empty listing by doing nothing"
     ),
+    ("play_client.py", "plan"): (
+        "T181a. Walks the player's own client to sort its files into hard-linked (`*.MPQ`, "
+        "`*.dll`) and copied, for a ready-to-play client built BESIDE it. The listing decides "
+        "what is read from the original, never a write into it: every write goes to "
+        "`<target>.yulon-partial`, and `plan()` refuses a target that is the original or "
+        "inside it before it lists anything. An OSError propagates, and `create()` turns it "
+        "into a refusal with the unfinished folder removed - never a partial client "
+        "reported as built"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 
