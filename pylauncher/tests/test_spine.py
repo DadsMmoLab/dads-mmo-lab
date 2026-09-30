@@ -2668,6 +2668,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "into a refusal with the unfinished folder removed - never a partial client "
         "reported as built"
     ),
+    ("play_client.py", "remove_folder"): (
+        "T181a fix round 1. Walks, bottom up, a folder this app is DELETING: an unfinished "
+        "`<target>.yulon-partial` of this same build, or a leftover whose marker names this "
+        "game and server. The listing decides what is deleted, but only inside a folder "
+        "the caller already proved is Yu'lon's by its marker; it never follows a symlink, "
+        "and a failure to list or delete raises rather than reporting a folder removed"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 

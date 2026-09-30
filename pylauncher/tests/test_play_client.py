@@ -369,3 +369,198 @@ def test_a_marker_in_the_original_is_not_copied_over_the_new_one(tmp_path: Path)
     build(orig, target, tmp_path, game="mine")
     marker = play_client.read_marker(target)
     assert marker is not None and marker.game == "mine"
+
+
+# -- fix round 1 --------------------------------------------------------------
+
+
+def test_a_marked_partial_of_another_server_is_left_alone(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+    partial = partial_of(target)
+    partial.mkdir()
+    (partial / "half.bin").write_bytes(b"x")
+    theirs = play_client.Marker(
+        game="g", server_dir=tmp_path / "other-server", source_client_dir=orig, created_at=WHEN
+    )
+    (partial / play_client.MARKER).write_text(theirs.model_dump_json(), encoding="utf-8")
+    with pytest.raises(play_client.PlayClientError, match="another server.*[Cc]hoose another"):
+        build(orig, target, tmp_path, game="g", server_dir=tmp_path / "s")
+    assert (partial / "half.bin").read_bytes() == b"x"
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_cleanup_leaves_a_read_only_original_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+    mpq = orig / "Data" / "common.MPQ"
+    os.chmod(mpq, 0o444)
+    before = mpq.stat().st_mode
+    blocked: list[str] = []
+
+    def windows_like_unlink(path: object) -> None:
+        # Windows refuses to delete a file whose read-only attribute is set.
+        if not os.lstat(path).st_mode & 0o200:  # type: ignore[arg-type]
+            blocked.append(str(path))
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        os.unlink(path)  # type: ignore[arg-type]
+
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, **kw, unlink=windows_like_unlink),
+    )
+    linked: list[Path] = []
+
+    def counting_link(src: Path, dst: Path) -> None:
+        os.link(src, dst)
+        linked.append(Path(src))
+
+    def broken_copy(src: object, dst: object, **kw: object) -> object:
+        raise OSError(errno.EIO, "I/O error")  # after every linked file is in place
+
+    monkeypatch.setattr(play_client.shutil, "copy2", broken_copy)
+    with pytest.raises(play_client.PlayClientError, match="I/O error"):
+        build(orig, target, tmp_path, link=counting_link)
+    assert mpq in linked
+    assert str(partial_of(target) / "Data" / "common.MPQ") in blocked, "read-only path not hit"
+    assert not partial_of(target).exists()
+    assert mpq.stat().st_mode == before
+
+
+def test_default_target_stays_plain_when_free_or_this_servers(tmp_path: Path) -> None:
+    orig = tmp_path / "WoW"
+    plain = tmp_path / "WoW (Yu'lon – WoW WotLK)"
+    assert play_client.default_target(orig, "WoW WotLK", tmp_path / "srv") == plain
+    plain.mkdir()
+    mine = play_client.Marker(
+        game="g", server_dir=tmp_path / "srv", source_client_dir=orig, created_at=WHEN
+    )
+    (plain / play_client.MARKER).write_text(mine.model_dump_json(), encoding="utf-8")
+    assert play_client.default_target(orig, "WoW WotLK", tmp_path / "srv") == plain
+
+
+def test_default_target_names_the_server_when_another_server_has_the_plain_name(
+    tmp_path: Path,
+) -> None:
+    orig = tmp_path / "WoW"
+    plain = tmp_path / "WoW (Yu'lon – WoW WotLK)"
+    plain.mkdir()
+    theirs = play_client.Marker(
+        game="g", server_dir=tmp_path / "srv-a", source_client_dir=orig, created_at=WHEN
+    )
+    (plain / play_client.MARKER).write_text(theirs.model_dump_json(), encoding="utf-8")
+    assert play_client.default_target(orig, "WoW WotLK", tmp_path / "srv-b") == (
+        tmp_path / "WoW (Yu'lon – WoW WotLK, srv-b)"
+    )
+
+
+def test_default_target_names_the_server_when_the_plain_name_is_not_yulons(
+    tmp_path: Path,
+) -> None:
+    orig = tmp_path / "WoW"
+    (tmp_path / "WoW (Yu'lon – WoW WotLK)").mkdir()
+    assert play_client.default_target(orig, "WoW WotLK", tmp_path / "srv-b") == (
+        tmp_path / "WoW (Yu'lon – WoW WotLK, srv-b)"
+    )
+
+
+def test_plan_names_the_other_server_a_target_belongs_to(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+    build(orig, target, tmp_path, server_dir=tmp_path / "srv-a")
+    with pytest.raises(play_client.PlayClientError, match="another server at .*srv-a") as info:
+        play_client.plan(orig, target, server_dir=tmp_path / "srv-b")
+    assert "Refresh" not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "code",
+    sorted({errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EMLINK}),
+    ids=errno.errorcode.get,
+)
+def test_a_drive_that_cannot_hard_link_needs_consent_then_copies(tmp_path: Path, code: int) -> None:
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+
+    def cannot(src: Path, dst: Path) -> None:
+        raise OSError(code, os.strerror(code))
+
+    with pytest.raises(play_client.PlayClientError, match="cannot share files.*full copy needs"):
+        build(orig, target, tmp_path, link=cannot)
+    assert not target.exists() and not partial_of(target).exists()
+    build(orig, target, tmp_path, link=cannot, allow_full_copy=True)
+    assert (target / "Data/common.MPQ").read_bytes() == (orig / "Data/common.MPQ").read_bytes()
+    assert not os.path.samefile(orig / "Data/common.MPQ", target / "Data/common.MPQ")
+
+
+def test_windows_invalid_function_on_link_needs_consent(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+
+    def invalid_function(src: Path, dst: Path) -> None:
+        exc = OSError(errno.EINVAL, "Incorrect function")
+        exc.winerror = 1  # type: ignore[attr-defined]
+        raise exc
+
+    with pytest.raises(play_client.PlayClientError, match="cannot share files"):
+        build(orig, target, tmp_path, link=invalid_function)
+
+
+def test_a_cleanup_that_fails_does_not_claim_the_folder_was_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+
+    def stuck(folder: Path, **kw: object) -> None:
+        raise PermissionError(errno.EACCES, "in use", str(folder))
+
+    def denied(src: Path, dst: Path) -> None:
+        raise PermissionError(errno.EACCES, "Access is denied")
+
+    monkeypatch.setattr(play_client, "remove_folder", stuck)
+    with pytest.raises(play_client.PlayClientError, match="could not be removed") as info:
+        build(orig, target, tmp_path, link=denied)
+    assert "was removed" not in str(info.value)
+    assert "next attempt" in str(info.value)
+    assert play_client.read_marker(partial_of(target)) is not None
+
+
+def test_a_full_copy_that_runs_out_of_space_counts_the_shared_files_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    with open(orig / "Data" / "common.MPQ", "r+b") as f:
+        f.truncate(64 * 1024**2)  # 0.0625 GiB: "0.1 GB" counted, "0.0 GB" if left out
+    target = tmp_path / "t"
+
+    def exdev(src: Path, dst: Path) -> None:
+        raise OSError(errno.EXDEV, "cross-device")
+
+    def full_disk(src: object, dst: object, **kw: object) -> object:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(play_client.shutil, "copy2", full_disk)
+    with pytest.raises(play_client.PlayClientError, match=r"needs 0\.1 GB"):
+        build(orig, target, tmp_path, link=exdev, allow_full_copy=True)
+
+
+def test_running_out_of_space_while_linking_counts_only_the_own_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    with open(orig / "Data" / "common.MPQ", "r+b") as f:
+        f.truncate(64 * 1024**2)
+    target = tmp_path / "t"
+
+    def full_disk(src: object, dst: object, **kw: object) -> object:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(play_client.shutil, "copy2", full_disk)
+    with pytest.raises(play_client.PlayClientError, match=r"needs 0\.0 GB"):
+        build(orig, target, tmp_path)
