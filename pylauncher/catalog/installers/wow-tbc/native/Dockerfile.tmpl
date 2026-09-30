@@ -78,10 +78,21 @@ ENV CXX=/usr/bin/g++-12
 COPY src/mangos-tbc /src/mangos-tbc
 
 WORKDIR /src/mangos-tbc
+# FETCHCONTENT_SOURCE_DIR_PLAYERBOTS is what makes the bots compiled the pinned
+# ones. With BUILD_PLAYERBOTS on, the core's own src/CMakeLists.txt declares
+# PlayerBots with `GIT_TAG "master"` and populates it at configure time into
+# src/modules/PlayerBots, so without this flag the image compiled whatever
+# cmangos/playerbots master was that day, while the SQL the import applies
+# comes from the pinned checkout the COPY above puts at src/modules/Bots. The
+# two must be the same commit. Measured (T180): the T135 installs of 2026-09-26
+# logged `Playerbots module source dir: /src/mangos-tbc/src/modules/PlayerBots`,
+# and from master c1193bcb (2026-09-29) every Vanilla build failed inside that
+# fetched tree. With the flag, CMake downloads nothing and builds the pin.
 RUN mkdir -p build && cd build && \
     cmake .. \
         -DCMAKE_INSTALL_PREFIX={{CORE_DIR}} \
         -DBUILD_PLAYERBOTS=1 \
+        -DFETCHCONTENT_SOURCE_DIR_PLAYERBOTS=/src/mangos-tbc/src/modules/Bots \
         -DBUILD_AHBOT=1 \
         -DBUILD_EXTRACTORS=1 \
         -DBUILD_GAME_SERVER=1 \

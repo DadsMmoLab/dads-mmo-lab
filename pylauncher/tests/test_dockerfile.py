@@ -18,6 +18,7 @@ project can ship silently:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -1404,3 +1405,197 @@ def test_the_ready_wait_outlasts_a_measured_first_boot(entry: CatalogEntry) -> N
         f"{entry.id} gives up after {ready.timeout_s}s, under the 793s a TBC first boot "
         "actually took -- a working server reported as a failed install"
     )
+
+
+# -- T180: the playerbots module compiled is the one the catalog pins ----------
+
+PLAYERBOTS_OVERRIDE = "-DFETCHCONTENT_SOURCE_DIR_PLAYERBOTS="
+"""The CMake cache variable that points the core's `FetchContent_Declare(PlayerBots ...
+GIT_TAG "master")` at a checkout already on disk, so configure downloads nothing."""
+
+
+def nested_playerbots(entry: CatalogEntry) -> list[str]:
+    """The `dest` of every cmangos playerbots checkout the entry nests inside a core's
+    `src/modules/` -- the layout whose core fetches playerbots master on its own."""
+    return [
+        source.dest
+        for source in entry.emulator.sources
+        if source.repo.lower().endswith("/playerbots") and "/src/modules/" in f"/{source.dest}"
+    ]
+
+
+def logical_lines(text: str) -> list[str]:
+    """The Dockerfile's instructions, each with its `\\` continuations joined and the
+    comment lines between them dropped -- so a flag counts only where docker runs it."""
+    lines: list[str] = []
+    pending = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        lines.append(pending + line)
+        pending = ""
+    if pending:
+        lines.append(pending)
+    return lines
+
+
+def image_path(text: str, dest: str) -> str | None:
+    """Where the build-context path `dest` lands in the builder, read off the render's
+    own `COPY <src> <dst>` lines (a `--from=` copy is between stages, not from the host)."""
+    for line in logical_lines(text):
+        parts = line.split()
+        if parts[0].upper() != "COPY" or any(p.startswith("--") for p in parts[1:]):
+            continue
+        src, dst = parts[1].rstrip("/"), parts[2].rstrip("/")
+        if dest == src or dest.startswith(src + "/"):
+            return dst + dest[len(src) :]
+    return None
+
+
+def _ignore_pattern(pattern: str) -> re.Pattern[str]:
+    """One `.dockerignore` rule as a regex: `*` and `?` stay inside one folder, `**` does not."""
+    body = "".join(
+        (
+            ".*"
+            if part == "**"
+            else "[^/]*" if part == "*" else "[^/]" if part == "?" else re.escape(part)
+        )
+        for part in re.split(r"(\*\*|\*|\?)", pattern.strip("/"))
+    )
+    return re.compile(body)
+
+
+def in_build_context(ignore: str, path: str) -> bool:
+    """`.dockerignore`'s answer for one file: the LAST rule matching the file or any
+    folder above it wins, and a `!` rule puts it back."""
+    ancestors = ["/".join(path.split("/")[: i + 1]) for i in range(len(path.split("/")))]
+    kept = True
+    for raw in ignore.splitlines():
+        rule = raw.strip()
+        if not rule or rule.startswith("#"):
+            continue
+        negated = rule.startswith("!")
+        matcher = _ignore_pattern(rule[1:] if negated else rule)
+        if any(matcher.fullmatch(a) for a in ancestors):
+            kept = negated
+    return kept
+
+
+def playerbots_pin_problems(entry: CatalogEntry, text: str, ignore: str) -> list[str]:
+    """Every way the rendered build would compile a playerbots other than the pinned one.
+
+    Three rules, one sentence each, so a negative fixture can break exactly one:
+    the checkout reaches the build context, a `COPY` puts it in the image, and the
+    `cmake ..` step hands that in-image path to FetchContent.
+    """
+    problems: list[str] = []
+    cmake = [line for line in logical_lines(text) if line.startswith("RUN") and "cmake .." in line]
+    flags = [
+        word for line in cmake for word in line.split() if word.startswith(PLAYERBOTS_OVERRIDE)
+    ]
+    for dest in nested_playerbots(entry):
+        if not in_build_context(ignore, f"{dest}/CMakeLists.txt"):
+            problems.append(f"{entry.id}: .dockerignore keeps {dest} out of the build context")
+        where = image_path(text, dest)
+        if where is None:
+            problems.append(f"{entry.id}: no COPY puts {dest} into the image")
+            continue
+        if flags != [PLAYERBOTS_OVERRIDE + where]:
+            problems.append(
+                f"{entry.id}: cmake is handed {flags or 'no override'}, not "
+                f"{PLAYERBOTS_OVERRIDE}{where}, so it compiles playerbots master"
+            )
+    return problems
+
+
+def test_the_entries_with_a_nested_playerbots_are_exactly_tbc_and_vanilla() -> None:
+    """The rule below is not vacuous: it reaches both games that build cmangos/playerbots
+    inside the core, and a catalog that gains another is covered without a list here."""
+    assert {e.id for e in load_catalog().games if nested_playerbots(e)} == {
+        "wow-tbc",
+        "wow-vanilla",
+    }
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [e for e in load_catalog().games if nested_playerbots(e)],
+    ids=lambda e: e.id,
+)
+def test_every_nested_playerbots_build_compiles_the_pinned_checkout(entry: CatalogEntry) -> None:
+    """The core's own `src/CMakeLists.txt` declares PlayerBots with `GIT_TAG "master"` and
+    populates it at configure time into `modules/PlayerBots`, so without the override the
+    image compiled whatever master was that day while the SQL came from the pinned
+    checkout at `modules/Bots` (T180: T135's installs logged `Playerbots module source
+    dir: /src/mangos-classic/src/modules/PlayerBots`, and since playerbots master
+    c1193bcb of 2026-09-29 every Vanilla build failed there).
+
+    The path is derived from the catalog `dest` and the render's own COPY line, never
+    spelled here, so moving either without the other goes red."""
+    text, ignore = dockerfile.render(
+        shipped(entry), composegen.entry_tokens(entry), secrets=SECRETS
+    )
+    assert playerbots_pin_problems(entry, text, ignore) == []
+
+
+def _tbc_render() -> tuple[CatalogEntry, str, str]:
+    entry = load_catalog().get("wow-tbc")
+    text, ignore = dockerfile.render(
+        shipped(entry), composegen.entry_tokens(entry), secrets=SECRETS
+    )
+    return entry, text, ignore
+
+
+def test_a_render_without_the_override_breaks_only_the_cmake_rule() -> None:
+    entry, text, ignore = _tbc_render()
+    stripped = re.sub(r"\s*" + re.escape(PLAYERBOTS_OVERRIDE) + r"\S+", "", text)
+    assert stripped != text
+    problems = playerbots_pin_problems(entry, stripped, ignore)
+    assert len(problems) == 1 and "no override" in problems[0], problems
+
+
+def test_an_override_only_in_a_comment_does_not_count() -> None:
+    entry, text, ignore = _tbc_render()
+    stripped = re.sub(r"\s*" + re.escape(PLAYERBOTS_OVERRIDE) + r"\S+", "", text)
+    commented = stripped + f"# {PLAYERBOTS_OVERRIDE}/src/mangos-tbc/src/modules/Bots\n"
+    problems = playerbots_pin_problems(entry, commented, ignore)
+    assert len(problems) == 1 and "no override" in problems[0], problems
+
+
+def test_a_moved_playerbots_dest_breaks_only_the_cmake_rule() -> None:
+    """The test follows the catalog: the same render against a `dest` moved elsewhere
+    inside the core names the path cmake is no longer handed."""
+    entry, text, ignore = _tbc_render()
+    moved = tuple(
+        (
+            s.model_copy(update={"dest": s.dest.replace("/Bots", "/PlayerBots")})
+            if s.repo == "cmangos/playerbots"
+            else s
+        )
+        for s in entry.emulator.sources
+    )
+    entry = entry.model_copy(
+        update={"emulator": entry.emulator.model_copy(update={"sources": moved})}
+    )
+    problems = playerbots_pin_problems(entry, text, ignore)
+    assert len(problems) == 1 and "/src/mangos-tbc/src/modules/PlayerBots" in problems[0], problems
+
+
+def test_a_dockerignore_dropping_the_module_breaks_only_the_context_rule() -> None:
+    entry, text, ignore = _tbc_render()
+    problems = playerbots_pin_problems(entry, text, ignore + "src/mangos-tbc/src/modules/Bots\n")
+    assert len(problems) == 1 and ".dockerignore" in problems[0], problems
+
+
+def test_a_render_that_copies_the_core_elsewhere_breaks_only_the_copy_rule() -> None:
+    entry, text, ignore = _tbc_render()
+    elsewhere = text.replace(
+        "COPY src/mangos-tbc /src/mangos-tbc", "COPY src/other /src/mangos-tbc"
+    )
+    assert elsewhere != text
+    problems = playerbots_pin_problems(entry, elsewhere, ignore)
+    assert len(problems) == 1 and "no COPY" in problems[0], problems

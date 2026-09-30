@@ -1021,6 +1021,39 @@ def test_a_rebuild_hands_the_compiler_the_current_template_not_the_render_on_dis
     assert {name: (server_dir / name).read_bytes() for name in fresh} == fresh
 
 
+def test_a_server_rendered_before_t180_compiles_the_pinned_playerbots_on_rebuild(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """T180's way to an existing TBC or Vanilla server: the Rebuild press, not a migration.
+
+    An install made before T180 holds a Dockerfile whose cmake line has no
+    `FETCHCONTENT_SOURCE_DIR_PLAYERBOTS`, so its compile takes playerbots master.
+    The marker on that file is Yu'lon's, so the rebuild's `write-dockerfile`
+    rewrites it from today's template before `build` runs; Update to latest and
+    Return to the tested pin reach the same stages through `rebuild()`. Read
+    inside the build seam for the T8 test's reason.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    path = server_dir / dockerfile.DOCKERFILE
+    current = path.read_bytes()
+    before_t180 = re.sub(rb"\n[ \t]*-DFETCHCONTENT_SOURCE_DIR_PLAYERBOTS=\S+ \\", b"", current)
+    assert before_t180 != current, "the template no longer carries the override"
+    path.write_bytes(before_t180)
+    handed: list[bytes] = []
+
+    def build(
+        build_dir: Path, files: object, *, sink: object = None, cancel: object = None
+    ) -> docker.AttachedRun:
+        rec.calls.append("build")
+        handed.append((build_dir / dockerfile.DOCKERFILE).read_bytes())
+        return rec.build_result
+
+    list(cm_engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir)))
+    assert handed == [current], "the rebuild compiled the pre-T180 recipe: playerbots master"
+    assert b"-DFETCHCONTENT_SOURCE_DIR_PLAYERBOTS=/src/mangos-tbc/src/modules/Bots" in handed[0]
+
+
 def test_a_rebuild_that_is_already_current_leaves_the_dockerfile_alone(
     cmangos_gate: None, tmp_path: Path
 ) -> None:
