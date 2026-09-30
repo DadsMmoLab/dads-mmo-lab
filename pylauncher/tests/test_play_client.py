@@ -8,10 +8,12 @@ real client, a network or docker. The hard-link behaviour is pinned with
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
 import shutil
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -564,3 +566,180 @@ def test_running_out_of_space_while_linking_counts_only_the_own_files(
     monkeypatch.setattr(play_client.shutil, "copy2", full_disk)
     with pytest.raises(play_client.PlayClientError, match=r"needs 0\.0 GB"):
         build(orig, target, tmp_path)
+
+
+# -- fix round 2 --------------------------------------------------------------
+
+
+def _as_junction(monkeypatch: pytest.MonkeyPatch, *junctions: Path, tag: int | None = None) -> None:
+    """Make `play_client._lstat` report `junctions` the way Windows reports a junction."""
+    real = os.lstat
+    marked = {str(j) for j in junctions}
+    reparse_tag = play_client.IO_REPARSE_TAG_MOUNT_POINT if tag is None else tag
+
+    def fake(path: object) -> object:
+        st = real(path)  # type: ignore[arg-type]
+        if os.fspath(path) not in marked:  # type: ignore[call-overload]
+            return st
+        return types.SimpleNamespace(
+            st_mode=st.st_mode,
+            st_file_attributes=play_client.FILE_ATTRIBUTE_REPARSE_POINT | 0x10,  # | DIRECTORY
+            st_reparse_tag=reparse_tag,
+        )
+
+    monkeypatch.setattr(play_client, "_lstat", fake)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_remove_folder_removes_a_symlinked_folder_inside_but_not_what_it_points_at(
+    tmp_path: Path,
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "precious.MPQ").write_bytes(b"keep")
+    folder = tmp_path / "t.yulon-partial"
+    (folder / "Data").mkdir(parents=True)
+    os.symlink(elsewhere, folder / "Data" / "linked")
+    play_client.remove_folder(folder)
+    assert not folder.exists()
+    assert (elsewhere / "precious.MPQ").read_bytes() == b"keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_remove_folder_refuses_a_folder_that_is_itself_a_link(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "precious.MPQ").write_bytes(b"keep")
+    folder = tmp_path / "t.yulon-partial"
+    os.symlink(elsewhere, folder)
+    with pytest.raises(OSError, match="link"):
+        play_client.remove_folder(folder)
+    assert folder.is_symlink()
+    assert (elsewhere / "precious.MPQ").read_bytes() == b"keep"
+
+
+def test_remove_folder_never_walks_into_a_junction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "t.yulon-partial"
+    junction = folder / "Data" / "junction"
+    junction.mkdir(parents=True)
+    (junction / "precious.MPQ").write_bytes(b"keep")  # what the junction's target holds
+    _as_junction(monkeypatch, junction)
+    removed: list[str] = []
+
+    def recording_unlink(path: Path) -> None:
+        removed.append(os.fspath(path))
+        os.unlink(path)
+
+    with pytest.raises(OSError):  # a real directory, so removing "the link" cannot succeed
+        play_client.remove_folder(folder, unlink=recording_unlink)
+    assert (junction / "precious.MPQ").read_bytes() == b"keep"
+    assert os.fspath(junction / "precious.MPQ") not in removed
+
+
+def test_plan_leaves_out_a_junctioned_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    _as_junction(monkeypatch, orig / "Interface")
+    p = play_client.plan(orig, tmp_path / "t")
+    assert not any(rel.parts[0] == "Interface" for rel in p.copied + p.linked)
+    assert Path("WTF/Config.wtf") in p.copied
+
+
+def test_plan_keeps_a_cloud_placeholder_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # OneDrive "files on demand" are reparse points too, but not links: dropping them
+    # would build a client without the player's archives.
+    orig = fake_client(tmp_path)
+    _as_junction(monkeypatch, orig / "Data", tag=0x9000001A)  # IO_REPARSE_TAG_CLOUD_6
+    p = play_client.plan(orig, tmp_path / "t")
+    assert Path("Data/common.MPQ") in p.linked
+
+
+def test_a_folder_that_could_not_be_made_is_not_reported_removed(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    (tmp_path / "afile").write_text("x")
+    target = tmp_path / "afile" / "t"
+    with pytest.raises(play_client.PlayClientError) as info:
+        build(orig, target, tmp_path)
+    assert "was removed" not in str(info.value)
+    assert "Nothing was created" in str(info.value)
+
+
+def test_a_client_drive_that_cannot_share_says_the_full_copy_is_the_way(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+
+    def eperm(src: Path, dst: Path) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    with pytest.raises(
+        play_client.PlayClientError,
+        match="drive your client .* is on.*The only way is the full copy",
+    ) as info:
+        build(orig, tmp_path / "t", tmp_path, link=eperm)
+    assert "the one your client is on" not in str(info.value)
+
+
+def test_cannot_share_across_drives_keeps_the_choose_a_folder_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    real_plan = play_client.plan
+    monkeypatch.setattr(
+        play_client,
+        "plan",
+        lambda *a, **kw: dataclasses.replace(real_plan(*a, **kw), same_volume=False),
+    )
+
+    def eperm(src: Path, dst: Path) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    with pytest.raises(play_client.PlayClientError, match="the one your client is on"):
+        build(orig, tmp_path / "t", tmp_path, link=eperm)
+
+
+def _leftover(tmp_path: Path, orig: Path, *, game: str, server: str) -> Path:
+    partial = partial_of(tmp_path / "t")
+    partial.mkdir()
+    m = play_client.Marker(
+        game=game, server_dir=tmp_path / server, source_client_dir=orig, created_at=WHEN
+    )
+    (partial / play_client.MARKER).write_text(m.model_dump_json(), encoding="utf-8")
+    return partial
+
+
+def test_a_leftover_of_another_game_says_it_is_another_game(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    partial = _leftover(tmp_path, orig, game="wow-tbc", server="s")
+    with pytest.raises(play_client.PlayClientError, match="another game, wow-tbc") as info:
+        build(orig, tmp_path / "t", tmp_path, game="g", server_dir=tmp_path / "s")
+    assert "another server" not in str(info.value)
+    assert partial.exists()
+
+
+def test_a_leftover_of_another_server_names_that_server(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    _leftover(tmp_path, orig, game="g", server="other")
+    with pytest.raises(play_client.PlayClientError, match="another server at .*other") as info:
+        build(orig, tmp_path / "t", tmp_path, game="g", server_dir=tmp_path / "s")
+    assert "another game" not in str(info.value)
+
+
+def test_a_failed_mode_restore_does_not_hide_the_delete_error(tmp_path: Path) -> None:
+    folder = tmp_path / "t.yulon-partial"
+    folder.mkdir()
+    (folder / "f.MPQ").write_bytes(b"x")
+    calls: list[int] = []
+
+    def refusing_unlink(path: Path) -> None:
+        calls.append(1)
+        if len(calls) == 3:
+            os.unlink(path)  # gone, so putting its mode back fails too
+            raise PermissionError(errno.EACCES, "late refusal", str(path))
+        raise PermissionError(errno.EACCES, "refused", str(path))
+
+    with pytest.raises(PermissionError, match="late refusal"):
+        play_client.remove_folder(folder, unlink=refusing_unlink)

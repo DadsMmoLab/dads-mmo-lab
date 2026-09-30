@@ -60,6 +60,39 @@ _CANNOT_LINK = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EM
 shares, a file at its link limit). Same answer as another drive: a full copy, asked."""
 _ERROR_INVALID_FUNCTION = 1  # Windows' answer from a filesystem without hard links
 
+# Windows reparse points. Defined here, not taken from `stat`: there they exist only
+# on Windows builds, and the link test below must be exercisable everywhere.
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003  # a junction
+IO_REPARSE_TAG_SYMLINK = 0xA000000C
+_LINK_TAGS = frozenset({IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK})
+
+_lstat = os.lstat  # a seam: tests stand in Windows' answer for a junction
+
+
+def _is_link(path: str | os.PathLike[str]) -> bool:
+    """A symlink, or a Windows junction: something never walked into, only removed.
+
+    On Windows a junction is not a symlink to `os.walk(followlinks=False)`,
+    `DirEntry.is_symlink()` or `Path.is_symlink()`, on any Python version, and
+    `os.path.isjunction` is 3.12+. What gives it away is the reparse-point
+    attribute with the junction (mount point) or symlink tag. Other reparse
+    points are NOT links: OneDrive's files-on-demand placeholders carry the
+    attribute too, and treating them as links would drop the player's archives
+    from the build. A reparse point with no tag reported is treated as a link,
+    the cautious answer.
+    """
+    try:
+        st = _lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if not getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    tag = getattr(st, "st_reparse_tag", None)
+    return not tag or tag in _LINK_TAGS
+
 
 class Marker(BaseModel):
     """`.yulon-client.json`: what says a folder is Yu'lon's to change or delete."""
@@ -192,8 +225,8 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
         rel_dir = here.relative_to(original)
         kept = []
         for name in dirnames:
-            if (here / name).is_symlink():
-                logger.info("ready-to-play client: skipping symlinked folder %s", here / name)
+            if _is_link(here / name):
+                logger.info("ready-to-play client: skipping linked folder %s", here / name)
             elif rel_dir == Path(".") and name.lower() in LEFT_OUT:
                 continue
             else:
@@ -201,7 +234,7 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
         dirnames[:] = kept
         for name in filenames:
             path = here / name
-            if path.is_symlink():
+            if _is_link(path):
                 logger.info("ready-to-play client: skipping symlink %s", path)
                 continue
             st = path.lstat()
@@ -274,15 +307,43 @@ def remove_folder(
     Directories are this folder's own, never shared, so they are made writable
     freely. Raises OSError if something cannot be removed.
     """
-    for dirpath, dirnames, filenames in os.walk(folder, topdown=False, followlinks=False):
-        here = Path(dirpath)
-        for name in filenames + [d for d in dirnames if (here / d).is_symlink()]:
-            _remove_file(here / name, folder, original, unlink)
-        for name in dirnames:
-            sub = here / name
-            if not sub.is_symlink():
-                _remove_dir(sub)
+    if _is_link(folder):
+        raise OSError(
+            errno.EPERM,
+            f"{folder} is a link, not a folder Yu'lon may delete through; nothing was changed",
+        )
+    _empty(folder, folder, original, unlink)
     _remove_dir(folder, parent_is_ours=False)  # its parent is the player's, not ours
+
+
+def _empty(here: Path, folder: Path, original: Path | None, unlink: Callable[[Path], None]) -> None:
+    """Remove everything inside `here`, bottom up, never entering a link."""
+    with os.scandir(here) as entries:
+        children = [Path(entry.path) for entry in entries]
+    for child in children:
+        if _is_link(child):
+            _remove_link(child, unlink)
+        elif child.is_dir():
+            _empty(child, folder, original, unlink)
+            _remove_dir(child)
+        else:
+            _remove_file(child, folder, original, unlink)
+
+
+def _remove_link(path: Path, unlink: Callable[[Path], None]) -> None:
+    """Remove a symlink or junction itself, never what it points at.
+
+    `unlink` removes a symlink, and on Windows a directory symlink or junction
+    too; `rmdir` is the other spelling Windows accepts for a directory link, and
+    it refuses a non-empty real directory, so it cannot empty anything either.
+    """
+    try:
+        unlink(path)
+    except OSError as first:
+        try:
+            os.rmdir(path)
+        except OSError:
+            raise first from None
 
 
 def _make_writable(path: Path) -> None:
@@ -317,7 +378,15 @@ def _remove_file(
     try:
         unlink(path)
     except OSError:
-        os.chmod(path, stat.S_IMODE(st.st_mode))
+        try:
+            os.chmod(path, stat.S_IMODE(st.st_mode))
+        except OSError:
+            logger.warning(
+                "ready-to-play client: %s could not be made read-only again and may be "
+                "left writable",
+                path,
+                exc_info=True,
+            )
         raise
     if st.st_nlink <= 1:
         return
@@ -367,9 +436,15 @@ def _remove_leftover_partial(partial: Path, *, game: str, server_dir: Path) -> N
             "was. Move it away or choose another folder, then try again."
         )
     if marker.game != game or marker.server_dir != server_dir:
+        if marker.server_dir == server_dir:
+            whose = f"another game, {marker.game}, on this server"
+        elif marker.game == game:
+            whose = f"another server at {marker.server_dir}"
+        else:
+            whose = f"another game, {marker.game}, on another server at {marker.server_dir}"
         raise PlayClientError(
-            f"{partial} is the unfinished ready-to-play client of another server at "
-            f"{marker.server_dir}, so it was left as it was. Choose another folder."
+            f"{partial} is the unfinished ready-to-play client of {whose}, so it was left "
+            "as it was. Choose another folder."
         )
     logger.info("ready-to-play client: removing an unfinished earlier attempt at %s", partial)
     try:
@@ -380,6 +455,12 @@ def _remove_leftover_partial(partial: Path, *, game: str, server_dir: Path) -> N
             "Nothing new was created and your client was left as it was. Delete that "
             "folder yourself, then try again."
         ) from exc
+
+
+_ACROSS_DRIVES_ADVICE = (
+    "Choose a folder on a drive that can share them (the one your client is on), or "
+    "agree to the full copy."
+)
 
 
 class _Stop(Exception):
@@ -443,20 +524,36 @@ def create(
                     continue
                 except OSError as exc:
                     if exc.errno == errno.EXDEV:
-                        why = f"{target} is on another drive than your client {original}"
-                    elif _cannot_link(exc):
-                        why = f"The drive holding {target} cannot share files with your client"
-                    else:
+                        what = (
+                            f"{target} is on another drive than your client {original}, so "
+                            "its game files cannot be shared"
+                        )
+                        advice = _ACROSS_DRIVES_ADVICE
+                    elif not _cannot_link(exc):
                         raise
+                    elif build.same_volume:
+                        # exFAT/FAT32: no folder on this drive can share, and no folder on
+                        # another drive either (links never cross drives).
+                        what = (
+                            f"The drive your client {original} is on cannot share files, "
+                            "so no folder on it can share its game files"
+                        )
+                        advice = (
+                            "The only way is the full copy: agree to it, or move your "
+                            "client to a drive that can share files (NTFS, ext4, btrfs)."
+                        )
+                    else:
+                        what = (
+                            f"The drive holding {target} cannot share files with your "
+                            "client, so its game files cannot be shared"
+                        )
+                        advice = _ACROSS_DRIVES_ADVICE
                     if not allow_full_copy:
                         raise _Stop(
-                            f"{why}, so its game files cannot be shared and a full copy "
-                            f"needs {full_size} GB.",
-                            "Choose a folder on a drive that can share them (the one your "
-                            "client is on), or agree to the full copy.",
+                            f"{what} and a full copy needs {full_size} GB.", advice
                         ) from exc
                     full_copy = True
-                    logger.info("ready-to-play client: %s (%s), copying in full", why, exc)
+                    logger.info("ready-to-play client: %s (%s), copying in full", what, exc)
             shutil.copy2(src, dst)
 
         for rel in build.copied:
@@ -466,7 +563,7 @@ def create(
 
         os.replace(partial, target)
     except BaseException as exc:
-        cleaned = _discard(partial, original) if made else True
+        cleaned = _discard(partial, original) if made else None
         if not isinstance(exc, Exception):
             raise
         if isinstance(exc, _Stop):
@@ -491,7 +588,9 @@ def create(
                 f"Building the ready-to-play client in {target} failed: {exc}.",
                 "Try again; if it fails the same way, send the Yu'lon log.",
             )
-        if cleaned:
+        if cleaned is None:  # the folder itself could not be made
+            outcome = "Nothing was created and your client was left as it was."
+        elif cleaned:
             outcome = "The unfinished folder was removed and your client was left as it was."
         else:
             outcome = (
