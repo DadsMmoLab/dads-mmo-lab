@@ -2384,9 +2384,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "write: zero and two are both named refusals, so a listing that came back short "
         "stops the press rather than picking a library to write into"
     ),
-    ("steam.py", "find_compat_tool"): (
+    ("steam.py", "_proton_candidates"): (
         "8.8. Lists `compatibilitytools.d/` and `steamapps/common/` for a Proton. Same "
-        "shape: nothing found is the `NO_PROTON` refusal, which names what to install"
+        "shape: nothing found is the `NO_PROTON` refusal, which names what to install. "
+        "Moved out of `find_compat_tool` in T181 so Play's `find_proton_script` reads "
+        "the same order; there, nothing found falls back to Wine or the "
+        "`play_launch` refusal that names Proton and Wine, and nothing is started"
     ),
     ("steam.py", "client_executable"): (
         "8.8. Globs a client folder the user already chose and Yu'lon already validated, "
