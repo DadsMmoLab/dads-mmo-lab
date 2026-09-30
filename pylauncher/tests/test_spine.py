@@ -2670,14 +2670,24 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("play_client.py", "_empty"): (
         "T181a fix rounds 1-2. Lists, bottom up, a folder this app is DELETING through "
-        "`remove_folder()`: an unfinished `<target>.yulon-partial` of this same build, or a "
-        "leftover whose marker names this game and server. The listing decides what is "
-        "deleted, but only inside a folder the caller already proved is Yu'lon's by its "
-        "marker. It never enters a symlink or a Windows junction (`_is_link`, the "
-        "reparse-point attribute, since neither `os.walk` nor `is_symlink()` sees a "
-        "junction): the link itself is removed, never what it points at, and a top-level "
-        "folder that is a link is refused. A failure to list or delete raises rather than "
-        "reporting a folder removed"
+        "`remove_folder()`: an unfinished `<target>.yulon-partial` of this same build, a "
+        "leftover whose marker names this game and server, or (Task 2's `delete()`) this "
+        "game's and server's ready-to-play client, matched by its marker the same way. The "
+        "listing decides what is deleted, but only inside a folder the caller already "
+        "proved is Yu'lon's by its marker. It never enters a symlink or a Windows "
+        "junction (`_is_link`, the reparse-point attribute, since neither `os.walk` nor "
+        "`is_symlink()` sees a junction): the link itself is removed, never what it points "
+        "at, and a top-level folder that is a link is refused. A failure to list or delete "
+        "raises rather than reporting a folder removed"
+    ),
+    ("play_client.py", "_linked_files"): (
+        "T181a Task 2. Walks a ready-to-play client (a folder carrying Yu'lon's marker) for "
+        "its `*.MPQ`/`*.dll`, never into a link and never into top-level `WTF/` or "
+        "`Interface/`, so `stale()` can compare each with the original and `refresh()` can "
+        "replace exactly those. It decides which of the folder's own files are rewritten "
+        "(under a temporary name, then renamed into place), never a write into the "
+        "original; `refresh()` refuses a folder without the marker, or an original other "
+        "than the one it names, before it lists anything"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.

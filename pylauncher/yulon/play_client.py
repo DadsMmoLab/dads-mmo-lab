@@ -24,6 +24,11 @@ end. Any failure removes the partial folder; a crash leaves one carrying a
 marker, which the next attempt recognises as Yu'lon's own and removes. Nothing
 is ever deleted from a folder without that marker.
 
+Afterwards the folder is kept in step, not rebuilt: a patcher that replaces an
+archive in the original breaks the hard link, and `stale()`/`refresh()` find and
+re-share exactly those (and `Wow.exe`), never touching `WTF/` or `Interface/`.
+`delete()` removes the folder only when its marker names the same game and server.
+
 No Qt here: the dialog that asks and the progress it shows live in the view.
 """
 
@@ -34,7 +39,7 @@ import os
 import shutil
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +48,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from yulon.log import get_logger
+from yulon.steam import client_executable
 
 logger = get_logger(__name__)
 
@@ -65,9 +71,19 @@ _ERROR_INVALID_FUNCTION = 1  # Windows' answer from a filesystem without hard li
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003  # a junction
 IO_REPARSE_TAG_SYMLINK = 0xA000000C
-_LINK_TAGS = frozenset({IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK})
+_NAME_SURROGATE = 0x20000000  # winnt.h IsReparseTagNameSurrogate: "this names another file"
 
 _lstat = os.lstat  # a seam: tests stand in Windows' answer for a junction
+
+
+def _stat_is_link(st: os.stat_result) -> bool:
+    """`_is_link` for a look already taken, so the caller acts on the same answer."""
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if not getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    tag = getattr(st, "st_reparse_tag", None)
+    return not tag or bool(tag & _NAME_SURROGATE)
 
 
 def _is_link(path: str | os.PathLike[str]) -> bool:
@@ -76,22 +92,22 @@ def _is_link(path: str | os.PathLike[str]) -> bool:
     On Windows a junction is not a symlink to `os.walk(followlinks=False)`,
     `DirEntry.is_symlink()` or `Path.is_symlink()`, on any Python version, and
     `os.path.isjunction` is 3.12+. What gives it away is the reparse-point
-    attribute with the junction (mount point) or symlink tag. Other reparse
-    points are NOT links: OneDrive's files-on-demand placeholders carry the
+    attribute with a tag whose name-surrogate bit is set: Windows' own mark for
+    "this entry stands for another file or folder" (junctions, symlinks, WSL
+    symlinks, and any later kind). Other reparse points are NOT links:
+    OneDrive's files-on-demand placeholders and deduplicated files carry the
     attribute too, and treating them as links would drop the player's archives
     from the build. A reparse point with no tag reported is treated as a link,
     the cautious answer.
+
+    A path that cannot be looked at answers False here, for `plan()`, whose next
+    step reads the same path and fails loudly. The remover does not use this: it
+    takes one look per entry and lets a failed look stop it.
     """
     try:
-        st = _lstat(path)
+        return _stat_is_link(_lstat(path))
     except OSError:
         return False
-    if stat.S_ISLNK(st.st_mode):
-        return True
-    if not getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
-        return False
-    tag = getattr(st, "st_reparse_tag", None)
-    return not tag or tag in _LINK_TAGS
 
 
 class Marker(BaseModel):
@@ -317,17 +333,30 @@ def remove_folder(
 
 
 def _empty(here: Path, folder: Path, original: Path | None, unlink: Callable[[Path], None]) -> None:
-    """Remove everything inside `here`, bottom up, never entering a link."""
+    """Remove everything inside `here`, bottom up, never entering a link.
+
+    One `lstat` per entry decides both "is it a link" and "is it a folder": a
+    second, following look (`is_dir()`) could see a link that replaced the entry
+    in between and send the walk through it. A look that fails stops the removal
+    rather than guessing, so what could not be seen is never entered.
+
+    At the top, the marker goes last: a removal that stops half way leaves a
+    folder that still says it is Yu'lon's, so it can be finished later.
+    """
     with os.scandir(here) as entries:
         children = [Path(entry.path) for entry in entries]
+    if here == folder:
+        children.sort(key=lambda child: child.name == MARKER)  # stable: marker last
     for child in children:
-        if _is_link(child):
+        st = _lstat(child)
+        if _stat_is_link(st):
             _remove_link(child, unlink)
-        elif child.is_dir():
+        elif stat.S_ISDIR(st.st_mode):
             _empty(child, folder, original, unlink)
             _remove_dir(child)
         else:
-            _remove_file(child, folder, original, unlink)
+            survivor = original / child.relative_to(folder) if original is not None else None
+            _remove_file(child, survivor, unlink)
 
 
 def _remove_link(path: Path, unlink: Callable[[Path], None]) -> None:
@@ -353,14 +382,14 @@ def _make_writable(path: Path) -> None:
         pass
 
 
-def _remove_file(
-    path: Path, folder: Path, original: Path | None, unlink: Callable[[Path], None]
-) -> None:
+def _remove_file(path: Path, survivor: Path | None, unlink: Callable[[Path], None]) -> None:
     """Delete one file, clearing its own read-only flag only if nothing else helps.
 
     First the directory (this folder's own: on POSIX its write bit is what
     refuses an unlink), and only then the file itself (Windows' read-only
-    attribute), because on a hard link that flag is the original's too.
+    attribute), because on a hard link that flag is the original's too. The
+    recorded mode is put back on `survivor`, the name in the player's client
+    this file may share its inode with, if it still does.
     """
     st = path.lstat()
     try:
@@ -390,7 +419,6 @@ def _remove_file(
         raise
     if st.st_nlink <= 1:
         return
-    survivor = original / path.relative_to(folder) if original is not None else None
     try:
         if survivor is not None:
             now = survivor.lstat()
@@ -426,26 +454,23 @@ def _discard(partial: Path, original: Path | None) -> bool:
     return True
 
 
-def _remove_leftover_partial(partial: Path, *, game: str, server_dir: Path) -> None:
-    if not partial.exists():
-        return
-    marker = read_marker(partial)
-    if marker is None:
-        raise PlayClientError(
-            f"{partial} is in the way and was not made by Yu'lon, so it was left as it "
-            "was. Move it away or choose another folder, then try again."
-        )
-    if marker.game != game or marker.server_dir != server_dir:
-        if marker.server_dir == server_dir:
-            whose = f"another game, {marker.game}, on this server"
-        elif marker.game == game:
-            whose = f"another server at {marker.server_dir}"
-        else:
-            whose = f"another game, {marker.game}, on another server at {marker.server_dir}"
-        raise PlayClientError(
-            f"{partial} is the unfinished ready-to-play client of {whose}, so it was left "
-            "as it was. Choose another folder."
-        )
+def _whose(marker: Marker, *, game: str, server_dir: Path) -> str | None:
+    """Whose folder a marked folder is, when it is not `game`'s at `server_dir`; else None.
+
+    The one rule for every change to a marked folder: the marker must name this
+    game AND this server. A marker is not a licence to touch any folder Yu'lon
+    ever made, because another server's client is the player's too.
+    """
+    if marker.game == game and marker.server_dir == server_dir:
+        return None
+    if marker.server_dir == server_dir:
+        return f"another game, {marker.game}, on this server"
+    if marker.game == game:
+        return f"another server at {marker.server_dir}"
+    return f"another game, {marker.game}, on another server at {marker.server_dir}"
+
+
+def _remove_partial(partial: Path, marker: Marker) -> None:
     logger.info("ready-to-play client: removing an unfinished earlier attempt at %s", partial)
     try:
         remove_folder(partial, original=marker.source_client_dir)
@@ -455,6 +480,44 @@ def _remove_leftover_partial(partial: Path, *, game: str, server_dir: Path) -> N
             "Nothing new was created and your client was left as it was. Delete that "
             "folder yourself, then try again."
         ) from exc
+
+
+def _remove_leftover_partial(partial: Path, *, game: str, server_dir: Path) -> None:
+    """For `create()`: clear the way, or say why the folder in it is not Yu'lon's to clear."""
+    if not partial.exists():
+        return
+    marker = read_marker(partial)
+    if marker is None:
+        raise PlayClientError(
+            f"{partial} is in the way and was not made by Yu'lon, so it was left as it "
+            "was. Move it away or choose another folder, then try again."
+        )
+    whose = _whose(marker, game=game, server_dir=server_dir)
+    if whose is not None:
+        raise PlayClientError(
+            f"{partial} is the unfinished ready-to-play client of {whose}, so it was left "
+            "as it was. Choose another folder."
+        )
+    _remove_partial(partial, marker)
+
+
+def clean_partials(target: Path, *, game: str, server_dir: Path) -> bool:
+    """Remove `<target>.yulon-partial` left by a crashed build; True if it was removed.
+
+    Only a leftover whose marker names this game and server is removed (the same
+    rule `create()` applies); one without a marker, or another server's, is left
+    and answers False, and `create()` then refuses with the reason. A removal
+    that fails raises `PlayClientError`.
+    """
+    partial = _partial(target)
+    if not partial.exists():
+        return False
+    marker = read_marker(partial)
+    if marker is None or _whose(marker, game=game, server_dir=server_dir) is not None:
+        logger.info("ready-to-play client: leaving %s, it is not this server's", partial)
+        return False
+    _remove_partial(partial, marker)
+    return True
 
 
 _ACROSS_DRIVES_ADVICE = (
@@ -474,6 +537,23 @@ class _Stop(Exception):
 
 def _cannot_link(exc: OSError) -> bool:
     return exc.errno in _CANNOT_LINK or getattr(exc, "winerror", None) == _ERROR_INVALID_FUNCTION
+
+
+def _share(
+    src: Path,
+    dst: Path,
+    *,
+    link: Callable[[Path, Path], None],
+    reflink: Callable[[Path, Path], bool],
+) -> None:
+    """Make a new `dst` hold `src`'s bytes at no extra space: a clone, else a hard link.
+
+    The one linking path for `create()` and `refresh()`. Raises the link's
+    OSError; which of those mean "this drive cannot share" is `_cannot_link`'s
+    and EXDEV's to say, and what to do about it is the caller's.
+    """
+    if not reflink(src, dst):
+        link(src, dst)
 
 
 def create(
@@ -517,10 +597,8 @@ def create(
             src, dst = original / rel, partial / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             if not full_copy:
-                if reflink(src, dst):
-                    continue
                 try:
-                    link(src, dst)
+                    _share(src, dst, link=link, reflink=reflink)
                     continue
                 except OSError as exc:
                     if exc.errno == errno.EXDEV:
@@ -608,3 +686,315 @@ def create(
         ", full copy" if full_copy else "",
     )
     return marker
+
+
+# -- keeping it in step with the original, and removing it --------------------
+
+PLAYERS_OWN = frozenset({"wtf", "interface"})
+"""Top-level folders (lower-case) refresh never touches: the player's settings and
+add-ons live there, and they are this client's own from the moment it is built."""
+REFRESH_SUFFIX = ".yulon-refresh"
+_SAME_TIME_NS = 2 * 10**9
+"""How far apart two modification times may be and still be the same file. FAT32
+keeps times to two seconds, so a full copy there never matches to the nanosecond
+and an exact test would offer Refresh at every Play. A patched archive is newer
+by far more than that."""
+_CHUNK = 1024 * 1024
+
+
+def _players_own(rel: Path) -> bool:
+    return bool(rel.parts) and rel.parts[0].lower() in PLAYERS_OWN
+
+
+def _linked_files(play_dir: Path) -> Iterator[Path]:
+    """The `*.MPQ`/`*.dll` of a ready-to-play client, relative, outside WTF/ and Interface/.
+
+    Never through a link: `plan()` puts none there, so one found later is not
+    Yu'lon's to compare or replace.
+    """
+    for dirpath, dirnames, filenames in os.walk(play_dir, followlinks=False):
+        here = Path(dirpath)
+        rel_dir = here.relative_to(play_dir)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not _is_link(here / name) and not _players_own(rel_dir / name)
+        ]
+        for name in filenames:
+            if Path(name).suffix.lower() in LINKED_SUFFIXES and not _is_link(here / name):
+                yield rel_dir / name
+
+
+def _original_file(path: Path) -> os.stat_result | None:
+    """The original's file as it is now, or None when it is gone (or no longer a file)."""
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return st if stat.S_ISREG(st.st_mode) else None
+
+
+def _out_of_date(mine: Path, theirs: Path) -> bool:
+    """True when `theirs` is gone, or is another file than `mine` with another size or time.
+
+    The same file (a hard link that still shares its inode) is up to date by
+    definition, whatever was written into it. Otherwise size and time decide,
+    which is all a full copy or a clone can be compared by without reading
+    gigabytes at every Play.
+    """
+    now = _original_file(theirs)
+    if now is None:
+        return True
+    st = mine.lstat()
+    if os.path.samestat(st, now):
+        return False
+    return st.st_size != now.st_size or abs(st.st_mtime_ns - now.st_mtime_ns) > _SAME_TIME_NS
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    """Byte for byte, sizes first. Not `filecmp`: its cache answers from size and time,
+    which is exactly what a same-size patched `Wow.exe` with its time kept defeats."""
+    if a.stat().st_size != b.stat().st_size:
+        return False
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        while True:
+            chunk = fa.read(_CHUNK)
+            if chunk != fb.read(_CHUNK):
+                return False
+            if not chunk:
+                return True
+
+
+def stale(play_dir: Path, original: Path) -> tuple[Path, ...]:
+    """What in `play_dir` no longer matches the original client, relative and sorted.
+
+    An `*.MPQ`/`*.dll` whose original is gone, or is no longer the same file and
+    differs in size or time (a patcher writes a new file, which breaks the hard
+    link); and `Wow.exe` when its bytes differ, since it is always a copy. Nothing
+    under WTF/ or Interface/, which `refresh()` would not touch either: listing
+    what it will not fix would offer Refresh at every Play.
+
+    An original that no longer looks like a client (no Data folder: moved, or a
+    drive not plugged in) answers nothing: the ready-to-play client still plays
+    from its own names, and "gone" is not a reason to offer removing every
+    archive from it. A file that cannot be compared is logged and left out.
+    """
+    if not (original / "Data").is_dir():
+        logger.warning(
+            "ready-to-play client %s: its original %s has no Data folder, not compared",
+            play_dir,
+            original,
+        )
+        return ()
+    found: list[Path] = []
+    for rel in _linked_files(play_dir):
+        try:
+            if _out_of_date(play_dir / rel, original / rel):
+                found.append(rel)
+        except OSError:
+            logger.warning(
+                "ready-to-play client: could not compare %s", play_dir / rel, exc_info=True
+            )
+    mine, theirs = client_executable(play_dir), client_executable(original)
+    try:
+        if mine.is_file() and theirs.is_file() and not _same_bytes(mine, theirs):
+            found.append(Path(mine.name))
+    except OSError:
+        logger.warning("ready-to-play client: could not compare %s", mine, exc_info=True)
+    return tuple(sorted(found))
+
+
+def _drop_temp(tmp: Path, survivor: Path | None) -> None:
+    """Remove a refresh's temporary file (this run's, or a crashed one's); raise if in the way."""
+    try:
+        st = _lstat(tmp)
+    except FileNotFoundError:
+        return
+    if _stat_is_link(st):
+        _remove_link(tmp, os.unlink)
+    elif stat.S_ISDIR(st.st_mode):
+        raise IsADirectoryError(errno.EISDIR, "a folder is in the way", str(tmp))
+    else:
+        _remove_file(tmp, survivor, os.unlink)
+
+
+def _replace(tmp: Path, dst: Path) -> None:
+    """Put `tmp` in `dst`'s place in one step, so no moment leaves the name missing.
+
+    Windows refuses to replace a file whose read-only attribute is set. When that
+    file is this folder's alone the attribute is cleared and the replace tried
+    again; when another folder still shares it (a second ready-to-play client made
+    from the same original), clearing it would change that folder too, so it is
+    refused instead.
+    """
+    try:
+        os.replace(tmp, dst)
+        return
+    except PermissionError:
+        st = dst.lstat()
+        if st.st_mode & stat.S_IWRITE:
+            raise
+    if st.st_nlink > 1:
+        raise _Stop(
+            f"{dst} is read-only and another folder shares it (another ready-to-play "
+            "client made from the same client), so it could not be replaced without "
+            "making that one writable too.",
+            "Clear that file's read-only flag yourself, then refresh again.",
+        )
+    os.chmod(dst, st.st_mode | stat.S_IWRITE)
+    os.replace(tmp, dst)
+
+
+def refresh(
+    play_dir: Path,
+    original: Path,
+    *,
+    link: Callable[[Path, Path], None] = os.link,
+    reflink: Callable[[Path, Path], bool] = try_reflink,
+) -> tuple[Path, ...]:
+    """Bring what `stale()` lists back in step with the original; return what was changed.
+
+    Each file is made beside the old one under a temporary name and then put in
+    its place, so an interrupted refresh leaves every name holding a whole file,
+    old or new. An archive whose original is gone is removed, as the original's
+    patcher removed it. WTF/ and Interface/ are never touched.
+
+    Archives are shared the same way `create()` shares them. A client that still
+    shares files with the original and now cannot (the original moved to another
+    drive) is refused rather than silently copied in full; a client that shares
+    nothing was a full copy all along, and stays one.
+    """
+    marker = read_marker(play_dir)
+    if marker is None:
+        raise PlayClientError(
+            f"{play_dir} was not made by Yu'lon (it has no {MARKER}), so nothing in it was "
+            "changed. Make a ready-to-play client from Yu'lon instead."
+        )
+    if _norm(original) != _norm(marker.source_client_dir):
+        raise PlayClientError(
+            f"{play_dir} was made from your client at {marker.source_client_dir}, not "
+            f"{original}, so nothing in it was changed. Refresh it from "
+            f"{marker.source_client_dir}, or delete it and make it again from {original}."
+        )
+    if not (original / "Data").is_dir():
+        raise PlayClientError(
+            f"{original} has no Data folder any more, so there is nothing to refresh "
+            "from. Nothing was changed. Put your client back there, or delete the "
+            "ready-to-play client and make it again from where your client is now."
+        )
+    todo = [rel for rel in stale(play_dir, original) if not _players_own(rel)]
+    if not todo:
+        return ()
+    try:
+        still_shares = any(
+            os.path.samestat((play_dir / rel).lstat(), found)
+            for rel in _linked_files(play_dir)
+            if rel not in todo and (found := _original_file(original / rel)) is not None
+        )
+    except OSError as exc:
+        raise PlayClientError(
+            f"{play_dir} could not be compared with your client {original}: {exc}. Nothing "
+            "was changed. Close World of Warcraft if it is running from either folder, "
+            "then try again."
+        ) from exc
+    exe = client_executable(original)
+    done: list[Path] = []
+    copy_all = False
+    for rel in todo:
+        archive = rel.suffix.lower() in LINKED_SUFFIXES
+        src, dst = (original / rel if archive else exe), play_dir / rel
+        tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
+        try:
+            if _original_file(src) is None:
+                if not archive:
+                    continue  # Wow.exe gone since stale() looked: keep the one it has
+                _remove_file(dst, None, os.unlink)
+                done.append(rel)
+                continue
+            _drop_temp(tmp, src)
+            if archive and not copy_all:
+                try:
+                    _share(src, tmp, link=link, reflink=reflink)
+                except OSError as exc:
+                    if exc.errno != errno.EXDEV and not _cannot_link(exc):
+                        raise
+                    if still_shares:
+                        raise _Stop(
+                            f"{rel} could not be shared with your client {original} any "
+                            f"more ({exc}).",
+                            "Delete the ready-to-play client and make it again with a "
+                            "full copy.",
+                        ) from exc
+                    copy_all = True  # it was a full copy all along
+                    shutil.copy2(src, tmp)
+            else:
+                shutil.copy2(src, tmp)
+            _replace(tmp, dst)
+        except Exception as exc:
+            try:
+                _drop_temp(tmp, src)
+            except OSError:
+                logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
+            if isinstance(exc, _Stop):
+                stop = exc
+            elif isinstance(exc, OSError):
+                logger.error("ready-to-play client: refreshing %s failed", dst, exc_info=True)
+                stop = _Stop(f"Refreshing {dst} failed: {exc}.", "Fix the cause and try again.")
+            else:
+                raise
+            kept = (
+                "Nothing in the ready-to-play client was changed"
+                if not done
+                else f"{len(done)} file(s) were refreshed before it and the rest were left "
+                "as they were"
+            )
+            raise PlayClientError(
+                f"{stop.what} {kept}; your own client was left as it was. {stop.next_step}"
+            ) from exc
+        done.append(rel)
+    logger.info("ready-to-play client %s refreshed: %s", play_dir, ", ".join(map(str, done)))
+    return tuple(done)
+
+
+def delete(play_dir: Path, *, game: str, server_dir: Path) -> None:
+    """Delete this server's ready-to-play client; the original keeps every shared file.
+
+    Only a folder whose marker names this game and server. A folder that is
+    already gone is not an error: what Delete promises is that it is not there.
+    """
+    if not os.path.lexists(play_dir):
+        logger.info("ready-to-play client %s is already gone", play_dir)
+        return
+    if _is_link(play_dir):
+        raise PlayClientError(
+            f"{play_dir} is a link to another folder, so it was left as it was. Delete "
+            "the link yourself if you no longer want it."
+        )
+    marker = read_marker(play_dir)
+    if marker is None:
+        raise PlayClientError(
+            f"{play_dir} was not made by Yu'lon (it has no {MARKER}), so it was left as it "
+            "was. Delete it yourself if you no longer want it."
+        )
+    whose = _whose(marker, game=game, server_dir=server_dir)
+    if whose is not None:
+        raise PlayClientError(
+            f"{play_dir} is the ready-to-play client of {whose}, so it was left as it "
+            "was. Delete it from that server instead."
+        )
+    try:
+        remove_folder(play_dir, original=marker.source_client_dir)
+    except OSError as exc:
+        logger.warning("ready-to-play client: could not delete %s", play_dir, exc_info=True)
+        if read_marker(play_dir) is not None:
+            rest = (
+                "What is left still carries Yu'lon's marker: close World of Warcraft if "
+                "it is running from that folder, then try again."
+            )
+        else:
+            rest = "Delete what is left of that folder yourself."
+        raise PlayClientError(
+            f"{play_dir} could not be deleted completely: {exc}. Your own client was "
+            f"left as it was. {rest}"
+        ) from exc
+    logger.info("ready-to-play client for %s at %s deleted", game, play_dir)
