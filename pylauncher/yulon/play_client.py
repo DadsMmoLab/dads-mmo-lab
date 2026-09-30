@@ -120,6 +120,14 @@ class Marker(BaseModel):
     server_dir: Path
     source_client_dir: Path
     created_at: datetime
+    full_copy: bool = False
+    """Its archives were copied, not shared (another drive, or one that cannot share).
+
+    Recorded because nothing on disk tells a full copy from a clone: neither
+    shares an inode with the original. `refresh()` re-copies a full copy's
+    archives without asking (the player agreed to its size once already), and
+    refuses to turn a shared client into one. Absent in a marker means shared.
+    """
 
 
 class PlayClientError(RuntimeError):
@@ -323,7 +331,7 @@ def remove_folder(
     Directories are this folder's own, never shared, so they are made writable
     freely. Raises OSError if something cannot be removed.
     """
-    if _is_link(folder):
+    if _stat_is_link(_lstat(folder)):  # a look that fails stops it: never fail open
         raise OSError(
             errno.EPERM,
             f"{folder} is a link, not a folder Yu'lon may delete through; nothing was changed",
@@ -639,6 +647,9 @@ def create(
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original / rel, dst)
 
+        if full_copy:
+            marker = marker.model_copy(update={"full_copy": True})
+            (partial / MARKER).write_text(marker.model_dump_json(indent=2), encoding="utf-8")
         os.replace(partial, target)
     except BaseException as exc:
         cleaned = _discard(partial, original) if made else None
@@ -735,7 +746,11 @@ def _original_file(path: Path) -> os.stat_result | None:
 
 
 def _out_of_date(mine: Path, theirs: Path) -> bool:
-    """True when `theirs` is gone, or is another file than `mine` with another size or time.
+    """True when `theirs` is another file than `mine`, with another size or time.
+
+    No `theirs` is never out of date: an archive only the ready-to-play client
+    has (a module's patch, the player's own, one the original's patcher removed)
+    may be its only copy, and nothing in the original can replace it.
 
     The same file (a hard link that still shares its inode) is up to date by
     definition, whatever was written into it. Otherwise size and time decide,
@@ -744,7 +759,7 @@ def _out_of_date(mine: Path, theirs: Path) -> bool:
     """
     now = _original_file(theirs)
     if now is None:
-        return True
+        return False
     st = mine.lstat()
     if os.path.samestat(st, now):
         return False
@@ -768,16 +783,17 @@ def _same_bytes(a: Path, b: Path) -> bool:
 def stale(play_dir: Path, original: Path) -> tuple[Path, ...]:
     """What in `play_dir` no longer matches the original client, relative and sorted.
 
-    An `*.MPQ`/`*.dll` whose original is gone, or is no longer the same file and
-    differs in size or time (a patcher writes a new file, which breaks the hard
-    link); and `Wow.exe` when its bytes differ, since it is always a copy. Nothing
+    An `*.MPQ`/`*.dll` whose original is no longer the same file and differs in
+    size or time (a patcher writes a new file, which breaks the hard link); and
+    `Wow.exe` when its bytes differ, since it is always a copy. Nothing
     under WTF/ or Interface/, which `refresh()` would not touch either: listing
     what it will not fix would offer Refresh at every Play.
 
     An original that no longer looks like a client (no Data folder: moved, or a
     drive not plugged in) answers nothing: the ready-to-play client still plays
-    from its own names, and "gone" is not a reason to offer removing every
-    archive from it. A file that cannot be compared is logged and left out.
+    from its own names. A file with no counterpart in the original is never
+    listed (see `_out_of_date`). A file that cannot be compared is logged and
+    left out.
     """
     if not (original / "Data").is_dir():
         logger.warning(
@@ -839,7 +855,8 @@ def _replace(tmp: Path, dst: Path) -> None:
             f"{dst} is read-only and another folder shares it (another ready-to-play "
             "client made from the same client), so it could not be replaced without "
             "making that one writable too.",
-            "Clear that file's read-only flag yourself, then refresh again.",
+            "Delete the other ready-to-play client made from the same client (Yu'lon can "
+            "make it again), then refresh this one again.",
         )
     os.chmod(dst, st.st_mode | stat.S_IWRITE)
     os.replace(tmp, dst)
@@ -849,26 +866,35 @@ def refresh(
     play_dir: Path,
     original: Path,
     *,
+    game: str,
+    server_dir: Path,
     link: Callable[[Path, Path], None] = os.link,
     reflink: Callable[[Path, Path], bool] = try_reflink,
 ) -> tuple[Path, ...]:
     """Bring what `stale()` lists back in step with the original; return what was changed.
 
+    Only this game's and server's ready-to-play client, made from `original`.
     Each file is made beside the old one under a temporary name and then put in
     its place, so an interrupted refresh leaves every name holding a whole file,
-    old or new. An archive whose original is gone is removed, as the original's
-    patcher removed it. WTF/ and Interface/ are never touched.
+    old or new. Nothing is ever removed, and WTF/ and Interface/ are never touched.
 
-    Archives are shared the same way `create()` shares them. A client that still
-    shares files with the original and now cannot (the original moved to another
-    drive) is refused rather than silently copied in full; a client that shares
-    nothing was a full copy all along, and stays one.
+    Archives are shared the same way `create()` shares them. A full copy (its
+    marker says so) is re-copied without asking: the player agreed to its size
+    when it was made. A shared or cloned client that cannot share any more (the
+    original moved to another drive) is refused rather than silently turned
+    into a copy of many gigabytes.
     """
     marker = read_marker(play_dir)
     if marker is None:
         raise PlayClientError(
             f"{play_dir} was not made by Yu'lon (it has no {MARKER}), so nothing in it was "
             "changed. Make a ready-to-play client from Yu'lon instead."
+        )
+    whose = _whose(marker, game=game, server_dir=server_dir)
+    if whose is not None:
+        raise PlayClientError(
+            f"{play_dir} is the ready-to-play client of {whose}, so nothing in it was "
+            "changed. Refresh it from that server instead."
         )
     if _norm(original) != _norm(marker.source_client_dir):
         raise PlayClientError(
@@ -883,50 +909,28 @@ def refresh(
             "ready-to-play client and make it again from where your client is now."
         )
     todo = [rel for rel in stale(play_dir, original) if not _players_own(rel)]
-    if not todo:
-        return ()
-    try:
-        still_shares = any(
-            os.path.samestat((play_dir / rel).lstat(), found)
-            for rel in _linked_files(play_dir)
-            if rel not in todo and (found := _original_file(original / rel)) is not None
-        )
-    except OSError as exc:
-        raise PlayClientError(
-            f"{play_dir} could not be compared with your client {original}: {exc}. Nothing "
-            "was changed. Close World of Warcraft if it is running from either folder, "
-            "then try again."
-        ) from exc
     exe = client_executable(original)
     done: list[Path] = []
-    copy_all = False
     for rel in todo:
         archive = rel.suffix.lower() in LINKED_SUFFIXES
         src, dst = (original / rel if archive else exe), play_dir / rel
         tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
         try:
             if _original_file(src) is None:
-                if not archive:
-                    continue  # Wow.exe gone since stale() looked: keep the one it has
-                _remove_file(dst, None, os.unlink)
-                done.append(rel)
-                continue
+                continue  # gone since stale() looked: keep what the client has
             _drop_temp(tmp, src)
-            if archive and not copy_all:
+            if archive and not marker.full_copy:
                 try:
                     _share(src, tmp, link=link, reflink=reflink)
                 except OSError as exc:
                     if exc.errno != errno.EXDEV and not _cannot_link(exc):
                         raise
-                    if still_shares:
-                        raise _Stop(
-                            f"{rel} could not be shared with your client {original} any "
-                            f"more ({exc}).",
-                            "Delete the ready-to-play client and make it again with a "
-                            "full copy.",
-                        ) from exc
-                    copy_all = True  # it was a full copy all along
-                    shutil.copy2(src, tmp)
+                    raise _Stop(
+                        f"{rel} could not be shared with your client {original} any more "
+                        f"({exc}), and refreshing it would need a full copy.",
+                        "Delete the ready-to-play client and make it again, agreeing to "
+                        "a full copy.",
+                    ) from exc
             else:
                 shutil.copy2(src, tmp)
             _replace(tmp, dst)
@@ -952,7 +956,8 @@ def refresh(
                 f"{stop.what} {kept}; your own client was left as it was. {stop.next_step}"
             ) from exc
         done.append(rel)
-    logger.info("ready-to-play client %s refreshed: %s", play_dir, ", ".join(map(str, done)))
+    if done:
+        logger.info("ready-to-play client %s refreshed: %s", play_dir, ", ".join(map(str, done)))
     return tuple(done)
 
 
@@ -965,7 +970,14 @@ def delete(play_dir: Path, *, game: str, server_dir: Path) -> None:
     if not os.path.lexists(play_dir):
         logger.info("ready-to-play client %s is already gone", play_dir)
         return
-    if _is_link(play_dir):
+    try:
+        is_link = _stat_is_link(_lstat(play_dir))
+    except OSError as exc:
+        raise PlayClientError(
+            f"{play_dir} could not be looked at ({exc}), so it was left as it was. Check "
+            "that you can open that folder, then try again."
+        ) from exc
+    if is_link:
         raise PlayClientError(
             f"{play_dir} is a link to another folder, so it was left as it was. Delete "
             "the link yourself if you no longer want it."

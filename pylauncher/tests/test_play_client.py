@@ -116,6 +116,7 @@ def test_marker_records_where_the_folder_came_from(tmp_path: Path) -> None:
         "server_dir": str(tmp_path / "srv"),
         "source_client_dir": str(orig),
         "created_at": "2026-09-30T12:00:00Z",
+        "full_copy": False,
     }
     assert play_client.read_marker(target) == returned
 
@@ -752,6 +753,12 @@ def exdev(src: Path, dst: Path) -> None:
     raise OSError(errno.EXDEV, "cross-device")
 
 
+def refresh(play: Path, orig: Path, tmp_path: Path, **kw: object) -> tuple[Path, ...]:
+    args: dict[str, object] = {"game": "g", "server_dir": tmp_path / "s", "reflink": no_reflink}
+    args.update(kw)
+    return play_client.refresh(play, orig, **args)  # type: ignore[arg-type]
+
+
 def replace_file(path: Path, data: bytes) -> None:
     """What a patcher does: a new file under the old name, not a write into the old one."""
     path.unlink()
@@ -775,7 +782,7 @@ def test_a_replaced_original_archive_is_stale_and_refresh_shares_it_again(tmp_pa
     replace_file(orig / "Data" / "common.MPQ", b"patched" * 100)
 
     assert play_client.stale(play, orig) == (Path("Data/common.MPQ"),)
-    changed = play_client.refresh(play, orig, reflink=no_reflink)
+    changed = refresh(play, orig, tmp_path)
 
     assert changed == (Path("Data/common.MPQ"),)
     assert os.path.samefile(orig / "Data/common.MPQ", play / "Data/common.MPQ")
@@ -785,7 +792,7 @@ def test_a_replaced_original_archive_is_stale_and_refresh_shares_it_again(tmp_pa
 
 
 def test_refresh_writes_the_new_file_beside_the_old_one_before_replacing_it(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     orig = fake_client(tmp_path)
     play = tmp_path / "t"
@@ -797,11 +804,29 @@ def test_refresh_writes_the_new_file_beside_the_old_one_before_replacing_it(
         seen.append(((play / "Data" / "common.MPQ").exists(), Path(dst)))
         os.link(src, dst)
 
-    play_client.refresh(play, orig, link=watching_link, reflink=no_reflink)
+    dst = play / "Data" / "common.MPQ"
+    unlinked: list[str] = []
+    replaced: list[tuple[str, str]] = []
+    real_unlink, real_replace = os.unlink, os.replace
+
+    def recording_unlink(path: object, *a: object, **kw: object) -> None:
+        unlinked.append(os.fspath(path))  # type: ignore[call-overload]
+        real_unlink(path, *a, **kw)  # type: ignore[arg-type]
+
+    def recording_replace(src: object, target: object, *a: object, **kw: object) -> None:
+        replaced.append((os.fspath(src), os.fspath(target)))  # type: ignore[call-overload]
+        real_replace(src, target, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(play_client.os, "unlink", recording_unlink)
+    monkeypatch.setattr(play_client.os, "remove", recording_unlink)
+    monkeypatch.setattr(play_client.os, "replace", recording_replace)
+    refresh(play, orig, tmp_path, link=watching_link)
     assert len(seen) == 1
     old_still_there, temp = seen[0]
     assert old_still_there
     assert temp.parent == play / "Data" and temp.name != "common.MPQ"
+    assert str(dst) not in unlinked, "the old file was removed before the new one took its name"
+    assert replaced == [(str(temp), str(dst))]
 
 
 def test_a_changed_wow_exe_is_stale_and_refresh_copies_it(tmp_path: Path) -> None:
@@ -813,36 +838,46 @@ def test_a_changed_wow_exe_is_stale_and_refresh_copies_it(tmp_path: Path) -> Non
     os.utime(orig / "Wow.exe", ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
 
     assert play_client.stale(play, orig) == (Path("Wow.exe"),)
-    assert play_client.refresh(play, orig, reflink=no_reflink) == (Path("Wow.exe"),)
+    assert refresh(play, orig, tmp_path) == (Path("Wow.exe"),)
     assert (play / "Wow.exe").read_bytes() == b"MZnew"
     assert not os.path.samefile(orig / "Wow.exe", play / "Wow.exe")
     assert play_client.stale(play, orig) == ()
 
 
-def test_an_original_archive_that_is_gone_is_stale_and_refresh_removes_it(
+def test_an_archive_the_original_lacks_is_never_stale_and_survives_refresh(
     tmp_path: Path,
 ) -> None:
+    # A module's patch, a player's own patch-Z.MPQ, an archive the original's patcher
+    # removed: after the switch the ready-to-play client may hold the only copy.
     orig = fake_client(tmp_path)
     play = tmp_path / "t"
     build(orig, play, tmp_path)
+    (play / "Data" / "patch-Z.MPQ").write_bytes(b"only here")
     (orig / "DivxDecoder.dll").unlink()
-    assert play_client.stale(play, orig) == (Path("DivxDecoder.dll"),)
-    assert play_client.refresh(play, orig, reflink=no_reflink) == (Path("DivxDecoder.dll"),)
-    assert not (play / "DivxDecoder.dll").exists()
-    assert (play / "Data" / "common.MPQ").is_file()
+    replace_file(orig / "Data" / "common.MPQ", b"new!")  # so refresh has something to do
+    assert play_client.stale(play, orig) == (Path("Data/common.MPQ"),)
+    assert refresh(play, orig, tmp_path) == (Path("Data/common.MPQ"),)
+    assert (play / "Data" / "patch-Z.MPQ").read_bytes() == b"only here"
+    assert (play / "DivxDecoder.dll").read_bytes() == b"dll"
 
 
 def test_a_full_copy_is_stale_only_when_size_or_time_differ(tmp_path: Path) -> None:
     orig = fake_client(tmp_path)
     play = tmp_path / "t"
     build(orig, play, tmp_path, link=exdev, allow_full_copy=True)
+    marker = play_client.read_marker(play)
+    assert marker is not None and marker.full_copy
     assert play_client.stale(play, orig) == ()
     mpq = orig / "Data" / "common.MPQ"
     st = mpq.stat()
     os.utime(mpq, ns=(st.st_atime_ns, st.st_mtime_ns + 3 * 10**9))
 
     assert play_client.stale(play, orig) == (Path("Data/common.MPQ"),)
-    assert play_client.refresh(play, orig, link=exdev, reflink=no_reflink) == (
+
+    def no_sharing(src: Path, dst: Path) -> None:
+        raise AssertionError("a full copy is refreshed by copying, not by sharing")
+
+    assert refresh(play, orig, tmp_path, link=no_sharing, reflink=no_sharing) == (
         Path("Data/common.MPQ"),
     )
     assert not os.path.samefile(mpq, play / "Data/common.MPQ")
@@ -859,21 +894,26 @@ def test_a_time_within_two_seconds_is_the_same_file(tmp_path: Path) -> None:
     assert play_client.stale(play, orig) == ()
 
 
-def test_refresh_never_touches_wtf_or_interface_whatever_their_case(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("wtf", "interface"), [("WTF", "INTERFACE"), ("wtf", "interface")])
+def test_refresh_never_touches_wtf_or_interface_whatever_their_case(
+    tmp_path: Path, wtf: str, interface: str
+) -> None:
     orig = fake_client(tmp_path)
-    (orig / "Interface").rename(orig / "INTERFACE")
-    (orig / "INTERFACE" / "AddOns" / "Foo" / "helper.dll").write_bytes(b"old")
-    (orig / "WTF" / "odd.MPQ").write_bytes(b"old")
+    (orig / "Interface").rename(orig / interface)
+    if wtf != "WTF":
+        (orig / "WTF").rename(orig / wtf)
+    (orig / interface / "AddOns" / "Foo" / "helper.dll").write_bytes(b"old")
+    (orig / wtf / "odd.MPQ").write_bytes(b"old")
     play = tmp_path / "t"
     build(orig, play, tmp_path)
-    replace_file(orig / "INTERFACE" / "AddOns" / "Foo" / "helper.dll", b"new!")
-    replace_file(orig / "WTF" / "odd.MPQ", b"new!")
+    replace_file(orig / interface / "AddOns" / "Foo" / "helper.dll", b"new!")
+    replace_file(orig / wtf / "odd.MPQ", b"new!")
     replace_file(orig / "Data" / "common.MPQ", b"new!")  # so refresh has something to do
 
     assert play_client.stale(play, orig) == (Path("Data/common.MPQ"),)
-    play_client.refresh(play, orig, reflink=no_reflink)
-    assert (play / "INTERFACE" / "AddOns" / "Foo" / "helper.dll").read_bytes() == b"old"
-    assert (play / "WTF" / "odd.MPQ").read_bytes() == b"old"
+    refresh(play, orig, tmp_path)
+    assert (play / interface / "AddOns" / "Foo" / "helper.dll").read_bytes() == b"old"
+    assert (play / wtf / "odd.MPQ").read_bytes() == b"old"
 
 
 def test_refresh_needs_a_marker(tmp_path: Path) -> None:
@@ -883,7 +923,7 @@ def test_refresh_needs_a_marker(tmp_path: Path) -> None:
     replace_file(orig / "Data" / "common.MPQ", b"new!")
     (play / play_client.MARKER).unlink()
     with pytest.raises(play_client.PlayClientError, match="not made by Yu'lon"):
-        play_client.refresh(play, orig, reflink=no_reflink)
+        refresh(play, orig, tmp_path)
     assert (play / "Data" / "common.MPQ").read_bytes() == b"mpq" * 1000
 
 
@@ -893,7 +933,7 @@ def test_refresh_refuses_a_client_it_was_not_made_from(tmp_path: Path) -> None:
     build(orig, play, tmp_path)
     other = fake_client(tmp_path / "elsewhere")
     with pytest.raises(play_client.PlayClientError, match="was made from"):
-        play_client.refresh(play, other, reflink=no_reflink)
+        refresh(play, other, tmp_path)
     assert os.path.samefile(orig / "Data/common.MPQ", play / "Data/common.MPQ")
 
 
@@ -904,8 +944,8 @@ def test_refresh_of_a_shared_client_that_cannot_share_any_more_changes_nothing(
     play = tmp_path / "t"
     build(orig, play, tmp_path)
     replace_file(orig / "Data" / "common.MPQ", b"new!")
-    with pytest.raises(play_client.PlayClientError, match="make it again with a full copy"):
-        play_client.refresh(play, orig, link=exdev, reflink=no_reflink)
+    with pytest.raises(play_client.PlayClientError, match="make it again.*full copy"):
+        refresh(play, orig, tmp_path, link=exdev)
     assert (play / "Data" / "common.MPQ").read_bytes() == b"mpq" * 1000
     assert not list(play.rglob("*.yulon-refresh"))
 
@@ -935,7 +975,7 @@ def test_refresh_replaces_a_read_only_archive_that_is_its_own(
     build(orig, play, tmp_path)
     replace_file(orig / "Data" / "common.MPQ", b"new!")
     refused = _windows_like_replace(monkeypatch)
-    play_client.refresh(play, orig, reflink=no_reflink)
+    refresh(play, orig, tmp_path)
     assert refused == [str(play / "Data" / "common.MPQ")], "read-only path not hit"
     assert os.path.samefile(orig / "Data/common.MPQ", play / "Data/common.MPQ")
 
@@ -951,8 +991,10 @@ def test_refresh_does_not_unprotect_an_archive_another_client_shares(
     build(orig, theirs, tmp_path, server_dir=tmp_path / "s2")
     replace_file(orig / "Data" / "common.MPQ", b"new!")
     _windows_like_replace(monkeypatch)
-    with pytest.raises(play_client.PlayClientError, match="read-only"):
-        play_client.refresh(mine, orig, reflink=no_reflink)
+    with pytest.raises(play_client.PlayClientError, match="read-only") as info:
+        refresh(mine, orig, tmp_path)
+    assert "Delete the other ready-to-play client" in str(info.value)
+    assert "flag yourself" not in str(info.value)
     assert (theirs / "Data" / "common.MPQ").stat().st_mode & 0o777 == 0o444
     assert (mine / "Data" / "common.MPQ").read_bytes() == b"mpq" * 1000
 
@@ -1052,7 +1094,7 @@ def test_refresh_leaves_wtf_and_interface_alone_even_when_listed(
     replace_file(orig / "Interface" / "helper.dll", b"new!")
     listed = (Path("Interface/helper.dll"), Path("WTF/odd.MPQ"))
     monkeypatch.setattr(play_client, "stale", lambda play_dir, original: listed)
-    assert play_client.refresh(play, orig, reflink=no_reflink) == ()
+    assert refresh(play, orig, tmp_path) == ()
     assert (play / "WTF" / "odd.MPQ").read_bytes() == b"old"
     assert (play / "Interface" / "helper.dll").read_bytes() == b"old"
 
@@ -1159,3 +1201,96 @@ def test_remove_folder_takes_folderness_from_the_look_it_decided_on(
     play_client.remove_folder(folder)
     assert (elsewhere / "precious.MPQ").read_bytes() == b"keep"
     assert not folder.exists()
+
+
+# -- Task 2 fix round 1 --------------------------------------------------------
+
+
+def test_refresh_refuses_another_servers_client(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path, server_dir=tmp_path / "other")
+    replace_file(orig / "Data" / "common.MPQ", b"new!")
+    with pytest.raises(play_client.PlayClientError, match="another server at .*other"):
+        refresh(play, orig, tmp_path, game="g", server_dir=tmp_path / "s")
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"mpq" * 1000
+
+
+def test_a_cloned_client_that_cannot_share_is_not_taken_for_a_full_copy(tmp_path: Path) -> None:
+    # A clone shares no inode with the original, just like a full copy; only the
+    # marker tells them apart, and only a full copy may be re-copied unasked.
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+
+    def copying_reflink(src: Path, dst: Path) -> bool:
+        shutil.copy2(src, dst)
+        return True
+
+    build(orig, play, tmp_path, reflink=copying_reflink)
+    marker = play_client.read_marker(play)
+    assert marker is not None and not marker.full_copy
+    replace_file(orig / "Data" / "common.MPQ", b"new!")
+    with pytest.raises(play_client.PlayClientError, match="make it again.*full copy"):
+        refresh(play, orig, tmp_path, link=exdev)
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"mpq" * 1000
+
+
+def test_a_marker_without_full_copy_reads_as_shared(tmp_path: Path) -> None:
+    raw = {
+        "version": 1,
+        "game": "g",
+        "server_dir": str(tmp_path / "s"),
+        "source_client_dir": str(tmp_path / "WoW"),
+        "created_at": "2026-09-30T12:00:00Z",
+    }
+    (tmp_path / play_client.MARKER).write_text(json.dumps(raw), encoding="utf-8")
+    marker = play_client.read_marker(tmp_path)
+    assert marker is not None and marker.full_copy is False
+
+
+def _unlookable(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    real = os.lstat
+
+    def failing(path: object) -> object:
+        if os.fspath(path) == str(target):  # type: ignore[call-overload]
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        return real(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(play_client, "_lstat", failing)
+
+
+def test_remove_folder_stops_when_the_folder_itself_cannot_be_looked_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "t.yulon-partial"
+    folder.mkdir()
+    (folder / "precious.MPQ").write_bytes(b"keep")
+    _unlookable(monkeypatch, folder)
+    with pytest.raises(OSError, match="Access is denied"):
+        play_client.remove_folder(folder)
+    assert (folder / "precious.MPQ").read_bytes() == b"keep"
+
+
+def test_delete_stops_when_the_folder_itself_cannot_be_looked_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    _unlookable(monkeypatch, play)
+    with pytest.raises(play_client.PlayClientError, match="could not be looked at"):
+        play_client.delete(play, game="g", server_dir=tmp_path / "s")
+    assert (play / "Wow.exe").is_file()
+
+
+def test_refresh_keeps_an_archive_the_original_lacks_even_when_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The original's archive vanished between stale() and refresh(): still keep ours.
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    (orig / "DivxDecoder.dll").unlink()
+    monkeypatch.setattr(play_client, "stale", lambda play_dir, original: (Path("DivxDecoder.dll"),))
+    assert refresh(play, orig, tmp_path) == ()
+    assert (play / "DivxDecoder.dll").read_bytes() == b"dll"
