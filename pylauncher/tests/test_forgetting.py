@@ -79,3 +79,13 @@ def test_the_stop_failure_question_names_the_reason_and_what_yes_costs() -> None
     assert "Docker would not say who owns tbc-db" in said
     assert "anyway" in said
     assert "keeps running with nothing in Yu'lon managing it" in said
+
+
+def test_the_question_names_the_ready_to_play_client_it_leaves(tmp_path: Path) -> None:
+    """T181: the removal deletes nothing, so its ready-to-play client is named as left."""
+    play = tmp_path / "WoW (Yu'lon)"
+    for gone in (False, True):
+        said = forgetting.question(_facts(tmp_path, play_client_dir=play, folder_gone=gone))
+        assert f"ready-to-play client at {play} is left where it is" in said
+        assert "delete that folder by hand" in said
+    assert "ready-to-play" not in forgetting.question(_facts(tmp_path))

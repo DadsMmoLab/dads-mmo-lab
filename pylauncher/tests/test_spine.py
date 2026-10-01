@@ -2384,9 +2384,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "write: zero and two are both named refusals, so a listing that came back short "
         "stops the press rather than picking a library to write into"
     ),
-    ("steam.py", "find_compat_tool"): (
+    ("steam.py", "_proton_candidates"): (
         "8.8. Lists `compatibilitytools.d/` and `steamapps/common/` for a Proton. Same "
-        "shape: nothing found is the `NO_PROTON` refusal, which names what to install"
+        "shape: nothing found is the `NO_PROTON` refusal, which names what to install. "
+        "Moved out of `find_compat_tool` in T181 so Play's `find_proton_script` reads "
+        "the same order; there, nothing found falls back to Wine or the "
+        "`play_launch` refusal that names Proton and Wine, and nothing is started"
     ),
     ("steam.py", "client_executable"): (
         "8.8. Globs a client folder the user already chose and Yu'lon already validated, "
@@ -2584,9 +2587,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
-    ("networking.py", "write_client_realmlist"): (
-        "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
-        "matching nothing falls back to `Data/enUS/`, and the write itself is to a named file"
+    ("networking.py", "_realmlist_candidates"): (
+        "globs `Data/*/realmlist.wtf` in a client to find the file(s) to write: the first "
+        "for `write_client_realmlist()`, every one for T181's "
+        "`write_ready_to_play_realmlists()`, which is only ever handed a ready-to-play "
+        "client. A glob matching nothing falls back to `Data/enUS/`, and each write is to a "
+        "named file"
     ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "
@@ -2658,6 +2664,44 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "this app's own directory, that is more than a day old - old enough that it cannot "
         "belong to a write still in flight in another copy of Yu'lon. It touches nothing of "
         "a server's and answers an empty listing by doing nothing"
+    ),
+    ("play_client.py", "plan"): (
+        "T181a. Walks the player's own client to sort its files into hard-linked (`*.MPQ`, "
+        "`*.dll`) and copied, for a ready-to-play client built BESIDE it. The listing decides "
+        "what is read from the original, never a write into it: every write goes to "
+        "`<target>.yulon-partial`, and `plan()` refuses a target that is the original or "
+        "inside it before it lists anything. An OSError propagates, and `create()` turns it "
+        "into a refusal with the unfinished folder removed - never a partial client "
+        "reported as built"
+    ),
+    ("play_client.py", "_empty"): (
+        "T181a fix rounds 1-2. Lists, bottom up, a folder this app is DELETING through "
+        "`remove_folder()`: an unfinished `<target>.yulon-partial` of this same build, a "
+        "leftover whose marker names this game and server, or (Task 2's `delete()`) this "
+        "game's and server's ready-to-play client, matched by its marker the same way. The "
+        "listing decides what is deleted, but only inside a folder the caller already "
+        "proved is Yu'lon's by its marker. It never enters a symlink or a Windows "
+        "junction (`_is_link`, the reparse-point attribute, since neither `os.walk` nor "
+        "`is_symlink()` sees a junction): the link itself is removed, never what it points "
+        "at, and a top-level folder that is a link is refused. A failure to list or delete "
+        "raises rather than reporting a folder removed"
+    ),
+    ("play_client.py", "left_out_archives"): (
+        "T181a final review. Walks the player's own client for `*.MPQ`/`*.dll` the "
+        "ready-to-play client has no file for, the way `plan()` walks it (never through a "
+        "link, never into the left-out folders, WTF/ or Interface/), less this server's "
+        "module patches (`ignore`). Read-only on both sides: the answer is only NAMED to "
+        "the player (Play and Refresh say to make the client again to include them); "
+        "nothing is copied or written because of it"
+    ),
+    ("play_client.py", "_linked_files"): (
+        "T181a Task 2. Walks a ready-to-play client (a folder carrying Yu'lon's marker) for "
+        "its `*.MPQ`/`*.dll`, never into a link and never into top-level `WTF/` or "
+        "`Interface/`, so `stale()` can compare each with the original and `refresh()` can "
+        "replace exactly those. It decides which of the folder's own files are rewritten "
+        "(under a temporary name, then renamed into place), never a write into the "
+        "original; `refresh()` refuses a folder without the marker, or an original other "
+        "than the one it names, before it lists anything"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.

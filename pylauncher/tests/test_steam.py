@@ -825,3 +825,92 @@ def test_the_newest_proton_in_compatibilitytools_d_wins_not_the_alphabetical_one
     _proton(tmp_path, name="GE-Proton11-2")
 
     assert steam.find_compat_tool(tmp_path / ".local/share/Steam") == "GE-Proton11-6-x86_64"
+
+
+# --------------------------------------------------------------------------
+# the Proton script Play runs (T181): the same order, and a file that exists
+# --------------------------------------------------------------------------
+
+
+def _script(tool: Path) -> Path:
+    """A `proton` script inside `tool`, the file Play hands the client to."""
+    tool.mkdir(parents=True, exist_ok=True)
+    script = tool / "proton"
+    script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    return script
+
+
+def test_the_proton_script_comes_from_the_tool_with_a_readable_manifest_first(
+    tmp_path: Path,
+) -> None:
+    """`compatibilitytools.d` before `steamapps/common`, as `find_compat_tool` has it.
+
+    Both hold a runnable `proton`; the one Add to Steam… would name is the one
+    Play must run, or the two buttons start the client under different Protons.
+    """
+    root = tmp_path / ".local/share/Steam"
+    _proton(tmp_path, name="GE-Proton11-6-x86_64")
+    wanted = _script(root / "compatibilitytools.d/GE-Proton11-6-x86_64")
+    _script(root / "steamapps/common/Proton 9.0")
+
+    assert steam.find_proton_script(root) == wanted
+
+
+def test_a_tool_whose_proton_file_is_missing_is_skipped(tmp_path: Path) -> None:
+    """A newer tool with a good manifest but no `proton` is passed over for the next.
+
+    Catches returning the path the first candidate WOULD have, unchecked.
+    """
+    root = tmp_path / ".local/share/Steam"
+    _proton(tmp_path, name="GE-Proton11-6-x86_64")
+    _proton(tmp_path, name="GE-Proton10-1")
+    wanted = _script(root / "compatibilitytools.d/GE-Proton10-1")
+
+    assert steam.find_proton_script(root) == wanted
+
+
+def test_a_tool_without_a_readable_manifest_is_skipped_even_with_a_script(
+    tmp_path: Path,
+) -> None:
+    """The manifest rule `find_compat_tool` follows holds for the script too."""
+    root = tmp_path / ".local/share/Steam"
+    _script(root / "compatibilitytools.d/GE-Proton99-old")
+    wanted = _script(root / "steamapps/common/Proton 9.0")
+
+    assert steam.find_proton_script(root) == wanted
+
+
+def test_the_newest_numbered_proton_script_beats_experimental(tmp_path: Path) -> None:
+    """`Proton 9.0` over `Proton 8.0` over Experimental — the stable build wins."""
+    root = tmp_path / ".local/share/Steam"
+    _script(root / "steamapps/common/Proton 8.0")
+    wanted = _script(root / "steamapps/common/Proton 9.0")
+    _script(root / "steamapps/common/Proton - Experimental")
+
+    assert steam.find_proton_script(root) == wanted
+
+
+def test_the_experimental_proton_script_is_used_when_it_is_all_there_is(
+    tmp_path: Path,
+) -> None:
+    """The named builds are the last resort, not no answer."""
+    root = tmp_path / ".local/share/Steam"
+    wanted = _script(root / "steamapps/common/Proton - Experimental")
+
+    assert steam.find_proton_script(root) == wanted
+
+
+def test_a_proton_that_is_a_directory_is_no_proton_script(tmp_path: Path) -> None:
+    """`proton` must be a FILE: a directory by that name runs nothing."""
+    root = tmp_path / ".local/share/Steam"
+    (root / "steamapps/common/Proton 9.0/proton").mkdir(parents=True)
+
+    assert steam.find_proton_script(root) is None
+
+
+def test_no_proton_at_all_is_no_proton_script(tmp_path: Path) -> None:
+    """An empty Steam root answers `None`, not an error."""
+    root = tmp_path / ".local/share/Steam"
+    root.mkdir(parents=True)
+
+    assert steam.find_proton_script(root) is None

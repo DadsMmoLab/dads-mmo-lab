@@ -365,6 +365,78 @@ def test_write_client_realmlist_retail_and_repack_layouts(tmp_path: Path) -> Non
     assert out3 == fresh / "Data" / "enUS" / "realmlist.wtf"
 
 
+# -- the ready-to-play client's realmlists (T181a final review) ---------------
+
+
+def _two_locales(folder: Path) -> tuple[Path, Path, Path]:
+    gb, us, top = (
+        folder / "Data" / "enGB" / "realmlist.wtf",
+        folder / "Data" / "enUS" / "realmlist.wtf",
+        folder / "realmlist.wtf",
+    )
+    for f in (gb, us, top):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("set realmlist logon.example.com\nset patchlist x\n", encoding="utf-8")
+    return gb, us, top
+
+
+def test_every_realmlist_of_a_ready_to_play_client_is_written(tmp_path: Path) -> None:
+    """Finding 5: a client reads its locale's file; one left alone names another server."""
+    files = _two_locales(tmp_path / "play")
+
+    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+
+    assert sorted(written) == sorted(files)
+    for f in files:
+        assert f.read_text(encoding="utf-8") == "set realmlist 127.0.0.1\nset patchlist x\n"
+
+
+def test_the_first_found_writer_is_unchanged_for_its_other_callers(tmp_path: Path) -> None:
+    gb, us, top = _two_locales(tmp_path / "client")
+
+    assert networking.write_client_realmlist(tmp_path / "client", "10.0.0.5") == gb
+    assert us.read_text(encoding="utf-8").startswith("set realmlist logon.example.com")
+    assert top.read_text(encoding="utf-8").startswith("set realmlist logon.example.com")
+
+
+def test_a_ready_to_play_client_with_no_realmlist_gets_one(tmp_path: Path) -> None:
+    (tmp_path / "play").mkdir()
+
+    written = networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+
+    assert written == (tmp_path / "play" / "Data" / "enUS" / "realmlist.wtf",)
+    assert written[0].read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
+
+
+def test_a_read_only_realmlist_of_its_own_is_made_writable_and_written(tmp_path: Path) -> None:
+    """Finding 1: `create()` copies the original's read-only flag along with the file."""
+    f = tmp_path / "play" / "Data" / "enUS" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_text("set realmlist logon.example.com\n", encoding="utf-8")
+    os.chmod(f, 0o444)
+
+    networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+
+    assert f.read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
+
+
+def test_a_realmlist_shared_through_a_hard_link_is_never_touched(tmp_path: Path) -> None:
+    """Finding 1: its flag and its bytes are the other folder's too."""
+    other = tmp_path / "other" / "realmlist.wtf"
+    other.parent.mkdir()
+    other.write_text("set realmlist logon.example.com\n", encoding="utf-8")
+    os.chmod(other, 0o444)
+    f = tmp_path / "play" / "Data" / "enUS" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    os.link(other, f)
+
+    with pytest.raises(PermissionError, match="shared with another folder"):
+        networking.write_ready_to_play_realmlists(tmp_path / "play", "127.0.0.1")
+
+    assert other.read_text(encoding="utf-8") == "set realmlist logon.example.com\n"
+    assert other.stat().st_mode & 0o777 == 0o444
+
+
 # --------------------------------------------------------- the macOS firewall
 # Every one of these runs the real parsing against the strings `socketfilterfw`
 # is documented to print. None of it has been run on a Mac — the checks that

@@ -37,6 +37,13 @@ class KnownInstall(BaseModel):
     is the same kind of fact - where this server is - and nothing infers it at
     runtime: an install was either adopted from a distro or it was not.
     """
+    play_client_dir: Path | None = None
+    """This server's ready-to-play client (T181), if the player made one.
+
+    A folder Yu'lon built from `client_dir` and marked as its own; once set,
+    module client files go into it and never into `client_dir`. Optional with a
+    default, so every `state.json` written before it existed still loads.
+    """
 
 
 class AppState(BaseModel):

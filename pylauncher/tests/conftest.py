@@ -1059,6 +1059,22 @@ def _no_unit_test_holds_a_real_distro_open(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _no_unit_test_starts_a_real_game(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that would start a real WoW client through Play (T181).
+
+    `play_launch.launch()` starts the game DETACHED, so a test that reached it
+    without its own `popen=` would leave a Wine or Proton session running on the
+    test box after the suite, or a `Wow.exe` window on a Windows runner.
+    """
+    from yulon import play_launch
+
+    def refuse(argv: object, **kwargs: object) -> None:
+        pytest.fail(f"a test reached a real game launch: {argv!r}")
+
+    monkeypatch.setattr(play_launch, "_spawn", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_unit_test_talks_to_a_real_docker_daemon(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:

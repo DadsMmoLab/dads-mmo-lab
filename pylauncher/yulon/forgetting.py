@@ -102,6 +102,8 @@ class Facts:
     says, because a poll's "stopped" is trusted until the next poll begins and
     a server started outside Yu'lon in that gap would be forgotten while it ran
     (Codex, final review, T95)."""
+    play_client_dir: Path | None = None
+    """This server's ready-to-play client (T181), named because it is left behind too."""
 
 
 def way_back(facts: Facts) -> str:
@@ -120,13 +122,22 @@ def way_back(facts: Facts) -> str:
 def question(facts: Facts) -> str:
     """The one Yes/No a removal asks: what goes, what stays, the stop, the way back."""
     goes = f"Yu'lon stops listing {facts.name} at {facts.server_dir}, and its tab closes."
+    play = (
+        f"Its ready-to-play client at {facts.play_client_dir} is left where it is too; "
+        "delete that folder by hand if you no longer want it."
+        if facts.play_client_dir is not None
+        else None
+    )
     if facts.folder_gone:
-        return "\n\n".join((goes, _FOLDER_GONE.format(server_dir=facts.server_dir)))
+        gone = (goes, _FOLDER_GONE.format(server_dir=facts.server_dir))
+        return "\n\n".join((*gone, play) if play is not None else gone)
     parts = [
         goes,
         "Nothing is deleted: the server folder, its database volume (your characters) and its "
         "Docker images all stay where they are.",
     ]
+    if play is not None:
+        parts.append(play)
     parts.append(
         "It is running, so it is stopped first. Its containers are kept."
         if facts.running

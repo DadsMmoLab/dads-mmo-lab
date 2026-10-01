@@ -3969,3 +3969,165 @@ def test_a_panel_that_finished_during_the_last_join_is_not_called_stuck(qapp: ob
     window = SimpleNamespace(yulon_log_panels=[_LatePanel()], property=lambda _name: None)
 
     assert main._stop_background_threads(window) == []
+
+
+# ------------------------------------ T181a: the ready-to-play client folder seam
+
+
+def test_the_play_client_seam_writes_the_record_and_keeps_the_rest_of_it(
+    window: Any, tmp_path: Any
+) -> None:
+    """`main._remember_play_client_live()`: the same live-`AppState` write as T36's seam."""
+    server_dir = tmp_path / "play-client-live"
+    client = tmp_path / "WoW"
+    catalog = _catalog_view(window)
+    catalog.adopted.emit("wow-wotlk", server_dir, client, "Ubuntu-24.04")
+    view = _tab_for(window, server_dir)
+    assert view.services.set_play_client_dir is not None
+    play = tmp_path / "WoW (Yu'lon)"
+
+    view.services.set_play_client_dir(play)
+
+    after = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert after is not None
+    assert after.play_client_dir == play
+    assert after.client_dir == client, "the original folder was dropped"
+    assert after.wsl_distro == "Ubuntu-24.04", "the distro was dropped"
+
+    view.services.set_play_client_dir(None)
+
+    cleared = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert cleared is not None and cleared.play_client_dir is None
+    assert cleared.client_dir == client
+
+
+def test_a_failing_play_client_save_restores_the_old_record(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = tmp_path / "play-client-restore"
+    seen_states: list[Any] = []
+
+    def _refuse(app_state: Any, path: Any = None) -> None:
+        seen_states.append(app_state)
+        raise PermissionError(13, "Access is denied", "state.json")
+
+    monkeypatch.setattr(state, "save_state", _refuse)
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+
+    with pytest.raises(OSError):
+        view.services.set_play_client_dir(tmp_path / "WoW (Yu'lon)")
+
+    restored = seen_states[-1].find("wow-wotlk", server_dir)
+    assert restored is not None
+    assert restored.play_client_dir is None, "the failed write was not undone"
+
+
+def test_a_rebuilt_tab_keeps_writing_modules_into_the_ready_to_play_client(
+    window: Any, tmp_path: Any
+) -> None:
+    """A client-folder press rebuilds the tab, which reads the record's ready-to-play client."""
+    server_dir = tmp_path / "tw-play-client"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-tortoise", server_dir, None)
+    view = _tab_for(window, server_dir)
+    client = tmp_path / "TurtleWoW"
+    play = tmp_path / "TurtleWoW (Yu'lon)"
+    for folder in (client, play):
+        (folder / "Interface").mkdir(parents=True)
+    view.services.set_play_client_dir(play)
+    view.services.set_client_dir(client)
+    view.client_dir_changed.emit("wow-tortoise", server_dir, client)
+
+    rebuilt = _tab_for(window, server_dir)
+    assert rebuilt is not view
+    assert rebuilt.services.client_dir == client
+    assert rebuilt.services.play_client_dir == play
+    assert rebuilt.services.applier is not None
+    assert rebuilt.services.applier.client_dir == play, "modules went back to the original"
+
+
+def test_use_existing_on_a_known_server_keeps_its_ready_to_play_client(
+    window: Any, tmp_path: Any
+) -> None:
+    """`installed` replaces the record; its ready-to-play client is carried over like the distro."""
+    server_dir = tmp_path / "play-client-reinstalled"
+    client = tmp_path / "WoW"
+    play = tmp_path / "WoW (Yu'lon)"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, client)
+    _tab_for(window, server_dir).services.set_play_client_dir(play)
+
+    catalog.installed.emit("wow-wotlk", server_dir, client)
+
+    kept = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert kept is not None and kept.play_client_dir == play
+
+
+def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
+    window: Any, tmp_path: Any
+) -> None:
+    """T181a carried finding 1: `play_client_dir_changed` rebuilds the tab, as T36's signal does."""
+    server_dir = tmp_path / "tw-play-made"
+    catalog = _catalog_view(window)
+    client = tmp_path / "TurtleWoW"
+    play = tmp_path / "TurtleWoW (Yu'lon)"
+    for folder in (client, play):
+        (folder / "Interface").mkdir(parents=True)
+    catalog.installed.emit("wow-tortoise", server_dir, client)
+    view = _tab_for(window, server_dir)
+    assert view.services.set_play_client_dir is not None
+    view.services.set_play_client_dir(play)
+    view.play_client_dir_changed.emit("wow-tortoise", server_dir, play)
+
+    made = _tab_for(window, server_dir)
+    assert made is not view, "the old tab was kept"
+    assert made.services.play_client_dir == play
+    assert made.services.client_dir == client
+    assert made.services.applier is not None and made.services.applier.client_dir == play
+
+    made.services.set_play_client_dir(None)
+    made.play_client_dir_changed.emit("wow-tortoise", server_dir, None)
+
+    gone = _tab_for(window, server_dir)
+    assert gone is not made
+    assert gone.services.play_client_dir is None
+    assert gone.services.applier is not None and gone.services.applier.client_dir == client
+
+
+def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T181 fix round 1: the removal promises nothing is deleted, so the folder is named as left."""
+    asked = _answer(monkeypatch, False)
+    server_dir = tmp_path / "t181-remove"
+    view, _stops = _removable_tab(window, monkeypatch, server_dir)
+    play = tmp_path / "WoW (Yu'lon)"
+    view.services.set_play_client_dir(play)
+    view.play_client_dir_changed.emit("wow-tbc", server_dir, play)
+    view = _tab_for(window, server_dir)
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1
+    assert f"ready-to-play client at {play} is left where it is" in asked[0][1]
+
+
+def test_the_removal_list_reads_the_other_installs_but_not_this_one_or_a_wsl_one(
+    window: Any, tmp_path: Any
+) -> None:
+    """`other_server_dirs` is bound from the live state: every other install on this host."""
+    catalog = _catalog_view(window)
+    mine, other, wsl_one = tmp_path / "mine", tmp_path / "other", tmp_path / "in-wsl"
+    catalog.installed.emit("wow-wotlk", mine, None)
+    catalog.installed.emit("wow-tbc", other, None)
+    catalog.adopted.emit("wow-vanilla", wsl_one, None, "Ubuntu-24.04")
+    view = _tab_for(window, mine)
+
+    assert view.services.other_server_dirs is not None
+    others = view.services.other_server_dirs()
+    # Membership, not equality: the window fixture's state may hold earlier installs.
+    assert other in others
+    assert mine not in others, "this server's own receipts would hide every file"
+    assert wsl_one not in others, "reading it would boot its distro"

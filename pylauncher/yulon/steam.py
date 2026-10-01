@@ -51,7 +51,7 @@ import struct
 import subprocess
 import sys
 import zlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -370,12 +370,19 @@ def _tool_name_from_manifest(manifest: Path) -> str | None:
     return None
 
 
-def find_compat_tool(steam_root: Path) -> str | None:
-    """What to name in `CompatToolMapping`, or `None` if this Steam has no Proton.
+def _proton_candidates(steam_root: Path) -> Iterator[tuple[str, Path]]:
+    """Every Proton this Steam holds, best first: `(CompatToolMapping name, folder)`.
+
+    The one place the preference order lives, because two buttons read it: Add
+    to Steam… names the first in `CompatToolMapping` and Play runs the first
+    one's `proton` script (T181). Two copies of the order would drift, and then
+    the same client starts under a different Proton depending on which button
+    the player pressed.
 
     `compatibilitytools.d` first because its answer is read off the tool's own
     manifest; an official Proton under `steamapps/common` second, because its
-    name is Steam's convention rather than a fact on disk.
+    name is Steam's convention rather than a fact on disk. A generator, so a
+    caller satisfied by the first answer never lists `steamapps/common`.
     """
     tools = steam_root / "compatibilitytools.d"
     if tools.is_dir():
@@ -391,25 +398,47 @@ def find_compat_tool(steam_root: Path) -> str | None:
             # T17, round 2). Skipped, and the next one asked.
             name = _tool_name_from_manifest(entry / "compatibilitytool.vdf")
             if name:
-                return name
+                yield name, entry
     common = steam_root / "steamapps" / "common"
     if common.is_dir():
-        numbered: list[tuple[int, str]] = []
-        named: list[str] = []
+        numbered: list[tuple[str, Path]] = []
+        named: list[tuple[str, Path]] = []
         for entry in sorted(common.iterdir()):
             if not entry.is_dir() or not entry.name.startswith("Proton"):
                 continue
             match = _PROTON_VERSION.match(entry.name)
             if match:
-                numbered.append((int(match.group(1)), f"proton_{match.group(1)}"))
+                numbered.append((f"proton_{match.group(1)}", entry))
             elif entry.name in _OFFICIAL_PROTON:
-                named.append(_OFFICIAL_PROTON[entry.name])
-        # A numbered build is the one Valve ships as stable, so it wins; the
-        # Experimental and Hotfix builds are picked only when they are all there is.
-        if numbered:
-            return max(numbered)[1]
-        if named:
-            return sorted(named)[0]
+                named.append((_OFFICIAL_PROTON[entry.name], entry))
+        # A numbered build is the one Valve ships as stable, so it wins, newest
+        # first; the Experimental and Hotfix builds are asked only after every
+        # numbered one.
+        yield from sorted(numbered, key=lambda c: _tool_order(c[1].name), reverse=True)
+        yield from sorted(named, key=lambda c: (c[0], c[1].name))
+
+
+def find_compat_tool(steam_root: Path) -> str | None:
+    """What to name in `CompatToolMapping`, or `None` if this Steam has no Proton.
+
+    The first of `_proton_candidates()`, which says why that order.
+    """
+    return next((name for name, _ in _proton_candidates(steam_root)), None)
+
+
+def find_proton_script(steam_root: Path) -> Path | None:
+    """The `proton` script Play runs the client with, or `None` if there is none.
+
+    The same order as `find_compat_tool`, so Play and the Steam entry agree on
+    which Proton, with one more condition: the script must be a file that is
+    there. A folder Steam half-installed, or a tool unpacked without it, runs
+    nothing, and handing that path to `Popen` fails with an error that names a
+    file the player never heard of; the next candidate is asked instead.
+    """
+    for _, folder in _proton_candidates(steam_root):
+        script = folder / "proton"
+        if script.is_file():
+            return script
     return None
 
 
