@@ -74,6 +74,7 @@ from yulon import (
     networking,
     party,
     platform,
+    play_client,
     purge,
     reset_defaults,
     resources,
@@ -1066,6 +1067,14 @@ class ControllerServices:
     included, to say which of its three sentences applies.
     """
 
+    play_client_dir: Path | None = None
+    """This install's ready-to-play client (T181), or `None` when it has none.
+
+    Beside `client_dir` rather than in its place: the applier and the Steam
+    entry were built over THIS folder (`for_entry()`), while `client_dir` stays
+    the player's own folder, which is what the Server tab's row names.
+    """
+
     time_zone: server_time_zone.TimeZoneRoute | None = None
     """The Tuning tab's "Server time zone" (T171), bound to this install.
 
@@ -1102,6 +1111,13 @@ class ControllerServices:
     state file to write back into.
     """
 
+    set_play_client_dir: Callable[[Path | None], None] | None = None
+    """Record (or clear with `None`) THIS install's ready-to-play client (T181).
+
+    `set_client_dir`'s twin, bound by `main.py` for the same reason and left
+    `None` by every factory.
+    """
+
     @classmethod
     def for_entry(
         cls,
@@ -1109,6 +1125,7 @@ class ControllerServices:
         server_dir: Path,
         client_dir: Path | None = None,
         wsl_distro: str | None = None,
+        play_client_dir: Path | None = None,
     ) -> ControllerServices:
         """The real wiring for the install at `server_dir`, from THIS game's package.
 
@@ -1123,6 +1140,14 @@ class ControllerServices:
         An id with no factory raises `UnsupportedGameError` rather than falling
         back to WotLK; that class says what the fallback cost.
 
+        With `play_client_dir` (T181) the factory is handed the ready-to-play
+        client as its client folder, so every seam built over one (the module
+        applier, the Steam entry) writes and points there; the applier is told
+        which folders are the player's own so a receipt from before the switch
+        is taken back from the ready-to-play client. `client_dir` is then put
+        back to the player's own folder for the Server tab's row. Without one
+        the factory's answer is returned as it is.
+
         Raises:
             UnsupportedGameError: no controller package is wired for `entry.id`.
         """
@@ -1133,7 +1158,12 @@ class ControllerServices:
                 f"app cannot manage an install of it. Nothing was opened. The games it can "
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
-        return factory(entry, server_dir, client_dir, wsl_distro)
+        if play_client_dir is None:
+            return factory(entry, server_dir, client_dir, wsl_distro)
+        services = factory(entry, server_dir, play_client_dir, wsl_distro)
+        if services.applier is not None:
+            services.applier.client_origins = _originals_of(play_client_dir, client_dir)
+        return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
 
     @classmethod
     def for_wotlk(
@@ -1142,6 +1172,7 @@ class ControllerServices:
         server_dir: Path,
         client_dir: Path | None = None,
         wsl_distro: str | None = None,
+        play_client_dir: Path | None = None,
     ) -> ControllerServices:
         """`for_entry()` under the name it had while WotLK was the only wiring.
 
@@ -1149,7 +1180,46 @@ class ControllerServices:
         not this change's to edit; it dispatches like any other caller, so a
         TBC entry passed to it reaches the TBC package. Prefer `for_entry()`.
         """
-        return cls.for_entry(entry, server_dir, client_dir, wsl_distro=wsl_distro)
+        return cls.for_entry(
+            entry,
+            server_dir,
+            client_dir,
+            wsl_distro=wsl_distro,
+            play_client_dir=play_client_dir,
+        )
+
+
+def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:
+    """The player's own client folder(s) a ready-to-play client stands in for (T181).
+
+    The one its marker says it was made from, and the install's recorded client
+    folder when that is another (the player pointed the row elsewhere since).
+    An unreadable marker leaves the recorded folder alone to go by.
+    """
+    marker = play_client.read_marker(play_client_dir)
+    found = [marker.source_client_dir] if marker is not None else []
+    if client_dir is not None and client_dir not in found:
+        found.append(client_dir)
+    return tuple(found)
+
+
+def module_kept_files(server_dir: Path, play_client_dir: Path) -> tuple[Path, ...]:
+    """The module client files in a ready-to-play client, relative to it, sorted (T181).
+
+    What Play and Refresh hand `play_client.stale()`/`refresh()` as `keep`: a
+    module's patch there under a name the original also has would otherwise be
+    replaced by the original's. Read from the receipts in the claims of this
+    server's installed modules, moved onto the ready-to-play client the way a
+    Remove moves them (`apply.rebased()`), so a patch installed into the player's
+    own client before the switch counts too.
+    """
+    origins = _originals_of(play_client_dir, None)
+    found: set[Path] = set()
+    for copy in apply_module.client_receipts(server_dir):
+        path = apply_module.rebased(Path(copy.path), play_client_dir, origins)
+        if path.is_relative_to(play_client_dir):
+            found.add(path.relative_to(play_client_dir))
+    return tuple(sorted(found))
 
 
 # ------------------------------------------------------ one factory per game

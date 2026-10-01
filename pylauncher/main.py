@@ -786,6 +786,27 @@ def build_window() -> object:
 
         return set_client_dir
 
+    def _remember_play_client_live(game: str, server_dir: Path) -> Callable[[Path | None], None]:
+        """`_remember_client_live()` for the ready-to-play client (T181), same shape and reasons.
+
+        Only `play_client_dir` changes; the record's client folder and distro
+        are copied over, and a failed save puts the whole old record back.
+        """
+        from yulon.state import save_state
+
+        def set_play_client_dir(play_client_dir: Path | None) -> None:
+            install = state.find(game, server_dir)
+            if install is None:
+                return
+            state.remember(install.model_copy(update={"play_client_dir": play_client_dir}))
+            try:
+                save_state(state)
+            except OSError:
+                state.remember(install)
+                raise
+
+        return set_play_client_dir
+
     def on_uninstalled(game: str, server_dir: object) -> None:
         """An install is gone (8.9a): drop its tab, and recompute its Catalog tile.
 
@@ -1029,13 +1050,20 @@ def build_window() -> object:
         if key in controllers:
             drop_controller(key)
         known = state.find(game, sd)
-        add_controller(game, sd, cd, known.wsl_distro if known else None)
+        add_controller(
+            game,
+            sd,
+            cd,
+            known.wsl_distro if known else None,
+            known.play_client_dir if known else None,
+        )
 
     def add_controller(
         game: str,
         server_dir: Path,
         client_dir: Path | None,
         wsl_distro: str | None = None,
+        play_client_dir: Path | None = None,
     ) -> None:
         """One tab per (game, server dir); a repeat (e.g. "Use existing…" twice) just focuses it.
 
@@ -1085,13 +1113,17 @@ def build_window() -> object:
                 return
             drop_controller(key)
         entry = catalog.get(game)
-        services = ControllerServices.for_wotlk(entry, server_dir, client_dir, wsl_distro)
+        services = ControllerServices.for_wotlk(
+            entry, server_dir, client_dir, wsl_distro, play_client_dir
+        )
         # T36. Unconditional, unlike `uninstall.forget` below: the row is
         # offered on every game's tab (WotLK's client is unread by AzerothCore
         # but still a host path a manifest's `client` step or the Steam entry
         # can use), so every tab built through this closure gets the live
         # write seam rather than only the two families 8.9a gates.
         services.set_client_dir = _remember_client_live(game, server_dir)
+        # T181: the ready-to-play client's record, over the same live state.
+        services.set_play_client_dir = _remember_play_client_live(game, server_dir)
         if services.uninstall is not None:
             # 8.9a. The record is the LAST thing an uninstall forgets, and in a
             # running window "the record" is this closure's live `AppState` -
@@ -1140,7 +1172,13 @@ def build_window() -> object:
 
     for install in state.installs:
         try:
-            add_controller(install.game, install.server_dir, install.client_dir, install.wsl_distro)
+            add_controller(
+                install.game,
+                install.server_dir,
+                install.client_dir,
+                install.wsl_distro,
+                install.play_client_dir,
+            )
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
 
@@ -1161,10 +1199,19 @@ def build_window() -> object:
                 server_dir=sd,
                 client_dir=cd,
                 wsl_distro=known.wsl_distro if known else None,
+                # T181, for the distro's reason: dropping it would send this
+                # server's module client files back into the player's own client.
+                play_client_dir=known.play_client_dir if known else None,
             )
         )
         _warn_unless_remembered(state, window)
-        add_controller(game, sd, cd, known.wsl_distro if known else None)
+        add_controller(
+            game,
+            sd,
+            cd,
+            known.wsl_distro if known else None,
+            known.play_client_dir if known else None,
+        )
 
     def on_fresh_install(game: str, server_dir: object, client_dir: object) -> None:
         """A FRESH install ended with the world up and, since T87, with its
@@ -1193,9 +1240,16 @@ def build_window() -> object:
         sd = Path(str(server_dir))
         cd = Path(str(client_dir)) if client_dir is not None else None
         distro = str(wsl_distro) if wsl_distro else None
-        state.remember(KnownInstall(game=game, server_dir=sd, client_dir=cd, wsl_distro=distro))
+        # T181: a re-adopt of a known server keeps its ready-to-play client.
+        known = state.find(game, sd)
+        play = known.play_client_dir if known else None
+        state.remember(
+            KnownInstall(
+                game=game, server_dir=sd, client_dir=cd, wsl_distro=distro, play_client_dir=play
+            )
+        )
         _warn_unless_remembered(state, window)
-        add_controller(game, sd, cd, distro)
+        add_controller(game, sd, cd, distro, play)
 
     catalog_view.installed.connect(on_installed)
     catalog_view.fresh_install.connect(on_fresh_install)

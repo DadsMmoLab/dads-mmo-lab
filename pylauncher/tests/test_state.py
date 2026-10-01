@@ -100,3 +100,47 @@ def test_a_game_installed_twice_reports_the_one_remembered_last() -> None:
     app_state.remember(KnownInstall(game="wow-tbc", server_dir=Path("C:/srv/kept")))
     assert app_state.installed_dirs() == {"wow-tbc": Path("C:/srv/kept")}
     assert len(app_state.installs) == 2, "collapsing the tile must not forget an install"
+
+
+# ------------------------------------------ T181: the ready-to-play client folder
+
+
+def test_a_state_file_written_before_ready_to_play_clients_still_loads(tmp_path: Path) -> None:
+    """An install record with no `play_client_dir` key loads, and reads as having none.
+
+    Loaded from a file through `load_state()`, not built in memory: `extra="forbid"`
+    moves a record it cannot read to `.broken`, so a required field would forget
+    every install a player has.
+    """
+    target = tmp_path / "state.json"
+    target.write_text(
+        '{"schema_version": 1, "installs": [{"game": "wow-tbc", "server_dir": "C:/srv/tbc",'
+        ' "client_dir": "C:/WoW", "wsl_distro": null}]}',
+        encoding="utf-8",
+    )
+
+    loaded = load_state(target)
+
+    assert [i.play_client_dir for i in loaded.installs] == [None]
+    assert not (tmp_path / "state.json.broken").exists(), "an older state file was moved aside"
+
+
+def test_the_ready_to_play_client_folder_survives_a_save_and_a_load(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    play = tmp_path / "WoW (Yu'lon \u2013 WoW TBC)"
+    state = AppState()
+    state.remember(
+        KnownInstall(
+            game="wow-tbc",
+            server_dir=tmp_path / "srv",
+            client_dir=tmp_path / "WoW",
+            play_client_dir=play,
+        )
+    )
+    save_state(state, path)
+
+    loaded = load_state(path).find("wow-tbc", tmp_path / "srv")
+
+    assert loaded is not None
+    assert loaded.play_client_dir == play
+    assert loaded.client_dir == tmp_path / "WoW", "the original folder is a separate fact"

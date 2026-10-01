@@ -22,6 +22,8 @@ Install press to the file in `Data/` is the app's own.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -31,18 +33,21 @@ from tests.test_server_dbc import (
     ARAC,
     ARAC_DBCS,
     SOD,
+    WOTLK,
     _CloneFromManifest,
     _compose_run_double,
+    _FakeSql,
     _manifest,
     _the_app_s_applier,
     _volume,
     _write,
 )
+from yulon import play_client
 from yulon.apply import CLAIM_FILE, Applier, ClientCopy, read_client_copies, sha256_of
 from yulon.catalog import upstream
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import Manifest
-from yulon.ui.controller_view import _format_report
+from yulon.ui.controller_view import ControllerServices, _format_report, module_kept_files
 
 BOTS_MANAGER = Path("wow-tortoise") / "mods" / "tortoise-bots-manager.json"
 
@@ -326,3 +331,147 @@ def test_with_no_game_client_folder_the_remove_names_what_it_could_not_reach(
         "is set here now, so Yu'lon could not reach it)"
     ) in report.left_behind
     assert not any("took back" in line for line in report.done), report.done
+
+
+# ------------------------------------- T181a: after the switch to a ready-to-play client
+
+
+def _play_applier(
+    monkeypatch: pytest.MonkeyPatch,
+    server_dir: Path,
+    original: Path,
+    play: Path,
+    manifest: Manifest,
+    git: Any = None,
+) -> Any:
+    """The Modules tab's applier for a server WITH a ready-to-play client, git and SQL faked.
+
+    Built by `for_entry(..., play_client_dir=)`, the route the tab takes, so the
+    rebase under test is the one the factory wires rather than one set by hand.
+    """
+    services = ControllerServices.for_entry(
+        WOTLK, server_dir, client_dir=original, play_client_dir=play
+    )
+    applier = services.applier
+    assert applier is not None
+    applier.sql = _FakeSql()
+    applier.git = git if git is not None else _CloneFromManifest(manifest, ARAC_DBCS)
+    return applier
+
+
+def _make_play_client(original: Path, server_dir: Path) -> Path:
+    play = original.with_name(original.name + " (Yu'lon)")
+    play_client.create(
+        original,
+        play,
+        game="wow-wotlk",
+        server_dir=server_dir,
+        allow_full_copy=False,
+        reflink=lambda src, dst: False,
+    )
+    return play
+
+
+def test_a_patch_installed_into_the_original_is_removed_from_the_ready_to_play_client_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review Focus 5. Receipts are ABSOLUTE paths into the folder they were written to.
+
+    Installed before the switch, the receipt names the ORIGINAL's `Data/Patch-A.MPQ`;
+    the ready-to-play client got the same file as a hard link. Removed after the
+    switch, the ready-to-play client's link goes and the original's file stays:
+    the receipt is moved onto the ready-to-play client, never acted on where it points.
+    """
+    manifest = _manifest(ARAC)
+    _arac(monkeypatch, tmp_path)
+    server_dir, original = tmp_path / "server", tmp_path / "client"
+    receipts = read_client_copies(_the_clone(server_dir, manifest), item_id=manifest.id)
+    assert [Path(c.path) for c in receipts] == [
+        original / "Data" / "Patch-A.MPQ"
+    ], "the fixture no longer records an absolute path into the original"
+    play = _make_play_client(original, server_dir)
+    assert os.path.samefile(original / "Data/Patch-A.MPQ", play / "Data/Patch-A.MPQ")
+    applier = _play_applier(monkeypatch, server_dir, original, play, manifest)
+
+    report = applier.remove(manifest)
+
+    assert not (play / "Data" / "Patch-A.MPQ").exists(), report.left_behind
+    assert (original / "Data" / "Patch-A.MPQ").read_bytes() == MPQ, "reached into the original"
+    assert f"took back Patch-A.MPQ from {play / 'Data'}" in report.done
+    assert (original / "Data" / "Patch-Y.MPQ").read_bytes() == b"the user's own patch"
+
+
+class _NewerClone(_CloneFromManifest):
+    """The same module a release later: its client patch has other bytes."""
+
+    def clone(self, spec: Any) -> None:
+        super().clone(spec)
+        for client in self.manifest.client:
+            _write(spec.dest / client.src, NEWER_MPQ)
+
+
+NEWER_MPQ = b"MPQ\x1a a newer Patch-A.MPQ"
+
+
+def test_reinstalling_after_the_switch_never_writes_through_a_shared_archive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A copy onto the ready-to-play client's hard link would write the original's file.
+
+    `shutil.copy2` opens an existing destination and truncates it, and a hard link
+    is the same file in both folders. The new patch must land as the ready-to-play
+    client's own file.
+    """
+    manifest = _manifest(ARAC)
+    _arac(monkeypatch, tmp_path)
+    server_dir, original = tmp_path / "server", tmp_path / "client"
+    play = _make_play_client(original, server_dir)
+    assert os.path.samefile(original / "Data/Patch-A.MPQ", play / "Data/Patch-A.MPQ")
+    # The clone goes, so the install is a fresh clone and asks nothing of a real git
+    # about the old one; what is under test is only the copy into the client.
+    shutil.rmtree(_the_clone(server_dir, manifest))
+    applier = _play_applier(
+        monkeypatch, server_dir, original, play, manifest, _NewerClone(manifest, ARAC_DBCS)
+    )
+
+    applier.install(manifest)
+
+    assert (play / "Data" / "Patch-A.MPQ").read_bytes() == NEWER_MPQ
+    assert (original / "Data" / "Patch-A.MPQ").read_bytes() == MPQ, "wrote through the link"
+    assert not os.path.samefile(original / "Data/Patch-A.MPQ", play / "Data/Patch-A.MPQ")
+
+
+@pytest.mark.parametrize("installed", ["before the switch", "after the switch"])
+def test_a_receipted_patch_in_the_ready_to_play_client_is_kept_from_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, installed: str
+) -> None:
+    """`module_kept_files()` is what Play and Refresh pass to `play_client` as `keep`."""
+    manifest = _manifest(ARAC)
+    server_dir, original = tmp_path / "server", tmp_path / "client"
+    if installed == "before the switch":
+        _arac(monkeypatch, tmp_path)
+        play = _make_play_client(original, server_dir)
+    else:
+        server_dir.mkdir()
+        (original / "Data").mkdir(parents=True)
+        _compose_run_double(monkeypatch, _volume(tmp_path))
+        play = _make_play_client(original, server_dir)
+        _the_app_s_applier(monkeypatch, server_dir, original, manifest)  # the fakes
+        _play_applier(monkeypatch, server_dir, original, play, manifest).install(manifest)
+        assert not (original / "Data" / "Patch-A.MPQ").exists(), "installed into the original"
+
+    assert module_kept_files(server_dir, play) == (Path("Data") / "Patch-A.MPQ",)
+
+
+def test_no_receipt_means_nothing_is_kept(tmp_path: Path) -> None:
+    """A server with no module clones keeps nothing: Refresh works as it did."""
+    server_dir, original = tmp_path / "server", tmp_path / "client"
+    server_dir.mkdir()
+    (original / "Data").mkdir(parents=True)
+    play = _make_play_client(original, server_dir)
+
+    assert module_kept_files(server_dir, play) == ()
+
+
+def _the_clone(server_dir: Path, manifest: Manifest) -> Path:
+    return server_dir / "modules" / manifest.id

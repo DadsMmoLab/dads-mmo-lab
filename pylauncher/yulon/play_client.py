@@ -39,7 +39,7 @@ import os
 import shutil
 import stat
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -717,6 +717,12 @@ def _players_own(rel: Path) -> bool:
     return bool(rel.parts) and rel.parts[0].lower() in PLAYERS_OWN
 
 
+def _kept(keep: Collection[Path]) -> Callable[[Path], bool]:
+    """Whether a relative path is one of `keep`, compared the way the OS compares names."""
+    names = {os.path.normcase(os.fspath(rel)) for rel in keep}
+    return lambda rel: os.path.normcase(os.fspath(rel)) in names
+
+
 def _linked_files(play_dir: Path) -> Iterator[Path]:
     """The `*.MPQ`/`*.dll` of a ready-to-play client, relative, outside WTF/ and Interface/.
 
@@ -780,7 +786,7 @@ def _same_bytes(a: Path, b: Path) -> bool:
                 return True
 
 
-def stale(play_dir: Path, original: Path) -> tuple[Path, ...]:
+def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tuple[Path, ...]:
     """What in `play_dir` no longer matches the original client, relative and sorted.
 
     An `*.MPQ`/`*.dll` whose original is no longer the same file and differs in
@@ -794,7 +800,12 @@ def stale(play_dir: Path, original: Path) -> tuple[Path, ...]:
     from its own names. A file with no counterpart in the original is never
     listed (see `_out_of_date`). A file that cannot be compared is logged and
     left out.
+
+    `keep` (relative paths) is never listed: a module's patch in the ready-to-play
+    client under a name the original also has is that module's file, and
+    listing it would have Refresh put the original's back over it.
     """
+    is_kept = _kept(keep)
     if not (original / "Data").is_dir():
         logger.warning(
             "ready-to-play client %s: its original %s has no Data folder, not compared",
@@ -804,6 +815,8 @@ def stale(play_dir: Path, original: Path) -> tuple[Path, ...]:
         return ()
     found: list[Path] = []
     for rel in _linked_files(play_dir):
+        if is_kept(rel):
+            continue
         try:
             if _out_of_date(play_dir / rel, original / rel):
                 found.append(rel)
@@ -813,7 +826,12 @@ def stale(play_dir: Path, original: Path) -> tuple[Path, ...]:
             )
     mine, theirs = client_executable(play_dir), client_executable(original)
     try:
-        if mine.is_file() and theirs.is_file() and not _same_bytes(mine, theirs):
+        if (
+            not is_kept(Path(mine.name))
+            and mine.is_file()
+            and theirs.is_file()
+            and not _same_bytes(mine, theirs)
+        ):
             found.append(Path(mine.name))
     except OSError:
         logger.warning("ready-to-play client: could not compare %s", mine, exc_info=True)
@@ -870,6 +888,7 @@ def refresh(
     server_dir: Path,
     link: Callable[[Path, Path], None] = os.link,
     reflink: Callable[[Path, Path], bool] = try_reflink,
+    keep: Collection[Path] = (),
 ) -> tuple[Path, ...]:
     """Bring what `stale()` lists back in step with the original; return what was changed.
 
@@ -883,6 +902,9 @@ def refresh(
     when it was made. A shared or cloned client that cannot share any more (the
     original moved to another drive) is refused rather than silently turned
     into a copy of many gigabytes.
+
+    `keep` (relative paths, a module's files) is never touched, whatever `stale()`
+    answers: the filter is applied here, to its list, so no list can reach past it.
     """
     marker = read_marker(play_dir)
     if marker is None:
@@ -908,7 +930,8 @@ def refresh(
             "from. Nothing was changed. Put your client back there, or delete the "
             "ready-to-play client and make it again from where your client is now."
         )
-    todo = [rel for rel in stale(play_dir, original) if not _players_own(rel)]
+    is_kept = _kept(keep)
+    todo = [rel for rel in stale(play_dir, original) if not _players_own(rel) and not is_kept(rel)]
     exe = client_executable(original)
     done: list[Path] = []
     for rel in todo:

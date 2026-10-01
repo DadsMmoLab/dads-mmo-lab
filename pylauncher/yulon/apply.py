@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence, Set
@@ -542,6 +543,62 @@ def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
         if isinstance(step, str) and isinstance(path, str) and isinstance(digest, str):
             out.append(ClientCopy(step=step, path=path, sha256=digest))
     return tuple(out)
+
+
+def rebased(path: Path, client_dir: Path, origins: Sequence[Path]) -> Path:
+    """A receipt's path moved from an original client folder onto `client_dir` (T181).
+
+    Receipts are absolute: the file as it was written. One written into the
+    player's own client before this server had a ready-to-play client names the
+    original, and the ready-to-play client holds the same name (a hard link to
+    the same file, or a copy of it). From then on the original is never written
+    to for this server, so the receipt is acted on in `client_dir` instead. A
+    path already in `client_dir`, or in none of `origins`, comes back unchanged.
+    """
+    if path.is_relative_to(client_dir):
+        return path
+    for origin in origins:
+        if path.is_relative_to(origin):
+            return client_dir / path.relative_to(origin)
+    return path
+
+
+def client_receipts(server_dir: Path) -> tuple[ClientCopy, ...]:
+    """Every client-file receipt in the claims of this server's clones, every family (T181).
+
+    A clone's folder name is its item id (`Applier.clone_dir()`), which is the id
+    `read_client_copies()` checks the claim against.
+    """
+    found: list[ClientCopy] = []
+    for folder in sorted(set(CLONE_DIRS.values())):
+        for name in sorted(docker.clone_names(server_dir / folder)):
+            found.extend(read_client_copies(server_dir / folder / name, item_id=name))
+    return tuple(found)
+
+
+def _copy_unshared(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> object:
+    """`shutil.copy2`, except onto a hard-linked file, which gets a file of its own (T181).
+
+    A ready-to-play client shares its `*.MPQ` files with the player's own client
+    by hard link, and `copy2` opens an existing destination and writes into it:
+    through a link that is a write into the original. So a linked destination is
+    replaced instead, by a copy made beside it and renamed over the name.
+    """
+    try:
+        st = os.lstat(dst)
+    except FileNotFoundError:
+        return shutil.copy2(src, dst)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink < 2:
+        return shutil.copy2(src, dst)
+    target = Path(dst)
+    tmp = target.with_name(target.name + ".yulon-new")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return dst
 
 
 COMPLETED_KEY = "install_completed"
@@ -1934,8 +1991,14 @@ class Applier:
         start_database: Callable[[], bool] | None = None,
         newest_release: Callable[[str], upstream.Release | None] | None = None,
         compare_commits: Callable[[str, str, str], upstream.Comparison | None] | None = None,
+        client_origins: Sequence[Path] = (),
     ) -> None:
         self.server_dir = server_dir
+        # T181: the player's own client folder(s) when `client_dir` is a
+        # ready-to-play client built from one. A receipt that names a file in
+        # one of them is taken back from `client_dir` instead (`rebased()`).
+        # Empty for every applier without a ready-to-play client.
+        self.client_origins: tuple[Path, ...] = tuple(client_origins)
         # T150: "how does this release stand to this commit?", asked of GitHub
         # by `update()` only when the clone's own shallow graph cannot say. A
         # seam for `_newest_release`'s reason: it is the network, and a test
@@ -4089,12 +4152,18 @@ class Applier:
             else:
                 target = self.client_dir / "Data"
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
+                shutil.copytree(
+                    src,
+                    target,
+                    dirs_exist_ok=True,
+                    ignore=_NOT_FOR_THE_CLIENT,
+                    copy_function=_copy_unshared,
+                )
                 if step.dest == "data":
                     log.client_copies += self._receipts(step.src, src, target)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, target / src.name)
+                _copy_unshared(src, target / src.name)
                 if step.dest == "data":
                     log.client_copies += self._receipts(step.src, src, target)
             else:
@@ -4202,8 +4271,15 @@ class Applier:
                 self._take_back(copy, log)
 
     def _take_back(self, copy: ClientCopy, log: _Log) -> None:
-        """One recorded file: delete it if it is still ours byte-for-byte, else say why not."""
+        """One recorded file: delete it if it is still ours byte-for-byte, else say why not.
+
+        Looked for in the client this applier writes to: a receipt from before
+        a ready-to-play client existed is moved onto it (`rebased()`), so the
+        player's own client is never where a Remove deletes.
+        """
         path = Path(copy.path)
+        if self.client_dir is not None:
+            path = rebased(path, self.client_dir, self.client_origins)
         if not path.exists():
             log.skipped.append(f"client {path.name}: already gone from {path.parent}")
             return

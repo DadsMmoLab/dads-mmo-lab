@@ -19518,3 +19518,89 @@ def test_a_rewritten_history_moves_after_yes_and_the_log_says_so(
     assert line in boxes[0].text()  # type: ignore[attr-defined]
     assert rec.heads[_bots_dest(server_dir)] == REL
     assert "Upstream rewrote its history" in view.rebuild_log.text()
+
+
+# --------------------------------------------------------------------------
+# T181a -- a ready-to-play client takes the module writes and the Steam entry
+# --------------------------------------------------------------------------
+
+
+def _a_client(folder: Path) -> Path:
+    """Enough of a WoW client for every factory's applier (Tortoise wants Interface/)."""
+    (folder / "Interface" / "AddOns").mkdir(parents=True)
+    (folder / "Data").mkdir()
+    return folder
+
+
+@pytest.mark.parametrize("game", sorted(controller_view_module._FACTORIES))
+def test_a_ready_to_play_client_takes_the_module_writes_and_the_row_keeps_the_original(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, game: str
+) -> None:
+    """Decision 2: module client files go only into the ready-to-play client.
+
+    Asserted on the applier and the Steam entry the tab is really handed, per
+    game, because each factory builds its own applier. The Server tab's row
+    reads `services.client_dir`, which must stay the player's own folder.
+    """
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
+    entry = load_catalog().get(game)
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    original = _a_client(tmp_path / "WoW")
+    play = _a_client(tmp_path / "WoW (Yu'lon)")
+
+    services = ControllerServices.for_entry(
+        entry, server_dir, client_dir=original, play_client_dir=play
+    )
+
+    assert services.client_dir == original
+    assert services.play_client_dir == play
+    if entry.has_manifests:
+        assert services.applier is not None
+        assert services.applier.client_dir == play, "modules would write into the original"
+    assert services.steam is not None
+    assert services.steam.client_dir == play, "Add to Steam would start the original"
+
+
+@pytest.mark.parametrize("game", sorted(controller_view_module._FACTORIES))
+def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, game: str
+) -> None:
+    """`play_client_dir=None` is today's wiring, field for field where a field is a plain value."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
+    entry = load_catalog().get(game)
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    original = _a_client(tmp_path / "WoW")
+
+    before = ControllerServices.for_entry(entry, server_dir, client_dir=original)
+    after = ControllerServices.for_entry(
+        entry, server_dir, client_dir=original, play_client_dir=None
+    )
+
+    assert after.client_dir == before.client_dir == original
+    assert after.play_client_dir is None
+    assert after.set_play_client_dir is None, "only main.py binds the write seam"
+    if entry.has_manifests:
+        assert after.applier is not None and before.applier is not None
+        assert after.applier.client_dir == before.applier.client_dir == original
+        assert after.applier.client_origins == before.applier.client_origins == ()
+    assert after.steam is not None and before.steam is not None
+    assert after.steam.client_dir == before.steam.client_dir == original
+    for name in ControllerServices.__dataclass_fields__:
+        a, b = getattr(after, name), getattr(before, name)
+        assert (a is None) == (b is None), f"{name} is wired differently"
+        assert type(a) is type(b), f"{name} is a different kind of seam"
+
+
+def test_for_wotlk_passes_the_ready_to_play_client_on(tmp_path: Path) -> None:
+    """`main.py` still spells the call `for_wotlk()`, so it must not drop the new keyword."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    original = _a_client(tmp_path / "WoW")
+    play = _a_client(tmp_path / "WoW (Yu'lon)")
+
+    services = ControllerServices.for_wotlk(WOTLK, server_dir, original, None, play)
+
+    assert services.play_client_dir == play
+    assert services.applier is not None and services.applier.client_dir == play

@@ -1294,3 +1294,43 @@ def test_refresh_keeps_an_archive_the_original_lacks_even_when_listed(
     monkeypatch.setattr(play_client, "stale", lambda play_dir, original: (Path("DivxDecoder.dll"),))
     assert refresh(play, orig, tmp_path) == ()
     assert (play / "DivxDecoder.dll").read_bytes() == b"dll"
+
+
+# -- Task 4: a module's patch in the ready-to-play client is kept -------------
+
+
+def module_patch_over(play: Path, orig: Path) -> Path:
+    """A module's patch installed after the switch, under a name the original also has.
+
+    The original's `patch-A.MPQ` is the player's (or an older module's); the
+    ready-to-play client's is its own file with other bytes, as a module install
+    after the switch leaves it. Sizes differ, so it reads as out of date.
+    """
+    (orig / "Data" / "patch-A.MPQ").write_bytes(b"the player's own patch")
+    build(orig, play, orig.parent)
+    replace_file(play / "Data" / "patch-A.MPQ", b"the module's patch, longer" * 10)
+    return Path("Data") / "patch-A.MPQ"
+
+
+def test_stale_never_lists_a_kept_module_file_whose_original_differs(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    rel = module_patch_over(play, orig)
+    assert play_client.stale(play, orig) == (rel,), "the fixture must be stale without keep"
+
+    assert play_client.stale(play, orig, keep=(rel,)) == ()
+
+
+def test_refresh_never_touches_a_kept_module_file_even_when_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refresh honours `keep` itself, not only through `stale()`'s list."""
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    rel = module_patch_over(play, orig)
+    ours = (play / rel).read_bytes()
+    monkeypatch.setattr(play_client, "stale", lambda play_dir, original: (rel,))
+
+    assert refresh(play, orig, tmp_path, keep=(rel,)) == ()
+    assert (play / rel).read_bytes() == ours
+    assert (orig / rel).read_bytes() == b"the player's own patch"

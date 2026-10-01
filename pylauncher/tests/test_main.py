@@ -3969,3 +3969,97 @@ def test_a_panel_that_finished_during_the_last_join_is_not_called_stuck(qapp: ob
     window = SimpleNamespace(yulon_log_panels=[_LatePanel()], property=lambda _name: None)
 
     assert main._stop_background_threads(window) == []
+
+
+# ------------------------------------ T181a: the ready-to-play client folder seam
+
+
+def test_the_play_client_seam_writes_the_record_and_keeps_the_rest_of_it(
+    window: Any, tmp_path: Any
+) -> None:
+    """`main._remember_play_client_live()`: the same live-`AppState` write as T36's seam."""
+    server_dir = tmp_path / "play-client-live"
+    client = tmp_path / "WoW"
+    catalog = _catalog_view(window)
+    catalog.adopted.emit("wow-wotlk", server_dir, client, "Ubuntu-24.04")
+    view = _tab_for(window, server_dir)
+    assert view.services.set_play_client_dir is not None
+    play = tmp_path / "WoW (Yu'lon)"
+
+    view.services.set_play_client_dir(play)
+
+    after = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert after is not None
+    assert after.play_client_dir == play
+    assert after.client_dir == client, "the original folder was dropped"
+    assert after.wsl_distro == "Ubuntu-24.04", "the distro was dropped"
+
+    view.services.set_play_client_dir(None)
+
+    cleared = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert cleared is not None and cleared.play_client_dir is None
+    assert cleared.client_dir == client
+
+
+def test_a_failing_play_client_save_restores_the_old_record(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir = tmp_path / "play-client-restore"
+    seen_states: list[Any] = []
+
+    def _refuse(app_state: Any, path: Any = None) -> None:
+        seen_states.append(app_state)
+        raise PermissionError(13, "Access is denied", "state.json")
+
+    monkeypatch.setattr(state, "save_state", _refuse)
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+
+    with pytest.raises(OSError):
+        view.services.set_play_client_dir(tmp_path / "WoW (Yu'lon)")
+
+    restored = seen_states[-1].find("wow-wotlk", server_dir)
+    assert restored is not None
+    assert restored.play_client_dir is None, "the failed write was not undone"
+
+
+def test_a_rebuilt_tab_keeps_writing_modules_into_the_ready_to_play_client(
+    window: Any, tmp_path: Any
+) -> None:
+    """A client-folder press rebuilds the tab, which reads the record's ready-to-play client."""
+    server_dir = tmp_path / "tw-play-client"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-tortoise", server_dir, None)
+    view = _tab_for(window, server_dir)
+    client = tmp_path / "TurtleWoW"
+    play = tmp_path / "TurtleWoW (Yu'lon)"
+    for folder in (client, play):
+        (folder / "Interface").mkdir(parents=True)
+    view.services.set_play_client_dir(play)
+    view.services.set_client_dir(client)
+    view.client_dir_changed.emit("wow-tortoise", server_dir, client)
+
+    rebuilt = _tab_for(window, server_dir)
+    assert rebuilt is not view
+    assert rebuilt.services.client_dir == client
+    assert rebuilt.services.play_client_dir == play
+    assert rebuilt.services.applier is not None
+    assert rebuilt.services.applier.client_dir == play, "modules went back to the original"
+
+
+def test_use_existing_on_a_known_server_keeps_its_ready_to_play_client(
+    window: Any, tmp_path: Any
+) -> None:
+    """`installed` replaces the record; its ready-to-play client is carried over like the distro."""
+    server_dir = tmp_path / "play-client-reinstalled"
+    client = tmp_path / "WoW"
+    play = tmp_path / "WoW (Yu'lon)"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, client)
+    _tab_for(window, server_dir).services.set_play_client_dir(play)
+
+    catalog.installed.emit("wow-wotlk", server_dir, client)
+
+    kept = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert kept is not None and kept.play_client_dir == play
