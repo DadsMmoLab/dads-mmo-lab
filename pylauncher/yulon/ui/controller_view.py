@@ -8950,16 +8950,21 @@ class ControllerView(QWidget):
         for pack_id in sorted(skip):
             half = packs.get(pack_id)
             if half is not None and _half_installed(half):
-                say(f"Removing the half-installed {pack_id}…")
-                client_packs.remove(
+                gone = next((p for p in client.packs if p.id == pack_id), None)
+                say(f"Removing the half-installed {client_packs.pack_label(gone)}…")
+                left = client_packs.remove(
+                    play, half, gone, game=game, server_dir=server_dir, when_off=False
+                )
+                files = half.get("files")
+                client_packs.restore_asides(
                     play,
-                    half,
-                    next((p for p in client.packs if p.id == pack_id), None),
+                    list(files) if isinstance(files, dict) else [],
                     game=game,
                     server_dir=server_dir,
                 )
                 del packs[pack_id]
                 save()
+                notes += self._removal_notes(play, source, half, gone, left)
         in_catalog = {pack.id: pack for pack in client.packs}
         # 1a. Switched off, or gone from the catalog: its recorded files go.
         for pack_id in list(packs):

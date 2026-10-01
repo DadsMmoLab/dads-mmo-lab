@@ -21136,6 +21136,7 @@ def _client_entry(
     with_packs: bool = True,
     optional: bool = True,
     remove_locale: bool = True,
+    hd_remove_when_off: tuple[str, ...] = (),
 ) -> CatalogEntry:
     """WotLK's entry with a `client` section: two required packs, one optional, exe, config."""
     zip_path = server_dir / "patches" / "patch-W.zip"
@@ -21179,6 +21180,7 @@ def _client_entry(
                 },
                 "install": [{"member": "patch-F.MPQ", "to": hd_to}],
                 "optional": True,
+                "remove_when_off": list(hd_remove_when_off),
                 "default": hd_default,
                 "size_hint": 1_500_000,
             }
@@ -22383,3 +22385,106 @@ def test_a_failure_after_the_tab_was_torn_down_asks_nothing_and_releases_the_loc
 
     assert "launch" not in steps and asks.calls == [] and warned == []
     assert view._play_pending is False and not view._play_client_running and not view._busy
+
+
+# -- residual fixes ------------------------------------------------------------------
+
+
+def _half_swapped(
+    tmp_path: Path, rel: str, *, edited: bool = False, **entry_kw: Any
+) -> tuple[CatalogEntry, Path, Path, Path]:
+    """A client whose HD pack's swap of `rel` got stuck: new bytes in place, old in an aside."""
+    entry, original, play = _made_client(tmp_path, hd_to=rel, **entry_kw)
+    target = play / rel
+    old = target.read_bytes() if target.exists() else None
+    if target.exists():
+        target.unlink()  # not a write through the hard link to the original
+    target.write_bytes(b"MPQ the new, half-installed one")
+    sha = hashlib.sha256(b"MPQ the new, half-installed one").hexdigest()
+    if edited:
+        target.write_bytes(b"MPQ the player changed it")
+    if old is not None:
+        target.with_name(target.name + ".yulon-pack-old").write_bytes(old)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            {"hd": {"version": None, "sha256": None, "files": {rel: sha}}},
+            None,
+            _choices(hd=True),
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    return entry, original, play, target
+
+
+def test_play_without_a_half_swapped_pack_puts_the_archive_it_replaced_back(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play, target = _half_swapped(tmp_path, "Data/common.MPQ")
+    site.errors["hd"] = client_packs.PackError("HD creatures could not be downloaded: offline.")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    asks.answers = ["save"]
+
+    view.play()
+
+    assert steps[-1] == "launch"
+    assert target.read_bytes() == b"MPQ the shared archive", "the archive it replaced is missing"
+    assert (original / "Data" / "common.MPQ").read_bytes() == b"MPQ the shared archive"
+    assert not list((play / "Data").glob("*.yulon-pack-old*"))
+
+
+def test_play_without_a_half_swapped_pack_leaves_edited_files_and_remove_when_off_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play, target = _half_swapped(
+        tmp_path,
+        "Data/patch-F.MPQ",
+        edited=True,
+        hd_remove_when_off=("Data/other.MPQ",),
+    )
+    other = play / "Data" / "other.MPQ"
+    other.write_bytes(b"MPQ not this pack's to remove just for skipping it once")
+    site.errors["hd"] = client_packs.PackError("HD creatures could not be downloaded: offline.")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    asks.answers = ["save"]
+    texts: list[str] = []
+    view._say_play = texts.append  # type: ignore[method-assign]
+
+    view.play()
+
+    assert other.exists(), "remove_when_off ran for a pack that was only skipped"
+    assert target.read_bytes() == b"MPQ the player changed it"
+    assert "Removing the half-installed HD creatures…" in texts
+    assert "left in place" in view.play_label.text() or any("left in place" in t for t in texts)
+
+
+def test_a_permission_error_reading_the_originals_exe_keeps_the_patch(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    warned: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    ps.names = WORLD_UP
+    first, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    first.play()
+    patched = (play / "Wow.exe").read_bytes()
+
+    def denied(_path: Path) -> Any:
+        raise PermissionError(13, "device not ready")
+
+    monkeypatch.setattr(play_client, "_original_file", denied)
+    unpatched = _client_entry(tmp_path, exe=False)
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=unpatched)
+    again.play()
+
+    assert warned == [] and steps[-1] == "launch"
+    assert (play / "Wow.exe").read_bytes() == patched
+    assert client_packs.read_record(play).exe is not None

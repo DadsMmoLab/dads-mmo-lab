@@ -51,7 +51,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -1279,6 +1279,29 @@ def _recover_asides(targets: list[Path], sleep: Callable[[float], None]) -> None
             _remove_aside(stray)
 
 
+def restore_asides(
+    play_dir: Path,
+    rels: Collection[str],
+    *,
+    game: str,
+    server_dir: Path,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Put back the file a stuck swap moved aside, for each of `rels` that is now missing.
+
+    The rule an install uses before staging (`_recover_asides`): a missing target gets
+    its first `.yulon-pack-old*` aside back, and any other aside is deleted. For
+    a pack whose half-installed files were removed: the file it replaced (maybe the
+    player's shared archive) must be there when the game starts.
+    """
+    _gate(play_dir, game=game, server_dir=server_dir, what="putting back a replaced file")
+    targets = [_removal_path(play_dir, rel)[1] for rel in rels]
+    try:
+        _recover_asides(targets, sleep)
+    except OSError as exc:
+        raise _write_refusal("A replaced file", exc) from exc
+
+
 def _swap(
     play_dir: Path,
     staged: list[tuple[Path, Path, str]],
@@ -1516,8 +1539,12 @@ def remove(
     *,
     game: str,
     server_dir: Path,
+    when_off: bool = True,
 ) -> tuple[str, ...]:
     """Delete what a pack installed, when it is switched off or gone from the catalog.
+
+    `when_off=False` leaves the pack's `remove_when_off` files alone: for a pack only
+    skipped this once, which is not "switched off".
 
     A recorded file goes only if its SHA-256 still matches the record: one the
     player edited is left, and its relative path is returned so the caller can say
@@ -1529,7 +1556,7 @@ def remove(
     """
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the removal of {pack_label(pack)}")
     try:
-        return _remove(play_dir, rec_entry, pack)
+        return _remove(play_dir, rec_entry, pack, when_off)
     except OSError as exc:
         raise _write_refusal(pack_label(pack), exc) from exc
 
@@ -1558,12 +1585,14 @@ def _delete_own(rel: str, path: Path) -> None:
 
 
 def _remove(
-    play_dir: Path, rec_entry: Mapping[str, Any], pack: ClientPack | None
+    play_dir: Path, rec_entry: Mapping[str, Any], pack: ClientPack | None, when_off: bool = True
 ) -> tuple[str, ...]:
     recorded = rec_entry.get("files")
     recorded = recorded if isinstance(recorded, dict) else {}
     todo = [(*_removal_path(play_dir, rel), sha) for rel, sha in recorded.items()]
-    extra = [_removal_path(play_dir, rel) for rel in (pack.remove_when_off if pack else ())]
+    extra = [
+        _removal_path(play_dir, rel) for rel in (pack.remove_when_off if pack and when_off else ())
+    ]
     left: list[str] = []
     removed: list[Path] = []
     for rel, path, sha in todo:

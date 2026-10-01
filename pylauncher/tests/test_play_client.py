@@ -1754,6 +1754,23 @@ def test_refresh_keeps_the_patch_and_its_record_when_the_originals_exe_cannot_be
     assert client_packs.read_record(play).exe is None
 
 
+def test_refresh_treats_an_unreadable_original_exe_like_a_missing_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import client_packs
+
+    play, orig, stock, _patch = _exe_world(tmp_path, monkeypatch)
+    patched = (play / "Wow.exe").read_bytes()
+
+    def denied(_path: Path) -> object:
+        raise PermissionError(13, "device not ready")
+
+    monkeypatch.setattr(play_client, "_original_file", denied)
+    assert refresh(play, orig, tmp_path) == ()
+    assert (play / "Wow.exe").read_bytes() == patched
+    assert client_packs.read_record(play).exe is not None
+
+
 def test_refresh_remakes_the_exe_with_the_options_the_player_chose(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

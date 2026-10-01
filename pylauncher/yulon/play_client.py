@@ -1024,7 +1024,7 @@ def refresh(
     exe_patch: ExePatch | None,
     opener: Any = None,
 ) -> tuple[Path, ...]:
-    """Bring what `stale() lists back in step with the original; return what was changed.
+    """Bring what `stale()` lists back in step with the original; return what was changed.
 
     Only this game's and server's ready-to-play client, made from `original`.
     Each file is made beside the old one under a temporary name and then put in
@@ -1147,7 +1147,11 @@ def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_di
     from yulon import client_packs
 
     src, dst = client_executable(original), client_executable(play_dir)
-    if _original_file(src) is None:
+    try:
+        readable = _original_file(src) is not None
+    except OSError:
+        readable = False  # permission denied, device not ready: the same as missing
+    if not readable:
         logger.info("ready-to-play client: %s has no readable Wow.exe, patched exe kept", original)
         return False
     tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
