@@ -2003,3 +2003,18 @@ def test_the_record_never_keeps_left_behind(rig: _Rig) -> None:
     assert "left_behind" not in (rig.play / client_packs.RECORD).read_text()
     assert "left_behind" not in client_packs.read_record(rig.play).packs["p"]
     assert entry["left_behind"] == ["Interface/AddOns/x.lua"], "the caller's entry is not changed"
+
+
+def test_a_missing_checkout_pack_refusal_ends_by_naming_the_press_to_repeat(
+    tmp_path: Path,
+) -> None:
+    """Play built nothing yet either way, but the press to repeat differs: Play or Make…."""
+    from yulon.ui import controller_view as cv
+
+    pack = _checkout_pack("centurion/patches/patch-Y.zip", sha256="0" * 64)
+    play_text = cv._checkout_refusal(pack, tmp_path)
+    make_text = cv._checkout_refusal(pack, tmp_path, again=f"“{cv.MAKE_PLAY_CLIENT_LABEL}”")
+    assert play_text is not None and make_text is not None
+    assert play_text.endswith("then press Play again.")
+    assert make_text.endswith(f"then press “{cv.MAKE_PLAY_CLIENT_LABEL}” again.")
+    assert "press Play" not in make_text

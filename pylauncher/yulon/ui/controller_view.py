@@ -1308,12 +1308,16 @@ def _checkout_commit(server_dir: Path, rel: str, wsl_distro: str | None = None) 
 
 
 def _checkout_refusal(
-    pack: ClientPack, server_dir: Path, wsl_distro: str | None = None
+    pack: ClientPack,
+    server_dir: Path,
+    wsl_distro: str | None = None,
+    again: str = PLAY_LABEL,
 ) -> str | None:
     """The refusal for a checkout pack whose file is not there (decision 3), or None.
 
     Names the file and the commit the server is on, and points at the Server
-    build menu: a newer commit (or the tested pin) is what has the file.
+    build menu: a newer commit (or the tested pin) is what has the file. `again`
+    is the press to make afterwards: Play, or Make… when nothing was built.
     """
     rel = pack.source.path
     if pack.source.kind != "checkout" or rel is None:
@@ -1328,7 +1332,7 @@ def _checkout_refusal(
         f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} to "
         f"get a commit that has it (or "
         f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)}), "
-        "then press Play again."
+        f"then press {again} again."
     )
 
 
@@ -8485,7 +8489,10 @@ class ControllerView(QWidget):
         for pack in self.entry.client.packs:
             if not pack.optional:
                 missing = _checkout_refusal(
-                    pack, server_dir, wsl_distro=self.services.controller.wsl_distro
+                    pack,
+                    server_dir,
+                    wsl_distro=self.services.controller.wsl_distro,
+                    again=f"“{MAKE_PLAY_CLIENT_LABEL}”",
                 )
                 if missing is not None:
                     raise play_client.PlayClientError(missing)
@@ -8863,7 +8870,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def _cancel_play_download(self) -> None:
-        """Stop the download. It is checked between reads, so a stalled one takes a while."""
+        """Stop the whole preparation; it is checked between steps, so a stalled read waits."""
         self._play_cancel.set()
         self.play_cancel_button.setEnabled(False)
         self.play_cancel_button.setText("Cancelling…")
