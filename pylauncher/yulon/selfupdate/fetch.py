@@ -232,10 +232,14 @@ def _https_only_opener(
             target = urllib.parse.urlsplit(newurl)
             if target.scheme != "https":
                 raise UpdateError(f"The download was redirected off https, to {newurl[:200]!r}.")
-            if hosts is not None and (target.hostname or "") not in hosts:
+            if hosts is not None and not (
+                (target.hostname or "") in hosts
+                and _can_only_go_where_it_says(newurl, target.hostname)
+            ):
                 raise UpdateError(
                     f"The download was redirected to {target.hostname!r}, which this server's "
-                    "catalog entry does not name, so Yu'lon did not follow it."
+                    "catalog entry does not name as a plain https address (no port, no login), so "
+                    "Yu'lon did not follow it."
                 )
             followed = super().redirect_request(req, fp, code, msg, headers, newurl)
             # CPython (3.12 measured) rebuilds the request WITHOUT its method, so

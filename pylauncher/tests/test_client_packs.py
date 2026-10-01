@@ -12,8 +12,10 @@ each positive base (`_url_pack`, `_zip`) is shown to work on its own first.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
+import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Mapping
@@ -23,9 +25,15 @@ from typing import Any
 
 import pytest
 
-from yulon import client_packs, platform
+from yulon import client_packs, platform, server_build_presses
 from yulon.catalog.catalog import ClientPack
-from yulon.client_packs import Cancelled, PackError, fetch_checkout, fetch_url
+from yulon.client_packs import (
+    Cancelled,
+    PackError,
+    PackUnavailable,
+    fetch_checkout,
+    fetch_url,
+)
 from yulon.selfupdate import fetch
 from yulon.update import _Deadline
 
@@ -33,6 +41,7 @@ HOST = "packs.example.org"
 ZIP_URL = f"https://{HOST}/downloads/hd-creatures.zip"
 VERSION_URL = f"https://{HOST}/downloads/hd-creatures.version"
 HOSTS = frozenset({HOST})
+LATEST = server_build_presses.UPDATE_TO_LATEST
 
 
 @pytest.fixture(autouse=True)
@@ -165,6 +174,34 @@ def test_the_cache_lives_in_the_config_dir(_cache_in_tmp: Path) -> None:
     assert client_packs.cache_dir() == platform.config_dir() / "client-packs"
 
 
+def test_on_windows_the_cache_is_in_local_appdata_not_the_roaming_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    local = r"C:\Users\test\AppData\Local"
+    monkeypatch.setenv("LOCALAPPDATA", local)
+
+    assert client_packs.cache_dir() == Path(local) / "yulon" / "client-packs"
+
+
+def test_on_windows_without_local_appdata_the_cache_falls_back_to_the_config_dir(
+    monkeypatch: pytest.MonkeyPatch, _cache_in_tmp: Path
+) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "win32")
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    assert client_packs.cache_dir() == _cache_in_tmp
+
+
+def test_off_windows_local_appdata_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, _cache_in_tmp: Path
+) -> None:
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setenv("LOCALAPPDATA", "/somewhere/else")
+
+    assert client_packs.cache_dir() == _cache_in_tmp
+
+
 # --- from the server's checkout ------------------------------------------------------------
 
 
@@ -254,6 +291,71 @@ def test_joined_parts_with_the_wrong_md5_are_refused_and_nothing_is_kept(
         fetch_checkout(pack, server)
     cached = client_packs.cache_dir() / "checkout" / ("0" * 32)
     assert list(cached.iterdir()) == []
+
+
+def test_a_gap_in_the_part_numbers_is_refused_before_joining_and_names_the_missing_piece(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server"
+    folder = server / "p"
+    folder.mkdir(parents=True)
+    for number in (1, 2, 4):
+        (folder / f"patch-Y.zip.part{number:02d}").write_bytes(b"x")
+    pack = _checkout_pack("p/patch-Y.zip", md5="0" * 32)
+
+    with pytest.raises(PackError) as caught:
+        fetch_checkout(pack, server)
+    assert "patch-Y.zip.part03" in str(caught.value)
+    assert LATEST in str(caught.value)
+    assert not client_packs.cache_dir().exists()  # refused before anything was written
+
+
+def test_a_duplicate_part_number_is_refused_before_joining(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    folder = server / "p"
+    folder.mkdir(parents=True)
+    (folder / "patch-Y.zip.part1").write_bytes(b"x")
+    (folder / "patch-Y.zip.part01").write_bytes(b"x")
+    (folder / "patch-Y.zip.part2").write_bytes(b"x")
+    pack = _checkout_pack("p/patch-Y.zip", md5="0" * 32)
+
+    with pytest.raises(PackError, match="more than one piece numbered 1") as caught:
+        fetch_checkout(pack, server)
+    assert LATEST in str(caught.value)
+    assert not client_packs.cache_dir().exists()
+
+
+def test_unpadded_part_numbers_are_joined_numerically_part2_before_part10(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server"
+    folder = server / "p"
+    folder.mkdir(parents=True)
+    data = _zip({"patch-Y.MPQ": bytes(range(256)) * 300})
+    size = -(-len(data) // 10)
+    for number in range(1, 11):
+        piece = data[(number - 1) * size : number * size]
+        (folder / f"patch-Y.zip.part{number}").write_bytes(piece)
+    # By NAME `.part10` sorts before `.part2`; only a numeric order joins these into `data`.
+    assert sorted(p.name for p in folder.iterdir())[1] == "patch-Y.zip.part10"
+    pack = _checkout_pack("p/patch-Y.zip", md5=hashlib.md5(data).hexdigest())
+
+    assert fetch_checkout(pack, server).path.read_bytes() == data
+
+
+def test_a_join_mismatch_points_to_the_servers_sources_not_to_trying_again(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server"
+    folder = server / "p"
+    folder.mkdir(parents=True)
+    _split(_zip(), folder, "patch-Y.zip", 3)
+    pack = _checkout_pack("p/patch-Y.zip", md5="0" * 32)
+
+    with pytest.raises(PackError) as caught:
+        fetch_checkout(pack, server)
+    assert LATEST in str(caught.value)
+    assert "Try again" not in str(caught.value)
 
 
 def test_a_checkout_without_the_file_or_its_parts_names_the_path_and_the_commit(
@@ -523,6 +625,135 @@ def test_a_404_says_the_pack_is_not_available() -> None:
         fetch_url(_url_pack(), entry_id="centurion", allowed_hosts=HOSTS, opener=site)
 
 
+# --- OS errors become PackError -----------------------------------------------------------
+
+
+def test_a_full_disk_mid_download_is_a_pack_error_and_keeps_the_part(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _zip()
+    real_open = Path.open
+
+    class _Full:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+            self.written = 0
+
+        def __enter__(self) -> _Full:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self.handle.close()
+
+        def write(self, chunk: bytes) -> int:
+            if self.written:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            self.written += self.handle.write(chunk[:100])
+            return len(chunk)
+
+    def opening(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(self, mode, *args, **kwargs)
+        return _Full(handle) if self.name.endswith(".part") else handle
+
+    monkeypatch.setattr(Path, "open", opening)
+    site = _site(data)
+    pack = _url_pack()
+
+    with pytest.raises(PackError, match="No space left") as caught:
+        fetch_url(pack, entry_id="centurion", allowed_hosts=HOSTS, opener=site)
+    assert "press Play again" in str(caught.value)
+    parts = list(client_packs.cache_dir().rglob("*.part"))
+    assert len(parts) == 1 and parts[0].stat().st_size == 100
+
+
+def test_a_cache_folder_that_cannot_be_made_is_a_pack_error_naming_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+
+    with pytest.raises(PackError, match="Permission denied") as caught:
+        fetch_url(_url_pack(), entry_id="centurion", allowed_hosts=HOSTS, opener=_site(_zip()))
+    assert "1.00155" in str(caught.value)  # the folder it could not make
+
+
+def test_a_checkout_cache_folder_that_cannot_be_made_is_a_pack_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = tmp_path / "server"
+    (server / "p").mkdir(parents=True)
+    _split(_zip(), server / "p", "patch-Y.zip", 3)
+
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+    with pytest.raises(PackError, match="Permission denied"):
+        fetch_checkout(_checkout_pack("p/patch-Y.zip", md5="0" * 32), server)
+
+
+@pytest.mark.parametrize("name", ["NUL", "con", "COM1", "lpt9", "AUX.txt", "prn.1"])
+def test_a_windows_device_name_is_not_a_version(name: str) -> None:
+    with pytest.raises(PackError, match="not a version Yu'lon can use"):
+        fetch_url(
+            _url_pack(),
+            entry_id="centurion",
+            allowed_hosts=HOSTS,
+            opener=_site(_zip(), version=name.encode()),
+        )
+
+
+def test_a_name_that_only_starts_like_a_device_is_a_version() -> None:
+    got = fetch_url(
+        _url_pack(),
+        entry_id="centurion",
+        allowed_hosts=HOSTS,
+        opener=_site(_zip(), version=b"COM10"),
+    )
+    assert got.version == "COM10"
+
+
+# --- 404 is "unavailable" ------------------------------------------------------------------
+
+
+class _Gone:
+    """An opener answering one URL with an HTTPError and everything else from a site."""
+
+    def __init__(self, site: _Site, url: str, code: int) -> None:
+        self.site, self.url, self.code = site, url, code
+
+    def __call__(self, url: str, watcher: _Deadline, **kwargs: Any) -> Any:
+        if url == self.url:
+            raise urllib.error.HTTPError(url, self.code, "gone", {}, None)  # type: ignore[arg-type]
+        return self.site(url, watcher, **kwargs)
+
+
+@pytest.mark.parametrize("code", [404, 410])
+@pytest.mark.parametrize("gone", [ZIP_URL, VERSION_URL])
+def test_a_pack_whose_url_is_gone_is_unavailable(code: int, gone: str) -> None:
+    opener = _Gone(_site(_zip()), gone, code)
+
+    with pytest.raises(PackUnavailable, match=f"HTTP {code}"):
+        fetch_url(_url_pack(), entry_id="centurion", allowed_hosts=HOSTS, opener=opener)
+
+
+def test_a_404_status_answer_is_unavailable_too() -> None:
+    site = _Site({VERSION_URL: b"1.0"})  # the zip is absent: the fake answers a 404 status
+
+    with pytest.raises(PackUnavailable):
+        fetch_url(_url_pack(), entry_id="centurion", allowed_hosts=HOSTS, opener=site)
+
+
+def test_a_server_error_is_not_unavailable() -> None:
+    opener = _Gone(_site(_zip()), VERSION_URL, 503)
+
+    with pytest.raises(PackError) as caught:
+        fetch_url(_url_pack(), entry_id="centurion", allowed_hosts=HOSTS, opener=opener)
+    assert not isinstance(caught.value, PackUnavailable)
+
+
 # --- the real opener's redirect rule -------------------------------------------------------
 
 
@@ -537,6 +768,15 @@ def test_a_redirect_to_a_host_the_entry_does_not_name_is_not_followed() -> None:
 
     with pytest.raises(fetch.UpdateError, match="does not name"):
         handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example/x.zip")
+
+
+@pytest.mark.parametrize("target", [f"https://{HOST}:8443/x.zip", f"https://user:pw@{HOST}/x.zip"])
+def test_a_redirect_to_a_listed_host_with_a_port_or_userinfo_is_not_followed(target: str) -> None:
+    handler = _redirect_handler(HOSTS)
+    request = urllib.request.Request(ZIP_URL, method="GET")
+
+    with pytest.raises(fetch.UpdateError, match="does not name"):
+        handler.redirect_request(request, None, 302, "Found", {}, target)
 
 
 def test_a_redirected_head_stays_a_head_and_a_range_survives() -> None:

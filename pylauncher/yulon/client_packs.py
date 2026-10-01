@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
-from yulon import __version__, platform
+from yulon import __version__, platform, server_build_presses
 from yulon.catalog.catalog import ClientPack
 from yulon.log import get_logger
 from yulon.selfupdate import fetch
@@ -72,12 +72,31 @@ would let remote text re-point a path (`/`, `\\`) or that Windows refuses in a
 file name.
 """
 
+_WINDOWS_DEVICES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{n}" for n in range(1, 10)),
+        *(f"LPT{n}" for n in range(1, 10)),
+    }
+)
+"""Names Windows treats as devices, with or without an extension: `NUL.txt` is `NUL`."""
+
 _PART = re.compile(r"\.part(\d+)$")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 
 
 class PackError(RuntimeError):
     """A refusal worded for the player, naming what to do next. Nothing else leaves this module."""
+
+
+class PackUnavailable(PackError):
+    """The pack's address answered 404 or 410: the server's site no longer has it.
+
+    The view shows such a pack as "unavailable" instead of a failure to retry.
+    """
 
 
 class Cancelled(PackError):
@@ -147,8 +166,29 @@ def _open(
 
 
 def cache_dir() -> Path:
-    """Where proved pack zips are kept: `<config dir>/client-packs`."""
+    """Where proved pack zips are kept.
+
+    On Windows `%LOCALAPPDATA%\\yulon\\client-packs`: the zips are gigabytes of
+    regenerable downloads, which must not ride in the Roaming profile that
+    `platform.config_dir()` (`%APPDATA%`) names. Where `LOCALAPPDATA` is unset,
+    and on Linux and macOS, `<config dir>/client-packs`.
+    """
+    if platform.detect() == "windows":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            return Path(local) / platform.APP_DIR_NAME / "client-packs"
     return platform.config_dir() / "client-packs"
+
+
+def _os_refusal(pack: ClientPack, exc: OSError) -> PackError:
+    """A `PackError` for a failed read, write or folder: what failed, where, and what to do."""
+    where = exc.filename or cache_dir()
+    reason = exc.strerror or str(exc)
+    return PackError(
+        f"{pack.label}: Yu'lon could not use {where} ({reason}). Free some space and check "
+        "that Yu'lon may write there, then press Play again; a download continues from what "
+        "has already arrived."
+    )
 
 
 def _size_text(size: int) -> str:
@@ -185,7 +225,15 @@ def _digests(path: Path) -> tuple[str, str]:
     return sha256.hexdigest(), md5.hexdigest()
 
 
-def _prove(pack: ClientPack, path: Path) -> str:
+_RETRY = "Try again; if it happens again, the server's makers have changed the file."
+_FROM_SOURCES = (
+    f"Press {server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+    "to fetch the server's sources again; if it stays, the server's makers have changed "
+    "the file."
+)
+
+
+def _prove(pack: ClientPack, path: Path, advice: str = _RETRY) -> str:
     """The file's SHA-256, once it matches the pack's checksum (or, with none, its zip CRCs).
 
     Raises `PackError` and leaves the file where it is: the caller decides
@@ -199,8 +247,7 @@ def _prove(pack: ClientPack, path: Path) -> str:
         if actual != expected:
             raise PackError(
                 f"{pack.label} does not match its published checksum ({actual[:12]}… instead "
-                f"of {expected[:12]}…), so Yu'lon did not use it. Try again; if it happens "
-                "again, the server's makers have changed the file."
+                f"of {expected[:12]}…), so Yu'lon did not use it. {advice}"
             )
         return sha256
     try:
@@ -229,6 +276,7 @@ def _checked_version(pack: ClientPack, raw: bytes, where: str) -> str:
         or len(raw) > VERSION_MAX_BYTES
         or text in (".", "..")
         or text.endswith(".")
+        or text.split(".")[0].strip().upper() in _WINDOWS_DEVICES
         or any(ch in _VERSION_FORBIDDEN or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
     ):
         raise PackError(
@@ -241,8 +289,8 @@ def _checked_version(pack: ClientPack, raw: bytes, where: str) -> str:
 # --- From the server's own checkout --------------------------------------------------------
 
 
-def _parts_of(path: Path) -> list[Path]:
-    """`<path>.partNN` beside `path`, in order: part10 after part09, part2 before part10."""
+def _numbered_parts(path: Path) -> list[tuple[int, Path]]:
+    """`<path>.partNN` beside `path` as `(number, file)`, in numeric order (part2 before part10)."""
     try:
         siblings = list(path.parent.iterdir())
     except OSError:
@@ -254,7 +302,38 @@ def _parts_of(path: Path) -> list[Path]:
         match = _PART.search(sibling.name)
         if match and sibling.name == f"{path.name}.part{match.group(1)}":
             found.append((int(match.group(1)), sibling.name, sibling))
-    return [part for _, _, part in sorted(found)]
+    return [(number, part) for number, _, part in sorted(found)]
+
+
+def _parts_of(path: Path) -> list[Path]:
+    """`<path>.partNN` beside `path`, in order: part10 after part09, part2 before part10."""
+    return [part for _, part in _numbered_parts(path)]
+
+
+def _whole_parts(pack: ClientPack, path: Path) -> list[Path]:
+    """The pieces in order, refused if the numbering has a duplicate or a gap.
+
+    A set of pieces missing one in the middle joins into a file that fails its
+    checksum with no hint why; this names the piece, before anything is joined.
+    The numbering starts at 0 or 1 (what `split` tools do).
+    """
+    numbered = _numbered_parts(path)
+    for (before, _), (number, _) in zip(numbered, numbered[1:], strict=False):
+        if number == before:
+            raise PackError(
+                f"{pack.label}: the server's checkout has more than one piece numbered {number} "
+                f"of {path.name}. {_FROM_SOURCES}"
+            )
+    expected = numbered[0][0] if numbered and numbered[0][0] in (0, 1) else 0
+    for index, (number, part) in enumerate(numbered):
+        if number != expected + index:
+            digits = len(_PART.search(part.name).group(1))  # type: ignore[union-attr]
+            missing = f"{path.name}.part{expected + index:0{digits}d}"
+            raise PackError(
+                f"{pack.label}: the server's checkout is missing {missing} (it has "
+                f"{part.name}), so the pieces cannot be joined. {_FROM_SOURCES}"
+            )
+    return [part for _, part in numbered]
 
 
 def _checkout_version(pack: ClientPack, path: Path) -> str | None:
@@ -267,7 +346,7 @@ def _checkout_version(pack: ClientPack, path: Path) -> str | None:
     return _checked_version(pack, raw, str(beside))
 
 
-def fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
+def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
     """A checkout pack's zip, proved against its checksum.
 
     The plain file when the checkout has it, verified where it is (and never
@@ -284,12 +363,10 @@ def fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
     version = _checkout_version(pack, path)
     if path.is_file():
         try:
-            return Fetched(path, version, _prove(pack, path))
+            return Fetched(path, version, _prove(pack, path, _FROM_SOURCES))
         except PackError as exc:
-            raise PackError(
-                f"{exc} The file is {path}; updating the server's sources fetches it again."
-            ) from exc
-    parts = _parts_of(path)
+            raise PackError(f"{exc} The file is {path}.") from exc
+    parts = _whole_parts(pack, path)
     if not parts:
         raise PackError(
             f"{pack.label}: this server's checkout has no {source.path} (nor its .partNN "
@@ -314,13 +391,21 @@ def fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
             for part in parts:
                 with part.open("rb") as piece:
                     shutil.copyfileobj(piece, out, CHUNK_BYTES)
-        sha256 = _prove(pack, joining)
+        sha256 = _prove(pack, joining, _FROM_SOURCES)
         os.replace(joining, dest)
     except BaseException:
         joining.unlink(missing_ok=True)
         raise
     logger.info(f"client-packs: joined {len(parts)} parts of {source.path} into {dest}")
     return Fetched(dest, version, sha256)
+
+
+def fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
+    """`_fetch_checkout`, with an operating-system failure worded as a `PackError`."""
+    try:
+        return _fetch_checkout(pack, server_dir)
+    except OSError as exc:
+        raise _os_refusal(pack, exc) from exc
 
 
 # --- From the server's site ----------------------------------------------------------------
@@ -333,6 +418,9 @@ def _refuse_unlisted(pack: ClientPack, url: str, allowed_hosts: frozenset[str]) 
             f"{pack.label} would be fetched from {host or url!r}, which is not a plain https "
             "address on a host this server's catalog entry names, so Yu'lon did not ask it."
         )
+
+
+_GONE = frozenset({404, 410})
 
 
 def _request(
@@ -349,7 +437,7 @@ def _request(
     try:
         response = opener(url, watcher, method=method, headers=headers, hosts=hosts)
     except urllib.error.HTTPError as exc:
-        raise PackError(
+        raise (PackUnavailable if exc.code in _GONE else PackError)(
             f"{pack.label} is not available from the server's site right now (HTTP {exc.code} "
             f"for {url}). Try again later."
         ) from exc
@@ -362,7 +450,7 @@ def _request(
         ) from exc
     if not 200 <= response.status < 300:
         _close(response)
-        raise PackError(
+        raise (PackUnavailable if response.status in _GONE else PackError)(
             f"{pack.label} is not available from the server's site right now (HTTP "
             f"{response.status} for {url}). Try again later."
         )
@@ -521,6 +609,32 @@ def _file_name(url: str) -> str:
 
 
 def fetch_url(
+    pack: ClientPack,
+    *,
+    entry_id: str,
+    allowed_hosts: frozenset[str],
+    opener: Opener = _open,
+    progress: Progress | None = None,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> Fetched:
+    """`_fetch_url`, with an operating-system failure worded as a `PackError`.
+
+    A write that fails (a full disk) keeps the `.part`, so pressing Play again resumes.
+    """
+    try:
+        return _fetch_url(
+            pack,
+            entry_id=entry_id,
+            allowed_hosts=allowed_hosts,
+            opener=opener,
+            progress=progress,
+            cancelled=cancelled,
+        )
+    except OSError as exc:
+        raise _os_refusal(pack, exc) from exc
+
+
+def _fetch_url(
     pack: ClientPack,
     *,
     entry_id: str,

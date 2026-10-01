@@ -2703,13 +2703,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "original; `refresh()` refuses a folder without the marker, or an original other "
         "than the one it names, before it lists anything"
     ),
-    ("client_packs.py", "_parts_of"): (
+    ("client_packs.py", "_numbered_parts"): (
         "T181b. Lists the folder of a checkout pack's zip in the server's own checkout for "
         "its `<name>.zip.partNN` pieces, which are then READ and joined into a `.joining` "
-        "file in Yu'lon's cache (`<config dir>/client-packs/checkout/<checksum>/`), renamed "
-        "into place only once the join matches the pack's checksum. Read-only on the "
-        "checkout: nothing there is written or deleted because of it. A folder that cannot "
-        "be listed answers no parts, and `fetch_checkout()` then refuses naming the file"
+        "file in Yu'lon's download cache (`client-packs/checkout/<checksum>/`, in "
+        "`%LOCALAPPDATA%` on Windows), renamed into place only once the join matches the "
+        "pack's checksum. Read-only on the checkout: nothing there is written or deleted "
+        "because of it. A folder that cannot be listed answers no parts, and "
+        "`fetch_checkout()` then refuses naming the file"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
