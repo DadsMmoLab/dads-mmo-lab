@@ -35,6 +35,7 @@ No Qt here: the dialog that asks and the progress it shows live in the view.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import shutil
 import stat
@@ -54,6 +55,15 @@ from yulon.steam import client_executable
 logger = get_logger(__name__)
 
 MARKER = ".yulon-client.json"
+TAKEN_BACK = ".yulon-taken-back.json"
+"""Beside the marker: module patches removed from this folder that the original still has.
+
+Written by a module's Remove (`apply.Applier._take_back()`) when the receipt
+named the player's own client, i.e. the module was installed before the switch
+and "Also remove them from your original client" was left unticked. Read by
+Play and Refresh so the original's copy is not named as left out (T181a).
+Goes with the folder: a ready-to-play client made again starts without one.
+"""
 LEFT_OUT = frozenset({"cache", "wdb", "logs", "errors", "screenshots"})
 """Top-level folder names (lower-case) not carried over: WoW recreates them, and a
 stale cache from another server confuses the client. 3.3.5a keeps it in `Cache/`
@@ -1148,8 +1158,44 @@ def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool =
     logger.info("ready-to-play client for %s at %s deleted", game, play_dir)
 
 
-def left_out_archives(play_dir: Path, original: Path) -> tuple[Path, ...]:
+def taken_back(play_dir: Path) -> tuple[Path, ...]:
+    """The relative paths `record_taken_back()` kept for `play_dir`, or `()` for any doubt."""
+    try:
+        raw = json.loads((play_dir / TAKEN_BACK).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ()
+    paths = raw.get("paths") if isinstance(raw, dict) else None
+    if not isinstance(paths, list):
+        return ()
+    return tuple(Path(path) for path in paths if isinstance(path, str) and path)
+
+
+def record_taken_back(play_dir: Path, rels: Collection[Path]) -> None:
+    """Add `rels` (relative to `play_dir`) to its `TAKEN_BACK` record, in one rename.
+
+    Raises OSError when it cannot be written; the caller decides what that costs.
+    """
+    known = {os.path.normcase(os.fspath(rel)): rel for rel in taken_back(play_dir)}
+    for rel in rels:
+        known.setdefault(os.path.normcase(os.fspath(rel)), rel)
+    payload = {"version": 1, "paths": sorted(rel.as_posix() for rel in known.values())}
+    target = play_dir / TAKEN_BACK
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def left_out_archives(
+    play_dir: Path, original: Path, *, ignore: Collection[Path] = ()
+) -> tuple[Path, ...]:
     """The original's `*.MPQ`/`*.dll` that the ready-to-play client has no file for, sorted.
+
+    `ignore` (relative paths) is never listed: this server's module patches, which
+    the original may hold while this folder rightly does not (`taken_back()`).
 
     Refresh never adds these (an archive that appeared in the original may be
     another server's module patch, and this folder is one server's), so Play and
@@ -1160,6 +1206,7 @@ def left_out_archives(play_dir: Path, original: Path) -> tuple[Path, ...]:
     """
     if not (original / "Data").is_dir():
         return ()
+    is_ignored = _kept(ignore)
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(original, followlinks=False):
         here = Path(dirpath)
@@ -1177,6 +1224,7 @@ def left_out_archives(play_dir: Path, original: Path) -> tuple[Path, ...]:
                 Path(name).suffix.lower() in LINKED_SUFFIXES
                 and not _is_link(here / name)
                 and not os.path.lexists(play_dir / rel)
+                and not is_ignored(rel)
             ):
                 found.append(rel)
     return tuple(sorted(found))

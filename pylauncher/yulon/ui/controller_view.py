@@ -726,9 +726,13 @@ ONEDRIVE_WARNING = (
 
 
 def left_out_sentence(names: Collection[Path]) -> str:
-    """Archives the original has and the ready-to-play client lacks (Refresh never adds them)."""
+    """Archives the original has and the ready-to-play client lacks (Refresh never adds them).
+
+    Not called "new": the original's copy of a module patch removed after the
+    switch is not, and `archives_left_out()` leaves those out of `names`.
+    """
     return (
-        "Left out (new in your own client): "
+        "Left out (in your own client only): "
         + ", ".join(str(name) for name in names)
         + " — make the ready-to-play client again to include them."
     )
@@ -1660,6 +1664,25 @@ def module_kept_files(
         if path.is_relative_to(play_client_dir):
             found.add(path.relative_to(play_client_dir))
     return tuple(sorted(found))
+
+
+def archives_left_out(
+    server_dir: Path, play_client_dir: Path, source: Path, client_dir: Path | None = None
+) -> tuple[Path, ...]:
+    """The original's archives Play and Refresh name as left out of the ready-to-play client.
+
+    Never one of this server's module patches (controller ruling, T181a): one a
+    Remove took back from the ready-to-play client while the original kept it
+    (`play_client.taken_back()`, the module installed before the switch with
+    "Also remove them from your original client" unticked), nor one a module
+    still has a receipt for (`module_kept_files()`, its origins and the clones'
+    claims). Making the client again would bring such a patch back.
+    """
+    ignore = (
+        *module_kept_files(server_dir, play_client_dir, client_dir),
+        *play_client.taken_back(play_client_dir),
+    )
+    return play_client.left_out_archives(play_client_dir, source, ignore=ignore)
 
 
 # ------------------------------------------------------ one factory per game
@@ -8469,7 +8492,7 @@ class ControllerView(QWidget):
                 play_client.stale(
                     play, source, keep=module_kept_files(server_dir, play, client_dir)
                 ),
-                play_client.left_out_archives(play, source),
+                archives_left_out(server_dir, play, source, client_dir),
             ),
             self._play_stale_read,
             self._play_failed,
@@ -8598,7 +8621,7 @@ class ControllerView(QWidget):
                 server_dir=server_dir,
                 keep=module_kept_files(server_dir, play, client_dir),
             )
-            return _Compared(done, play_client.left_out_archives(play, source))
+            return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
 
         self._run(work, self._play_client_refreshed, self._play_client_job_failed)
         return True

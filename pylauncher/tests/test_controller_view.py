@@ -20992,6 +20992,34 @@ def test_refresh_names_the_archives_it_leaves_out(qapp: object, ps: _Ps, tmp_pat
     assert not (play / rel).exists()
 
 
+def test_the_left_out_sentence_does_not_call_an_archive_new(qapp: object) -> None:
+    """Controller ruling, T181a: an archive only the original has is not always new there.
+
+    The original's copy of a module patch removed after the switch is one, and
+    calling it new invited bringing the removed patch back.
+    """
+    said = controller_view_module.left_out_sentence((Path("Data") / "patch-5.MPQ",))
+
+    assert "new" not in said.lower()
+    assert "patch-5.MPQ" in said
+
+
+def test_refresh_does_not_name_a_removed_modules_patch_the_original_kept(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The Refresh press itself goes by the record a Remove keeps in the ready-to-play client."""
+    original, play, rel = _a_new_archive_in_the_original(tmp_path)
+    removed = Path("Data") / "Patch-A.MPQ"
+    (original / removed).write_bytes(b"MPQ a removed module's patch, kept in the original")
+    play_client.record_taken_back(play, [removed])
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+
+    view.refresh_play_client()
+
+    assert controller_view_module.left_out_sentence((rel,)) in view.play_label.text()
+    assert "Patch-A.MPQ" not in view.play_label.text()
+
+
 def test_the_plays_refresh_question_names_the_archives_left_out(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
 ) -> None:

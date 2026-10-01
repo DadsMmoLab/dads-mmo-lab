@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
-from yulon import docker, module_answers, platform, rmtree, runner
+from yulon import docker, module_answers, platform, play_client, rmtree, runner
 from yulon.catalog import composegen, upstream
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -1615,6 +1615,14 @@ def take_back_file(path: Path, sha256: str, log: _Log) -> None:
         )
         return
     log.done.append(f"took back {path.name} from {path.parent}")
+
+
+def _record_taken_back(play_dir: Path, rel: Path) -> None:
+    """Best-effort: a record that cannot be written costs a sentence at Play, not the Remove."""
+    try:
+        play_client.record_taken_back(play_dir, (rel,))
+    except OSError as exc:
+        logger.warning(f"could not record {rel} as taken back in {play_dir}: {exc}")
 
 
 def take_back_files(copies: Iterable[ClientCopy]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -4324,11 +4332,16 @@ class Applier:
 
         Looked for in the client this applier writes to: a receipt from before
         a ready-to-play client existed is moved onto it (`rebased()`), so the
-        player's own client is never where a Remove deletes.
+        player's own client is never where a Remove deletes. Such a file stays
+        in the player's own client, so the ready-to-play client records it
+        (`play_client.record_taken_back()`) and Play and Refresh do not name
+        the original's copy as left out of it (T181a).
         """
         path = Path(copy.path)
         if self.client_dir is not None:
             path = rebased(path, self.client_dir, self.client_origins)
+            if path != Path(copy.path) and path.is_relative_to(self.client_dir):
+                _record_taken_back(self.client_dir, path.relative_to(self.client_dir))
         take_back_file(path, copy.sha256, log)
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:

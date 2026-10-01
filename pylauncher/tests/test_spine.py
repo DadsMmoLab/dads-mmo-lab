@@ -2689,9 +2689,10 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("play_client.py", "left_out_archives"): (
         "T181a final review. Walks the player's own client for `*.MPQ`/`*.dll` the "
         "ready-to-play client has no file for, the way `plan()` walks it (never through a "
-        "link, never into the left-out folders, WTF/ or Interface/). Read-only on both "
-        "sides: the answer is only NAMED to the player (Play and Refresh say to make the "
-        "client again to include them); nothing is copied or written because of it"
+        "link, never into the left-out folders, WTF/ or Interface/), less this server's "
+        "module patches (`ignore`). Read-only on both sides: the answer is only NAMED to "
+        "the player (Play and Refresh say to make the client again to include them); "
+        "nothing is copied or written because of it"
     ),
     ("play_client.py", "_linked_files"): (
         "T181a Task 2. Walks a ready-to-play client (a folder carrying Yu'lon's marker) for "

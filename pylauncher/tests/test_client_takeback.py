@@ -47,7 +47,12 @@ from yulon.apply import CLAIM_FILE, Applier, ClientCopy, read_client_copies, sha
 from yulon.catalog import upstream
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import Manifest
-from yulon.ui.controller_view import ControllerServices, _format_report, module_kept_files
+from yulon.ui.controller_view import (
+    ControllerServices,
+    _format_report,
+    archives_left_out,
+    module_kept_files,
+)
 
 BOTS_MANAGER = Path("wow-tortoise") / "mods" / "tortoise-bots-manager.json"
 
@@ -399,6 +404,35 @@ def test_a_patch_installed_into_the_original_is_removed_from_the_ready_to_play_c
     assert (original / "Data" / "Patch-A.MPQ").read_bytes() == MPQ, "reached into the original"
     assert f"took back Patch-A.MPQ from {play / 'Data'}" in report.done
     assert (original / "Data" / "Patch-Y.MPQ").read_bytes() == b"the user's own patch"
+
+
+def test_a_patch_removed_after_the_switch_is_not_named_as_left_out_of_the_ready_to_play_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Controller ruling, T181a: the original's copy of a removed module's patch is not "left out".
+
+    Installed into the player's own client before the switch, the ready-to-play
+    client made with "Also remove them from your original client" unticked (no
+    `take_back_files()`), then removed after the switch: the patch goes from the
+    ready-to-play client only and stays in the original. Play and Refresh must
+    not then name it at every press, nor advise making the client again, which
+    would bring the removed module's patch back. An archive of the original's
+    that no module of this server put there is still named.
+    """
+    manifest = _manifest(ARAC)
+    _arac(monkeypatch, tmp_path)
+    server_dir, original = tmp_path / "server", tmp_path / "client"
+    play = _make_play_client(original, server_dir)
+    (original / "Data" / "patch-Z.MPQ").write_bytes(b"MPQ another server's patch")
+    applier = _play_applier(monkeypatch, server_dir, original, play, manifest)
+
+    applier.remove(manifest)
+
+    assert (original / "Data" / "Patch-A.MPQ").read_bytes() == MPQ, "the scenario changed"
+    assert not (play / "Data" / "Patch-A.MPQ").exists(), "the scenario changed"
+    assert archives_left_out(server_dir, play, original, original) == (
+        Path("Data") / "patch-Z.MPQ",
+    )
 
 
 class _NewerClone(_CloneFromManifest):
