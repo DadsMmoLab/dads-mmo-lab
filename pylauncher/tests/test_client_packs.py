@@ -15,6 +15,9 @@ from __future__ import annotations
 import errno
 import hashlib
 import io
+import os
+import shutil
+import types
 import urllib.error
 import urllib.request
 import zipfile
@@ -25,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from yulon import client_packs, platform, server_build_presses
+from yulon import client_packs, platform, play_client, server_build_presses
 from yulon.catalog.catalog import ClientPack
 from yulon.client_packs import (
     Cancelled,
@@ -801,3 +804,708 @@ def test_the_self_updater_still_follows_a_redirect_to_any_https_host() -> None:
     )
 
     assert followed is not None and followed.get_method() == "GET"
+
+
+# -- Installing, recording and removing packs in a ready-to-play client (T181 b/c, Task 3) ------
+
+GAME = "wow-wotlk"
+STOCK_X = b"stock patch-X from the player's own client"
+NEW_Y = b"MPQ\x1a" + b"centurion patch-Y " * 50
+
+
+def _original(root: Path) -> Path:
+    c = root / "WoW"
+    (c / "Data" / "enUS").mkdir(parents=True)
+    (c / "Data" / "common.MPQ").write_bytes(b"mpq" * 100)
+    (c / "Data" / "patch-X.MPQ").write_bytes(STOCK_X)
+    (c / "Data" / "enUS" / "realmlist.wtf").write_text("set realmlist logon.example\n")
+    (c / "Wow.exe").write_bytes(b"MZexe")
+    (c / "WTF").mkdir()
+    (c / "WTF" / "Config.wtf").write_bytes(b'SET locale "enUS"\n')
+    (c / "Interface" / "AddOns" / "Blizzard_Own").mkdir(parents=True)
+    (c / "Interface" / "AddOns" / "Blizzard_Own" / "x.toc").write_text("## own\n")
+    return c
+
+
+def _snapshot(folder: Path) -> dict[str, bytes]:
+    return {
+        p.relative_to(folder).as_posix(): p.read_bytes() for p in folder.rglob("*") if p.is_file()
+    }
+
+
+class _Rig:
+    """A real ready-to-play client made by step (a) from a fake original, plus its watcher."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.original = _original(root)
+        self.server = root / "srv"
+        self.play = root / "WoW (Yu'lon)"
+        play_client.create(
+            self.original,
+            self.play,
+            game=GAME,
+            server_dir=self.server,
+            allow_full_copy=False,
+            reflink=lambda src, dst: False,
+        )
+        self.before = _snapshot(self.original)
+
+    def untouched(self) -> None:
+        """The player's own client holds exactly the bytes it held when the rig was made."""
+        assert _snapshot(self.original) == self.before, "the original client was changed"
+
+    def fetched(self, members: Mapping[str, bytes], name: str = "pack.zip") -> client_packs.Fetched:
+        path = self.root / "zips" / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(_zip(members))
+        return client_packs.Fetched(path, "1.00155", hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def install(self, pack: ClientPack, fetched: client_packs.Fetched, **kw: Any) -> dict[str, Any]:
+        return client_packs.install(
+            self.play, pack, fetched, game=GAME, server_dir=self.server, **kw
+        )
+
+    def remove(self, entry: dict[str, Any], pack: ClientPack | None) -> tuple[str, ...]:
+        return client_packs.remove(self.play, entry, pack, game=GAME, server_dir=self.server)
+
+
+@pytest.fixture
+def rig(tmp_path: Path) -> _Rig:
+    return _Rig(tmp_path)
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _pack_of(install: list[dict[str, str]], **extra: Any) -> ClientPack:
+    return ClientPack.model_validate(
+        {
+            "id": "p",
+            "label": "Patch pack",
+            "source": {"kind": "checkout", "path": "centurion/patches/p.zip"},
+            "md5": "0" * 32,
+            "install": install,
+            **extra,
+        }
+    )
+
+
+WORLD = _pack_of([{"member": "patch-Y.MPQ", "to": "Data/patch-X.MPQ"}])
+ADDONS = _pack_of([{"member": "*", "to_dir": "Interface/AddOns"}], id="addons")
+ADDON_FILES = {"Nova/Nova.toc": b"## Title: Nova\n", "Nova/Nova.lua": b"print('hi')\n"}
+
+
+def test_a_named_member_is_installed_under_its_new_name_and_recorded_with_its_hash(
+    rig: _Rig,
+) -> None:
+    entry = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+
+    assert (rig.play / "Data" / "patch-X.MPQ").read_bytes() == NEW_Y
+    assert not (rig.play / "Data" / "patch-Y.MPQ").exists()
+    assert entry == {
+        "version": "1.00155",
+        "sha256": rig.fetched({"patch-Y.MPQ": NEW_Y}).sha256,
+        "files": {"Data/patch-X.MPQ": _sha(NEW_Y)},
+    }
+    rig.untouched()
+
+
+def test_a_star_member_unpacks_the_whole_zip_under_its_folder(rig: _Rig) -> None:
+    entry = rig.install(ADDONS, rig.fetched(ADDON_FILES))
+
+    addons = rig.play / "Interface" / "AddOns"
+    assert (addons / "Nova" / "Nova.toc").read_bytes() == ADDON_FILES["Nova/Nova.toc"]
+    assert (addons / "Nova" / "Nova.lua").read_bytes() == ADDON_FILES["Nova/Nova.lua"]
+    assert entry["files"] == {
+        "Interface/AddOns/Nova/Nova.toc": _sha(ADDON_FILES["Nova/Nova.toc"]),
+        "Interface/AddOns/Nova/Nova.lua": _sha(ADDON_FILES["Nova/Nova.lua"]),
+    }
+    assert (addons / "Blizzard_Own" / "x.toc").exists(), "the client's own addons stay"
+    rig.untouched()
+
+
+def test_an_mpq_is_hard_linked_from_an_extracted_copy_in_the_cache(rig: _Rig) -> None:
+    rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+
+    target = rig.play / "Data" / "patch-X.MPQ"
+    assert target.stat().st_nlink == 2, "linked with the cache's extracted copy"
+    rig.untouched()
+
+
+def test_an_mpq_is_copied_when_the_cache_is_on_another_volume(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def cross_device(src: object, dst: object) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "link", cross_device)
+
+    rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+
+    target = rig.play / "Data" / "patch-X.MPQ"
+    assert target.read_bytes() == NEW_Y
+    assert target.stat().st_nlink == 1, "a copy, not a link"
+    rig.untouched()
+
+
+def test_an_install_over_a_file_hard_linked_to_the_original_never_writes_through_it(
+    rig: _Rig,
+) -> None:
+    """The ready-to-play client's patch-X.MPQ IS the player's own file (one inode)."""
+    target = rig.play / "Data" / "patch-X.MPQ"
+    assert target.stat().st_nlink > 1, "the fixture must start as a shared file"
+
+    rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+
+    assert target.read_bytes() == NEW_Y
+    assert (rig.original / "Data" / "patch-X.MPQ").read_bytes() == STOCK_X
+    rig.untouched()
+
+
+def test_a_non_mpq_install_over_a_shared_file_never_writes_through_it(rig: _Rig) -> None:
+    pack = _pack_of([{"member": "tweaks.dll", "to": "Wow.exe"}], id="dll")
+    # Wow.exe is a copy in step (a); make it a hard link to prove the rule on its own.
+    (rig.play / "Wow.exe").unlink()
+    os.link(rig.original / "Wow.exe", rig.play / "Wow.exe")
+
+    rig.install(pack, rig.fetched({"tweaks.dll": b"MZ new"}))
+
+    assert (rig.play / "Wow.exe").read_bytes() == b"MZ new"
+    rig.untouched()
+
+
+def test_a_changed_pack_replaces_its_files_and_the_record_follows(rig: _Rig) -> None:
+    first = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    newer = NEW_Y + b" version 2"
+
+    second = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": newer}, name="v2.zip"))
+
+    assert (rig.play / "Data" / "patch-X.MPQ").read_bytes() == newer
+    assert second["files"] == {"Data/patch-X.MPQ": _sha(newer)} != first["files"]
+    assert not list((rig.play / "Data").glob("*.yulon-pack-tmp")), "no temporary file left"
+    rig.untouched()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../../evil.dll", "../evil.dll", "/abs/evil.dll", "C:evil.dll", "sub\\..\\evil.dll"],
+)
+def test_a_member_that_would_leave_the_client_is_refused_and_nothing_is_written(
+    rig: _Rig, name: str
+) -> None:
+    fetched = rig.fetched({"Nova/Nova.toc": b"ok", name: b"MZ evil"})
+    files_before = _snapshot(rig.play)
+
+    with pytest.raises(PackError, match="would leave the client"):
+        rig.install(ADDONS, fetched)
+
+    assert _snapshot(rig.play) == files_before, "not even the harmless first member"
+    assert not (rig.root / "evil.dll").exists()
+    assert not (rig.root.parent / "evil.dll").exists()
+    rig.untouched()
+
+
+def test_a_zip_cannot_forge_the_marker_or_the_record(rig: _Rig) -> None:
+    pack = _pack_of([{"member": "*", "to_dir": "."}], id="root")
+    marker = (rig.play / play_client.MARKER).read_bytes()
+
+    with pytest.raises(PackError, match="Yu'lon's own"):
+        rig.install(pack, rig.fetched({play_client.MARKER: b"{}"}))
+
+    assert (rig.play / play_client.MARKER).read_bytes() == marker
+
+
+def test_a_symlink_member_is_refused(rig: _Rig) -> None:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        info = zipfile.ZipInfo("Nova/evil")
+        info.create_system = 3
+        info.external_attr = (0o120777) << 16
+        archive.writestr(info, "/etc/passwd")
+    path = rig.root / "link.zip"
+    path.write_bytes(buffer.getvalue())
+
+    with pytest.raises(PackError, match="link"):
+        rig.install(ADDONS, client_packs.Fetched(path, None, _sha(path.read_bytes())))
+
+    assert not (rig.play / "Interface" / "AddOns" / "Nova").exists()
+    rig.untouched()
+
+
+def test_a_missing_named_member_is_refused_naming_it(rig: _Rig) -> None:
+    with pytest.raises(PackError, match=r"patch-Y\.MPQ"):
+        rig.install(WORLD, rig.fetched({"other.MPQ": b"x"}))
+
+    assert (rig.play / "Data" / "patch-X.MPQ").read_bytes() == STOCK_X
+    rig.untouched()
+
+
+def test_a_target_folder_that_is_a_symlink_is_refused_and_the_other_folder_untouched(
+    rig: _Rig,
+) -> None:
+    """`Interface/AddOns` linked to the original's: writing there would be writing the original."""
+    addons = rig.play / "Interface" / "AddOns"
+    shutil.rmtree(addons)
+    addons.symlink_to(rig.original / "Interface" / "AddOns", target_is_directory=True)
+
+    with pytest.raises(PackError, match="link"):
+        rig.install(ADDONS, rig.fetched(ADDON_FILES))
+
+    rig.untouched()
+
+
+def test_a_target_folder_that_looks_like_a_junction_is_refused(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = play_client._is_link
+    junction = rig.play / "Interface"
+    (junction / "AddOns").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(play_client, "_is_link", lambda p: Path(p) == junction or real(p))
+
+    with pytest.raises(PackError, match="link"):
+        rig.install(ADDONS, rig.fetched(ADDON_FILES))
+
+    assert not (junction / "AddOns" / "Nova").exists()
+
+
+def test_a_damaged_member_leaves_even_the_members_before_it_uninstalled(rig: _Rig) -> None:
+    fetched = rig.fetched({"A/first.txt": b"first file", "B/second.txt": b"second file" * 20})
+    raw = bytearray(fetched.path.read_bytes())
+    at = bytes(raw).index(b"second file")
+    raw[at] ^= 0xFF  # a stored member: its CRC no longer matches
+    fetched.path.write_bytes(bytes(raw))
+    files_before = _snapshot(rig.play)
+
+    with pytest.raises(PackError, match="damaged"):
+        rig.install(ADDONS, fetched)
+
+    assert _snapshot(rig.play) == files_before
+    rig.untouched()
+
+
+def test_a_failed_write_is_a_pack_error_and_leaves_no_temporary_file(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device", str(rig.play))
+
+    monkeypatch.setattr(client_packs.shutil, "copyfileobj", full)
+
+    with pytest.raises(PackError, match="No space left"):
+        rig.install(ADDONS, rig.fetched(ADDON_FILES))
+
+    assert not list(rig.play.rglob("*.yulon-pack-tmp"))
+    rig.untouched()
+
+
+def test_an_install_refuses_a_folder_without_the_marker(rig: _Rig) -> None:
+    (rig.play / play_client.MARKER).unlink()
+
+    with pytest.raises(PackError, match="not a ready-to-play client"):
+        rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+
+    rig.untouched()
+
+
+def test_an_install_refuses_another_servers_client(rig: _Rig) -> None:
+    with pytest.raises(PackError, match="another server"):
+        client_packs.install(
+            rig.play,
+            WORLD,
+            rig.fetched({"patch-Y.MPQ": NEW_Y}),
+            game=GAME,
+            server_dir=rig.root / "other",
+        )
+
+    assert (rig.play / "Data" / "patch-X.MPQ").read_bytes() == STOCK_X
+    rig.untouched()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_a_read_only_file_of_its_own_is_replaced_but_a_shared_one_is_not_unprotected(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = os.replace
+    refused: list[str] = []
+
+    def replace(src: Any, dst: Any) -> None:
+        if os.path.isfile(dst) and not os.lstat(dst).st_mode & 0o200:
+            refused.append(os.fspath(dst))
+            raise PermissionError(errno.EACCES, "Access is denied", os.fspath(dst))
+        real(src, dst)
+
+    monkeypatch.setattr(client_packs.os, "replace", replace)
+    pack = _pack_of([{"member": "t.dll", "to": "Own.dll"}], id="own")
+    own = rig.play / "Own.dll"
+    own.write_bytes(b"old")
+    os.chmod(own, 0o444)
+    rig.install(pack, rig.fetched({"t.dll": b"new"}))
+    assert refused == [str(own)] and own.read_bytes() == b"new"
+
+    shared = rig.play / "Data" / "patch-X.MPQ"
+    os.chmod(rig.original / "Data" / "patch-X.MPQ", 0o444)  # one inode: the player's too
+    with pytest.raises(PackError, match="read-only"):
+        rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    assert shared.read_bytes() == STOCK_X
+    assert (rig.original / "Data" / "patch-X.MPQ").stat().st_mode & 0o777 == 0o444
+    os.chmod(rig.original / "Data" / "patch-X.MPQ", 0o644)
+    rig.untouched()
+
+
+# -- the record --------------------------------------------------------------------------------
+
+
+def _record(**packs: Any) -> Any:
+    return client_packs.PackRecord(
+        packs=dict(packs), exe=None, choices={"packs": {}, "exe_options": {}}
+    )
+
+
+def _entry(**files: bytes) -> dict[str, Any]:
+    return {"version": "1", "sha256": "0" * 64, "files": {k: _sha(v) for k, v in files.items()}}
+
+
+def test_a_record_round_trips_and_a_missing_one_reads_as_empty(rig: _Rig) -> None:
+    empty = client_packs.read_record(rig.play)
+    assert (empty.packs, empty.exe, empty.choices) == (
+        {},
+        None,
+        {"packs": {}, "exe_options": {}},
+    )
+    record = client_packs.PackRecord(
+        packs={"p": _entry(**{"Data/patch-X.MPQ": NEW_Y})},
+        exe={"stock_sha256": "a" * 64},
+        choices={"packs": {"hd": True}, "exe_options": {"borderless": False}},
+    )
+
+    client_packs.write_record(rig.play, record, game=GAME, server_dir=rig.server)
+
+    assert client_packs.read_record(rig.play) == record
+    assert not list(rig.play.glob("*.tmp")) and not list(rig.play.glob("*.yulon-tmp"))
+    rig.untouched()
+
+
+@pytest.mark.parametrize(
+    "junk", [b"", b"\xff\xfe", b"[1, 2]", b'{"packs": 5}', b'{"packs": {"p": 3}}']
+)
+def test_a_record_that_cannot_be_read_reads_as_empty(rig: _Rig, junk: bytes) -> None:
+    (rig.play / client_packs.RECORD).write_bytes(junk)
+
+    assert client_packs.read_record(rig.play).packs == {}
+    assert client_packs.pack_files(rig.play) == frozenset()
+
+
+def test_writing_a_record_refuses_a_folder_without_the_marker(rig: _Rig) -> None:
+    (rig.play / play_client.MARKER).unlink()
+
+    with pytest.raises(PackError, match="not a ready-to-play client"):
+        client_packs.write_record(rig.play, _record(), game=GAME, server_dir=rig.server)
+
+    assert not (rig.play / client_packs.RECORD).exists()
+
+
+@pytest.mark.parametrize(
+    ("game", "server", "fragment"),
+    [(GAME, "other", "another server"), ("wow-tbc", "srv", "another game")],
+)
+def test_writing_a_record_refuses_another_servers_or_games_client(
+    rig: _Rig, game: str, server: str, fragment: str
+) -> None:
+    with pytest.raises(PackError, match=fragment):
+        client_packs.write_record(rig.play, _record(), game=game, server_dir=rig.root / server)
+
+    assert not (rig.play / client_packs.RECORD).exists()
+
+
+def test_writing_a_record_refuses_a_folder_that_is_a_link(rig: _Rig) -> None:
+    link = rig.root / "link"
+    link.symlink_to(rig.play, target_is_directory=True)
+
+    with pytest.raises(PackError, match="link"):
+        client_packs.write_record(link, _record(), game=GAME, server_dir=rig.server)
+
+    assert not (rig.play / client_packs.RECORD).exists()
+
+
+def test_a_record_leftover_that_is_a_link_is_never_written_through(rig: _Rig) -> None:
+    tmp = rig.play / f"{client_packs.RECORD}.{os.getpid()}.yulon-tmp"
+    tmp.symlink_to(rig.original / "Wow.exe")
+
+    client_packs.write_record(rig.play, _record(), game=GAME, server_dir=rig.server)
+
+    rig.untouched()
+    assert client_packs.read_record(rig.play).packs == {}
+
+
+def test_a_failed_record_write_is_a_pack_error_and_keeps_the_old_record(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client_packs.write_record(rig.play, _record(p=_entry()), game=GAME, server_dir=rig.server)
+
+    def refuse(src: object, dst: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(client_packs.os, "replace", refuse)
+    with pytest.raises(PackError, match="No space left"):
+        client_packs.write_record(rig.play, _record(), game=GAME, server_dir=rig.server)
+    monkeypatch.undo()
+
+    assert set(client_packs.read_record(rig.play).packs) == {"p"}
+    assert not list(rig.play.glob("*.yulon-tmp"))
+
+
+def test_pack_files_lists_every_recorded_file_and_ignores_unsafe_names(rig: _Rig) -> None:
+    record = _record(
+        p=_entry(**{"Data/patch-X.MPQ": b"a", "Interface/AddOns/Nova/Nova.toc": b"b"}),
+        q={"version": "1", "sha256": "0" * 64, "files": {"../escape.dll": "0" * 64}},
+    )
+    client_packs.write_record(rig.play, record, game=GAME, server_dir=rig.server)
+
+    assert client_packs.pack_files(rig.play) == frozenset(
+        {Path("Data/patch-X.MPQ"), Path("Interface/AddOns/Nova/Nova.toc")}
+    )
+
+
+def _client_with(*packs: ClientPack) -> Any:
+    return types.SimpleNamespace(packs=packs)
+
+
+def test_wanted_is_every_required_pack_and_the_optional_ones_switched_on(rig: _Rig) -> None:
+    hd_on = _pack_of(
+        [{"member": "a.MPQ", "to": "Data/patch-A.MPQ"}], id="hd-on", optional=True, default=True
+    )
+    hd_off = _pack_of([{"member": "b.MPQ", "to": "Data/patch-B.MPQ"}], id="hd-off", optional=True)
+    client = _client_with(WORLD, hd_on, hd_off)
+
+    assert [p.id for p in client_packs.wanted(client, {})] == ["p", "hd-on"]
+    chosen = {"packs": {"hd-on": False, "hd-off": True}}
+    assert [p.id for p in client_packs.wanted(client, chosen)] == ["p", "hd-off"]
+    assert [p.id for p in client_packs.wanted(client, {"packs": {"p": False}})] == ["p", "hd-on"]
+
+
+# -- removing ----------------------------------------------------------------------------------
+
+
+def test_remove_deletes_only_the_files_that_still_match_and_reports_a_hand_edited_one(
+    rig: _Rig,
+) -> None:
+    entry = rig.install(ADDONS, rig.fetched(ADDON_FILES))
+    toc = rig.play / "Interface" / "AddOns" / "Nova" / "Nova.toc"
+    lua = rig.play / "Interface" / "AddOns" / "Nova" / "Nova.lua"
+    lua.write_bytes(b"print('the player edited this')\n")
+
+    left = rig.remove(entry, ADDONS)
+
+    assert not toc.exists()
+    assert lua.read_bytes() == b"print('the player edited this')\n"
+    assert left == ("Interface/AddOns/Nova/Nova.lua",)
+    assert (rig.play / "Interface" / "AddOns" / "Blizzard_Own").parent.is_dir()
+    rig.untouched()
+
+
+def test_remove_takes_away_the_folders_the_pack_made_but_never_a_toplevel_one(rig: _Rig) -> None:
+    entry = rig.install(ADDONS, rig.fetched(ADDON_FILES))
+
+    left = rig.remove(entry, ADDONS)
+
+    assert left == ()
+    assert not (rig.play / "Interface" / "AddOns" / "Nova").exists()
+    assert (rig.play / "Interface" / "AddOns").is_dir() and (rig.play / "Data").is_dir()
+    rig.untouched()
+
+
+def test_remove_also_deletes_the_remove_when_off_files_whoever_put_them_there(rig: _Rig) -> None:
+    pack = _pack_of(
+        [{"member": "t.MPQ", "to": "Data/patch-T.MPQ"}], remove_when_off=["Data/patch-Y.MPQ"]
+    )
+    entry = rig.install(pack, rig.fetched({"t.MPQ": b"t"}))
+    other = rig.play / "Data" / "patch-Y.MPQ"
+    other.write_bytes(b"put there by somebody else")
+
+    rig.remove(entry, pack)
+
+    assert not other.exists() and not (rig.play / "Data" / "patch-T.MPQ").exists()
+    rig.untouched()
+
+
+def test_remove_for_a_pack_gone_from_the_catalog_removes_what_it_recorded(rig: _Rig) -> None:
+    entry = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+
+    rig.remove(entry, None)
+
+    assert not (rig.play / "Data" / "patch-X.MPQ").exists()
+    rig.untouched()
+
+
+def test_remove_of_a_recorded_name_that_is_a_hard_link_to_the_original_leaves_the_original(
+    rig: _Rig,
+) -> None:
+    """A tampered record naming a shared file with the original's own hash: the NAME goes."""
+    entry = {"version": "1", "sha256": "0" * 64, "files": {"Data/common.MPQ": _sha(b"mpq" * 100)}}
+
+    rig.remove(entry, None)
+
+    rig.untouched()
+
+
+@pytest.mark.parametrize("rel", ["../outside.txt", "/abs.txt", "C:evil.txt", "a\\b.txt"])
+def test_remove_refuses_a_record_that_names_a_path_outside_the_client(rig: _Rig, rel: str) -> None:
+    outside = rig.root / "outside.txt"
+    outside.write_bytes(b"precious")
+    entry = {"version": "1", "sha256": "0" * 64, "files": {rel: _sha(b"precious")}}
+
+    with pytest.raises(PackError, match="outside"):
+        rig.remove(entry, None)
+
+    assert outside.read_bytes() == b"precious"
+
+
+def test_remove_does_not_go_through_a_linked_folder(rig: _Rig) -> None:
+    entry = rig.install(ADDONS, rig.fetched(ADDON_FILES))
+    addons = rig.play / "Interface" / "AddOns"
+    shutil.rmtree(addons)
+    addons.symlink_to(rig.original / "Interface" / "AddOns", target_is_directory=True)
+    (rig.original / "Interface" / "AddOns" / "Nova").mkdir()
+    (rig.original / "Interface" / "AddOns" / "Nova" / "Nova.toc").write_bytes(
+        ADDON_FILES["Nova/Nova.toc"]
+    )
+    before = _snapshot(rig.original)
+
+    with pytest.raises(PackError, match="link"):
+        rig.remove(entry, ADDONS)
+
+    assert _snapshot(rig.original) == before
+
+
+def test_remove_refuses_a_folder_without_the_marker(rig: _Rig) -> None:
+    entry = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    (rig.play / play_client.MARKER).unlink()
+
+    with pytest.raises(PackError, match="not a ready-to-play client"):
+        rig.remove(entry, WORLD)
+
+    assert (rig.play / "Data" / "patch-X.MPQ").read_bytes() == NEW_Y
+
+
+# -- step (a) leaves pack files alone ----------------------------------------------------------
+
+
+def _record_installed(rig: _Rig, pack: ClientPack, entry: dict[str, Any]) -> None:
+    client_packs.write_record(
+        rig.play, _record(**{pack.id: entry}), game=GAME, server_dir=rig.server
+    )
+
+
+def test_stale_and_refresh_leave_a_recorded_pack_file_alone(rig: _Rig) -> None:
+    """The pack's patch-X.MPQ differs from the original's: without the record it is stale."""
+    entry = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y + b"-longer"}))
+    rel = Path("Data/patch-X.MPQ")
+    assert play_client.stale(rig.play, rig.original) == (rel,), "the fixture must read as stale"
+    assert play_client.refresh(rig.play, rig.original, game=GAME, server_dir=rig.server) == (
+        rel,
+    ), "and be refreshed"
+    rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y + b"-longer"}, name="again.zip"))
+    _record_installed(rig, WORLD, entry)
+    # the player's patcher rewrote the original's archive: now the original differs
+    (rig.original / "Data" / "patch-X.MPQ").write_bytes(b"the original grew a new patch-X")
+    before = _snapshot(rig.original)
+
+    assert play_client.stale(rig.play, rig.original) == ()
+    assert play_client.refresh(rig.play, rig.original, game=GAME, server_dir=rig.server) == ()
+    assert (rig.play / rel).read_bytes() == NEW_Y + b"-longer"
+    assert _snapshot(rig.original) == before
+
+
+def test_left_out_archives_does_not_name_an_original_archive_a_pack_installed_by_that_name(
+    rig: _Rig,
+) -> None:
+    entry = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    (rig.play / "Data" / "patch-X.MPQ").unlink()  # say it is momentarily absent
+    assert play_client.left_out_archives(rig.play, rig.original) == (
+        Path("Data/patch-X.MPQ"),
+    ), "the fixture must name it without a record"
+    _record_installed(rig, WORLD, entry)
+
+    assert play_client.left_out_archives(rig.play, rig.original) == ()
+
+
+# -- the cache of old versions -----------------------------------------------------------------
+
+
+def _version_folder(entry: str, pack: str, version: str) -> Path:
+    folder = client_packs.cache_dir() / entry / pack / version
+    folder.mkdir(parents=True)
+    (folder / "pack.zip").write_bytes(b"zip " + version.encode())
+    (folder / "pack.zip.part").write_bytes(b"half")
+    return folder
+
+
+def test_prune_cache_removes_older_versions_and_keeps_the_current_one() -> None:
+    old = _version_folder("centurion", "hd", "1.00100")
+    older = _version_folder("centurion", "hd", "1.00090")
+    current = _version_folder("centurion", "hd", "1.00155")
+    sibling = _version_folder("centurion", "hd-misc", "1.00100")
+    other_server = _version_folder("other", "hd", "1.00100")
+
+    client_packs.prune_cache("centurion", "hd", "1.00155")
+
+    assert not old.exists() and not older.exists()
+    assert (current / "pack.zip").read_bytes() == b"zip 1.00155"
+    assert (current / "pack.zip.part").exists(), "the current version's own .part is its resume"
+    assert sibling.exists() and other_server.exists()
+
+
+def test_prune_cache_never_follows_a_link_out_of_the_cache(tmp_path: Path) -> None:
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "keep.txt").write_bytes(b"mine")
+    folder = client_packs.cache_dir() / "centurion" / "hd"
+    folder.mkdir(parents=True)
+    (folder / "1.0").symlink_to(precious, target_is_directory=True)
+
+    client_packs.prune_cache("centurion", "hd", "1.1")
+
+    assert (precious / "keep.txt").read_bytes() == b"mine"
+    assert not (folder / "1.0").exists() and not (folder / "1.0").is_symlink()
+
+
+@pytest.mark.parametrize("entry_id,pack_id", [("..", "hd"), ("centurion", "../x"), ("a/b", "hd")])
+def test_prune_cache_refuses_a_name_that_is_not_one_folder(
+    tmp_path: Path, entry_id: str, pack_id: str
+) -> None:
+    victim = client_packs.cache_dir().parent / "x"
+    victim.mkdir(parents=True)
+
+    client_packs.prune_cache(entry_id, pack_id, "1")
+
+    assert victim.is_dir()
+
+
+def test_an_install_from_a_new_url_version_prunes_the_old_versions_of_that_pack(
+    rig: _Rig,
+) -> None:
+    site_old = _version_folder("centurion", "p", "1.00100")
+    folder = _version_folder("centurion", "p", "1.00155")
+    zip_path = folder / "pack.zip"
+    zip_path.write_bytes(_zip({"patch-Y.MPQ": NEW_Y}))
+    fetched = client_packs.Fetched(zip_path, "1.00155", _sha(zip_path.read_bytes()))
+
+    rig.install(WORLD, fetched)
+
+    assert not site_old.exists()
+    assert zip_path.is_file()
+
+
+def test_an_install_does_not_prune_what_a_failed_install_may_still_need(rig: _Rig) -> None:
+    old = _version_folder("centurion", "p", "1.00100")
+    folder = _version_folder("centurion", "p", "1.00155")
+    zip_path = folder / "pack.zip"
+    zip_path.write_bytes(_zip({"wrong-name.MPQ": b"x"}))
+    fetched = client_packs.Fetched(zip_path, "1.00155", _sha(zip_path.read_bytes()))
+
+    with pytest.raises(PackError):
+        rig.install(WORLD, fetched)
+
+    assert old.exists(), "the older version is the only one that installs, until the new one does"

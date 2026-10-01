@@ -1755,6 +1755,8 @@ class Client(_Strict):
         The install record is kept per pack id, and switching a pack off removes
         the files it recorded: two packs sharing an id would share a record, and
         two writing one file would let switching one off delete the other's.
+        A pack's `remove_when_off` may not name a file another pack installs, for the
+        same reason: switching one pack off must never delete another pack's file.
         Compared casefolded, because the client folder is usually on Windows.
         """
         ids = [pack.id for pack in self.packs]
@@ -1772,6 +1774,15 @@ class Client(_Strict):
                         f"two packs install {rule.to!r}: {owner[target]!r} and {pack.id!r}"
                     )
                 owner[target] = pack.id
+        for pack in self.packs:
+            for item in pack.remove_when_off:
+                target = PurePosixPath(item).as_posix().casefold()
+                if owner.get(target, pack.id) != pack.id:
+                    raise ValueError(
+                        f"pack {pack.id!r} removes {item!r} when off, which pack "
+                        f"{owner[target]!r} installs: switching one off must never delete "
+                        "the other's file"
+                    )
         return self
 
     def hosts(self) -> frozenset[str]:

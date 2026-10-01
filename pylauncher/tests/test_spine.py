@@ -2712,6 +2712,22 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "because of it. A folder that cannot be listed answers no parts, and "
         "`fetch_checkout()` then refuses naming the file"
     ),
+    ("client_packs.py", "prune_cache"): (
+        "T181 b/c. Lists one pack's folder in Yu'lon's own download cache "
+        "(`client-packs/<entry>/<pack>/`) for the cached "
+        "versions other than the one just installed, and removes them, with any "
+        "orphaned `.part` there, once a newer version of that pack is installed. Only names that "
+        "are one plain folder name are looked at, a link is removed as a name and never followed, "
+        "and the kept version is never touched. It deletes only inside Yu'lon's cache, never in a "
+        "client or a server's checkout, and a failure is logged and ignored"
+    ),
+    ("client_packs.py", "_prune_after_install"): (
+        "T181 b/c. Lists `client-packs/extracted/` in Yu'lon's own cache for the extracted "
+        "`.MPQ` copies of the pack that was just installed from an older version of itself "
+        "(folders named `<pack>~<checksum>`), and removes those. Cache only: a client's file "
+        "hard-linked to one keeps its own name and bytes, since removing a name never changes "
+        "another name of the same file"
+    ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
         "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "

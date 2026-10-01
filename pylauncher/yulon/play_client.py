@@ -824,6 +824,16 @@ def _players_own(rel: Path) -> bool:
     return bool(rel.parts) and rel.parts[0].lower() in PLAYERS_OWN
 
 
+def _packs_installed(play_dir: Path) -> frozenset[Path]:
+    """Files a client pack installed here (T181 b/c): treated like a module's, kept as they are.
+
+    Imported here because `client_packs` imports this module.
+    """
+    from yulon import client_packs
+
+    return client_packs.pack_files(play_dir)
+
+
 def _kept(keep: Collection[Path]) -> Callable[[Path], bool]:
     """Whether a relative path is one of `keep`, compared the way the OS compares names."""
     names = {os.path.normcase(os.fspath(rel)) for rel in keep}
@@ -912,7 +922,7 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
     client under a name the original also has is that module's file, and
     listing it would have Refresh put the original's back over it.
     """
-    is_kept = _kept(keep)
+    is_kept = _kept({*keep, *_packs_installed(play_dir)})
     if not (original / "Data").is_dir():
         logger.warning(
             "ready-to-play client %s: its original %s has no Data folder, not compared",
@@ -1037,7 +1047,7 @@ def refresh(
             "from. Nothing was changed. Put your client back there, or delete the "
             "ready-to-play client and make it again from where your client is now."
         )
-    is_kept = _kept(keep)
+    is_kept = _kept({*keep, *_packs_installed(play_dir)})
     todo = [rel for rel in stale(play_dir, original) if not _players_own(rel) and not is_kept(rel)]
     exe = client_executable(original)
     done: list[Path] = []
@@ -1218,7 +1228,7 @@ def left_out_archives(
     """
     if not (original / "Data").is_dir():
         return ()
-    is_ignored = _kept(ignore)
+    is_ignored = _kept({*ignore, *_packs_installed(play_dir)})
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(original, followlinks=False):
         here = Path(dirpath)

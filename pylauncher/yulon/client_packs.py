@@ -37,20 +37,27 @@ No Qt here: progress and cancel are callables the view supplies.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
+import json
 import os
 import re
 import shutil
+import stat
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Any, Protocol
 
-from yulon import __version__, platform, server_build_presses
+from yulon import __version__, client_config, platform, play_client, server_build_presses
 from yulon.catalog.catalog import ClientPack
 from yulon.log import get_logger
 from yulon.selfupdate import fetch
@@ -702,3 +709,654 @@ def _fetch_url(
     os.replace(part, dest)
     logger.info(f"client-packs: {pack.id} {version or ''} downloaded to {dest}")
     return Fetched(dest, version, sha256)
+
+
+# --- Installing, recording and removing packs in a ready-to-play client ------------------------
+#
+# The next steps work on a folder step (a) made (`play_client`, its marker), never on the player's
+# own client: every function below is gated on that marker and on the folder being this game's
+# and this server's, and writes only through a temporary name that is renamed into place, so a
+# name that is a hard link to the player's own file is replaced (the link dropped) and never
+# written through.
+
+RECORD = ".yulon-client-packs.json"
+"""The file that records what Yu'lon installed: per pack, its version and each file's SHA-256."""
+
+_STAGING = ".yulon-pack-tmp"
+_PROTECTED = ".yulon-"
+"""A file name starting so is Yu'lon's own (the marker, this record): no zip may write one."""
+_RECORD_VERSION = 1
+_KEEP_DEPTH = 3
+"""A folder a removal leaves behind empty is removed only from this many levels down
+(`Interface/AddOns/<addon>`): `Data`, `Interface/AddOns` and the like are the client's own."""
+
+
+@dataclass(frozen=True)
+class PackRecord:
+    """The record file's content.
+
+    `packs` maps a pack id to `{"version", "sha256", "files": {relative path: sha256}}`;
+    `exe` is the Wow.exe patch record (a later step's); `choices` is the player's picks,
+    `{"packs": {id: bool}, "exe_options": {name: bool}}`.
+    """
+
+    packs: dict[str, dict[str, Any]]
+    exe: dict[str, Any] | None
+    choices: dict[str, Any]
+
+
+def _empty_record() -> PackRecord:
+    return PackRecord(packs={}, exe=None, choices={"packs": {}, "exe_options": {}})
+
+
+def _bool_map(raw: object) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, bool)}
+
+
+def _entry_or_none(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    files = raw.get("files")
+    if not isinstance(files, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in files.items()
+    ):
+        return None
+    return dict(raw)
+
+
+def read_record(play_dir: Path) -> PackRecord:
+    """The folder's record; an absent, unreadable or malformed one reads as empty.
+
+    Anything in it that is not the shape `write_record` writes is dropped rather
+    than trusted: what names a file to delete later must be well formed. The
+    NAMES are checked again where they are used (`_clean_rel`).
+    """
+    try:
+        raw = json.loads((play_dir / RECORD).read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return _empty_record()
+    if not isinstance(raw, dict):
+        return _empty_record()
+    packs: dict[str, dict[str, Any]] = {}
+    raw_packs = raw.get("packs")
+    if isinstance(raw_packs, dict):
+        for pack_id, raw_entry in raw_packs.items():
+            entry = _entry_or_none(raw_entry)
+            if isinstance(pack_id, str) and entry is not None:
+                packs[pack_id] = entry
+    exe = raw.get("exe")
+    raw_choices = raw.get("choices")
+    choices = raw_choices if isinstance(raw_choices, dict) else {}
+    return PackRecord(
+        packs=packs,
+        exe=dict(exe) if isinstance(exe, dict) else None,
+        choices={
+            "packs": _bool_map(choices.get("packs")),
+            "exe_options": _bool_map(choices.get("exe_options")),
+        },
+    )
+
+
+def _clean_rel(value: object) -> PurePosixPath | None:
+    """A relative path that stays inside the client folder, as a POSIX path; else None."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    if "\\" in value or ":" in value:
+        return None
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or not path.parts or path.as_posix() != value:
+        return None
+    return path
+
+
+def pack_files(play_dir: Path) -> frozenset[Path]:
+    """Every file the record says a pack installed, relative to `play_dir`.
+
+    Step (a) treats these like a module's files: never stale, never refreshed,
+    never named as left out. A name that could leave the folder is not listed.
+    """
+    found: set[Path] = set()
+    for entry in read_record(play_dir).packs.values():
+        for rel in entry["files"]:
+            clean = _clean_rel(rel)
+            if clean is not None:
+                found.add(Path(*clean.parts))
+    return frozenset(found)
+
+
+def wanted(client: Any, choices: Mapping[str, Any]) -> tuple[ClientPack, ...]:
+    """Every required pack, and each optional one switched on (its `default` where unchosen)."""
+    chosen = _bool_map(choices.get("packs"))
+    return tuple(
+        pack for pack in client.packs if not pack.optional or chosen.get(pack.id, pack.default)
+    )
+
+
+def _gate(play_dir: Path, *, game: str, server_dir: Path, what: str) -> None:
+    """Refuse a folder that is a link, has no step (a) marker, or is another game's or server's."""
+    if play_client._is_link(play_dir):
+        raise PackError(
+            f"{play_dir} is a link to another folder, so {what} was left as it was. Make the "
+            "ready-to-play client again from the server's Client settings."
+        )
+    marker = play_client.read_marker(play_dir)
+    if marker is None:
+        raise PackError(
+            f"{play_dir} is not a ready-to-play client made by Yu'lon (it has no "
+            f"{play_client.MARKER} marker), so {what} was left as it was. Make the "
+            "ready-to-play client again from the server's Client settings."
+        )
+    whose = play_client._whose(marker, game=game, server_dir=server_dir)
+    if whose is not None:
+        raise PackError(
+            f"{play_dir} is the ready-to-play client of {whose}, so {what} was left as it was. "
+            "Use that server's own Client settings instead."
+        )
+
+
+def _write_refusal(what: str, exc: OSError) -> PackError:
+    where = exc.filename or "the ready-to-play client"
+    return PackError(
+        f"{what}: Yu'lon could not write {where} ({exc.strerror or exc}). Your own WoW client "
+        "was not changed. Free some space and check that Yu'lon may write there, then press "
+        "Play again."
+    )
+
+
+def _replace_own(tmp: Path, dst: Path) -> None:
+    """Rename `tmp` onto `dst`; a read-only `dst` of this folder's own is made writable once.
+
+    Windows refuses to replace a read-only file. When `dst` has more than one name
+    the flag is the other name's too (the player's own client shares it), so it
+    is refused instead of cleared.
+    """
+    try:
+        os.replace(tmp, dst)
+        return
+    except PermissionError:
+        st = dst.lstat()
+        if st.st_mode & stat.S_IWRITE:
+            raise
+    if stat.S_ISLNK(st.st_mode) or st.st_nlink > 1:
+        raise PackError(
+            f"{dst} is read-only and shared with another folder (your own WoW client, or "
+            "another ready-to-play client), so Yu'lon did not replace it: that would change "
+            "the other folder too. Make the ready-to-play client again from the server's "
+            "Client settings."
+        )
+    os.chmod(dst, st.st_mode | stat.S_IWRITE)
+    os.replace(tmp, dst)
+
+
+def write_record(
+    play_dir: Path,
+    record: PackRecord,
+    *,
+    game: str,
+    server_dir: Path,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Write `record` into `play_dir` through a new temporary file renamed into place.
+
+    Only into a folder whose step (a) marker names `game` and `server_dir`
+    (`PackError` otherwise, nothing written). The temporary name is created new
+    (`xb`) after any leftover of that name is removed, so a leftover that is a
+    link is never written through.
+    """
+    _gate(play_dir, game=game, server_dir=server_dir, what="its record of installed packs")
+    payload = {
+        "version": _RECORD_VERSION,
+        "packs": record.packs,
+        "exe": record.exe,
+        "choices": record.choices,
+    }
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    target = play_dir / RECORD
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.yulon-tmp")
+    try:
+        tmp.unlink(missing_ok=True)
+        with open(tmp, "xb") as handle:
+            handle.write(data)
+        play_client._retrying(lambda: os.replace(tmp, target), sleep=sleep)
+    except OSError as exc:
+        _unlink_quietly(tmp)
+        raise _write_refusal("The record of installed packs", exc) from exc
+    except BaseException:
+        _unlink_quietly(tmp)
+        raise
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Remove a temporary file while another error is on its way out; log, never raise."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("client-packs: could not remove %s", path, exc_info=True)
+
+
+# --- Install ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Item:
+    info: zipfile.ZipInfo
+    rel: PurePosixPath
+
+
+def _unsafe_member(pack: ClientPack, name: str) -> PackError:
+    return PackError(
+        f"{pack.label}: {name!r} in the zip would leave the client folder, so Yu'lon "
+        "unpacked nothing from it. The server's makers have a damaged or unsafe pack; tell them."
+    )
+
+
+def _is_symlink_member(info: zipfile.ZipInfo) -> bool:
+    return (info.external_attr >> 16) & 0o170000 == 0o120000
+
+
+def _plan(pack: ClientPack, archive: zipfile.ZipFile) -> list[_Item]:
+    """Which member goes where, refused whole if any one is unsafe. Writes nothing."""
+    files = [info for info in archive.infolist() if not info.is_dir()]
+    by_name = {info.filename: info for info in files}
+    items: list[_Item] = []
+    for rule in pack.install:
+        if rule.member == "*":
+            assert rule.to_dir is not None  # catalog validation
+            for info in files:
+                items.append(_Item(info, _target(pack, rule.to_dir, info.filename)))
+            continue
+        assert rule.to is not None  # catalog validation
+        found = by_name.get(rule.member)
+        if found is None:
+            folded = [i for i in files if i.filename.casefold() == rule.member.casefold()]
+            found = folded[0] if len(folded) == 1 else None
+        if found is None:
+            raise PackError(
+                f"{pack.label} has no {rule.member} in it, so Yu'lon cannot install it. The "
+                "server's makers changed the pack; press "
+                f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+                "to fetch it again, and if it stays, tell them."
+            )
+        items.append(_Item(found, _target(pack, None, found.filename, to=rule.to)))
+    seen: dict[str, str] = {}
+    for item in items:
+        if _is_symlink_member(item.info):
+            raise PackError(
+                f"{pack.label}: {item.info.filename!r} is a link, not a file, so Yu'lon "
+                "unpacked nothing from the zip."
+            )
+        key = item.rel.as_posix().casefold()
+        if key in seen:
+            raise PackError(
+                f"{pack.label}: {item.info.filename!r} and {seen[key]!r} would both be "
+                f"installed as {item.rel.as_posix()}, so Yu'lon unpacked nothing from it."
+            )
+        seen[key] = item.info.filename
+    return items
+
+
+def _target(
+    pack: ClientPack, to_dir: str | None, member: str, *, to: str | None = None
+) -> PurePosixPath:
+    """Where one member lands, or a refusal for a member name that could go elsewhere."""
+    if _clean_rel(member) is None:
+        raise _unsafe_member(pack, member)
+    rel = PurePosixPath(to) if to is not None else PurePosixPath(to_dir or ".") / member
+    if _clean_rel(rel.as_posix()) is None:
+        raise _unsafe_member(pack, member)
+    if rel.name.startswith(_PROTECTED):
+        raise PackError(
+            f"{pack.label}: {member!r} would replace {rel.name}, one of Yu'lon's own files, so "
+            "Yu'lon unpacked nothing from the zip."
+        )
+    return rel
+
+
+def _check_path(play_dir: Path, rel: PurePosixPath) -> None:
+    """Refuse a target whose folder (or itself) is a link or is in the way as the wrong kind."""
+    here = play_dir
+    for part in rel.parts[:-1]:
+        here = here / part
+        if play_client._is_link(here):
+            raise PackError(
+                f"{here} is a link to another folder, so nothing was installed into it: "
+                "writing there could change your own WoW client. Make the ready-to-play "
+                "client again from the server's Client settings."
+            )
+        if os.path.lexists(here) and not here.is_dir():
+            raise PackError(f"{here} is a file where a folder is needed, so nothing was installed.")
+    target = play_dir / Path(*rel.parts)
+    if not play_client._is_link(target) and target.is_dir():
+        raise PackError(f"{target} is a folder where a file is needed, so nothing was installed.")
+
+
+def _make_dirs(folder: Path, stop: Path) -> list[Path]:
+    """Create `folder` (and parents below `stop`); the ones created, outermost first."""
+    missing: list[Path] = []
+    here = folder
+    while here != stop and not os.path.lexists(here):
+        missing.append(here)
+        here = here.parent
+    for path in reversed(missing):
+        path.mkdir()
+    return list(reversed(missing))
+
+
+class _Tee:
+    """A write target that also hashes what passes through."""
+
+    def __init__(self, out: Any) -> None:
+        self.out = out
+        self.sha256 = hashlib.sha256()
+
+    def write(self, data: bytes) -> int:
+        self.sha256.update(data)
+        return int(self.out.write(data))
+
+
+def _extracted_dir(pack: ClientPack, fetched: Fetched) -> Path:
+    return cache_dir() / "extracted" / f"{pack.id}~{fetched.sha256[:16]}"
+
+
+def _extracted_copy(
+    pack: ClientPack, fetched: Fetched, archive: zipfile.ZipFile, info: zipfile.ZipInfo
+) -> tuple[Path, str]:
+    """An `.MPQ` member extracted once into the cache, with its SHA-256.
+
+    A copy already there is used when its size and CRC-32 are the member's own.
+    Never rewritten in place: a client's file may be a hard link to it, so a new
+    copy is written beside it and renamed over it.
+    """
+    folder = _extracted_dir(pack, fetched)
+    leaf = re.sub(r"[^A-Za-z0-9._-]", "_", PurePosixPath(info.filename).name)
+    dest = folder / f"{info.CRC:08x}-{info.file_size}-{leaf}"
+    if dest.is_file() and not play_client._is_link(dest) and dest.stat().st_size == info.file_size:
+        sha256, crc = hashlib.sha256(), 0
+        with dest.open("rb") as handle:
+            while chunk := handle.read(CHUNK_BYTES):
+                sha256.update(chunk)
+                crc = zlib.crc32(chunk, crc)
+        if crc == info.CRC:
+            return dest, sha256.hexdigest()
+    folder.mkdir(parents=True, exist_ok=True)
+    _refuse_without_room(pack, folder, info.file_size)
+    part = dest.with_name(dest.name + ".part")
+    part.unlink(missing_ok=True)
+    try:
+        with archive.open(info) as source, open(part, "xb") as out:
+            tee = _Tee(out)
+            shutil.copyfileobj(source, tee, CHUNK_BYTES)
+        os.replace(part, dest)
+    except BaseException:
+        _unlink_quietly(part)
+        raise
+    return dest, tee.sha256.hexdigest()
+
+
+def _stage(
+    pack: ClientPack,
+    fetched: Fetched,
+    archive: zipfile.ZipFile,
+    item: _Item,
+    play_dir: Path,
+) -> tuple[Path, Path, str]:
+    """Make `item`'s file under a temporary name beside its target; `(tmp, target, sha256)`."""
+    target = play_dir / Path(*item.rel.parts)
+    tmp = target.with_name(target.name + _STAGING)
+    tmp.unlink(missing_ok=True)
+    if item.rel.suffix.lower() == ".mpq":
+        cached, sha256 = _extracted_copy(pack, fetched, archive, item.info)
+        try:
+            os.link(cached, tmp)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV and not play_client._cannot_link(exc):
+                raise
+            try:
+                with cached.open("rb") as source, open(tmp, "xb") as out:
+                    shutil.copyfileobj(source, out, CHUNK_BYTES)
+            except BaseException:
+                _unlink_quietly(tmp)
+                raise
+        return tmp, target, sha256
+    try:
+        with archive.open(item.info) as source, open(tmp, "xb") as out:
+            tee = _Tee(out)
+            shutil.copyfileobj(source, tee, CHUNK_BYTES)
+    except BaseException:
+        _unlink_quietly(tmp)
+        raise
+    return tmp, target, tee.sha256.hexdigest()
+
+
+def install(
+    play_dir: Path,
+    pack: ClientPack,
+    fetched: Fetched,
+    *,
+    game: str,
+    server_dir: Path,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Unpack `pack`'s mapped members into `play_dir`; the record entry for what was written.
+
+    Only into a folder whose marker names `game` and `server_dir`. Everything is
+    checked first (member names, symlink members, links in the way, free space)
+    and every file is made under a temporary name before any is renamed into
+    place, so a refusal or a damaged member leaves the client as it was. A name
+    that is a hard link to the player's own file is replaced, never written
+    through. `*.MPQ` members are extracted once into the cache and hard-linked
+    from there where the volume allows, else copied. Once the pack is installed,
+    older cached versions of it are removed (`prune_cache`).
+
+    The caller records the returned entry (`write_record`). Raises only `PackError`.
+    """
+    try:
+        return _install(play_dir, pack, fetched, game=game, server_dir=server_dir, sleep=sleep)
+    except OSError as exc:
+        raise _write_refusal(pack.label, exc) from exc
+    except (zipfile.BadZipFile, EOFError, zlib.error, NotImplementedError, RuntimeError) as exc:
+        if isinstance(exc, PackError):
+            raise
+        raise PackError(
+            f"{pack.label} arrived damaged or in a form Yu'lon cannot read ({exc}), so nothing "
+            "from it was installed. Try again."
+        ) from exc
+
+
+def _install(
+    play_dir: Path,
+    pack: ClientPack,
+    fetched: Fetched,
+    *,
+    game: str,
+    server_dir: Path,
+    sleep: Callable[[float], None],
+) -> dict[str, Any]:
+    _gate(play_dir, game=game, server_dir=server_dir, what=f"the pack {pack.label}")
+    with zipfile.ZipFile(fetched.path) as archive:
+        items = _plan(pack, archive)
+        for item in items:
+            _check_path(play_dir, item.rel)
+        plain = sum(i.info.file_size for i in items if i.rel.suffix.lower() != ".mpq")
+        if plain:
+            _refuse_without_room(pack, play_dir, plain)
+        staged: list[tuple[Path, Path, str]] = []
+        made: list[Path] = []
+        try:
+            for item in items:
+                made += _make_dirs((play_dir / Path(*item.rel.parts)).parent, play_dir)
+                staged.append(_stage(pack, fetched, archive, item, play_dir))
+        except BaseException:
+            for tmp, _, _ in staged:
+                _unlink_quietly(tmp)
+            for folder in reversed(made):
+                with contextlib.suppress(OSError):
+                    folder.rmdir()
+            raise
+    files: dict[str, str] = {}
+    try:
+        for tmp, target, sha256 in staged:
+            play_client._retrying(partial(_replace_own, tmp, target), sleep=sleep)
+            files[target.relative_to(play_dir).as_posix()] = sha256
+    except BaseException:
+        for tmp, _, _ in staged:
+            _unlink_quietly(tmp)
+        raise
+    logger.info("client-packs: installed %s into %s (%d files)", pack.id, play_dir, len(files))
+    _prune_after_install(pack, fetched)
+    return {"version": fetched.version, "sha256": fetched.sha256, "files": files}
+
+
+# --- The cache of old versions ---------------------------------------------------------------
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove a cache entry: a link's own name only, a folder with what is in it. Best effort."""
+    try:
+        if play_client._is_link(path) or path.is_file():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+    except OSError:
+        logger.warning("client-packs: could not remove old cache entry %s", path, exc_info=True)
+
+
+def prune_cache(entry_id: str, pack_id: str, keep_version: str) -> None:
+    """Remove every cached version of one pack but `keep_version`, and orphaned `.part` files.
+
+    Looks only inside `<cache>/<entry>/<pack>/`, only at names that are one plain
+    folder name, and never follows a link out of the cache. The kept version's own
+    `.part` (a download in progress) stays. Best effort: a failure is logged, since
+    a cache that could not be tidied is no reason to refuse Play.
+    """
+    if not all(_SAFE_NAME.match(name) for name in (entry_id, pack_id, keep_version)):
+        return
+    folder = cache_dir() / entry_id / pack_id
+    try:
+        children = list(folder.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if child.name == keep_version:
+            continue
+        if play_client._is_link(child) or child.is_dir() or child.name.endswith(".part"):
+            _remove_tree(child)
+
+
+def _prune_after_install(pack: ClientPack, fetched: Fetched) -> None:
+    """Tidy the cache after a pack installed: its older versions, and older extracted copies."""
+    version = fetched.path.parent
+    pack_folder, entry_folder = version.parent, version.parent.parent
+    if pack_folder.name == pack.id and entry_folder.parent == cache_dir():
+        prune_cache(entry_folder.name, pack.id, version.name)
+    keep = _extracted_dir(pack, fetched).name
+    extracted = cache_dir() / "extracted"
+    try:
+        for child in extracted.iterdir():
+            if child.name.startswith(f"{pack.id}~") and child.name != keep:
+                _remove_tree(child)
+    except OSError:
+        return
+
+
+# --- Remove ----------------------------------------------------------------------------------
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _removal_path(play_dir: Path, rel: object) -> tuple[str, Path]:
+    clean = _clean_rel(rel)
+    if clean is None or clean.name.startswith(_PROTECTED):
+        raise PackError(
+            f"The record of installed packs names {rel!r}, which is outside the ready-to-play "
+            "client or one of Yu'lon's own files, so nothing was removed. Make the "
+            "ready-to-play client again from the server's Client settings."
+        )
+    here = play_dir
+    for part in clean.parts[:-1]:
+        here = here / part
+        if play_client._is_link(here):
+            raise PackError(
+                f"{here} is a link to another folder, so nothing was removed through it. "
+                "Make the ready-to-play client again from the server's Client settings."
+            )
+    return clean.as_posix(), play_dir / Path(*clean.parts)
+
+
+def remove(
+    play_dir: Path,
+    rec_entry: Mapping[str, Any],
+    pack: ClientPack | None,
+    *,
+    game: str,
+    server_dir: Path,
+) -> tuple[str, ...]:
+    """Delete what a pack installed, when it is switched off or gone from the catalog.
+
+    A recorded file goes only if its SHA-256 still matches the record: one the
+    player edited is left, and its relative path is returned so the caller can say
+    so. The pack's `remove_when_off` files go whatever their content (that is what
+    they are for). Only a name is ever removed: a name that is a hard link to the
+    player's own file leaves the player's file as it is. Folders the pack's files
+    leave empty are removed from `_KEEP_DEPTH` levels down. Nothing is removed if
+    the record or the catalog names a path outside the folder, or one through a link.
+    """
+    _gate(play_dir, game=game, server_dir=server_dir, what=f"the removal of {pack_label(pack)}")
+    try:
+        return _remove(play_dir, rec_entry, pack)
+    except OSError as exc:
+        raise _write_refusal(pack_label(pack), exc) from exc
+
+
+def pack_label(pack: ClientPack | None) -> str:
+    return pack.label if pack is not None else "a pack no longer in the catalog"
+
+
+def _remove(
+    play_dir: Path, rec_entry: Mapping[str, Any], pack: ClientPack | None
+) -> tuple[str, ...]:
+    recorded = rec_entry.get("files")
+    recorded = recorded if isinstance(recorded, dict) else {}
+    todo = [(*_removal_path(play_dir, rel), sha) for rel, sha in recorded.items()]
+    extra = [_removal_path(play_dir, rel) for rel in (pack.remove_when_off if pack else ())]
+    left: list[str] = []
+    removed: list[Path] = []
+    for rel, path, sha in todo:
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha:
+            left.append(rel)
+            continue
+        client_config._remove_own(path)
+        removed.append(path)
+    for _, path in extra:
+        if path.is_dir() and not play_client._is_link(path):
+            continue
+        if os.path.lexists(path):
+            client_config._remove_own(path)
+            removed.append(path)
+    for path in removed:
+        _remove_empty_parents(play_dir, path)
+    if left:
+        logger.warning("client-packs: left %s, which was edited since it was installed", left)
+    return tuple(sorted(left))
+
+
+def _remove_empty_parents(play_dir: Path, path: Path) -> None:
+    parent = path.parent
+    while len(parent.relative_to(play_dir).parts) >= _KEEP_DEPTH:
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        parent = parent.parent

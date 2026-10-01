@@ -328,6 +328,10 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
         _set("packs.1.id", "patch-y"),
         "pack ids must be unique",
     ),
+    "a pack removing another pack's file": (
+        _set("packs.3.remove_when_off.0", "DATA/patch-x.mpq"),
+        "removes",
+    ),
     "two packs writing one file": (
         _set("packs.3.install.0.to", "data/PATCH-x.mpq"),
         "two packs install",
