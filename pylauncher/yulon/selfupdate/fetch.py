@@ -176,7 +176,10 @@ def expected_digest(checksums_text: str, name: str) -> str:
 
 
 def _https_only_opener(
-    watcher: _Deadline, context: ssl.SSLContext
+    watcher: _Deadline,
+    context: ssl.SSLContext,
+    *,
+    hosts: frozenset[str] | None = None,
 ) -> urllib.request.OpenerDirector:
     """An opener that watches its connections and follows redirects only over https.
 
@@ -185,6 +188,12 @@ def _https_only_opener(
     GitHub with a 302 to its object store, so redirects have to be followed —
     and a redirect is a URL this app did not choose, which is exactly the thing
     `artifact_url()` refuses to let the feed do.
+
+    `hosts`, when given, is the only set of hosts a redirect may go to: a
+    client pack (`client_packs`) may be fetched only from the hosts its catalog
+    entry names, and a redirect elsewhere is the same address the catalog
+    never chose. `None` keeps the self-updater's rule, https and nothing else,
+    because GitHub's object store is not a host this module can name in advance.
     """
 
     def capture(factory: Any) -> Any:
@@ -220,9 +229,22 @@ def _https_only_opener(
             # is fetched over plain http is an update anyone on the path can
             # replace — the checksum would still catch it, and being caught is
             # not the same as not being offered.
-            if urllib.parse.urlsplit(newurl).scheme != "https":
+            target = urllib.parse.urlsplit(newurl)
+            if target.scheme != "https":
                 raise UpdateError(f"The download was redirected off https, to {newurl[:200]!r}.")
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
+            if hosts is not None and (target.hostname or "") not in hosts:
+                raise UpdateError(
+                    f"The download was redirected to {target.hostname!r}, which this server's "
+                    "catalog entry does not name, so Yu'lon did not follow it."
+                )
+            followed = super().redirect_request(req, fp, code, msg, headers, newurl)
+            # CPython (3.12 measured) rebuilds the request WITHOUT its method, so
+            # a redirected HEAD became a GET of the whole body — for a client
+            # pack, 1.4 GB asked for to learn its size. `Range` survives on its
+            # own: only the content headers are dropped.
+            if followed is not None and req.get_method() == "HEAD":
+                followed.method = "HEAD"
+            return followed
 
     return urllib.request.build_opener(_Http(), _Https(context=context), _HttpsOnlyRedirect())
 
