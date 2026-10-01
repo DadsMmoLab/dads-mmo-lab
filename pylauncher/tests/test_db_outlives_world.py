@@ -207,6 +207,7 @@ def _until(check, what: str, seconds: float = 10.0) -> None:
 
 @needs_bash
 @pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.slow
 def test_sigterm_is_held_while_a_server_is_connected(game: str, tmp_path: Path) -> None:
     proc, where = _start(game, tmp_path)
     try:
@@ -239,6 +240,7 @@ def test_with_no_server_connected_the_database_stops_at_once(game: str, tmp_path
 
 @needs_bash
 @pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.slow
 def test_a_database_that_stays_unanswerable_is_stopped_after_five_tries(
     game: str, tmp_path: Path
 ) -> None:
@@ -265,6 +267,7 @@ def test_a_database_that_stays_unanswerable_is_stopped_after_five_tries(
 
 @needs_bash
 @pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.slow
 def test_a_count_that_fails_for_a_moment_keeps_the_hold(game: str, tmp_path: Path) -> None:
     """Codex review: one failed query used to end the hold under a still-connected world.
 
@@ -307,6 +310,7 @@ def test_the_count_leaves_out_this_containers_own_connections(tmp_path: Path) ->
 
 @needs_bash
 @pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.slow
 def test_a_signal_before_the_server_started_still_stops_it(game: str, tmp_path: Path) -> None:
     """The early-signal line: TERM before `db=$!` exists must reach the server once it does.
 

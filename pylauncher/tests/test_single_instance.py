@@ -340,6 +340,7 @@ def test_a_lock_left_by_a_killed_yulon_does_not_stop_the_next_launch(
     assert "T152 brought" in _said(relaunched_out), _said(relaunched_out)
 
 
+@pytest.mark.slow
 def test_a_first_copy_that_does_not_answer_is_named_in_a_box_not_waited_on(
     tmp_path: Path, launches: list[subprocess.Popen[bytes]]
 ) -> None:
@@ -366,6 +367,7 @@ def test_a_first_copy_that_does_not_answer_is_named_in_a_box_not_waited_on(
     assert took < HUNG_FIRST_SECONDS, f"the second waited out the whole hang ({took:.1f}s)"
 
 
+@pytest.mark.slow
 def test_a_second_launch_during_the_first_ones_slow_start_waits_for_it_and_raises_it(
     tmp_path: Path, launches: list[subprocess.Popen[bytes]]
 ) -> None:

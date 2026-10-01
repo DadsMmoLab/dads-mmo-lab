@@ -3802,6 +3802,7 @@ def _close_the_real_window_with(job: str, tmp_path: Path) -> tuple[Any, float, f
     return done, closed_at, ended, log_file.read_text(encoding="utf-8")
 
 
+@pytest.mark.slow
 def test_closing_while_a_job_is_stuck_exits_cleanly_and_names_the_job(tmp_path: Path) -> None:
     """T113: a job blocked forever must not turn a close into a crash report.
 
@@ -3833,6 +3834,7 @@ def test_closing_while_a_job_is_stuck_exits_cleanly_and_names_the_job(tmp_path: 
         ("stuck-update", "the launch update check"),
     ],
 )
+@pytest.mark.slow
 def test_a_stuck_log_panel_or_update_check_reaches_the_forced_exit_by_name(
     job: str, named: str, tmp_path: Path
 ) -> None:
