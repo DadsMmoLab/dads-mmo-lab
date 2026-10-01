@@ -28,4 +28,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "integration: drives a real Docker daemon; skipped automatically when none is reachable",
+    # T183: the inner loop deselects these (`-m 'not integration and not slow'`); CI
+    # and the full local run do not. tests/test_slow_marker_t183.py pins both halves.
+    "slow: takes more than ~2 s on the laptop; deselected by `-m 'not slow'` for a quick local run (e.g. a runner's --fast); always run in CI",
 ]

@@ -500,6 +500,7 @@ def a_server_that(
 
 
 @pytest.mark.parametrize("shape", ["body", "chunked", "headers"])
+@pytest.mark.slow
 def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(
     shape: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

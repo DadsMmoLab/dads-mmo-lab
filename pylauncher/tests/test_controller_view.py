@@ -809,6 +809,7 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
     assert "cancelled" in view.module_report.toPlainText().lower()
 
 
+@pytest.mark.slow
 def test_every_module_whose_install_renders_a_question_asks_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -3182,6 +3183,7 @@ def test_the_restore_warning_names_the_plan_and_does_not_overstate(
     assert "merges" in said
 
 
+@pytest.mark.slow
 def test_for_wotlk_wires_the_distro_into_every_seam_that_talks_to_docker(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -13843,6 +13845,7 @@ def test_the_modules_tab_fits_at_the_size_the_app_opens_at(
     )
 
 
+@pytest.mark.slow
 def test_a_report_that_wraps_does_not_take_the_list_with_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -14578,6 +14581,7 @@ def test_the_chips_a_narrow_row_cannot_fit_are_in_the_overflow_chips_tooltip(
     assert missing == [], f"hidden with nothing to find them by: {missing}"
 
 
+@pytest.mark.slow
 def test_the_overflow_chip_is_drawn_inside_the_strip_at_every_width(qapp: object) -> None:
     """Dragged across the whole range, the "…" never hangs off the right edge.
 
@@ -14672,6 +14676,7 @@ def test_a_locked_row_keeps_the_reason_on_screen_on_a_handheld(
     )
 
 
+@pytest.mark.slow
 def test_a_row_too_narrow_for_its_chips_drops_the_facts_before_the_locks(qapp: object) -> None:
     """The RULE behind the test above, asked of a row carrying all eight chips.
 
@@ -15675,6 +15680,7 @@ def test_a_flow_bar_puts_a_single_lines_leftover_at_the_gap(qapp: object) -> Non
     host.hide()
 
 
+@pytest.mark.slow
 def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -16256,6 +16262,7 @@ def test_a_populated_report_leaves_nothing_on_the_modules_tab_cut(
         ), f"folding the report for room at {size} lost what it said"
 
 
+@pytest.mark.slow
 def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -16441,6 +16448,7 @@ def _cut_on_the_modules_tab(view: ControllerView, tab: Any) -> list[str]:
     return cut
 
 
+@pytest.mark.slow
 def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild_owed(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -16545,6 +16553,7 @@ def _past_its_pin(
 
 
 @pytest.mark.parametrize("past_the_pins", [True, False], ids=["past-the-pins", "on-the-pins"])
+@pytest.mark.slow
 def test_the_module_list_keeps_two_rows_at_the_smallest_window(
     qapp: object, ps: _Ps, tmp_path: Path, past_the_pins: bool
 ) -> None:
@@ -16592,6 +16601,7 @@ def test_the_module_list_keeps_two_rows_at_the_smallest_window(
     assert wrapped, f"the action bar was one line at every width in {THE_WRAPPED_WIDTHS}"
 
 
+@pytest.mark.slow
 def test_past_its_pins_with_a_rebuild_owed_nothing_on_the_modules_tab_is_cut(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -16738,6 +16748,7 @@ and a twenty-pixel step once stepped over the one that mattered.
 @pytest.mark.parametrize(
     "state", ["past-the-pins-with-a-rebuild-owed", "past-the-pins-after-a-job", "on-the-pins"]
 )
+@pytest.mark.slow
 def test_a_taller_window_never_takes_back_what_a_shorter_one_showed(
     qapp: object, ps: _Ps, tmp_path: Path, width: int, state: str
 ) -> None:
@@ -16838,6 +16849,7 @@ def _press_a_on(nav: Any, start: Any, target: Any, routes: dict[Any, list[Any]])
     process_events()
 
 
+@pytest.mark.slow
 def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -16950,6 +16962,7 @@ def _in_page(page: Any) -> list[Any]:
 
 @pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
 @pytest.mark.parametrize("bumper", ["RB", "LB"])
+@pytest.mark.slow
 def test_after_a_bumper_the_first_down_or_right_goes_into_the_new_page(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int], bumper: str
 ) -> None:
@@ -17027,6 +17040,7 @@ def test_after_a_bumper_the_first_down_or_right_goes_into_the_new_page(
 
 
 @pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.slow
 def test_up_from_a_sub_tabs_top_row_still_reaches_a_tab_bar(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
@@ -17244,6 +17258,7 @@ def _pad_describe(widget: Any, window: Any) -> str:
 
 
 @pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.slow
 def test_no_press_of_the_pad_passes_over_a_whole_row_or_leaves_the_screen(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
@@ -17383,6 +17398,7 @@ def _centre_in(widget: Any, window: Any) -> tuple[float, float]:
 
 
 @pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.slow
 def test_every_box_the_pad_goes_into_can_be_left_by_pressing_on_the_same_way(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
@@ -17532,6 +17548,7 @@ def _wholly_past(edges: Any, loop: list[Any], direction: Any) -> bool:
 
 
 @pytest.mark.parametrize("size", PAD_WINDOW_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.slow
 def test_pressing_one_way_never_goes_round_while_a_stop_lies_past_the_round(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
 ) -> None:
@@ -17807,6 +17824,7 @@ def _shows_and_hides(widget: Any) -> list[str]:
     return seen
 
 
+@pytest.mark.slow
 def test_the_card_changes_form_at_most_once_per_step_of_a_drag(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -17946,6 +17964,7 @@ report to give and needing the report AND the list's floor.
 """
 
 
+@pytest.mark.slow
 def test_a_press_on_the_log_reopens_it_at_the_window_the_app_opens_at(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -18066,6 +18085,7 @@ def test_folding_the_log_by_hand_gives_the_report_its_height_back(
     assert view.module_report.toPlainText() != "", "the report came back empty"
 
 
+@pytest.mark.slow
 def test_a_restyle_at_an_unchanged_width_folds_nothing(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

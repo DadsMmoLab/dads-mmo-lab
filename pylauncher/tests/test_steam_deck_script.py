@@ -258,6 +258,7 @@ def test_a_server_dir_holding_docker_compose_yml_is_accepted(tmp_path: Path) -> 
 
 
 @needs_bash
+@pytest.mark.slow
 def test_the_default_pause_holds_the_closing_message_on_screen(tmp_path: Path) -> None:
     """Unset `YULON_GAMING_MODE_PAUSE`, and the script must still be dwelling after 3s.
 

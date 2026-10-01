@@ -1318,6 +1318,7 @@ def _free_spot(
     return None
 
 
+@pytest.mark.slow
 def test_no_up_or_down_press_passes_over_a_row_in_any_layout(placed: QWidget) -> None:
     """Up and Down never go wholly past a stop to one beyond it, however the stops stand (T175).
 

@@ -828,6 +828,7 @@ def test_output_the_reader_still_holds_after_the_join_is_announced_not_lost(
     assert runner._OUTPUT_MAY_BE_CUT_OFF in lines, lines
 
 
+@pytest.mark.slow
 def test_a_reader_that_finishes_between_the_drain_and_the_check_is_never_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

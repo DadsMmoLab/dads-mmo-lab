@@ -461,6 +461,7 @@ def test_a_new_update_stands_the_previous_helper_down_before_it_discards_anythin
     assert witness.read_text(encoding="utf-8") == "NEW"
 
 
+@pytest.mark.slow
 def test_a_helper_that_will_not_let_go_refuses_the_update_and_touches_nothing(
     tmp_path: Path,
 ) -> None:

@@ -1710,6 +1710,7 @@ class _Hangs:
         return subprocess.CompletedProcess(argv, 1, "", "")
 
 
+@pytest.mark.slow
 def test_docker_ready_bounds_its_own_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """A caller who asks for nothing still gets a bound — that is where it belongs.
 
