@@ -10,10 +10,12 @@ must supply (README §3a) — is data here, not Python (style-guide §3). Acrony
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1393,13 +1395,399 @@ class Console(_Strict):
     )
 
 
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+Md5 = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+# A Config.wtf line is `SET key "value"`: a key is one word, and a value may not
+# hold the quote or the line break that would end it and start a line of its own.
+WtfKey = Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*$")]
+WtfValue = Annotated[str, Field(pattern=r'^[^"\r\n]*$')]
+
+
+def _https_url(value: str, field: str) -> str:
+    """Refuse anything but an https URL with a host and no credentials in it.
+
+    Every URL in the client section is something Yu'lon downloads from, or
+    sends a person to, without asking. Plain http would let anyone on the path
+    swap a 1.4 GB MPQ or a Wow.exe; a user:password@ part would put a secret in
+    a catalog that is public and in every log line that names the URL.
+    """
+    parts = urlsplit(value)
+    if parts.scheme != "https" or not parts.hostname:
+        raise ValueError(f"{field} must be an https URL with a host, got {value!r}")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(f"{field} must not carry credentials, got {value!r}")
+    return value
+
+
+def _inside(value: str, field: str, *, names_a_file: bool) -> str:
+    """Refuse a path that could leave the folder it is relative to.
+
+    The rule the other relative paths in this file follow, plus `:`: these
+    paths land in a WoW client folder, which is a Windows folder for most
+    players, and `C:/Windows/x` is relative to PurePosixPath and absolute to
+    Windows.
+    """
+    path = PurePosixPath(value)
+    if "\\" in value or ":" in value or path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"{field} must be a relative POSIX path that stays inside its folder, got {value!r}"
+        )
+    if names_a_file and not path.parts:
+        raise ValueError(f"{field} must name a file, got {value!r}")
+    return value
+
+
+class PackSource(_Strict):
+    """Where one client pack's zip comes from: the server's own checkout, or a URL.
+
+    One shape for both so a pack is one list entry either way; `kind` says
+    which half is filled, and the validator holds the two halves apart so a
+    pack can never be ambiguous about which of two places it trusts.
+    """
+
+    kind: Literal["checkout", "url"]
+    path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The zip, relative to the server dir (`src/<core>/centurion/patches/patch-Y.zip`). "
+            "Where the plain file is absent, its `<path>.partNN` files are joined in name order."
+        ),
+    )
+    url: str | None = Field(default=None, description="The zip's https URL.")
+    version_url: str | None = Field(
+        default=None,
+        description=(
+            "An https URL whose body is the pack's current version string, so a changed pack "
+            "is noticed without downloading it again. URL packs only: a checkout pack's "
+            "version is the commit it was checked out at."
+        ),
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _path_stays_inside_the_server_dir(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "source.path", names_a_file=True)
+
+    @field_validator("url", "version_url")
+    @classmethod
+    def _urls_are_https(cls, value: str | None) -> str | None:
+        return value if value is None else _https_url(value, "source url")
+
+    @model_validator(mode="after")
+    def _kind_matches_the_half_that_is_filled(self) -> PackSource:
+        if self.kind == "checkout" and (
+            self.path is None or self.url is not None or self.version_url is not None
+        ):
+            raise ValueError("a checkout source names a path, and no url or version_url")
+        if self.kind == "url" and (self.url is None or self.path is not None):
+            raise ValueError("a url source names a url, and no path")
+        return self
+
+
+class InstallRule(_Strict):
+    """One zip member and where it goes in the ready-to-play client.
+
+    A named member goes to a named file, which is how `patch-Y.MPQ` becomes
+    `Data/patch-X.MPQ`; `"*"` unpacks the whole zip under a folder, which is how
+    21 addon folders reach `Interface/AddOns/`. Exactly one target, and the
+    target must suit the member: a named member with only a folder would leave
+    the engine guessing the file name, and `"*"` with a file name cannot fit.
+    """
+
+    member: str = Field(
+        min_length=1, description='A member name inside the zip, or "*" for all of them.'
+    )
+    to: str | None = Field(
+        default=None, description="The target file, relative to the client folder."
+    )
+    to_dir: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            'The target folder for "*", relative to the client folder; "." is the folder itself.'
+        ),
+    )
+
+    @field_validator("member")
+    @classmethod
+    def _member_is_star_or_a_relative_name(cls, value: str) -> str:
+        return value if value == "*" else _inside(value, "install.member", names_a_file=True)
+
+    @field_validator("to")
+    @classmethod
+    def _to_stays_inside_the_client(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "install.to", names_a_file=True)
+
+    @field_validator("to_dir")
+    @classmethod
+    def _to_dir_stays_inside_the_client(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "install.to_dir", names_a_file=False)
+
+    @model_validator(mode="after")
+    def _the_target_suits_the_member(self) -> InstallRule:
+        if self.member == "*":
+            if self.to_dir is None or self.to is not None:
+                raise ValueError(f'member "*" installs into to_dir, and names no to: {self!r}')
+        elif self.to is None or self.to_dir is not None:
+            raise ValueError(
+                f"a named member installs to a file: it takes to, and no to_dir: {self!r}"
+            )
+        return self
+
+
+class ClientPack(_Strict):
+    """One zip of files a server's ready-to-play client needs, or may have (T181 b).
+
+    A required pack (`optional` false) is installed on every ready-to-play
+    client of this server; an optional one only when the player switched it
+    on, and `default` is its state before they choose. A checkout pack must
+    carry a checksum, because the server's own repo publishes one
+    (`patches.md5`) and a joined set of parts is exactly where a missing piece
+    goes unnoticed; a URL pack may have none, since the server's site may
+    publish none, and then size, zip CRC and the recorded version stand in.
+    """
+
+    id: Slug
+    label: str = Field(min_length=1)
+    description: str = ""
+    source: PackSource
+    sha256: Sha256 | None = None
+    md5: Md5 | None = None
+    install: tuple[InstallRule, ...] = Field(min_length=1)
+    remove_when_off: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Files, relative to the client folder, deleted when the pack is off -- beyond the "
+            "ones it recorded installing. Centurion's launcher deletes `Data/patch-Y.MPQ` when "
+            "world-terrain is off, whoever put it there."
+        ),
+    )
+    optional: bool = False
+    default: bool = Field(default=False, description="An optional pack's state before a choice.")
+    size_hint: int | None = Field(
+        default=None, ge=0, description="Bytes, for the download size the dialog shows."
+    )
+
+    @field_validator("remove_when_off")
+    @classmethod
+    def _removals_stay_inside_the_client(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            _inside(item, "remove_when_off", names_a_file=True)
+        return value
+
+    @model_validator(mode="after")
+    def _checksum_and_choice_are_coherent(self) -> ClientPack:
+        if self.sha256 is not None and self.md5 is not None:
+            raise ValueError(f"pack {self.id!r}: at most one of sha256 and md5")
+        if self.source.kind == "checkout" and self.sha256 is None and self.md5 is None:
+            raise ValueError(f"pack {self.id!r}: a checkout pack needs a checksum")
+        if self.default and not self.optional:
+            raise ValueError(
+                f"pack {self.id!r}: default only means something on an optional pack; "
+                "a required pack is always installed"
+            )
+        return self
+
+
+class ExeWrite(_Strict):
+    """Bytes written into Wow.exe at one offset: given in hex, or one byte repeated.
+
+    `fill` + `count` exists because Centurion's patch set NOPs runs of 11 and
+    22 bytes, and 44 hex digits of `90` is a typo waiting to happen.
+    """
+
+    offset: int = Field(ge=0)
+    bytes: str | None = Field(
+        default=None,
+        pattern=r"^(?:[0-9a-fA-F]{2})+$",
+        description='The bytes, as hex pairs (`"eb"`, `"313233343200"`).',
+    )
+    fill: int | None = Field(default=None, ge=0, le=255, description="One byte value, repeated.")
+    count: int | None = Field(default=None, gt=0, description="How many times `fill` repeats.")
+
+    @model_validator(mode="after")
+    def _one_way_of_saying_the_bytes(self) -> ExeWrite:
+        if (self.bytes is None) == (self.fill is None):
+            raise ValueError(f"a write takes exactly one of bytes and fill, at {self.offset:#x}")
+        if (self.count is None) != (self.fill is None):
+            raise ValueError(f"count goes with fill, and only with fill, at {self.offset:#x}")
+        return self
+
+    @property
+    def length(self) -> int:
+        """How many bytes this write covers."""
+        if self.bytes is not None:
+            return len(self.bytes) // 2
+        assert self.count is not None  # the validator pairs count with fill
+        return self.count
+
+    def payload(self) -> builtins.bytes:
+        """The bytes this write puts at `offset`."""
+        if self.bytes is not None:
+            return builtins.bytes.fromhex(self.bytes)
+        assert self.fill is not None and self.count is not None
+        return builtins.bytes([self.fill]) * self.count
+
+
+class ExeOption(_Strict):
+    """A player's on/off choice over some Wow.exe bytes (Centurion: a borderless window).
+
+    `off` may be empty: the exe is always patched from stock bytes, so an
+    option whose off state IS stock has nothing to write.
+    """
+
+    label: str = Field(min_length=1)
+    default: bool
+    on: tuple[ExeWrite, ...] = Field(min_length=1)
+    off: tuple[ExeWrite, ...]
+
+
+class CleanSource(_Strict):
+    """A zip holding a stock Wow.exe, from which only that member is fetched by range requests."""
+
+    url: str
+    member: str = Field(min_length=1, description="The exe's member name inside the zip.")
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https(cls, value: str) -> str:
+        return _https_url(value, "clean_sources.url")
+
+    @field_validator("member")
+    @classmethod
+    def _member_is_a_relative_name(cls, value: str) -> str:
+        return _inside(value, "clean_sources.member", names_a_file=True)
+
+
+class ExePatch(_Strict):
+    """Byte patches to the ready-to-play client's Wow.exe, applied to stock bytes only (T181 c).
+
+    `expect_sha256`/`expect_size` name the stock exe the offsets were measured
+    on; a different exe is never patched, because the same offset in another
+    build is another instruction. Every write -- the fixed ones and both
+    states of every option -- must end inside `expect_size`, checked here
+    once rather than discovered as a short file at Play.
+    """
+
+    expect_sha256: Sha256
+    expect_size: int = Field(gt=0)
+    clean_sources: tuple[CleanSource, ...] = Field(
+        min_length=1, description="Where a stock exe is fetched from, tried in order."
+    )
+    fallback_page: str | None = Field(
+        default=None,
+        description="A page for a whole clean client, named in the refusal when no source answers.",
+    )
+    writes: tuple[ExeWrite, ...]
+    options: dict[Slug, ExeOption] = Field(default_factory=dict)
+    pe_large_address_aware: bool = Field(
+        default=False, description="Set IMAGE_FILE_LARGE_ADDRESS_AWARE in the PE header."
+    )
+    build: int = Field(gt=0, description="The build the patched exe reports, for messages.")
+
+    @field_validator("fallback_page")
+    @classmethod
+    def _fallback_page_is_https(cls, value: str | None) -> str | None:
+        return value if value is None else _https_url(value, "fallback_page")
+
+    @model_validator(mode="after")
+    def _every_write_ends_inside_the_stock_exe(self) -> ExePatch:
+        named: list[tuple[str, ExeWrite]] = [("writes", write) for write in self.writes]
+        for name, option in self.options.items():
+            named += [(f"options.{name}.on", write) for write in option.on]
+            named += [(f"options.{name}.off", write) for write in option.off]
+        for where, write in named:
+            if write.offset + write.length > self.expect_size:
+                raise ValueError(
+                    f"{where}: the write at {write.offset:#x} of {write.length} bytes runs past "
+                    f"the end of the stock exe ({self.expect_size} bytes)"
+                )
+        return self
+
+
+class ConfigWtf(_Strict):
+    """Settings merged into the ready-to-play client's `WTF/Config.wtf`.
+
+    `always` is set at every Play (where the server is); `seed` only where
+    the key is absent (a first-run preference the player may change after).
+    A key in both would be a seed that is never a seed, so it is refused.
+    """
+
+    always: dict[WtfKey, WtfValue] = Field(default_factory=dict)
+    seed: dict[WtfKey, WtfValue] = Field(default_factory=dict)
+    remove_locale_realmlists: bool = Field(
+        default=False,
+        description=(
+            "Delete `Data/*/realmlist.wtf` in the ready-to-play client, never the original's."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_key_is_either_always_or_seeded(self) -> ConfigWtf:
+        always = {key.casefold() for key in self.always}
+        both = sorted(key for key in self.seed if key.casefold() in always)
+        if both:
+            raise ValueError(f"Config.wtf keys {both} are in both always and seed")
+        return self
+
+
 class Client(_Strict):
-    """The client the USER supplies (README §3a) and how to point it at the server."""
+    """The client the USER supplies (README §3a) and how to point it at the server.
+
+    `packs`, `exe_patch` and `config_wtf` describe what this server's
+    ready-to-play client needs beyond the user's own files (T181 b/c). All
+    three are optional, and an entry without them behaves exactly as before.
+    """
 
     version: str = Field(min_length=1)
     build: int = Field(gt=0)
     realmlist_file: str = "realmlist.wtf"
     notes: tuple[str, ...] = ()
+    packs: tuple[ClientPack, ...] = ()
+    exe_patch: ExePatch | None = None
+    config_wtf: ConfigWtf | None = None
+
+    @model_validator(mode="after")
+    def _packs_are_distinct(self) -> Client:
+        """Ids are unique, and no two packs install the same file.
+
+        The install record is kept per pack id, and switching a pack off removes
+        the files it recorded: two packs sharing an id would share a record, and
+        two writing one file would let switching one off delete the other's.
+        Compared casefolded, because the client folder is usually on Windows.
+        """
+        ids = [pack.id for pack in self.packs]
+        doubled = sorted({pack_id for pack_id in ids if ids.count(pack_id) > 1})
+        if doubled:
+            raise ValueError(f"pack ids must be unique, got {doubled} more than once")
+        owner: dict[str, str] = {}
+        for pack in self.packs:
+            for rule in pack.install:
+                if rule.to is None:
+                    continue
+                target = PurePosixPath(rule.to).as_posix().casefold()
+                if owner.get(target, pack.id) != pack.id:
+                    raise ValueError(
+                        f"two packs install {rule.to!r}: {owner[target]!r} and {pack.id!r}"
+                    )
+                owner[target] = pack.id
+        return self
+
+    def hosts(self) -> frozenset[str]:
+        """Every host a download for this client may reach: packs and clean exe sources.
+
+        The allow-list later steps check every fetch against, so a redirect to
+        anywhere else is refused. Not `fallback_page`: that is a page a person
+        is sent to, never fetched.
+        """
+        urls: list[str | None] = []
+        for pack in self.packs:
+            urls += [pack.source.url, pack.source.version_url]
+        if self.exe_patch is not None:
+            urls += [source.url for source in self.exe_patch.clean_sources]
+        hosts = (urlsplit(url).hostname for url in urls if url is not None)
+        return frozenset(host for host in hosts if host)
 
 
 class BotRegistry(_Strict):
@@ -1771,4 +2159,20 @@ def parse_catalog(data: object) -> Catalog:
 def load_catalog(path: Path = CATALOG_FILE) -> Catalog:
     """Read + validate `catalog.json` (the bundled one by default)."""
     with path.open(encoding="utf-8") as fh:
-        return parse_catalog(json.load(fh))
+        return parse_catalog(json.load(fh, object_pairs_hook=_refuse_duplicate_keys))
+
+
+def _refuse_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Refuse an object that names one key twice, which `json` would resolve silently.
+
+    JSON keeps the LAST of two equal keys, so two exe options of one name, or
+    two `client` blocks in one entry, would load as one and the loser would
+    vanish without a word. Refused here because no model can see it: by the
+    time pydantic gets a dict, the duplicate is already gone.
+    """
+    seen: dict[str, object] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r} in one object of the catalog file")
+        seen[key] = value
+    return seen
