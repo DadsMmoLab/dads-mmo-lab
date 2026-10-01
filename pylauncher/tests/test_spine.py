@@ -2724,7 +2724,8 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("client_packs.py", "_prune_after_install"): (
         "T181 b/c. Lists `client-packs/extracted/` in Yu'lon's own cache for the extracted "
         "`.MPQ` copies of the pack that was just installed from an older version of itself "
-        "(folders named `<pack>~<checksum>`), and removes those. Cache only: a client's file "
+        "(folders named `<server>~<pack>~<checksum>`), and removes those. Cache only: "
+        "a client's file "
         "hard-linked to one keeps its own name and bytes, since removing a name never changes "
         "another name of the same file"
     ),

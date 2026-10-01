@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from yulon import client_packs, platform, play_client, server_build_presses
+from yulon import client_config, client_packs, platform, play_client, server_build_presses
 from yulon.catalog.catalog import ClientPack
 from yulon.client_packs import (
     Cancelled,
@@ -1124,9 +1124,10 @@ def test_an_install_refuses_another_servers_client(rig: _Rig) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
-def test_a_read_only_file_of_its_own_is_replaced_but_a_shared_one_is_not_unprotected(
+def test_read_only_targets_are_replaced_without_clearing_any_flag(
     rig: _Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Windows refuses to replace a read-only file; the swap renames it aside instead."""
     real = os.replace
     refused: list[str] = []
 
@@ -1142,15 +1143,15 @@ def test_a_read_only_file_of_its_own_is_replaced_but_a_shared_one_is_not_unprote
     own.write_bytes(b"old")
     os.chmod(own, 0o444)
     rig.install(pack, rig.fetched({"t.dll": b"new"}))
-    assert refused == [str(own)] and own.read_bytes() == b"new"
+    assert own.read_bytes() == b"new"
 
-    shared = rig.play / "Data" / "patch-X.MPQ"
-    os.chmod(rig.original / "Data" / "patch-X.MPQ", 0o444)  # one inode: the player's too
-    with pytest.raises(PackError, match="read-only"):
-        rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
-    assert shared.read_bytes() == STOCK_X
-    assert (rig.original / "Data" / "patch-X.MPQ").stat().st_mode & 0o777 == 0o444
-    os.chmod(rig.original / "Data" / "patch-X.MPQ", 0o644)
+    shared_original = rig.original / "Data" / "patch-X.MPQ"
+    os.chmod(shared_original, 0o444)  # one inode: the player's file too
+    rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    assert (rig.play / "Data" / "patch-X.MPQ").read_bytes() == NEW_Y
+    assert shared_original.stat().st_mode & 0o777 == 0o444, "the player's flag was not cleared"
+    assert refused == [], "no replace was ever aimed at a read-only file"
+    os.chmod(shared_original, 0o644)
     rig.untouched()
 
 
@@ -1509,3 +1510,323 @@ def test_an_install_does_not_prune_what_a_failed_install_may_still_need(rig: _Ri
         rig.install(WORLD, fetched)
 
     assert old.exists(), "the older version is the only one that installs, until the new one does"
+
+
+# -- fix round 1 (review of Task 3) ----------------------------------------------------------
+
+V1 = {"Nova/Nova.toc": b"## v1\n", "Nova/Nova.lua": b"v1 lua\n", "Old/Old.toc": b"## old\n"}
+ADDONS_DIR = Path("Interface") / "AddOns"
+
+
+def _addon(rig: _Rig, rel: str) -> Path:
+    return rig.play / ADDONS_DIR / rel
+
+
+def test_a_reinstall_removes_the_files_the_new_version_no_longer_has(rig: _Rig) -> None:
+    first = rig.install(ADDONS, rig.fetched(V1))
+    v2 = {"Nova/Nova.toc": b"## v2\n", "Old/Old.toc": b"## old\n"}
+
+    second = rig.install(ADDONS, rig.fetched(v2, name="v2.zip"), previous=first)
+
+    assert not _addon(rig, "Nova/Nova.lua").exists(), "never old and new mixed"
+    assert _addon(rig, "Nova/Nova.toc").read_bytes() == b"## v2\n"
+    assert set(second["files"]) == {
+        "Interface/AddOns/Nova/Nova.toc",
+        "Interface/AddOns/Old/Old.toc",
+    }
+    assert "left_behind" not in second
+    rig.untouched()
+
+
+def test_a_reinstall_that_drops_a_whole_addon_removes_its_folder_but_not_addons(
+    rig: _Rig,
+) -> None:
+    first = rig.install(ADDONS, rig.fetched(V1))
+
+    rig.install(ADDONS, rig.fetched({"Nova/Nova.toc": b"## v2\n"}, name="v2.zip"), previous=first)
+
+    assert not _addon(rig, "Old").exists()
+    assert (rig.play / ADDONS_DIR).is_dir() and _addon(rig, "Nova/Nova.toc").exists()
+    rig.untouched()
+
+
+def test_a_reinstall_under_a_new_target_removes_the_old_target(rig: _Rig) -> None:
+    first = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    moved = _pack_of([{"member": "patch-Y.MPQ", "to": "Data/patch-Q.MPQ"}])
+
+    second = rig.install(moved, rig.fetched({"patch-Y.MPQ": NEW_Y}, name="q.zip"), previous=first)
+
+    assert not (rig.play / "Data" / "patch-X.MPQ").exists()
+    assert (rig.play / "Data" / "patch-Q.MPQ").read_bytes() == NEW_Y
+    assert set(second["files"]) == {"Data/patch-Q.MPQ"}
+    rig.untouched()
+
+
+def test_a_case_only_rename_never_deletes_the_file_it_just_installed(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows `nova.lua` and `Nova.lua` are one file: dropping the old name drops the new."""
+    first = rig.install(ADDONS, rig.fetched({"Nova/nova.lua": b"v1\n"}))
+    removed: list[Path] = []
+    real = client_config._remove_own
+    monkeypatch.setattr(client_config, "_remove_own", lambda p: (removed.append(p), real(p)))
+
+    second = rig.install(
+        ADDONS, rig.fetched({"Nova/Nova.lua": b"v2\n"}, name="v2.zip"), previous=first
+    )
+
+    assert removed == [], "nothing was removed: the old name folds onto a new one"
+    assert _addon(rig, "Nova/Nova.lua").read_bytes() == b"v2\n"
+    assert set(second["files"]) == {"Interface/AddOns/Nova/Nova.lua"}
+
+
+def test_a_dropped_file_the_player_edited_is_left_and_named_in_the_entry(rig: _Rig) -> None:
+    first = rig.install(ADDONS, rig.fetched(V1))
+    _addon(rig, "Nova/Nova.lua").write_bytes(b"the player's own edit\n")
+
+    second = rig.install(
+        ADDONS, rig.fetched({"Nova/Nova.toc": b"## v2\n"}, name="v2.zip"), previous=first
+    )
+
+    assert _addon(rig, "Nova/Nova.lua").read_bytes() == b"the player's own edit\n"
+    assert second["left_behind"] == ["Interface/AddOns/Nova/Nova.lua"]
+    assert "Interface/AddOns/Nova/Nova.lua" not in second["files"]
+
+
+def test_a_reinstall_does_not_apply_remove_when_off(rig: _Rig) -> None:
+    pack = _pack_of(
+        [{"member": "t.MPQ", "to": "Data/patch-T.MPQ"}], remove_when_off=["Data/patch-Y.MPQ"]
+    )
+    first = rig.install(pack, rig.fetched({"t.MPQ": b"t1"}))
+    other = rig.play / "Data" / "patch-Y.MPQ"
+    other.write_bytes(b"somebody else's")
+
+    rig.install(pack, rig.fetched({"t.MPQ": b"t2"}, name="t2.zip"), previous=first)
+
+    assert other.read_bytes() == b"somebody else's"
+
+
+def test_without_previous_nothing_old_is_removed(rig: _Rig) -> None:
+    rig.install(ADDONS, rig.fetched(V1))
+
+    rig.install(ADDONS, rig.fetched({"Nova/Nova.toc": b"## v2\n"}, name="v2.zip"))
+
+    assert _addon(rig, "Nova/Nova.lua").exists()
+
+
+def test_a_previous_naming_a_path_outside_the_client_refuses_before_writing_anything(
+    rig: _Rig,
+) -> None:
+    bad = {"version": "1", "sha256": "0" * 64, "files": {"../outside.dll": "0" * 64}}
+    before = _snapshot(rig.play)
+
+    with pytest.raises(PackError, match="outside"):
+        rig.install(ADDONS, rig.fetched(V1), previous=bad)
+
+    assert _snapshot(rig.play) == before
+    rig.untouched()
+
+
+# -- a swap that is all or nothing ----------------------------------------------------------
+
+
+V2 = {"Nova/Nova.toc": b"## v2\n", "Nova/Nova.lua": b"v2 lua\n", "Old/Old.toc": b"## v2 old\n"}
+V1_FILES = {
+    "Interface/AddOns/Nova/Nova.toc": b"## v1\n",
+    "Interface/AddOns/Nova/Nova.lua": b"v1 lua\n",
+    "Interface/AddOns/Old/Old.toc": b"## old\n",
+}
+
+
+def _failing_replace(
+    monkeypatch: pytest.MonkeyPatch, fails: Any, exc: OSError
+) -> list[tuple[str, str]]:
+    """`os.replace` that raises `exc` for the calls `fails(src_name, dst_name)` picks."""
+    real = os.replace
+    calls: list[tuple[str, str]] = []
+
+    def replace(src: Any, dst: Any) -> None:
+        calls.append((Path(src).name, Path(dst).name))
+        if fails(Path(src), Path(dst)):
+            raise exc
+        real(src, dst)
+
+    monkeypatch.setattr(client_packs.os, "replace", replace)
+    return calls
+
+
+def _bytes_of_play(rig: _Rig, files: dict[str, bytes]) -> None:
+    for rel, data in files.items():
+        assert (rig.play / rel).read_bytes() == data, rel
+    assert not list(rig.play.rglob("*.yulon-pack-tmp")), "a temporary file was left"
+    assert not list(rig.play.rglob("*.yulon-pack-old")), "an aside file was left"
+
+
+def test_a_failure_on_the_third_rename_puts_every_target_back(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.install(ADDONS, rig.fetched(V1))
+    _failing_replace(
+        monkeypatch,
+        lambda src, dst: src.name.endswith(".yulon-pack-tmp") and dst.name == "Old.toc",
+        OSError(errno.EIO, "Input/output error", "Old.toc"),
+    )
+
+    with pytest.raises(PackError, match="Input/output error"):
+        rig.install(ADDONS, rig.fetched(V2, name="v2.zip"), sleep=lambda _s: None)
+    monkeypatch.undo()
+
+    _bytes_of_play(rig, V1_FILES)
+    rig.untouched()
+
+
+def test_a_refused_rename_says_to_close_wow_not_to_free_space(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.install(ADDONS, rig.fetched(V1))
+    _failing_replace(
+        monkeypatch,
+        lambda src, dst: src.name.endswith(".yulon-pack-tmp") and dst.name == "Old.toc",
+        PermissionError(errno.EACCES, "Access is denied", "Old.toc"),
+    )
+
+    with pytest.raises(PackError) as info:
+        rig.install(ADDONS, rig.fetched(V2, name="v2.zip"), sleep=lambda _s: None)
+    monkeypatch.undo()
+
+    text = str(info.value)
+    assert "Close World of Warcraft (and any program using the client's files)" in text
+    assert "free some space" not in text.casefold()
+    _bytes_of_play(rig, V1_FILES)
+
+
+def test_a_failed_swap_of_a_new_file_removes_what_the_earlier_renames_installed(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing was there before: the rollback deletes the files already renamed in."""
+    _failing_replace(
+        monkeypatch,
+        lambda src, dst: src.name.endswith(".yulon-pack-tmp") and dst.name == "Old.toc",
+        OSError(errno.EIO, "Input/output error", "Old.toc"),
+    )
+
+    with pytest.raises(PackError):
+        rig.install(ADDONS, rig.fetched(V1), sleep=lambda _s: None)
+    monkeypatch.undo()
+
+    assert not _addon(rig, "Nova/Nova.toc").exists()
+    assert not list(rig.play.rglob("*.yulon-pack-*"))
+    rig.untouched()
+
+
+def test_a_rollback_that_fails_too_raises_partial_install_with_what_is_there_now(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.install(ADDONS, rig.fetched(V1))
+    new_lua = V2["Nova/Nova.lua"]
+    _failing_replace(
+        monkeypatch,
+        lambda src, dst: (src.name.endswith(".yulon-pack-tmp") and dst.name == "Old.toc")
+        or (src.name.endswith(".yulon-pack-old") and dst.name == "Nova.lua"),
+        OSError(errno.EIO, "Input/output error", "x"),
+    )
+
+    with pytest.raises(client_packs.PartialInstall) as info:
+        rig.install(ADDONS, rig.fetched(V2, name="v2.zip"), sleep=lambda _s: None)
+    monkeypatch.undo()
+
+    entry = info.value.entry
+    assert isinstance(info.value, PackError)
+    assert entry["version"] is None
+    assert entry["files"] == {"Interface/AddOns/Nova/Nova.lua": _sha(new_lua)}
+    assert _addon(rig, "Nova/Nova.lua").read_bytes() == new_lua
+    assert _addon(rig, "Nova/Nova.toc").read_bytes() == b"## v1\n", "rolled back"
+    assert _addon(rig, "Old/Old.toc").read_bytes() == b"## old\n", "rolled back"
+    rig.untouched()
+
+
+def test_the_aside_files_are_deleted_only_after_every_rename_succeeded(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.install(ADDONS, rig.fetched(V1))
+    seen: list[bool] = []
+    real = os.replace
+
+    def replace(src: Any, dst: Any) -> None:
+        if Path(dst).name == "Old.toc" and Path(src).name.endswith(".yulon-pack-tmp"):
+            seen.append(bool(list(rig.play.rglob("*.yulon-pack-old"))))
+        real(src, dst)
+
+    monkeypatch.setattr(client_packs.os, "replace", replace)
+    rig.install(ADDONS, rig.fetched(V2, name="v2.zip"))
+
+    assert seen == [True], "the earlier targets' old files were still aside at the last rename"
+    _bytes_of_play(rig, {k: V2[k.removeprefix("Interface/AddOns/")] for k in V1_FILES})
+
+
+# -- smaller fixes ---------------------------------------------------------------------------
+
+
+def test_a_zip_with_a_name_that_is_not_utf8_is_refused_as_damaged(rig: _Rig) -> None:
+    fetched = rig.fetched({"Nova/xÿ.toc": b"x"})
+    raw = fetched.path.read_bytes()
+    assert raw.count(b"\xc3\xbf") == 2, "the fixture must carry the name in both headers"
+    fetched.path.write_bytes(raw.replace(b"\xc3\xbf", b"\xff\xff"))
+
+    with pytest.raises(PackError, match="damaged"):
+        rig.install(ADDONS, fetched)
+
+    rig.untouched()
+
+
+@pytest.mark.parametrize("suffix", [".yulon-pack-tmp", ".yulon-pack-old", ".YULON-PACK-TMP"])
+def test_a_member_named_like_one_of_the_swap_files_is_refused(rig: _Rig, suffix: str) -> None:
+    files = {"Nova/Nova.lua": b"real", f"Nova/Nova.lua{suffix}": b"hostile"}
+
+    with pytest.raises(PackError, match="temporary file"):
+        rig.install(ADDONS, rig.fetched(files))
+
+    assert not _addon(rig, "Nova").exists()
+    rig.untouched()
+
+
+@pytest.mark.parametrize("name", ["Nova/Nova.toc.", "Nova/Nova.toc ", "Nova./x.toc", "Nova /x.toc"])
+def test_a_name_ending_in_a_dot_or_a_space_is_refused(rig: _Rig, name: str) -> None:
+    """Windows reads `Wow.exe.` as `Wow.exe`."""
+    with pytest.raises(PackError, match="would leave the client"):
+        rig.install(ADDONS, rig.fetched({name: b"x"}))
+
+    rig.untouched()
+
+
+def test_remove_refuses_a_recorded_name_with_a_trailing_dot(rig: _Rig) -> None:
+    entry = {"version": "1", "sha256": "0" * 64, "files": {"Wow.exe.": _sha(b"MZexe")}}
+
+    with pytest.raises(PackError, match="outside"):
+        rig.remove(entry, None)
+
+    assert (rig.play / "Wow.exe").read_bytes() == b"MZexe"
+
+
+def test_two_servers_with_the_same_pack_id_each_keep_their_extracted_copy(
+    tmp_path: Path,
+) -> None:
+    one, two = _Rig(tmp_path / "one"), _Rig(tmp_path / "two")
+    first = one.fetched({"patch-Y.MPQ": NEW_Y})
+    second = two.fetched({"patch-Y.MPQ": NEW_Y + b" a different build"})
+    one.install(WORLD, first)
+    two.install(WORLD, second)
+    extracted = client_packs.cache_dir() / "extracted"
+    assert len(list(extracted.iterdir())) == 2, "one folder per server"
+
+    one.install(WORLD, one.fetched({"patch-Y.MPQ": NEW_Y + b" newer"}, name="n.zip"))
+
+    folders = sorted(p.name for p in extracted.iterdir())
+    assert len(folders) == 2, "server one replaced its own copy only"
+    assert any(
+        (p / f).read_bytes() == NEW_Y + b" a different build"
+        for p in extracted.iterdir()
+        for f in os.listdir(p)
+    ), "server two's copy survived"
+    one.untouched()
+    two.untouched()

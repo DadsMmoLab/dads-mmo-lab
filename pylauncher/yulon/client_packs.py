@@ -723,6 +723,8 @@ RECORD = ".yulon-client-packs.json"
 """The file that records what Yu'lon installed: per pack, its version and each file's SHA-256."""
 
 _STAGING = ".yulon-pack-tmp"
+_ASIDE = ".yulon-pack-old"
+"""A target's previous file, kept beside it until every file of a pack is in place."""
 _PROTECTED = ".yulon-"
 """A file name starting so is Yu'lon's own (the marker, this record): no zip may write one."""
 _RECORD_VERSION = 1
@@ -808,6 +810,8 @@ def _clean_rel(value: object) -> PurePosixPath | None:
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts or not path.parts or path.as_posix() != value:
         return None
+    if any(part.endswith((".", " ")) for part in path.parts):
+        return None  # Windows reads `Wow.exe.` as `Wow.exe`
     return path
 
 
@@ -858,36 +862,17 @@ def _gate(play_dir: Path, *, game: str, server_dir: Path, what: str) -> None:
 
 def _write_refusal(what: str, exc: OSError) -> PackError:
     where = exc.filename or "the ready-to-play client"
+    if isinstance(exc, PermissionError):
+        return PackError(
+            f"{what}: {where} was refused ({exc.strerror or exc}), which usually means a "
+            "program has the file open. Your own WoW client was not changed. Close World of "
+            "Warcraft (and any program using the client's files), then press Play again."
+        )
     return PackError(
         f"{what}: Yu'lon could not write {where} ({exc.strerror or exc}). Your own WoW client "
         "was not changed. Free some space and check that Yu'lon may write there, then press "
         "Play again."
     )
-
-
-def _replace_own(tmp: Path, dst: Path) -> None:
-    """Rename `tmp` onto `dst`; a read-only `dst` of this folder's own is made writable once.
-
-    Windows refuses to replace a read-only file. When `dst` has more than one name
-    the flag is the other name's too (the player's own client shares it), so it
-    is refused instead of cleared.
-    """
-    try:
-        os.replace(tmp, dst)
-        return
-    except PermissionError:
-        st = dst.lstat()
-        if st.st_mode & stat.S_IWRITE:
-            raise
-    if stat.S_ISLNK(st.st_mode) or st.st_nlink > 1:
-        raise PackError(
-            f"{dst} is read-only and shared with another folder (your own WoW client, or "
-            "another ready-to-play client), so Yu'lon did not replace it: that would change "
-            "the other folder too. Make the ready-to-play client again from the server's "
-            "Client settings."
-        )
-    os.chmod(dst, st.st_mode | stat.S_IWRITE)
-    os.replace(tmp, dst)
 
 
 def write_record(
@@ -1011,6 +996,11 @@ def _target(
             f"{pack.label}: {member!r} would replace {rel.name}, one of Yu'lon's own files, so "
             "Yu'lon unpacked nothing from the zip."
         )
+    if rel.name.casefold().endswith((_STAGING, _ASIDE)):
+        raise PackError(
+            f"{pack.label}: {member!r} would be mistaken for one of Yu'lon's own temporary "
+            "files, so Yu'lon unpacked nothing from the zip."
+        )
     return rel
 
 
@@ -1056,12 +1046,22 @@ class _Tee:
         return int(self.out.write(data))
 
 
-def _extracted_dir(pack: ClientPack, fetched: Fetched) -> Path:
-    return cache_dir() / "extracted" / f"{pack.id}~{fetched.sha256[:16]}"
+def _extracted_prefix(pack: ClientPack, server_dir: Path) -> str:
+    """Names this server's copies of this pack: the server (by its folder) and the pack."""
+    owner = hashlib.sha256(os.fspath(server_dir).encode("utf-8", "replace")).hexdigest()[:10]
+    return f"{owner}~{pack.id}~"
+
+
+def _extracted_dir(pack: ClientPack, fetched: Fetched, server_dir: Path) -> Path:
+    return cache_dir() / "extracted" / f"{_extracted_prefix(pack, server_dir)}{fetched.sha256[:16]}"
 
 
 def _extracted_copy(
-    pack: ClientPack, fetched: Fetched, archive: zipfile.ZipFile, info: zipfile.ZipInfo
+    pack: ClientPack,
+    fetched: Fetched,
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    server_dir: Path,
 ) -> tuple[Path, str]:
     """An `.MPQ` member extracted once into the cache, with its SHA-256.
 
@@ -1069,7 +1069,7 @@ def _extracted_copy(
     Never rewritten in place: a client's file may be a hard link to it, so a new
     copy is written beside it and renamed over it.
     """
-    folder = _extracted_dir(pack, fetched)
+    folder = _extracted_dir(pack, fetched, server_dir)
     leaf = re.sub(r"[^A-Za-z0-9._-]", "_", PurePosixPath(info.filename).name)
     dest = folder / f"{info.CRC:08x}-{info.file_size}-{leaf}"
     if dest.is_file() and not play_client._is_link(dest) and dest.stat().st_size == info.file_size:
@@ -1101,13 +1101,14 @@ def _stage(
     archive: zipfile.ZipFile,
     item: _Item,
     play_dir: Path,
+    server_dir: Path,
 ) -> tuple[Path, Path, str]:
     """Make `item`'s file under a temporary name beside its target; `(tmp, target, sha256)`."""
     target = play_dir / Path(*item.rel.parts)
     tmp = target.with_name(target.name + _STAGING)
     tmp.unlink(missing_ok=True)
     if item.rel.suffix.lower() == ".mpq":
-        cached, sha256 = _extracted_copy(pack, fetched, archive, item.info)
+        cached, sha256 = _extracted_copy(pack, fetched, archive, item.info, server_dir)
         try:
             os.link(cached, tmp)
         except OSError as exc:
@@ -1137,6 +1138,7 @@ def install(
     *,
     game: str,
     server_dir: Path,
+    previous: Mapping[str, Any] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Unpack `pack`'s mapped members into `play_dir`; the record entry for what was written.
@@ -1144,25 +1146,128 @@ def install(
     Only into a folder whose marker names `game` and `server_dir`. Everything is
     checked first (member names, symlink members, links in the way, free space)
     and every file is made under a temporary name before any is renamed into
-    place, so a refusal or a damaged member leaves the client as it was. A name
-    that is a hard link to the player's own file is replaced, never written
-    through. `*.MPQ` members are extracted once into the cache and hard-linked
-    from there where the volume allows, else copied. Once the pack is installed,
-    older cached versions of it are removed (`prune_cache`).
+    place, so a refusal or a damaged member leaves the client as it was. The swap
+    is all or nothing: each existing target is first renamed aside
+    (`<name>.yulon-pack-old`), then the new file is renamed in; if any step fails
+    every target is put back from its aside name and the temporaries are removed,
+    and only after every target succeeded are the aside files deleted. A name that
+    is a hard link to the player's own file is moved aside and replaced, never
+    written through. `*.MPQ` members are extracted once into the cache and
+    hard-linked from there where the volume allows, else copied. Once the pack is
+    installed, older cached versions of it are removed (`prune_cache`).
 
-    The caller records the returned entry (`write_record`). Raises only `PackError`.
+    `previous` is this pack's record entry from the install being replaced. Only
+    after every rename succeeded, the files it lists that the new version does not
+    install are removed (a name that case-folds onto a new one is never removed, so
+    a case-only rename keeps its file), each only if it still has the recorded
+    hash, and folders that leaves empty go too. `remove_when_off` is not applied.
+    A dropped file the player edited is kept and named in the returned entry's
+    `"left_behind"` (absent when there is none).
+
+    The caller records the returned entry (`write_record`). Raises only
+    `PackError`; `PartialInstall` (a subclass) when the rollback itself failed.
     """
     try:
-        return _install(play_dir, pack, fetched, game=game, server_dir=server_dir, sleep=sleep)
+        return _install(
+            play_dir,
+            pack,
+            fetched,
+            game=game,
+            server_dir=server_dir,
+            previous=previous,
+            sleep=sleep,
+        )
     except OSError as exc:
         raise _write_refusal(pack.label, exc) from exc
-    except (zipfile.BadZipFile, EOFError, zlib.error, NotImplementedError, RuntimeError) as exc:
+    except (
+        zipfile.BadZipFile,
+        EOFError,
+        zlib.error,
+        NotImplementedError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         if isinstance(exc, PackError):
             raise
         raise PackError(
             f"{pack.label} arrived damaged or in a form Yu'lon cannot read ({exc}), so nothing "
             "from it was installed. Try again."
         ) from exc
+
+
+class PartialInstall(PackError):
+    """A swap failed and putting the old files back failed too.
+
+    `entry` is a record entry (`version` None, so the next Play installs the pack
+    again) naming the files that now hold the new bytes, so the caller can record
+    it and a later switch-off still finds every file. Files that were put back,
+    or never touched, are not in it.
+    """
+
+    def __init__(self, message: str, entry: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.entry = entry
+
+
+def _swap(
+    play_dir: Path,
+    staged: list[tuple[Path, Path, str]],
+    pack: ClientPack,
+    sleep: Callable[[float], None],
+) -> None:
+    """Rename every staged file into place, or put everything back and raise.
+
+    Raises the OSError that stopped the swap once the rollback succeeded, and
+    `PartialInstall` when it did not.
+    """
+    done: list[tuple[Path, Path | None]] = []  # (target, its file moved aside, or None)
+    try:
+        for tmp, target, _ in staged:
+            aside = target.with_name(target.name + _ASIDE)
+            moved: Path | None = None
+            if os.path.lexists(target):
+                _unlink_quietly(aside)
+                play_client._retrying(partial(os.replace, target, aside), sleep=sleep)
+                moved = aside
+            done.append((target, moved))
+            play_client._retrying(partial(os.replace, tmp, target), sleep=sleep)
+    except BaseException as failure:
+        stuck: list[Path] = []
+        for target, moved in reversed(done):
+            try:
+                if moved is not None:
+                    play_client._retrying(partial(os.replace, moved, target), sleep=sleep)
+                else:
+                    target.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("client-packs: could not put %s back", target, exc_info=True)
+                stuck.append(target)
+        for tmp, _, _ in staged:
+            _unlink_quietly(tmp)
+        if stuck and isinstance(failure, OSError):
+            now = {
+                target.relative_to(play_dir).as_posix(): sha256
+                for _, target, sha256 in staged
+                if target in stuck and _holds(target, sha256)
+            }
+            raise PartialInstall(
+                f"{pack.label} could only be partly installed ({failure.strerror or failure}) "
+                "and Yu'lon could not put every file back. Close World of Warcraft (and any "
+                "program using the client's files), then press Play again: the pack is "
+                "installed again from the start.",
+                {"version": None, "sha256": None, "files": now},
+            ) from failure
+        raise
+    for _, moved in done:
+        if moved is not None:
+            _unlink_quietly(moved)
+
+
+def _holds(path: Path, sha256: str) -> bool:
+    try:
+        return path.is_file() and _file_sha256(path) == sha256
+    except OSError:
+        return False
 
 
 def _install(
@@ -1172,6 +1277,7 @@ def _install(
     *,
     game: str,
     server_dir: Path,
+    previous: Mapping[str, Any] | None,
     sleep: Callable[[float], None],
 ) -> dict[str, Any]:
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the pack {pack.label}")
@@ -1182,12 +1288,14 @@ def _install(
         plain = sum(i.info.file_size for i in items if i.rel.suffix.lower() != ".mpq")
         if plain:
             _refuse_without_room(pack, play_dir, plain)
+        new = {item.rel.as_posix().casefold() for item in items}
+        drops = _drops(play_dir, previous, new)
         staged: list[tuple[Path, Path, str]] = []
         made: list[Path] = []
         try:
             for item in items:
                 made += _make_dirs((play_dir / Path(*item.rel.parts)).parent, play_dir)
-                staged.append(_stage(pack, fetched, archive, item, play_dir))
+                staged.append(_stage(pack, fetched, archive, item, play_dir, server_dir))
         except BaseException:
             for tmp, _, _ in staged:
                 _unlink_quietly(tmp)
@@ -1195,18 +1303,57 @@ def _install(
                 with contextlib.suppress(OSError):
                     folder.rmdir()
             raise
-    files: dict[str, str] = {}
-    try:
-        for tmp, target, sha256 in staged:
-            play_client._retrying(partial(_replace_own, tmp, target), sleep=sleep)
-            files[target.relative_to(play_dir).as_posix()] = sha256
-    except BaseException:
-        for tmp, _, _ in staged:
-            _unlink_quietly(tmp)
-        raise
+    _swap(play_dir, staged, pack, sleep)
+    files = {t.relative_to(play_dir).as_posix(): sha256 for _, t, sha256 in staged}
+    entry: dict[str, Any] = {"version": fetched.version, "sha256": fetched.sha256, "files": files}
+    left = _drop_old(play_dir, drops)
+    if left:
+        entry["left_behind"] = left
     logger.info("client-packs: installed %s into %s (%d files)", pack.id, play_dir, len(files))
-    _prune_after_install(pack, fetched)
-    return {"version": fetched.version, "sha256": fetched.sha256, "files": files}
+    _prune_after_install(pack, fetched, server_dir)
+    return entry
+
+
+def _drops(
+    play_dir: Path, previous: Mapping[str, Any] | None, new: set[str]
+) -> list[tuple[str, Path, str]]:
+    """What the previous install wrote that the new one does not: `(rel, path, sha256)`.
+
+    Checked BEFORE anything is written, so a record naming a path outside the folder
+    refuses the install instead of surprising it halfway.
+    """
+    files = previous.get("files") if previous else None
+    if not isinstance(files, dict):
+        return []
+    found: list[tuple[str, Path, str]] = []
+    for rel, sha in files.items():
+        checked, path = _removal_path(play_dir, rel)
+        if checked.casefold() not in new:
+            found.append((checked, path, str(sha)))
+    return found
+
+
+def _drop_old(play_dir: Path, drops: list[tuple[str, Path, str]]) -> list[str]:
+    """Remove the dropped files that still match their record; the paths left, sorted."""
+    left: list[str] = []
+    removed: list[Path] = []
+    for rel, path, sha in drops:
+        try:
+            st = path.lstat()
+            if stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha:
+                left.append(rel)
+                continue
+            client_config._remove_own(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.warning("client-packs: could not remove old %s", path, exc_info=True)
+            left.append(rel)
+            continue
+        removed.append(path)
+    for path in removed:
+        _remove_empty_parents(play_dir, path)
+    return sorted(left)
 
 
 # --- The cache of old versions ---------------------------------------------------------------
@@ -1245,17 +1392,18 @@ def prune_cache(entry_id: str, pack_id: str, keep_version: str) -> None:
             _remove_tree(child)
 
 
-def _prune_after_install(pack: ClientPack, fetched: Fetched) -> None:
+def _prune_after_install(pack: ClientPack, fetched: Fetched, server_dir: Path) -> None:
     """Tidy the cache after a pack installed: its older versions, and older extracted copies."""
     version = fetched.path.parent
     pack_folder, entry_folder = version.parent, version.parent.parent
     if pack_folder.name == pack.id and entry_folder.parent == cache_dir():
         prune_cache(entry_folder.name, pack.id, version.name)
-    keep = _extracted_dir(pack, fetched).name
+    keep = _extracted_dir(pack, fetched, server_dir).name
+    prefix = _extracted_prefix(pack, server_dir)
     extracted = cache_dir() / "extracted"
     try:
         for child in extracted.iterdir():
-            if child.name.startswith(f"{pack.id}~") and child.name != keep:
+            if child.name.startswith(prefix) and child.name != keep:
                 _remove_tree(child)
     except OSError:
         return
