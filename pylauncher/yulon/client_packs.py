@@ -812,6 +812,10 @@ def launcher_config_keys(
 
     Display: `gxWindow`/`gxMaximize`/`gxResolution`; the account: `accountName`.
     A picks dict that is not well formed contributes nothing for the bad part.
+
+    The one exception (lead ruling, T187): a typed realm address sets `realmList`
+    and `patchList` (Centurion's own launcher writes both from one address) even
+    where the catalog's `always` sets them, so the caller lets these keys win.
     """
     picks = clean_launcher(launcher)
     keys: dict[str, str] = {}
@@ -828,7 +832,27 @@ def launcher_config_keys(
     if picks.get("account"):
         keys["accountName"] = picks["account"]
     fixed = {key.casefold() for key in catalog_always}
-    return {k: v for k, v in keys.items() if k.casefold() not in fixed}
+    keys = {k: v for k, v in keys.items() if k.casefold() not in fixed}
+    address = picks.get("realm_address")
+    if address:
+        keys.update(realmList=address, patchList=address)
+    return keys
+
+
+def launcher_config_removals(
+    launcher: Mapping[str, Any], *, catalog_always: Mapping[str, str]
+) -> tuple[str, ...]:
+    """The Config.wtf keys the launcher's picks take out: `accountName` for "Ask in the game".
+
+    Only an `account` saved as None says so; no `account` at all leaves the file as
+    it is. A key the catalog's `always` sets is the catalog's, and is never taken out.
+    """
+    picks = clean_launcher(launcher)
+    if "account" not in picks or picks["account"] is not None:
+        return ()
+    if "accountname" in {key.casefold() for key in catalog_always}:
+        return ()
+    return ("accountName",)
 
 
 def launcher_exe_options(

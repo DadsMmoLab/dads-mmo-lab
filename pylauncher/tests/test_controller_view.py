@@ -22752,7 +22752,7 @@ def test_make_client_options_and_play_all_keep_the_launcher_picks(
     assert client_packs.read_record(play).launcher == picks, "refresh"
 
 
-def test_make_over_an_existing_record_keeps_its_launcher_picks(
+def test_makes_record_write_passes_the_folders_launcher_picks_through(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site
 ) -> None:
     entry = _client_entry(tmp_path)
@@ -22773,3 +22773,105 @@ def test_make_over_an_existing_record_keeps_its_launcher_picks(
         view.make_play_client()
 
     assert client_packs.read_record(target).launcher == {"account": "BOB"}
+
+
+# -- fix round 1: the typed address wins; "Ask in the game" (T187) ------------------------
+
+
+@pytest.mark.parametrize("remove_locale", [True, False])
+def test_a_typed_realm_address_replaces_the_catalogs_realmlist_and_patchlist(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    remove_locale: bool,
+) -> None:
+    entry, original, play = _made_client(tmp_path, remove_locale=remove_locale)
+    assert entry.client.config_wtf is not None
+    assert entry.client.config_wtf.always["realmList"] == "127.0.0.1"
+    _save_launcher(play, {"realm_address": "10.0.0.7"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    text = _config(play)
+    assert 'SET realmList "10.0.0.7"' in text and 'SET patchList "10.0.0.7"' in text
+    assert "127.0.0.1" not in text
+    if remove_locale:
+        assert not (play / "Data" / "enUS" / "realmlist.wtf").exists()
+    else:
+        assert _realmlist(play).startswith("set realmlist 10.0.0.7\n"), "the same address"
+    assert _realmlist(original) == "set realmlist logon.example.com\n"
+    assert not (original / "WTF").exists()
+
+
+def test_without_a_typed_address_the_catalogs_realmlist_stays(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    _save_launcher(play, {"display": {"window": "windowed"}})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    text = _config(play)
+    assert 'SET realmList "127.0.0.1"' in text and "patchList" not in text
+
+
+@pytest.mark.parametrize("config", [True, False])
+def test_ask_in_the_game_takes_the_account_name_out_and_leaves_every_other_line(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    config: bool,
+) -> None:
+    entry, original, play = _made_client(tmp_path, config=config, exe=False)
+    ps.names = WORLD_UP
+    _save_launcher(play, {"account": "BOB", "display": {"window": "windowed"}})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    view.play()
+    before = (play / "WTF" / "Config.wtf").read_bytes()
+    assert b'SET accountName "BOB"' in before
+    # No other pick: on an entry without config_wtf only the removal asks for a merge.
+    _save_launcher(play, {"account": None})
+
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    again.play()
+
+    after = (play / "WTF" / "Config.wtf").read_bytes()
+    kept = [line for line in before.splitlines(keepends=True) if b"accountName" not in line]
+    assert after.splitlines(keepends=True) == kept
+
+
+@pytest.mark.parametrize("config", [True, False])
+def test_an_account_never_picked_leaves_a_typed_in_account_name_alone(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    config: bool,
+) -> None:
+    entry, original, play = _made_client(tmp_path, config=config, exe=False)
+    (play / "WTF").mkdir(exist_ok=True)
+    (play / "WTF" / "Config.wtf").write_bytes(
+        b'SET accountName "TYPEDINGAME"\nSET gxWindow "1"\nSET realmList "127.0.0.1"\n'
+    )
+    before = (play / "WTF" / "Config.wtf").read_bytes()
+    _save_launcher(play, {"display": {"window": "windowed"}})
+    ps.names = WORLD_UP
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+
+    view.play()
+
+    after = (play / "WTF" / "Config.wtf").read_bytes()
+    assert b'SET accountName "TYPEDINGAME"' in after
+    assert after.startswith(before), "only keys added after the player's lines"

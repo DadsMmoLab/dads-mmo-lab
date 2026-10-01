@@ -2116,3 +2116,22 @@ def test_borderless_follows_the_window_pick_only_where_the_patch_has_it() -> Non
     assert client_packs.launcher_exe_options({}, {"borderless": True}, ["borderless"]) == {
         "borderless": True
     }
+
+
+def test_a_typed_realm_address_sets_realmlist_and_patchlist_over_the_catalogs() -> None:
+    """Lead ruling: the typed address wins over the catalog's for these two keys only."""
+    picks = {"realm_address": "10.0.0.7", "display": {"window": "windowed"}}
+    always = {"REALMLIST": "127.0.0.1", "patchlist": "127.0.0.1", "gxWindow": "0"}
+    got = client_packs.launcher_config_keys(picks, catalog_always=always)
+    assert got == {"realmList": "10.0.0.7", "patchList": "10.0.0.7", "gxMaximize": "0"}
+    assert "realmList" not in client_packs.launcher_config_keys({}, catalog_always={})
+
+
+def test_ask_in_the_game_removes_accountname_and_only_when_said_so() -> None:
+    assert client_packs.launcher_config_removals({"account": None}, catalog_always={}) == (
+        "accountName",
+    )
+    assert client_packs.launcher_config_removals({}, catalog_always={}) == ()
+    assert client_packs.launcher_config_removals({"account": "BOB"}, catalog_always={}) == ()
+    fixed = {"ACCOUNTNAME": "SERVER"}
+    assert client_packs.launcher_config_removals({"account": None}, catalog_always=fixed) == ()

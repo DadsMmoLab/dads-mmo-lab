@@ -9079,15 +9079,19 @@ class ControllerView(QWidget):
                 exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
-        picked = client_packs.launcher_config_keys(
-            record.launcher, catalog_always=cfg.always if cfg is not None else {}
+        catalog_always = cfg.always if cfg is not None else {}
+        picked = client_packs.launcher_config_keys(record.launcher, catalog_always=catalog_always)
+        removed = client_packs.launcher_config_removals(
+            record.launcher, catalog_always=catalog_always
         )
-        if cfg is None and picked:
+        if cfg is None and (picked or removed):
             # An entry without `config_wtf` still gets the launcher's picks (T187); its
             # realmlist stays `_launch`'s, and no seed was written, so none is used up.
             check_cancel()
             say("Setting up Config.wtf…")
-            client_config.merge_config_wtf(play, ConfigWtf(always=picked), first_run=False)
+            client_config.merge_config_wtf(
+                play, ConfigWtf(always=picked), first_run=False, remove=removed
+            )
         elif cfg is not None:
             check_cancel()
             say("Setting up Config.wtf…")
@@ -9103,16 +9107,22 @@ class ControllerView(QWidget):
                         f"The realmlist in {play} could not be written ({exc}), so nothing was "
                         "started. Check that you can write to that folder, then press Play again."
                     ) from exc
-            # The catalog's `always` is the server's own; the picks only add keys it leaves
-            # (`launcher_config_keys` dropped the rest), and a pick takes a seed's place.
-            taken = {key.casefold() for key in picked}
+            # The catalog's `always` is the server's own: `launcher_config_keys` dropped every
+            # pick it sets except a typed address's `realmList`/`patchList`, which win (lead
+            # ruling). A pick, or a removal, also takes a seed's place.
+            taken = {key.casefold() for key in (*picked, *removed)}
             cfg = cfg.model_copy(
                 update={
-                    "always": {**picked, **cfg.always},
+                    "always": {
+                        **{k: v for k, v in cfg.always.items() if k.casefold() not in taken},
+                        **picked,
+                    },
                     "seed": {k: v for k, v in cfg.seed.items() if k.casefold() not in taken},
                 }
             )
-            client_config.merge_config_wtf(play, cfg, first_run=not record.config_seeded)
+            client_config.merge_config_wtf(
+                play, cfg, first_run=not record.config_seeded, remove=removed
+            )
             seeded = True
             save()
         return _Prepared(tuple(notes), frozenset(unavailable))
