@@ -1170,11 +1170,23 @@ def taken_back(play_dir: Path) -> tuple[Path, ...]:
     return tuple(Path(path) for path in paths if isinstance(path, str) and path)
 
 
-def record_taken_back(play_dir: Path, rels: Collection[Path]) -> None:
+def record_taken_back(
+    play_dir: Path, rels: Collection[Path], *, game: str, server_dir: Path
+) -> None:
     """Add `rels` (relative to `play_dir`) to its `TAKEN_BACK` record, in one rename.
 
-    Raises OSError when it cannot be written; the caller decides what that costs.
+    Only into a folder whose marker names `game` and `server_dir` (`_whose()`'s
+    rule): a module's Remove is not gated on the marker, and a folder without
+    one is not Yu'lon's to write a file into. Raises PlayClientError for such a
+    folder and OSError when the record cannot be written; the caller decides
+    what either costs.
     """
+    marker = read_marker(play_dir)
+    if marker is None:
+        raise PlayClientError(f"{play_dir} has no {MARKER}, so no record was kept in it.")
+    whose = _whose(marker, game=game, server_dir=server_dir)
+    if whose is not None:
+        raise PlayClientError(f"{play_dir} is the ready-to-play client of {whose}.")
     known = {os.path.normcase(os.fspath(rel)): rel for rel in taken_back(play_dir)}
     for rel in rels:
         known.setdefault(os.path.normcase(os.fspath(rel)), rel)

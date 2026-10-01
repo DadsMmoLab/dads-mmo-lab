@@ -433,6 +433,35 @@ def test_a_patch_removed_after_the_switch_is_not_named_as_left_out_of_the_ready_
     assert archives_left_out(server_dir, play, original, original) == (
         Path("Data") / "patch-Z.MPQ",
     )
+    assert not (original / play_client.TAKEN_BACK).exists(), "the original gained a record"
+    assert (play / play_client.TAKEN_BACK).exists()
+
+    play_client.delete(play, game="wow-wotlk", server_dir=server_dir)
+
+    assert not play.exists(), "Delete left the record (or anything) behind"
+    assert not (original / play_client.TAKEN_BACK).exists()
+
+
+def test_a_remove_keeps_no_record_in_a_folder_without_this_servers_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A module's Remove is not marker-gated, so the record it keeps is (T181a fix round).
+
+    The marker goes after the applier is built: the Remove still takes the patch
+    back by its receipt, and writes no file of Yu'lon's into an unmarked folder.
+    """
+    manifest = _manifest(ARAC)
+    _arac(monkeypatch, tmp_path)
+    server_dir, original = tmp_path / "server", tmp_path / "client"
+    play = _make_play_client(original, server_dir)
+    applier = _play_applier(monkeypatch, server_dir, original, play, manifest)
+    (play / play_client.MARKER).unlink()
+
+    applier.remove(manifest)
+
+    assert not (play / "Data" / "Patch-A.MPQ").exists(), "the take-back itself stopped"
+    assert not (play / play_client.TAKEN_BACK).exists()
+    assert not (original / play_client.TAKEN_BACK).exists()
 
 
 class _NewerClone(_CloneFromManifest):

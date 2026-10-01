@@ -1571,6 +1571,60 @@ def test_archives_new_in_the_original_are_named_not_added(tmp_path: Path) -> Non
     assert not (play / "Data" / "patch-5.MPQ").exists()
 
 
+def test_a_taken_back_record_is_kept_only_in_this_servers_marked_folder(tmp_path: Path) -> None:
+    """T181a fix round: a module's Remove is not marker-gated, so the record write is."""
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    rel = Path("Data") / "Patch-A.MPQ"
+
+    for game, server_dir in (("g", tmp_path / "other"), ("other", tmp_path / "s")):
+        with pytest.raises(play_client.PlayClientError):
+            play_client.record_taken_back(play, (rel,), game=game, server_dir=server_dir)
+        assert not (play / play_client.TAKEN_BACK).exists()
+
+    unmarked = tmp_path / "unmarked"
+    (unmarked / "Data").mkdir(parents=True)
+    with pytest.raises(play_client.PlayClientError):
+        play_client.record_taken_back(unmarked, (rel,), game="g", server_dir=tmp_path / "s")
+    assert sorted(unmarked.iterdir()) == [unmarked / "Data"], "an unmarked folder gained a file"
+
+    play_client.record_taken_back(play, (rel,), game="g", server_dir=tmp_path / "s")
+    play_client.record_taken_back(play, (rel,), game="g", server_dir=tmp_path / "s")
+    assert play_client.taken_back(play) == (rel,)
+    assert not (orig / play_client.TAKEN_BACK).exists(), "the original gained a record"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "not json",
+        "[]",
+        '["Data/Patch-A.MPQ"]',
+        '{"version": 1}',
+        '{"version": 1, "paths": "Data/Patch-A.MPQ"}',
+        '{"version": 1, "paths": {"a": 1}}',
+    ],
+)
+def test_a_malformed_taken_back_record_reads_as_nothing(tmp_path: Path, text: str) -> None:
+    (tmp_path / play_client.TAKEN_BACK).write_text(text, encoding="utf-8")
+
+    assert play_client.taken_back(tmp_path) == ()
+
+
+def test_a_taken_back_record_entry_that_is_not_a_path_is_skipped(tmp_path: Path) -> None:
+    (tmp_path / play_client.TAKEN_BACK).write_bytes(b'{"paths": ["Data/a.MPQ", 3, "", null]}')
+
+    assert play_client.taken_back(tmp_path) == (Path("Data") / "a.MPQ",)
+
+
+def test_an_unreadable_taken_back_record_reads_as_nothing(tmp_path: Path) -> None:
+    (tmp_path / play_client.TAKEN_BACK).write_bytes(b"\xff\xfe not utf-8")
+
+    assert play_client.taken_back(tmp_path) == ()
+
+
 def test_nothing_is_left_out_of_a_client_just_made(tmp_path: Path) -> None:
     orig = fake_client(tmp_path)
     play = tmp_path / "t"

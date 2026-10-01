@@ -1617,11 +1617,11 @@ def take_back_file(path: Path, sha256: str, log: _Log) -> None:
     log.done.append(f"took back {path.name} from {path.parent}")
 
 
-def _record_taken_back(play_dir: Path, rel: Path) -> None:
+def _record_taken_back(play_dir: Path, rel: Path, *, game: str, server_dir: Path) -> None:
     """Best-effort: a record that cannot be written costs a sentence at Play, not the Remove."""
     try:
-        play_client.record_taken_back(play_dir, (rel,))
-    except OSError as exc:
+        play_client.record_taken_back(play_dir, (rel,), game=game, server_dir=server_dir)
+    except (OSError, play_client.PlayClientError) as exc:
         logger.warning(f"could not record {rel} as taken back in {play_dir}: {exc}")
 
 
@@ -2056,6 +2056,11 @@ class Applier:
         # one of them is taken back from `client_dir` instead (`rebased()`).
         # Empty for every applier without a ready-to-play client.
         self.client_origins: tuple[Path, ...] = tuple(client_origins)
+        # T181a: the game id a ready-to-play client's marker must name, beside
+        # `server_dir`, before a Remove keeps a record in it. Set with
+        # `client_origins` by `ControllerServices.for_entry()`; empty, nothing
+        # is recorded.
+        self.client_game = ""
         # T150: "how does this release stand to this commit?", asked of GitHub
         # by `update()` only when the clone's own shallow graph cannot say. A
         # seam for `_newest_release`'s reason: it is the network, and a test
@@ -4341,7 +4346,12 @@ class Applier:
         if self.client_dir is not None:
             path = rebased(path, self.client_dir, self.client_origins)
             if path != Path(copy.path) and path.is_relative_to(self.client_dir):
-                _record_taken_back(self.client_dir, path.relative_to(self.client_dir))
+                _record_taken_back(
+                    self.client_dir,
+                    path.relative_to(self.client_dir),
+                    game=self.client_game,
+                    server_dir=self.server_dir,
+                )
         take_back_file(path, copy.sha256, log)
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:

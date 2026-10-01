@@ -20988,7 +20988,9 @@ def test_refresh_names_the_archives_it_leaves_out(qapp: object, ps: _Ps, tmp_pat
     view.refresh_play_client()
 
     assert controller_view_module.left_out_sentence((rel,)) in view.play_label.text()
-    assert "make the ready-to-play client again" in view.play_label.text()
+    assert "Making the ready-to-play client again takes in every archive" in (
+        view.play_label.text()
+    )
     assert not (play / rel).exists()
 
 
@@ -21004,6 +21006,22 @@ def test_the_left_out_sentence_does_not_call_an_archive_new(qapp: object) -> Non
     assert "patch-5.MPQ" in said
 
 
+def test_the_left_out_sentence_warns_what_making_the_client_again_takes_in(qapp: object) -> None:
+    """T181a fix round: Delete wipes the record and `create()` links every archive.
+
+    So a client made again takes in other servers' module patches and patches of
+    modules removed from this one, with no receipt to remove them by again.
+    """
+    said = controller_view_module.left_out_sentence((Path("Data") / "patch-5.MPQ",))
+
+    assert said == (
+        "Left out (in your own client only): Data/patch-5.MPQ. Making the ready-to-play "
+        "client again takes in every archive your own client has, including other "
+        "servers' module patches and patches of modules you removed, so only do that "
+        "if those archives are meant for this server."
+    )
+
+
 def test_refresh_does_not_name_a_removed_modules_patch_the_original_kept(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -21011,7 +21029,7 @@ def test_refresh_does_not_name_a_removed_modules_patch_the_original_kept(
     original, play, rel = _a_new_archive_in_the_original(tmp_path)
     removed = Path("Data") / "Patch-A.MPQ"
     (original / removed).write_bytes(b"MPQ a removed module's patch, kept in the original")
-    play_client.record_taken_back(play, [removed])
+    play_client.record_taken_back(play, [removed], game=WOTLK.id, server_dir=tmp_path)
     view, _ = _play_view(ps, tmp_path, original=None, play=play)
 
     view.refresh_play_client()

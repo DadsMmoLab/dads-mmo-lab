@@ -734,7 +734,9 @@ def left_out_sentence(names: Collection[Path]) -> str:
     return (
         "Left out (in your own client only): "
         + ", ".join(str(name) for name in names)
-        + " — make the ready-to-play client again to include them."
+        + ". Making the ready-to-play client again takes in every archive your own "
+        "client has, including other servers' module patches and patches of modules "
+        "you removed, so only do that if those archives are meant for this server."
     )
 
 
@@ -1601,6 +1603,7 @@ class ControllerServices:
         services = factory(entry, server_dir, play_client_dir, wsl_distro)
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
+            services.applier.client_game = entry.id
         return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
 
     @classmethod
