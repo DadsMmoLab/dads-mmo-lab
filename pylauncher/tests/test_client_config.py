@@ -8,8 +8,11 @@ Each negative test breaks one rule and nothing else.
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -286,16 +289,20 @@ def test_only_realmlist_wtf_in_a_locale_folder_is_removed(tmp_path: Path) -> Non
     assert (enus / "sub" / "realmlist.wtf").is_file()
 
 
-def test_a_locale_folder_that_is_a_link_is_not_entered(tmp_path: Path) -> None:
+def test_a_locale_folder_that_is_a_link_is_not_entered(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     original, play = make_play(tmp_path)
     (play / "Data" / "deDE" / "REALMLIST.WTF").unlink()
     (play / "Data" / "deDE").rmdir()
     (play / "Data" / "deDE").symlink_to(original / "Data" / "deDE", target_is_directory=True)
 
-    removed = client_config.remove_locale_realmlists(play)
+    with caplog.at_level(logging.WARNING):
+        removed = client_config.remove_locale_realmlists(play)
 
     assert removed == (play / "Data" / "enUS" / "realmlist.wtf",)
     assert (original / "Data" / "deDE" / "REALMLIST.WTF").is_file()
+    assert any(str(play / "Data" / "deDE") in r.getMessage() for r in caplog.records)
 
 
 def test_a_client_without_a_data_folder_has_nothing_to_remove(tmp_path: Path) -> None:
@@ -314,3 +321,160 @@ def test_a_folder_without_the_marker_keeps_its_realmlist_wtf_files(tmp_path: Pat
 
     assert (play / "Data" / "enUS" / "realmlist.wtf").is_file()
     assert (play / "Data" / "deDE" / "REALMLIST.WTF").is_file()
+
+
+def test_a_data_folder_that_is_a_link_is_not_entered_and_is_named(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    original, play = make_play(tmp_path)
+    shutil.rmtree(play / "Data")
+    (play / "Data").symlink_to(original / "Data", target_is_directory=True)
+
+    with caplog.at_level(logging.WARNING):
+        assert client_config.remove_locale_realmlists(play) == ()
+
+    assert (original / "Data" / "enUS" / "realmlist.wtf").is_file()
+    assert (original / "Data" / "deDE" / "REALMLIST.WTF").is_file()
+    assert any(str(play / "Data") in r.getMessage() for r in caplog.records)
+
+
+# -- Windows' read-only refusal, simulated ------------------------------------
+
+
+def refuse_read_only_unlinks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`Path.unlink` refuses a read-only realmlist.wtf, as Windows does and POSIX does not."""
+    real = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.casefold() == "realmlist.wtf" and not self.lstat().st_mode & stat.S_IWRITE:
+            raise PermissionError(errno.EACCES, "Access is denied", str(self))
+        real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def read_only(path: Path) -> None:
+    os.chmod(path, stat.S_IMODE(path.lstat().st_mode) & ~0o222)
+
+
+def test_a_read_only_locale_realmlist_of_its_own_is_made_writable_and_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = tmp_path / "WoW"
+    _, play = make_play(tmp_path)
+    for path in (
+        original / "Data" / "enUS" / "realmlist.wtf",
+        play / "Data" / "enUS" / "realmlist.wtf",
+    ):
+        read_only(path)
+    refuse_read_only_unlinks(monkeypatch)
+
+    removed = client_config.remove_locale_realmlists(play)
+
+    assert play / "Data" / "enUS" / "realmlist.wtf" in removed
+    assert not (play / "Data" / "enUS" / "realmlist.wtf").exists()
+    mode = (original / "Data" / "enUS" / "realmlist.wtf").lstat().st_mode
+    assert not mode & stat.S_IWRITE, "the original's read-only flag was cleared"
+
+
+def test_a_read_only_locale_realmlist_shared_through_a_hard_link_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original, play = make_play(tmp_path)
+    theirs = original / "Data" / "enUS" / "realmlist.wtf"
+    mine = play / "Data" / "enUS" / "realmlist.wtf"
+    mine.unlink()
+    os.link(theirs, mine)
+    read_only(theirs)
+    refuse_read_only_unlinks(monkeypatch)
+
+    with pytest.raises(play_client.PlayClientError, match="Play again"):
+        client_config.remove_locale_realmlists(play)
+
+    assert os.path.samefile(theirs, mine)
+    assert not theirs.lstat().st_mode & stat.S_IWRITE, "the original's flag was cleared"
+
+
+def test_a_refused_removal_names_the_files_already_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, play = make_play(tmp_path)
+    locked = play / "Data" / "enUS" / "realmlist.wtf"
+    real = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == locked:
+            raise PermissionError(errno.EACCES, "in use by another process", str(self))
+        real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    with pytest.raises(play_client.PlayClientError) as refused:
+        client_config.remove_locale_realmlists(play)
+
+    assert str(locked) in str(refused.value)
+    assert f"Already removed: {play / 'Data' / 'deDE' / 'REALMLIST.WTF'}." in str(refused.value)
+    assert locked.is_file()
+
+
+# -- the rename and its temporary file ---------------------------------------
+
+
+def test_a_rename_refused_for_a_moment_is_tried_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, play = make_play(tmp_path)
+    real = os.replace
+    refusals = [PermissionError(errno.EACCES, "held by a virus scanner")] * 2
+    slept: list[float] = []
+
+    def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if refusals:
+            raise refusals.pop()
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+
+    client_config.merge_config_wtf(
+        play, ConfigWtf(always={"realmList": "127.0.0.1"}), first_run=False, sleep=slept.append
+    )
+
+    assert config_of(play).read_bytes() == b'SET locale "enUS"\nSET realmList "127.0.0.1"\n'
+    assert len(slept) == 2
+
+
+def test_a_leftover_temporary_file_linked_to_the_original_is_not_written_through(
+    tmp_path: Path,
+) -> None:
+    original, play = make_play(tmp_path)
+    leftover = play / "WTF" / f"Config.wtf.{os.getpid()}.yulon-tmp"
+    os.link(original / "WTF" / "Config.wtf", leftover)
+
+    client_config.merge_config_wtf(play, CENTURION, first_run=True)
+
+    assert (original / "WTF" / "Config.wtf").read_bytes() == b'SET locale "enUS"\n'
+    assert b'SET realmList "127.0.0.1"' in config_of(play).read_bytes()
+    assert not leftover.exists()
+
+
+def test_a_cleanup_that_fails_does_not_hide_why_the_write_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, play = make_play(tmp_path)
+    real_unlink = Path.unlink
+
+    def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        raise OSError(errno.EIO, "the disk said no")
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".yulon-tmp") and self.exists():
+            raise OSError(errno.EBUSY, "cleanup refused too")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    with pytest.raises(OSError, match="the disk said no"):
+        client_config.merge_config_wtf(play, CENTURION, first_run=True)
+
+    assert config_of(play).read_bytes() == b'SET locale "enUS"\n'

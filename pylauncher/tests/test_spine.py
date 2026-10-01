@@ -2717,8 +2717,10 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "
         "launcher does. The listing decides a delete, but only inside a folder whose step (a) "
         "marker was read first, only one level under `Data/`, and never into a link: a locale "
-        "folder linked to the player's own client is skipped, so the original's file is never "
-        "reached. A failure to list or delete raises rather than reporting files removed"
+        "folder linked to the player's own client is skipped (and named in a warning), so the "
+        "original's file is never reached. A failure to list raises OSError and a failure to "
+        "delete raises PlayClientError naming the files already removed, rather than "
+        "reporting files removed"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
