@@ -756,7 +756,12 @@ def exdev(src: Path, dst: Path) -> None:
 
 
 def refresh(play: Path, orig: Path, tmp_path: Path, **kw: object) -> tuple[Path, ...]:
-    args: dict[str, object] = {"game": "g", "server_dir": tmp_path / "s", "reflink": no_reflink}
+    args: dict[str, object] = {
+        "game": "g",
+        "server_dir": tmp_path / "s",
+        "reflink": no_reflink,
+        "exe_patch": None,
+    }
     args.update(kw)
     return play_client.refresh(play, orig, **args)  # type: ignore[arg-type]
 
@@ -1730,6 +1735,23 @@ def test_refresh_without_the_patch_puts_the_originals_exe_back_and_forgets_the_p
     assert not os.path.samefile(play / "Wow.exe", orig / "Wow.exe")
     assert client_packs.read_record(play).exe is None
     assert play_client.stale(play, orig) == ()
+
+
+def test_refresh_keeps_the_patch_and_its_record_when_the_originals_exe_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import client_packs
+
+    play, orig, stock, _patch = _exe_world(tmp_path, monkeypatch)
+    patched = (play / "Wow.exe").read_bytes()
+    original_exe = (orig / "Wow.exe").read_bytes()
+    (orig / "Wow.exe").unlink()  # the drive is unplugged, the folder is still there
+    assert refresh(play, orig, tmp_path) == ()
+    assert (play / "Wow.exe").read_bytes() == patched
+    assert client_packs.read_record(play).exe is not None
+    (orig / "Wow.exe").write_bytes(original_exe)
+    assert refresh(play, orig, tmp_path) == (Path("Wow.exe"),)
+    assert client_packs.read_record(play).exe is None
 
 
 def test_refresh_remakes_the_exe_with_the_options_the_player_chose(

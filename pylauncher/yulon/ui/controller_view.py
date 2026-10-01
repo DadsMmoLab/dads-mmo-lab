@@ -1296,6 +1296,11 @@ class _Prepared:
     unavailable: frozenset[str]
 
 
+def _half_installed(entry: Mapping[str, Any]) -> bool:
+    """A record entry a `PartialInstall` left: no version, no checksum, a mix of files."""
+    return entry.get("version") is None and entry.get("sha256") is None
+
+
 def _checkout_commit(server_dir: Path, rel: str, wsl_distro: str | None = None) -> str | None:
     """The commit the checkout holding `rel` is on, read the way the Server build section does."""
     folder = (server_dir / rel).parent
@@ -8940,6 +8945,21 @@ class ControllerView(QWidget):
                 raise client_packs.Cancelled("Cancelled. Nothing was started.")
 
         wanted = {pack.id for pack in client_packs.wanted(client, record.choices)}
+        # "Play without" a pack whose update was cut half way: its files are a mix of old
+        # and new, so they go (and the entry) before the game starts.
+        for pack_id in sorted(skip):
+            half = packs.get(pack_id)
+            if half is not None and _half_installed(half):
+                say(f"Removing the half-installed {pack_id}…")
+                client_packs.remove(
+                    play,
+                    half,
+                    next((p for p in client.packs if p.id == pack_id), None),
+                    game=game,
+                    server_dir=server_dir,
+                )
+                del packs[pack_id]
+                save()
         in_catalog = {pack.id: pack for pack in client.packs}
         # 1a. Switched off, or gone from the catalog: its recorded files go.
         for pack_id in list(packs):
@@ -9033,8 +9053,8 @@ class ControllerView(QWidget):
         elif exe is not None:
             # The catalog dropped the patch: the original's Wow.exe comes back.
             say("Putting your own Wow.exe back…")
-            play_client.restore_original_exe(play, source, game=game, server_dir=server_dir)
-            exe = None
+            if play_client.restore_original_exe(play, source, game=game, server_dir=server_dir):
+                exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
         if cfg is not None:
@@ -9154,7 +9174,8 @@ class ControllerView(QWidget):
         self._say_play(stopped.reason)
         if pack.optional:
             play = self.services.play_client_dir
-            have = play is not None and pack.id in client_packs.read_record(play).packs
+            held = client_packs.read_record(play).packs.get(pack.id) if play is not None else None
+            have = held is not None and not _half_installed(held)
             if have:
                 text = (
                     f"{stopped.reason}\n\nPlay with the version of “{pack.label}” you have "

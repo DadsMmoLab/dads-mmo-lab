@@ -1418,9 +1418,9 @@ def test_stale_and_refresh_leave_a_recorded_pack_file_alone(rig: _Rig) -> None:
     entry = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y + b"-longer"}))
     rel = Path("Data/patch-X.MPQ")
     assert play_client.stale(rig.play, rig.original) == (rel,), "the fixture must read as stale"
-    assert play_client.refresh(rig.play, rig.original, game=GAME, server_dir=rig.server) == (
-        rel,
-    ), "and be refreshed"
+    assert play_client.refresh(
+        rig.play, rig.original, game=GAME, server_dir=rig.server, exe_patch=None
+    ) == (rel,), "and be refreshed"
     rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y + b"-longer"}, name="again.zip"))
     _record_installed(rig, WORLD, entry)
     # the player's patcher rewrote the original's archive: now the original differs
@@ -1428,7 +1428,12 @@ def test_stale_and_refresh_leave_a_recorded_pack_file_alone(rig: _Rig) -> None:
     before = _snapshot(rig.original)
 
     assert play_client.stale(rig.play, rig.original) == ()
-    assert play_client.refresh(rig.play, rig.original, game=GAME, server_dir=rig.server) == ()
+    assert (
+        play_client.refresh(
+            rig.play, rig.original, game=GAME, server_dir=rig.server, exe_patch=None
+        )
+        == ()
+    )
     assert (rig.play / rel).read_bytes() == NEW_Y + b"-longer"
     assert _snapshot(rig.original) == before
 

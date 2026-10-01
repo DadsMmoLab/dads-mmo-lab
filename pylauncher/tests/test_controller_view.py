@@ -22286,3 +22286,100 @@ def test_a_play_that_finishes_after_the_tab_was_torn_down_launches_nothing(
 
     assert "launch" not in steps and asks.calls == []
     assert view._play_pending is False and not view._play_client_running
+
+
+# -- hardening follow-up -------------------------------------------------------------
+
+
+def test_an_unreadable_original_exe_leaves_the_patch_and_its_record_for_the_next_play(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    warned: list[str],
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    ps.names = WORLD_UP
+    first, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    first.play()
+    patched = (play / "Wow.exe").read_bytes()
+    (original / "Wow.exe").unlink()
+    unpatched = _client_entry(tmp_path, exe=False)
+
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=unpatched)
+    again.play()
+
+    assert warned == [] and steps[-1] == "launch"
+    assert (play / "Wow.exe").read_bytes() == patched
+    assert client_packs.read_record(play).exe is not None
+    (original / "Wow.exe").write_bytes(STOCK_EXE)
+
+    third, _ = _play_view(ps, tmp_path, original=original, play=play, entry=unpatched)
+    third.play()
+
+    assert (play / "Wow.exe").read_bytes() == STOCK_EXE
+    assert client_packs.read_record(play).exe is None
+
+
+def test_a_half_swapped_pack_is_not_offered_as_a_version_you_have_and_is_removed(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    leftover = play / "Data" / "patch-F.MPQ"
+    leftover.write_bytes(b"MPQ half of an update")
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            {
+                "hd": {
+                    "version": None,
+                    "sha256": None,
+                    "files": {
+                        "Data/patch-F.MPQ": hashlib.sha256(leftover.read_bytes()).hexdigest()
+                    },
+                }
+            },
+            None,
+            _choices(hd=True),
+        ),
+        game=WOTLK.id,
+        server_dir=tmp_path,
+    )
+    site.errors["hd"] = client_packs.PackError("HD creatures could not be downloaded: offline.")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    asks.answers = ["save"]
+
+    view.play()
+
+    assert asks.calls[0][3] == "Play without HD creatures"
+    assert steps[-1] == "launch"
+    assert not leftover.exists()
+    assert "hd" not in client_packs.read_record(play).packs
+
+
+def test_a_failure_after_the_tab_was_torn_down_asks_nothing_and_releases_the_locks(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    warned: list[str],
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    site.errors["addons"] = client_packs.PackError("Addons could not be downloaded: offline.")
+
+    def close(_progress: Any, _cancelled: Callable[[], bool]) -> None:
+        view._closed = True
+
+    site.hook = close
+
+    view.play()
+
+    assert "launch" not in steps and asks.calls == [] and warned == []
+    assert view._play_pending is False and not view._play_client_running and not view._busy

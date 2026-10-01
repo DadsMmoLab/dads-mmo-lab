@@ -1021,10 +1021,10 @@ def refresh(
     link: Callable[[Path, Path], None] = os.link,
     reflink: Callable[[Path, Path], bool] = try_reflink,
     keep: Collection[Path] = (),
-    exe_patch: ExePatch | None = None,
+    exe_patch: ExePatch | None,
     opener: Any = None,
 ) -> tuple[Path, ...]:
-    """Bring what `stale()` lists back in step with the original; return what was changed.
+    """Bring what `stale() lists back in step with the original; return what was changed.
 
     Only this game's and server's ready-to-play client, made from `original`.
     Each file is made beside the old one under a temporary name and then put in
@@ -1039,6 +1039,9 @@ def refresh(
 
     `keep` (relative paths, a module's files) is never touched, whatever `stale()`
     answers: the filter is applied here, to its list, so no list can reach past it.
+
+    `exe_patch` has no default on purpose: `None` means the catalog entry has no exe
+    patch, so a recorded patched exe is replaced by the original's. A caller must say so.
     """
     marker = read_marker(play_dir)
     if marker is None:
@@ -1133,33 +1136,34 @@ def refresh(
 
 
 def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_dir: Path) -> bool:
-    """Put the original's Wow.exe back over a patched one, and forget the patch. True if copied.
+    """Put the original's Wow.exe back over a patched one, and forget the patch. True if done.
 
     For a catalog entry that no longer has an `exe_patch`. A real copy through a
     temporary name renamed into place (never a link, never a write through the
-    old name), then the record's `exe` is cleared. No original exe: the record is
-    still cleared, the file left as it is.
+    old name), then the record's `exe` is cleared. An original exe that cannot be read
+    (moved, drive unplugged): False, the patched exe and the record stay, so the next
+    Play tries again.
     """
     from yulon import client_packs
 
     src, dst = client_executable(original), client_executable(play_dir)
-    copied = False
-    if _original_file(src) is not None:
-        tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
+    if _original_file(src) is None:
+        logger.info("ready-to-play client: %s has no readable Wow.exe, patched exe kept", original)
+        return False
+    tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
+    try:
+        _drop_temp(tmp, src)
+        shutil.copy2(src, tmp)
+        _replace(tmp, dst)
+    except (OSError, _Stop) as exc:
         try:
             _drop_temp(tmp, src)
-            shutil.copy2(src, tmp)
-            _replace(tmp, dst)
-        except (OSError, _Stop) as exc:
-            try:
-                _drop_temp(tmp, src)
-            except OSError:
-                logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
-            raise PlayClientError(
-                f"Putting your own Wow.exe back into {play_dir} failed: {exc}. Nothing else "
-                "was changed. Fix the cause and press Play again."
-            ) from exc
-        copied = True
+        except OSError:
+            logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
+        raise PlayClientError(
+            f"Putting your own Wow.exe back into {play_dir} failed: {exc}. Nothing else "
+            "was changed. Fix the cause and press Play again."
+        ) from exc
     record = client_packs.read_record(play_dir)
     try:
         client_packs.write_record(
@@ -1170,7 +1174,7 @@ def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_di
         )
     except client_packs.PackError as exc:
         raise PlayClientError(str(exc)) from exc
-    return copied
+    return True
 
 
 def _reapply_exe(
