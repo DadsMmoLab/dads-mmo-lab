@@ -2712,6 +2712,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "because of it. A folder that cannot be listed answers no parts, and "
         "`fetch_checkout()` then refuses naming the file"
     ),
+    ("client_config.py", "remove_locale_realmlists"): (
+        "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
+        "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "
+        "launcher does. The listing decides a delete, but only inside a folder whose step (a) "
+        "marker was read first, only one level under `Data/`, and never into a link: a locale "
+        "folder linked to the player's own client is skipped, so the original's file is never "
+        "reached. A failure to list or delete raises rather than reporting files removed"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 
