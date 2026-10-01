@@ -27,7 +27,7 @@ import re
 import shutil
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -711,6 +711,29 @@ Networking tab manages, not from this file.
 
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
 
+PLAY_PENDING = (
+    "Play is still starting World of Warcraft from this server's ready-to-play client. "
+    "Wait for it to finish, then press this again. Nothing was changed."
+)
+"""Make…, Refresh, Delete and Uninstall while a Play is on its way (T181a final review)."""
+
+LINKED_LEFT_OUT = "Left out because it is linked: "
+ONEDRIVE_WARNING = (
+    "This folder is inside {root}, which OneDrive syncs: it would upload the "
+    "client's files and may later keep only placeholders of them on this PC. "
+    "Choose a folder outside it."
+)
+
+
+def left_out_sentence(names: Collection[Path]) -> str:
+    """Archives the original has and the ready-to-play client lacks (Refresh never adds them)."""
+    return (
+        "Left out (new in your own client): "
+        + ", ".join(str(name) for name in names)
+        + " — make the ready-to-play client again to include them."
+    )
+
+
 PLAY_CLIENT_RUNNING = (
     "Yu'lon is still writing this server's ready-to-play client. Closing now would "
     "leave it half made or half refreshed. This window will close normally once it "
@@ -837,6 +860,14 @@ class PlayClientDialog(QDialog):
         box.addWidget(self.size_label)
         self.full_copy_check = QCheckBox("", self)
         box.addWidget(self.full_copy_check)
+        self.links_label = QLabel("", self)
+        self.links_label.setWordWrap(True)
+        self.links_label.setVisible(False)
+        box.addWidget(self.links_label)
+        self.onedrive_label = QLabel("", self)
+        self.onedrive_label.setWordWrap(True)
+        self.onedrive_label.setVisible(False)
+        box.addWidget(self.onedrive_label)
         self.originals_label = QLabel(
             "Yu'lon put these files into your own client for this server's modules. The "
             "ready-to-play client gets them too:",
@@ -953,9 +984,22 @@ class PlayClientDialog(QDialog):
         plan = self._plan
         if plan is None:
             self.full_copy_check.setVisible(False)
+            self.links_label.setVisible(False)
+            self.onedrive_label.setVisible(False)
             self._update_ok()
             return
         self.size_label.setText(_play_size_text(plan, self._free))
+        self.links_label.setText(
+            LINKED_LEFT_OUT + ", ".join(str(rel) for rel in plan.skipped_links) + "."
+        )
+        self.links_label.setVisible(bool(plan.skipped_links))
+        synced = play_client.onedrive_folder(
+            self._planned, env=os.environ, os_name=platform.detect()
+        )
+        self.onedrive_label.setText(
+            ONEDRIVE_WARNING.format(root=synced) if synced is not None else ""
+        )
+        self.onedrive_label.setVisible(synced is not None)
         full = _gb_text(plan.shared_bytes + plan.own_bytes)
         if plan.same_volume:
             # A drive that cannot share files at all (exFAT, FAT32) is only found
@@ -1040,6 +1084,19 @@ class _MadePlayClient:
 
 
 @dataclass(frozen=True)
+class _Compared:
+    """A ready-to-play client against the original, read off the GUI thread.
+
+    `stale` is what `play_client.stale()` listed (or, after a Refresh, what was
+    refreshed); `left_out` the original's archives it has no file for, which
+    Refresh never adds (`play_client.left_out_archives()`).
+    """
+
+    stale: tuple[Path, ...]
+    left_out: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
 class _UninstallOutcome:
     """An uninstall's report, and what became of its ready-to-play client (None: not asked)."""
 
@@ -1050,7 +1107,7 @@ class _UninstallOutcome:
 def _delete_with_the_server(play: Path, *, game: str, server_dir: Path) -> str:
     """Delete a removed server's ready-to-play client; the sentence that says how it went."""
     try:
-        play_client.delete(play, game=game, server_dir=server_dir)
+        play_client.delete(play, game=game, server_dir=server_dir, can_try_again=False)
     except play_client.PlayClientError as exc:
         return str(exc)
     return f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
@@ -7610,6 +7667,11 @@ class ControllerView(QWidget):
             # client, and the uninstall may delete that very folder.
             self.uninstall_label.setText(PLAY_CLIENT_RUNNING)
             return
+        if self._play_pending:
+            # T181: a Play is on its way and still writes the realmlist into,
+            # and starts the game from, the folder the uninstall may delete.
+            self.uninstall_label.setText(PLAY_PENDING)
+            return
         self._stop_forced = ""
         if self._uninstall_plan is None:
             self.uninstall_label.setText(UNINSTALL_NO_PLAN)
@@ -7730,8 +7792,12 @@ class ControllerView(QWidget):
         half a disabled `QPushButton` does not give for free -- a press
         already queued in Qt's event loop, or one this method is called from
         directly in a test, still has to be told no.
+
+        Make… counts too (T181): from its press it plans, asks and builds from
+        the client folder this press would change, and the tab rebuild this
+        press ends in would cut it off.
         """
-        if not self._busy:
+        if not self._busy and not self._play_client_running:
             return False
         QMessageBox.information(
             self,
@@ -7874,6 +7940,7 @@ class ControllerView(QWidget):
         """
         self._play_holds_busy = False
         self._play_pending = False
+        self._play_left_out: tuple[Path, ...] = ()
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
@@ -7945,6 +8012,17 @@ class ControllerView(QWidget):
                 "Server tab, then press this again. Nothing was changed."
             )
         return None
+
+    def _play_waits_for_play(self) -> bool:
+        """True (said) while a Play is on its way: Make…, Refresh and Delete wait for it.
+
+        Not part of `_play_client_refusal()`: the Refresh a Play asks for itself
+        ("Refresh and play") runs while `_play_pending` is set, and would refuse itself.
+        """
+        if not self._play_pending:
+            return False
+        QMessageBox.information(self, "Something else is running", PLAY_PENDING)
+        return True
 
     def _play_client_blocked(self) -> bool:
         """`_play_client_refusal()` said to the player; True when there was one."""
@@ -8021,7 +8099,7 @@ class ControllerView(QWidget):
         """Ask where and how, then build this server's ready-to-play client (T181 §1, §3)."""
         if self.services.set_play_client_dir is None:
             return
-        if self._play_client_blocked():
+        if self._play_waits_for_play() or self._play_client_blocked():
             return
         original = self.services.client_dir
         if original is None:
@@ -8140,6 +8218,11 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _play_plan_ready(self, result: object) -> None:
+        if getattr(self, "_closed", False):
+            # The tab is being torn down (a client folder changed, the window
+            # closing): no dialog over it, and nothing built from its old folder.
+            self._play_client_running = False
+            return
         if self._make_refused_now():
             return
         if isinstance(result, Path):
@@ -8184,7 +8267,7 @@ class ControllerView(QWidget):
         )
         problem: str | None = None
         try:
-            networking.write_client_realmlist(
+            networking.write_ready_to_play_realmlists(
                 choice.target, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
             )
         except OSError as exc:
@@ -8287,7 +8370,7 @@ class ControllerView(QWidget):
         self._release_play_client()
         if self._play_after_refresh:
             self._play_after_refresh = False
-            self._play_pending = False
+            self._play_end()
         if not isinstance(exc, play_client.PlayClientError):
             logger.warning(f"{self.entry.id}: ready-to-play client: {exc!r}")
         self._play_refused(str(exc))
@@ -8323,6 +8406,7 @@ class ControllerView(QWidget):
     def _play_end(self, said: str | None = None) -> None:
         """The Play under way is over, started or not."""
         self._play_pending = False
+        self._play_left_out = ()
         if said is not None:
             self._say_play(said)
 
@@ -8336,8 +8420,25 @@ class ControllerView(QWidget):
                 self._offer_remake(play)
         return marker
 
+    def _play_stopped_by_another_action(self) -> bool:
+        """Re-asked once the status is read: did a job start while it was being read?
+
+        `_play_client_refusal()` (a module job, any Server action, Make…/Refresh/
+        Delete) was asked at the press, but the status read runs on a worker
+        with the tab unlocked, and the question below is modal. Starting the
+        server, or the game, over one of them is what the press refused.
+        """
+        refusal = self._play_client_refusal()
+        if refusal is None:
+            return False
+        self._play_end("Nothing was started.")
+        QMessageBox.information(self, "Something else is running", refusal)
+        return True
+
     @Slot(object)
     def _play_status_read(self, status: object) -> None:
+        if self._play_stopped_by_another_action():
+            return
         if isinstance(status, InstallStatus) and status.all_running:
             self._play_check_stale()
             return
@@ -8350,6 +8451,8 @@ class ControllerView(QWidget):
         if answer != "yes":
             self._play_end("Nothing was started.")
             return
+        if self._play_stopped_by_another_action():
+            return
         self._play_after_start = True
         self.start_server()
 
@@ -8359,12 +8462,14 @@ class ControllerView(QWidget):
         if marker is None or play is None:
             return
         server_dir, client_dir = self.services.controller.server_dir, self.services.client_dir
+        source = marker.source_client_dir
         self._say_play("Comparing the ready-to-play client with your own client…")
         self._run(
-            lambda: play_client.stale(
-                play,
-                marker.source_client_dir,
-                keep=module_kept_files(server_dir, play, client_dir),
+            lambda: _Compared(
+                play_client.stale(
+                    play, source, keep=module_kept_files(server_dir, play, client_dir)
+                ),
+                play_client.left_out_archives(play, source),
             ),
             self._play_stale_read,
             self._play_failed,
@@ -8372,16 +8477,19 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _play_stale_read(self, found: object) -> None:
-        names = [str(rel) for rel in found] if isinstance(found, tuple) else []
+        compared = found if isinstance(found, _Compared) else _Compared((), ())
+        names = [str(rel) for rel in compared.stale]
+        self._play_left_out = compared.left_out
         if not names:
             self._play_launch()
             return
+        left = f"\n\n{left_out_sentence(compared.left_out)}" if compared.left_out else ""
         answer = _ask_with(
             self,
             "Your client was patched",
             f"These files of your own client changed since the ready-to-play client was "
             f"made: {', '.join(names)}. Refresh it from your original client first? "
-            "(Your settings and addons are not touched.)",
+            f"(Your settings and addons are not touched.){left}",
             "Refresh and play",
             "Play without refreshing",
         )
@@ -8408,7 +8516,7 @@ class ControllerView(QWidget):
         Wine that went away) comes through `launch()` raw and is worded here.
         """
         try:
-            networking.write_client_realmlist(
+            networking.write_ready_to_play_realmlists(
                 play, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
             )
         except OSError as exc:
@@ -8436,7 +8544,10 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _play_launched(self, _result: object) -> None:
-        self._play_end("World of Warcraft is starting. Closing Yu'lon does not close it.")
+        said = "World of Warcraft is starting. Closing Yu'lon does not close it."
+        if self._play_left_out:
+            said += " " + left_out_sentence(self._play_left_out)
+        self._play_end(said)
 
     @Slot(object)
     def _play_failed(self, exc: object) -> None:
@@ -8455,6 +8566,8 @@ class ControllerView(QWidget):
     @Slot()
     def refresh_play_client(self) -> None:
         """Bring shared game files and Wow.exe back in step with the original (T181 §4)."""
+        if self._play_waits_for_play():
+            return
         self._start_refresh(then_play=False)
 
     def _start_refresh(self, *, then_play: bool) -> bool:
@@ -8475,27 +8588,33 @@ class ControllerView(QWidget):
         self._play_client_running = True
         self._hold_busy()
         self._say_play(f"Refreshing the ready-to-play client from {marker.source_client_dir}…")
-        self._run(
-            lambda: play_client.refresh(
+        source = marker.source_client_dir
+
+        def work() -> _Compared:
+            done = play_client.refresh(
                 play,
-                marker.source_client_dir,
+                source,
                 game=self.entry.id,
                 server_dir=server_dir,
                 keep=module_kept_files(server_dir, play, client_dir),
-            ),
-            self._play_client_refreshed,
-            self._play_client_job_failed,
-        )
+            )
+            return _Compared(done, play_client.left_out_archives(play, source))
+
+        self._run(work, self._play_client_refreshed, self._play_client_job_failed)
         return True
 
     @Slot(object)
     def _play_client_refreshed(self, result: object) -> None:
         self._release_play_client()
-        done = [str(rel) for rel in result] if isinstance(result, tuple) else []
+        compared = result if isinstance(result, _Compared) else _Compared((), ())
+        done = [str(rel) for rel in compared.stale]
         if done:
-            self._say_play("Refreshed from your own client: " + ", ".join(done) + ".")
+            said = "Refreshed from your own client: " + ", ".join(done) + "."
         else:
-            self._say_play("Nothing needed refreshing: it matches your own client.")
+            said = "Nothing needed refreshing: it matches your own client."
+        if compared.left_out:
+            said += " " + left_out_sentence(compared.left_out)
+        self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False
             self._play_launch()
@@ -8507,7 +8626,7 @@ class ControllerView(QWidget):
         play = self.services.play_client_dir
         if setter is None or play is None:
             return
-        if self._play_client_blocked():
+        if self._play_waits_for_play() or self._play_client_blocked():
             return
         marker = play_client.read_marker(play)
         source = marker.source_client_dir if marker is not None else self.services.client_dir
@@ -8516,12 +8635,14 @@ class ControllerView(QWidget):
             "Delete the ready-to-play client?",
             f"Delete the ready-to-play client at {play}?\n\n{own} is not touched: it keeps "
             "all its files, the game files the two shared included. This server's modules "
-            "install into your own client again afterwards. Yu'lon can make a "
+            "install into your own client again afterwards. Module client files installed "
+            "since the ready-to-play client was made live only in it, so your own client "
+            "lacks them until those modules are reinstalled or updated. Yu'lon can make a "
             "ready-to-play client again at any time.",
         ):
             return
         # Again: a module job may have started while the question was open.
-        if self._play_client_blocked():
+        if self._play_waits_for_play() or self._play_client_blocked():
             return
         server_dir = self.services.controller.server_dir
         self._play_client_running = True
