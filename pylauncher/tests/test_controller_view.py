@@ -33,6 +33,7 @@ from yulon import (
     module_answers,
     networking,
     party,
+    play_client,
     purge,
     reset_defaults,
     runner,
@@ -19566,14 +19567,18 @@ def test_a_ready_to_play_client_takes_the_module_writes_and_the_row_keeps_the_or
 def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, game: str
 ) -> None:
-    """`play_client_dir=None` is today's wiring, field for field where a field is a plain value."""
+    """`play_client_dir=None` is today's wiring, field for field where a field is a plain value.
+
+    Compared against the game's factory called directly, not against `for_entry()`
+    without the keyword: that would compare the new code with itself.
+    """
     monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
     entry = load_catalog().get(game)
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     original = _a_client(tmp_path / "WoW")
 
-    before = ControllerServices.for_entry(entry, server_dir, client_dir=original)
+    before = controller_view_module._FACTORIES[game](entry, server_dir, original, None)
     after = ControllerServices.for_entry(
         entry, server_dir, client_dir=original, play_client_dir=None
     )
@@ -19604,3 +19609,786 @@ def test_for_wotlk_passes_the_ready_to_play_client_on(tmp_path: Path) -> None:
 
     assert services.play_client_dir == play
     assert services.applier is not None and services.applier.client_dir == play
+
+
+# --------------------------------------------------------------------------
+# T181a Task 5 -- the Server tab's Make…, Play, Refresh and Delete
+# --------------------------------------------------------------------------
+
+WORLD_UP = "ac-database\nac-authserver\nac-worldserver\n"
+"""What `docker ps` names for a WotLK server whose three containers all run."""
+
+
+def _game_client(folder: Path) -> Path:
+    """A small WoW client: an archive to share, a `Wow.exe`, a realmlist, `Interface/`."""
+    (folder / "Data" / "enUS").mkdir(parents=True)
+    (folder / "Interface" / "AddOns").mkdir(parents=True)
+    (folder / "Data" / "common.MPQ").write_bytes(b"MPQ the shared archive")
+    (folder / "Wow.exe").write_bytes(b"MZ the game")
+    (folder / "Data" / "enUS" / "realmlist.wtf").write_text(
+        "set realmlist logon.example.com\n", encoding="utf-8"
+    )
+    return folder
+
+
+def _built(original: Path, server_dir: Path) -> Path:
+    """This server's ready-to-play client, made by the real `play_client.create()`."""
+    target = play_client.default_target(original, WOTLK.name, server_dir)
+    play_client.create(
+        original,
+        target,
+        game=WOTLK.id,
+        server_dir=server_dir,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    return target
+
+
+class _Asked:
+    """The creation dialog's seam: keeps every offer, answers with the choice it was given."""
+
+    def __init__(
+        self, *, full_copy: bool = False, remove_originals: bool = False, cancel: bool = False
+    ) -> None:
+        self.offers: list[controller_view_module.PlayClientOffer] = []
+        self.full_copy = full_copy
+        self.remove_originals = remove_originals
+        self.cancel = cancel
+
+    def __call__(
+        self, _parent: object, offer: controller_view_module.PlayClientOffer
+    ) -> controller_view_module.PlayClientChoice | None:
+        self.offers.append(offer)
+        if self.cancel:
+            return None
+        return controller_view_module.PlayClientChoice(
+            target=offer.target, full_copy=self.full_copy, remove_originals=self.remove_originals
+        )
+
+
+def _play_view(
+    ps: _Ps,
+    tmp_path: Path,
+    *,
+    original: Path | None,
+    play: Path | None = None,
+    asker: _Asked | None = None,
+    seam: bool = True,
+) -> tuple[ControllerView, _FakeClientDir]:
+    """A tab over the docker-free fakes, wired with both client-folder write seams.
+
+    The server folder is `tmp_path` (`_services()`'s), so a module claim written
+    under `tmp_path / "modules"` is this server's.
+    """
+    services = replace(_services(ps, tmp_path, []), client_dir=original, play_client_dir=play)
+    services.set_client_dir = _FakeClientDir()
+    recorder = _FakeClientDir()
+    if seam:
+        services.set_play_client_dir = recorder
+    view = ControllerView(
+        WOTLK, services, status_poll_ms=0, play_client_asker=asker if asker else _Asked()
+    )
+    return view, recorder
+
+
+@pytest.fixture
+def launched(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Every `LaunchSpec` Play hands to `play_launch.launch()`; nothing is started.
+
+    The OS is Windows for these tests, so the spec is `Wow.exe` itself and no
+    Proton or Wine on the box running the suite is looked for.
+    """
+    from yulon import play_launch
+
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    specs: list[object] = []
+    monkeypatch.setattr(play_launch, "launch", lambda spec, **_k: specs.append(spec))
+    return specs
+
+
+def _realmlist(client: Path) -> str:
+    return (client / "Data" / "enUS" / "realmlist.wtf").read_text(encoding="utf-8")
+
+
+# -- the button ----------------------------------------------------------------
+
+
+def test_the_button_offers_to_make_one_and_then_reads_play(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    without, _ = _play_view(ps, tmp_path, original=original)
+    assert without.play_button is not None
+    assert without.play_button.text() == controller_view_module.MAKE_PLAY_CLIENT_LABEL
+    assert not without.play_button.isHidden()
+    assert without.play_menu_button is not None and without.play_menu_button.isHidden()
+
+    play = _built(original, tmp_path)
+    with_one, _ = _play_view(ps, tmp_path, original=original, play=play)
+    assert with_one.play_button is not None
+    assert with_one.play_button.text() == "Play"
+    assert with_one.play_menu_button is not None and not with_one.play_menu_button.isHidden()
+    entries = [action.text() for action in with_one.play_menu.actions()]
+    assert entries == [
+        controller_view_module.REFRESH_PLAY_CLIENT_LABEL,
+        controller_view_module.DELETE_PLAY_CLIENT_LABEL,
+    ]
+
+
+def test_no_write_seam_means_no_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The client-folder row's rule: a control that cannot record anything is not drawn."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, seam=False)
+    assert view.play_button is None
+    assert view.play_menu_button is None
+
+
+def test_without_a_client_folder_the_button_is_hidden_and_the_row_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, _ = _play_view(ps, tmp_path, original=None)
+    assert view.play_button is not None and view.play_button.isHidden()
+    assert view.set_client_dir_button is not None
+    assert "ready-to-play client" in view.set_client_dir_button.toolTip()
+
+
+def test_a_forgotten_original_still_leaves_play(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """ "Forget client folder" does not affect the ready-to-play client (spec §4)."""
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+    assert view.play_button is not None and not view.play_button.isHidden()
+    assert view.play_button.text() == "Play"
+
+
+def test_busy_greys_play_and_its_menu(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+    assert view.play_button is not None and view.play_menu_button is not None
+
+    view._set_busy(True)
+    assert not view.play_button.isEnabled() and not view.play_menu_button.isEnabled()
+    view._set_busy(False)
+    assert view.play_button.isEnabled() and view.play_menu_button.isEnabled()
+
+
+# -- Make… ---------------------------------------------------------------------
+
+
+def test_make_builds_the_folder_points_it_here_and_records_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    asker = _Asked()
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=asker)
+    seen: list[tuple[str, object, object]] = []
+    view.play_client_dir_changed.connect(lambda g, s, p: seen.append((g, s, p)))
+    target = play_client.default_target(original, WOTLK.name, tmp_path)
+
+    view.make_play_client()
+
+    assert [offer.target for offer in asker.offers] == [target]
+    assert asker.offers[0].plan.same_volume
+    marker = play_client.read_marker(target)
+    assert marker is not None and marker.server_dir == tmp_path
+    assert (target / "Data" / "common.MPQ").read_bytes() == b"MPQ the shared archive"
+    assert _realmlist(target).startswith("set realmlist 127.0.0.1\n")
+    assert _realmlist(original) == "set realmlist logon.example.com\n", "wrote the original"
+    assert recorder.written == [target]
+    assert seen == [(WOTLK.id, tmp_path, target)]
+
+
+def test_a_cancelled_dialog_makes_and_records_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=_Asked(cancel=True))
+
+    view.make_play_client()
+
+    assert not play_client.default_target(original, WOTLK.name, tmp_path).exists()
+    assert recorder.written == []
+
+
+def test_make_clears_this_servers_crashed_attempt_before_planning(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Carried finding 6: `clean_partials()` first, before the plan and its free space.
+
+    Answered Cancel on purpose: `create()` removes the leftover too, so only a
+    press that never reaches `create()` shows the removal happened first.
+    """
+    original = _game_client(tmp_path / "clients" / "WoW")
+    target = play_client.default_target(original, WOTLK.name, tmp_path)
+    leftover = target.with_name(target.name + play_client.PARTIAL_SUFFIX)
+    leftover.mkdir(parents=True)
+    marker = play_client.Marker(
+        game=WOTLK.id,
+        server_dir=tmp_path,
+        source_client_dir=original,
+        created_at=datetime(2026, 9, 30),
+    )
+    (leftover / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=_Asked(cancel=True))
+
+    view.make_play_client()
+
+    assert not leftover.exists()
+    assert recorder.written == []
+
+
+def _exdev(_src: Path, _dst: Path) -> None:
+    import errno
+
+    raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+
+def test_a_full_copy_is_made_only_on_the_players_word(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carried finding 6: `allow_full_copy` comes from the dialog's agreement and nowhere else.
+
+    Another drive is stood in by a link that answers EXDEV, through the real
+    `create()`.
+    """
+    real = play_client.create
+    monkeypatch.setattr(
+        play_client, "create", lambda *a, **k: real(*a, link=_exdev, reflink=lambda *_: False, **k)
+    )
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **_k: warned.append(a[2])
+    )
+    original = _game_client(tmp_path / "clients" / "WoW")
+    target = play_client.default_target(original, WOTLK.name, tmp_path)
+
+    refused, recorder = _play_view(ps, tmp_path, original=original, asker=_Asked())
+    refused.make_play_client()
+    assert not target.exists() and recorder.written == []
+    assert warned and "full copy" in warned[0]
+
+    agreed, recorder = _play_view(ps, tmp_path, original=original, asker=_Asked(full_copy=True))
+    agreed.make_play_client()
+    assert recorder.written == [target]
+    made = play_client.read_marker(target)
+    assert made is not None and made.full_copy
+
+
+def _receipted(server_dir: Path, *files: Path) -> None:
+    """A module claim under this server holding a receipt for each file, as `_client()` writes."""
+    clone = server_dir / "modules" / "mod-x"
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        clone,
+        item_id="mod-x",
+        url="https://example.invalid/mod-x.git",
+        completed=True,
+        client_files=[
+            apply_module.ClientCopy(
+                step="data", path=str(path), sha256=apply_module.sha256_of(path)
+            )
+            for path in files
+        ],
+    )
+
+
+def _patches(original: Path) -> tuple[Path, Path, Path]:
+    data = original / "Data"
+    ours, edited, theirs = data / "Patch-A.MPQ", data / "Patch-B.MPQ", data / "Patch-Y.MPQ"
+    ours.write_bytes(b"MPQ ours")
+    edited.write_bytes(b"MPQ ours too")
+    theirs.write_bytes(b"MPQ the player's own")
+    return ours, edited, theirs
+
+
+def test_the_removal_box_is_offered_unticked_with_the_receipted_files(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    ours, edited, _theirs = _patches(original)
+    _receipted(tmp_path, ours, edited)
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+
+    view.make_play_client()
+
+    offer = asker.offers[0]
+    assert sorted(offer.originals) == [ours, edited]
+    dialog = controller_view_module.PlayClientDialog(offer)
+    assert not dialog.remove_originals_check.isHidden()
+    assert not dialog.remove_originals_check.isChecked()
+    choice = dialog.choice()
+    assert choice is not None and choice.remove_originals is False
+    shown = [dialog.originals_list.item(i).text() for i in range(dialog.originals_list.count())]
+    assert sorted(shown) == sorted([str(ours), str(edited)])
+
+
+def test_ticked_removal_takes_only_receipted_unchanged_files_from_the_original(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    ours, edited, theirs = _patches(original)
+    _receipted(tmp_path, ours, edited)
+    edited.write_bytes(b"MPQ changed by the player since")
+    view, recorder = _play_view(
+        ps, tmp_path, original=original, asker=_Asked(remove_originals=True)
+    )
+    target = play_client.default_target(original, WOTLK.name, tmp_path)
+
+    view.make_play_client()
+
+    assert recorder.written == [target]
+    assert not ours.exists(), "the receipted, unchanged patch stayed in the original"
+    assert (target / "Data" / "Patch-A.MPQ").read_bytes() == b"MPQ ours", "lost from the copy"
+    assert edited.read_bytes() == b"MPQ changed by the player since"
+    assert theirs.read_bytes() == b"MPQ the player's own"
+
+
+def test_unticked_removal_leaves_the_original_as_it_was(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    ours, edited, theirs = _patches(original)
+    _receipted(tmp_path, ours, edited)
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=_Asked())
+
+    view.make_play_client()
+
+    assert recorder.written == [play_client.default_target(original, WOTLK.name, tmp_path)]
+    assert ours.read_bytes() == b"MPQ ours", "removed from the original without being asked"
+    assert edited.exists() and theirs.exists()
+
+
+def test_the_dialog_states_the_full_copy_and_asks_before_it(qapp: object, tmp_path: Path) -> None:
+    """Across drives: the size of the full copy and the free space, and OK only once agreed."""
+    plan = play_client.BuildPlan(
+        linked=(Path("Data/common.MPQ"),),
+        copied=(Path("Wow.exe"),),
+        shared_bytes=15 * 1024**3,
+        own_bytes=200 * 1024**2,
+        same_volume=False,
+    )
+    offer = controller_view_module.PlayClientOffer(
+        original=tmp_path / "WoW",
+        target=tmp_path / "other drive" / "WoW (Yu'lon)",
+        plan=plan,
+        free_bytes=40 * 1024**3,
+        copies=(),
+        addons=(),
+        replan=lambda _t: plan,
+        free_space=lambda _t: 40 * 1024**3,
+    )
+    dialog = controller_view_module.PlayClientDialog(offer)
+
+    assert "15.2 GB" in dialog.size_label.text()
+    assert "40.0 GB free" in dialog.size_label.text()
+    assert dialog.remove_originals_check.isHidden(), "nothing receipted, nothing to offer"
+    assert not dialog.ok_button.isEnabled()
+    assert dialog.choice() is None
+    dialog.full_copy_check.setChecked(True)
+    assert dialog.ok_button.isEnabled()
+    choice = dialog.choice()
+    assert choice is not None and choice.full_copy
+
+
+# -- Play ----------------------------------------------------------------------
+
+
+def test_play_with_the_world_down_asks_starts_and_then_plays(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Yes)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = ""
+
+    view.play()
+
+    assert "The server is stopped. Start it first?" in boxes[0].text()  # type: ignore[attr-defined]
+    yes = boxes[0].button(qmb.StandardButton.Yes)  # type: ignore[attr-defined]
+    assert yes is not None and yes.text() == "Start and play"
+    assert any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls), "never started"
+    assert len(launched) == 1
+    assert launched[0].argv == (str(play / "Wow.exe"),)  # type: ignore[attr-defined]
+
+
+def test_play_with_the_world_down_and_cancel_starts_and_plays_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Cancel)
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+    ps.names = ""
+
+    view.play()
+
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+    assert launched == []
+
+
+def test_play_rewrites_the_realmlist_even_after_a_hand_edit(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    (play / "Data" / "enUS" / "realmlist.wtf").write_text(
+        "set realmlist somewhere.else\nset patchlist x\n", encoding="utf-8"
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play) == "set realmlist 127.0.0.1\nset patchlist x\n"
+    assert _realmlist(original) == "set realmlist logon.example.com\n"
+    assert len(launched) == 1
+
+
+@pytest.mark.parametrize("how", ["deleted", "unmarked"])
+def test_play_with_the_folder_gone_offers_to_make_it_again_and_starts_nothing(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+    how: str,
+) -> None:
+    """Carried finding 4: detected first, so nothing creates a bare `…(Yu'lon)/Data`."""
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    if how == "deleted":
+        shutil.rmtree(play)
+    else:
+        (play / play_client.MARKER).unlink()
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, asker=asker)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert str(play) in boxes[0].text()  # type: ignore[attr-defined]
+    remake = boxes[0].button(qmb.StandardButton.Yes)  # type: ignore[attr-defined]
+    assert remake is not None and remake.text() == "Make it again"
+    assert launched == []
+    assert asker.offers == [], "Cancel went on to make one"
+    assert how == "unmarked" or not play.exists(), "Play created the folder"
+
+
+def test_make_it_again_after_the_folder_was_deleted_offers_the_same_place(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    shutil.rmtree(play)
+    asker = _Asked()
+    view, recorder = _play_view(ps, tmp_path, original=original, play=play, asker=asker)
+
+    view.play()
+
+    assert [offer.target for offer in asker.offers] == [play]
+    assert play_client.read_marker(play) is not None
+    assert recorder.written == [play]
+    assert launched == []
+
+
+def test_a_patched_original_offers_refresh_before_play(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Yes)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    (original / "Data" / "common.MPQ").unlink()
+    (original / "Data" / "common.MPQ").write_bytes(b"MPQ the patched archive, longer")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert "common.MPQ" in boxes[0].text()  # type: ignore[attr-defined]
+    refresh = boxes[0].button(qmb.StandardButton.Yes)  # type: ignore[attr-defined]
+    assert refresh is not None and refresh.text() == "Refresh and play"
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"MPQ the patched archive, longer"
+    assert len(launched) == 1
+
+
+def test_play_keeps_a_modules_patch_out_of_the_refresh_question(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """Carried finding 5: `keep=module_kept_files(...)` reaches `stale()` from Play."""
+    boxes = _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Cancel)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    (original / "Data" / "patch-4.MPQ").write_bytes(b"MPQ the player's patch-4")
+    play = _built(original, tmp_path)
+    module_patch = play / "Data" / "patch-4.MPQ"
+    module_patch.unlink()
+    module_patch.write_bytes(b"MPQ a module's patch-4, of another size")
+    _receipted(tmp_path, module_patch)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert boxes == [], "the module's own patch was offered for refreshing"
+    assert len(launched) == 1
+    assert module_patch.read_bytes() == b"MPQ a module's patch-4, of another size"
+
+
+def test_a_launch_refusal_is_shown_in_its_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    from yulon import play_launch
+
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **_k: warned.append(a[2])
+    )
+    original = _game_client(tmp_path / "clients" / "WoW")
+    (original / "Wow.exe").unlink()
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert warned == [play_launch.NO_WOW_EXE.format(folder=play)]
+    assert launched == []
+
+
+def test_a_runner_that_cannot_be_started_says_what_to_do(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """`launch()` lets the OSError of starting the process through raw; Play words it."""
+    from yulon import play_launch
+
+    def refuse(_spec: object, **_k: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(play_launch, "launch", refuse)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **_k: warned.append(a[2])
+    )
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(warned) == 1
+    assert "Permission denied" in warned[0]
+    assert "nothing was started" in warned[0] and "press Play again" in warned[0]
+
+
+# -- Refresh and Delete ---------------------------------------------------------
+
+
+def test_refresh_from_the_menu_brings_a_patched_archive_back_in_step(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    (original / "Data" / "common.MPQ").unlink()
+    (original / "Data" / "common.MPQ").write_bytes(b"MPQ patched")
+    (play / "WTF").mkdir()
+    (play / "WTF" / "Config.wtf").write_text("SET the player's own\n", encoding="utf-8")
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+
+    view.refresh_play_client()
+
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"MPQ patched"
+    assert (play / "WTF" / "Config.wtf").read_text(encoding="utf-8") == "SET the player's own\n"
+    assert "common.MPQ" in view.play_label.text()
+
+
+def test_delete_removes_a_marked_folder_and_keeps_the_original(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    qmb = controller_view_module.QMessageBox
+
+    def yes(*a: object, **_k: object) -> object:
+        asked.append(str(a[2]))
+        return qmb.StandardButton.Yes
+
+    monkeypatch.setattr(qmb, "question", yes)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    view, recorder = _play_view(ps, tmp_path, original=original, play=play)
+    seen: list[tuple[str, object, object]] = []
+    view.play_client_dir_changed.connect(lambda g, s, p: seen.append((g, s, p)))
+
+    view.delete_play_client()
+
+    assert str(play) in asked[0] and str(original) in asked[0]
+    assert "keeps all its files" in asked[0]
+    assert not play.exists()
+    assert (original / "Data" / "common.MPQ").read_bytes() == b"MPQ the shared archive"
+    assert recorder.written == [None]
+    assert seen == [(WOTLK.id, tmp_path, None)]
+
+
+def test_delete_refuses_a_folder_without_the_marker(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    qmb = controller_view_module.QMessageBox
+    monkeypatch.setattr(qmb, "question", lambda *a, **k: qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(qmb, "warning", lambda *a, **_k: warned.append(a[2]))
+    play = tmp_path / "clients" / "Not Yu'lon's"
+    (play / "Data").mkdir(parents=True)
+    (play / "Data" / "common.MPQ").write_bytes(b"somebody's")
+    view, recorder = _play_view(ps, tmp_path, original=None, play=play)
+    seen: list[object] = []
+    view.play_client_dir_changed.connect(lambda *a: seen.append(a))
+
+    view.delete_play_client()
+
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"somebody's"
+    assert warned and "not made by Yu'lon" in warned[0]
+    assert recorder.written == [] and seen == []
+
+
+# -- the Steam entry, the modules and Remove server -----------------------------
+
+
+def test_add_to_steam_points_at_the_ready_to_play_client(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
+    pressed: list[Path | None] = []
+
+    def add(shortcuts: steam.SteamShortcuts) -> steam.AddReport:
+        pressed.append(shortcuts.client_dir)
+        return _report(tmp_path)
+
+    monkeypatch.setattr(steam.SteamShortcuts, "add", add)
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    original = _a_client(tmp_path / "WoW")
+    play = _a_client(tmp_path / "WoW (Yu'lon)")
+    services = ControllerServices.for_entry(
+        WOTLK, server_dir, client_dir=original, play_client_dir=play
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.add_to_steam()
+
+    assert pressed == [play]
+
+
+def _arac_manifest() -> Manifest:
+    return ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME).load("module", ARAC)
+
+
+def test_a_forgotten_original_does_not_block_a_client_module_once_there_is_a_play_client(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Carried finding 4: the applier writes into the ready-to-play client, so no notice."""
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+    manifest = _arac_manifest()
+
+    assert view._stopped_for_the_client(f"install {ARAC}", manifest) is False
+    row = view.modules_panel.row(ARAC)
+    assert row is not None
+    assert modules_panel.CHIP_NEEDS_CLIENT_FOLDER not in [c.label for c in row.data.chips]
+
+
+def test_a_module_install_into_a_vanished_play_client_is_stopped_first(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carried finding 4: `_client()`'s mkdir must never make a bare `…(Yu'lon)/Data`."""
+    boxes = _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Cancel)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    shutil.rmtree(play)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    manifest = _arac_manifest()
+
+    assert view._stopped_for_the_client(f"install {ARAC}", manifest) is True
+    assert "not started" in view.module_report.toPlainText()
+    assert str(play) in boxes[0].text()  # type: ignore[attr-defined]
+    assert not play.exists()
+
+
+def test_kept_files_go_by_the_recorded_client_folder_too(tmp_path: Path) -> None:
+    """Carried finding 2: the same origins as `_take_back` -- marker source AND recorded folder."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    elsewhere = _game_client(tmp_path / "clients" / "WoW moved")
+    patch = elsewhere / "Data" / "Patch-A.MPQ"
+    patch.write_bytes(b"MPQ a module's")
+    _receipted(tmp_path, patch)
+
+    assert controller_view_module.module_kept_files(tmp_path, play) == ()
+    assert controller_view_module.module_kept_files(tmp_path, play, elsewhere) == (
+        Path("Data") / "Patch-A.MPQ",
+    )
+
+
+class _PlanOnlyUninstall:
+    """An `Uninstall` seam that plans one fixed answer and records the run."""
+
+    def __init__(self, server_dir: Path) -> None:
+        self.server_dir = server_dir
+        self.runs: list[bool] = []
+        self.forget: Callable[[], None] = lambda: None
+
+    def plan(self) -> purge.PurgePlan:
+        return purge.PurgePlan(game="wow-wotlk", server_dir=self.server_dir, project="t-project")
+
+    def run(self, *, keep_characters: bool) -> purge.PurgeReport:
+        self.runs.append(keep_characters)
+        return purge.PurgeReport()
+
+
+@pytest.mark.parametrize("ticked", [True, False])
+def test_uninstall_offers_to_delete_the_ready_to_play_client_too(
+    qapp: object, ps: _Ps, tmp_path: Path, ticked: bool
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    services = replace(
+        _services(ps, tmp_path, []),
+        client_dir=original,
+        play_client_dir=play,
+        uninstall=_PlanOnlyUninstall(tmp_path),
+    )
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.show_uninstall_plan()
+    check = view.delete_play_client_check
+    assert not check.isHidden() and check.isChecked(), "offered ticked"
+    assert str(play) in check.text()
+    check.setChecked(ticked)
+    view.run_uninstall()
+
+    assert play.exists() is not ticked
+    assert (original / "Data" / "common.MPQ").exists()
+    if ticked:
+        assert f"ready-to-play client at {play} was deleted" in view.uninstall_label.text()
+
+
+def test_uninstall_offers_nothing_for_a_folder_without_the_marker(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    play = tmp_path / "clients" / "Not Yu'lon's"
+    (play / "Data").mkdir(parents=True)
+    services = replace(
+        _services(ps, tmp_path, []), play_client_dir=play, uninstall=_PlanOnlyUninstall(tmp_path)
+    )
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.show_uninstall_plan()
+    view.run_uninstall()
+
+    assert view.delete_play_client_check.isHidden()
+    assert (play / "Data").is_dir()

@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import enum
 import math
+import os
 import re
+import shutil
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -37,6 +39,8 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -75,6 +79,7 @@ from yulon import (
     party,
     platform,
     play_client,
+    play_launch,
     purge,
     reset_defaults,
     resources,
@@ -688,6 +693,306 @@ def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
     return said_yes(box.exec())
 
 
+# ------------------------------------------------- the ready-to-play client (T181)
+
+MAKE_PLAY_CLIENT_LABEL = "Make a ready-to-play client…"
+PLAY_LABEL = "Play"
+REFRESH_PLAY_CLIENT_LABEL = "Refresh from your original client"
+DELETE_PLAY_CLIENT_LABEL = "Delete ready-to-play client…"
+PLAY_CLIENT_ADDRESS = "127.0.0.1"
+"""What a ready-to-play client's realmlist names (spec §1, amended 2026-09-30).
+
+The client runs on the machine that runs Yu'lon, which is where the login server
+is (a WSL-resident one too, through WSL's localhost forwarding). The LAN or
+public address would be wrong here: a router often does not loop a machine's
+own public address back to it. The world address comes from the realm row the
+Networking tab manages, not from this file.
+"""
+
+PLAY_CLIENT_RUNNING = (
+    "Yu'lon is still writing this server's ready-to-play client. Closing now would "
+    "leave it half made or half refreshed. This window will close normally once it "
+    "finishes — the Server tab says what it is doing."
+)
+
+
+@dataclass(frozen=True)
+class PlayClientOffer:
+    """What the "Make a ready-to-play client…" dialog shows, worked out off the GUI thread.
+
+    `copies` are the receipts of this server's module files that Yu'lon put
+    into the player's own client (`apply.client_receipts()`, paths inside
+    `original`): the files "Also remove them from your original client" may
+    take back, by the receipt's hash. `addons` are the addon folders this
+    server's modules copied there, which were never receipted and are only
+    named. `replan` and `free_space` are for a folder changed in the dialog.
+    """
+
+    original: Path
+    target: Path
+    plan: play_client.BuildPlan
+    free_bytes: int | None
+    copies: tuple[apply_module.ClientCopy, ...]
+    addons: tuple[str, ...]
+    replan: Callable[[Path], play_client.BuildPlan]
+    free_space: Callable[[Path], int | None]
+
+    @property
+    def originals(self) -> tuple[Path, ...]:
+        return tuple(Path(copy.path) for copy in self.copies)
+
+
+@dataclass(frozen=True)
+class PlayClientChoice:
+    """The dialog's answer: where, whether a full copy was agreed to, and the removal box."""
+
+    target: Path
+    full_copy: bool
+    remove_originals: bool
+
+
+PlayClientAsker = Callable[[QWidget, PlayClientOffer], PlayClientChoice | None]
+"""How the tab asks the creation dialog: a seam, so a test answers it without a modal."""
+
+
+def _gb_text(size: int) -> str:
+    return f"{size / 1024**3:.1f} GB"
+
+
+def _free_bytes(path: Path) -> int | None:
+    """Free space on the drive `path` would be made on (its nearest existing folder)."""
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            try:
+                return shutil.disk_usage(candidate).free
+            except OSError:
+                return None
+    return None
+
+
+def _play_size_text(plan: play_client.BuildPlan, free: int | None) -> str:
+    """The size line: what is shared, what is its own, or the full copy and the free space."""
+    full = _gb_text(plan.shared_bytes + plan.own_bytes)
+    space = f", and that drive has {_gb_text(free)} free" if free is not None else ""
+    if plan.same_volume:
+        return (
+            f"{_gb_text(plan.shared_bytes)} of game files are shared with your client and "
+            f"take no extra space; its own files take {_size_text(plan.own_bytes)}{space}."
+        )
+    return (
+        "This folder is on another drive than your client, so its game files cannot be "
+        f"shared: it would be a full copy of {full}{space}."
+    )
+
+
+class PlayClientDialog(QDialog):
+    """The creation dialog (T181a §1, §3): where, how big, and the original's module files.
+
+    Built from a `PlayClientOffer` and read back through `choice()`, so a test
+    looks at the widgets without opening a modal. OK is live only for a folder
+    `plan()` accepted and, across drives, only once the full copy is agreed to.
+    """
+
+    def __init__(
+        self,
+        offer: PlayClientOffer,
+        *,
+        pick_dir: DirPicker = _qt_dir_picker,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Make a ready-to-play client")
+        self._offer = offer
+        self._pick_dir = pick_dir
+        self._plan: play_client.BuildPlan | None = offer.plan
+        self._free = offer.free_bytes
+        box = QVBoxLayout(self)
+        intro = QLabel(
+            f"Yu'lon makes a copy of your client at {offer.original} that is set up for "
+            "this server. Play starts it. Your own client is never changed for this server.",
+            self,
+        )
+        intro.setWordWrap(True)
+        box.addWidget(intro)
+        row = QHBoxLayout()
+        self.path_edit = QLineEdit(str(offer.target), self)
+        self.change_button = QPushButton("Change…", self)
+        row.addWidget(self.path_edit, 1)
+        row.addWidget(self.change_button)
+        box.addLayout(row)
+        self.size_label = QLabel("", self)
+        self.size_label.setWordWrap(True)
+        self.size_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.addWidget(self.size_label)
+        self.full_copy_check = QCheckBox("", self)
+        box.addWidget(self.full_copy_check)
+        self.originals_label = QLabel(
+            "Yu'lon put these files into your own client for this server's modules. The "
+            "ready-to-play client gets them too:",
+            self,
+        )
+        self.originals_label.setWordWrap(True)
+        self.originals_list = QListWidget(self)
+        for path in offer.originals:
+            self.originals_list.addItem(str(path))
+        self.remove_originals_check = QCheckBox("Also remove them from your original client", self)
+        self.remove_originals_check.setToolTip(
+            "Only files still exactly as Yu'lon copied them are removed; any file that "
+            "changed since is left where it is."
+        )
+        self.remove_originals_check.setChecked(False)
+        for widget in (self.originals_label, self.originals_list, self.remove_originals_check):
+            widget.setVisible(bool(offer.originals))
+            box.addWidget(widget)
+        self.addons_label = QLabel(
+            "Addons Yu'lon copied into your own client (it never deletes addons; you can "
+            "delete these yourself): " + ", ".join(offer.addons),
+            self,
+        )
+        self.addons_label.setWordWrap(True)
+        self.addons_label.setVisible(bool(offer.addons))
+        box.addWidget(self.addons_label)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
+        )
+        ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        assert ok is not None
+        ok.setText("Make it")
+        self.ok_button = ok
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        box.addWidget(buttons)
+        self.path_edit.editingFinished.connect(self._path_edited)
+        self.change_button.clicked.connect(self._change)
+        self.full_copy_check.toggled.connect(self._update_ok)
+        self._show_plan()
+
+    def _path_edited(self) -> None:
+        self._retarget(Path(self.path_edit.text().strip()))
+
+    def _change(self) -> None:
+        """Pick the folder to put it in; the name stays the one shown."""
+        current = Path(self.path_edit.text().strip())
+        chosen = self._pick_dir(
+            self, "Choose where to put the ready-to-play client", current.parent
+        )
+        if chosen is None:
+            return
+        target = chosen / current.name
+        self.path_edit.setText(str(target))
+        self._retarget(target)
+
+    def _retarget(self, target: Path) -> None:
+        try:
+            self._plan = self._offer.replan(target)
+        except (play_client.PlayClientError, OSError) as exc:
+            self._plan = None
+            self.size_label.setText(str(exc))
+        self._free = self._offer.free_space(target)
+        self.full_copy_check.setChecked(False)
+        self._show_plan()
+
+    def _show_plan(self) -> None:
+        plan = self._plan
+        if plan is None:
+            self.full_copy_check.setVisible(False)
+            self._update_ok()
+            return
+        self.size_label.setText(_play_size_text(plan, self._free))
+        full = _gb_text(plan.shared_bytes + plan.own_bytes)
+        if plan.same_volume:
+            # A drive that cannot share files at all (exFAT, FAT32) is only found
+            # out by trying, so the agreement is offered here too, unticked.
+            self.full_copy_check.setText(
+                f"If this drive cannot share files, make a full copy instead ({full})"
+            )
+        else:
+            self.full_copy_check.setText(f"Make a full copy ({full})")
+        self.full_copy_check.setVisible(True)
+        self._update_ok()
+
+    def _update_ok(self) -> None:
+        self.ok_button.setEnabled(self.choice() is not None)
+
+    def choice(self) -> PlayClientChoice | None:
+        """What OK would make, or None while the folder is refused or the copy not agreed."""
+        plan = self._plan
+        if plan is None:
+            return None
+        full_copy = self.full_copy_check.isChecked()
+        if not plan.same_volume and not full_copy:
+            return None
+        return PlayClientChoice(
+            target=Path(self.path_edit.text().strip()),
+            full_copy=full_copy,
+            remove_originals=bool(self._offer.originals)
+            and self.remove_originals_check.isChecked(),
+        )
+
+
+def ask_play_client(
+    parent: QWidget, offer: PlayClientOffer, pick_dir: DirPicker = _qt_dir_picker
+) -> PlayClientChoice | None:
+    """The real `PlayClientAsker`: the dialog, modal; None for Cancel."""
+    dialog = PlayClientDialog(offer, pick_dir=pick_dir, parent=parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
+    return dialog.choice()
+
+
+def _ask_with(
+    parent: QWidget, title: str, text: str, yes: str, save: str | None = None
+) -> str | None:
+    """A question with relabelled standard buttons, Cancel the default: "yes", "save" or None.
+
+    `ask_backup_choice()`'s shape for the same reasons: a relabelled standard
+    button answers `exec()` with a value, and `No` is never one of them, so the
+    suite's modal guard (which answers `No`) can never walk into an action.
+    """
+    buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+    if save is not None:
+        buttons |= QMessageBox.StandardButton.Save
+    box = FittedMessageBox(QMessageBox.Icon.Question, title, text, buttons, parent)
+    _relabel(box, QMessageBox.StandardButton.Yes, yes)
+    if save is not None:
+        _relabel(box, QMessageBox.StandardButton.Save, save)
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    answer = box.exec()
+    if answer == QMessageBox.StandardButton.Yes:
+        return "yes"
+    if save is not None and answer == QMessageBox.StandardButton.Save:
+        return "save"
+    return None
+
+
+@dataclass(frozen=True)
+class _MadePlayClient:
+    """What a finished "Make…" did, read on the GUI thread once the build is over."""
+
+    target: Path
+    realmlist_problem: str | None
+    removed: tuple[str, ...]
+    left: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _UninstallOutcome:
+    """An uninstall's report, and what became of its ready-to-play client (None: not asked)."""
+
+    report: purge.PurgeReport
+    play_client: str | None
+
+
+def _delete_with_the_server(play: Path, *, game: str, server_dir: Path) -> str:
+    """Delete a removed server's ready-to-play client; the sentence that says how it went."""
+    try:
+        play_client.delete(play, game=game, server_dir=server_dir)
+    except play_client.PlayClientError as exc:
+        return str(exc)
+    return f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
+
+
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
 """Apply the SQL of the modules on disk, reporting the importer's lines to a sink.
 
@@ -1203,7 +1508,9 @@ def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path,
     return tuple(found)
 
 
-def module_kept_files(server_dir: Path, play_client_dir: Path) -> tuple[Path, ...]:
+def module_kept_files(
+    server_dir: Path, play_client_dir: Path, client_dir: Path | None = None
+) -> tuple[Path, ...]:
     """The module client files in a ready-to-play client, relative to it, sorted (T181).
 
     What Play and Refresh hand `play_client.stale()`/`refresh()` as `keep`: a
@@ -1212,8 +1519,12 @@ def module_kept_files(server_dir: Path, play_client_dir: Path) -> tuple[Path, ..
     server's installed modules, moved onto the ready-to-play client the way a
     Remove moves them (`apply.rebased()`), so a patch installed into the player's
     own client before the switch counts too.
+
+    `client_dir` is the install's recorded client folder: the origins are the
+    ones `for_entry()` hands the applier (`_originals_of()`), so a receipt a
+    Remove would take back from the ready-to-play client is kept here too.
     """
-    origins = _originals_of(play_client_dir, None)
+    origins = _originals_of(play_client_dir, client_dir)
     found: set[Path] = set()
     for copy in apply_module.client_receipts(server_dir):
         path = apply_module.rebased(Path(copy.path), play_client_dir, origins)
@@ -5064,6 +5375,14 @@ class ControllerView(QWidget):
     and `main.py` holds no other way back to this closure's key.
     """
 
+    play_client_dir_changed = Signal(str, object, object)  # game id, server_dir, play dir (T181)
+    """This install's ready-to-play client was made, recorded or deleted -- rebuild the tab.
+
+    `client_dir_changed`'s twin for the same reason: the folder is baked into
+    the applier and the Steam entry at construction (`for_entry()`), so only a
+    rebuilt tab writes modules into the new folder (or back into the original).
+    """
+
     def __init__(
         self,
         entry: CatalogEntry,
@@ -5075,11 +5394,26 @@ class ControllerView(QWidget):
         link_asker: LinkAsker | None = None,
         folder_asker: FolderAsker | None = None,
         pick_client_dir: DirPicker = _qt_dir_picker,
+        play_client_asker: PlayClientAsker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.entry = entry
         self.services = services
+        # T181's creation dialog, a seam for `prompt_asker`'s reason. The real
+        # one is the dialog, with this tab's own folder picker behind "Change…".
+        self._play_client_asker: PlayClientAsker = play_client_asker or (
+            lambda parent, offer: ask_play_client(parent, offer, self._pick_client_dir)
+        )
+        # A Make…, Refresh or Delete writing the ready-to-play client: it holds
+        # the close (`busy_reason()`) the way the import does.
+        self._play_client_running = False
+        # Play's two waits: a Start it asked for, and a Refresh it asked for.
+        self._play_after_start = False
+        self._play_after_refresh = False
+        # Whether the uninstall plan on screen offered to delete the
+        # ready-to-play client (its marker was this server's when it was read).
+        self._play_delete_offered = False
         # T133: what WSL last said about this server's distro. Every tab reads
         # the install's files as it is built, and reading
         # `\\wsl.localhost\<distro>` starts a stopped distro, so a WSL install
@@ -5428,6 +5762,13 @@ class ControllerView(QWidget):
             self.forget_client_dir_button.setVisible(has_client)
             self.forget_client_dir_button.clicked.connect(self.forget_client_dir)
             self.client_dir_label.setVisible(True)
+            if not has_client and self.services.play_client_dir is None:
+                # T181: the ready-to-play client is made from this folder, so
+                # its button is hidden until there is one; this says where it went.
+                self.set_client_dir_button.setToolTip(
+                    "Set your own client folder first: Yu'lon makes this server's "
+                    "ready-to-play client from it, and then offers Play."
+                )
         self.client_dir_label.setText(_client_dir_row_text(self.services.client_dir))
         # Why a whole label and not a dialog: the stop path's refusals are
         # paragraphs naming containers, projects and the file to edit, and they
@@ -5512,6 +5853,14 @@ class ControllerView(QWidget):
         )
         self.keep_characters_check.setChecked(False)  # owner answer 2: unticked by default
         self.keep_characters_check.setVisible(False)
+        # T181 §4: Remove server offers to delete its ready-to-play client too.
+        # Ticked by default, and shown only once a plan is on screen and the
+        # folder still carries this server's marker (`_uninstall_plan_ready()`).
+        self.delete_play_client_check = QCheckBox(
+            f"Also delete its ready-to-play client at {self.services.play_client_dir}", tab
+        )
+        self.delete_play_client_check.setChecked(True)
+        self.delete_play_client_check.setVisible(False)
         self.uninstall_confirm_button = QPushButton("Uninstall this server", tab)
         self.uninstall_confirm_button.setProperty("danger", True)
         self.uninstall_confirm_button.setVisible(False)
@@ -5533,11 +5882,13 @@ class ControllerView(QWidget):
             self.steam_button = QPushButton("Add to Steam\u2026", tab)
             self.steam_button.clicked.connect(self.add_to_steam)
             self.steam_label.setVisible(True)
+        self._build_play_controls(tab)
         if self.services.uninstall is not None:
             self.uninstall_button = QPushButton("Uninstall\u2026", tab)
             self.uninstall_button.clicked.connect(self.show_uninstall_plan)
             self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
             self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
+            self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
             self.keep_characters_check.setVisible(True)
             self.uninstall_label.setVisible(True)
         self.start_button.clicked.connect(self.start_server)
@@ -5549,13 +5900,13 @@ class ControllerView(QWidget):
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
         row = QHBoxLayout()
-        for b in (
-            self.start_button,
-            self.stop_button,
-            self.refresh_button,
-            self.remove_button,
-            self.repair_button,
-        ):
+        for b in (self.start_button, self.stop_button):
+            row.addWidget(b)
+        # T181: beside Start and Stop, the third thing this row does with the server.
+        if self.play_button is not None and self.play_menu_button is not None:
+            row.addWidget(self.play_button)
+            row.addWidget(self.play_menu_button)
+        for b in (self.refresh_button, self.remove_button, self.repair_button):
             row.addWidget(b)
         if self.steam_button is not None:
             row.addWidget(self.steam_button)
@@ -5634,6 +5985,7 @@ class ControllerView(QWidget):
         box.addWidget(self.enable_channel_button)
         box.addWidget(self.repair_channel_button)
         box.addLayout(row)
+        box.addWidget(self.play_label)
         box.addWidget(self.steam_label)
         box.addWidget(self.problem_label)
         box.addWidget(self.stop_anyway_button)
@@ -5643,6 +5995,7 @@ class ControllerView(QWidget):
         if self.uninstall_button is not None:
             box.addWidget(self.uninstall_button)
             box.addWidget(self.keep_characters_check)
+            box.addWidget(self.delete_play_client_check)
             box.addWidget(self.uninstall_label)
             box.addWidget(self.uninstall_confirm_button)
         box.addStretch(1)
@@ -5679,6 +6032,8 @@ class ControllerView(QWidget):
             return TIME_ZONE_RUNNING
         if self._uninstall_running:
             return UNINSTALL_RUNNING
+        if self._play_client_running:
+            return PLAY_CLIENT_RUNNING
         if self._module_sql_running:
             return (
                 "The module importer is still running. It cannot be stopped, and closing now "
@@ -6433,6 +6788,13 @@ class ControllerView(QWidget):
                 self.set_client_dir_button.setEnabled(False)
             if self.forget_client_dir_button is not None:
                 self.forget_client_dir_button.setEnabled(False)
+            # T181: Play may Start, and Make…/Refresh/Delete write the folder a
+            # module install writes into and race `main.py`'s rebuild.
+            if self.play_button is not None:
+                self.play_button.setEnabled(False)
+            if self.play_menu_button is not None:
+                self.play_menu_button.setEnabled(False)
+            self.delete_play_client_check.setEnabled(False)
             self.rebuild_action.setEnabled(False)
             # And both T64 presses, for the rebuild's reason exactly: each of
             # them IS that rebuild with a fetch in front of it. Disabled and not
@@ -6547,6 +6909,11 @@ class ControllerView(QWidget):
                 self.set_client_dir_button.setEnabled(True)
             if self.forget_client_dir_button is not None:
                 self.forget_client_dir_button.setEnabled(True)
+            if self.play_button is not None:
+                self.play_button.setEnabled(True)
+            if self.play_menu_button is not None:
+                self.play_menu_button.setEnabled(True)
+            self.delete_play_client_check.setEnabled(True)
             self.rebuild_action.setEnabled(self.services.rebuild is not None)
             # Back to what this install can do, never unconditionally, and then
             # the version line is re-read: the job that just finished may BE the
@@ -6599,6 +6966,10 @@ class ControllerView(QWidget):
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+        if self._play_after_start:
+            # T181: Play asked for this Start ("Start and play"); it is done.
+            self._play_after_start = False
+            self._play_check_stale()
 
     def _say_zone_problem(self) -> str | None:
         """T171: what the last Start could not put right about the zone file, on the Server tab.
@@ -6789,6 +7160,9 @@ class ControllerView(QWidget):
     @Slot(object)
     def _start_failed(self, exc: object) -> None:
         self._set_busy(False)
+        if self._play_after_start:
+            self._play_after_start = False
+            self._say_play("The server did not start, so World of Warcraft was not started.")
         if isinstance(exc, PortConflictError):
             self._offer_to_stop_the_other_server(exc)
             return
@@ -7065,6 +7439,8 @@ class ControllerView(QWidget):
             return
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self._play_delete_offered = False
+        self.delete_play_client_check.setVisible(False)
         self.uninstall_label.setText("Working out what would be removed\u2026")
         self._run(self.services.uninstall.plan, self._uninstall_plan_ready, self._uninstall_failed)
 
@@ -7082,6 +7458,14 @@ class ControllerView(QWidget):
             return
         self._uninstall_plan = result
         self.uninstall_confirm_button.setVisible(True)
+        # T181 §4: offered only for a folder that still carries this server's
+        # marker -- `play_client.delete()` would refuse any other, and an offer
+        # the press cannot keep is worse than none.
+        play = self.services.play_client_dir
+        self._play_delete_offered = play is not None and self._is_this_servers(
+            play_client.read_marker(play)
+        )
+        self.delete_play_client_check.setVisible(self._play_delete_offered)
         self._redraw_uninstall_plan()
 
     @Slot()
@@ -7119,6 +7503,15 @@ class ControllerView(QWidget):
             lines.append(f"  volumes removed: {', '.join(plan.volumes) or 'none'}")
             lines.append("  your characters go with the database volume.")
         lines.append("It does not touch " + "; ".join(plan.left_behind) + ".")
+        play = self.services.play_client_dir
+        if self._play_delete_offered and play is not None:
+            if self.delete_play_client_check.isChecked():
+                lines.append(
+                    f"It also deletes its ready-to-play client at {play}; your own client "
+                    "keeps all its files."
+                )
+            else:
+                lines.append(f"It leaves its ready-to-play client at {play} where it is.")
         if plan.problems:
             lines.append("Could not determine: " + "; ".join(plan.problems))
         self.uninstall_label.setText("\n".join(lines))
@@ -7144,14 +7537,29 @@ class ControllerView(QWidget):
             return
         keep = self.keep_characters_check.isChecked()
         uninstall = self.services.uninstall
+        play = self.services.play_client_dir
+        delete_play = (
+            play
+            if self._play_delete_offered and self.delete_play_client_check.isChecked()
+            else None
+        )
+        game, server_dir = self.entry.id, self.services.controller.server_dir
+
+        def work() -> _UninstallOutcome:
+            report = uninstall.run(keep_characters=keep)
+            # After the server is gone, never before: a removal that failed
+            # keeps the tab, and the tab still plays from this folder.
+            said = (
+                _delete_with_the_server(delete_play, game=game, server_dir=server_dir)
+                if delete_play is not None
+                else None
+            )
+            return _UninstallOutcome(report, said)
+
         self._uninstall_running = True
         self._set_busy(True)
         self.uninstall_label.setText("Uninstalling\u2026")
-        self._run(
-            lambda: uninstall.run(keep_characters=keep),
-            self._uninstall_done,
-            self._uninstall_failed,
-        )
+        self._run(work, self._uninstall_done, self._uninstall_failed)
 
     @Slot(object)
     def _uninstall_done(self, result: object) -> None:
@@ -7159,7 +7567,13 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
-        report = result if isinstance(result, purge.PurgeReport) else purge.PurgeReport()
+        play_said: str | None = None
+        if isinstance(result, _UninstallOutcome):
+            report, play_said = result.report, result.play_client
+        elif isinstance(result, purge.PurgeReport):
+            report = result
+        else:
+            report = purge.PurgeReport()
         # T158: a load wait's forced-stop warning goes first, as on a Stop.
         forced, self._stop_forced = self._stop_forced, ""
         said = [part for part in (forced,) if part]
@@ -7184,6 +7598,8 @@ class ControllerView(QWidget):
         elif report.snapshot.problem:
             said.append(f"No log could be saved: {report.snapshot.problem}")
         said.extend(report.warnings)
+        if play_said is not None:
+            said.append(play_said)
         self.uninstall_label.setText(" ".join(said))
         # Last, and only on success: the window drops this tab on this signal,
         # which destroys the view. Nothing may touch `self` after it.
@@ -7352,6 +7768,533 @@ class ControllerView(QWidget):
             self._client_dir_refused(f"Could not forget the client folder: {exc}")
             return
         self.client_dir_changed.emit(self.entry.id, self.services.controller.server_dir, None)
+
+    # ------------------------------------------- the ready-to-play client (T181)
+    #
+    # Make…, Play, Refresh and Delete. Everything that reads or writes the folder
+    # runs through `_run()`: a build is gigabytes when it is a full copy, and
+    # even a listing of a client walks thousands of files. Make…, Refresh and
+    # Delete hold `_set_busy()` and the close (`busy_reason()`) while they write.
+
+    def _build_play_controls(self, tab: QWidget) -> None:
+        """The Play button, its ▾ menu and its label (T181).
+
+        Built only where `main.py` hands down the write seam, the client-folder
+        row's rule: Make… would make a folder nothing could record. Hidden while
+        the install has neither its own client folder (nothing to make one
+        from; the row's "Set client folder…" says so) nor a ready-to-play client.
+        """
+        self.play_button: QPushButton | None = None
+        self.play_menu_button: QPushButton | None = None
+        self.play_menu = QMenu(tab)
+        self.play_menu.setToolTipsVisible(True)
+        self.refresh_play_client_action = self.play_menu.addAction(REFRESH_PLAY_CLIENT_LABEL)
+        self.refresh_play_client_action.setToolTip(
+            "Bring the game files and Wow.exe back in step with your own client after a "
+            "patch. Your settings (WTF) and addons (Interface) are never touched."
+        )
+        self.refresh_play_client_action.triggered.connect(self.refresh_play_client)
+        self.delete_play_client_action = self.play_menu.addAction(DELETE_PLAY_CLIENT_LABEL)
+        self.delete_play_client_action.setToolTip(
+            "Delete the ready-to-play client. Your own client keeps all its files. Asks first."
+        )
+        self.delete_play_client_action.triggered.connect(self.delete_play_client)
+        self.play_label = QLabel("", tab)
+        self.play_label.setWordWrap(True)
+        self.play_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.play_label.setVisible(False)
+        if self.services.set_play_client_dir is None:
+            return
+        has_play = self.services.play_client_dir is not None
+        self.play_button = QPushButton(PLAY_LABEL if has_play else MAKE_PLAY_CLIENT_LABEL, tab)
+        if has_play:
+            self.play_button.setIcon(dadcraft_icon("play", COLOR_GOLD_LIGHT, 14))
+            self.play_button.setToolTip(
+                "Start World of Warcraft from this server's ready-to-play client, pointed "
+                "at this server. Starts the server first if it is stopped (asks)."
+            )
+        else:
+            self.play_button.setToolTip(
+                "Make a copy of your client set up for this server, without changing your "
+                "own client. Game files are shared, so it takes little extra space."
+            )
+        self.play_button.clicked.connect(self.play)
+        self.play_button.setVisible(has_play or self.services.client_dir is not None)
+        self.play_menu_button = QPushButton("▾", tab)
+        self.play_menu_button.setToolTip("More for the ready-to-play client")
+        self.play_menu_button.setMenu(self.play_menu)
+        self.play_menu_button.setVisible(has_play)
+        self.play_label.setVisible(True)
+
+    def _say_play(self, text: str) -> None:
+        self.play_label.setText(text)
+
+    def _play_refused(self, message: str) -> None:
+        """A Play-side refusal, on the label, in the log and in front of the player."""
+        self._say_play(message)
+        self.action_failed.emit(message)
+        QMessageBox.warning(self, self.entry.name, message)
+
+    def _is_this_servers(self, marker: play_client.Marker | None) -> bool:
+        return (
+            marker is not None
+            and marker.game == self.entry.id
+            and marker.server_dir == self.services.controller.server_dir
+        )
+
+    def _usable_play_client(self, *, offer_remake: bool = True) -> play_client.Marker | None:
+        """The recorded ready-to-play client's marker, or None (after offering to remake it).
+
+        Asked before Play, Refresh and a module install touch the folder:
+        deleted, moved or unmarked outside Yu'lon, it is not this server's any
+        more, and writing into it would make a bare `…(Yu'lon)/Data` or change a
+        folder Yu'lon cannot vouch for.
+        """
+        play = self.services.play_client_dir
+        if play is None:
+            return None
+        marker = play_client.read_marker(play)
+        if self._is_this_servers(marker):
+            return marker
+        if offer_remake:
+            self._offer_remake(play)
+        return None
+
+    def _play_client_gone_text(self, play: Path) -> str:
+        if not os.path.lexists(play):
+            return (
+                f"The ready-to-play client at {play} is gone: it was deleted or moved "
+                "outside Yu'lon. Nothing was started or changed."
+            )
+        return (
+            f"The folder at {play} is no longer this server's ready-to-play client (its "
+            f"{play_client.MARKER} is missing or names another server), so Yu'lon will "
+            "not use or change it. Nothing was started or changed."
+        )
+
+    def _offer_remake(self, play: Path) -> None:
+        said = self._play_client_gone_text(play)
+        self._say_play(said)
+        answer = _ask_with(
+            self,
+            "The ready-to-play client is gone",
+            f"{said}\n\nMake a ready-to-play client for this server again?",
+            "Make it again",
+        )
+        if answer == "yes":
+            self.make_play_client()
+
+    # -- Make… -------------------------------------------------------------
+
+    @Slot()
+    def make_play_client(self) -> None:
+        """Ask where and how, then build this server's ready-to-play client (T181 §1, §3)."""
+        if self.services.set_play_client_dir is None or self._play_client_running:
+            return
+        if self._client_dir_busy():
+            return
+        original = self.services.client_dir
+        if original is None:
+            QMessageBox.information(
+                self,
+                MAKE_PLAY_CLIENT_LABEL,
+                "A ready-to-play client is made from your own client folder, and none is "
+                "set for this server. Press “Set client folder…” on this tab "
+                "first. Nothing was created.",
+            )
+            return
+        server_dir = self.services.controller.server_dir
+        recorded = self.services.play_client_dir
+        if recorded is not None and not os.path.lexists(recorded):
+            target = recorded  # made again where it was
+        else:
+            target = play_client.default_target(original, self.entry.name, server_dir)
+        addons = self._addons_in(original)
+        self._say_play("Looking at your client…")
+        self._run(
+            lambda: self._plan_play_client(original, target, addons),
+            self._play_plan_ready,
+            self._play_client_job_failed,
+        )
+
+    def _addons_in(self, original: Path) -> tuple[str, ...]:
+        """Addon folders this server's installed modules put into `original` (never receipted)."""
+        installed = self._installed_clones() or {}
+        names: list[str] = []
+        for family, ids in installed.items():
+            for module_id in sorted(ids):
+                manifest = self._manifests.get((family, module_id))
+                if manifest is None:
+                    continue
+                for step in manifest.client:
+                    name = step.name or Path(step.src).name
+                    if step.dest == "addons" and (original / "Interface/AddOns" / name).is_dir():
+                        names.append(name)
+        return tuple(sorted(set(names)))
+
+    def _replan(self, original: Path, target: Path) -> play_client.BuildPlan:
+        """`plan()` for a folder, after clearing this server's crashed attempt there."""
+        server_dir = self.services.controller.server_dir
+        play_client.clean_partials(target, game=self.entry.id, server_dir=server_dir)
+        return play_client.plan(original, target, server_dir=server_dir)
+
+    def _plan_play_client(
+        self, original: Path, target: Path, addons: tuple[str, ...]
+    ) -> PlayClientOffer | Path:
+        """Off the GUI thread: the offer the dialog shows, or `target` if it is already made.
+
+        A folder already carrying this server's marker (made by an earlier
+        press whose record could not be saved) is recorded as it is, not built
+        again: `create()` would refuse it.
+        """
+        server_dir = self.services.controller.server_dir
+        if self._is_this_servers(play_client.read_marker(target)):
+            return target
+        build = self._replan(original, target)
+        copies = tuple(
+            copy
+            for copy in apply_module.client_receipts(server_dir)
+            if Path(copy.path).is_relative_to(original) and Path(copy.path).is_file()
+        )
+        return PlayClientOffer(
+            original=original,
+            target=target,
+            plan=build,
+            free_bytes=_free_bytes(target.parent),
+            copies=copies,
+            addons=addons,
+            replan=lambda chosen: self._replan(original, chosen),
+            free_space=lambda chosen: _free_bytes(chosen.parent),
+        )
+
+    @Slot(object)
+    def _play_plan_ready(self, result: object) -> None:
+        if isinstance(result, Path):
+            self._record_play_client(
+                result, [f"This server's ready-to-play client at {result} is used again."]
+            )
+            return
+        if not isinstance(result, PlayClientOffer):  # pragma: no cover - defensive
+            return
+        offer = result
+        choice = self._play_client_asker(self, offer)
+        if choice is None:
+            self._say_play("No ready-to-play client was made.")
+            return
+        copies = offer.copies if choice.remove_originals else ()
+        self._play_client_running = True
+        self._set_busy(True)
+        self._say_play(f"Making the ready-to-play client at {choice.target}…")
+        self._run(
+            lambda: self._build_play_client(offer.original, choice, copies),
+            self._play_client_made,
+            self._play_client_job_failed,
+        )
+
+    def _build_play_client(
+        self,
+        original: Path,
+        choice: PlayClientChoice,
+        copies: tuple[apply_module.ClientCopy, ...],
+    ) -> _MadePlayClient:
+        """Off the GUI thread: build, point it at this server, then the asked-for removals.
+
+        The removals come last and only after a build that succeeded: a file is
+        taken out of the original only once the ready-to-play client holds it.
+        """
+        play_client.create(
+            original,
+            choice.target,
+            game=self.entry.id,
+            server_dir=self.services.controller.server_dir,
+            allow_full_copy=choice.full_copy,
+        )
+        problem: str | None = None
+        try:
+            networking.write_client_realmlist(
+                choice.target, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+            )
+        except OSError as exc:
+            problem = str(exc)
+        removed, left = apply_module.take_back_files(copies)
+        return _MadePlayClient(choice.target, problem, removed, left)
+
+    @Slot(object)
+    def _play_client_made(self, result: object) -> None:
+        self._play_client_running = False
+        self._set_busy(False)
+        if not isinstance(result, _MadePlayClient):  # pragma: no cover - defensive
+            return
+        said = [f"The ready-to-play client is at {result.target}. Press Play to start it."]
+        if result.realmlist_problem is not None:
+            said.append(
+                f"Its realmlist could not be written yet ({result.realmlist_problem}); "
+                "Play writes it again first."
+            )
+        if result.removed:
+            said.append("Removed from your own client: " + "; ".join(result.removed) + ".")
+        if result.left:
+            said.append("Left in your own client: " + "; ".join(result.left) + ".")
+        self._record_play_client(result.target, said)
+
+    def _record_play_client(self, target: Path, said: list[str]) -> None:
+        """Remember the folder for this install, say so, and have the tab rebuilt over it."""
+        setter = self.services.set_play_client_dir
+        if setter is None:  # pragma: no cover - the button is not built without it
+            return
+        try:
+            setter(target)
+        except OSError as exc:
+            self._play_refused(
+                f"The ready-to-play client was made at {target}, but Yu'lon could not "
+                f"remember it: {exc}. Press “{MAKE_PLAY_CLIENT_LABEL}” again to "
+                "use it."
+            )
+            return
+        logger.info(f"{self.entry.id}: ready-to-play client recorded at {target}")
+        QMessageBox.information(self, "Ready-to-play client", "\n\n".join(said))
+        # Last: main.py drops this tab on it.
+        self.play_client_dir_changed.emit(
+            self.entry.id, self.services.controller.server_dir, target
+        )
+
+    @Slot(object)
+    def _play_client_job_failed(self, exc: object) -> None:
+        """Make…, Refresh or Delete stopped; `PlayClientError`'s text says what to do next."""
+        self._play_client_running = False
+        self._play_after_refresh = False
+        self._set_busy(False)
+        if not isinstance(exc, play_client.PlayClientError):
+            logger.warning(f"{self.entry.id}: ready-to-play client: {exc!r}")
+        self._play_refused(str(exc))
+
+    # -- Play --------------------------------------------------------------
+
+    @Slot()
+    def play(self) -> None:
+        """Start the game from this server's ready-to-play client (T181 §2).
+
+        In order: the folder must still be this server's (else the offer to
+        make it again); the server must run (else "Start it first?"); a patched
+        original offers Refresh; then the realmlist is written again and the
+        game is started, detached.
+        """
+        if self.services.set_play_client_dir is None:
+            return
+        if self.services.play_client_dir is None:
+            self.make_play_client()
+            return
+        if self._client_dir_busy():
+            return
+        if self._usable_play_client() is None:
+            return
+        self._say_play("Checking that the server is running…")
+        self._run(self.services.controller.status, self._play_status_read, self._play_failed)
+
+    @Slot(object)
+    def _play_status_read(self, status: object) -> None:
+        if isinstance(status, InstallStatus) and status.all_running:
+            self._play_check_stale()
+            return
+        answer = _ask_with(
+            self,
+            "Start the server?",
+            "The server is stopped. Start it first?",
+            "Start and play",
+        )
+        if answer != "yes":
+            self._say_play("Nothing was started.")
+            return
+        self._play_after_start = True
+        self.start_server()
+
+    def _play_check_stale(self) -> None:
+        marker = self._usable_play_client()
+        play = self.services.play_client_dir
+        if marker is None or play is None:
+            return
+        server_dir, client_dir = self.services.controller.server_dir, self.services.client_dir
+        self._say_play("Comparing the ready-to-play client with your own client…")
+        self._run(
+            lambda: play_client.stale(
+                play,
+                marker.source_client_dir,
+                keep=module_kept_files(server_dir, play, client_dir),
+            ),
+            self._play_stale_read,
+            self._play_failed,
+        )
+
+    @Slot(object)
+    def _play_stale_read(self, found: object) -> None:
+        names = [str(rel) for rel in found] if isinstance(found, tuple) else []
+        if not names:
+            self._play_launch()
+            return
+        answer = _ask_with(
+            self,
+            "Your client was patched",
+            f"These files of your own client changed since the ready-to-play client was "
+            f"made: {', '.join(names)}. Refresh it from your original client first? "
+            "(Your settings and addons are not touched.)",
+            "Refresh and play",
+            "Play without refreshing",
+        )
+        if answer == "save":
+            self._play_launch()
+        elif answer == "yes":
+            self._play_after_refresh = True
+            self.refresh_play_client()
+        else:
+            self._say_play("Nothing was started.")
+
+    def _play_launch(self) -> None:
+        play = self.services.play_client_dir
+        if play is None or self._usable_play_client() is None:
+            return
+        self._say_play("Starting World of Warcraft…")
+        self._run(lambda: self._launch(play), self._play_launched, self._play_failed)
+
+    def _launch(self, play: Path) -> None:
+        """Off the GUI thread: the realmlist again, then the game, detached.
+
+        Every refusal is a `LaunchRefusal` whose text says what to do next. An
+        `OSError` from starting the process (a Proton that is not executable, a
+        Wine that went away) comes through `launch()` raw and is worded here.
+        """
+        try:
+            networking.write_client_realmlist(
+                play, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+            )
+        except OSError as exc:
+            raise play_launch.LaunchRefusal(
+                f"The realmlist in {play} could not be written ({exc}), so nothing was "
+                "started. Check that you can write to that folder, then press Play again."
+            ) from exc
+        spec = play_launch.launch_spec(
+            play,
+            game=self.entry.id,
+            server_dir=self.services.controller.server_dir,
+            os_name=platform.detect(),
+            home=Path.home(),
+            config_dir=platform.config_dir(),
+        )
+        try:
+            play_launch.launch(spec)
+        except OSError as exc:
+            raise play_launch.LaunchRefusal(
+                f"Yu'lon could not start {spec.argv[0]} ({exc.strerror or exc}), so nothing "
+                "was started. If that is Proton or Wine, check that it is still installed "
+                "and can be run (reinstall it if it was moved), then press Play again."
+            ) from exc
+        logger.info(f"{self.entry.id}: started {' '.join(spec.argv)} in {spec.cwd}")
+
+    @Slot(object)
+    def _play_launched(self, _result: object) -> None:
+        self._say_play("World of Warcraft is starting. Closing Yu'lon does not close it.")
+
+    @Slot(object)
+    def _play_failed(self, exc: object) -> None:
+        self._play_after_refresh = False
+        if not isinstance(exc, play_launch.LaunchRefusal):
+            logger.warning(f"{self.entry.id}: Play: {exc!r}")
+            exc = (
+                f"Play stopped: {exc}. Nothing was started. Press Refresh on this tab, then "
+                "Play again."
+            )
+        self._play_refused(str(exc))
+
+    # -- Refresh and Delete ------------------------------------------------
+
+    @Slot()
+    def refresh_play_client(self) -> None:
+        """Bring shared game files and Wow.exe back in step with the original (T181 §4)."""
+        play = self.services.play_client_dir
+        if play is None or self._play_client_running:
+            return
+        if self._client_dir_busy():
+            self._play_after_refresh = False
+            return
+        marker = self._usable_play_client()
+        if marker is None:
+            self._play_after_refresh = False
+            return
+        server_dir, client_dir = self.services.controller.server_dir, self.services.client_dir
+        self._play_client_running = True
+        self._set_busy(True)
+        self._say_play(f"Refreshing the ready-to-play client from {marker.source_client_dir}…")
+        self._run(
+            lambda: play_client.refresh(
+                play,
+                marker.source_client_dir,
+                game=self.entry.id,
+                server_dir=server_dir,
+                keep=module_kept_files(server_dir, play, client_dir),
+            ),
+            self._play_client_refreshed,
+            self._play_client_job_failed,
+        )
+
+    @Slot(object)
+    def _play_client_refreshed(self, result: object) -> None:
+        self._play_client_running = False
+        self._set_busy(False)
+        done = [str(rel) for rel in result] if isinstance(result, tuple) else []
+        if done:
+            self._say_play("Refreshed from your own client: " + ", ".join(done) + ".")
+        else:
+            self._say_play("Nothing needed refreshing: it matches your own client.")
+        if self._play_after_refresh:
+            self._play_after_refresh = False
+            self._play_launch()
+
+    @Slot()
+    def delete_play_client(self) -> None:
+        """Delete this server's ready-to-play client; the original keeps every file (T181 §4)."""
+        setter = self.services.set_play_client_dir
+        play = self.services.play_client_dir
+        if setter is None or play is None or self._play_client_running:
+            return
+        if self._client_dir_busy():
+            return
+        marker = play_client.read_marker(play)
+        source = marker.source_client_dir if marker is not None else self.services.client_dir
+        own = f"Your own client at {source}" if source is not None else "Your own client"
+        if not self._confirm(
+            "Delete the ready-to-play client?",
+            f"Delete the ready-to-play client at {play}?\n\n{own} is not touched: it keeps "
+            "all its files, the game files the two shared included. This server's modules "
+            "install into your own client again afterwards. Yu'lon can make a "
+            "ready-to-play client again at any time.",
+        ):
+            return
+        server_dir = self.services.controller.server_dir
+        self._play_client_running = True
+        self._set_busy(True)
+        self._say_play(f"Deleting {play}…")
+        self._run(
+            lambda: play_client.delete(play, game=self.entry.id, server_dir=server_dir),
+            self._play_client_deleted,
+            self._play_client_job_failed,
+        )
+
+    @Slot(object)
+    def _play_client_deleted(self, _result: object) -> None:
+        self._play_client_running = False
+        self._set_busy(False)
+        setter = self.services.set_play_client_dir
+        if setter is None:  # pragma: no cover - the menu is not built without it
+            return
+        try:
+            setter(None)
+        except OSError as exc:
+            self._play_refused(
+                f"The ready-to-play client was deleted, but Yu'lon could not forget it: {exc}. "
+                f"Use “{DELETE_PLAY_CLIENT_LABEL}” again."
+            )
+            return
+        # Last: main.py drops this tab on it.
+        self.play_client_dir_changed.emit(self.entry.id, self.services.controller.server_dir, None)
 
     @Slot()
     def add_to_steam(self) -> None:
@@ -10556,7 +11499,7 @@ class ControllerView(QWidget):
                 manifests,
                 installed,
                 self._session_state(),
-                self.services.client_dir,
+                self._module_client_dir(),
                 # Only what the cache ALREADY knows. Nothing is read here, so
                 # the first paint of the tab costs exactly what it did before
                 # T44 -- the reads happen afterwards, one event-loop turn at a
@@ -10836,6 +11779,13 @@ class ControllerView(QWidget):
             return
         if action == "install" and self._stopped_for_the_client(f"install {manifest.id}", manifest):
             return
+        if (
+            action == "update"
+            and manifest.client
+            and self.services.play_client_dir is not None
+            and self._play_client_gone_for(f"update {manifest.id}")
+        ):
+            return
         relative = reapplies_on_top(manifest)
         if action in ("install", "update") and relative:
             # T115, before any question (T55's order): a mob multiplier applied
@@ -11068,6 +12018,30 @@ class ControllerView(QWidget):
             logger.warning(f"could not tell what installing {manifest.id} would replace: {exc}")
             return None
 
+    def _module_client_dir(self) -> Path | None:
+        """The folder module client files go into: the ready-to-play client once there is one."""
+        if self.services.play_client_dir is not None:
+            return self.services.play_client_dir
+        return self.services.client_dir
+
+    def _play_client_gone_for(self, what: str) -> bool:
+        """True (nothing started) when the recorded ready-to-play client is not this server's.
+
+        Says so in the module report and offers to make it again; the press is
+        then made again by the player on the rebuilt tab.
+        """
+        if self._usable_play_client(offer_remake=False) is not None:
+            return False
+        play = self.services.play_client_dir
+        assert play is not None
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(
+            f"{what}: not started \u2014 {self._play_client_gone_text(play)}"
+        )
+        self._offer_remake(play)
+        return True
+
     def _stopped_for_the_client(self, what: str, manifest: Manifest) -> bool:
         """T62: tell the user before an install whose client half would be skipped.
 
@@ -11087,7 +12061,14 @@ class ControllerView(QWidget):
         and nothing touches `self` after. The user presses Install again on the
         rebuilt tab, where the folder is set and this asks nothing.
         """
-        if not manifest.client or self.services.client_dir is not None:
+        if not manifest.client:
+            return False
+        if self.services.play_client_dir is not None:
+            # T181: the applier writes into the ready-to-play client, so the
+            # player's own folder is not needed -- but that one must still be
+            # this server's, or `_client()`'s mkdir would make a bare `Data/`.
+            return self._play_client_gone_for(what)
+        if self.services.client_dir is not None:
             return False
         self._module_pending = None
         self._acting_on = None

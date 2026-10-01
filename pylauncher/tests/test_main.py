@@ -4063,3 +4063,34 @@ def test_use_existing_on_a_known_server_keeps_its_ready_to_play_client(
 
     kept = window.saved_states[-1].find("wow-wotlk", server_dir)
     assert kept is not None and kept.play_client_dir == play
+
+
+def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
+    window: Any, tmp_path: Any
+) -> None:
+    """T181a carried finding 1: `play_client_dir_changed` rebuilds the tab, as T36's signal does."""
+    server_dir = tmp_path / "tw-play-made"
+    catalog = _catalog_view(window)
+    client = tmp_path / "TurtleWoW"
+    play = tmp_path / "TurtleWoW (Yu'lon)"
+    for folder in (client, play):
+        (folder / "Interface").mkdir(parents=True)
+    catalog.installed.emit("wow-tortoise", server_dir, client)
+    view = _tab_for(window, server_dir)
+    assert view.services.set_play_client_dir is not None
+    view.services.set_play_client_dir(play)
+    view.play_client_dir_changed.emit("wow-tortoise", server_dir, play)
+
+    made = _tab_for(window, server_dir)
+    assert made is not view, "the old tab was kept"
+    assert made.services.play_client_dir == play
+    assert made.services.client_dir == client
+    assert made.services.applier is not None and made.services.applier.client_dir == play
+
+    made.services.set_play_client_dir(None)
+    made.play_client_dir_changed.emit("wow-tortoise", server_dir, None)
+
+    gone = _tab_for(window, server_dir)
+    assert gone is not made
+    assert gone.services.play_client_dir is None
+    assert gone.services.applier is not None and gone.services.applier.client_dir == client

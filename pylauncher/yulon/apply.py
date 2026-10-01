@@ -1582,6 +1582,55 @@ class _Log:
     world_stopped: bool = False
 
 
+def take_back_file(path: Path, sha256: str, log: _Log) -> None:
+    """Delete `path` if it still holds the bytes a receipt recorded; else say why not (T67).
+
+    The one place a client file this app copied is deleted, for a module's
+    Remove (`Applier._take_back()`) and for the ready-to-play client's "Also
+    remove them from your original client" (`take_back_files()`, T181).
+    """
+    if not path.exists():
+        log.skipped.append(f"client {path.name}: already gone from {path.parent}")
+        return
+    try:
+        same = sha256_of(path) == sha256
+    except OSError as exc:
+        log.client_left_behind.append(
+            f"{path.name} in your game client's Data folder (Yu'lon could not read it to "
+            f"check whether it is still the file it copied: {exc})"
+        )
+        return
+    if not same:
+        log.client_left_behind.append(
+            f"{path.name} in your game client's Data folder (it has changed since Yu'lon "
+            f"copied it, so it left it alone)"
+        )
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        log.client_left_behind.append(
+            f"{path.name} in your game client's Data folder (Yu'lon could not delete it: "
+            f"{exc} — close the game and delete it by hand)"
+        )
+        return
+    log.done.append(f"took back {path.name} from {path.parent}")
+
+
+def take_back_files(copies: Iterable[ClientCopy]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Each receipted file where its receipt says it is, by `take_back_file()`'s rule (T181).
+
+    For the ready-to-play client's creation dialog: the module patches Yu'lon
+    put into the player's own client for this server, removed from it once the
+    ready-to-play client holds them. Never rebased, so a receipt names exactly
+    the file it deletes. Answers what was removed, and what was left and why.
+    """
+    log = _Log()
+    for copy in copies:
+        take_back_file(Path(copy.path), copy.sha256, log)
+    return tuple(log.done), (*log.skipped, *log.client_left_behind)
+
+
 class _NoAdoption(Enum):
     """Why an existing checkout was not adopted — one value per fact, per answer.
 
@@ -4280,32 +4329,7 @@ class Applier:
         path = Path(copy.path)
         if self.client_dir is not None:
             path = rebased(path, self.client_dir, self.client_origins)
-        if not path.exists():
-            log.skipped.append(f"client {path.name}: already gone from {path.parent}")
-            return
-        try:
-            same = sha256_of(path) == copy.sha256
-        except OSError as exc:
-            log.client_left_behind.append(
-                f"{path.name} in your game client's Data folder (Yu'lon could not read it to "
-                f"check whether it is still the file it copied: {exc})"
-            )
-            return
-        if not same:
-            log.client_left_behind.append(
-                f"{path.name} in your game client's Data folder (it has changed since Yu'lon "
-                f"copied it, so it left it alone)"
-            )
-            return
-        try:
-            path.unlink()
-        except OSError as exc:
-            log.client_left_behind.append(
-                f"{path.name} in your game client's Data folder (Yu'lon could not delete it: "
-                f"{exc} — close the game and delete it by hand)"
-            )
-            return
-        log.done.append(f"took back {path.name} from {path.parent}")
+        take_back_file(path, copy.sha256, log)
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         for step in manifest.server_dbc:

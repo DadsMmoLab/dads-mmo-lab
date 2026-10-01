@@ -1058,6 +1058,28 @@ def build_window() -> object:
             known.play_client_dir if known else None,
         )
 
+    def on_play_client_dir_changed(game: str, server_dir: object, play_client_dir: object) -> None:
+        """A ready-to-play client was made, recorded or deleted (T181): rebuild its tab.
+
+        `on_client_dir_changed()`'s reason exactly: the folder is baked into the
+        applier and the Steam entry, so only a rebuilt tab writes modules into
+        the new folder (or, after a Delete, into the player's own client again).
+        The client folder and the distro are read back off `state.json`.
+        """
+        sd = Path(str(server_dir))
+        play = Path(str(play_client_dir)) if play_client_dir is not None else None
+        key = (game, sd)
+        if key in controllers:
+            drop_controller(key)
+        known = state.find(game, sd)
+        add_controller(
+            game,
+            sd,
+            known.client_dir if known else None,
+            known.wsl_distro if known else None,
+            play,
+        )
+
     def add_controller(
         game: str,
         server_dir: Path,
@@ -1141,6 +1163,7 @@ def build_window() -> object:
         view = ControllerView(entry, services)
         view.uninstalled.connect(on_uninstalled)
         view.client_dir_changed.connect(on_client_dir_changed)
+        view.play_client_dir_changed.connect(on_play_client_dir_changed)
         # T95: the Server tab's "Remove from Yu'lon…", and the stop a removal waits for.
         view.remove_requested.connect(request_removal)
         view.stopped_for_removal.connect(on_stopped_for_removal)
