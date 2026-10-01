@@ -45,12 +45,15 @@ from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from yulon.log import get_logger
 from yulon.steam import client_executable
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import ExePatch
 
 logger = get_logger(__name__)
 
@@ -834,6 +837,13 @@ def _packs_installed(play_dir: Path) -> frozenset[Path]:
     return client_packs.pack_files(play_dir)
 
 
+def _exe_record(play_dir: Path) -> dict[str, Any] | None:
+    """The Wow.exe patch record of a ready-to-play client, or None where it has none (T181 c)."""
+    from yulon import client_packs
+
+    return client_packs.read_record(play_dir).exe
+
+
 def _kept(keep: Collection[Path]) -> Callable[[Path], bool]:
     """Whether a relative path is one of `keep`, compared the way the OS compares names."""
     names = {os.path.normcase(os.fspath(rel)) for rel in keep}
@@ -942,13 +952,18 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
                 "ready-to-play client: could not compare %s", play_dir / rel, exc_info=True
             )
     mine, theirs = client_executable(play_dir), client_executable(original)
+    rec_exe = _exe_record(play_dir)
     try:
-        if (
-            not is_kept(Path(mine.name))
-            and mine.is_file()
-            and theirs.is_file()
-            and not _same_bytes(mine, theirs)
-        ):
+        if is_kept(Path(mine.name)):
+            pass
+        elif rec_exe is not None:
+            # A patched exe differs from the original's by design: it is stale only when it is
+            # no longer what Yu'lon made, and that is `refresh()`'s to re-patch, never to copy over.
+            from yulon import client_exe
+
+            if client_exe.exe_stale(play_dir, original, rec_exe):
+                found.append(Path(mine.name))
+        elif mine.is_file() and theirs.is_file() and not _same_bytes(mine, theirs):
             found.append(Path(mine.name))
     except OSError:
         logger.warning("ready-to-play client: could not compare %s", mine, exc_info=True)
@@ -1006,6 +1021,8 @@ def refresh(
     link: Callable[[Path, Path], None] = os.link,
     reflink: Callable[[Path, Path], bool] = try_reflink,
     keep: Collection[Path] = (),
+    exe_patch: ExePatch | None = None,
+    opener: Any = None,
 ) -> tuple[Path, ...]:
     """Bring what `stale()` lists back in step with the original; return what was changed.
 
@@ -1051,8 +1068,18 @@ def refresh(
     todo = [rel for rel in stale(play_dir, original) if not _players_own(rel) and not is_kept(rel)]
     exe = client_executable(original)
     done: list[Path] = []
+    rec_exe = _exe_record(play_dir)
     for rel in todo:
         archive = rel.suffix.lower() in LINKED_SUFFIXES
+        if not archive and rec_exe is not None:
+            # A patched exe is made again from stock bytes, never copied from the original.
+            if exe_patch is None:
+                continue
+            _reapply_exe(
+                play_dir, original, exe_patch, opener, rec_exe, game=game, server_dir=server_dir
+            )
+            done.append(rel)
+            continue
         src, dst = (original / rel if archive else exe), play_dir / rel
         tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
         try:
@@ -1099,6 +1126,38 @@ def refresh(
     if done:
         logger.info("ready-to-play client %s refreshed: %s", play_dir, ", ".join(map(str, done)))
     return tuple(done)
+
+
+def _reapply_exe(
+    play_dir: Path,
+    original: Path,
+    patch: ExePatch,
+    opener: Any,
+    rec_exe: dict[str, Any],
+    *,
+    game: str,
+    server_dir: Path,
+) -> None:
+    """Make the patched Wow.exe again from stock bytes, with the options it was made with."""
+    from yulon import client_exe, client_packs
+
+    record = client_packs.read_record(play_dir)
+    chosen = {**(rec_exe.get("options") or {}), **record.choices.get("exe_options", {})}
+    options = client_exe.options_for(patch, chosen)
+    try:
+        kwargs = {} if opener is None else {"opener": opener}
+        made = client_exe.apply(play_dir, original, patch, options, **kwargs)
+        client_packs.write_record(
+            play_dir,
+            client_packs.PackRecord(record.packs, made, record.choices),
+            game=game,
+            server_dir=server_dir,
+        )
+    except (client_exe.ExeError, client_packs.PackError) as exc:
+        raise PlayClientError(
+            f"Refreshing the patched Wow.exe in {play_dir} failed: {exc} Your own client was "
+            "left as it was."
+        ) from exc
 
 
 def _on_windows() -> bool:

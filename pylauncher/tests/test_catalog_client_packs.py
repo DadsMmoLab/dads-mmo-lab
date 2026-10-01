@@ -373,6 +373,18 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
         _set("exe_patch.options.borderless.off.0.offset", STOCK_SIZE),
         "past the end of the stock exe",
     ),
+    "two fixed writes overlapping": (
+        _set("exe_patch.writes.1.offset", 0x5F3A02),
+        "write the same bytes",
+    ),
+    "option write overlapping a fixed write": (
+        _set("exe_patch.options.borderless.on.0.offset", 0x2E1C67 + 3),
+        "write the same bytes",
+    ),
+    "option-off write overlapping a fixed write": (
+        _set("exe_patch.options.borderless.off.0.offset", 0x5F3A05),
+        "write the same bytes",
+    ),
     "no clean source": (_set("exe_patch.clean_sources", []), "at least 1 item"),
     "option name not a slug": (
         _both(

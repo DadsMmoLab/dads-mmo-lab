@@ -1705,6 +1705,28 @@ class ExePatch(_Strict):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _no_two_writes_that_can_apply_together_overlap(self) -> ExePatch:
+        # The fixed writes always apply; one state of each option applies on
+        # top. The two states of ONE option never apply together, so they may
+        # share bytes (Centurion's borderless on/off do exactly that).
+        tagged: list[tuple[str, tuple[str, str] | None, ExeWrite]] = [
+            ("writes", None, write) for write in self.writes
+        ]
+        for name, option in self.options.items():
+            tagged += [(f"options.{name}.on", (name, "on"), w) for w in option.on]
+            tagged += [(f"options.{name}.off", (name, "off"), w) for w in option.off]
+        for index, (where_a, tag_a, a) in enumerate(tagged):
+            for where_b, tag_b, b in tagged[index + 1 :]:
+                if tag_a and tag_b and tag_a[0] == tag_b[0] and tag_a != tag_b:
+                    continue  # the on and off of one option: only one applies
+                if a.offset < b.offset + b.length and b.offset < a.offset + a.length:
+                    raise ValueError(
+                        f"{where_a} at {a.offset:#x} and {where_b} at {b.offset:#x} "
+                        "write the same bytes of the stock exe"
+                    )
+        return self
+
 
 class ConfigWtf(_Strict):
     """Settings merged into the ready-to-play client's `WTF/Config.wtf`.
