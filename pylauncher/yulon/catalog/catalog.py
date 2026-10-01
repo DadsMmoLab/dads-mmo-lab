@@ -1582,6 +1582,16 @@ class ClientPack(_Strict):
             raise ValueError(f"pack {self.id!r}: at most one of sha256 and md5")
         if self.source.kind == "checkout" and self.sha256 is None and self.md5 is None:
             raise ValueError(f"pack {self.id!r}: a checkout pack needs a checksum")
+        if (
+            self.source.kind == "url"
+            and self.sha256 is None
+            and self.md5 is None
+            and self.source.version_url is None
+        ):
+            raise ValueError(
+                f"pack {self.id!r}: a url pack needs a checksum or a version_url, or a "
+                "changed pack would never be fetched again"
+            )
         if self.default and not self.optional:
             raise ValueError(
                 f"pack {self.id!r}: default only means something on an optional pack; "

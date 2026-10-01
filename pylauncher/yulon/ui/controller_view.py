@@ -8848,7 +8848,13 @@ class ControllerView(QWidget):
         """The last step before the game: the client's packs, exe and config, then the launch."""
         if self.services.play_client_dir is None or self._play_still_usable() is None:
             return
-        if has_client_data(self.entry.client):
+        play = self.services.play_client_dir
+        recorded = client_packs.read_record(play) if play is not None else None
+        # Also when the catalog no longer has client data but the record still lists
+        # packs or a patched exe: step 1 takes them out.
+        if has_client_data(self.entry.client) or (
+            recorded is not None and (recorded.packs or recorded.exe is not None)
+        ):
             self._skipped = frozenset()
             self._play_prepare()
             return
@@ -9016,7 +9022,19 @@ class ControllerView(QWidget):
             say("Checking Wow.exe…")
             options = client_exe.options_for(client.exe_patch, record.choices["exe_options"])
             exe = client_exe.apply(play, source, client.exe_patch, options)
-            save()
+            try:
+                save()
+            except client_packs.PackError as exc:
+                raise client_exe.ExeError(
+                    f"Wow.exe was patched, but the note of it could not be saved ({exc}). "
+                    "Press Play again: it is checked and noted then. If Play offers to refresh "
+                    "Wow.exe first, say yes."
+                ) from exc
+        elif exe is not None:
+            # The catalog dropped the patch: the original's Wow.exe comes back.
+            say("Putting your own Wow.exe back…")
+            play_client.restore_original_exe(play, source, game=game, server_dir=server_dir)
+            exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
         if cfg is not None:
@@ -9024,6 +9042,16 @@ class ControllerView(QWidget):
             say("Setting up Config.wtf…")
             if cfg.remove_locale_realmlists:
                 client_config.remove_locale_realmlists(play)
+            else:
+                try:
+                    networking.write_ready_to_play_realmlists(
+                        play, PLAY_CLIENT_ADDRESS, client.realmlist_file
+                    )
+                except OSError as exc:
+                    raise play_client.PlayClientError(
+                        f"The realmlist in {play} could not be written ({exc}), so nothing was "
+                        "started. Check that you can write to that folder, then press Play again."
+                    ) from exc
             client_config.merge_config_wtf(play, cfg, first_run=not record.config_seeded)
             seeded = True
             save()
@@ -9078,8 +9106,18 @@ class ControllerView(QWidget):
             )
         return notes
 
+    def _torn_down_during_play(self) -> bool:
+        """The tab was dropped while the pipeline ran: no dialog, no launch, locks given back."""
+        if not getattr(self, "_closed", False):
+            return False
+        self._release_play_client()
+        self._play_end()
+        return True
+
     @Slot(object)
     def _play_prepared(self, result: object) -> None:
+        if self._torn_down_during_play():
+            return
         self._release_play_client()
         self._show_cancel(False)
         if self._play_cancel.is_set():
@@ -9093,6 +9131,8 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _play_prepare_failed(self, exc: object) -> None:
+        if self._torn_down_during_play():
+            return
         self._release_play_client()
         self._show_cancel(False)
         if isinstance(exc, _PackStopped):
@@ -9113,8 +9153,17 @@ class ControllerView(QWidget):
         self.action_failed.emit(f"{self.entry.id}: {stopped.reason}")
         self._say_play(stopped.reason)
         if pack.optional:
-            text = f"{stopped.reason}\n\nPlay without “{pack.label}” this time, or try again?"
-            skip: str | None = f"Play without {pack.label}"
+            play = self.services.play_client_dir
+            have = play is not None and pack.id in client_packs.read_record(play).packs
+            if have:
+                text = (
+                    f"{stopped.reason}\n\nPlay with the version of “{pack.label}” you have "
+                    "this time, or try again?"
+                )
+                skip: str | None = "Play with the version you have"
+            else:
+                text = f"{stopped.reason}\n\nPlay without “{pack.label}” this time, or try again?"
+                skip = f"Play without {pack.label}"
         else:
             text = (
                 f"“{pack.label}” is needed to play on this server, so nothing was started: "

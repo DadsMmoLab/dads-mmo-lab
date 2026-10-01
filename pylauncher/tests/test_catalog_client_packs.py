@@ -315,6 +315,10 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
         _drop("packs.0.md5"),
         "a checkout pack needs a checksum",
     ),
+    "url pack with no checksum and no version_url": (
+        _drop("packs.3.source.version_url"),
+        "a url pack needs a checksum or a version_url",
+    ),
     "pack with two checksums": (
         _set("packs.0.sha256", "3" * 64),
         "at most one of sha256 and md5",

@@ -1717,13 +1717,19 @@ def test_refresh_after_the_originals_exe_changed_keeps_the_exe_patched_from_stoc
     assert (orig / "Wow.exe").read_bytes().startswith(b"MZ the player")
 
 
-def test_refresh_without_the_patch_leaves_a_stale_patched_exe_alone_rather_than_copy(
+def test_refresh_without_the_patch_puts_the_originals_exe_back_and_forgets_the_patch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The catalog dropped the exe patch: the patched exe goes, and is not stale forever."""
+    from yulon import client_packs
+
     play, orig, stock, _patch = _exe_world(tmp_path, monkeypatch)
     (play / "Wow.exe").write_bytes(b"damaged")
-    assert refresh(play, orig, tmp_path) == ()
-    assert (play / "Wow.exe").read_bytes() == b"damaged"
+    assert refresh(play, orig, tmp_path) == (Path("Wow.exe"),)
+    assert (play / "Wow.exe").read_bytes() == (orig / "Wow.exe").read_bytes()
+    assert not os.path.samefile(play / "Wow.exe", orig / "Wow.exe")
+    assert client_packs.read_record(play).exe is None
+    assert play_client.stale(play, orig) == ()
 
 
 def test_refresh_remakes_the_exe_with_the_options_the_player_chose(

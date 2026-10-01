@@ -1065,9 +1065,13 @@ def refresh(
             "ready-to-play client and make it again from where your client is now."
         )
     is_kept = _kept({*keep, *_packs_installed(play_dir)})
+    done: list[Path] = []
+    if exe_patch is None and _exe_record(play_dir) is not None:
+        # The catalog dropped the exe patch: the patched exe goes, the original's comes back.
+        if restore_original_exe(play_dir, original, game=game, server_dir=server_dir):
+            done.append(Path(client_executable(play_dir).name))
     todo = [rel for rel in stale(play_dir, original) if not _players_own(rel) and not is_kept(rel)]
     exe = client_executable(original)
-    done: list[Path] = []
     rec_exe = _exe_record(play_dir)
     for rel in todo:
         archive = rel.suffix.lower() in LINKED_SUFFIXES
@@ -1126,6 +1130,47 @@ def refresh(
     if done:
         logger.info("ready-to-play client %s refreshed: %s", play_dir, ", ".join(map(str, done)))
     return tuple(done)
+
+
+def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_dir: Path) -> bool:
+    """Put the original's Wow.exe back over a patched one, and forget the patch. True if copied.
+
+    For a catalog entry that no longer has an `exe_patch`. A real copy through a
+    temporary name renamed into place (never a link, never a write through the
+    old name), then the record's `exe` is cleared. No original exe: the record is
+    still cleared, the file left as it is.
+    """
+    from yulon import client_packs
+
+    src, dst = client_executable(original), client_executable(play_dir)
+    copied = False
+    if _original_file(src) is not None:
+        tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
+        try:
+            _drop_temp(tmp, src)
+            shutil.copy2(src, tmp)
+            _replace(tmp, dst)
+        except (OSError, _Stop) as exc:
+            try:
+                _drop_temp(tmp, src)
+            except OSError:
+                logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
+            raise PlayClientError(
+                f"Putting your own Wow.exe back into {play_dir} failed: {exc}. Nothing else "
+                "was changed. Fix the cause and press Play again."
+            ) from exc
+        copied = True
+    record = client_packs.read_record(play_dir)
+    try:
+        client_packs.write_record(
+            play_dir,
+            client_packs.PackRecord(record.packs, None, record.choices, record.config_seeded),
+            game=game,
+            server_dir=server_dir,
+        )
+    except client_packs.PackError as exc:
+        raise PlayClientError(str(exc)) from exc
+    return copied
 
 
 def _reapply_exe(

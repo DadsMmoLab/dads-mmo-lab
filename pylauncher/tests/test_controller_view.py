@@ -21135,6 +21135,7 @@ def _client_entry(
     config: bool = True,
     with_packs: bool = True,
     optional: bool = True,
+    remove_locale: bool = True,
 ) -> CatalogEntry:
     """WotLK's entry with a `client` section: two required packs, one optional, exe, config."""
     zip_path = server_dir / "patches" / "patch-W.zip"
@@ -21157,7 +21158,11 @@ def _client_entry(
             {
                 "id": "addons",
                 "label": "Addons",
-                "source": {"kind": "url", "url": f"{url}/addons.zip"},
+                "source": {
+                    "kind": "url",
+                    "url": f"{url}/addons.zip",
+                    "version_url": f"{url}/addons.version",
+                },
                 "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
                 "size_hint": 2_000_000,
             }
@@ -21205,7 +21210,7 @@ def _client_entry(
             {
                 "always": {"realmList": "127.0.0.1"},
                 "seed": {"gxWindow": "1"},
-                "remove_locale_realmlists": True,
+                "remove_locale_realmlists": remove_locale,
             }
         )
         if config
@@ -21243,7 +21248,8 @@ class _Site:
         path = self.folder / f"{pack.id}-{self.version}.zip"
         with zipfile.ZipFile(path, "w") as archive:
             for name, data in self.members[pack.id].items():
-                archive.writestr(name, data)
+                # A fixed stamp: the zip's bytes must not change with the clock.
+                archive.writestr(zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0)), data)
         return client_packs.Fetched(
             path, self.version, hashlib.sha256(path.read_bytes()).hexdigest()
         )
@@ -22135,3 +22141,148 @@ def test_the_make_summary_points_to_client_options_only_where_the_item_exists(
         assert "disk full" in told[-1]
         assert (controller_view_module.CLIENT_OPTIONS_LABEL in told[-1]) is mentions
         assert mentions or "defaults" in told[-1]
+
+
+# -- final fix round -----------------------------------------------------------------
+
+
+def test_a_pack_the_catalog_dropped_is_removed_at_the_next_play(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    ps.names = WORLD_UP
+    first, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    first.play()
+    assert (play / "Data" / "patch-W.MPQ").is_file()
+
+    plain, _ = _play_view(ps, tmp_path, original=original, play=play)  # no client section
+    plain.play()
+
+    assert not (play / "Data" / "patch-W.MPQ").exists()
+    assert not (play / "Interface" / "AddOns" / "Foo").exists()
+    record = client_packs.read_record(play)
+    assert record.packs == {} and record.exe is None
+    assert play_client.stale(play, original) == ()
+    assert steps[-1] == "launch"
+
+
+def test_a_dropped_exe_patch_puts_the_originals_exe_back_at_play(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    ps.names = WORLD_UP
+    first, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    first.play()
+    assert (play / "Wow.exe").read_bytes() != STOCK_EXE
+    unpatched = _client_entry(tmp_path, exe=False)
+
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=unpatched)
+    again.play()
+
+    assert (play / "Wow.exe").read_bytes() == STOCK_EXE
+    assert not os.path.samefile(play / "Wow.exe", original / "Wow.exe"), "a link to the original"
+    assert client_packs.read_record(play).exe is None
+    assert play_client.stale(play, original) == ()
+    assert steps[-1] == "launch"
+
+
+def test_refresh_puts_the_originals_exe_back_when_the_patch_was_dropped(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    ps.names = WORLD_UP
+    first, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    first.play()
+    unpatched = _client_entry(tmp_path, exe=False)
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=unpatched)
+
+    again.refresh_play_client()
+
+    assert (play / "Wow.exe").read_bytes() == STOCK_EXE
+    assert client_packs.read_record(play).exe is None
+    assert play_client.stale(play, original) == ()
+
+
+def test_a_failed_update_offers_the_version_you_have_when_one_is_installed(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    asker = _OptionsAsker(_choices(hd=True))
+    view, _ = _play_view(
+        ps, tmp_path, original=original, play=play, entry=entry, options_asker=asker
+    )
+    ps.names = WORLD_UP
+    view.client_options()
+    view.play()
+    assert (play / "Data" / "patch-F.MPQ").read_bytes() == b"MPQ hd one"
+    site.version = "2"
+    site.errors["hd"] = client_packs.PackError("HD creatures could not be downloaded: offline.")
+    asks.answers = ["save"]
+    steps.clear()
+
+    view.play()
+
+    assert asks.calls[-1][3] == "Play with the version you have"
+    assert steps[-1] == "launch"
+    assert (play / "Data" / "patch-F.MPQ").read_bytes() == b"MPQ hd one"
+
+
+def test_an_entry_that_keeps_the_locale_realmlists_still_gets_its_realmlist_written(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path, remove_locale=False)
+    (play / "Data" / "enUS" / "realmlist.wtf").write_text("set realmlist x\n", encoding="utf-8")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play).startswith("set realmlist 127.0.0.1\n")
+    assert steps[-1] == "launch"
+
+
+def test_an_exe_patched_but_not_recorded_says_so(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    warned: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+    real = client_packs.write_record
+
+    def refuse_the_exe_record(path: Path, record: Any, **kw: Any) -> None:
+        if record.exe is not None:
+            raise client_packs.PackError("disk full")
+        real(path, record, **kw)
+
+    monkeypatch.setattr(client_packs, "write_record", refuse_the_exe_record)
+
+    view.play()
+
+    assert "launch" not in steps
+    assert "Wow.exe was patched" in warned[0] and "disk full" in warned[0]
+    assert "Play" in warned[0]
+
+
+def test_a_play_that_finishes_after_the_tab_was_torn_down_launches_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    def close(_progress: Any, _cancelled: Callable[[], bool]) -> None:
+        view._closed = True
+
+    site.hook = close
+
+    view.play()
+
+    assert "launch" not in steps and asks.calls == []
+    assert view._play_pending is False and not view._play_client_running
