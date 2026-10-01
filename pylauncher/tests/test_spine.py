@@ -2631,6 +2631,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`Known.missing`, because a password it could not see is one it cannot promise to "
         "have removed"
     ),
+    ("ui/controller_view.py", "_checkout_refusal"): (
+        "T181. Lists the folder of a client pack's zip for its `.partNN` pieces, only to word "
+        "the refusal when Play finds the pack missing from the server's checkout (the file, "
+        "the commit, what to press); reads only, writes nothing. A listing that finds pieces "
+        "answers None and leaves the engine's own message to say what is wrong"
+    ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
