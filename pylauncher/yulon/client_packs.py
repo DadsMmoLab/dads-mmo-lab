@@ -725,6 +725,8 @@ RECORD = ".yulon-client-packs.json"
 _STAGING = ".yulon-pack-tmp"
 _ASIDE = ".yulon-pack-old"
 """A target's previous file, kept beside it until every file of a pack is in place."""
+_STRAY = re.compile(r"\.yulon-pack-(?:tmp|old)(?:\.\d+)?$", re.IGNORECASE)
+"""A name Yu'lon's own swap may use, with the number a fresh aside name takes."""
 _PROTECTED = ".yulon-"
 """A file name starting so is Yu'lon's own (the marker, this record): no zip may write one."""
 _RECORD_VERSION = 1
@@ -893,7 +895,10 @@ def write_record(
     _gate(play_dir, game=game, server_dir=server_dir, what="its record of installed packs")
     payload = {
         "version": _RECORD_VERSION,
-        "packs": record.packs,
+        "packs": {
+            pack_id: {k: v for k, v in entry.items() if k != "left_behind"}
+            for pack_id, entry in record.packs.items()
+        },
         "exe": record.exe,
         "choices": record.choices,
     }
@@ -996,7 +1001,7 @@ def _target(
             f"{pack.label}: {member!r} would replace {rel.name}, one of Yu'lon's own files, so "
             "Yu'lon unpacked nothing from the zip."
         )
-    if rel.name.casefold().endswith((_STAGING, _ASIDE)):
+    if _STRAY.search(rel.name):
         raise PackError(
             f"{pack.label}: {member!r} would be mistaken for one of Yu'lon's own temporary "
             "files, so Yu'lon unpacked nothing from the zip."
@@ -1209,6 +1214,67 @@ class PartialInstall(PackError):
         self.entry = entry
 
 
+def _remove_aside(path: Path) -> bool:
+    """Delete a swap's aside or stray file; False (logged) if it cannot go.
+
+    `client_config._remove_own`'s rule: a read-only file with one name is made
+    writable first, one with more names (a hard link to the player's own file) is
+    never chmodded and is left where it is.
+    """
+    try:
+        client_config._remove_own(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        logger.warning("client-packs: could not remove %s, leaving it", path, exc_info=True)
+        return False
+    return True
+
+
+def _fresh_aside(target: Path) -> Path:
+    """A name beside `target` to move its old file to, that nothing is at.
+
+    The plain `.yulon-pack-old` when it is free or its leftover can be removed;
+    otherwise `.yulon-pack-old.<n>`, so a swap never depends on deleting a leftover
+    a read-only flag (Windows) or a sharing violation keeps in place.
+    """
+    base = target.with_name(target.name + _ASIDE)
+    if os.path.lexists(base) and not _remove_aside(base):
+        number = 1
+        while os.path.lexists(base.with_name(f"{base.name}.{number}")):
+            number += 1
+        return base.with_name(f"{base.name}.{number}")
+    return base
+
+
+def _strays(target: Path) -> list[Path]:
+    """Aside files of `target` a crashed install left, plain name first."""
+    stem = target.name + _ASIDE
+    found = [
+        sibling
+        for sibling in target.parent.iterdir()
+        if sibling.name == stem or re.fullmatch(re.escape(stem) + r"\.\d+", sibling.name)
+    ]
+    return sorted(found, key=lambda p: (len(p.name), p.name))
+
+
+def _recover_asides(targets: list[Path], sleep: Callable[[float], None]) -> None:
+    """Before staging: an install that crashed mid-swap left asides; settle them.
+
+    A target that is MISSING gets its first aside put back (it was the file before
+    the crash); any other aside is deleted as `_remove_aside` can.
+    """
+    for target in targets:
+        if not target.parent.is_dir() or play_client._is_link(target.parent):
+            continue
+        strays = _strays(target)
+        if strays and not os.path.lexists(target):
+            play_client._retrying(partial(os.replace, strays[0], target), sleep=sleep)
+            strays = strays[1:]
+        for stray in strays:
+            _remove_aside(stray)
+
+
 def _swap(
     play_dir: Path,
     staged: list[tuple[Path, Path, str]],
@@ -1223,10 +1289,9 @@ def _swap(
     done: list[tuple[Path, Path | None]] = []  # (target, its file moved aside, or None)
     try:
         for tmp, target, _ in staged:
-            aside = target.with_name(target.name + _ASIDE)
             moved: Path | None = None
             if os.path.lexists(target):
-                _unlink_quietly(aside)
+                aside = _fresh_aside(target)
                 play_client._retrying(partial(os.replace, target, aside), sleep=sleep)
                 moved = aside
             done.append((target, moved))
@@ -1260,7 +1325,7 @@ def _swap(
         raise
     for _, moved in done:
         if moved is not None:
-            _unlink_quietly(moved)
+            _remove_aside(moved)
 
 
 def _holds(path: Path, sha256: str) -> bool:
@@ -1285,6 +1350,7 @@ def _install(
         items = _plan(pack, archive)
         for item in items:
             _check_path(play_dir, item.rel)
+        _recover_asides([play_dir / Path(*item.rel.parts) for item in items], sleep)
         plain = sum(i.info.file_size for i in items if i.rel.suffix.lower() != ".mpq")
         if plain:
             _refuse_without_room(pack, play_dir, plain)
@@ -1468,6 +1534,25 @@ def pack_label(pack: ClientPack | None) -> str:
     return pack.label if pack is not None else "a pack no longer in the catalog"
 
 
+def _delete_own(rel: str, path: Path) -> None:
+    """`client_config._remove_own`, with its deliberate refusal worded for the player.
+
+    It raises EPERM for a read-only file that another name shares (your own WoW
+    client's file): that is not a program holding a file open, so it must not say
+    to close WoW.
+    """
+    try:
+        client_config._remove_own(path)
+    except PermissionError as exc:
+        if exc.errno != errno.EPERM:
+            raise
+        raise PackError(
+            f"{rel} is read-only and shared with your own WoW client (or another "
+            "ready-to-play client), so Yu'lon left it in place and removed nothing more. "
+            "Delete that file from the ready-to-play client yourself if you no longer want it."
+        ) from exc
+
+
 def _remove(
     play_dir: Path, rec_entry: Mapping[str, Any], pack: ClientPack | None
 ) -> tuple[str, ...]:
@@ -1485,13 +1570,13 @@ def _remove(
         if stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode) or _file_sha256(path) != sha:
             left.append(rel)
             continue
-        client_config._remove_own(path)
+        _delete_own(rel, path)
         removed.append(path)
-    for _, path in extra:
+    for rel, path in extra:
         if path.is_dir() and not play_client._is_link(path):
             continue
         if os.path.lexists(path):
-            client_config._remove_own(path)
+            _delete_own(rel, path)
             removed.append(path)
     for path in removed:
         _remove_empty_parents(play_dir, path)

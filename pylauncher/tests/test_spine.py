@@ -2729,6 +2729,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "hard-linked to one keeps its own name and bytes, since removing a name never changes "
         "another name of the same file"
     ),
+    ("client_packs.py", "_strays"): (
+        "T181 b/c. Lists the folder of ONE install target in a ready-to-play client for the "
+        "`<name>.yulon-pack-old[.n]` files a crashed pack install left beside it, before that "
+        "install stages anything. The listing decides a rename or a delete of those aside "
+        "names only: a missing target gets its first aside put back, any other aside is "
+        "deleted (a read-only one with a single name is made writable first; one shared with "
+        "the player's own client is never chmodded and is left). Only in a folder whose step "
+        "(a) marker was checked, never into a link, and never the player's own client"
+    ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
         "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "

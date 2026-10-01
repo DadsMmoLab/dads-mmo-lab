@@ -808,6 +808,7 @@ def test_the_self_updater_still_follows_a_redirect_to_any_https_host() -> None:
 
 # -- Installing, recording and removing packs in a ready-to-play client (T181 b/c, Task 3) ------
 
+_REAL_CHMOD = os.chmod
 GAME = "wow-wotlk"
 STOCK_X = b"stock patch-X from the player's own client"
 NEW_Y = b"MPQ\x1a" + b"centurion patch-Y " * 50
@@ -1830,3 +1831,162 @@ def test_two_servers_with_the_same_pack_id_each_keep_their_extracted_copy(
     ), "server two's copy survived"
     one.untouched()
     two.untouched()
+
+
+# -- fix round 2 (re-review of 2bc604aa) ----------------------------------------------------
+
+
+@pytest.fixture
+def windows_read_only(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
+    """Linux cannot say WinError 5: refuse to delete or replace a read-only file, as Windows does.
+
+    Returns the `os.chmod` calls as `(path, link count at the time)`.
+    """
+    import pathlib
+
+    real_unlink, real_replace, real_chmod = pathlib.Path.unlink, os.replace, _REAL_CHMOD
+    chmods: list[tuple[str, int]] = []
+
+    def read_only(path: Any) -> bool:
+        try:
+            return os.path.isfile(path) and not os.lstat(path).st_mode & 0o200
+        except OSError:
+            return False
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if read_only(self):
+            raise PermissionError(errno.EACCES, "Access is denied", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    def replace(src: Any, dst: Any) -> None:
+        if read_only(dst):
+            raise PermissionError(errno.EACCES, "Access is denied", os.fspath(dst))
+        real_replace(src, dst)
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        chmods.append((os.fspath(path), os.lstat(path).st_nlink))
+        real_chmod(path, mode, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", unlink)
+    monkeypatch.setattr(client_packs.os, "replace", replace)
+    monkeypatch.setattr(client_packs.os, "chmod", chmod)
+    monkeypatch.setattr(client_config.os, "chmod", chmod)
+    return chmods
+
+
+def test_a_read_only_target_shared_with_the_original_never_wedges_the_next_install(
+    rig: _Rig, windows_read_only: list[tuple[str, int]]
+) -> None:
+    original = rig.original / "Data" / "patch-X.MPQ"
+    _REAL_CHMOD(original, 0o444)  # the player's own file, hard-linked into the client
+    first = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}))
+    stuck = rig.play / "Data" / ("patch-X.MPQ" + client_packs._ASIDE)
+    assert stuck.exists(), "the fixture must leave the read-only aside that cannot be deleted"
+    newer = NEW_Y + b" version 2"
+
+    second = rig.install(WORLD, rig.fetched({"patch-Y.MPQ": newer}, name="v2.zip"), previous=first)
+
+    assert (rig.play / "Data" / "patch-X.MPQ").read_bytes() == newer
+    assert second["files"] == {"Data/patch-X.MPQ": _sha(newer)}
+    assert original.stat().st_mode & 0o777 == 0o444 and original.read_bytes() == STOCK_X
+    assert [c for c in windows_read_only if c[1] > 1] == [], "a shared name was chmodded"
+    _REAL_CHMOD(original, 0o644)
+    rig.untouched()
+
+
+def test_a_read_only_aside_with_one_name_is_made_writable_and_deleted(
+    rig: _Rig, windows_read_only: list[tuple[str, int]]
+) -> None:
+    pack = _pack_of([{"member": "t.dll", "to": "Own.dll"}], id="own")
+    own = rig.play / "Own.dll"
+    own.write_bytes(b"old")
+    _REAL_CHMOD(own, 0o444)
+
+    rig.install(pack, rig.fetched({"t.dll": b"new"}))
+
+    assert own.read_bytes() == b"new"
+    assert not (rig.play / ("Own.dll" + client_packs._ASIDE)).exists()
+    assert [Path(p).name for p, _ in windows_read_only] == ["Own.dll" + client_packs._ASIDE]
+    assert [n for _, n in windows_read_only] == [1]
+
+
+def _fail_staging(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(client_packs, "_stage", refuse)
+
+
+def test_a_stray_aside_of_a_missing_target_is_put_back_before_anything_is_staged(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash after the aside rename and before the new file went in left the name empty."""
+    target = _addon(rig, "Nova/Nova.lua")
+    target.parent.mkdir(parents=True)
+    stray = target.with_name(target.name + client_packs._ASIDE)
+    stray.write_bytes(b"the file before the crash")
+    _fail_staging(monkeypatch)
+
+    with pytest.raises(PackError):
+        rig.install(ADDONS, rig.fetched({"Nova/Nova.lua": b"new"}))
+
+    assert target.read_bytes() == b"the file before the crash"
+    assert not stray.exists()
+    rig.untouched()
+
+
+def test_a_stray_aside_beside_an_existing_target_is_deleted_before_anything_is_staged(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _addon(rig, "Nova/Nova.lua")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"current")
+    stray = target.with_name(target.name + client_packs._ASIDE + ".3")
+    stray.write_bytes(b"stale")
+    _fail_staging(monkeypatch)
+
+    with pytest.raises(PackError):
+        rig.install(ADDONS, rig.fetched({"Nova/Nova.lua": b"new"}))
+
+    assert target.read_bytes() == b"current" and not stray.exists()
+    rig.untouched()
+
+
+@pytest.mark.parametrize("suffix", [".yulon-pack-old.1", ".yulon-pack-tmp.2"])
+def test_a_member_named_like_a_numbered_swap_file_is_refused(rig: _Rig, suffix: str) -> None:
+    with pytest.raises(PackError, match="temporary file"):
+        rig.install(ADDONS, rig.fetched({f"Nova/Nova.lua{suffix}": b"x"}))
+
+    rig.untouched()
+
+
+def test_removing_a_read_only_file_shared_with_the_players_client_names_it_and_leaves_it(
+    rig: _Rig, windows_read_only: list[tuple[str, int]]
+) -> None:
+    common = rig.original / "Data" / "common.MPQ"
+    _REAL_CHMOD(common, 0o444)
+    entry = {
+        "version": "1",
+        "sha256": "0" * 64,
+        "files": {"Data/common.MPQ": _sha(common.read_bytes())},
+    }
+
+    with pytest.raises(PackError) as info:
+        rig.remove(entry, None)
+
+    text = str(info.value)
+    assert "Data/common.MPQ" in text and "shared with your own" in text and "left" in text
+    assert "Close World of Warcraft" not in text
+    assert (rig.play / "Data" / "common.MPQ").exists()
+    _REAL_CHMOD(common, 0o644)
+    rig.untouched()
+
+
+def test_the_record_never_keeps_left_behind(rig: _Rig) -> None:
+    entry = _entry(**{"Data/patch-X.MPQ": NEW_Y}) | {"left_behind": ["Interface/AddOns/x.lua"]}
+
+    client_packs.write_record(rig.play, _record(p=entry), game=GAME, server_dir=rig.server)
+
+    assert "left_behind" not in (rig.play / client_packs.RECORD).read_text()
+    assert "left_behind" not in client_packs.read_record(rig.play).packs["p"]
+    assert entry["left_behind"] == ["Interface/AddOns/x.lua"], "the caller's entry is not changed"
