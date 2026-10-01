@@ -1172,7 +1172,9 @@ def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_di
     try:
         client_packs.write_record(
             play_dir,
-            client_packs.PackRecord(record.packs, None, record.choices, record.config_seeded),
+            client_packs.PackRecord(
+                record.packs, None, record.choices, record.config_seeded, record.launcher
+            ),
             game=game,
             server_dir=server_dir,
         )
@@ -1196,13 +1198,17 @@ def _reapply_exe(
 
     record = client_packs.read_record(play_dir)
     chosen = {**(rec_exe.get("options") or {}), **record.choices.get("exe_options", {})}
+    # A launcher window pick saved since the last Play decides `borderless`, as Play does.
+    chosen = client_packs.launcher_exe_options(record.launcher, chosen, patch.options)
     options = client_exe.options_for(patch, chosen)
     try:
         kwargs = {} if opener is None else {"opener": opener}
         made = client_exe.apply(play_dir, original, patch, options, **kwargs)
         client_packs.write_record(
             play_dir,
-            client_packs.PackRecord(record.packs, made, record.choices, record.config_seeded),
+            client_packs.PackRecord(
+                record.packs, made, record.choices, record.config_seeded, record.launcher
+            ),
             game=game,
             server_dir=server_dir,
         )

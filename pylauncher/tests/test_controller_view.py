@@ -22488,3 +22488,288 @@ def test_a_permission_error_reading_the_originals_exe_keeps_the_patch(
     assert warned == [] and steps[-1] == "launch"
     assert (play / "Wow.exe").read_bytes() == patched
     assert client_packs.read_record(play).exe is not None
+
+
+# -- the launcher's picks at Play (T187) -----------------------------------------------
+
+
+def _save_launcher(play: Path, launcher: dict[str, Any]) -> None:
+    record = client_packs.read_record(play)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            record.packs, record.exe, record.choices, record.config_seeded, launcher
+        ),
+        game=WOTLK.id,
+        server_dir=_server_of(play),
+    )
+
+
+def _server_of(play: Path) -> Path:
+    marker = play_client.read_marker(play)
+    assert marker is not None
+    return Path(marker.server_dir)
+
+
+def _config(play: Path) -> str:
+    return (play / "WTF" / "Config.wtf").read_text(encoding="utf-8")
+
+
+def test_play_writes_the_launcher_picks_into_config_wtf(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    _save_launcher(
+        play,
+        {
+            "display": {"window": "maximized", "resolution": "1600x900"},
+            "account": "BOB",
+        },
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    text = _config(play)
+    assert 'SET gxWindow "1"' in text and 'SET gxMaximize "1"' in text
+    assert 'SET gxResolution "1600x900"' in text and 'SET accountName "BOB"' in text
+    assert "launch" in steps
+
+
+def test_the_catalog_always_wins_over_a_launcher_pick(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    always = {"realmList": "127.0.0.1", "gxWindow": "0"}
+    cfg = entry.client.config_wtf.model_copy(update={"always": always, "seed": {}})
+    entry = entry.model_copy(update={"client": entry.client.model_copy(update={"config_wtf": cfg})})
+    _save_launcher(play, {"display": {"window": "windowed"}})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    text = _config(play)
+    assert 'SET gxWindow "0"' in text and 'SET gxWindow "1"' not in text
+    assert 'SET gxMaximize "0"' in text, "the key the catalog leaves is the launcher's"
+
+
+def test_an_entry_without_config_wtf_gets_the_launcher_keys(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path, config=False, exe=False)
+    _save_launcher(play, {"display": {"window": "fullscreen"}, "account": "BOB"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    text = _config(play)
+    assert 'SET gxWindow "0"' in text and 'SET accountName "BOB"' in text
+    assert _realmlist(play).startswith(
+        "set realmlist 127.0.0.1\n"
+    ), "the realmlist is still step (a)'s"
+
+
+def test_an_entry_without_config_wtf_and_no_picks_writes_no_config(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path, config=False, exe=False)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert not (play / "WTF" / "Config.wtf").exists()
+
+
+def test_the_typed_realm_address_goes_to_the_play_clients_realmlists_only(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path, config=False, exe=False)
+    before = _realmlist(original)
+    _save_launcher(play, {"realm_address": "10.0.0.7"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play).startswith("set realmlist 10.0.0.7\n")
+    assert _realmlist(original) == before == "set realmlist logon.example.com\n"
+
+
+def test_the_typed_realm_address_is_written_by_the_pipeline_for_a_config_entry(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    entry, original, play = _made_client(tmp_path, remove_locale=False)
+    _save_launcher(play, {"realm_address": "10.0.0.7"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert _realmlist(play).startswith("set realmlist 10.0.0.7\n")
+    assert _realmlist(original) == "set realmlist logon.example.com\n"
+
+
+def test_a_borderless_pick_turns_the_exe_option_on_and_another_turns_it_off(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry, original, play = _made_client(tmp_path)
+    seen: list[dict[str, bool]] = []
+    apply = client_exe.apply
+
+    def spy(
+        play_dir: Path, source: Path, patch: Any, options: dict[str, bool], *a: Any, **k: Any
+    ) -> Any:
+        seen.append(dict(options))
+        return apply(play_dir, source, patch, options, *a, **k)
+
+    monkeypatch.setattr(client_exe, "apply", spy)
+    ps.names = WORLD_UP
+    _save_launcher(play, {"display": {"window": "borderless"}})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    view.play()
+    assert seen[-1] == {"borderless": True}
+    assert 'SET gxMaximize "1"' in _config(play)
+
+    _save_launcher(play, {"display": {"window": "windowed"}})
+    again, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    again.play()
+    assert seen[-1] == {"borderless": False}
+
+
+def test_nothing_the_launcher_writes_holds_a_password(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """The server's own password file, and one smuggled into the record, reach no written file.
+
+    The server folder is `tmp_path` (`_play_view`'s), so its database password file
+    is the one a real server keeps. The record's `password` key is what a careless
+    later writer could leave there: `read_record` drops it, and the saves rewrite it.
+    """
+    secret = "hunter2-the-fake-server-password"
+    smuggled = "s3cret-typed-into-the-launcher"
+    (tmp_path / (WOTLK.install.password.file or ".db_password")).write_text(
+        secret + "\n", encoding="utf-8"
+    )
+    entry, original, play = _made_client(tmp_path)
+    _save_launcher(
+        play,
+        {"display": {"window": "windowed"}, "account": "BOB", "realm_address": "10.0.0.7"},
+    )
+    raw = json.loads((play / client_packs.RECORD).read_text(encoding="utf-8"))
+    raw["launcher"]["password"] = smuggled
+    (play / client_packs.RECORD).write_text(json.dumps(raw), encoding="utf-8")
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert "launch" in steps
+    written = [p for p in play.rglob("*") if p.is_file() and not p.is_symlink()]
+    assert {"Config.wtf", client_packs.RECORD} <= {p.name for p in written}
+    assert 'SET accountName "BOB"' in _config(play)
+    for needle in (secret, smuggled):
+        assert not [p for p in written if needle.encode() in p.read_bytes()], needle
+    assert "password" not in _config(play).lower()
+
+
+def test_a_launcher_pick_takes_the_place_of_the_catalogs_seed_for_that_key(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """The entry seeds `gxWindow "1"` on a first Play; a full-screen pick is the one written."""
+    entry, original, play = _made_client(tmp_path)
+    assert entry.client.config_wtf is not None and "gxWindow" in entry.client.config_wtf.seed
+    _save_launcher(play, {"display": {"window": "fullscreen"}})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    lines = [line for line in _config(play).splitlines() if "gxwindow" in line.casefold()]
+    assert lines == ['SET gxWindow "0"']
+
+
+def test_picks_on_an_entry_without_config_wtf_do_not_use_up_its_first_run_seed(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """Were the catalog to add a `config_wtf` later, its seed keys must still be written once."""
+    entry, original, play = _made_client(tmp_path, config=False, exe=False)
+    _save_launcher(play, {"display": {"window": "windowed"}})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert 'SET gxWindow "1"' in _config(play)
+    assert client_packs.read_record(play).config_seeded is False
+
+
+def test_the_borderless_pick_is_saved_as_the_exe_option_it_turned_on(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """One shared record: Client options… and a later Refresh read the same exe option."""
+    entry, original, play = _made_client(tmp_path)
+    _save_launcher(play, {"display": {"window": "borderless"}})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    record = client_packs.read_record(play)
+    assert record.choices["exe_options"] == {"borderless": True}
+    assert record.launcher == {"display": {"window": "borderless"}}
+
+
+def test_make_client_options_and_play_all_keep_the_launcher_picks(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    picks = {"display": {"window": "windowed"}, "realm_address": "10.0.0.7"}
+    entry, original, play = _made_client(tmp_path)
+    _save_launcher(play, picks)
+    asker = _OptionsAsker(_choices(hd=True))
+    view, _ = _play_view(
+        ps, tmp_path, original=original, play=play, entry=entry, options_asker=asker
+    )
+    view.client_options()
+    assert client_packs.read_record(play).launcher == picks, "Client options"
+    ps.names = WORLD_UP
+    view.play()
+    assert client_packs.read_record(play).launcher == picks, "the Play pipeline's saves"
+    (play / "Wow.exe").write_bytes(STOCK_EXE)  # stale: Refresh patches it again, and saves
+    before = (play / client_packs.RECORD).stat().st_ino
+    view.refresh_play_client()
+    assert (play / "Wow.exe").read_bytes() != STOCK_EXE
+    assert (play / client_packs.RECORD).stat().st_ino != before, "Refresh saved the record"
+    assert client_packs.read_record(play).launcher == picks, "refresh"
+
+
+def test_make_over_an_existing_record_keeps_its_launcher_picks(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site
+) -> None:
+    entry = _client_entry(tmp_path)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    (original / "Wow.exe").write_bytes(STOCK_EXE)
+    asker = _Asked(client_choices=_choices(hd=True))
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker, entry=entry)
+    target = play_client.default_target(original, WOTLK.name, tmp_path)
+    real = play_client.create
+
+    def create_with_picks(*a: Any, **k: Any) -> Any:
+        made = real(*a, **k)
+        _save_launcher(target, {"account": "BOB"})
+        return made
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(play_client, "create", create_with_picks)
+        view.make_play_client()
+
+    assert client_packs.read_record(target).launcher == {"account": "BOB"}

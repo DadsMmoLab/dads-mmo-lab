@@ -52,7 +52,7 @@ import urllib.request
 import zipfile
 import zlib
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -742,13 +742,108 @@ class PackRecord:
     `packs` maps a pack id to `{"version", "sha256", "files": {relative path: sha256}}`;
     `exe` is the Wow.exe patch record (a later step's); `choices` is the player's picks,
     `{"packs": {id: bool}, "exe_options": {name: bool}}`; `config_seeded` is whether Play has
-    merged Config.wtf into this client once (the seed keys are written on that first merge only).
+    merged Config.wtf into this client once (the seed keys are written on that first merge only);
+    `launcher` is the per-server launcher window's picks (T187), see `clean_launcher`.
     """
 
     packs: dict[str, dict[str, Any]]
     exe: dict[str, Any] | None
     choices: dict[str, Any]
     config_seeded: bool = False
+    launcher: dict[str, Any] = field(default_factory=dict)
+
+
+WINDOW_MODES = ("fullscreen", "windowed", "maximized", "borderless")
+_RESOLUTION = re.compile(r"[1-9][0-9]{2,4}x[1-9][0-9]{2,4}")
+_ADDRESS = re.compile(r"[A-Za-z0-9._:\-]{1,253}")
+ACCOUNT_MAX = 32
+
+
+def clean_account(value: object) -> str | None:
+    """An account name WoW can hold in Config.wtf (upper-cased), or None when it cannot.
+
+    Never a quote, a control character (a CR or LF would start a new `SET` line) or
+    more than 32 characters.
+    """
+    if not isinstance(value, str):
+        return None
+    name = value.strip().upper()
+    if not name or len(name) > ACCOUNT_MAX:
+        return None
+    if '"' in name or "\\" in name or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return None
+    return name
+
+
+def clean_launcher(raw: object) -> dict[str, Any]:
+    """The launcher picks in `raw`, keeping only well-formed known keys.
+
+    `{"display": {"window": one of WINDOW_MODES, "resolution": "1920x1080"},
+    "account": "NAME" | None, "realm_address": "127.0.0.1"}`; anything else is dropped.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    display = raw.get("display")
+    if isinstance(display, dict):
+        shown: dict[str, str] = {}
+        window = display.get("window")
+        if isinstance(window, str) and window in WINDOW_MODES:
+            shown["window"] = window
+        resolution = display.get("resolution")
+        if isinstance(resolution, str) and _RESOLUTION.fullmatch(resolution):
+            shown["resolution"] = resolution
+        if shown:
+            out["display"] = shown
+    if "account" in raw:
+        account = clean_account(raw["account"])
+        if account is not None or raw["account"] is None:
+            out["account"] = account
+    address = raw.get("realm_address")
+    if isinstance(address, str) and _ADDRESS.fullmatch(address):
+        out["realm_address"] = address
+    return out
+
+
+def launcher_config_keys(
+    launcher: Mapping[str, Any], *, catalog_always: Mapping[str, str]
+) -> dict[str, str]:
+    """The Config.wtf keys the launcher picks set; a key the catalog's `always` sets is dropped.
+
+    Display: `gxWindow`/`gxMaximize`/`gxResolution`; the account: `accountName`.
+    A picks dict that is not well formed contributes nothing for the bad part.
+    """
+    picks = clean_launcher(launcher)
+    keys: dict[str, str] = {}
+    display = picks.get("display", {})
+    window = display.get("window")
+    if window == "fullscreen":
+        keys["gxWindow"] = "0"
+    elif window == "windowed":
+        keys.update(gxWindow="1", gxMaximize="0")
+    elif window in ("maximized", "borderless"):
+        keys.update(gxWindow="1", gxMaximize="1")
+    if "resolution" in display:
+        keys["gxResolution"] = display["resolution"]
+    if picks.get("account"):
+        keys["accountName"] = picks["account"]
+    fixed = {key.casefold() for key in catalog_always}
+    return {k: v for k, v in keys.items() if k.casefold() not in fixed}
+
+
+def launcher_exe_options(
+    launcher: Mapping[str, Any], chosen: Mapping[str, bool], patch_options: Collection[str]
+) -> dict[str, bool]:
+    """`chosen` exe options with `borderless` following the launcher's window pick.
+
+    Only where the catalog's exe patch has a `borderless` option and the launcher has
+    picked a window mode: borderless is on for "borderless" and off for any other mode.
+    """
+    window = clean_launcher(launcher).get("display", {}).get("window")
+    out = dict(chosen)
+    if window is not None and "borderless" in patch_options:
+        out["borderless"] = window == "borderless"
+    return out
 
 
 def _empty_record() -> PackRecord:
@@ -803,6 +898,7 @@ def read_record(play_dir: Path) -> PackRecord:
             "exe_options": _bool_map(choices.get("exe_options")),
         },
         config_seeded=raw.get("config_seeded") is True,
+        launcher=clean_launcher(raw.get("launcher")),
     )
 
 
@@ -905,6 +1001,7 @@ def write_record(
         "exe": record.exe,
         "choices": record.choices,
         "config_seeded": record.config_seeded,
+        "launcher": clean_launcher(record.launcher),
     }
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     target = play_dir / RECORD

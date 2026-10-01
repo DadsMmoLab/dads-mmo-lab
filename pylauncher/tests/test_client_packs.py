@@ -15,6 +15,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import io
+import json
 import os
 import shutil
 import types
@@ -2023,3 +2024,95 @@ def test_a_missing_checkout_pack_refusal_ends_by_naming_the_press_to_repeat(
     assert play_text.endswith("then press Play again.")
     assert make_text.endswith(f"then press “{cv.MAKE_PLAY_CLIENT_LABEL}” again.")
     assert "press Play" not in make_text
+
+
+# -- the launcher's picks (T187) ----------------------------------------------------------------
+
+_NO_CHOICES: dict[str, Any] = {"packs": {}, "exe_options": {}}
+
+
+def test_launcher_picks_round_trip_and_an_old_record_reads_empty(rig: _Rig) -> None:
+    assert client_packs.read_record(rig.play).launcher == {}
+    picks = {
+        "display": {"window": "windowed", "resolution": "1920x1080"},
+        "account": "PLAYER_1",
+        "realm_address": "192.168.1.5",
+    }
+    record = client_packs.PackRecord({}, None, _NO_CHOICES, launcher=picks)
+
+    client_packs.write_record(rig.play, record, game=GAME, server_dir=rig.server)
+
+    assert client_packs.read_record(rig.play).launcher == picks
+    (rig.play / client_packs.RECORD).write_bytes(b'{"version": 1, "packs": {}}')
+    assert client_packs.read_record(rig.play).launcher == {}
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        {"display": {"window": "floating"}},
+        {"display": {"resolution": "big"}},
+        {"display": "windowed"},
+        {"account": 'A"B'},
+        {"account": "A\nSET realmList x"},
+        {"account": "X" * 33},
+        {"account": 5},
+        {"realm_address": "host name"},
+        {"realm_address": 'a"b'},
+        {"realm_address": ""},
+        {"unknown": "x"},
+    ],
+)
+def test_junk_launcher_values_are_dropped_on_read(rig: _Rig, junk: dict[str, Any]) -> None:
+    (rig.play / client_packs.RECORD).write_text(
+        json.dumps({"packs": {}, "launcher": junk}), encoding="utf-8"
+    )
+    assert client_packs.read_record(rig.play).launcher == {}
+
+
+def test_a_launcher_that_is_not_a_mapping_reads_empty(rig: _Rig) -> None:
+    (rig.play / client_packs.RECORD).write_text(
+        json.dumps({"packs": {}, "launcher": ["x"]}), encoding="utf-8"
+    )
+    assert client_packs.read_record(rig.play).launcher == {}
+
+
+@pytest.mark.parametrize(
+    ("window", "keys"),
+    [
+        ("fullscreen", {"gxWindow": "0"}),
+        ("windowed", {"gxWindow": "1", "gxMaximize": "0"}),
+        ("maximized", {"gxWindow": "1", "gxMaximize": "1"}),
+        ("borderless", {"gxWindow": "1", "gxMaximize": "1"}),
+    ],
+)
+def test_each_window_mode_maps_to_its_config_keys(window: str, keys: dict[str, str]) -> None:
+    got = client_packs.launcher_config_keys({"display": {"window": window}}, catalog_always={})
+    assert got == keys
+
+
+def test_resolution_and_account_map_to_their_keys() -> None:
+    got = client_packs.launcher_config_keys(
+        {"display": {"resolution": "1280x720"}, "account": "bob"}, catalog_always={}
+    )
+    assert got == {"gxResolution": "1280x720", "accountName": "BOB"}
+    assert client_packs.launcher_config_keys({}, catalog_always={}) == {}
+
+
+def test_a_key_the_catalog_always_sets_is_dropped_whatever_its_spelling() -> None:
+    picks = {"display": {"window": "windowed", "resolution": "1280x720"}, "account": "BOB"}
+    got = client_packs.launcher_config_keys(picks, catalog_always={"GXWINDOW": "0"})
+    assert got == {"gxMaximize": "0", "gxResolution": "1280x720", "accountName": "BOB"}
+
+
+def test_borderless_follows_the_window_pick_only_where_the_patch_has_it() -> None:
+    mode = {"display": {"window": "borderless"}}
+    assert client_packs.launcher_exe_options(mode, {}, ["borderless"]) == {"borderless": True}
+    other = {"display": {"window": "windowed"}}
+    assert client_packs.launcher_exe_options(other, {"borderless": True}, ["borderless"]) == {
+        "borderless": False
+    }
+    assert client_packs.launcher_exe_options(mode, {}, []) == {}
+    assert client_packs.launcher_exe_options({}, {"borderless": True}, ["borderless"]) == {
+        "borderless": True
+    }

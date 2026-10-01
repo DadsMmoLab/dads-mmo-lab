@@ -109,7 +109,7 @@ from yulon.apply import (
     required_prompts,
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
-from yulon.catalog.catalog import CatalogEntry, Client, ClientPack
+from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
 from yulon.catalog.families import azerothcore, clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
@@ -713,6 +713,12 @@ public address would be wrong here: a router often does not loop a machine's
 own public address back to it. The world address comes from the realm row the
 Networking tab manages, not from this file.
 """
+
+
+def _realm_address(record: client_packs.PackRecord) -> str:
+    """The address the ready-to-play client points at: the launcher's pick, else this machine."""
+    return str(record.launcher.get("realm_address") or PLAY_CLIENT_ADDRESS)
+
 
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
 
@@ -8605,7 +8611,12 @@ class ControllerView(QWidget):
             try:
                 client_packs.write_record(
                     choice.target,
-                    client_packs.PackRecord({}, None, choice.client_choices),
+                    client_packs.PackRecord(
+                        {},
+                        None,
+                        choice.client_choices,
+                        launcher=client_packs.read_record(choice.target).launcher,
+                    ),
                     game=self.entry.id,
                     server_dir=self.services.controller.server_dir,
                 )
@@ -8929,13 +8940,14 @@ class ControllerView(QWidget):
         packs = dict(record.packs)
         exe = record.exe
         seeded = record.config_seeded
+        choices = record.choices
         notes: list[str] = []
         unavailable: set[str] = set()
 
         def save() -> None:
             client_packs.write_record(
                 play,
-                client_packs.PackRecord(packs, exe, record.choices, seeded),
+                client_packs.PackRecord(packs, exe, choices, seeded, record.launcher),
                 game=game,
                 server_dir=server_dir,
             )
@@ -9045,7 +9057,12 @@ class ControllerView(QWidget):
         if client.exe_patch is not None:
             check_cancel()
             say("Checking Wow.exe…")
-            options = client_exe.options_for(client.exe_patch, record.choices["exe_options"])
+            # A window pick decides `borderless`, and is saved as that exe option (T187).
+            picked_exe = client_packs.launcher_exe_options(
+                record.launcher, record.choices["exe_options"], client.exe_patch.options
+            )
+            choices = {**record.choices, "exe_options": picked_exe}
+            options = client_exe.options_for(client.exe_patch, picked_exe)
             exe = client_exe.apply(play, source, client.exe_patch, options)
             try:
                 save()
@@ -9062,7 +9079,16 @@ class ControllerView(QWidget):
                 exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
-        if cfg is not None:
+        picked = client_packs.launcher_config_keys(
+            record.launcher, catalog_always=cfg.always if cfg is not None else {}
+        )
+        if cfg is None and picked:
+            # An entry without `config_wtf` still gets the launcher's picks (T187); its
+            # realmlist stays `_launch`'s, and no seed was written, so none is used up.
+            check_cancel()
+            say("Setting up Config.wtf…")
+            client_config.merge_config_wtf(play, ConfigWtf(always=picked), first_run=False)
+        elif cfg is not None:
             check_cancel()
             say("Setting up Config.wtf…")
             if cfg.remove_locale_realmlists:
@@ -9070,13 +9096,22 @@ class ControllerView(QWidget):
             else:
                 try:
                     networking.write_ready_to_play_realmlists(
-                        play, PLAY_CLIENT_ADDRESS, client.realmlist_file
+                        play, _realm_address(record), client.realmlist_file
                     )
                 except OSError as exc:
                     raise play_client.PlayClientError(
                         f"The realmlist in {play} could not be written ({exc}), so nothing was "
                         "started. Check that you can write to that folder, then press Play again."
                     ) from exc
+            # The catalog's `always` is the server's own; the picks only add keys it leaves
+            # (`launcher_config_keys` dropped the rest), and a pick takes a seed's place.
+            taken = {key.casefold() for key in picked}
+            cfg = cfg.model_copy(
+                update={
+                    "always": {**picked, **cfg.always},
+                    "seed": {k: v for k, v in cfg.seed.items() if k.casefold() not in taken},
+                }
+            )
             client_config.merge_config_wtf(play, cfg, first_run=not record.config_seeded)
             seeded = True
             save()
@@ -9217,7 +9252,9 @@ class ControllerView(QWidget):
             # realmlists removed) by the pipeline; every other entry is step (a)'s.
             try:
                 networking.write_ready_to_play_realmlists(
-                    play, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+                    play,
+                    _realm_address(client_packs.read_record(play)),
+                    self.entry.client.realmlist_file,
                 )
             except OSError as exc:
                 raise play_launch.LaunchRefusal(
@@ -9297,7 +9334,9 @@ class ControllerView(QWidget):
             current = client_packs.read_record(play)
             client_packs.write_record(
                 play,
-                client_packs.PackRecord(current.packs, current.exe, chosen, current.config_seeded),
+                client_packs.PackRecord(
+                    current.packs, current.exe, chosen, current.config_seeded, current.launcher
+                ),
                 game=game,
                 server_dir=server_dir,
             )
