@@ -709,6 +709,8 @@ own public address back to it. The world address comes from the realm row the
 Networking tab manages, not from this file.
 """
 
+PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
+
 PLAY_CLIENT_RUNNING = (
     "Yu'lon is still writing this server's ready-to-play client. Closing now would "
     "leave it half made or half refreshed. This window will close normally once it "
@@ -791,6 +793,12 @@ class PlayClientDialog(QDialog):
     Built from a `PlayClientOffer` and read back through `choice()`, so a test
     looks at the widgets without opening a modal. OK is live only for a folder
     `plan()` accepted and, across drives, only once the full copy is agreed to.
+
+    A folder typed or picked here is planned again through `jobs`, off the GUI
+    thread: the plan walks the whole client, and the leftover of a crashed full
+    copy it clears first can be gigabytes. Until that answer is in, and while
+    the path field says anything but the folder it answered for, OK is dead:
+    what is made is always the folder the numbers on screen are for.
     """
 
     def __init__(
@@ -798,13 +806,16 @@ class PlayClientDialog(QDialog):
         offer: PlayClientOffer,
         *,
         pick_dir: DirPicker = _qt_dir_picker,
+        jobs: JobRunner | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Make a ready-to-play client")
         self._offer = offer
         self._pick_dir = pick_dir
+        self._jobs: JobRunner = jobs or threaded_job_runner(self)
         self._plan: play_client.BuildPlan | None = offer.plan
+        self._planned: Path = offer.target
         self._free = offer.free_bytes
         box = QVBoxLayout(self)
         intro = QLabel(
@@ -838,7 +849,8 @@ class PlayClientDialog(QDialog):
         self.remove_originals_check = QCheckBox("Also remove them from your original client", self)
         self.remove_originals_check.setToolTip(
             "Only files still exactly as Yu'lon copied them are removed; any file that "
-            "changed since is left where it is."
+            "changed since is left where it is. Files another server of yours also uses "
+            "are kept and not listed here."
         )
         self.remove_originals_check.setChecked(False)
         for widget in (self.originals_label, self.originals_list, self.remove_originals_check):
@@ -863,12 +875,25 @@ class PlayClientDialog(QDialog):
         buttons.rejected.connect(self.reject)
         box.addWidget(buttons)
         self.path_edit.editingFinished.connect(self._path_edited)
+        self.path_edit.textChanged.connect(self._path_typed)
         self.change_button.clicked.connect(self._change)
         self.full_copy_check.toggled.connect(self._update_ok)
         self._show_plan()
 
+    def _shown_path(self) -> Path:
+        return Path(self.path_edit.text().strip())
+
     def _path_edited(self) -> None:
-        self._retarget(Path(self.path_edit.text().strip()))
+        target = self._shown_path()
+        if target != self._planned or self._plan is None:
+            self._retarget(target)
+
+    def _path_typed(self, _text: str) -> None:
+        if self._shown_path() != self._planned:
+            self.size_label.setText("Press Enter to check this folder.")
+        elif self._plan is not None:
+            self.size_label.setText(_play_size_text(self._plan, self._free))
+        self._update_ok()
 
     def _change(self) -> None:
         """Pick the folder to put it in; the name stays the one shown."""
@@ -883,14 +908,46 @@ class PlayClientDialog(QDialog):
         self._retarget(target)
 
     def _retarget(self, target: Path) -> None:
-        try:
-            self._plan = self._offer.replan(target)
-        except (play_client.PlayClientError, OSError) as exc:
-            self._plan = None
-            self.size_label.setText(str(exc))
-        self._free = self._offer.free_space(target)
+        """Plan `target` off the GUI thread; OK stays dead until its answer is in."""
+        self._plan = None
+        self._planned = target
         self.full_copy_check.setChecked(False)
-        self._show_plan()
+        self.full_copy_check.setVisible(False)
+        self.size_label.setText(f"Checking {target}\u2026")
+        self._update_ok()
+        offer = self._offer
+
+        def work() -> tuple[Path, object, int | None]:
+            # The folder rides along with its answer: an edit made meanwhile
+            # must not be shown another folder's numbers.
+            try:
+                return target, offer.replan(target), offer.free_space(target)
+            except (play_client.PlayClientError, OSError) as exc:
+                return target, exc, None
+
+        self._jobs(work, self._replanned, self._replan_failed)
+
+    @Slot(object)
+    def _replanned(self, answer: object) -> None:
+        if not isinstance(answer, tuple) or answer[0] != self._planned:
+            return  # an older folder's answer, overtaken by another edit
+        _target, plan, free = answer
+        if isinstance(plan, play_client.BuildPlan):
+            self._plan = plan
+            self._free = free if isinstance(free, int) else None
+            self._show_plan()
+            return
+        self._plan = None
+        self.size_label.setText(str(plan))
+        self._update_ok()
+
+    @Slot(object)
+    def _replan_failed(self, exc: object) -> None:
+        """Something `work()` did not expect; the folder stays unplanned and OK dead."""
+        logger.warning(f"ready-to-play client: planning {self._planned} failed: {exc!r}")
+        self._plan = None
+        self.size_label.setText(f"{self._planned} could not be checked: {exc}")
+        self._update_ok()
 
     def _show_plan(self) -> None:
         plan = self._plan
@@ -917,13 +974,13 @@ class PlayClientDialog(QDialog):
     def choice(self) -> PlayClientChoice | None:
         """What OK would make, or None while the folder is refused or the copy not agreed."""
         plan = self._plan
-        if plan is None:
+        if plan is None or self._shown_path() != self._planned:
             return None
         full_copy = self.full_copy_check.isChecked()
         if not plan.same_volume and not full_copy:
             return None
         return PlayClientChoice(
-            target=Path(self.path_edit.text().strip()),
+            target=self._planned,
             full_copy=full_copy,
             remove_originals=bool(self._offer.originals)
             and self.remove_originals_check.isChecked(),
@@ -931,10 +988,17 @@ class PlayClientDialog(QDialog):
 
 
 def ask_play_client(
-    parent: QWidget, offer: PlayClientOffer, pick_dir: DirPicker = _qt_dir_picker
+    parent: QWidget,
+    offer: PlayClientOffer,
+    pick_dir: DirPicker = _qt_dir_picker,
+    jobs: JobRunner | None = None,
 ) -> PlayClientChoice | None:
-    """The real `PlayClientAsker`: the dialog, modal; None for Cancel."""
-    dialog = PlayClientDialog(offer, pick_dir=pick_dir, parent=parent)
+    """The real `PlayClientAsker`: the dialog, modal; None for Cancel.
+
+    `jobs` is the tab's own runner, whose `shutdown()` joins a re-plan still
+    running when the window closes; the dialog's own would be destroyed with it.
+    """
+    dialog = PlayClientDialog(offer, pick_dir=pick_dir, jobs=jobs, parent=parent)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
     return dialog.choice()
@@ -968,12 +1032,11 @@ def _ask_with(
 
 @dataclass(frozen=True)
 class _MadePlayClient:
-    """What a finished "Make…" did, read on the GUI thread once the build is over."""
+    """A finished build, read on the GUI thread; `copies` are still to be removed (ticked)."""
 
     target: Path
     realmlist_problem: str | None
-    removed: tuple[str, ...]
-    left: tuple[str, ...]
+    copies: tuple[apply_module.ClientCopy, ...]
 
 
 @dataclass(frozen=True)
@@ -1421,6 +1484,15 @@ class ControllerServices:
 
     `set_client_dir`'s twin, bound by `main.py` for the same reason and left
     `None` by every factory.
+    """
+
+    other_server_dirs: Callable[[], tuple[Path, ...]] | None = None
+    """The server folders of every OTHER install Yu'lon knows, on this host (T181).
+
+    Read by Make…'s "Also remove them from your original client": a file
+    another server also has a receipt for is never offered. Bound by `main.py`
+    from the live `AppState`; `None` (every factory) offers this server's own.
+    A WSL-distro install is left out: reading its folder boots its distro (T133).
     """
 
     @classmethod
@@ -5403,7 +5475,7 @@ class ControllerView(QWidget):
         # T181's creation dialog, a seam for `prompt_asker`'s reason. The real
         # one is the dialog, with this tab's own folder picker behind "Change…".
         self._play_client_asker: PlayClientAsker = play_client_asker or (
-            lambda parent, offer: ask_play_client(parent, offer, self._pick_client_dir)
+            lambda parent, offer: ask_play_client(parent, offer, self._pick_client_dir, self._jobs)
         )
         # A Make…, Refresh or Delete writing the ready-to-play client: it holds
         # the close (`busy_reason()`) the way the import does.
@@ -6966,6 +7038,9 @@ class ControllerView(QWidget):
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
+        if self.play_label.text() == PLAY_START_FAILED:
+            # A later Start (or "Stop the other server and start this one") worked.
+            self._say_play("")
         if self._play_after_start:
             # T181: Play asked for this Start ("Start and play"); it is done.
             self._play_after_start = False
@@ -7162,7 +7237,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         if self._play_after_start:
             self._play_after_start = False
-            self._say_play("The server did not start, so World of Warcraft was not started.")
+            self._play_end(PLAY_START_FAILED)
         if isinstance(exc, PortConflictError):
             self._offer_to_stop_the_other_server(exc)
             return
@@ -7530,6 +7605,11 @@ class ControllerView(QWidget):
             return
         if self._uninstall_running:
             return
+        if self._play_client_running:
+            # T181: Make…, Refresh or Delete is writing the ready-to-play
+            # client, and the uninstall may delete that very folder.
+            self.uninstall_label.setText(PLAY_CLIENT_RUNNING)
+            return
         self._stop_forced = ""
         if self._uninstall_plan is None:
             self.uninstall_label.setText(UNINSTALL_NO_PLAN)
@@ -7773,8 +7853,16 @@ class ControllerView(QWidget):
     #
     # Make…, Play, Refresh and Delete. Everything that reads or writes the folder
     # runs through `_run()`: a build is gigabytes when it is a full copy, and
-    # even a listing of a client walks thousands of files. Make…, Refresh and
-    # Delete hold `_set_busy()` and the close (`busy_reason()`) while they write.
+    # even a listing of a client walks thousands of files.
+    #
+    # Two flags, and why two. `_play_client_running` is held by Make… from its
+    # press to its end (the plan, the dialog, the build, the removals), and by
+    # Refresh and Delete: it holds the close (`busy_reason()`) and refuses a
+    # second of them. `_set_busy()` is taken only around the parts that WRITE
+    # (`_hold_busy()`), and given back only by whoever took it
+    # (`_release_play_client()`): a Start pressed while Make… was still planning
+    # owns the lock, and unlocking it from here was `_set_busy`'s recorded
+    # double-unlock defect.
 
     def _build_play_controls(self, tab: QWidget) -> None:
         """The Play button, its ▾ menu and its label (T181).
@@ -7784,6 +7872,9 @@ class ControllerView(QWidget):
         the install has neither its own client folder (nothing to make one
         from; the row's "Set client folder…" says so) nor a ready-to-play client.
         """
+        self._play_holds_busy = False
+        self._play_pending = False
+        self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
@@ -7834,6 +7925,45 @@ class ControllerView(QWidget):
         self._say_play(message)
         self.action_failed.emit(message)
         QMessageBox.warning(self, self.entry.name, message)
+
+    def _play_client_refusal(self) -> str | None:
+        """Why Make…, Play, Refresh or Delete may not start now, or None.
+
+        A module job first: it never takes `_set_busy()` (`_module_pending`
+        alone, as `forget_refusal()` reads it), and it may be writing into the
+        very folder Delete would remove, or racing the tab rebuild Make… and
+        Delete end with. Then any Server action, and another of these four.
+        """
+        if self._module_pending is not None:
+            return (
+                f"“{self._module_pending}” is running on this server's Modules tab. "
+                "Wait for it to finish, then press this again. Nothing was changed."
+            )
+        if self._busy or self._play_client_running:
+            return (
+                "This server is busy with another action — wait for it to finish on the "
+                "Server tab, then press this again. Nothing was changed."
+            )
+        return None
+
+    def _play_client_blocked(self) -> bool:
+        """`_play_client_refusal()` said to the player; True when there was one."""
+        refusal = self._play_client_refusal()
+        if refusal is None:
+            return False
+        QMessageBox.information(self, "Something else is running", refusal)
+        return True
+
+    def _hold_busy(self) -> None:
+        self._play_holds_busy = True
+        self._set_busy(True)
+
+    def _release_play_client(self) -> None:
+        """End a Make…, Refresh or Delete: give back the lock only if this took it."""
+        self._play_client_running = False
+        if self._play_holds_busy:
+            self._play_holds_busy = False
+            self._set_busy(False)
 
     def _is_this_servers(self, marker: play_client.Marker | None) -> bool:
         return (
@@ -7889,9 +8019,9 @@ class ControllerView(QWidget):
     @Slot()
     def make_play_client(self) -> None:
         """Ask where and how, then build this server's ready-to-play client (T181 §1, §3)."""
-        if self.services.set_play_client_dir is None or self._play_client_running:
+        if self.services.set_play_client_dir is None:
             return
-        if self._client_dir_busy():
+        if self._play_client_blocked():
             return
         original = self.services.client_dir
         if original is None:
@@ -7910,9 +8040,14 @@ class ControllerView(QWidget):
         else:
             target = play_client.default_target(original, self.entry.name, server_dir)
         addons = self._addons_in(original)
+        others = self.services.other_server_dirs
+        other_dirs = others() if others is not None else ()  # the live state, read here
+        # Held from here, through the plan and the dialog, to the end: a second
+        # Make…, a Delete or a Refresh is refused all that time, and so is the close.
+        self._play_client_running = True
         self._say_play("Looking at your client…")
         self._run(
-            lambda: self._plan_play_client(original, target, addons),
+            lambda: self._plan_play_client(original, target, addons, other_dirs),
             self._play_plan_ready,
             self._play_client_job_failed,
         )
@@ -7933,28 +8068,48 @@ class ControllerView(QWidget):
         return tuple(sorted(set(names)))
 
     def _replan(self, original: Path, target: Path) -> play_client.BuildPlan:
-        """`plan()` for a folder, after clearing this server's crashed attempt there."""
+        """`plan()` for a folder, after clearing this server's crashed attempt there.
+
+        Off the GUI thread only: from `_plan_play_client()` and, for a folder
+        changed in the dialog, through the dialog's job runner.
+        """
         server_dir = self.services.controller.server_dir
         play_client.clean_partials(target, game=self.entry.id, server_dir=server_dir)
         return play_client.plan(original, target, server_dir=server_dir)
 
     def _plan_play_client(
-        self, original: Path, target: Path, addons: tuple[str, ...]
+        self,
+        original: Path,
+        target: Path,
+        addons: tuple[str, ...],
+        other_servers: tuple[Path, ...],
     ) -> PlayClientOffer | Path:
         """Off the GUI thread: the offer the dialog shows, or `target` if it is already made.
 
         A folder already carrying this server's marker (made by an earlier
         press whose record could not be saved) is recorded as it is, not built
         again: `create()` would refuse it.
+
+        The files offered for removal from the original are this server's
+        receipts there, less every path another known server also has a receipt
+        for: deleting a file another server's module put there (or still uses)
+        would break that server's client, and the hash cannot tell them apart.
         """
         server_dir = self.services.controller.server_dir
         if self._is_this_servers(play_client.read_marker(target)):
             return target
         build = self._replan(original, target)
+        shared = {
+            os.path.normcase(copy.path)
+            for other in other_servers
+            for copy in apply_module.client_receipts(other)
+        }
         copies = tuple(
             copy
             for copy in apply_module.client_receipts(server_dir)
-            if Path(copy.path).is_relative_to(original) and Path(copy.path).is_file()
+            if Path(copy.path).is_relative_to(original)
+            and Path(copy.path).is_file()
+            and os.path.normcase(copy.path) not in shared
         )
         return PlayClientOffer(
             original=original,
@@ -7967,23 +8122,45 @@ class ControllerView(QWidget):
             free_space=lambda chosen: _free_bytes(chosen.parent),
         )
 
+    def _make_refused_now(self) -> bool:
+        """Re-asked after the plan and after the dialog: did a job start meanwhile?
+
+        `_play_client_running` is Make…'s own, so only the other two halves of
+        `_play_client_refusal()` are asked.
+        """
+        if self._module_pending is None and not self._busy:
+            return False
+        self._play_client_running = False
+        self._play_refused(
+            "No ready-to-play client was made: another action started on this server "
+            "while Yu'lon was getting it ready. Wait for it to finish, then press "
+            f"“{MAKE_PLAY_CLIENT_LABEL}” again."
+        )
+        return True
+
     @Slot(object)
     def _play_plan_ready(self, result: object) -> None:
+        if self._make_refused_now():
+            return
         if isinstance(result, Path):
-            self._record_play_client(
-                result, [f"This server's ready-to-play client at {result} is used again."]
-            )
+            if self._remember_play_client(result):
+                self._finish_make(
+                    result, [f"This server's ready-to-play client at {result} is used again."]
+                )
             return
         if not isinstance(result, PlayClientOffer):  # pragma: no cover - defensive
+            self._release_play_client()
             return
         offer = result
         choice = self._play_client_asker(self, offer)
         if choice is None:
+            self._release_play_client()
             self._say_play("No ready-to-play client was made.")
             return
+        if self._make_refused_now():
+            return
         copies = offer.copies if choice.remove_originals else ()
-        self._play_client_running = True
-        self._set_busy(True)
+        self._hold_busy()
         self._say_play(f"Making the ready-to-play client at {choice.target}…")
         self._run(
             lambda: self._build_play_client(offer.original, choice, copies),
@@ -7997,11 +8174,7 @@ class ControllerView(QWidget):
         choice: PlayClientChoice,
         copies: tuple[apply_module.ClientCopy, ...],
     ) -> _MadePlayClient:
-        """Off the GUI thread: build, point it at this server, then the asked-for removals.
-
-        The removals come last and only after a build that succeeded: a file is
-        taken out of the original only once the ready-to-play client holds it.
-        """
+        """Off the GUI thread: build it and point it at this server. No removals yet."""
         play_client.create(
             original,
             choice.target,
@@ -8016,42 +8189,92 @@ class ControllerView(QWidget):
             )
         except OSError as exc:
             problem = str(exc)
-        removed, left = apply_module.take_back_files(copies)
-        return _MadePlayClient(choice.target, problem, removed, left)
+        return _MadePlayClient(choice.target, problem, copies)
 
     @Slot(object)
     def _play_client_made(self, result: object) -> None:
-        self._play_client_running = False
-        self._set_busy(False)
+        """Built: record it, and only then take the ticked files out of the original.
+
+        In that order because the removal is only safe once the ready-to-play
+        client is where this server's modules live: a record that failed leaves
+        the original as the folder they go into, and its files must stay.
+        """
         if not isinstance(result, _MadePlayClient):  # pragma: no cover - defensive
+            self._release_play_client()
             return
-        said = [f"The ready-to-play client is at {result.target}. Press Play to start it."]
-        if result.realmlist_problem is not None:
+        if not self._remember_play_client(result.target):
+            return
+        if not result.copies:
+            self._finish_make(result.target, self._made_sentences(result, (), ()))
+            return
+        self._made = result
+        self._say_play("Removing the ticked files from your own client…")
+        self._run(
+            lambda: apply_module.take_back_files(result.copies),
+            self._play_originals_removed,
+            self._play_originals_failed,
+        )
+
+    @Slot(object)
+    def _play_originals_removed(self, answer: object) -> None:
+        made, self._made = self._made, None
+        if made is None:  # pragma: no cover - defensive
+            self._release_play_client()
+            return
+        removed: tuple[str, ...] = ()
+        left: tuple[str, ...] = ()
+        if isinstance(answer, tuple) and len(answer) == 2:
+            removed, left = answer
+        self._finish_make(made.target, self._made_sentences(made, removed, left))
+
+    @Slot(object)
+    def _play_originals_failed(self, exc: object) -> None:
+        made, self._made = self._made, None
+        if made is None:  # pragma: no cover - defensive
+            self._release_play_client()
+            return
+        said = self._made_sentences(made, (), ())
+        said.append(f"The ticked files could not be removed from your own client: {exc}.")
+        self._finish_make(made.target, said)
+
+    @staticmethod
+    def _made_sentences(
+        made: _MadePlayClient, removed: tuple[str, ...], left: tuple[str, ...]
+    ) -> list[str]:
+        said = [f"The ready-to-play client is at {made.target}. Press Play to start it."]
+        if made.realmlist_problem is not None:
             said.append(
-                f"Its realmlist could not be written yet ({result.realmlist_problem}); "
+                f"Its realmlist could not be written yet ({made.realmlist_problem}); "
                 "Play writes it again first."
             )
-        if result.removed:
-            said.append("Removed from your own client: " + "; ".join(result.removed) + ".")
-        if result.left:
-            said.append("Left in your own client: " + "; ".join(result.left) + ".")
-        self._record_play_client(result.target, said)
+        if removed:
+            said.append("Removed from your own client: " + "; ".join(removed) + ".")
+        if left:
+            said.append("Left in your own client: " + "; ".join(left) + ".")
+        return said
 
-    def _record_play_client(self, target: Path, said: list[str]) -> None:
-        """Remember the folder for this install, say so, and have the tab rebuilt over it."""
+    def _remember_play_client(self, target: Path) -> bool:
+        """Record the folder for this install; on failure say so, end Make…, answer False."""
         setter = self.services.set_play_client_dir
         if setter is None:  # pragma: no cover - the button is not built without it
-            return
+            self._release_play_client()
+            return False
         try:
             setter(target)
         except OSError as exc:
+            self._release_play_client()
             self._play_refused(
                 f"The ready-to-play client was made at {target}, but Yu'lon could not "
-                f"remember it: {exc}. Press “{MAKE_PLAY_CLIENT_LABEL}” again to "
-                "use it."
+                f"remember it: {exc}. Nothing was removed from your own client. Press "
+                f"“{MAKE_PLAY_CLIENT_LABEL}” again to use it."
             )
-            return
+            return False
         logger.info(f"{self.entry.id}: ready-to-play client recorded at {target}")
+        return True
+
+    def _finish_make(self, target: Path, said: list[str]) -> None:
+        """Say what Make… did, and have the tab rebuilt over the new folder."""
+        self._release_play_client()
         QMessageBox.information(self, "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
@@ -8061,9 +8284,10 @@ class ControllerView(QWidget):
     @Slot(object)
     def _play_client_job_failed(self, exc: object) -> None:
         """Make…, Refresh or Delete stopped; `PlayClientError`'s text says what to do next."""
-        self._play_client_running = False
-        self._play_after_refresh = False
-        self._set_busy(False)
+        self._release_play_client()
+        if self._play_after_refresh:
+            self._play_after_refresh = False
+            self._play_pending = False
         if not isinstance(exc, play_client.PlayClientError):
             logger.warning(f"{self.entry.id}: ready-to-play client: {exc!r}")
         self._play_refused(str(exc))
@@ -8078,18 +8302,39 @@ class ControllerView(QWidget):
         make it again); the server must run (else "Start it first?"); a patched
         original offers Refresh; then the realmlist is written again and the
         game is started, detached.
+
+        One Play at a time (`_play_pending`, from the press to the launch or
+        the refusal): a second press while the first is on its way would start
+        a second game.
         """
-        if self.services.set_play_client_dir is None:
+        if self.services.set_play_client_dir is None or self._play_pending:
             return
         if self.services.play_client_dir is None:
             self.make_play_client()
             return
-        if self._client_dir_busy():
+        if self._play_client_blocked():
             return
         if self._usable_play_client() is None:
             return
+        self._play_pending = True
         self._say_play("Checking that the server is running…")
         self._run(self.services.controller.status, self._play_status_read, self._play_failed)
+
+    def _play_end(self, said: str | None = None) -> None:
+        """The Play under way is over, started or not."""
+        self._play_pending = False
+        if said is not None:
+            self._say_play(said)
+
+    def _play_still_usable(self) -> play_client.Marker | None:
+        """`_usable_play_client()` part-way through a Play: a gone folder ends it first."""
+        marker = self._usable_play_client(offer_remake=False)
+        play = self.services.play_client_dir
+        if marker is None:
+            self._play_end()
+            if play is not None:
+                self._offer_remake(play)
+        return marker
 
     @Slot(object)
     def _play_status_read(self, status: object) -> None:
@@ -8103,13 +8348,13 @@ class ControllerView(QWidget):
             "Start and play",
         )
         if answer != "yes":
-            self._say_play("Nothing was started.")
+            self._play_end("Nothing was started.")
             return
         self._play_after_start = True
         self.start_server()
 
     def _play_check_stale(self) -> None:
-        marker = self._usable_play_client()
+        marker = self._play_still_usable()
         play = self.services.play_client_dir
         if marker is None or play is None:
             return
@@ -8143,14 +8388,14 @@ class ControllerView(QWidget):
         if answer == "save":
             self._play_launch()
         elif answer == "yes":
-            self._play_after_refresh = True
-            self.refresh_play_client()
+            if not self._start_refresh(then_play=True):
+                self._play_end()
         else:
-            self._say_play("Nothing was started.")
+            self._play_end("Nothing was started.")
 
     def _play_launch(self) -> None:
         play = self.services.play_client_dir
-        if play is None or self._usable_play_client() is None:
+        if play is None or self._play_still_usable() is None:
             return
         self._say_play("Starting World of Warcraft…")
         self._run(lambda: self._launch(play), self._play_launched, self._play_failed)
@@ -8191,16 +8436,17 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _play_launched(self, _result: object) -> None:
-        self._say_play("World of Warcraft is starting. Closing Yu'lon does not close it.")
+        self._play_end("World of Warcraft is starting. Closing Yu'lon does not close it.")
 
     @Slot(object)
     def _play_failed(self, exc: object) -> None:
-        self._play_after_refresh = False
+        self._play_end()
         if not isinstance(exc, play_launch.LaunchRefusal):
             logger.warning(f"{self.entry.id}: Play: {exc!r}")
             exc = (
-                f"Play stopped: {exc}. Nothing was started. Press Refresh on this tab, then "
-                "Play again."
+                f"Play stopped: {exc}. Nothing was started. Press Play again; if it stops "
+                f"the same way, use “{REFRESH_PLAY_CLIENT_LABEL}” in the "
+                "▾ menu beside Play first."
             )
         self._play_refused(str(exc))
 
@@ -8209,19 +8455,25 @@ class ControllerView(QWidget):
     @Slot()
     def refresh_play_client(self) -> None:
         """Bring shared game files and Wow.exe back in step with the original (T181 §4)."""
+        self._start_refresh(then_play=False)
+
+    def _start_refresh(self, *, then_play: bool) -> bool:
+        """Start a Refresh; False (said) when it could not start. `then_play` launches after."""
         play = self.services.play_client_dir
-        if play is None or self._play_client_running:
-            return
-        if self._client_dir_busy():
-            self._play_after_refresh = False
-            return
-        marker = self._usable_play_client()
+        if play is None:
+            return False
+        if self._play_client_blocked():
+            return False
+        marker = self._usable_play_client(offer_remake=not then_play)
         if marker is None:
-            self._play_after_refresh = False
-            return
+            if then_play:
+                self._play_end()
+                self._offer_remake(play)
+            return False
         server_dir, client_dir = self.services.controller.server_dir, self.services.client_dir
+        self._play_after_refresh = then_play
         self._play_client_running = True
-        self._set_busy(True)
+        self._hold_busy()
         self._say_play(f"Refreshing the ready-to-play client from {marker.source_client_dir}…")
         self._run(
             lambda: play_client.refresh(
@@ -8234,11 +8486,11 @@ class ControllerView(QWidget):
             self._play_client_refreshed,
             self._play_client_job_failed,
         )
+        return True
 
     @Slot(object)
     def _play_client_refreshed(self, result: object) -> None:
-        self._play_client_running = False
-        self._set_busy(False)
+        self._release_play_client()
         done = [str(rel) for rel in result] if isinstance(result, tuple) else []
         if done:
             self._say_play("Refreshed from your own client: " + ", ".join(done) + ".")
@@ -8253,9 +8505,9 @@ class ControllerView(QWidget):
         """Delete this server's ready-to-play client; the original keeps every file (T181 §4)."""
         setter = self.services.set_play_client_dir
         play = self.services.play_client_dir
-        if setter is None or play is None or self._play_client_running:
+        if setter is None or play is None:
             return
-        if self._client_dir_busy():
+        if self._play_client_blocked():
             return
         marker = play_client.read_marker(play)
         source = marker.source_client_dir if marker is not None else self.services.client_dir
@@ -8268,9 +8520,12 @@ class ControllerView(QWidget):
             "ready-to-play client again at any time.",
         ):
             return
+        # Again: a module job may have started while the question was open.
+        if self._play_client_blocked():
+            return
         server_dir = self.services.controller.server_dir
         self._play_client_running = True
-        self._set_busy(True)
+        self._hold_busy()
         self._say_play(f"Deleting {play}…")
         self._run(
             lambda: play_client.delete(play, game=self.entry.id, server_dir=server_dir),
@@ -8280,8 +8535,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _play_client_deleted(self, _result: object) -> None:
-        self._play_client_running = False
-        self._set_busy(False)
+        self._release_play_client()
         setter = self.services.set_play_client_dir
         if setter is None:  # pragma: no cover - the menu is not built without it
             return

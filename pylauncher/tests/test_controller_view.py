@@ -19675,6 +19675,7 @@ def _play_view(
     play: Path | None = None,
     asker: _Asked | None = None,
     seam: bool = True,
+    job_runner: Any = None,
 ) -> tuple[ControllerView, _FakeClientDir]:
     """A tab over the docker-free fakes, wired with both client-folder write seams.
 
@@ -19687,7 +19688,11 @@ def _play_view(
     if seam:
         services.set_play_client_dir = recorder
     view = ControllerView(
-        WOTLK, services, status_poll_ms=0, play_client_asker=asker if asker else _Asked()
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        play_client_asker=asker if asker else _Asked(),
+        job_runner=job_runner,
     )
     return view, recorder
 
@@ -20392,3 +20397,299 @@ def test_uninstall_offers_nothing_for_a_folder_without_the_marker(
 
     assert view.delete_play_client_check.isHidden()
     assert (play / "Data").is_dir()
+
+
+# -- T181a Task 5, fix round 1 --------------------------------------------------
+
+
+class _Deferred:
+    """A job runner that holds every job until the test runs it: a worker still running."""
+
+    def __init__(self) -> None:
+        self.queue: list[tuple[Callable[[], object], Any, Any]] = []
+
+    def __call__(self, work: Callable[[], object], on_done: Any, on_error: Any) -> None:
+        self.queue.append((work, on_done, on_error))
+
+    def run(self, index: int = 0) -> None:
+        work, on_done, on_error = self.queue.pop(index)
+        run_inline(work, on_done, on_error)
+
+
+def _told(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every information and warning box's text."""
+    said: list[str] = []
+    qmb = controller_view_module.QMessageBox
+    for name in ("information", "warning"):
+        monkeypatch.setattr(qmb, name, lambda *a, **_k: said.append(str(a[2])))
+    return said
+
+
+def test_delete_is_refused_while_a_module_job_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A module install writes into this folder and takes no `_set_busy()`; Delete waits."""
+    qmb = controller_view_module.QMessageBox
+    monkeypatch.setattr(qmb, "question", lambda *a, **k: qmb.StandardButton.Yes)
+    said = _told(monkeypatch)
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, recorder = _play_view(ps, tmp_path, original=None, play=play)
+    view._module_pending = "install mod-arac"
+
+    view.delete_play_client()
+
+    assert play_client.read_marker(play) is not None, "deleted under a running module job"
+    assert recorder.written == []
+    assert said and "install mod-arac" in said[0]
+
+
+@pytest.mark.parametrize("press", ["make_play_client", "refresh_play_client", "play"])
+def test_make_refresh_and_play_are_refused_while_a_module_job_runs(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+    press: str,
+) -> None:
+    said = _told(monkeypatch)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = None if press == "make_play_client" else _built(original, tmp_path)
+    asker = _Asked()
+    jobs = _Deferred()
+    view, recorder = _play_view(
+        ps, tmp_path, original=original, play=play, asker=asker, job_runner=jobs
+    )
+    jobs.queue.clear()  # whatever the tab asked while it was built
+    view._module_pending = "install mod-arac"
+
+    getattr(view, press)()
+
+    assert jobs.queue == [], f"{press} started a job under a running module job"
+    assert asker.offers == [] and recorder.written == [] and launched == []
+    assert said and "install mod-arac" in said[0]
+
+
+def test_a_start_during_makes_plan_refuses_the_make_and_keeps_the_starts_lock(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plan runs on a worker with the tab not busy; a Start in that gap owns the lock.
+
+    Make… must not build on top of it, and must not unlock the tab while the
+    Start still runs (`_set_busy`'s recorded double-unlock defect).
+    """
+    said = _told(monkeypatch)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    asker = _Asked()
+    jobs = _Deferred()
+    view, recorder = _play_view(ps, tmp_path, original=original, asker=asker, job_runner=jobs)
+    jobs.queue.clear()
+
+    view.make_play_client()
+    assert len(jobs.queue) == 1, "the plan was not handed to a worker"
+    view.start_server()
+    assert view._busy
+    jobs.run(0)  # the plan answers while the Start still runs
+
+    assert asker.offers == [], "the dialog opened over a running Start"
+    assert view._busy, "Make… unlocked the tab under the running Start"
+    assert not view.start_button.isEnabled()
+    assert not view._play_client_running
+    assert said and "another action started" in said[-1]
+    assert recorder.written == []
+    queued = len(jobs.queue)  # the Start, still running
+    view.make_play_client()
+    assert len(jobs.queue) == queued, "a second Make… started under the running Start"
+    assert said[-1].startswith("This server is busy"), "a second Make… was not refused"
+
+
+def test_make_holds_the_close_from_its_press_to_its_end(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    jobs = _Deferred()
+    view, _ = _play_view(
+        ps, tmp_path, original=original, asker=_Asked(cancel=True), job_runner=jobs
+    )
+    jobs.queue.clear()
+
+    view.make_play_client()
+    assert view.busy_reason() == controller_view_module.PLAY_CLIENT_RUNNING
+    jobs.run(0)  # the plan; the dialog answers Cancel
+
+    assert view.busy_reason() is None
+    assert not view._busy, "a cancelled Make… left the tab locked"
+
+
+def test_a_second_play_press_while_one_is_on_its_way_starts_nothing_more(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    jobs = _Deferred()
+    view, _ = _play_view(ps, tmp_path, original=None, play=play, job_runner=jobs)
+    jobs.queue.clear()
+    ps.names = WORLD_UP
+
+    view.play()
+    view.play()
+    assert len(jobs.queue) == 1, "the second press started a second Play"
+    while jobs.queue:
+        jobs.run(0)
+    assert len(launched) == 1
+    view.play()
+    assert len(jobs.queue) == 1, "Play stayed locked after the first one ended"
+
+
+def _offer(tmp_path: Path, replan: Callable[[Path], play_client.BuildPlan]) -> Any:
+    plan = play_client.BuildPlan(
+        linked=(), copied=(), shared_bytes=10, own_bytes=10, same_volume=True
+    )
+    return controller_view_module.PlayClientOffer(
+        original=tmp_path / "WoW",
+        target=tmp_path / "WoW (Yu'lon)",
+        plan=plan,
+        free_bytes=None,
+        copies=(),
+        addons=(),
+        replan=replan,
+        free_space=lambda _t: None,
+    )
+
+
+def test_the_dialog_makes_only_the_folder_its_numbers_are_for(qapp: object, tmp_path: Path) -> None:
+    """Fix 3 and 7: a typed path is planned on the runner; OK waits for that answer."""
+    planned: list[Path] = []
+
+    def replan(target: Path) -> play_client.BuildPlan:
+        planned.append(target)
+        return play_client.BuildPlan(
+            linked=(), copied=(), shared_bytes=1, own_bytes=1, same_volume=True
+        )
+
+    jobs = _Deferred()
+    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan), jobs=jobs)
+    elsewhere = tmp_path / "elsewhere" / "WoW (Yu'lon)"
+
+    dialog.path_edit.setText(str(elsewhere))  # typed, Enter not pressed yet
+    assert dialog.choice() is None and not dialog.ok_button.isEnabled()
+
+    dialog.path_edit.editingFinished.emit()
+    assert planned == [], "the plan ran on the GUI thread"
+    assert dialog.choice() is None and "Checking" in dialog.size_label.text()
+
+    jobs.run(0)
+    assert planned == [elsewhere]
+    choice = dialog.choice()
+    assert choice is not None and choice.target == elsewhere
+    assert dialog.ok_button.isEnabled()
+
+
+def test_the_play_refusal_names_the_menu_entry_it_sends_you_to(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    from yulon import play_launch
+
+    def broken(*_a: object, **_k: object) -> object:
+        raise RuntimeError("something odd")
+
+    monkeypatch.setattr(play_launch, "launch_spec", broken)
+    said = _told(monkeypatch)
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert controller_view_module.REFRESH_PLAY_CLIENT_LABEL in said[-1]
+    assert "▾ menu" in said[-1]
+
+
+def test_a_later_start_clears_the_failed_play_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=None, play=play)
+    ps.names = ""
+    ps.ports = "tbc-realmd\t0.0.0.0:3724->3724/tcp\n"
+
+    view.play()
+    assert view.play_label.text() == controller_view_module.PLAY_START_FAILED
+    assert launched == []
+
+    ps.ports = ""
+    view.start_server()
+    assert view.play_label.text() == ""
+
+
+def test_a_failed_record_leaves_the_ticked_files_in_the_original(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix 6: the removal runs only once the ready-to-play client is recorded."""
+    said = _told(monkeypatch)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    ours, _edited, _theirs = _patches(original)
+    _receipted(tmp_path, ours)
+    view, recorder = _play_view(
+        ps, tmp_path, original=original, asker=_Asked(remove_originals=True)
+    )
+    recorder._error = OSError("state.json is read-only")
+
+    view.make_play_client()
+
+    assert ours.read_bytes() == b"MPQ ours", "removed from the original without a record"
+    assert said and "could not remember it" in said[-1]
+    assert not view._busy and not view._play_client_running
+
+
+def test_a_file_another_server_also_receipts_is_not_offered_for_removal(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix 9: the hash cannot tell two servers' copies of one patch apart, so neither goes."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    ours, edited, _theirs = _patches(original)
+    _receipted(tmp_path, ours, edited)
+    other = tmp_path / "other-server"
+    _receipted(other, edited)
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+    view.services.other_server_dirs = lambda: (other,)
+
+    view.make_play_client()
+
+    assert asker.offers[0].originals == (ours,)
+    dialog = controller_view_module.PlayClientDialog(asker.offers[0])
+    assert "another server" in dialog.remove_originals_check.toolTip()
+
+
+def test_uninstall_waits_for_a_running_make(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    uninstall = _PlanOnlyUninstall(tmp_path)
+    services = replace(
+        _services(ps, tmp_path, []), client_dir=original, play_client_dir=play, uninstall=uninstall
+    )
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_uninstall_plan()
+    view._play_client_running = True
+
+    view.run_uninstall()
+
+    assert uninstall.runs == []
+    assert view.uninstall_label.text() == controller_view_module.PLAY_CLIENT_RUNNING
+
+
+def test_a_folder_the_plan_refuses_shows_why_and_keeps_ok_dead(
+    qapp: object, tmp_path: Path
+) -> None:
+    def replan(target: Path) -> play_client.BuildPlan:
+        raise play_client.PlayClientError(f"{target} already exists and was not made by Yu'lon")
+
+    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan))
+    taken = tmp_path / "taken"
+    dialog.path_edit.setText(str(taken))
+    dialog.path_edit.editingFinished.emit()
+
+    assert "was not made by Yu'lon" in dialog.size_label.text()
+    assert dialog.choice() is None and not dialog.ok_button.isEnabled()

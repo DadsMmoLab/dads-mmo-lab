@@ -807,6 +807,23 @@ def build_window() -> object:
 
         return set_play_client_dir
 
+    def _other_server_dirs(game: str, server_dir: Path) -> Callable[[], tuple[Path, ...]]:
+        """Every other install's server folder on this host, read live (T181).
+
+        For Make…'s removal list: a file another server's module also put into
+        the player's own client is never offered. WSL-distro installs are left
+        out, because reading their folders boots their distro (T133).
+        """
+
+        def others() -> tuple[Path, ...]:
+            return tuple(
+                known.server_dir
+                for known in state.installs
+                if (known.game, known.server_dir) != (game, server_dir) and known.wsl_distro is None
+            )
+
+        return others
+
     def on_uninstalled(game: str, server_dir: object) -> None:
         """An install is gone (8.9a): drop its tab, and recompute its Catalog tile.
 
@@ -879,6 +896,7 @@ def build_window() -> object:
             wsl_distro=view.services.controller.wsl_distro,
             folder_gone=folder_gone,
             running=view.last_seen_running(),
+            play_client_dir=view.services.play_client_dir,
         )
         answer = QMessageBox.question(
             window,
@@ -1146,6 +1164,7 @@ def build_window() -> object:
         services.set_client_dir = _remember_client_live(game, server_dir)
         # T181: the ready-to-play client's record, over the same live state.
         services.set_play_client_dir = _remember_play_client_live(game, server_dir)
+        services.other_server_dirs = _other_server_dirs(game, server_dir)
         if services.uninstall is not None:
             # 8.9a. The record is the LAST thing an uninstall forgets, and in a
             # running window "the record" is this closure's live `AppState` -

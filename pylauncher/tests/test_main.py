@@ -4094,3 +4094,40 @@ def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
     assert gone is not made
     assert gone.services.play_client_dir is None
     assert gone.services.applier is not None and gone.services.applier.client_dir == client
+
+
+def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T181 fix round 1: the removal promises nothing is deleted, so the folder is named as left."""
+    asked = _answer(monkeypatch, False)
+    server_dir = tmp_path / "t181-remove"
+    view, _stops = _removable_tab(window, monkeypatch, server_dir)
+    play = tmp_path / "WoW (Yu'lon)"
+    view.services.set_play_client_dir(play)
+    view.play_client_dir_changed.emit("wow-tbc", server_dir, play)
+    view = _tab_for(window, server_dir)
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1
+    assert f"ready-to-play client at {play} is left where it is" in asked[0][1]
+
+
+def test_the_removal_list_reads_the_other_installs_but_not_this_one_or_a_wsl_one(
+    window: Any, tmp_path: Any
+) -> None:
+    """`other_server_dirs` is bound from the live state: every other install on this host."""
+    catalog = _catalog_view(window)
+    mine, other, wsl_one = tmp_path / "mine", tmp_path / "other", tmp_path / "in-wsl"
+    catalog.installed.emit("wow-wotlk", mine, None)
+    catalog.installed.emit("wow-tbc", other, None)
+    catalog.adopted.emit("wow-vanilla", wsl_one, None, "Ubuntu-24.04")
+    view = _tab_for(window, mine)
+
+    assert view.services.other_server_dirs is not None
+    others = view.services.other_server_dirs()
+    # Membership, not equality: the window fixture's state may hold earlier installs.
+    assert other in others
+    assert mine not in others, "this server's own receipts would hide every file"
+    assert wsl_one not in others, "reading it would boot its distro"

@@ -517,7 +517,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # read `None` here regardless of which game's entry this loop is on.
         # T181's ready-to-play client pair is the same kind of fact: a folder
         # only a caller passes in, and a write seam only `main.py` binds.
-        unwindowed = {"client_dir", "set_client_dir", "play_client_dir", "set_play_client_dir"}
+        unwindowed = {
+            "client_dir",
+            "set_client_dir",
+            "play_client_dir",
+            "set_play_client_dir",
+            "other_server_dirs",
+        }
         # T127's bot dashboard, decided by the CATALOG: only an entry whose conf
         # table carries the bots module's telemetry switch has a dashboard to turn
         # on -- the TortoiseBots module ships it and no other tree's bots do.
