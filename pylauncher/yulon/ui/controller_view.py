@@ -745,6 +745,12 @@ def left_out_sentence(names: Collection[Path]) -> str:
     )
 
 
+PLAY_PIPELINE_RUNNING = (
+    "Yu'lon is getting this server's ready-to-play client ready for Play (packs, Wow.exe, "
+    "settings). Press Cancel beside Play to stop it, then close the window. Closing now "
+    "would leave the client with some of its files installed; Play carries on from there."
+)
+
 PLAY_CLIENT_RUNNING = (
     "Yu'lon is still writing this server's ready-to-play client. Closing now would "
     "leave it half made or half refreshed. This window will close normally once it "
@@ -6429,7 +6435,7 @@ class ControllerView(QWidget):
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._play_client_running:
-            return PLAY_CLIENT_RUNNING
+            return PLAY_PIPELINE_RUNNING if self._play_preparing else PLAY_CLIENT_RUNNING
         if self._module_sql_running:
             return (
                 "The module importer is still running. It cannot be stopped, and closing now "
@@ -7932,7 +7938,9 @@ class ControllerView(QWidget):
         if self._play_client_running:
             # T181: Make…, Refresh or Delete is writing the ready-to-play
             # client, and the uninstall may delete that very folder.
-            self.uninstall_label.setText(PLAY_CLIENT_RUNNING)
+            self.uninstall_label.setText(
+                PLAY_PIPELINE_RUNNING if self._play_preparing else PLAY_CLIENT_RUNNING
+            )
             return
         if self._play_pending:
             # T181: a Play is on its way and still writes the realmlist into,
@@ -8210,19 +8218,19 @@ class ControllerView(QWidget):
         self._play_left_out: tuple[Path, ...] = ()
         self._play_notes: tuple[str, ...] = ()
         self._skipped: frozenset[str] = frozenset()
+        self._play_preparing = False
         # T181 b/c: set by the Cancel button, read by the download between reads.
         self._play_cancel = threading.Event()
-        # Whether the Config.wtf seed keys are still owed; None = not asked yet.
-        # Kept for the session so a Play that failed after installing packs (so
-        # the record no longer looks new) still seeds on the Play that succeeds.
-        self._config_seed_owed: bool | None = None
         # Optional packs whose address answered 404 at the last Play (spec §4).
         self._client_unavailable: frozenset[str] = frozenset()
         # The download's lines come from the worker through a signal, never a call.
         self._play_relay = LineRelay(self)
         self._play_relay.line.connect(self._play_progress)
         self.play_cancel_button = QPushButton("Cancel", tab)
-        self.play_cancel_button.setToolTip("Stop the download. What arrived is kept for next time.")
+        self.play_cancel_button.setToolTip(
+            "Stop getting the client ready. A download stops between reads, so a stalled one "
+            "can take a moment; what arrived is kept for next time."
+        )
         self.play_cancel_button.setVisible(False)
         self.play_cancel_button.clicked.connect(self._cancel_play_download)
         self._made: _MadePlayClient | None = None
@@ -8336,6 +8344,7 @@ class ControllerView(QWidget):
     def _release_play_client(self) -> None:
         """End a Make…, Refresh or Delete: give back the lock only if this took it."""
         self._play_client_running = False
+        self._play_preparing = False
         if self._play_holds_busy:
             self._play_holds_busy = False
             self._set_busy(False)
@@ -8471,6 +8480,15 @@ class ControllerView(QWidget):
         would break that server's client, and the hash cannot tell them apart.
         """
         server_dir = self.services.controller.server_dir
+        # Packs are fetched at Play, but a required one the checkout lacks cannot be
+        # fetched later either: refuse before anything is built (existence only).
+        for pack in self.entry.client.packs:
+            if not pack.optional:
+                missing = _checkout_refusal(
+                    pack, server_dir, wsl_distro=self.services.controller.wsl_distro
+                )
+                if missing is not None:
+                    raise play_client.PlayClientError(missing)
         if self._is_this_servers(play_client.read_marker(target)):
             return target
         build = self._replan(original, target)
@@ -8629,9 +8647,8 @@ class ControllerView(QWidget):
         said.append(f"The ticked files could not be removed from your own client: {exc}.")
         self._finish_make(made.target, said)
 
-    @staticmethod
     def _made_sentences(
-        made: _MadePlayClient, removed: tuple[str, ...], left: tuple[str, ...]
+        self, made: _MadePlayClient, removed: tuple[str, ...], left: tuple[str, ...]
     ) -> list[str]:
         said = [f"The ready-to-play client is at {made.target}. Press Play to start it."]
         if made.realmlist_problem is not None:
@@ -8640,9 +8657,13 @@ class ControllerView(QWidget):
                 "Play writes it again first."
             )
         if made.choices_problem is not None:
-            said.append(
-                f"Your client choices could not be saved yet ({made.choices_problem}); "
+            again = (
                 f"choose them again under “{CLIENT_OPTIONS_LABEL}” in the ▾ menu."
+                if has_client_choices(self.entry.client)
+                else "the defaults will be used."
+            )
+            said.append(
+                f"Your client choices could not be saved yet ({made.choices_problem}); {again}"
             )
         if removed:
             said.append("Removed from your own client: " + "; ".join(removed) + ".")
@@ -8862,6 +8883,7 @@ class ControllerView(QWidget):
             return
         self._play_cancel.clear()
         self._play_client_running = True
+        self._play_preparing = True
         self._hold_busy()
         self._show_cancel(True)
         self._say_play("Getting the ready-to-play client ready…")
@@ -8886,19 +8908,16 @@ class ControllerView(QWidget):
         say = self._play_relay.emit_line
         cancelled = self._play_cancel.is_set
         record = client_packs.read_record(play)
-        if self._config_seed_owed is None:
-            # Make… saves the player's choices into the record, so "no choices" cannot
-            # mean "never played": nothing recorded as installed does.
-            self._config_seed_owed = record.exe is None and not record.packs
         packs = dict(record.packs)
         exe = record.exe
+        seeded = record.config_seeded
         notes: list[str] = []
         unavailable: set[str] = set()
 
         def save() -> None:
             client_packs.write_record(
                 play,
-                client_packs.PackRecord(packs, exe, record.choices),
+                client_packs.PackRecord(packs, exe, record.choices, seeded),
                 game=game,
                 server_dir=server_dir,
             )
@@ -8998,8 +9017,9 @@ class ControllerView(QWidget):
             say("Setting up Config.wtf…")
             if cfg.remove_locale_realmlists:
                 client_config.remove_locale_realmlists(play)
-            client_config.merge_config_wtf(play, cfg, first_run=bool(self._config_seed_owed))
-            self._config_seed_owed = None
+            client_config.merge_config_wtf(play, cfg, first_run=not record.config_seeded)
+            seeded = True
+            save()
         return _Prepared(tuple(notes), frozenset(unavailable))
 
     def _download_progress(self, pack: ClientPack) -> Callable[[int, int], None]:
@@ -9055,6 +9075,10 @@ class ControllerView(QWidget):
     def _play_prepared(self, result: object) -> None:
         self._release_play_client()
         self._show_cancel(False)
+        if self._play_cancel.is_set():
+            # Pressed after the last check: the player asked to stop, so nothing starts.
+            self._play_end("Cancelled. Nothing was started.")
+            return
         if isinstance(result, _Prepared):
             self._client_unavailable = result.unavailable
             self._play_notes = result.notes
@@ -9191,7 +9215,7 @@ class ControllerView(QWidget):
             current = client_packs.read_record(play)
             client_packs.write_record(
                 play,
-                client_packs.PackRecord(current.packs, current.exe, chosen),
+                client_packs.PackRecord(current.packs, current.exe, chosen, current.config_seeded),
                 game=game,
                 server_dir=server_dir,
             )

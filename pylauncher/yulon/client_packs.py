@@ -741,12 +741,14 @@ class PackRecord:
 
     `packs` maps a pack id to `{"version", "sha256", "files": {relative path: sha256}}`;
     `exe` is the Wow.exe patch record (a later step's); `choices` is the player's picks,
-    `{"packs": {id: bool}, "exe_options": {name: bool}}`.
+    `{"packs": {id: bool}, "exe_options": {name: bool}}`; `config_seeded` is whether Play has
+    merged Config.wtf into this client once (the seed keys are written on that first merge only).
     """
 
     packs: dict[str, dict[str, Any]]
     exe: dict[str, Any] | None
     choices: dict[str, Any]
+    config_seeded: bool = False
 
 
 def _empty_record() -> PackRecord:
@@ -800,6 +802,7 @@ def read_record(play_dir: Path) -> PackRecord:
             "packs": _bool_map(choices.get("packs")),
             "exe_options": _bool_map(choices.get("exe_options")),
         },
+        config_seeded=raw.get("config_seeded") is True,
     )
 
 
@@ -901,6 +904,7 @@ def write_record(
         },
         "exe": record.exe,
         "choices": record.choices,
+        "config_seeded": record.config_seeded,
     }
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     target = play_dir / RECORD

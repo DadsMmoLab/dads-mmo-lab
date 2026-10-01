@@ -1189,6 +1189,19 @@ def test_a_record_round_trips_and_a_missing_one_reads_as_empty(rig: _Rig) -> Non
     rig.untouched()
 
 
+def test_config_seeded_round_trips_and_an_old_record_reads_false(rig: _Rig) -> None:
+    assert client_packs.read_record(rig.play).config_seeded is False
+    record = client_packs.PackRecord({}, None, {"packs": {}, "exe_options": {}}, config_seeded=True)
+
+    client_packs.write_record(rig.play, record, game=GAME, server_dir=rig.server)
+
+    assert client_packs.read_record(rig.play).config_seeded is True
+    # A record written before the field existed (and one where it is not a bool).
+    for raw in (b'{"version": 1, "packs": {}}', b'{"packs": {}, "config_seeded": "yes"}'):
+        (rig.play / client_packs.RECORD).write_bytes(raw)
+        assert client_packs.read_record(rig.play).config_seeded is False
+
+
 @pytest.mark.parametrize(
     "junk", [b"", b"\xff\xfe", b"[1, 2]", b'{"packs": 5}', b'{"packs": {"p": 3}}']
 )

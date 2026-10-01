@@ -1149,7 +1149,7 @@ def _reapply_exe(
         made = client_exe.apply(play_dir, original, patch, options, **kwargs)
         client_packs.write_record(
             play_dir,
-            client_packs.PackRecord(record.packs, made, record.choices),
+            client_packs.PackRecord(record.packs, made, record.choices, record.config_seeded),
             game=game,
             server_dir=server_dir,
         )
