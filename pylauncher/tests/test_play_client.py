@@ -56,6 +56,7 @@ def build(orig: Path, target: Path, tmp_path: Path, **kw: object) -> play_client
         "allow_full_copy": False,
         "reflink": no_reflink,
         "now": lambda: WHEN,
+        "sleep": lambda _seconds: None,
     }
     args.update(kw)
     return play_client.create(orig, target, **args)  # type: ignore[arg-type]
@@ -1334,3 +1335,245 @@ def test_refresh_never_touches_a_kept_module_file_even_when_listed(
     assert refresh(play, orig, tmp_path, keep=(rel,)) == ()
     assert (play / rel).read_bytes() == ours
     assert (orig / rel).read_bytes() == b"the player's own patch"
+
+
+# -- T181a final review fixes ----------------------------------------------------
+
+_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def test_vanillas_top_level_wdb_cache_is_left_out(tmp_path: Path) -> None:
+    """Finding 2: Vanilla and Tortoise keep their cache at the top as `WDB/`, not `Cache/WDB`."""
+    orig = fake_client(tmp_path)
+    (orig / "WDB").mkdir()
+    (orig / "WDB" / "creaturecache.wdb").write_bytes(b"another server's creatures")
+
+    p = play_client.plan(orig, tmp_path / "t")
+
+    assert not [rel for rel in p.copied if rel.parts[0] == "WDB"]
+
+
+def _rename_failing(
+    monkeypatch: pytest.MonkeyPatch, target: Path, *, failures: int
+) -> list[tuple[str, str]]:
+    """`os.replace` refusing the final rename onto `target` `failures` times, as Windows
+    does while Defender holds a file inside; every other rename is the real one."""
+    real = os.replace
+    tried: list[tuple[str, str]] = []
+
+    def replace(src: object, dst: object) -> None:
+        if os.fspath(dst) == os.fspath(target):  # type: ignore[arg-type]
+            tried.append((os.fspath(src), os.fspath(dst)))  # type: ignore[arg-type]
+            if len(tried) <= failures:
+                raise PermissionError(errno.EACCES, "Access is denied", os.fspath(dst))  # type: ignore[arg-type]
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(play_client.os, "replace", replace)
+    return tried
+
+
+def test_the_final_rename_is_tried_again_while_a_file_inside_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 3: a rename refused for a moment is tried again, not failed at once."""
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+    tried = _rename_failing(monkeypatch, target, failures=2)
+    slept: list[float] = []
+
+    build(orig, target, tmp_path, sleep=slept.append)
+
+    assert len(tried) == 3
+    assert len(slept) == 2 and sum(slept) <= 5
+    assert play_client.read_marker(target) is not None
+    assert not partial_of(target).exists()
+
+
+def test_a_rename_refused_for_good_fails_as_before_after_its_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+    tried = _rename_failing(monkeypatch, target, failures=10**6)
+    slept: list[float] = []
+
+    with pytest.raises(play_client.PlayClientError, match="Access is denied"):
+        build(orig, target, tmp_path, sleep=slept.append)
+
+    assert len(tried) == play_client._RENAME_TRIES
+    assert 4 <= sum(slept) <= 6, "about five seconds of retries"
+    assert not target.exists() and not partial_of(target).exists()
+
+
+def test_a_cleanup_refused_for_a_moment_is_tried_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 3: `_discard`'s removal is retried the same way."""
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+    real_remove = play_client.remove_folder
+    calls: list[Path] = []
+
+    def held_twice(folder: Path, **kw: object) -> None:
+        calls.append(folder)
+        if len(calls) <= 2:
+            raise PermissionError(errno.EACCES, "in use", str(folder))
+        real_remove(folder, **kw)  # type: ignore[arg-type]
+
+    def denied(src: Path, dst: Path) -> None:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(play_client, "remove_folder", held_twice)
+    with pytest.raises(play_client.PlayClientError) as info:
+        build(orig, target, tmp_path, link=denied)
+
+    assert len(calls) == 3
+    assert "unfinished folder was removed" in str(info.value)
+    assert not partial_of(target).exists()
+
+
+def test_a_data_folder_that_is_a_link_is_refused(tmp_path: Path) -> None:
+    """Finding 6: the walk never enters a link, so a linked Data would make an empty client."""
+    real = fake_client(tmp_path / "real")
+    orig = tmp_path / "WoW"
+    orig.mkdir()
+    (orig / "Wow.exe").write_bytes(b"MZexe")
+    os.symlink(real / "Data", orig / "Data", target_is_directory=True)
+
+    with pytest.raises(play_client.PlayClientError, match="Data folder .* is a link"):
+        play_client.plan(orig, tmp_path / "t")
+
+
+def test_a_client_with_no_mpq_at_all_is_refused(tmp_path: Path) -> None:
+    orig = tmp_path / "WoW"
+    (orig / "Data").mkdir(parents=True)
+    (orig / "Wow.exe").write_bytes(b"MZexe")
+
+    with pytest.raises(play_client.PlayClientError, match=r"no \.MPQ .*real client folder"):
+        play_client.plan(orig, tmp_path / "t")
+
+
+def test_linked_folders_left_out_are_named_in_the_plan(tmp_path: Path) -> None:
+    """Finding 6: e.g. `Interface/AddOns` shared between two clients by a link."""
+    orig = fake_client(tmp_path)
+    shared = tmp_path / "shared AddOns"
+    shared.mkdir()
+    shutil.rmtree(orig / "Interface" / "AddOns")
+    os.symlink(shared, orig / "Interface" / "AddOns", target_is_directory=True)
+
+    p = play_client.plan(orig, tmp_path / "t")
+
+    assert p.skipped_links == (Path("Interface") / "AddOns",)
+
+
+@pytest.mark.skipif(_ROOT or os.name == "nt", reason="needs a folder its owner cannot read")
+def test_a_folder_that_cannot_be_read_stops_the_plan_and_is_named(tmp_path: Path) -> None:
+    """Finding 6: `os.walk` skips an unreadable folder in silence unless told not to."""
+    orig = fake_client(tmp_path)
+    locked = orig / "Interface" / "AddOns"
+    os.chmod(locked, 0)
+    try:
+        with pytest.raises(play_client.PlayClientError, match="could not be read") as info:
+            play_client.plan(orig, tmp_path / "t")
+    finally:
+        os.chmod(locked, 0o755)
+    assert str(locked) in str(info.value)
+
+
+@pytest.mark.parametrize("variable", play_client.ONEDRIVE_VARIABLES)
+def test_a_folder_inside_onedrive_is_recognised_on_windows(tmp_path: Path, variable: str) -> None:
+    """Finding 7: the env is the injected one, never this box's."""
+    root = tmp_path / "OneDrive - Home"
+    env = {variable: str(root)}
+    inside = root / "Games" / "WoW (Yu'lon)"
+
+    assert play_client.onedrive_folder(inside, env=env, os_name="windows") == root
+    assert play_client.onedrive_folder(inside, env=env, os_name="linux") is None
+    assert (
+        play_client.onedrive_folder(tmp_path / "WoW (Yu'lon)", env=env, os_name="windows") is None
+    )
+    sibling = tmp_path / "OneDrive - Home2" / "WoW"
+    assert play_client.onedrive_folder(sibling, env=env, os_name="windows") is None
+
+
+def _held(monkeypatch: pytest.MonkeyPatch) -> None:
+    def stuck(folder: Path, **_kw: object) -> None:
+        raise PermissionError(errno.EACCES, "in use", str(folder))
+
+    monkeypatch.setattr(play_client, "remove_folder", stuck)
+
+
+def test_a_delete_that_cannot_try_again_says_to_finish_by_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 8: after an Uninstall there is no tab to press Delete on again."""
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    _held(monkeypatch)
+
+    with pytest.raises(play_client.PlayClientError) as info:
+        play_client.delete(play, game="g", server_dir=tmp_path / "s", can_try_again=False)
+
+    assert f"Delete what is left by hand at {play}" in str(info.value)
+    assert "try again" not in str(info.value)
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_on_windows_a_failed_delete_names_the_players_own_client_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+) -> None:
+    """Finding 8: a shared archive held open by the player's own WoW blocks the delete."""
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    _held(monkeypatch)
+    monkeypatch.setattr(play_client, "_on_windows", lambda: windows)
+
+    with pytest.raises(play_client.PlayClientError) as info:
+        play_client.delete(play, game="g", server_dir=tmp_path / "s")
+
+    assert ("from your own client" in str(info.value)) is windows
+    assert "then try again" in str(info.value)
+
+
+def test_windows_not_supported_on_link_needs_consent(tmp_path: Path) -> None:
+    """Finding 9: an SMB share answers ERROR_NOT_SUPPORTED (50) to a hard link."""
+    orig = fake_client(tmp_path)
+    target = tmp_path / "t"
+
+    def not_supported(src: Path, dst: Path) -> None:
+        exc = OSError(errno.EINVAL, "The request is not supported")
+        exc.winerror = 50  # type: ignore[attr-defined]
+        raise exc
+
+    with pytest.raises(play_client.PlayClientError, match="cannot share files"):
+        build(orig, target, tmp_path, link=not_supported)
+    assert not target.exists()
+
+
+def test_archives_new_in_the_original_are_named_not_added(tmp_path: Path) -> None:
+    """Finding 11: Refresh never adds them; `left_out_archives()` names them."""
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    (orig / "Data" / "patch-5.MPQ").write_bytes(b"new in the original")
+    (orig / "Data" / "enUS" / "patch-enUS-5.mpq").write_bytes(b"new too")
+    (orig / "WTF" / "odd.MPQ").write_bytes(b"the player's own")
+    (orig / "Cache" / "y.MPQ").write_bytes(b"left out anyway")
+    (orig / "Data" / "notes.txt").write_text("not an archive")
+
+    assert play_client.left_out_archives(play, orig) == (
+        Path("Data") / "enUS" / "patch-enUS-5.mpq",
+        Path("Data") / "patch-5.MPQ",
+    )
+    assert refresh(play, orig, tmp_path) == ()
+    assert not (play / "Data" / "patch-5.MPQ").exists()
+
+
+def test_nothing_is_left_out_of_a_client_just_made(tmp_path: Path) -> None:
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+
+    assert play_client.left_out_archives(play, orig) == ()

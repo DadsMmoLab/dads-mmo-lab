@@ -454,6 +454,7 @@ def test_a_receipted_patch_in_the_ready_to_play_client_is_kept_from_refresh(
     else:
         server_dir.mkdir()
         (original / "Data").mkdir(parents=True)
+        (original / "Data" / "common.MPQ").write_bytes(b"MPQ")  # a client has archives
         _compose_run_double(monkeypatch, _volume(tmp_path))
         play = _make_play_client(original, server_dir)
         _the_app_s_applier(monkeypatch, server_dir, original, manifest)  # the fakes
@@ -468,6 +469,7 @@ def test_no_receipt_means_nothing_is_kept(tmp_path: Path) -> None:
     server_dir, original = tmp_path / "server", tmp_path / "client"
     server_dir.mkdir()
     (original / "Data").mkdir(parents=True)
+    (original / "Data" / "common.MPQ").write_bytes(b"MPQ")  # a client has archives
     play = _make_play_client(original, server_dir)
 
     assert module_kept_files(server_dir, play) == ()

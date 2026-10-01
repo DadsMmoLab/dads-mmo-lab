@@ -2587,9 +2587,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
-    ("networking.py", "write_client_realmlist"): (
-        "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
-        "matching nothing falls back to `Data/enUS/`, and the write itself is to a named file"
+    ("networking.py", "_realmlist_candidates"): (
+        "globs `Data/*/realmlist.wtf` in a client to find the file(s) to write: the first "
+        "for `write_client_realmlist()`, every one for T181's "
+        "`write_ready_to_play_realmlists()`, which is only ever handed a ready-to-play "
+        "client. A glob matching nothing falls back to `Data/enUS/`, and each write is to a "
+        "named file"
     ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "
@@ -2682,6 +2685,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`is_symlink()` sees a junction): the link itself is removed, never what it points "
         "at, and a top-level folder that is a link is refused. A failure to list or delete "
         "raises rather than reporting a folder removed"
+    ),
+    ("play_client.py", "left_out_archives"): (
+        "T181a final review. Walks the player's own client for `*.MPQ`/`*.dll` the "
+        "ready-to-play client has no file for, the way `plan()` walks it (never through a "
+        "link, never into the left-out folders, WTF/ or Interface/). Read-only on both "
+        "sides: the answer is only NAMED to the player (Play and Refresh say to make the "
+        "client again to include them); nothing is copied or written because of it"
     ),
     ("play_client.py", "_linked_files"): (
         "T181a Task 2. Walks a ready-to-play client (a folder carrying Yu'lon's marker) for "

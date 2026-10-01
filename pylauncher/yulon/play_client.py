@@ -39,7 +39,8 @@ import os
 import shutil
 import stat
 import sys
-from collections.abc import Callable, Collection, Iterator
+import time
+from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,9 +54,10 @@ from yulon.steam import client_executable
 logger = get_logger(__name__)
 
 MARKER = ".yulon-client.json"
-LEFT_OUT = frozenset({"cache", "logs", "errors", "screenshots"})
+LEFT_OUT = frozenset({"cache", "wdb", "logs", "errors", "screenshots"})
 """Top-level folder names (lower-case) not carried over: WoW recreates them, and a
-stale `Cache/` from another server confuses the client."""
+stale cache from another server confuses the client. 3.3.5a keeps it in `Cache/`
+(`Cache/WDB`); Vanilla and Tortoise keep it at the top level as `WDB/`."""
 LINKED_SUFFIXES = frozenset({".mpq", ".dll"})
 PARTIAL_SUFFIX = ".yulon-partial"
 
@@ -65,6 +67,17 @@ _CANNOT_LINK = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EM
 """`link()` errors that mean THIS drive cannot share files (exFAT/FAT32, some network
 shares, a file at its link limit). Same answer as another drive: a full copy, asked."""
 _ERROR_INVALID_FUNCTION = 1  # Windows' answer from a filesystem without hard links
+_ERROR_NOT_SUPPORTED = 50  # Windows' answer from an SMB share that cannot hard-link
+
+_RENAME_TRIES = 10
+_RENAME_DELAY = 0.5
+"""How long a rename or removal refused with PermissionError is tried again: ten
+tries over about five seconds. On Windows a folder cannot be renamed or emptied
+while any file in it is open, and Defender or the search indexer opens a freshly
+written file for a moment; a refusal that outlives this is a real one."""
+
+ONEDRIVE_VARIABLES = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
+"""The environment variables Windows sets to the folders OneDrive syncs."""
 
 # Windows reparse points. Defined here, not taken from `stat`: there they exist only
 # on Windows builds, and the link test below must be exercisable everywhere.
@@ -146,6 +159,10 @@ class BuildPlan:
     shared_bytes: int
     own_bytes: int
     same_volume: bool
+    skipped_links: tuple[Path, ...] = ()
+    """Folders and files of the original left out because they are links (symlinks,
+    junctions) to somewhere else, relative: e.g. `Interface/AddOns` shared between
+    two clients by a junction. The dialog names them."""
 
 
 def utc_now() -> datetime:
@@ -223,6 +240,12 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
             "copy the client into itself. Nothing was created. Choose a folder "
             "outside it, for example next to it."
         )
+    if _is_link(original / "Data"):
+        raise PlayClientError(
+            f"The Data folder of {original} is a link to another folder, so its game files "
+            "cannot be shared from here. Nothing was created. Point Yu'lon at a real client "
+            "folder: the one that holds Wow.exe and the Data folder itself."
+        )
     if not (original / "Data").is_dir():
         raise PlayClientError(
             f"{original} has no Data folder, so it does not look like a WoW client. "
@@ -243,14 +266,16 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
 
     linked: list[Path] = []
     copied: list[Path] = []
+    skipped: list[Path] = []
     shared = own = 0
-    for dirpath, dirnames, filenames in os.walk(original, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(original, followlinks=False, onerror=_unreadable):
         here = Path(dirpath)
         rel_dir = here.relative_to(original)
         kept = []
         for name in dirnames:
             if _is_link(here / name):
                 logger.info("ready-to-play client: skipping linked folder %s", here / name)
+                skipped.append(rel_dir / name)
             elif rel_dir == Path(".") and name.lower() in LEFT_OUT:
                 continue
             else:
@@ -260,6 +285,7 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
             path = here / name
             if _is_link(path):
                 logger.info("ready-to-play client: skipping symlink %s", path)
+                skipped.append(rel_dir / name)
                 continue
             st = path.lstat()
             rel = rel_dir / name
@@ -272,6 +298,12 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
                 copied.append(rel)
                 own += st.st_size
 
+    if not any(rel.suffix.lower() == ".mpq" for rel in linked):
+        raise PlayClientError(
+            f"{original} holds no .MPQ game archives, so it does not look like a WoW client. "
+            "Nothing was created. Point Yu'lon at a real client folder: the one that holds "
+            "Wow.exe and the Data folder with the game's .MPQ files."
+        )
     same_volume = os.stat(original).st_dev == os.stat(_existing_ancestor(target.parent)).st_dev
     return BuildPlan(
         linked=tuple(linked),
@@ -279,7 +311,40 @@ def plan(original: Path, target: Path, *, server_dir: Path | None = None) -> Bui
         shared_bytes=shared,
         own_bytes=own,
         same_volume=same_volume,
+        skipped_links=tuple(skipped),
     )
+
+
+def _unreadable(exc: OSError) -> None:
+    """`os.walk`'s `onerror` for `plan()`: a folder that cannot be read stops the plan.
+
+    By default `os.walk` skips it in silence, and the client built would lack
+    whatever it held, with nothing said.
+    """
+    raise PlayClientError(
+        f"{exc.filename} could not be read ({exc.strerror or exc}), so nothing was created. "
+        "Check that you can open that folder, then try again."
+    ) from exc
+
+
+def onedrive_folder(target: Path, *, env: Mapping[str, str], os_name: str) -> Path | None:
+    """The OneDrive folder `target` would be inside, on Windows; else None.
+
+    OneDrive uploads every file put in it, a client's gigabytes included, and its
+    files-on-demand may later take the local copies away, so the dialog
+    suggests a folder outside it.
+    """
+    if os_name != "windows":
+        return None
+    where = os.path.normcase(os.path.abspath(target))
+    for name in ONEDRIVE_VARIABLES:
+        root = env.get(name)
+        if not root:
+            continue
+        top = os.path.normcase(os.path.abspath(root))
+        if where == top or where.startswith(top.rstrip("\\/") + os.sep):
+            return Path(root)
+    return None
 
 
 def try_reflink(src: Path, dst: Path) -> bool:
@@ -452,10 +517,25 @@ def _remove_dir(path: Path, *, parent_is_ours: bool = True) -> None:
         os.rmdir(path)
 
 
-def _discard(partial: Path, original: Path | None) -> bool:
+def _retrying(action: Callable[[], None], *, sleep: Callable[[float], None]) -> None:
+    """`action()`, tried again on PermissionError for a few seconds (`_RENAME_TRIES`)."""
+    for attempt in range(1, _RENAME_TRIES + 1):
+        try:
+            action()
+            return
+        except PermissionError:
+            if attempt == _RENAME_TRIES:
+                raise
+            logger.info("ready-to-play client: refused (attempt %d), trying again", attempt)
+            sleep(_RENAME_DELAY)
+
+
+def _discard(
+    partial: Path, original: Path | None, *, sleep: Callable[[float], None] = time.sleep
+) -> bool:
     """Remove an unfinished build; False (logged) if it could not be removed."""
     try:
-        remove_folder(partial, original=original)
+        _retrying(lambda: remove_folder(partial, original=original), sleep=sleep)
     except OSError:
         logger.warning("ready-to-play client: could not remove %s", partial, exc_info=True)
         return False
@@ -544,7 +624,10 @@ class _Stop(Exception):
 
 
 def _cannot_link(exc: OSError) -> bool:
-    return exc.errno in _CANNOT_LINK or getattr(exc, "winerror", None) == _ERROR_INVALID_FUNCTION
+    return exc.errno in _CANNOT_LINK or getattr(exc, "winerror", None) in (
+        _ERROR_INVALID_FUNCTION,
+        _ERROR_NOT_SUPPORTED,
+    )
 
 
 def _share(
@@ -574,12 +657,18 @@ def create(
     link: Callable[[Path, Path], None] = os.link,
     reflink: Callable[[Path, Path], bool] = try_reflink,
     now: Callable[[], datetime] = utc_now,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Marker:
     """Build the ready-to-play client for `game` at `server_dir` in `target`.
 
     Linked-class files are cloned where the filesystem can, else hard-linked;
     across volumes they are copied only when `allow_full_copy`. The folder
     appears at `target` complete or not at all.
+
+    The final rename, and the removal of a failed build, are tried again for a
+    few seconds when refused with PermissionError (`_RENAME_TRIES`): on Windows
+    Defender or the indexer briefly opens a freshly written file, and a folder
+    holding an open file can be neither renamed nor emptied.
     """
     build = plan(original, target, server_dir=server_dir)
     if target.exists():
@@ -650,9 +739,17 @@ def create(
         if full_copy:
             marker = marker.model_copy(update={"full_copy": True})
             (partial / MARKER).write_text(marker.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(partial, target)
+        for attempt in range(1, _RENAME_TRIES + 1):
+            try:
+                os.replace(partial, target)
+                break
+            except PermissionError:
+                if attempt == _RENAME_TRIES:
+                    raise
+                logger.info("ready-to-play client: renaming %s refused, trying again", partial)
+                sleep(_RENAME_DELAY)
     except BaseException as exc:
-        cleaned = _discard(partial, original) if made else None
+        cleaned = _discard(partial, original, sleep=sleep) if made else None
         if not isinstance(exc, Exception):
             raise
         if isinstance(exc, _Stop):
@@ -984,11 +1081,20 @@ def refresh(
     return tuple(done)
 
 
-def delete(play_dir: Path, *, game: str, server_dir: Path) -> None:
+def _on_windows() -> bool:
+    """A seam: the delete message names what only Windows does (an open file cannot go)."""
+    return sys.platform == "win32"
+
+
+def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool = True) -> None:
     """Delete this server's ready-to-play client; the original keeps every shared file.
 
     Only a folder whose marker names this game and server. A folder that is
     already gone is not an error: what Delete promises is that it is not there.
+
+    `can_try_again` is False when the press that asked cannot be made again (an
+    Uninstall: the server, and its tab, are gone): a delete that stops part way
+    then says to delete what is left by hand, rather than to try again.
     """
     if not os.path.lexists(play_dir):
         logger.info("ready-to-play client %s is already gone", play_dir)
@@ -1021,15 +1127,56 @@ def delete(play_dir: Path, *, game: str, server_dir: Path) -> None:
         remove_folder(play_dir, original=marker.source_client_dir)
     except OSError as exc:
         logger.warning("ready-to-play client: could not delete %s", play_dir, exc_info=True)
-        if read_marker(play_dir) is not None:
-            rest = (
-                "What is left still carries Yu'lon's marker: close World of Warcraft if "
-                "it is running from that folder, then try again."
+        if _on_windows():
+            holder = (
+                "close World of Warcraft if it is running from that folder, or from your own "
+                "client: the two share their game files, and Windows cannot delete a file "
+                "that either one has open"
             )
         else:
-            rest = "Delete what is left of that folder yourself."
+            holder = "close World of Warcraft if it is running from that folder"
+        if not can_try_again:
+            rest = f"Delete what is left by hand at {play_dir} ({holder} first)."
+        elif read_marker(play_dir) is not None:
+            rest = f"What is left still carries Yu'lon's marker: {holder}, then try again."
+        else:
+            rest = f"Delete what is left by hand at {play_dir} ({holder} first)."
         raise PlayClientError(
             f"{play_dir} could not be deleted completely: {exc}. Your own client was "
             f"left as it was. {rest}"
         ) from exc
     logger.info("ready-to-play client for %s at %s deleted", game, play_dir)
+
+
+def left_out_archives(play_dir: Path, original: Path) -> tuple[Path, ...]:
+    """The original's `*.MPQ`/`*.dll` that the ready-to-play client has no file for, sorted.
+
+    Refresh never adds these (an archive that appeared in the original may be
+    another server's module patch, and this folder is one server's), so Play and
+    Refresh name them instead, and making the client again takes them in.
+    Walked the way `plan()` walks: never through a link, never into the
+    top-level folders it leaves out, nor into WTF/ or Interface/, which are the
+    player's own here. An original without a Data folder answers nothing.
+    """
+    if not (original / "Data").is_dir():
+        return ()
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(original, followlinks=False):
+        here = Path(dirpath)
+        rel_dir = here.relative_to(original)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not _is_link(here / name)
+            and not (rel_dir == Path(".") and name.lower() in LEFT_OUT)
+            and not _players_own(rel_dir / name)
+        ]
+        for name in filenames:
+            rel = rel_dir / name
+            if (
+                Path(name).suffix.lower() in LINKED_SUFFIXES
+                and not _is_link(here / name)
+                and not os.path.lexists(play_dir / rel)
+            ):
+                found.append(rel)
+    return tuple(sorted(found))

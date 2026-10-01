@@ -184,9 +184,11 @@ users hit today, which is why it is not gated on `enable_firewall`.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -4310,21 +4312,13 @@ def _ssh_rules_still_missing(network_plan: NetworkPlan, done: list[str]) -> tupl
     )
 
 
-def write_client_realmlist(
-    client_dir: Path, address: str, realmlist_file: str = "realmlist.wtf"
-) -> Path:
-    """Set `set realmlist <address>` in the user's own client (README §13 LAN step 3).
+def _realmlist_candidates(client_dir: Path, realmlist_file: str) -> list[Path]:
+    """Where a client keeps its realmlist: `Data/<locale>/` (retail), then the top level."""
+    return sorted((client_dir / "Data").glob(f"*/{realmlist_file}")) + [client_dir / realmlist_file]
 
-    Finds the file under `Data/<locale>/` (retail layout) or at the top level
-    (repack layout); writes the first one found, creating `Data/enUS/` if none.
-    """
-    candidates = sorted((client_dir / "Data").glob(f"*/{realmlist_file}")) + [
-        client_dir / realmlist_file
-    ]
-    target = next(
-        (c for c in candidates if c.is_file()), client_dir / "Data" / "enUS" / realmlist_file
-    )
-    target.parent.mkdir(parents=True, exist_ok=True)
+
+def _set_realmlist(target: Path, address: str) -> None:
+    """Put `set realmlist <address>` first in `target`, keeping its other lines."""
     lines = (
         target.read_text(encoding="utf-8", errors="replace").splitlines()
         if target.is_file()
@@ -4336,4 +4330,62 @@ def write_client_realmlist(
         encoding="utf-8",
         newline="\n",
     )
+
+
+def write_client_realmlist(
+    client_dir: Path, address: str, realmlist_file: str = "realmlist.wtf"
+) -> Path:
+    """Set `set realmlist <address>` in the user's own client (README §13 LAN step 3).
+
+    Finds the file under `Data/<locale>/` (retail layout) or at the top level
+    (repack layout); writes the first one found, creating `Data/enUS/` if none.
+    """
+    target = next(
+        (c for c in _realmlist_candidates(client_dir, realmlist_file) if c.is_file()),
+        client_dir / "Data" / "enUS" / realmlist_file,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _set_realmlist(target, address)
     return target
+
+
+def write_ready_to_play_realmlists(
+    play_dir: Path, address: str, realmlist_file: str = "realmlist.wtf"
+) -> tuple[Path, ...]:
+    """Set `set realmlist <address>` in EVERY realmlist of a ready-to-play client (T181a).
+
+    For the ready-to-play client only, never the player's own client. Every
+    candidate, not the first: a client with two locales (`Data/enGB/`,
+    `Data/enUS/`) or a repack's top-level file beside them reads whichever its
+    locale says, and a file left alone would still name another server. None
+    at all: `Data/enUS/` is made, as `write_client_realmlist()` does.
+
+    A read-only file (copied with the original's read-only flag) is made
+    writable first, but only a file with one link: the ready-to-play client
+    copies its realmlists, so one is its own, and the flag on a file shared
+    through a hard link would be the other folder's too. A shared file, or a
+    link to another file, is not written at all: writing it would change
+    another folder. That refusal is a PermissionError whose text says what to do.
+    """
+    found = [c for c in _realmlist_candidates(play_dir, realmlist_file) if c.is_file()]
+    if not found:
+        fresh = play_dir / "Data" / "enUS" / realmlist_file
+        fresh.parent.mkdir(parents=True, exist_ok=True)
+        _set_realmlist(fresh, address)
+        return (fresh,)
+    for target in found:
+        st = os.lstat(target)
+        if os.path.islink(target) or st.st_nlink > 1:
+            raise PermissionError(
+                errno.EPERM,
+                "it is shared with another folder through a link, so it was not written "
+                "(that would change the other folder too); delete that file from the "
+                "ready-to-play client and Play writes a new one",
+                str(target),
+            )
+    for target in found:
+        st = os.lstat(target)
+        if not st.st_mode & stat.S_IWRITE:
+            os.chmod(target, st.st_mode | stat.S_IWRITE)
+        _set_realmlist(target, address)
+    return tuple(found)
