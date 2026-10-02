@@ -402,10 +402,9 @@ class Uninstaller:
         BEFORE that folder goes -- and removes it through `play_client`'s.
         Imported here rather than at module scope for `_default_claim`'s reason.
         """
-        from yulon.catalog.families.trinitycore import remove_leftover_extraction_client
+        from yulon.catalog.families.trinitycore import remove_for_uninstall
 
-        left = remove_leftover_extraction_client(self.server_dir, self.game)
-        return "" if left is None else left.for_uninstall()
+        return remove_for_uninstall(self.server_dir, self.game)
 
     def _pending_record(self) -> Path:
         """Where that record is, keyed as the channel keys it, for a sentence that names it."""

@@ -48,7 +48,7 @@ from tests.support_trinitycore import (
     centurion_like,
 )
 from tests.test_purge import Recorder as PurgeRecorder
-from yulon import client_packs, docker, play_client, purge, resources, rmtree
+from yulon import client_packs, docker, platform, play_client, purge, resources, rmtree
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import FAMILIES, extract, family_for, trinitycore
@@ -1215,10 +1215,13 @@ def test_uninstall_offers_our_own_copy_for_deleting_only_when_it_could_not_remov
     rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
     (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
     assert warning.startswith(
-        f"The temporary copy of your game client this server made for its map data, {target}, "
-        "could not be removed ("
+        f"A temporary copy of your game client at {target} could not be removed yet ("
     )
-    assert warning.endswith("; delete that folder yourself.")
+    assert warning.endswith(
+        "Yu'lon will remove it safely the next time it starts; don't delete it yourself -- "
+        "that can change your own client's files."
+    )
+    assert "delete that folder yourself" not in warning
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the hard link and the mode spy are POSIX here")
@@ -1343,8 +1346,11 @@ def test_a_copy_that_cannot_be_removed_after_a_success_says_uninstall_removes_it
     lay_for_client_data(machine)
     said = run_stage(machine, "client-data")
     (warning,) = [line for line in said if line.startswith("warning:")]
-    assert warning.startswith(f"warning: the temporary copy of your client {copy_dir(machine)}")
-    assert warning.endswith("Uninstalling this server removes it.")
+    assert warning.startswith(
+        f"warning: a temporary copy of your game client at {copy_dir(machine)} could not be"
+    )
+    assert "don't delete it yourself" in warning
+    assert warning.endswith("Uninstalling this server removes it safely.")
     assert "next press" not in warning
 
 
@@ -1454,9 +1460,9 @@ def test_an_archive_that_cannot_go_home_keeps_the_copy_and_says_so(
     assert (target / trinitycore.LEFT_OUT_DIR / "Data" / "patch-4.MPQ").is_file(), "left"
     assert (target / "Data" / "common.MPQ").is_file(), "nothing of the copy removed"
     assert mode(archive) == 0o444
-    assert warning.startswith("The temporary copy of your game client this server made for its")
-    assert "could not be put back before removing it" in warning
-    assert warning.endswith("; delete that folder yourself.")
+    assert warning.startswith(f"A temporary copy of your game client at {target} could not be")
+    assert "an archive it had set aside could not be put back first" in warning
+    assert warning.endswith("don't delete it yourself -- that can change your own client's files.")
 
 
 def test_a_move_aside_refused_by_a_program_holding_the_file_says_to_close_it(
@@ -1466,7 +1472,7 @@ def test_a_move_aside_refused_by_a_program_holding_the_file_says_to_close_it(
 
     def rename(src: Any, dst: Any) -> None:
         if Path(src).name == "patch-4.MPQ" and trinitycore.LEFT_OUT_DIR in Path(dst).parts:
-            raise PermissionError(errno.EACCES, "The process cannot access the file", str(src))
+            raise sharing_violation(src)
         real_rename(src, dst)
 
     monkeypatch.setattr(os, "rename", rename)
@@ -1480,3 +1486,129 @@ def test_a_move_aside_refused_by_a_program_holding_the_file_says_to_close_it(
     )
     assert "NTFS" not in message and "Program Files" not in message
     assert not os.path.lexists(copy_dir(machine)), "what was moved went home, then the copy"
+
+
+# -- fix round 4 -------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Yu'lon's own config folder, in tmp: Uninstall may note a copy it must retry there."""
+    folder = tmp_path / "yulon-config"
+    monkeypatch.setattr(platform, "config_dir", lambda: folder)
+    return folder
+
+
+def sharing_violation(path: Any) -> PermissionError:
+    """What Windows says when another program has the file open (ERROR_SHARING_VIOLATION)."""
+    exc = PermissionError(errno.EACCES, "The process cannot access the file", str(path))
+    exc.winerror = 32  # type: ignore[attr-defined]
+    return exc
+
+
+def test_uninstall_hands_a_copy_it_cannot_remove_to_yulon_and_the_next_start_removes_it(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    target = leftover_copy(machine)
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(play_client, "remove_folder", failing_removal(target))
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    assert not machine.server_dir.exists(), "the uninstall went on"
+    noted = json.loads((config_dir / trinitycore.LEFTOVERS_FILE).read_text(encoding="utf-8"))
+    assert noted == [
+        {"target": os.fspath(target), "game": ENTRY.id, "server_dir": os.fspath(machine.server_dir)}
+    ]
+    monkeypatch.setattr(play_client, "remove_folder", real_remove)
+    assert trinitycore.remove_recorded_leftovers() == []
+    assert not os.path.lexists(target)
+    assert not (config_dir / trinitycore.LEFTOVERS_FILE).exists(), "the entry was dropped"
+
+
+def test_a_held_open_file_at_uninstall_says_to_close_the_game_and_never_to_press_install(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = crashed_after_moving_aside(machine)
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if trinitycore.LEFT_OUT_DIR in Path(src).parts:
+            raise sharing_violation(src)
+        real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", rename)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
+    assert os.path.lexists(target)
+    assert (
+        "Close World of Warcraft (and any program using the client's files). Yu'lon will" in warning
+    )
+    assert "press Install" not in warning
+
+
+def test_the_retry_on_start_keeps_a_folder_that_is_not_ours_and_says_so(
+    machine: Machine, config_dir: Path
+) -> None:
+    lay_for_client_data(machine)
+    stranger = copy_dir(machine)
+    stranger.mkdir()
+    (stranger / "notes.txt").write_text("mine")
+    entry = {"target": os.fspath(stranger), "game": ENTRY.id, "server_dir": "/elsewhere/srv"}
+    config_dir.mkdir()
+    (config_dir / trinitycore.LEFTOVERS_FILE).write_text(json.dumps([entry]), encoding="utf-8")
+    (warning,) = trinitycore.remove_recorded_leftovers()
+    assert warning.startswith(f"{stranger} is where this server would keep a temporary copy")
+    assert (stranger / "notes.txt").read_text() == "mine"
+    kept = json.loads((config_dir / trinitycore.LEFTOVERS_FILE).read_text(encoding="utf-8"))
+    assert kept == [entry]
+
+
+def test_a_copy_the_install_cannot_clear_first_says_never_to_delete_it_by_hand(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = leftover_copy(machine)
+    monkeypatch.setattr(play_client, "remove_folder", failing_removal(target))
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data")
+    message = str(caught.value)
+    assert message.startswith(f"A temporary copy of your game client at {target} could not be")
+    assert "don't delete it yourself -- that can change your own client's files" in message
+    assert message.endswith(
+        "Press Install again: it is removed safely first. Nothing was extracted."
+    )
+    assert "yourself, then" not in message
+
+
+def test_a_left_out_folder_that_is_a_link_is_never_walked_and_the_copy_is_kept(
+    machine: Machine, tmp_path: Path
+) -> None:
+    target = leftover_copy(machine)
+    elsewhere = tmp_path / "somebody-else"
+    (elsewhere / "Data").mkdir(parents=True)
+    (elsewhere / "Data" / "theirs.MPQ").write_bytes(b"theirs")
+    (target / trinitycore.LEFT_OUT_DIR).symlink_to(elsewhere, target_is_directory=True)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
+    assert "is a link to another folder" in warning
+    assert (elsewhere / "Data" / "theirs.MPQ").read_bytes() == b"theirs"
+    assert not (target / "Data" / "theirs.MPQ").exists(), "nothing renamed out of the link"
+    assert (target / "Data" / "common.MPQ").is_file(), "the copy kept"
+
+
+def test_a_plain_permission_refusal_is_not_called_a_file_held_open(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a Windows sharing/lock violation or EBUSY says another program holds the file."""
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if Path(src).name == "patch-4.MPQ" and trinitycore.LEFT_OUT_DIR in Path(dst).parts:
+            raise PermissionError(errno.EACCES, "Permission denied", str(src))
+        real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", rename)
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data")
+    assert "Permission denied" in str(caught.value)
+    assert "Close World of Warcraft" not in str(caught.value)

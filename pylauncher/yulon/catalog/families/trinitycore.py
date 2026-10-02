@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal, cast
 
-from yulon import client_packs, docker, play_client
+from yulon import client_packs, docker, platform, play_client
 from yulon.catalog.catalog import ClientPack, CmangosData, SqlPlan, TrinityCoreData
 from yulon.catalog.families import conf, extract, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
@@ -293,11 +293,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "Install again. Nothing was extracted."
             )
         if left is not None and left.kind == "ours":
-            raise InstallerError(
-                f"An earlier temporary copy of your client, {left.path}, could not be removed "
-                f"({left.why}). Remove it yourself, then press Install again. Nothing was "
-                "extracted."
-            )
+            raise InstallerError(f"{left.for_install()} Nothing was extracted.")
         if left is not None:
             yield f"warning: {left.for_uninstall()}"
         try:
@@ -343,8 +339,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield "Removed the temporary copy of your client."
         elif left.kind == "ours":
             yield (
-                f"warning: the temporary copy of your client {left.path} could not be removed "
-                f"({left.why}). Uninstalling this server removes it."
+                f"warning: a temporary copy of your game client at {left.path} could not be "
+                f"removed yet ({left.why}); {_DO_NOT_DELETE}. {left.close_first()}"
+                "Uninstalling this server removes it safely."
             )
         else:
             yield f"warning: {left.for_uninstall()}"
@@ -421,10 +418,11 @@ class TrinityCoreInstaller(CmangosInstaller):
                 aside.parent.mkdir(parents=True, exist_ok=True)
                 os.rename(path, aside)
             except OSError as exc:
+                remedy = _close_and_press(exc, "Install")
                 raise InstallerError(
                     f"{path} could not be moved out of the temporary copy of your client's Data "
                     f"folder ({exc}), so the map data was not extracted: that archive would be "
-                    f"read into it. Your own client was not changed.{_held_open(exc)}"
+                    f"read into it. Your own client was not changed.{remedy}"
                 ) from exc
             left_out.append(rel.as_posix())
         return sorted(left_out)
@@ -585,11 +583,17 @@ Leftover = Literal["ours", "foreign", "record"]
 """What a `LeftoverProblem` is about, because each is said and handled differently.
 
 `ours`: this install's own copy (its marker and its place both check out) that
-could not be removed -- the person may delete it. `foreign`: a folder at a path
-this install would use that Yu'lon did not make there -- it is left alone and must
-not be deleted on our word. `record`: the record names no folder this install could
+could not be removed yet -- never offered to the person to delete by hand, because
+deleting it outside Yu'lon (Explorer) clears the read-only flag on archives the
+player's own client shares; Yu'lon retries (fix round 4). `foreign`: a folder at a
+path this install would use that Yu'lon did not make there -- left alone, and not
+to be deleted on our word. `record`: the record names no folder this install could
 have made; nothing is touched and nothing is blocked on it.
 """
+
+_DO_NOT_DELETE = "don't delete it yourself -- that can change your own client's files"
+"""Why our own copy is never left to the person: Explorer clears a read-only flag on the
+hard-linked archives to delete them, and the flag is the player's file's too."""
 
 
 @dataclass(frozen=True)
@@ -599,13 +603,27 @@ class LeftoverProblem:
     kind: Leftover
     path: Path
     why: str = ""
+    held_open: bool = False
+    """The reason is a file another program holds open (`_held_open()`): close it first."""
+
+    def close_first(self) -> str:
+        """ "Close World of Warcraft ..." when a held-open file is the reason; else nothing."""
+        if not self.held_open:
+            return ""
+        return "Close World of Warcraft (and any program using the client's files). "
 
     def for_uninstall(self) -> str:
-        """The warning Uninstall shows; only our own copy is offered to the person to delete."""
+        """The warning Uninstall shows; our own copy is retried by Yu'lon, never left to the person.
+
+        Uninstall goes on after it (the record moved to Yu'lon's own folder,
+        `remember_leftover()`), so its remedy is the next start of the app, never
+        another press of a button of an install that is gone.
+        """
         if self.kind == "ours":
             return (
-                f"The temporary copy of your game client this server made for its map data, "
-                f"{self.path}, could not be removed ({self.why}); delete that folder yourself."
+                f"A temporary copy of your game client at {self.path} could not be removed yet "
+                f"({self.why}). {self.close_first()}Yu'lon will remove it safely the next time it "
+                f"starts; {_DO_NOT_DELETE}."
             )
         if self.kind == "foreign":
             return (
@@ -618,6 +636,16 @@ class LeftoverProblem:
             "a folder Yu'lon makes, so nothing was removed there."
         )
 
+    def for_install(self) -> str:
+        """The same fact for a press of Install, whose own next press retries the removal."""
+        if self.kind != "ours":
+            return self.for_uninstall()
+        return (
+            f"A temporary copy of your game client at {self.path} could not be removed yet "
+            f"({self.why}); {_DO_NOT_DELETE}. {self.close_first()}Press Install again: it is "
+            "removed safely first."
+        )
+
 
 def remove_leftover_extraction_client(
     server_dir: Path, game: str, *, also: Path | None = None
@@ -625,19 +653,10 @@ def remove_leftover_extraction_client(
     """Remove the temporary extraction client this install left anywhere; None when none is left.
 
     Asked by the client-data stage before it makes a copy and after it is done, and
-    by Uninstall (`purge.Uninstaller`), so a copy a crash left behind is found
-    again: the one `EXTRACT_CLIENT_RECORD` names, and `also` (the path this press
-    would use). For each, the unfinished `<copy>.yulon-partial` a crash INSIDE
-    `play_client.create()` leaves and the copy itself -- each only when it is ours
-    (`_is_ours()`: its marker names this game and this server folder AND it sits at
-    the place `extraction_client_dir()` gives its own source client, so a record
-    pointed at this server's ready-to-play client, whose marker is the same, cannot
-    reach it), each with its moved-aside archives put back home first
-    (`_put_left_out_back()`; a copy whose archives cannot go home is left, and the
-    record with it), and each through `play_client.remove_folder()`, which never
-    enters a link and puts back a read-only flag a Windows delete had to clear on a
-    file the player's client shares. Never `rmtree`. The record goes last, once
-    nothing it names is left.
+    by Uninstall (`purge.Uninstaller`, through `remove_for_uninstall()`), so a copy a
+    crash left behind is found again: the one `EXTRACT_CLIENT_RECORD` names, and
+    `also` (the path this press would use). Each through `_remove_target()`. The
+    record goes last, once nothing it names is left.
 
     Returns what was left and why rather than raising: the stage refuses on `ours`
     and `foreign`, Uninstall reports each in its own words and goes on.
@@ -654,21 +673,9 @@ def remove_leftover_extraction_client(
             continue
         targets.append(target)
     for target in targets:
-        for folder in (target.with_name(target.name + play_client.PARTIAL_SUFFIX), target):
-            if not os.path.lexists(folder):
-                continue
-            marker = play_client.read_marker(folder)
-            if marker is None or not _is_ours(target, marker, game, server_dir):
-                return LeftoverProblem("foreign", folder)
-            put_back = _put_left_out_back(folder)
-            if put_back:
-                # Not removed: `remove_folder()` would clear the read-only flag on a
-                # name it cannot map to the player's file and leave it cleared there.
-                return LeftoverProblem("ours", folder, put_back)
-            try:
-                play_client.remove_folder(folder, original=marker.source_client_dir)
-            except OSError as exc:
-                return LeftoverProblem("ours", folder, str(exc))
+        problem = _remove_target(target, game, server_dir)
+        if problem is not None:
+            return problem
     try:
         (server_dir / EXTRACT_CLIENT_RECORD).unlink(missing_ok=True)
     except OSError as exc:
@@ -676,7 +683,134 @@ def remove_leftover_extraction_client(
     return noted
 
 
-def _put_left_out_back(copy: Path) -> str:
+def _remove_target(target: Path, game: str, server_dir: Path) -> LeftoverProblem | None:
+    """Remove one extraction client and its `.yulon-partial`; None when neither is left.
+
+    Each only when it is ours (`_is_ours()`: its marker names this game and this
+    server folder AND it sits at the place `extraction_client_dir()` gives its own
+    source client, so a record pointed at this server's ready-to-play client, whose
+    marker is the same, cannot reach it), each with its moved-aside archives put
+    back home first (`_put_left_out_back()`; a copy whose archives cannot go home is
+    left whole), and each through `play_client.remove_folder()`, which never enters
+    a link and puts back a read-only flag a Windows delete had to clear on a file
+    the player's client shares. Never `rmtree`. The server folder need not exist:
+    the check is of the marker and of paths.
+    """
+    for folder in (target.with_name(target.name + play_client.PARTIAL_SUFFIX), target):
+        if not os.path.lexists(folder):
+            continue
+        marker = play_client.read_marker(folder)
+        if marker is None or not _is_ours(target, marker, game, server_dir):
+            return LeftoverProblem("foreign", folder)
+        put_back = _put_left_out_back(folder)
+        if put_back is not None:
+            # Not removed: `remove_folder()` would clear the read-only flag on a name
+            # it cannot map to the player's file and leave it cleared there.
+            return put_back
+        try:
+            play_client.remove_folder(folder, original=marker.source_client_dir)
+        except OSError as exc:
+            return LeftoverProblem("ours", folder, str(exc), _held_open(exc))
+    return None
+
+
+LEFTOVERS_FILE = "leftover-extraction-clients.json"
+"""In Yu'lon's config folder: our own extraction clients Uninstall could not remove yet.
+
+A list of `{"target", "game", "server_dir"}`. Uninstall moves a server's record here
+BEFORE that server's folder (and the record in it) goes; `remove_recorded_leftovers()`
+retries each on the app's next start and drops what it removed (fix round 4).
+"""
+
+
+def _leftovers_path(config_dir: Path | None) -> Path:
+    return (config_dir if config_dir is not None else platform.config_dir()) / LEFTOVERS_FILE
+
+
+def _read_leftovers(path: Path) -> list[dict[str, str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    keys = ("target", "game", "server_dir")
+    return [
+        {key: str(item[key]) for key in keys}
+        for item in raw
+        if isinstance(item, dict) and all(isinstance(item.get(key), str) for key in keys)
+    ]
+
+
+def _write_leftovers(path: Path, entries: Sequence[dict[str, str]]) -> None:
+    if not entries:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(path.name + ".yulon-new")
+    staged.write_text(json.dumps(list(entries), indent=2) + "\n", encoding="utf-8")
+    os.replace(staged, path)
+
+
+def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None = None) -> str:
+    """Uninstall's call: remove a leftover copy, or hand it to Yu'lon's own folder; the warning.
+
+    Our own copy that cannot be removed yet is remembered in `LEFTOVERS_FILE` --
+    BEFORE the server folder, and the record in it, are removed -- for
+    `remove_recorded_leftovers()` to retry. `""` when nothing is left.
+    """
+    recorded = _recorded_target(server_dir)
+    left = remove_leftover_extraction_client(server_dir, game)
+    if left is None:
+        return ""
+    if left.kind == "ours" and recorded is not None:
+        path = _leftovers_path(config_dir)
+        entry = {"target": os.fspath(recorded), "game": game, "server_dir": os.fspath(server_dir)}
+        try:
+            entries = [item for item in _read_leftovers(path) if item != entry]
+            _write_leftovers(path, [*entries, entry])
+        except OSError as exc:
+            return (
+                f"A temporary copy of your game client at {left.path} could not be removed "
+                f"({left.why}), and Yu'lon could not note it to remove later ({exc}); "
+                f"{_DO_NOT_DELETE}."
+            )
+    return left.for_uninstall()
+
+
+def remove_recorded_leftovers(*, config_dir: Path | None = None) -> list[str]:
+    """Retry every copy Uninstall could not remove; drop the ones now gone; the warnings left.
+
+    Meant for the app's start (T179 Task 5 wires it from the main window; this task
+    may not edit it). The same `_remove_target()` every other route uses, so the same
+    checks hold: a folder that is not ours at its place is never touched, and stays
+    listed with a warning rather than being forgotten.
+    """
+    path = _leftovers_path(config_dir)
+    kept: list[dict[str, str]] = []
+    warnings: list[str] = []
+    for entry in _read_leftovers(path):
+        target = Path(entry["target"])
+        if not target.name:
+            warnings.append(LeftoverProblem("record", target).for_uninstall())
+            kept.append(entry)
+            continue
+        problem = _remove_target(target, entry["game"], Path(entry["server_dir"]))
+        if problem is None:
+            continue
+        kept.append(entry)
+        if problem.kind == "foreign":
+            warnings.append(problem.for_uninstall())
+        else:
+            logger.info(f"the temporary client copy {target} is still there: {problem.why}")
+    try:
+        _write_leftovers(path, kept)
+    except OSError as exc:
+        warnings.append(f"Yu'lon could not update {path} ({exc}).")
+    return warnings
+
+
+def _put_left_out_back(copy: Path) -> LeftoverProblem | None:
     """Rename every archive `_drop_unlisted_archives()` moved aside back to its own path.
 
     Before ANY removal of the copy (fix round 3, the lead's ruling).
@@ -690,14 +824,24 @@ def _put_left_out_back(copy: Path) -> str:
 
     A name already at the path is a required pack's file, laid in after the archive
     was moved aside (a pack installs over the name the player's own patch had left
-    empty); it is the copy's own, never the player's, and it goes first.
+    empty); it is the copy's own, never the player's, and it goes first. A
+    `.yulon-left-out` that is itself a link (or a junction) is never walked: it was
+    not made by this app, and walking it would rename files somewhere else.
 
-    Returns `""` when nothing is left aside, else what stopped it -- and then the
+    Returns None when nothing is left aside, else what stopped it -- and then the
     copy must NOT be removed.
     """
     aside_root = copy / LEFT_OUT_DIR
     if not os.path.lexists(aside_root):
-        return ""
+        return None
+    # T179: `_is_link` public after T187 merges (play_client.py is T187's now).
+    if play_client._is_link(aside_root):
+        return LeftoverProblem(
+            "ours",
+            copy,
+            f"{aside_root} is a link to another folder, not the folder Yu'lon sets archives "
+            "aside in, so nothing in it was moved",
+        )
     try:
         for folder, _dirs, files in os.walk(aside_root):
             for name in files:
@@ -710,29 +854,37 @@ def _put_left_out_back(copy: Path) -> str:
         for folder, _dirs, _files in sorted(os.walk(aside_root), key=lambda x: -len(x[0])):
             os.rmdir(folder)
     except OSError as exc:
-        return (
-            f"an archive it had moved aside could not be put back before removing it ({exc}); "
-            f"it was left so your own client's read-only flags stay as they are.{_held_open(exc)}"
+        return LeftoverProblem(
+            "ours",
+            copy,
+            f"an archive it had set aside could not be put back first ({exc})",
+            _held_open(exc),
         )
-    return ""
+    return None
 
 
-_SHARING_VIOLATION = 32
-"""Windows' ERROR_SHARING_VIOLATION: another program has the file open."""
+_HELD_OPEN_WINERRORS = frozenset({32, 33})
+"""Windows' ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION: another program has it open."""
 
 
-def _held_open(exc: OSError) -> str:
-    """The remedy for a file another program holds open, when that is what `exc` is."""
-    if getattr(exc, "winerror", None) == _SHARING_VIOLATION or exc.errno in (
-        errno.EACCES,
-        errno.EPERM,
-        errno.EBUSY,
-    ):
-        return (
-            " Close World of Warcraft (and any program using the client's files), then press "
-            "Install again."
-        )
-    return ""
+def _held_open(exc: OSError) -> bool:
+    """Is `exc` another program holding the file -- and nothing else?
+
+    Only a Windows sharing or lock violation, or EBUSY, says so (fix round 4). A
+    plain EACCES or EPERM is a permission, a read-only folder or a policy as often
+    as an open file, and is told as itself.
+    """
+    return getattr(exc, "winerror", None) in _HELD_OPEN_WINERRORS or exc.errno == errno.EBUSY
+
+
+def _close_and_press(exc: OSError, press: str) -> str:
+    """The remedy for a held-open file, for a button the person can press again."""
+    if not _held_open(exc):
+        return ""
+    return (
+        f" Close World of Warcraft (and any program using the client's files), then press "
+        f"{press} again."
+    )
 
 
 def _is_ours(target: Path, marker: play_client.Marker, game: str, server_dir: Path) -> bool:
