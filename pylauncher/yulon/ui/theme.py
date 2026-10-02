@@ -130,6 +130,10 @@ TAB_BUTTONS = "tab-buttons"
 """objectName of the strip that holds a server tab's ▶ and × side by side (T187)."""
 
 
+PLAY_MENU_BUTTON = "play-menu"
+"""objectName of the Server tab's ▾ (T181): one arrow, as on `SERVER_BUILD_BUTTON` (T187)."""
+
+
 SERVER_BUILD_BUTTON = "server-build"
 """objectName of the Modules toolbar's "Server build ▾" menu button (T89).
 
@@ -357,11 +361,13 @@ QTabBar QToolButton#{FORGET_TAB_BUTTON}:hover {{
 
 /* T187: the ▶ beside it opens the server's launcher. The same exemption and the
    same size, so the two sit side by side across the 64px rail and the tab is no
-   longer than the × alone made it; gold on hover, where the × goes red. */
+   longer than the × alone made it. Gold at rest, so it reads apart from the muted
+   ×, and brighter on hover, where the × goes red. */
 QTabBar QToolButton#{LAUNCH_TAB_BUTTON} {{
     background-color: transparent;
     border: none;
-    color: {COLOR_TEXT_MUTED};
+    color: {COLOR_GOLD_LIGHT};
+    font-size: 15px;
     padding: 0px;
     min-width: 16px;
     min-height: 16px;
@@ -422,7 +428,8 @@ QPushButton:disabled {{
 
 /* T89: the menu button says it opens a menu in its own label (its triangle), so the
    style's indicator would be a second arrow, and it reserves width for one too. */
-QPushButton#{SERVER_BUILD_BUTTON}::menu-indicator {{
+QPushButton#{SERVER_BUILD_BUTTON}::menu-indicator,
+QPushButton#{PLAY_MENU_BUTTON}::menu-indicator {{
     image: none;
     width: 0px;
 }}

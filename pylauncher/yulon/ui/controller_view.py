@@ -153,6 +153,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_GOLD,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_WARNING,
+    PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
@@ -8343,6 +8344,8 @@ class ControllerView(QWidget):
         self.play_button.clicked.connect(self._play_pressed)
         self.play_button.setVisible(has_play or self.services.client_dir is not None)
         self.play_menu_button = QPushButton("▾", tab)
+        # Its label is the arrow: the style's own indicator would be a second (T187).
+        self.play_menu_button.setObjectName(PLAY_MENU_BUTTON)
         self.play_menu_button.setToolTip("More for the ready-to-play client")
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
@@ -8378,11 +8381,16 @@ class ControllerView(QWidget):
     def _play_parent(self) -> QWidget:
         """Where a Make…/Play/Refresh/Delete dialog opens: the launcher that pressed, or this tab.
 
-        Only a launcher still on screen: one closed since its press has nobody
-        looking at it, and a dialog over a hidden window is a dialog nobody sees.
+        Only a launcher still on screen: one closed or minimized since its press
+        has nobody looking at it, and a dialog over it is a dialog nobody sees.
         """
         host = self.dialog_host
-        if host is not None and shiboken6.isValid(host) and host.isVisible():
+        if (
+            host is not None
+            and shiboken6.isValid(host)
+            and host.isVisible()
+            and not host.isMinimized()
+        ):
             return host
         return self
 

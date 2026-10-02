@@ -4276,6 +4276,9 @@ def test_the_server_tabs_play_opens_the_launcher_and_its_make_stays_a_make(
     assert played == [], "the tab played directly instead of opening the launcher"
     assert launchers[_key(view)].isVisible()
     assert not view.play_menu_button.isHidden(), "the ▾ menu went"
+    from yulon.ui.theme import PLAY_MENU_BUTTON
+
+    assert view.play_menu_button.objectName() == PLAY_MENU_BUTTON, "two arrows on the ▾"
 
 
 def test_a_rebuilt_tab_is_followed_by_its_open_launcher(

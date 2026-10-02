@@ -2671,6 +2671,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "belong to a write still in flight in another copy of Yu'lon. It touches nothing of "
         "a server's and answers an empty listing by doing nothing"
     ),
+    ("ui_settings.py", "_sweep_stale_temporaries"): (
+        "T187: `update_state._sweep_stale_temporaries` for `ui.json` - lists the config dir "
+        "for `ui.json.*.tmp` a killed save left, and deletes only a file this app named "
+        "itself, in its own directory, more than a day old. Nothing of a server's"
+    ),
     ("play_client.py", "plan"): (
         "T181a. Walks the player's own client to sort its files into hard-linked (`*.MPQ`, "
         "`*.dll`) and copied, for a ready-to-play client built BESIDE it. The listing decides "

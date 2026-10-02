@@ -415,6 +415,12 @@ class LauncherWindow(QWidget):
         self._typed: list[str] = ui_settings.recent_addresses(addresses)
         self._stale_account: str | None = None
         self._reconcile_owed = False
+        # A client read is on its worker: the owed account check waits for its
+        # answer rather than judging the reading it replaces (fix round 1).
+        self._client_pending = False
+        # Hidden by a close (not a minimize): what it shows may be old by the
+        # time it is opened again, so the next show reads it again.
+        self._reread_on_show = False
         self._was_busy = False
         self._client_asked = 0
         self._server_asked = 0
@@ -861,15 +867,28 @@ class LauncherWindow(QWidget):
         self._client_asked += 1
         asked = self._client_asked
         reads = self.reads
-        # The ask's number rides with the answer, so a slower earlier read
-        # landing after a later one is recognised and dropped.
-        self._jobs(lambda: (asked, reads.client(play)), self._client_read, self._client_failed)
+        self._client_pending = True
+
+        def work() -> tuple[int, ClientReading | Exception]:
+            # The ask's number rides with the answer -- a failure's too -- so a
+            # slower earlier read landing after a later one is recognised and
+            # dropped, and only the LAST ask's answer ends `_client_pending`.
+            try:
+                return asked, reads.client(play)
+            except Exception as exc:  # noqa: BLE001 - said in `_client_read`
+                return asked, exc
+
+        self._jobs(work, self._client_read, self._client_failed)
 
     @Slot(object)
     def _client_read(self, answer: object) -> None:
         if not isinstance(answer, tuple) or answer[0] != self._client_asked:
             return
+        self._client_pending = False
         result = answer[1]
+        if isinstance(result, Exception):
+            self._client_failed(result)
+            return
         if not isinstance(result, ClientReading):
             return
         self._client = result
@@ -878,6 +897,7 @@ class LauncherWindow(QWidget):
 
     @Slot(object)
     def _client_failed(self, exc: object) -> None:
+        self._client_pending = False
         logger.warning(f"the launcher could not read the ready-to-play client: {exc!r}")
         self._render()
 
@@ -952,9 +972,11 @@ class LauncherWindow(QWidget):
             return
         saved = record.launcher.get("account")
         if not isinstance(saved, str) or "accountname" in self._fixed_keys():
+            self._reconcile_owed = False  # nothing saved to check any more
             return
         known = {client_packs.clean_account(name) for name in server.accounts}
         if saved in known:
+            self._reconcile_owed = False  # the fresh reading's account is a valid one
             return
         view = self._alive()
         if view is None or view.play_client_busy() is not None:
@@ -991,17 +1013,17 @@ class LauncherWindow(QWidget):
         self.cancel_button.setEnabled(source.isEnabled())
         self.cancel_button.setText(source.text())
         busy = view.play_client_busy() is not None
-        reloading = self._was_busy and not busy
-        if reloading:
+        if self._was_busy and not busy:
             # A Make…, Refresh, Play, Client options or save just ended: what
             # the client holds may have changed under the window.
             self._reload_client()
         self._was_busy = busy
-        if not busy and not reloading and self._reconcile_owed:
-            # Only when no reading is on its way: run now, an owed check would
-            # judge the record the window read BEFORE the job, and could save
-            # "Ask" over the account the job left there. `_client_read` runs it
-            # on the fresh reading instead.
+        if not busy and not self._client_pending and self._reconcile_owed:
+            # Only when no client read is on its way, whatever started it: the
+            # view can say "idle" more than once (`_play_end(said)` does, through
+            # `_say_play` and again itself), and an owed check run on the reading
+            # from BEFORE the job could save "Ask" over the account the job left
+            # there. `_client_read` runs it on the fresh reading instead.
             self._reconcile_account()
         self._render_enabled()
 
@@ -1014,10 +1036,20 @@ class LauncherWindow(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's own name
         super().showEvent(event)
+        if self._reread_on_show and not event.spontaneous():
+            # Opened again after a close: the client (an addon added, a Refresh
+            # from the Server tab) and the server (an account made) may have
+            # changed while nobody looked.
+            self._reread_on_show = False
+            self._reload_client()
+            if self.realm_badge.status == "running":
+                self._reload_server()
         self._sync_online_timer()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 - Qt's own name
         super().hideEvent(event)
+        if not event.spontaneous():
+            self._reread_on_show = True  # closed, not minimized
         self._sync_online_timer()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name

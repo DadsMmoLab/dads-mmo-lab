@@ -1370,3 +1370,112 @@ def test_closing_the_launcher_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> 
     window.close()
 
     assert said == [1] and window.isHidden()
+
+
+# -- Task 4, fix round 1 --------------------------------------------------------------
+
+
+def _owed_alice_then_bob(
+    ps: _Ps, tmp_path: Path
+) -> tuple[_HeldRunner, LauncherWindow, ControllerView, Path]:
+    """ALICE saved and stale (owed while a Play holds the record); the record now says BOB."""
+    held = _HeldRunner()
+    answer = ServerReading(accounts=("BOB",), online=UP, announced=None)
+    window, view, play = _launcher(
+        ps, tmp_path, answer=answer, launcher={"account": "ALICE"}, job_runner=held
+    )
+    assert play is not None
+    held.run_all()
+    view._play_pending = True
+    view._say_play("Starting the game…")
+    _online(view)
+    held.run_all()
+    assert _picks(play) == {"account": "ALICE"}
+    _save(play, {"account": "BOB"})
+    return held, window, view, play
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        pytest.param(lambda view: view._play_end(), id="no-text"),
+        pytest.param(lambda view: view._play_end("Nothing was started."), id="nothing-started"),
+        pytest.param(lambda view: view._play_launched(None), id="launched"),
+        pytest.param(
+            lambda view: (view._cancel_play_download(), view._play_end("Cancelled.")),
+            id="cancel",
+        ),
+    ],
+)
+def test_an_owed_account_check_never_runs_while_a_client_read_is_on_its_way(
+    qapp: object, ps: _Ps, tmp_path: Path, end: Callable[[ControllerView], object]
+) -> None:
+    """Fix 1: `_play_end(said)` tells the window twice; neither may judge the stale reading."""
+    held, window, view, play = _owed_alice_then_bob(ps, tmp_path)
+
+    end(view)
+    assert _picks(play) == {"account": "BOB"}, "the owed check ran on the stale reading"
+    held.run_all()
+    view.play_state_changed.emit()  # any later word from the view: nothing is owed now
+
+    assert _picks(play) == {"account": "BOB"}
+    assert window.account_combo.currentData() == account_data("BOB")
+
+
+def test_reopening_a_hidden_launcher_reads_the_client_and_server_again(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    """Fix 2: closed, the player adds an addon and an account; opened again, both show."""
+    window, view, play = _launcher(ps, tmp_path)
+    assert play is not None
+    closing.append(window)
+    _shown(window, (1280, 800))
+    _online(view)
+    window.close()
+    process_events()
+
+    (play / "Interface" / "AddOns" / "Questie").mkdir(parents=True)
+    reads = window.reads
+    assert isinstance(reads, _Reads)
+    reads.answer = ServerReading(accounts=("ALICE", "BOB", "CAROL"), online=UP, announced=None)
+    window.show()
+    process_events()
+
+    addons = [window.addons_list.item(i).text() for i in range(window.addons_list.count())]
+    assert "Questie" in addons
+    assert window.account_combo.findData(account_data("CAROL")) >= 0
+
+
+def test_a_launcher_shown_the_first_time_reads_once(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    window, _view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    reads = window.reads
+    assert isinstance(reads, _Reads)
+    asked = reads.client_asked
+    _shown(window, (1280, 800))
+    assert reads.client_asked == asked, "the first show read the client a second time"
+
+
+def test_a_minimized_launcher_does_not_take_the_tabs_dialogs(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    closing: list[LauncherWindow],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    _shown(window, (1280, 800))
+    parents: list[object] = []
+    box = controller_view_module.QMessageBox
+    monkeypatch.setattr(box, "information", lambda parent, *_a, **_k: parents.append(parent))
+    view._module_pending = "Install Transmog"
+    window.play_button.click()
+    window.showMinimized()
+    process_events()
+
+    view.play()
+
+    assert parents == [window, view]

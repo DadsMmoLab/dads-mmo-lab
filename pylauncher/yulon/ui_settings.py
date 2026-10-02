@@ -24,6 +24,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -41,6 +42,12 @@ ADDRESS_HISTORY = 5
 
 THIS_COMPUTER = "127.0.0.1"
 """The realm box's default (`controller_view.PLAY_CLIENT_ADDRESS`): always offered, not kept."""
+
+STALE_TMP_SECONDS = 24 * 60 * 60
+"""How old a leftover `ui.json.*.tmp` must be before a load may delete it.
+
+`update_state.STALE_TMP_SECONDS`'s reason: old enough that it cannot belong to a
+write still in flight, in this copy of Yu'lon or another."""
 
 _LOCK = threading.RLock()
 """Held across every load-modify-save, for `update_state._LOCK`'s reason: one file, two writers
@@ -103,6 +110,7 @@ def load_ui_settings(path: Path | None = None) -> UiSettings:
     `utf-8-sig` for `state.py`'s reason: Windows tools write a byte-order mark.
     """
     target = path if path is not None else ui_settings_path()
+    _sweep_stale_temporaries(target, time.time())
     try:
         with target.open(encoding="utf-8-sig") as fh:
             return UiSettings.model_validate(json.load(fh))
@@ -111,6 +119,20 @@ def load_ui_settings(path: Path | None = None) -> UiSettings:
     except (OSError, ValueError, ValidationError) as exc:
         logger.info(f"window settings at {target} unreadable, starting empty: {exc}")
         return UiSettings()
+
+
+def _sweep_stale_temporaries(target: Path, now: float) -> None:
+    """Delete `ui.json.*.tmp` files a day old: a save killed between its write and its
+    rename left them, and nothing else comes back for one. Never raises."""
+    try:
+        for leftover in target.parent.glob(target.name + ".*.tmp"):
+            try:
+                if now - leftover.stat().st_mtime > STALE_TMP_SECONDS:
+                    leftover.unlink(missing_ok=True)
+            except OSError:  # gone already, or not ours to remove
+                continue
+    except OSError as exc:
+        logger.debug(f"could not sweep temporary files beside {target}: {exc}")
 
 
 def save_ui_settings(settings: UiSettings, path: Path | None = None) -> bool:

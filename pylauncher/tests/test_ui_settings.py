@@ -113,3 +113,25 @@ def test_a_hand_edited_history_is_cleaned_on_the_way_in(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert launcher_place("wow-wotlk", SERVER, path).addresses == ["ok.lan"]
+
+
+def test_a_load_sweeps_temporaries_a_day_old_and_keeps_younger_ones(tmp_path: Path) -> None:
+    """A save killed between write and rename leaves `ui.json.<x>.tmp`; nothing else sweeps it."""
+    import os
+    import time
+
+    path = tmp_path / "ui.json"
+    old = tmp_path / "ui.json.abc.tmp"
+    young = tmp_path / "ui.json.def.tmp"
+    other = tmp_path / "update.json.abc.tmp"
+    for leftover in (old, young, other):
+        leftover.write_text("{}", encoding="utf-8")
+    day_ago = time.time() - ui_settings.STALE_TMP_SECONDS - 60
+    os.utime(old, (day_ago, day_ago))
+    os.utime(other, (day_ago, day_ago))
+
+    load_ui_settings(path)
+
+    assert not old.exists()
+    assert young.exists(), "a write still in flight lost its file"
+    assert other.exists(), "another file's temporary was swept"
