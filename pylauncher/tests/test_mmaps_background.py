@@ -487,9 +487,11 @@ def test_a_rebuild_of_a_finished_set_leaves_it_and_its_switch(box: Machine) -> N
     assert "mmap.enablePathFinding = 1" in conf_text(box.server_dir)
 
 
-def test_the_update_routes_stop_the_job_before_the_first_fetch(
+def test_the_update_routes_stop_the_job_after_the_source_checks_and_before_the_rebuild(
     box: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """After every refusal -- the moved sources' own check included (T179 Task 6) -- and
+    before the compile: a press the source checks refuse leaves the job running."""
     install(box)
     eng = engine(box)
     order: list[str] = []
@@ -500,15 +502,27 @@ def test_the_update_routes_stop_the_job_before_the_first_fetch(
     monkeypatch.setattr(
         eng, "rebuild", lambda opts, cancel=None: iter([order.append("rebuild") or "rebuilt"])
     )
+    real_check = eng.check_moved_sources
+
+    def check(server_dir: Path, moved: object, *, to_pin: bool) -> object:
+        order.append("source checks")
+        return real_check(server_dir, moved, to_pin=to_pin)  # type: ignore[arg-type]
+
     real = eng.before_rebuild
 
-    def before(server_dir: Path, route: str) -> object:
-        order.append(f"stop:{route}")
-        return real(server_dir, route)
+    def before(server_dir: Path, route: str, press: str) -> object:
+        order.append(f"stop:{route}:{press}")
+        return real(server_dir, route, press)
 
+    monkeypatch.setattr(eng, "check_moved_sources", check)
     monkeypatch.setattr(eng, "before_rebuild", before)
     list(eng.update_to_latest(InstallOptions(server_dir=box.server_dir), to_pin=True))
-    assert order == ["refusals", "stop:the return to the tested commit", "rebuild"]
+    assert order == [
+        "refusals",
+        "source checks",
+        "stop:the return to the tested commit:Return to the tested pin…",
+        "rebuild",
+    ]
     assert not box.mmaps.jobs and output(box.server_dir) == []
 
 

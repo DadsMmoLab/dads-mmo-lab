@@ -1844,3 +1844,76 @@ def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
     said = str(native.RewrittenHistory("cmangos/x", "The release is on rewritten history."))
     assert "“Update the server to latest…”" in said
     assert "“Server build ▾”" in said, said
+
+
+# -- T179: what changed between two commits (the TrinityCore route's question) ---------------
+
+
+def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
+    """The spine's hooks are no-ops: WotLK and TBC updates ask the same questions as before."""
+    rec, server_dir = _ready(tmp_path / "wotlk")
+    _press(rec, server_dir)
+    assert not [call for call in rec.calls if call.startswith("changed-")]
+    rec, server_dir, tbc = _tbc(tmp_path)
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert not [call for call in rec.calls if call.startswith("changed-")]
+
+
+def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_and_its_new_one(
+    origin: Path, tmp_path: Path
+) -> None:
+    """Real git, at depth 1, as the update route leaves a checkout: the old commit's tree is
+    still in the store, so the two can be compared with no network and no history between.
+
+    Added, modified and removed are three different answers to the route (import, import,
+    leave the table), and a path outside the asked folders is not reported.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    (origin / "sql").mkdir()
+    (origin / "sql" / "old.sql").write_text("DROP TABLE old;\n", encoding="utf-8", newline="\n")
+    (origin / "sql" / "keep.sql").write_text(
+        "-- a comment\nINSERT INTO `realmlist` VALUES (1);\nINSERT INTO `other` VALUES (1);\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _git(["add", "-A"], origin)
+    _git(["commit", "-qm", "sql"], origin)
+    real = git.RunnerGit()
+    dest = tmp_path / "work"
+    spec = git.CloneSpec(url=f"file://{origin}", dest=dest, branch="main", depth=1)
+    real.clone(spec)
+    first = real.head_sha(dest)
+    assert first is not None
+
+    (origin / "sql" / "old.sql").unlink()
+    (origin / "sql" / "new.sql").write_text("DROP TABLE new;\n", encoding="utf-8", newline="\n")
+    (origin / "sql" / "keep.sql").write_text(
+        "-- another comment\n"
+        "INSERT INTO `realmlist` VALUES (2);\n"
+        "INSERT INTO `other` VALUES (1);\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (origin / "README").write_text("moved\n", encoding="utf-8", newline="\n")
+    _git(["add", "-A"], origin)
+    _git(["commit", "-qm", "moved"], origin)
+    real.clone(spec)
+    moved = real.head_sha(dest)
+    assert moved is not None and moved != first
+
+    assert sorted(real.changed_files(dest, first, moved, ["sql"]) or ()) == [
+        ("A", "sql/new.sql"),
+        ("D", "sql/old.sql"),
+        ("M", "sql/keep.sql"),
+    ]
+    assert real.changed_files(dest, moved, first, ["sql"]) is not None, "either direction"
+    # A removed SQL comment prints as `--- a comment`, the shape of a diff header.
+    assert real.changed_lines(dest, first, moved, "sql/keep.sql") == (
+        "--- a comment",
+        "-INSERT INTO `realmlist` VALUES (1);",
+        "+-- another comment",
+        "+INSERT INTO `realmlist` VALUES (2);",
+    )
+    assert real.changed_files(dest, first, "f" * 40, ["sql"]) is None, "an unknown commit"
+    assert real.changed_files(tmp_path / "nowhere", first, moved, ["sql"]) is None

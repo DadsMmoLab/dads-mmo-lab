@@ -56,7 +56,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from yulon import docker, platform, rmtree
+from yulon import docker, platform, rmtree, server_build_presses
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, TrinityCoreData
 from yulon.catalog.families import conf, extract
@@ -255,7 +255,17 @@ def _write_record(server_dir: Path, record: Record) -> None:
 
 
 def _forget_record(server_dir: Path) -> None:
-    (server_dir / RECORD_FILE).unlink(missing_ok=True)
+    """The record removed: not started. Raises `MmapsError`, never a bare `OSError`.
+
+    Every caller is a status, a stop or a route hook, and each of them already
+    answers a `MmapsError` in words; a bare `OSError` escaped the status path as a
+    crash of the reading thread (Task 4's review, carried to Task 6).
+    """
+    path = server_dir / RECORD_FILE
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise MmapsError(f"its record {path} could not be removed ({exc}).") from exc
 
 
 # -- what a status says -------------------------------------------------------------
@@ -553,21 +563,26 @@ def stop_for_route(
     entry: CatalogEntry,
     route: str,
     *,
+    press: str = server_build_presses.REBUILD,
     runner: Runner | None = None,
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
 ) -> str | None:
     """Stop a job that may run before `route` changes the server; None when none can.
 
-    The routes' hook (Rebuild, Update to latest, Return to the tested pin): asked
-    after their refusals and before their first change. Reads the record first, so
-    a server with no record asks Docker nothing, and one whose record is a readable
-    `done` or `failed` (its container already removed) is left alone. Anything else
-    -- queued, running, or a record that cannot be read, which says nothing about
-    the container -- is stopped by this folder's DERIVED container name. A stop
-    that fails raises, and the route does not start: the job must never run while
-    the server is rebuilt.
+    The routes' hook (Rebuild, Update to latest, Return to the tested pin, and the
+    map data's re-extraction): asked after their refusals and before their first
+    change. Reads the record first, so a server with no record asks Docker
+    nothing, and one whose record is a readable `done` is left alone: its set is
+    complete. A readable `failed` one has its DERIVED container removed again, in
+    case a start that timed out made it after all (fix round 2) -- a container
+    already gone is no failure. Anything else -- queued, running, or a record that
+    cannot be read, which says nothing about the container -- is stopped by that
+    derived name. A removal or stop that fails raises, ending in what to do and
+    `press`, the entry to press again; the route does not start, because the job
+    must never run while the server is rebuilt.
     """
+    again = f"Check that Docker is running, then press \u201c{press}\u201d again."
     if background_block(entry) is None:
         return None
     with _LOCK:
@@ -585,9 +600,9 @@ def stop_for_route(
                 run.remove(job.container, timeout=CHANGE_TIMEOUT)
             except docker.DockerCommandError as exc:
                 raise MmapsError(
-                    f"A container left by a pathfinding run that did not start ({job.container}) "
-                    f"could not be removed ({exc}), so {route} was not started: it must not run "
-                    "while the server is rebuilt. Nothing was changed."
+                    f"A container left by a pathfinding run that failed ({job.container}) could "
+                    f"not be removed ({exc}), so {route} was not started: it must not run while "
+                    f"the server is rebuilt. Nothing was changed. {again}"
                 ) from exc
             return None
         # Reconciled first: a run that FINISHED since the last status is a complete
@@ -603,13 +618,37 @@ def stop_for_route(
         except MmapsError as exc:
             raise MmapsError(
                 f"{exc} The pathfinding data is still being made, so {route} was not started: "
-                "it must not run while the server is rebuilt. Nothing was changed."
+                f"it must not run while the server is rebuilt. Nothing was changed. {again}"
             ) from exc
         return (
             f"Stopped making the pathfinding data before {route}; what it had made so far was "
             "removed and pathfinding stays off. It starts again from the beginning once the "
             "server has been rebuilt, or from the Server tab."
         )
+
+
+def discard(
+    server_dir: Path,
+    entry: CatalogEntry,
+    *,
+    platform_id: Callable[[], str] | None = None,
+    install_id: str | None = None,
+) -> None:
+    """Throw the movement maps away because the map data they were made from is replaced.
+
+    T179 Task 6's re-extraction, after `stop_for_route()` has stopped any job:
+    `_clear_output()` -- pathfinding switched off FIRST, then `data/mmaps`
+    emptied -- and the record forgotten, so the job reads as not started and the
+    next start makes a whole new set. A complete set goes too: it describes maps
+    that are about to change.
+
+    Raises:
+        MmapsError: the switch, the folder or the record could not be changed.
+    """
+    job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
+    with _LOCK:
+        _clear_output(job)
+        _forget_record(server_dir)
 
 
 def remove_for_uninstall(

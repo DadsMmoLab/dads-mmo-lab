@@ -2608,6 +2608,18 @@ def _git_restore_rev(dest: Path, rev: str) -> None:
     git.ContainerGit().restore_rev(dest, rev)
 
 
+def _git_changed_files(
+    dest: Path, old: str, new: str, paths: Sequence[str]
+) -> tuple[tuple[str, str], ...] | None:
+    """Which files under `paths` differ between two commits of this checkout, containerised."""
+    return git.ContainerGit().changed_files(dest, old, new, paths)
+
+
+def _git_changed_lines(dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
+    """One file's `+`/`-` lines between two commits of this checkout, containerised."""
+    return git.ContainerGit().changed_lines(dest, old, new, path)
+
+
 READY_CEILING_SECONDS = 6 * 60 * 60
 """The outer bound on the ready wait, whatever the server is saying.
 
@@ -3513,6 +3525,17 @@ class Seams:
     that disagree, which is the state `update_to_latest()`'s whole failure path
     exists to prevent, and it is invisible from the outside.
     """
+    changed_files: Callable[[Path, str, str, Sequence[str]], tuple[tuple[str, str], ...] | None] = (
+        _git_changed_files
+    )
+    """T179: `(status, path)` of each file under some paths that differs between two commits.
+
+    What the TrinityCore family's update route asks right after a move -- about
+    the commit a checkout moved from and the one it landed on -- before it lets
+    the compile start. `None` is git that could not say, which the route refuses.
+    """
+    changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
+    """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build: Callable[..., docker.AttachedRun] = docker.build_staged
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
@@ -3856,6 +3879,8 @@ class Seams:
             head_version=repo.head_version,
             commits_since=repo.commits_since,
             restore_rev=repo.restore_rev,
+            changed_files=repo.changed_files,
+            changed_lines=repo.changed_lines,
             images_built=on(docker.images_built, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
             one_shot=on(docker.run_one_shot, wsl_distro=distro),
@@ -3990,13 +4015,56 @@ class StagedInstaller:
         """
         return iter(())
 
-    def before_rebuild(self, server_dir: Path, route: str) -> Iterator[str]:
+    def before_rebuild(
+        self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
+    ) -> Iterator[str]:
         """What a family must stop before `route` (a rebuild, an update, a return) changes it.
 
         Nothing on the spine. The TrinityCore family stops a running movement-map
         job here, whose output must not be written while the server is rebuilt
         (T179 spec §3). Called after the press's refusals and before its first
-        change; a stop that fails raises `InstallerError`, and the press stops there.
+        change to the server; a stop that fails raises `InstallerError`, and the
+        press stops there. `press` is the menu entry the refusal tells the player
+        to press again.
+        """
+        return iter(())
+
+    def check_moved_sources(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        *,
+        to_pin: bool,
+    ) -> Generator[str, None, object]:
+        """The update route's family check of what the move brought, before the compile (T179).
+
+        Called by `update_to_latest()` right after every source moved and before
+        the carried patches, the movement-map stop and `rebuild()`: `moved` holds
+        each source, its checkout and the commit it was on, and the checkout now
+        stands on the commit it moved to. A refusal raises `InstallerError`, and
+        the route puts every source back with nothing built and nothing written.
+        What it returns is handed to `after_update()` once the rebuild is up.
+
+        Nothing on the spine: every other family's database repositories stay on
+        their pin (`held_at_its_pin()`), so a move brings no SQL with it.
+        """
+        yield from ()
+        return None
+
+    def after_update(
+        self,
+        server_dir: Path,
+        changes: object,
+        *,
+        press: str,
+        cancel: threading.Event | None,
+    ) -> Iterator[str]:
+        """What a family applies once the moved sources are built and running (T179).
+
+        Called by `update_to_latest()` after `rebuild()` succeeded and the new
+        commits were recorded, with what `check_moved_sources()` returned. Nothing
+        on the spine. A failure raises `InstallerError`; the build and its sources
+        stay, since the compile and the start both succeeded.
         """
         return iter(())
 
@@ -5764,21 +5832,26 @@ class StagedInstaller:
            one and then refused source two would leave a tree half a version
            ahead of the image, which is the state this whole method is arranged
            to prevent.
-        3. The moves, one source at a time, each remembered as it happens.
-        4. The carried patches: resolved dry (which can refuse), then written.
+        3. The moves, one source at a time, each remembered as it happens, then
+           the family's reading of what they brought (`check_moved_sources()`,
+           T179), which can refuse.
+        4. The carried patches: resolved dry (which can refuse), then written;
+           then the family's background work stopped (`before_rebuild()`).
         5. `rebuild()`, unchanged and in full, rollback tags included. This is
            deliberately NOT a copy of the rebuild with sources bolted on: the
            image rollback, the recipe restore and the "nothing was touched"
            promise are that method's, they are hard-won, and a second
            implementation of them would be a second one to keep correct.
+        6. The family's after-work on the running build (`after_update()`, T179:
+           TrinityCore's changed world tables), before the closing line.
 
-        Every failure from step 3 onward puts every moved source back on the
-        commit it came from, so what is on disk and what the running image was
-        compiled from agree. That is the one invariant a user cannot check for
-        themselves and the one that quietly breaks everything afterwards: a
-        Modules tab reading a source tree that is a hundred commits ahead of the
-        binary answering on the port is a tab telling the truth about the wrong
-        thing.
+        Every failure from step 3 through step 5 puts every moved source back on
+        the commit it came from, so what is on disk and what the running image was
+        compiled from agree (a step-6 failure leaves them: they already agree).
+        That is the one invariant a user cannot check for themselves and the one
+        that quietly breaks everything afterwards: a Modules tab reading a source
+        tree that is a hundred commits ahead of the binary answering on the port
+        is a tab telling the truth about the wrong thing.
 
         Raises:
             InstallerError: any refusal, any stage that failed, or a cancel. The
@@ -5822,12 +5895,7 @@ class StagedInstaller:
         for said in targets.values():
             yield said.line
         self._check_cancel(cancel)
-        # After every refusal, before the first fetch: `rebuild()`'s reason, one
-        # press earlier, because the sources move before the compile does.
-        yield from self.before_rebuild(
-            server_dir,
-            "the return to the tested commit" if to_pin else "the update to the newest code",
-        )
+        route = "the return to the tested commit" if to_pin else "the update to the newest code"
         try:
             moved: list[tuple[EmulatorSource, Path, str]] = []
             try:
@@ -5859,9 +5927,19 @@ class StagedInstaller:
                     )
                     yield self._moved_line(source, dest, old)
                 self._check_cancel(cancel)
+                # T179: the family reads what the move brought (TrinityCore's SQL
+                # snapshot) and may refuse it, while every source can still go back
+                # and nothing has been built, written or stopped.
+                changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
                 yield from self.check_carried_patches(server_dir)
                 yield from self._rewrite_what_we_own(server_dir, opts, state)
                 yield from self.apply_carried_patches(server_dir)
+                # After every refusal -- the source checks above included -- and
+                # before the compile: `rebuild()`'s reason, one step earlier. Not
+                # before the first fetch (as until T179 Task 6): what this stops
+                # (the movement-map job) reads no checkout, and a press the source
+                # checks refuse must leave it running. A stop that fails restores.
+                yield from self.before_rebuild(server_dir, route, press)
             except (InstallerError, OSError) as exc:
                 # `OSError` as well, and not for symmetry: everything between the
                 # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
@@ -5890,6 +5968,7 @@ class StagedInstaller:
             landed = (
                 "the commit this app was tested against" if to_pin else "the newest upstream code"
             )
+            yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
             yield f"{self.entry.name} is running on {landed}."
         finally:
             # T124's second drop, and the one that covers EVERY way out: a

@@ -119,6 +119,18 @@ In this column it reads **no — the press refuses while the world is running,
 twice asked**. Closing the walk's blindness means teaching it `exec_stdin`, which
 is bigger than this ticket and is named rather than done.
 
+**T179 Task 6 adds a third press on that same unseen seam.** On a TrinityCore
+server, "Update the server to latest…" and "Return to the tested pin…" import the
+world tables the move changed again (`TrinityCoreInstaller.after_update()`), one
+file at a time through `sqlplan.apply()` as root, into the world database only
+(the catalog refuses a re-imported phase writing anywhere else). Each file drops
+and re-creates its own table. What is true of it: it runs after the rebuild
+succeeded; the world server is stopped first (T158's stop and wait) and read
+again immediately before the first file, and anything but an explicit `False`
+imports nothing; the characters' and accounts' databases are never written --
+a change to what goes into them refuses the press before the compile. In this
+column it reads **no -- the world server is stopped first, and asked again**.
+
 **T26's account link is the fourth shape this walk cannot see, and it is one
 this ticket CHOSE** (2026-09-10, round 2). "Link an account…" in My Party writes
 two rows into `acore_playerbots.playerbots_account_links` — `(master's account,
@@ -304,6 +316,10 @@ descriptions are written by hand.
 | `catalog/families/trinitycore.py::_write_leftovers::unlink` | **new (T179 Task 3, fix rounds 4-5)** `leftover-extraction-clients.json` once no entry is left in it; and (round 5) its own `.yulon-new` temporary file when writing or renaming it failed, so no half-written list is left beside the real one | as above |
 | `catalog/families/trinitycore.py::_read_leftovers::os.replace` | **new (T179 Task 3, fix round 5)** a `leftover-extraction-clients.json` that reads but is not the list Yu'lon writes, renamed to `leftover-extraction-clients.json.corrupt-<stamp>` in the same folder -- kept for the person or for support, never dropped -- before it is read as empty. A file that cannot be READ is never renamed or rewritten | Uninstall; the app's start |
 | `catalog/families/trinitycore.py::_put_left_out_back::os.rename` | **new (T179 Task 3, fix round 3)** inside the temporary copy beside the player's client: each archive under `<copy>/.yulon-left-out/` renamed back to its own path under the copy's `Data/`, before any removal of the copy, so `play_client.remove_folder()` maps it to the player's file at the same relative path and puts back a read-only flag a Windows delete had to clear. A rename changes no flag | install time; Uninstall |
+| `catalog/families/trinitycore.py::_flag_map_data::write_text` | **new (T179 Task 6)** `<server>/.yulon-reextract.json.yulon-new`: the map data must be extracted again, and which changed files say so (the server's DBC files or a required client pack), written by Update the server to latest / Return to the tested pin after the rebuild succeeded; `needs_reextract()` reads it for the Server tab. The world server never reads it | **yes** -- written while the rebuilt server runs |
+| `catalog/families/trinitycore.py::_flag_map_data::os.replace` | **new (T179 Task 6)** that temporary file renamed onto `.yulon-reextract.json`, so the flag is whole or absent | yes (as above) |
+| `catalog/families/trinitycore.py::_flag_map_data::unlink` | **new (T179 Task 6)** the flag's own `.yulon-new` temporary file when writing or renaming it failed | yes (as above) |
+| `catalog/families/trinitycore.py::reextract::unlink` | **new (T179 Task 6)** `data/.yulon-extract.json` before "Re-extract map data" runs the `client-data` stage again (so the extraction is not skipped as vouched for), and `.yulon-reextract.json` once that stage finished. The extraction itself, its temporary client and the DBC overlay are the `client-data` stage's own rows; the movement maps go through `mmaps.discard()` (`_clear_output`, `_forget_record`) | **no** -- refused unless the world server reads as stopped: it reads its map files while it runs |
 | `catalog/families/trinitycore.py::_put_left_out_back::os.unlink` | **new (T179 Task 3, fix round 3)** a required pack's file the copy laid in at the path a moved-aside archive returns to -- the copy's own (a cache copy's hard link), never the player's, whose name had been moved away before the pack was installed | install time; Uninstall |
 | `catalog/families/trinitycore.py::_put_left_out_back::os.rmdir` | **new (T179 Task 3, fix round 3)** the emptied `.yulon-left-out/` folders of the copy, deepest first; only empty ones | install time; Uninstall |
 | `catalog/families/mmaps.py::_write_record::write_text` | **new (T179 Task 4)** `<server>/.yulon-mmaps.json.yulon-new`: the background movement-map job's record (state queued/running/done/failed, start and end times, the progress last read, the container's name and id, why it failed, when pathfinding was switched on) | **yes** -- the job runs while the server does; the world server never reads this file |

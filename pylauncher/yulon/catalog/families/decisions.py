@@ -116,6 +116,19 @@ _CENTURION_CONTROLLER = (
     "never reached: the Centurion controller package refuses an entry of another family"
 )
 _NO_SQL_PLAN = "AzerothCore's own database updater applies its updates; its block has no SQL plan"
+_NO_REEXTRACT_PRESS = (
+    "its map data is made from the player's client alone, not from files in its source tree, "
+    "so an update of the tree never marks it stale (the TrinityCore tree ships DBC files and "
+    "client packs the map data is made from)"
+)
+_DB_REPOS_STAY = (
+    "its database repositories stay on their tested pin (held_at_its_pin), and SQL that moves "
+    "with its core is applied by the database-updates and corrections presses"
+)
+_TC_SQL_MOVES_WITH_ITS_CODE = (
+    "its SQL snapshot moves with its code: an update to the latest code imports the changed "
+    "world tables again and refuses a change to the characters' or accounts' layout (T179 Task 6)"
+)
 _NO_CONF_TABLE = "AzerothCore's confs are made by its image from their .dist; it has no conf table"
 _COUNT_IN_CONF = "this family's random-bot count is in a conf file, not the override's environment"
 _WOTLK_DEFAULTS = "WotLK's Reset to default does not read its image: its defaults are not there"
@@ -263,14 +276,14 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "yulon.catalog.native",
         "update_phases",
         "the SQL phases an update of the server to its latest code applies",
-        _cmangos_only(_NO_SQL_PLAN, pending("Task 6 (world tables re-import route)")),
+        _cmangos_only(_NO_SQL_PLAN, not_applicable(_TC_SQL_MOVES_WITH_ITS_CODE)),
         hits=(".cmangos",),
     ),
     Site(
         "yulon.catalog.native",
         "correction_phases",
         "the SQL phases Apply database corrections offers (T129)",
-        _cmangos_only(_NO_SQL_PLAN, pending("Task 6 (world tables re-import route)")),
+        _cmangos_only(_NO_SQL_PLAN, not_applicable(_TC_SQL_MOVES_WITH_ITS_CODE)),
         hits=(".cmangos",),
     ),
     Site(
@@ -280,7 +293,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": pending("Task 6 (the SQL lives in the core repo and moves with it)"),
+            "trinitycore": supported(
+                "its SQL snapshot lives in the core repo and moves with it; the update route "
+                "reads what changed (`TrinityCoreInstaller.check_moved_sources`, Task 6)"
+            ),
         },
         scanned=False,
     ),
@@ -514,7 +530,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "yulon.install_wiring",
         "corrections_for_app",
         "Apply database corrections (T129, via correction_phases)",
-        _cmangos_only(_NO_SQL_PLAN, pending("Task 6 (world tables re-import route)")),
+        _cmangos_only(_NO_SQL_PLAN, not_applicable(_TC_SQL_MOVES_WITH_ITS_CODE)),
         scanned=False,
     ),
     Site(
@@ -811,6 +827,66 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
             "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
             "trinitycore": supported("TrinityCoreInstaller stops a running movement-map job"),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.catalog.families.trinitycore",
+        "needs_reextract",
+        "the Server tab's sentence asking for the map data to be extracted again (Task 6)",
+        {
+            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "cmangos": not_applicable(_NO_REEXTRACT_PRESS),
+            "trinitycore": supported("an update that changed its DBC files or a required pack"),
+        },
+        hits=(".trinitycore",),
+    ),
+    Site(
+        "yulon.install_wiring",
+        "reextract_for_app",
+        "the Re-extract map data press (Task 6)",
+        {
+            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "cmangos": not_applicable(_NO_REEXTRACT_PRESS),
+            "trinitycore": supported("`TrinityCoreInstaller.reextract`"),
+        },
+        hits=(".trinitycore",),
+    ),
+    Site(
+        "yulon.install_wiring",
+        "reextract_for_app.press",
+        "the Re-extract map data press runs on the TrinityCore engine only",
+        {
+            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "cmangos": not_applicable(_NO_REEXTRACT_PRESS),
+            "trinitycore": supported(),
+        },
+        hits=("isinstance TrinityCoreInstaller",),
+    ),
+    Site(
+        "yulon.catalog.native",
+        "StagedInstaller.check_moved_sources",
+        "what the update route checks in the sources it moved, before the compile",
+        {
+            "azerothcore": not_applicable(_NO_SQL_PLAN),
+            "cmangos": not_applicable(_DB_REPOS_STAY),
+            "trinitycore": supported(
+                "TrinityCoreInstaller reads the SQL snapshot's and the map inputs' changes"
+            ),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.catalog.native",
+        "StagedInstaller.after_update",
+        "what the update route applies once the moved sources are built and running",
+        {
+            "azerothcore": not_applicable(_NO_SQL_PLAN),
+            "cmangos": not_applicable(_DB_REPOS_STAY),
+            "trinitycore": supported(
+                "TrinityCoreInstaller imports the changed world tables again and flags the map "
+                "data"
+            ),
         },
         scanned=False,
     ),

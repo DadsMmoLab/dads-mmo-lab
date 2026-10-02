@@ -203,6 +203,20 @@ TRINITYCORE: dict[str, Any] = {
     },
     "sql": SQL,
     "required_maps": [0, 1, 530],
+    # What "Update the server to latest…" does with a change to the snapshot (T179
+    # Task 6, owner decision 2): each world file is a whole-table dump (DROP + CREATE,
+    # facts §2), so a changed one is imported again; the two schema dumps are the
+    # layout of the accounts and the characters, and a change there is refused; and
+    # the realm row is Yu'lon's, so an auth_data.sql change that touches only it is
+    # left out rather than refused.
+    "updates": {
+        "reimport_phases": ["world routines", "world tables"],
+        "layout_files": [
+            f"{SQL_DIR}/characters/characters_schema.sql",
+            f"{SQL_DIR}/auth/auth_schema.sql",
+        ],
+        "skip_lines": {f"{SQL_DIR}/auth/auth_data.sql": ["INSERT INTO `realmlist` "]},
+    },
 }
 
 
@@ -305,6 +319,7 @@ def centurion_like(
         "images": ["server"],
         "db": {"image": "mysql:8.4", "client": "mysql", "user": "root"},
         "ready": {"world": "World initialized"},
+        "update_to_latest": True,
         "trinitycore": copy.deepcopy(TRINITYCORE),
     }
     return parse_catalog({"schema_version": 1, "games": [entry]}).get("wow-centurion")

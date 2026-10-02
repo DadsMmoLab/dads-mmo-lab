@@ -27,41 +27,58 @@ is overridden here, by name:
   as a background job once the server is up, and stop before any rebuild route
   (`families/mmaps.py`, Task 4).
 
-The inherited update and corrections routes see a plan with no re-runnable and no
-correctable phases, because `native.update_phases()` and `correction_phases()` read
-a CMaNGOS block only; T179 Task 6 gives this family its own update route.
+* `check_moved_sources()` / `after_update()` -- the update route's hooks (Task 6): what
+  the move changed in the tree's SQL snapshot is read before the compile (a change to
+  the characters' or accounts' layout refuses the update), the changed world tables
+  are imported again once the new build runs, and a change to the DBC files or a
+  required client pack flags the map data for `reextract()`.
+
+The inherited "database updates" and corrections presses see a plan with no
+re-runnable and no correctable phases, because `native.update_phases()` and
+`correction_phases()` read a CMaNGOS block only: this family's SQL moves with its
+code, and "Update the server to latest…" is where a change to it is applied.
 """
 
 from __future__ import annotations
 
 import errno
+import fnmatch
 import hashlib
 import json
 import os
+import posixpath
+import re
+import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Generator, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar, Literal, cast
 
-from yulon import client_packs, docker, platform, play_client
+from yulon import client_packs, docker, platform, play_client, server_build_presses
 from yulon.catalog import bot_count
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
     CmangosData,
+    EmulatorSource,
+    SqlPhase,
     SqlPlan,
     TrinityCoreData,
 )
 from yulon.catalog.families import conf, extract, mmaps, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
+    InstallState,
     Seams,
     Stage,
     StageContext,
+    _speaking,
+    _stop_control,
+    read_state,
 )
 from yulon.log import get_logger
 
@@ -86,6 +103,54 @@ CLIENT_DATA_CANCEL_NOTE = (
     f"{extract.EXTRACT_CANCEL_NOTE} The temporary copy of your client is removed either way."
 )
 """What a Stop costs in `client-data`: the extraction's per-tool record, and the copy gone."""
+
+REEXTRACT_FILE = ".yulon-reextract.json"
+"""In the server folder: the map data must be extracted again, and which changed files say so.
+
+Written by an update or a return whose move changed the server's DBC files or a
+required client pack (Task 6), removed only by a `reextract()` that finished. Its
+own file rather than a field of `.yulon-install.json`: it outlives presses that
+rewrite that record, and Uninstall removes it with the folder.
+"""
+
+REEXTRACT_BUTTON = "Re-extract map data"
+"""The Server tab's press for `reextract()`, named in the sentences that ask for it."""
+
+WORLD_TABLES_CANCEL_NOTE = (
+    "Stopping now stops between two table files; a table already imported again stays so, and "
+    "the world server is left stopped. The backup offered before the update has the world "
+    "tables as they were."
+)
+"""What a Stop costs while the changed world tables are imported again (Task 6)."""
+
+_PART = re.compile(r"^(?P<stem>.+)\.\d+\.sql$")
+"""A table dumped across numbered files: `broadcast_text_locale.1.sql`, `.2.sql` (facts §2).
+
+Only the first part drops and creates the table; the next ones only insert. So a
+change to any part imports every part again, in order: the second alone would
+insert rows that are there already, and the first alone would drop the second's.
+"""
+
+
+@dataclass(frozen=True)
+class SnapshotChanges:
+    """What an update's move changed in the tree's SQL snapshot and map inputs (Task 6).
+
+    Every path is server-dir-relative, as the SQL plan's globs and the log name it.
+    `check_moved_sources()` makes it before the compile, after every refusal;
+    `after_update()` applies it once the new build is up.
+    """
+
+    reimport: tuple[str, ...] = ()
+    """Whole-table world files added or changed: imported again."""
+    parts: tuple[str, ...] = ()
+    """`_PART` stems (server-dir-relative) of split tables a part of which changed."""
+    left: tuple[str, ...] = ()
+    """World files removed upstream: their tables are left as they are."""
+    skipped: tuple[str, ...] = ()
+    """Files changed only in `skip_lines` lines (the realm row): left out."""
+    map_data: tuple[str, ...] = ()
+    """Changed DBC files and required client packs: the map data must be extracted again."""
 
 
 class TrinityCoreInstaller(CmangosInstaller):
@@ -574,12 +639,15 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "The server runs without it; it can be started again from the Server tab."
             )
 
-    def before_rebuild(self, server_dir: Path, route: str) -> Iterator[str]:
+    def before_rebuild(
+        self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
+    ) -> Iterator[str]:
         """Stop a running movement-map job before `route`; pathfinding stays off (spec §3)."""
         said = mmaps.stop_for_route(
             server_dir,
             self.entry,
             route,
+            press=press,
             runner=self._mmaps_runner,
             install_id=self._install_id(server_dir),
         )
@@ -615,6 +683,479 @@ class TrinityCoreInstaller(CmangosInstaller):
             install_id=self._install_id(server_dir),
         )
 
+    # -- the update route (Task 6) ----------------------------------------------
+
+    def check_moved_sources(
+        self,
+        server_dir: Path,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        *,
+        to_pin: bool,
+    ) -> Generator[str, None, object]:
+        """What the core checkout's move changed in the SQL snapshot and the map inputs.
+
+        Asked of git in the checkout, read-only, about the commit it moved from and
+        the one it stands on now -- the same question in both directions, so
+        "Return to the tested pin…" reads the pin's side as the update reads
+        upstream's. Before anything is built, written or stopped (owner decision
+        2, Review Focus 4): a change to the characters' or the accounts' database
+        refuses the whole press here, and the route puts the checkout back.
+        """
+        tc = self._tc()
+        for source, dest, old in moved:
+            if posixpath.normpath(source.dest) != posixpath.normpath(tc.checkout):
+                continue
+            new = self._seams.head_sha(dest)
+            pairs = (
+                self._seams.changed_files(dest, old, new, self._watched_paths())
+                if new is not None
+                else None
+            )
+            if new is None or pairs is None:
+                raise InstallerError(
+                    f"Yu'lon could not read what {source.repo} changed between {old[:7]} and "
+                    f"{(new or 'the new commit')[:7]} in {dest}, so it cannot tell whether this "
+                    f"would change the layout of your characters' or accounts' databases. "
+                    f"Nothing was changed."
+                )
+            changes = self._read_changes(dest, old, new, pairs)
+            if changes.reimport or changes.parts:
+                count = len(changes.reimport) + len(changes.parts)
+                yield (
+                    f"The SQL snapshot in {tc.checkout} changed {count} world table file(s); they "
+                    "are imported again once the new build is running."
+                )
+            return changes
+        return SnapshotChanges()
+
+    def _watched_paths(self) -> tuple[str, ...]:
+        """The checkout-relative folders the route asks git about: what the import and maps read."""
+        tc = self._tc()
+        found = {tc.extract.dbc_overlay_from.strip("/")}
+        prefix = f"{tc.checkout.rstrip('/')}/"
+        globs = [glob for phase in tc.sql.phases for glob in phase.files]
+        globs += [glob for phase in tc.sql.phases for glob in (phase.into_each or {}).values()]
+        paths = [*globs, *(pack.source.path or "" for pack in self._map_packs())]
+        for path in paths:
+            if path.startswith(prefix):
+                found.add(posixpath.dirname(path[len(prefix) :]))
+        return tuple(sorted(path for path in found if path))
+
+    def _map_packs(self) -> tuple[ClientPack, ...]:
+        """The required packs the map data is made from: the server's own, in its checkout."""
+        return tuple(
+            pack
+            for pack in self.entry.client.packs
+            if not pack.optional and pack.source.kind == "checkout"
+        )
+
+    def _is_map_data(self, rel: str) -> bool:
+        """Is this server-dir-relative file one the map data is made from?"""
+        tc = self._tc()
+        dbc = posixpath.join(tc.checkout, tc.extract.dbc_overlay_from.strip("/"))
+        if rel.startswith(f"{dbc}/"):
+            return True
+        for pack in self._map_packs():
+            path = pack.source.path or ""
+            if rel == path or rel.startswith(f"{path}.part"):
+                return True
+        return False
+
+    def _phase_reading(self, rel: str) -> SqlPhase | None:
+        """The plan's phase whose glob matches this file -- directory exact, name by pattern."""
+        folder, name = posixpath.split(rel)
+        for phase in self._tc().sql.phases:
+            for glob in (*phase.files, *(phase.into_each or {}).values()):
+                where, pattern = posixpath.split(glob)
+                if where == folder and fnmatch.fnmatchcase(name, pattern):
+                    return phase
+        return None
+
+    def _read_changes(
+        self, dest: Path, old: str, new: str, pairs: Sequence[tuple[str, str]]
+    ) -> SnapshotChanges:
+        """Sort each changed file into what the route does with it, or refuse the press."""
+        tc = self._tc()
+        updates = tc.updates
+        reimport_phases = set(updates.reimport_phases) if updates is not None else set()
+        skip_lines = updates.skip_lines if updates is not None else {}
+        reimport: list[str] = []
+        parts: list[str] = []
+        left: list[str] = []
+        skipped: list[str] = []
+        map_data: list[str] = []
+        for status, path in pairs:
+            rel = posixpath.join(tc.checkout, path)
+            if self._is_map_data(rel):
+                map_data.append(rel)
+                continue
+            phase = self._phase_reading(rel)
+            if phase is None:
+                logger.info(f"update: {rel} changed, and the install does not import it")
+                continue
+            if phase.name in reimport_phases:
+                part = _PART.match(rel)
+                if part is not None:
+                    parts.append(part["stem"])
+                elif status == "D":
+                    left.append(rel)
+                else:
+                    reimport.append(rel)
+                continue
+            prefixes = skip_lines.get(rel)
+            if prefixes:
+                lines = self._seams.changed_lines(dest, old, new, path)
+                if lines and all(line[1:].startswith(tuple(prefixes)) for line in lines):
+                    skipped.append(rel)
+                    continue
+            raise InstallerError(self._refusal(rel, phase))
+        return SnapshotChanges(
+            reimport=tuple(reimport),
+            parts=tuple(dict.fromkeys(parts)),
+            left=tuple(left),
+            skipped=tuple(skipped),
+            map_data=tuple(map_data),
+        )
+
+    def _refusal(self, rel: str, phase: SqlPhase) -> str:
+        """The sentence for a change the route will not apply: which database, which file.
+
+        The owner's words for a characters layout change (Review Focus 4), and the
+        same shape for the accounts and for what either database starts with.
+        """
+        tc = self._tc()
+        name = self.entry.name
+        databases = self.entry.databases
+        layout = tc.updates is not None and rel in tc.updates.layout_files
+        if phase.into == databases.characters:
+            what, whose = "characters", "your characters"
+        elif phase.into == databases.auth:
+            what, whose = "accounts", "your accounts"
+        else:
+            return (
+                f"{name} changed {rel}, which goes into its {phase.into or 'own'} database; "
+                f"Yu'lon can't apply that change over your server safely yet. Nothing was changed."
+            )
+        if layout:
+            return (
+                f"{name} changed its {what} database layout ({rel}); Yu'lon can't move {whose} "
+                f"to it safely yet. Nothing was changed."
+            )
+        return (
+            f"{name} changed what its {what} database starts with ({rel}); Yu'lon can't merge "
+            f"that into {whose} safely yet. Nothing was changed."
+        )
+
+    def after_update(
+        self,
+        server_dir: Path,
+        changes: object,
+        *,
+        press: str,
+        cancel: threading.Event | None,
+    ) -> Iterator[str]:
+        """Once the new build runs: flag the map data, then import the changed world tables again.
+
+        The tables go in with the world server stopped (owner answer 7: nothing
+        writes into a database a running world holds in memory), as root and with
+        the plan's renames (`_expand()`), one file at a time so a failure can say
+        exactly which were not imported -- and the world server is started again
+        and waited for after them.
+        """
+        if not isinstance(changes, SnapshotChanges):
+            return
+        if changes.map_data:
+            yield self._flag_map_data(server_dir, changes.map_data)
+        for rel in changes.skipped:
+            yield (
+                f"{rel} changed only in rows Yu'lon sets itself (the realm's address and name), "
+                "so that change is left out."
+            )
+        for rel in changes.left:
+            yield (
+                f"{rel} is no longer in {self.entry.name}'s snapshot; its table is left in your "
+                "world database as it is."
+            )
+        if not changes.reimport and not changes.parts:
+            return
+        ctx = StageContext(
+            server_dir=server_dir,
+            client_dir=None,
+            state=read_state(server_dir, valid=self.stage_names())
+            or InstallState(
+                game_id=self.entry.id,
+                install_id=self._install_id(server_dir),
+                family=self.family,
+            ),
+            cancel=cancel,
+            secrets=self.resolve_secrets(server_dir),
+        )
+        runs = self._reimport_runs(ctx, changes)
+        names = [run.rel for run in runs]
+        world_db = self.entry.databases.world
+        yield (
+            f"Importing {len(runs)} world tables again into {world_db}, the ones this update "
+            f"changed: each replaces its table whole. The backup offered before the update has "
+            f"them as they were."
+        )
+        yield from self._stop_the_world_for_tables(ctx, names)
+        db = self._native().db
+        container = self.entry.container_spec().db
+        done = 0
+        try:
+            self._refuse_unless_the_world_is_down(names)
+            for run in runs:
+
+                def apply_one(
+                    sink: docker.OutputSink, one: sqlplan.PhaseRun = run
+                ) -> Iterator[str]:
+                    return sqlplan.apply(
+                        (one,),
+                        container=container,
+                        client=db.client,
+                        password=ctx.secrets.db_password,
+                        exec_stdin=self._seams.exec_stdin,
+                        sink=sink,
+                        cancel=cancel,
+                        cancel_note=WORLD_TABLES_CANCEL_NOTE,
+                    )
+
+                yield from self._stream(apply_one, cancel=cancel, stage="world-tables")
+                done += 1
+        except InstallerError as exc:
+            remaining = names[done:]
+            raise InstallerError(
+                f"{exc} The world server was left stopped: {_listed(remaining)} "
+                f"{'was' if len(remaining) == 1 else 'were'} not imported again. "
+                f"{_RESTORE_ADVICE}"
+            ) from exc
+        yield f"The {len(runs)} world tables are in. Starting the world server again on them."
+        yield from self.stage_up(ctx)
+        yield from self.stage_ready(ctx)
+
+    def _reimport_runs(
+        self, ctx: StageContext, changes: SnapshotChanges
+    ) -> tuple[sqlplan.PhaseRun, ...]:
+        """The re-import phases' runs for the changed files, in plan order, renames and all."""
+        updates = self._tc().updates
+        phases = set(updates.reimport_phases) if updates is not None else set()
+        plan = self._tc().sql
+        cut = plan.model_copy(
+            update={"phases": tuple(phase for phase in plan.phases if phase.name in phases)}
+        )
+        try:
+            every = self._expand(cut, ctx.server_dir, self._secret_tokens(ctx))
+        except InstallerError:
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The world tables this update changed could not be prepared ({exc}); nothing "
+                f"was imported again, and the world server was not stopped. {_RESTORE_ADVICE}"
+            ) from exc
+        wanted = set(changes.reimport)
+        stems = set(changes.parts)
+        runs = tuple(
+            run
+            for run in every
+            if run.path is not None
+            and (run.rel in wanted or ((part := _PART.match(run.rel)) and part["stem"] in stems))
+        )
+        found = {run.rel for run in runs}
+        missing = sorted(wanted - found)
+        if missing:
+            raise InstallerError(
+                f"The world tables this update changed are not all in the server's sources "
+                f"({_listed(missing)}); nothing was imported again, and the world server was "
+                f"not stopped. {_RESTORE_ADVICE}"
+            )
+        return runs
+
+    def _stop_the_world_for_tables(self, ctx: StageContext, names: Sequence[str]) -> Iterator[str]:
+        """Stop a running world server before its tables are replaced; T158's stop and wait."""
+        container = self.entry.container_spec().world
+        try:
+            running: bool | None = self._seams.ask_world_running(container)
+        except Exception:  # noqa: BLE001 - "could not ask" is said below in words
+            running = None
+        if running is False:
+            return
+        if running is None:
+            raise InstallerError(
+                f"Yu'lon could not tell whether {self.entry.name}'s world server is running, so "
+                f"it could not stop it, and the world tables this update changed were not "
+                f"imported again: {_listed(names)}. Check that Docker is running. "
+                f"{_RESTORE_ADVICE}"
+            )
+        yield (
+            f"Stopping the world server ({container}) so its tables can be replaced; it saves "
+            "as it does on Stop."
+        )
+        spec = self.entry.container_spec()
+        control = _stop_control(ctx, rollback=False)
+
+        def stop_it(say: docker.OutputSink) -> None:
+            self._seams.stop_world(
+                [container],
+                known=(spec,),
+                control=replace(control, say=say),
+                deadline=docker.STOP_PROCESS_DEADLINE_SECONDS,
+            )
+
+        try:
+            yield from _speaking(stop_it, control.abandon)
+        except (docker.StopAbandoned, docker.DockerCommandError) as exc:
+            raise InstallerError(
+                f"Yu'lon could not stop {self.entry.name}'s world server ({exc}), so the world "
+                f"tables this update changed were not imported again: {_listed(names)}. The "
+                f"server runs the new build on the tables it had. {_RESTORE_ADVICE}"
+            ) from exc
+        yield "The world server is stopped."
+
+    def _refuse_unless_the_world_is_down(self, names: Sequence[str]) -> None:
+        """The second reading, right before the first table is written: down, or nothing is."""
+        container = self.entry.container_spec().world
+        try:
+            running: bool | None = self._seams.ask_world_running(container)
+        except Exception:  # noqa: BLE001 - any failure to ask is "could not ask"
+            running = None
+        if running is not False:
+            raise InstallerError(
+                f"{self.entry.name}'s world server "
+                f"{'is running again' if running else 'could not be read'}, and it holds its "
+                f"tables in memory and writes back over them, so nothing was imported again."
+            )
+
+    def _flag_map_data(self, server_dir: Path, changed: Sequence[str]) -> str:
+        """Record that the map data must be extracted again; the Server tab's sentence."""
+        path = server_dir / REEXTRACT_FILE
+        before = _read_flag(server_dir) or ()
+        staged = path.with_name(path.name + ".yulon-new")
+        body = {"version": 1, "changed": sorted({*before, *changed})}
+        try:
+            staged.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+            os.replace(staged, path)
+        except OSError as exc:
+            staged.unlink(missing_ok=True)
+            return (
+                f"warning: {_listed(changed)} changed, so {self.entry.name}'s map data must be "
+                f"extracted again, and {path} could not be written to remember it ({exc}): "
+                f"press “{REEXTRACT_BUTTON}” on the Server tab once the server is "
+                "stopped."
+            )
+        said = needs_reextract(server_dir, self.entry)
+        return said or f"{self.entry.name}'s map data must be extracted again."
+
+    # -- extracting the map data again (Task 6) ---------------------------------
+
+    def reextract(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Run the client-data stage again, from a new temporary client; the movement maps go.
+
+        The press `needs_reextract()` asks for. With the world server stopped (it
+        reads its map files while it runs): the movement-map job is stopped and its
+        set thrown away through `mmaps.discard()` -- pathfinding off, since the set
+        was made from the map data being replaced -- the extraction's evidence is
+        removed so nothing is vouched for, and `client-data` runs as the install
+        runs it: the same temporary extraction client, the same DBC overlay, the
+        same start check. Then the flag goes and the movement maps start again in
+        the background. The player's own client is the folder given, or the one
+        the map data was last made from.
+
+        Raises:
+            InstallerError: the folder is not one this app installed, no client
+                folder is known, the world server is or may be running, or a step
+                failed; the flag stays, so the press is still offered.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        state = self._refuse_unless_rebuildable(server_dir)
+        probe = StageContext(
+            server_dir=server_dir,
+            client_dir=opts.client_dir,
+            state=state,
+            cancel=cancel,
+            secrets=self.resolve_secrets(server_dir),
+        )
+        data_dir = self._data_dir(probe)
+        client = opts.client_dir
+        if client is None:
+            evidence = extract.read_evidence(data_dir)
+            client = Path(evidence.client_path) if evidence and evidence.client_path else None
+        if client is None:
+            raise InstallerError(
+                f"Yu'lon does not know which game client {self.entry.name}'s map data was made "
+                "from. Pick the client folder, then press "
+                f"“{REEXTRACT_BUTTON}” again. Nothing was changed."
+            )
+        self._refuse_a_running_world_for_maps()
+        yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
+        if mmaps.background_block(self.entry) is not None:
+            ident = self._install_id(server_dir)
+            stopped = mmaps.stop_for_route(
+                server_dir,
+                self.entry,
+                "the extraction",
+                press=REEXTRACT_BUTTON,
+                runner=self._mmaps_runner,
+                install_id=ident,
+            )
+            if stopped is not None:
+                yield stopped
+            mmaps.discard(server_dir, self.entry, install_id=ident)
+            yield (
+                "The pathfinding data made from the old map data was removed, and pathfinding "
+                "is off until it has been made again."
+            )
+        evidence_file = data_dir / extract.EVIDENCE_FILE
+        try:
+            evidence_file.unlink(missing_ok=True)
+        except OSError as exc:
+            raise InstallerError(
+                f"{evidence_file} could not be removed ({exc}), so the extraction would be "
+                f"skipped as done. Delete it, then press “{REEXTRACT_BUTTON}” again."
+            ) from exc
+        ctx = replace(probe, client_dir=client)
+        stage = replace(self.stage_named("client-data"), recorded=False)
+        yield from self._staged((stage,), ctx)
+        try:
+            (server_dir / REEXTRACT_FILE).unlink(missing_ok=True)
+        except OSError as exc:
+            yield (
+                f"warning: {server_dir / REEXTRACT_FILE} could not be removed ({exc}); the "
+                "Server tab will go on asking for an extraction that has been done."
+            )
+        yield from self.after_ready(server_dir)
+        yield (
+            f"{self.entry.name}'s map data was extracted again. Press Start on the Server tab "
+            "to run the server on it."
+        )
+
+    def _refuse_a_running_world_for_maps(self) -> None:
+        """A world server that is or may be running reads the map files about to be replaced."""
+        container = self.entry.container_spec().world
+        try:
+            running: bool | None = self._seams.ask_world_running(container)
+        except Exception:  # noqa: BLE001 - any failure to ask is "could not ask"
+            running = None
+        if running is False:
+            return
+        if running is None:
+            raise InstallerError(
+                f"Yu'lon could not tell whether {self.entry.name}'s world server is running, and "
+                "a running one reads the map files this replaces. Check that Docker is running, "
+                f"press Stop on the Server tab if the server is up, then press "
+                f"“{REEXTRACT_BUTTON}” again. Nothing was changed."
+            )
+        raise InstallerError(
+            f"{self.entry.name}'s world server is running, and it reads the map files this "
+            f"replaces. Press Stop on the Server tab, then press “{REEXTRACT_BUTTON}” "
+            "again. Nothing was changed."
+        )
+
     # -- import ----------------------------------------------------------------
 
     def _expand(
@@ -636,6 +1177,62 @@ class TrinityCoreInstaller(CmangosInstaller):
             renames=sql.renames,
             rename_files=sql.rename_files,
         )
+
+
+_RESTORE_ADVICE = (
+    "The backup offered before the update has the world tables as they were: restore it from "
+    "the Maintenance tab to put them back."
+)
+"""What a world-table re-import that did not finish leaves the player to do (Task 6)."""
+
+
+def _listed(paths: Sequence[str]) -> str:
+    return ", ".join(paths)
+
+
+def _read_flag(server_dir: Path) -> tuple[str, ...] | None:
+    """The changed files `REEXTRACT_FILE` names; None with no flag, `()` when it cannot be read.
+
+    A flag nobody can read still asks for the extraction: what it would have said
+    is lost, the need is not.
+    """
+    path = server_dir / REEXTRACT_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); the map data is still flagged")
+        return ()
+    try:
+        changed = json.loads(text)["changed"]
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.warning(f"{path} is not one Yu'lon wrote ({exc}); the map data is still flagged")
+        return ()
+    if not isinstance(changed, list) or not all(isinstance(item, str) for item in changed):
+        return ()
+    return tuple(changed)
+
+
+def needs_reextract(server_dir: Path, entry: CatalogEntry) -> str | None:
+    """The Server tab's sentence when the map data must be extracted again; None when not (Task 6).
+
+    A file read and nothing else -- no Docker, no git -- so the tab can ask it on
+    every reload. Set by an update or a return that changed the server's DBC files
+    or a required client pack; cleared by `TrinityCoreInstaller.reextract()`.
+    """
+    native = entry.install.native
+    if native is None or native.trinitycore is None:
+        return None
+    changed = _read_flag(server_dir)
+    if changed is None:
+        return None
+    what = _listed(changed) if changed else "the files its map data is made from"
+    return (
+        f"{entry.name}'s map data must be extracted again: the server's update changed {what}. "
+        f"Stop the server, then press \u201c{REEXTRACT_BUTTON}\u201d on the Server tab; it "
+        "uses your game client, and the pathfinding data is made again after it."
+    )
 
 
 def _packs_salt(packs: Sequence[ClientPack]) -> str:

@@ -1049,6 +1049,66 @@ class TrinityCoreSqlPlan(SqlPlan):
         return self
 
 
+class TrinityCoreUpdates(_Strict):
+    """What "Update the server to latest…" does with a change to the tree's SQL snapshot (T179).
+
+    The owner's decision 2 (T179 spec §3): the snapshot moves with the code, and an
+    update compares the commit it left with the one it landed on. A changed file of
+    a `reimport_phases` phase is imported again -- each is a whole-table dump that
+    drops and re-creates its own table (Centurion's `world/`, facts §2). Every other
+    file the import reads goes into a database holding the player's own accounts or
+    characters, and a change there refuses the whole update -- unless every line it
+    changed starts with one of `skip_lines`' prefixes for that file, which leaves the
+    change out (the realm row is Yu'lon's). Data rather than a rule in the family
+    module, because which phases are whole-table dumps is a fact about one tree.
+    """
+
+    reimport_phases: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Names of the SQL plan's phases whose changed files are imported again; each must "
+            "write into the entry's world database, and each file must DROP and CREATE its own "
+            "table."
+        ),
+    )
+    layout_files: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Server-dir-relative files that hold a database's layout (its schema dump): a "
+            "change to one is refused as a layout change, in the owner's words, naming the file."
+        ),
+    )
+    skip_lines: dict[str, tuple[str, ...]] = Field(
+        default_factory=dict,
+        description=(
+            "Server-dir-relative file -> line prefixes. A change to that file whose every "
+            "added and removed line starts with one of them is left out instead of refused: "
+            "Centurion's `auth_data.sql` row for the realm, whose address Yu'lon sets itself."
+        ),
+    )
+
+    @field_validator("layout_files")
+    @classmethod
+    def _layout_files_inside_the_server_dir(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for file in value:
+            _below(file, "layout_files", "the server dir")
+        return value
+
+    @field_validator("skip_lines")
+    @classmethod
+    def _skip_lines_name_files_and_prefixes(
+        cls, value: dict[str, tuple[str, ...]]
+    ) -> dict[str, tuple[str, ...]]:
+        for file, prefixes in value.items():
+            _below(file, "skip_lines", "the server dir")
+            if not prefixes or any(not prefix.strip() for prefix in prefixes):
+                raise ValueError(
+                    f"skip_lines[{file!r}] needs at least one non-blank line prefix; an empty "
+                    "one would leave out any change at all"
+                )
+        return value
+
+
 class TrinityCoreData(_Strict):
     """Everything the TrinityCore family needs that differs per game (T179).
 
@@ -1094,6 +1154,44 @@ class TrinityCoreData(_Strict):
             "§3) -- 0 and 1, and 530 with `Expansion = 2`."
         ),
     )
+    updates: TrinityCoreUpdates | None = Field(
+        default=None,
+        description=(
+            "What an update to the latest code, or a return to the tested pin, does with a "
+            "change to the SQL snapshot (T179 Task 6). Required when the entry offers "
+            "`update_to_latest`."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_update_rules_name_what_the_plan_imports(self) -> TrinityCoreData:
+        """Every phase and file `updates` names is one this plan has and imports.
+
+        A misspelt phase would re-import nothing and say so nowhere; a misspelt
+        file would turn a refusal or a skip into the refusal for any change.
+        """
+        if self.updates is None:
+            return self
+        names = {phase.name for phase in self.sql.phases}
+        unknown = [name for name in self.updates.reimport_phases if name not in names]
+        if unknown:
+            raise ValueError(
+                f"updates.reimport_phases names {unknown}, which the SQL plan does not have "
+                f"(its phases: {sorted(names)})"
+            )
+        globs = [glob for phase in self.sql.phases for glob in phase.files]
+        globs += [glob for phase in self.sql.phases for glob in (phase.into_each or {}).values()]
+        for field_name, files in (
+            ("layout_files", self.updates.layout_files),
+            ("skip_lines", tuple(self.updates.skip_lines)),
+        ):
+            for file in files:
+                if not any(fnmatch.fnmatchcase(file, glob) for glob in globs):
+                    raise ValueError(
+                        f"updates.{field_name} names {file!r}, which no phase imports; a rule "
+                        "for it would never apply"
+                    )
+        return self
 
     @field_validator("checkout")
     @classmethod
@@ -2576,6 +2674,25 @@ class CatalogEntry(_Strict):
                     f"rename {old!r} -> {new!r} lands on {new!r}, which is not one of this "
                     f"entry's schemas {sorted(schemas)}"
                 )
+        # T179 Task 6: the update route re-imports into the world database only. A
+        # whole-table dump imported again over the characters' or the accounts'
+        # database would DROP the player's own rows.
+        if native is not None and native.update_to_latest and block.updates is None:
+            raise ValueError(
+                "a trinitycore entry with update_to_latest must say what an update does with its "
+                "SQL snapshot (trinitycore.updates)"
+            )
+        if block.updates is not None:
+            phases = {phase.name: phase for phase in block.sql.phases}
+            for name in block.updates.reimport_phases:
+                phase = phases[name]
+                if phase.into != self.databases.world or phase.into_each:
+                    raise ValueError(
+                        f"updates.reimport_phases names {name!r}, which writes into "
+                        f"{phase.into or sorted(phase.into_each or {})!r}, not the world database "
+                        f"{self.databases.world!r}: imported again, its dumps would drop that "
+                        "database's tables"
+                    )
         return self
 
     def schema_map(self) -> dict[Db, str]:

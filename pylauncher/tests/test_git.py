@@ -383,6 +383,9 @@ def test_a_read_only_git_question_mounts_read_only_and_keeps_nothing_it_does_not
     for dest, ask in (
         (tmp_path / "read-remote", lambda impl, path: impl.remote_url(path)),
         (tmp_path / "read-status", lambda impl, path: impl.is_unmodified(path, "x")),
+        # T179: the update route's two diff questions are reads like these.
+        (tmp_path / "read-diff", lambda impl, path: impl.changed_files(path, "a", "b", ["sql"])),
+        (tmp_path / "read-lines", lambda impl, path: impl.changed_lines(path, "a", "b", "x.sql")),
     ):
         (dest / ".git").mkdir(parents=True)
         ask(git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=_labelling_fs), dest)
@@ -686,9 +689,16 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
     ran = len(seen)
     native._git_restore_rev(dest, "f82e7d6")
     assert len(seen) == ran + 1, "the restore route reached a container"
+    # T179's two: what changed between two commits, and how one file changed.
+    ran = len(seen)
+    native._git_changed_files(dest, "a" * 40, "b" * 40, ["centurion/sql"])
+    assert len(seen) == ran + 1, "the changed-files route reached a container"
+    ran = len(seen)
+    native._git_changed_lines(dest, "a" * 40, "b" * 40, "centurion/sql/auth/auth_data.sql")
+    assert len(seen) == ran + 1, "the changed-lines route reached a container"
     native.Seams()
 
-    assert made == [{}] * 9, "a production ContainerGit that carries a seam is not bare"
+    assert made == [{}] * 11, "a production ContainerGit that carries a seam is not bare"
 
     tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
     calls = [
@@ -3193,3 +3203,58 @@ def test_the_container_clone_sets_the_patterns_non_cone_before_any_checkout(
     ]
     checkout = next(i for i, argv in enumerate(seen) if argv[-1] == "checkout")
     assert sparse < checkout
+
+
+# -- T179: the diff questions' argv and parse ------------------------------------------
+
+
+def test_the_diff_questions_ask_git_for_no_renames_and_no_repository_programs(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    reader = git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _p: "ext4")
+    reader.changed_files(dest, "a" * 40, "b" * 40, ["centurion/sql", "centurion/dbc"])
+    tail = seen[-1][seen[-1].index("diff") :]
+    assert tail == [
+        "diff",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--name-status",
+        "-z",
+        "a" * 40,
+        "b" * 40,
+        "--",
+        "centurion/sql",
+        "centurion/dbc",
+    ]
+
+
+def test_the_name_status_parse_reads_pairs_and_refuses_what_it_cannot_read() -> None:
+    assert git.parse_changed_files("M\0a b.sql\0A\0c.sql\0D\0d.sql\0") == (
+        ("M", "a b.sql"),
+        ("A", "c.sql"),
+        ("D", "d.sql"),
+    )
+    assert git.parse_changed_files("") == ()
+    assert git.parse_changed_files("M\0a.sql\0A\0") is None, "an odd count is not an answer"
+
+
+def test_the_changed_lines_parse_keeps_hunk_lines_only() -> None:
+    raw = (
+        "diff --git a/x.sql b/x.sql\n"
+        "index 1..2 100644\n"
+        "--- a/x.sql\n"
+        "+++ b/x.sql\n"
+        "@@ -1 +1 @@\n"
+        "--- a removed comment\n"
+        "+INSERT INTO `realmlist` VALUES (2);\n"
+        "\\ No newline at end of file\n"
+    )
+    assert git.parse_changed_lines(raw) == (
+        "--- a removed comment",
+        "+INSERT INTO `realmlist` VALUES (2);",
+    )
+    assert git.parse_changed_lines("Binary files a/x and b/x differ\n") == ()

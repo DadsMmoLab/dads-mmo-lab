@@ -259,6 +259,9 @@ _GIT_FIELDS = {
     "head_version",
     "commits_since",
     "restore_rev",
+    # T179 Task 6: the TrinityCore update route's two diff questions.
+    "changed_files",
+    "changed_lines",
 }
 """The seams that are git questions: bound to a `ContainerGit` that names the distro."""
 

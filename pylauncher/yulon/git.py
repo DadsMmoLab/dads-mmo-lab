@@ -816,6 +816,66 @@ def _parse_count(raw: str) -> int | None:
         return None
 
 
+_DIFF_ARGS = ["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color"]
+"""What both diff questions ask, spelled once so the two `Git` bodies cannot drift (T179).
+
+`--no-renames` because a rename is then a removal and an addition, which is what
+the update route needs to hear -- a table file renamed is a table that moved --
+and because rename detection reads blobs, which a blob-less checkout may not
+hold. `--no-ext-diff`/`--no-textconv`: no program a repository names is run.
+"""
+
+
+def changed_files_args(old: str, new: str, paths: Sequence[str]) -> list[str]:
+    """`git diff --name-status -z <old> <new> -- <paths>`: which files differ, and how (T179)."""
+    return [*_DIFF_ARGS, "--name-status", "-z", old, new, "--", *paths]
+
+
+def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
+    """`(status letter, path)` pairs from a `--name-status -z` answer; None when malformed.
+
+    `-z` prints `M\\0path\\0A\\0path\\0`, unquoted. With `--no-renames` there is no
+    three-field record, so an odd count of fields is an answer this cannot read --
+    and "could not read" is not "nothing changed", for `_parse_count()`'s reason.
+    """
+    fields = raw.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 2:
+        logger.debug(f"git diff --name-status gave an answer this cannot read: {raw!r}")
+        return None
+    pairs = tuple((fields[i][:1], fields[i + 1]) for i in range(0, len(fields), 2))
+    if any(not status or not path for status, path in pairs):
+        return None
+    return pairs
+
+
+def changed_lines_args(old: str, new: str, path: str) -> list[str]:
+    """`git diff -U0 <old> <new> -- <path>`: one file's added and removed lines (T179)."""
+    return [*_DIFF_ARGS, "-U0", old, new, "--", path]
+
+
+def parse_changed_lines(raw: str) -> tuple[str, ...]:
+    """The `+`/`-` lines inside the hunks of a `-U0` diff, sign kept, in order.
+
+    Only lines AFTER a hunk header count: before the first `@@`, the `--- a/` and
+    `+++ b/` headers begin with the same characters as a removed SQL comment
+    (`--- a comment`) and an added line, and a parser going by the first
+    character alone would read a header as a change. A binary change has no hunk
+    and answers empty, which a caller must not read as "only harmless lines".
+    """
+    lines: list[str] = []
+    inside = False
+    for line in raw.splitlines():
+        if line.startswith("diff --git "):
+            inside = False
+        elif line.startswith("@@"):
+            inside = True
+        elif inside and line[:1] in ("+", "-"):
+            lines.append(line)
+    return tuple(lines)
+
+
 _SHALLOW_HEAD_AND_FETCHED = ["rev-parse", "--is-shallow-repository", "HEAD", "FETCH_HEAD"]
 """One question, three answers: is this checkout shallow, HEAD, and what the fetch brought.
 
@@ -1392,6 +1452,35 @@ class RunnerGit:
             logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
             return None
         return _parse_count(proc.stdout)
+
+    def changed_files(
+        self, dest: Path, old: str, new: str, paths: Sequence[str]
+    ) -> tuple[tuple[str, str], ...] | None:
+        """Which files under `paths` differ between two commits, and how. None = cannot ask.
+
+        Read-only and local: both commits are in this checkout's store -- T179's
+        update route asks right after a move, about the commit it moved from and
+        the one it landed on. Trees only, so a blob-less checkout answers too.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *changed_files_args(old, new, paths)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
+            return None
+        return parse_changed_files(proc.stdout)
+
+    def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
+        """One file's added (`+`) and removed (`-`) lines between two commits. None = cannot ask."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *changed_lines_args(old, new, path)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read how {path} changed in {dest}: {exc}")
+            return None
+        return parse_changed_lines(proc.stdout)
 
     def restore_rev(self, dest: Path, rev: str) -> None:
         """Put this checkout back on `rev`, detached, discarding what is in the way.
@@ -2183,6 +2272,34 @@ class ContainerGit:
             logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
             return None
         return _parse_count(proc.stdout)
+
+    def changed_files(
+        self, dest: Path, old: str, new: str, paths: Sequence[str]
+    ) -> tuple[tuple[str, str], ...] | None:
+        """`RunnerGit.changed_files()`, containerised; `writes=False`, nothing is fetched.
+
+        The read-only container has no network, so a diff that needed an object
+        this checkout does not hold fails, and answers None: "could not ask".
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, changed_files_args(old, new, paths), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
+            return None
+        return parse_changed_files(proc.stdout)
+
+    def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
+        """`RunnerGit.changed_lines()`, containerised; `writes=False`, nothing is fetched."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, changed_lines_args(old, new, path), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read how {path} changed in {dest}: {exc}")
+            return None
+        return parse_changed_lines(proc.stdout)
 
     def restore_rev(self, dest: Path, rev: str) -> None:
         """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
