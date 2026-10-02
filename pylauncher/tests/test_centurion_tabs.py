@@ -20,11 +20,15 @@ from yulon.catalog import composegen, native, time_zone
 from yulon.catalog.families import azerothcore, decisions
 from yulon.catalog.families.cmangos import ETC_DIR
 from yulon.catalog.families.trinitycore import TrinityCoreInstaller
+from yulon.catalog.installer import InstallerError
 from yulon.controller_wow_centurion import controller as centurion_controller
 from yulon.controller_wow_centurion import docker_ctl as centurion_docker
 
 ENTRY = centurion_like()
 PLAYERBOTS = f"{ETC_DIR}/playerbots.conf"
+AUTOBALANCE = f"{ETC_DIR}/AutoBalance.conf"
+AUTOBALANCE_SOURCE = "src/centurion/centurion/conf/AutoBalance.conf"
+AUTOBALANCE_TEXT = "# the live realm's AutoBalance.conf\r\nAutoBalance.Enabled = 1\r\n"
 
 
 def _linux() -> str:
@@ -185,6 +189,9 @@ def _server(tmp_path: Path) -> tuple[Path, str]:
     server.mkdir()
     password = "tc-" + secrets.token_hex(8)
     (server / ".db_password").write_text(password + "\n", encoding="utf-8")
+    source = server / AUTOBALANCE_SOURCE
+    source.parent.mkdir(parents=True)
+    source.write_bytes(AUTOBALANCE_TEXT.encode("utf-8"))
     return server, password
 
 
@@ -193,9 +200,11 @@ def test_the_files_reset_to_default_offers_are_the_install_conf_table() -> None:
         "etc/worldserver.conf",
         "etc/authserver.conf",
         "etc/playerbots.conf",
+        "etc/AutoBalance.conf",
     )
     for file in reset_defaults.core_files(ENTRY):
         assert reset_defaults.install_writes(ENTRY, file) is True
+    assert reset_defaults.install_keys(ENTRY, AUTOBALANCE) == frozenset(), "copied, not patched"
     assert "updates.enabledatabases" in reset_defaults.install_keys(ENTRY, "etc/worldserver.conf")
     assert reset_defaults.install_keys(ENTRY, "etc/playerbots.conf") == frozenset(
         key.casefold()
@@ -272,6 +281,101 @@ def test_the_default_of_each_file_is_what_the_install_itself_wrote(tmp_path: Pat
     assert "Updates.EnableDatabases = 0" in world
     assert f";{password};" in world
     assert "SOAP.Enabled = 1" in world
+
+
+# -- AutoBalance.conf: the live realm's, beside worldserver.conf (T179 Task 8) -------------
+
+
+def test_the_conf_stage_places_the_live_autobalance_conf_beside_worldserver_conf(
+    tmp_path: Path,
+) -> None:
+    """README.md:203-204; the world server falls back to its conf's folder for it
+    (AutoBalanceConfig.cpp:177-213, 761). Byte for byte: never patched."""
+    server, password = _server(tmp_path)
+    said = list(_engine()._conf(_context(server, password)))
+    placed = server / AUTOBALANCE
+    assert placed.parent == (server / ETC_DIR / "worldserver.conf").parent
+    assert placed.read_bytes() == AUTOBALANCE_TEXT.encode("utf-8")
+    assert "Copied AutoBalance.conf from the server's source beside worldserver.conf." in said
+    assert not list((server / ETC_DIR).glob("*.yulon-partial")), "no half file left behind"
+
+
+def test_the_conf_stage_run_again_keeps_the_players_own_autobalance_conf(tmp_path: Path) -> None:
+    server, password = _server(tmp_path)
+    engine = _engine()
+    list(engine._conf(_context(server, password)))
+    placed = server / AUTOBALANCE
+    placed.write_bytes(b"AutoBalance.Enabled = 0\n")
+    (server / AUTOBALANCE_SOURCE).write_bytes(b"# a newer checkout\n")
+
+    said = list(engine._conf(_context(server, password, done=("conf",))))
+
+    assert placed.read_bytes() == b"AutoBalance.Enabled = 0\n"
+    assert not any("AutoBalance.conf" in line for line in said)
+
+
+def test_a_checkout_without_autobalance_conf_is_refused_naming_the_path(tmp_path: Path) -> None:
+    server, password = _server(tmp_path)
+    (server / AUTOBALANCE_SOURCE).unlink()
+    with pytest.raises(InstallerError) as caught:
+        list(_engine()._conf(_context(server, password)))
+    assert str(server / AUTOBALANCE_SOURCE) in str(caught.value)
+    assert not (server / AUTOBALANCE).exists()
+
+
+def test_reset_to_default_puts_the_checkouts_autobalance_conf_back(tmp_path: Path) -> None:
+    server, password = _server(tmp_path)
+    list(_engine()._conf(_context(server, password)))
+    (server / AUTOBALANCE).write_text("AutoBalance.Enabled = 0\n", encoding="utf-8")
+
+    def no_docker(*args: object) -> None:
+        raise AssertionError("the checkout's file needs no image")
+
+    report = reset_defaults.reset(
+        ENTRY,
+        server,
+        (AUTOBALANCE,),
+        seams=reset_defaults.Seams(
+            copy_from_image=no_docker, image_present=no_docker, platform_id=_linux
+        ),
+    )
+
+    assert [result.outcome for result in report.results] == ["reset"]
+    assert (server / AUTOBALANCE).read_bytes() == AUTOBALANCE_TEXT.encode("utf-8")
+
+
+def test_a_deleted_autobalance_conf_is_made_again_by_reset_to_default(tmp_path: Path) -> None:
+    server, password = _server(tmp_path)
+    list(_engine()._conf(_context(server, password)))
+    (server / AUTOBALANCE).unlink()
+
+    report = reset_defaults.reset(
+        ENTRY, server, (AUTOBALANCE,), seams=reset_defaults.Seams(platform_id=_linux)
+    )
+
+    assert [result.outcome for result in report.results] == ["recreated"]
+    assert (server / AUTOBALANCE).read_bytes() == AUTOBALANCE_TEXT.encode("utf-8")
+
+
+def test_the_autobalance_default_is_read_even_when_the_image_is_gone(tmp_path: Path) -> None:
+    server, _password = _server(tmp_path)
+    files = reset_defaults.core_files(ENTRY)
+    texts, reasons = reset_defaults.default_texts(
+        ENTRY,
+        server,
+        files,
+        seams=reset_defaults.Seams(image_present=lambda refs: False, platform_id=_linux),
+    )
+    assert texts == {AUTOBALANCE: AUTOBALANCE_TEXT}
+    assert set(reasons) == set(files) - {AUTOBALANCE}
+
+    (server / AUTOBALANCE_SOURCE).unlink()
+    _texts, reasons = reset_defaults.default_texts(
+        ENTRY, server, (AUTOBALANCE,), seams=reset_defaults.Seams(platform_id=_linux)
+    )
+    assert reasons == {
+        AUTOBALANCE: f"the server's source has no {server / AUTOBALANCE_SOURCE} to reset it from"
+    }
 
 
 def test_the_rebuild_confirmation_names_reset_to_default_where_it_reads_the_image() -> None:

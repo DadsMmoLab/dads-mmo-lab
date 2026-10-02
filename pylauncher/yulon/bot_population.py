@@ -1,8 +1,11 @@
 """How many random bots a server runs, read and changed where its install wrote it (T99).
 
 Asked for on #yulon ("is there a way to lower the bot count?"). Every install
-pins the population to 500, Min = Max (owner decision 2026-08-28), and each game
-keeps that number in its install's own place:
+pins the population, Min = Max: to 500 on WotLK, TBC, Vanilla and Tortoise
+(owner decision 2026-08-28), and to 150 on Centurion -- its live realm's value
+(`centurion/conf/playerbots.conf:83,90`), because its bots are 232 pre-made
+characters on accounts 76-78 and 500 is a number it cannot reach (T179). Each
+game keeps that number in its install's own place:
 
 * **TBC, Vanilla, Tortoise** (CMaNGOS family): `AiPlayerbot.MinRandomBots` and
   `MaxRandomBots` in `etc/aiplayerbot.conf`, from the install's conf table

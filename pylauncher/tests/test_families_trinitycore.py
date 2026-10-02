@@ -141,6 +141,12 @@ DB_PASSWORD = "tc-0123456789abcdef"
 
 SERVER_DBC = {"Spell.dbc": b"the server's Spell.dbc", "LiquidType.dbc": b"the server's LiquidType"}
 
+AUTOBALANCE_CONF = (
+    b"[worldserver]\r\n# The live realm's AutoBalance settings (centurion/conf/)\r\n"
+    b"AutoBalance.Enabled = 1\r\n"
+)
+"""The checkout's `AutoBalance.conf`, CRLF so a copy that translated line endings would show."""
+
 SQL_FILES: dict[str, str] = {
     "auth/auth_schema.sql": (
         "CREATE TABLE realmlist (id INT);\n"
@@ -379,7 +385,7 @@ def snapshot(folder: Path) -> dict[str, tuple[bytes, int, int]]:
 
 
 def lay_checkout(dest: Path) -> None:
-    """What a clone of CENTURION leaves that the stages read: SQL, DBCs and pack zips."""
+    """What a clone of CENTURION leaves that the stages read: SQL, DBCs, AutoBalance.conf, zips."""
     for rel, text in SQL_FILES.items():
         path = dest / "centurion" / "sql" / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -388,6 +394,9 @@ def lay_checkout(dest: Path) -> None:
         path = dest / "centurion" / "dbc" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
+    autobalance = dest / "centurion" / "conf" / "AutoBalance.conf"
+    autobalance.parent.mkdir(parents=True, exist_ok=True)
+    autobalance.write_bytes(AUTOBALANCE_CONF)
     server_dir = dest.parents[1]
     for rel, body in ZIPS.items():
         path = server_dir / rel
@@ -1728,6 +1737,52 @@ def test_a_left_out_folder_that_is_a_link_is_never_walked_and_the_copy_is_kept(
     assert (elsewhere / "Data" / "theirs.MPQ").read_bytes() == b"theirs"
     assert not (target / "Data" / "theirs.MPQ").exists(), "nothing renamed out of the link"
     assert (target / "Data" / "common.MPQ").is_file(), "the copy kept"
+
+
+def _linked_left_out(machine: Machine, tmp_path: Path) -> tuple[Path, Path]:
+    """A leftover copy whose `.yulon-left-out` is a link to somebody else's folder."""
+    target = leftover_copy(machine)
+    elsewhere = tmp_path / "somebody-else"
+    (elsewhere / "Data").mkdir(parents=True)
+    (elsewhere / "Data" / "theirs.MPQ").write_bytes(b"theirs")
+    (target / trinitycore.LEFT_OUT_DIR).symlink_to(elsewhere, target_is_directory=True)
+    return target, elsewhere
+
+
+def test_install_refuses_over_a_copy_whose_left_out_folder_is_a_link(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Task 3 gap: Install says what Uninstall says, logs it, and extracts nothing."""
+    target, elsewhere = _linked_left_out(machine, tmp_path)
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.families.trinitycore"):
+        with pytest.raises(InstallerError) as caught:
+            run_stage(machine, "client-data")
+    message = str(caught.value)
+    assert message.startswith(
+        f"The temporary copy of your game client at {target} holds a link Yu'lon did not make"
+    )
+    assert message.endswith("it was left as it is. Nothing was extracted.")
+    assert machine.tools.seen == {}, "no extractor ran"
+    assert (elsewhere / "Data" / "theirs.MPQ").read_bytes() == b"theirs"
+    assert (target / "Data" / "common.MPQ").is_file(), "the copy kept"
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert record.getMessage() == (
+        f"{target / trinitycore.LEFT_OUT_DIR} is a link Yu'lon did not make; the copy {target} "
+        "is not removed through it"
+    )
+
+
+def test_a_copy_with_a_linked_left_out_folder_is_never_noted_for_a_retry(
+    machine: Machine, tmp_path: Path, config_dir: Path
+) -> None:
+    """Task 3 gap: the app's next start must not walk it either, so it is not on the list."""
+    target, _elsewhere = _linked_left_out(machine, tmp_path)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
+    assert "holds a link Yu'lon did not make" in warning
+    assert not (config_dir / trinitycore.LEFTOVERS_FILE).exists()
+    assert trinitycore.recorded_leftover_targets() == []
+    assert os.path.lexists(target)
 
 
 def test_a_plain_permission_refusal_is_not_called_a_file_held_open(

@@ -30,7 +30,7 @@ V1_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurio
 """README §1's four v1 servers, and Centurion after them (T179 Task 7)."""
 
 
-def test_bundled_catalog_describes_exactly_the_four_v1_servers() -> None:
+def test_bundled_catalog_describes_exactly_the_five_servers() -> None:
     """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only.
 
     Plus Centurion (T179), the first server that is not one of the four.

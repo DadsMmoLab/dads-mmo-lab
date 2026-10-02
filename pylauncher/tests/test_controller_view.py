@@ -3942,10 +3942,10 @@ their images — which is why the dispatch is keyed on the id.
 
 
 def _every_game() -> list[CatalogEntry]:
-    """Every game this build has a factory for: the shipped catalog's, then the fixtures.
+    """Every game this build has a factory for: the shipped catalog's, then any other.
 
-    T179: `wow-centurion` has its factory (Task 5) before its catalog entry (Task 7),
-    so the every-game tests drive it over its fixture (`_factory_entry`).
+    Since T179 Task 7 every factory's game is shipped, `wow-centurion` included, so
+    the tail is empty; a factory with no entry fails in `_factory_entry`.
     """
     shipped = list(load_catalog().games)
     ids = {entry.id for entry in shipped}
@@ -5848,7 +5848,7 @@ BOT_SQL_BY_GAME = {
     "wow-tbc": ("realmd", "characters", "tbc-db"),
     "wow-vanilla": ("realmd", "characters", "vanilla-db"),
     "wow-tortoise": ("tw_logon", "tw_char", "tortoise-db"),
-    # T179: the fixture's names (`support_trinitycore`); Task 7 ships the entry.
+    # T179: the shipped entry's names (`catalog.json`, T179 Task 7).
     "wow-centurion": ("centurion_auth", "centurion_characters", "centurion-db"),
 }
 """Written out per game rather than read back out of the entry.
@@ -12864,20 +12864,15 @@ def test_a_tab_with_no_database_seam_backs_up_exactly_as_it_did_before(
 
 
 def _factory_entry(game: str) -> CatalogEntry:
-    """The entry a factory in `_FACTORIES` serves: the shipped catalog's, else its fixture.
+    """The entry a factory in `_FACTORIES` serves: the shipped catalog's.
 
-    T179: `wow-centurion` has a factory (Task 5) before it has a shipped catalog
-    entry (Task 7), so its tests build the Centurion-shaped fixture instead. Any
-    other id missing from the catalog is a factory nothing can reach: an error.
+    Every factory's game is shipped (`wow-centurion` since T179 Task 7). An id
+    missing from the catalog is a factory nothing can reach: an error.
     """
     catalog = load_catalog()
     if game in {entry.id for entry in catalog.games}:
         return catalog.get(game)
-    if game == "wow-centurion":
-        from tests.support_trinitycore import centurion_like
-
-        return centurion_like()
-    raise KeyError(f"{game} has a factory and neither a catalog entry nor a fixture")
+    raise KeyError(f"{game} has a factory and no catalog entry")
 
 
 def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(

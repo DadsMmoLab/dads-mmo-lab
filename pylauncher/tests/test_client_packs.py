@@ -467,6 +467,23 @@ def test_an_md5_file_without_the_packs_line_is_refused_naming_both(tmp_path: Pat
     assert not client_packs.cache_dir().exists()
 
 
+def test_a_missing_zip_is_named_as_missing_before_its_md5_line_is_looked_for(
+    tmp_path: Path,
+) -> None:
+    """T179 Task 7 review: a checkout that lost the zip AND its line names the zip."""
+    server = tmp_path / "server"
+    folder = server / "centurion" / "patches"
+    folder.mkdir(parents=True)
+    (folder / "patches.md5").write_bytes(_md5_lines(addons_zip=b"a"))
+
+    with pytest.raises(PackError) as caught:
+        fetch_checkout(_md5_pack(), server)
+    assert "checkout has no centurion/patches/patch-Y.zip (nor its .partNN pieces)" in str(
+        caught.value
+    )
+    assert "has no line for" not in str(caught.value)
+
+
 def test_an_md5_file_naming_the_pack_twice_with_two_answers_is_refused(tmp_path: Path) -> None:
     server = tmp_path / "server"
     data = _zip()

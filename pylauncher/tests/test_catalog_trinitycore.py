@@ -377,6 +377,47 @@ def test_the_playerbots_conf_must_be_a_file_the_table_writes() -> None:
         NativeInstall.model_validate(_native(conf__playerbots_conf="aiplayerbot.conf"))
 
 
+def test_a_conf_copied_from_the_checkout_reads_back() -> None:
+    """T179 Task 8: Centurion's AutoBalance.conf, the live realm's, copied whole."""
+    block = NativeInstall.model_validate(
+        _native(conf__from_checkout={"AutoBalance.conf": "centurion/conf/AutoBalance.conf"})
+    ).trinitycore
+    assert block is not None
+    assert block.conf.from_checkout == {"AutoBalance.conf": "centurion/conf/AutoBalance.conf"}
+    bare = copy.deepcopy(NATIVE)
+    bare["trinitycore"]["conf"].pop("from_checkout", None)
+    plain = NativeInstall.model_validate(bare).trinitycore
+    assert plain is not None and plain.conf.from_checkout == {}, "none by default"
+
+
+@pytest.mark.parametrize("name", ["conf/AutoBalance.conf", "..", ""])
+def test_a_conf_copied_from_the_checkout_lands_beside_worldserver_conf(name: str) -> None:
+    with pytest.raises(ValidationError, match="from_checkout names a file beside"):
+        NativeInstall.model_validate(_native(conf__from_checkout={name: "centurion/conf/x.conf"}))
+
+
+@pytest.mark.parametrize("source", ["/etc/AutoBalance.conf", "../AutoBalance.conf", "a\\b", ""])
+def test_a_conf_copied_from_the_checkout_comes_from_inside_it(source: str) -> None:
+    with pytest.raises(ValidationError, match="from_checkout must be a relative POSIX path"):
+        NativeInstall.model_validate(_native(conf__from_checkout={"AutoBalance.conf": source}))
+
+
+def test_a_conf_is_either_copied_from_the_checkout_or_patched_never_both() -> None:
+    with pytest.raises(ValidationError, match="one file has one source"):
+        NativeInstall.model_validate(
+            _native(conf__from_checkout={"playerbots.conf": "centurion/conf/playerbots.conf"})
+        )
+
+
+def test_the_shipped_centurion_places_the_live_autobalance_conf() -> None:
+    """README.md:203-204: copy the live realm's centurion/conf/AutoBalance.conf."""
+    native = load_catalog().get("wow-centurion").install.native
+    assert native is not None and native.trinitycore is not None
+    assert native.trinitycore.conf.from_checkout == {
+        "AutoBalance.conf": "centurion/conf/AutoBalance.conf"
+    }
+
+
 @pytest.mark.parametrize(
     "option", ["PLAYERBOT=ON", "-DPLAYERBOT", "-DPLAYERBOT=ON && rm -rf /", "-DX=$(id)"]
 )

@@ -324,17 +324,11 @@ def test_a_press_windows_accepted_and_did_not_keep_is_a_failure(
 
 
 def _managed(game: str) -> CatalogEntry:
-    """A game the app has a tab for: shipped, or (T179, until Task 7) Centurion's fixture."""
-    if game == "wow-centurion" and game not in {g.id for g in load_catalog().games}:
-        from tests.support_trinitycore import centurion_like
-
-        return centurion_like()
+    """A game the app has a tab for: every one is shipped (Centurion since T179 Task 7)."""
     return load_catalog().get(game)
 
 
-@pytest.mark.parametrize(
-    "game", sorted({game.id for game in load_catalog().games} | {"wow-centurion"})
-)
+@pytest.mark.parametrize("game", sorted(game.id for game in load_catalog().games))
 def test_on_windows_every_game_is_offered_the_lock(
     windows: FakeWindows, tmp_path: Path, game: str
 ) -> None:

@@ -573,7 +573,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.reset_defaults",
-        "_from_image",
+        "_from_checkout",
+        "confs an install copies whole from its source tree, whose default is that file (T179 "
+        "Task 8)",
+        {
+            "azerothcore": not_applicable("every conf it writes comes from its image's .dist"),
+            "cmangos": not_applicable("every conf it writes comes from its image's .dist"),
+            "trinitycore": supported(
+                "conf.from_checkout: the tree's AutoBalance.conf, the live realm's (T179 Task 8)"
+            ),
+        },
+        hits=(".trinitycore", ".trinitycore"),
+    ),
+    Site(
+        "yulon.reset_defaults",
+        "_from_templates",
         "defaults read from the server image",
         _cmangos_only(
             _WOTLK_DEFAULTS,

@@ -629,7 +629,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         refuses a world conf without it), `DataDir`, `LogsDir`, the database
         strings, SOAP, the realm id, and `playerbots.conf` -- written into the SAME
         folder as `worldserver.conf`, the only place the world server reads it
-        (worldserver/Main.cpp:242-250, facts §4).
+        (worldserver/Main.cpp:242-250, facts §4). Then each `from_checkout` file
+        the folder lacks, copied whole from the checkout (`place_from_checkout()`:
+        Centurion's `AutoBalance.conf`, T179 Task 8).
 
         The player's random-bot count is carried over, as on CMaNGOS (T117, T179
         Task 5): read back from `playerbots.conf` BEFORE `materialise()`, and only
@@ -666,6 +668,8 @@ class TrinityCoreInstaller(CmangosInstaller):
             raise InstallerError(f"{etc_dir} could not be written: {exc}") from exc
         for path in copied:
             yield f"Copied {path.name} out of the server image."
+        for path in place_from_checkout(tc, ctx.server_dir, etc_dir):
+            yield f"Copied {path.name} from the server's source beside {tc.conf.world_conf}."
         try:
             changed = conf.apply_table(table, etc_dir, self._secret_tokens(ctx))
         except InstallerError:
@@ -1632,6 +1636,53 @@ class TrinityCoreInstaller(CmangosInstaller):
             renames=sql.renames,
             rename_files=sql.rename_files,
         )
+
+
+def checkout_conf_source(tc: TrinityCoreData, server_dir: Path, name: str) -> Path:
+    """Where `name`, one of `conf.from_checkout`'s, is copied from: inside the core checkout."""
+    return server_dir / tc.checkout / tc.conf.from_checkout[name]
+
+
+def place_from_checkout(tc: TrinityCoreData, server_dir: Path, etc_dir: Path) -> tuple[Path, ...]:
+    """Copy each `conf.from_checkout` file that is missing from `etc_dir`; return those made.
+
+    Centurion's `AutoBalance.conf` (the lead's ruling, T179 Task 8): its README says to
+    copy the live realm's `centurion/conf/AutoBalance.conf` (README.md:203-204), the
+    image installs no `.dist` of it, and the world server finds it in its own conf's
+    folder (`AutoBalance.Conf` defaults to `conf/AutoBalance.conf` and falls back to
+    the conf's directory, AutoBalanceConfig.cpp:177-213, 761). As `conf.materialise()`
+    treats the image's files: one already there is never touched, because by the
+    second press it may be the player's own; Reset to default puts the checkout's
+    back. Written to a temporary name and renamed, so a press that dies part way
+    leaves no half file the next press would take for the player's.
+
+    Raises:
+        InstallerError: the checkout lacks the file, or it could not be copied.
+    """
+    made: list[Path] = []
+    for name in tc.conf.from_checkout:
+        target = etc_dir / name
+        if target.exists():
+            continue
+        source = checkout_conf_source(tc, server_dir, name)
+        partial = etc_dir / f"{name}.yulon-partial"
+        try:
+            body = source.read_bytes()
+        except OSError as exc:
+            raise InstallerError(
+                f"{name} could not be read from the server's source at {source} ({exc}), so it "
+                f"was not placed beside {tc.conf.world_conf}."
+            ) from exc
+        try:
+            etc_dir.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(body)
+            os.chmod(partial, conf.CONF_MODE)
+            os.replace(partial, target)
+        except OSError as exc:
+            partial.unlink(missing_ok=True)
+            raise InstallerError(f"{target} could not be written: {exc}") from exc
+        made.append(target)
+    return tuple(made)
 
 
 def _backup_advice(press: str | None) -> str:

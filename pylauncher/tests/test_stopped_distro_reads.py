@@ -46,7 +46,7 @@ NO_WSL_EXE = "/nonexistent/yulon-test/wsl"
 """What `wsl` resolves to here: a name that is SEEN when the app starts it, and runs nothing."""
 
 GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
-"""Every game with a tab; `wow-centurion` over its fixture until T179 Task 7 ships it."""
+"""Every game with a tab, each a shipped catalog entry (`wow-centurion` since T179 Task 7)."""
 
 _THREADED = controller_view_module.threaded_job_runner
 """The view's real job runner, taken before `_inline_jobs` replaces it for each test."""
@@ -241,10 +241,6 @@ def disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_DistroDis
 
 
 def _entry(game: str) -> CatalogEntry:
-    if game == "wow-centurion" and game not in {g.id for g in load_catalog().games}:
-        from tests.support_trinitycore import centurion_like
-
-        return centurion_like()
     return load_catalog().get(game)
 
 

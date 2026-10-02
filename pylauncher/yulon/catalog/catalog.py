@@ -964,6 +964,17 @@ class TrinityCoreConf(ConfPatchTable):
             "§4), and a missing one leaves every bot setting at the `.dist`'s off."
         ),
     )
+    from_checkout: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "File name beside `worldserver.conf` -> the checkout-relative file it is copied "
+            "from when it is missing. For a conf the image does not install and the tree ships "
+            "whole: Centurion's `AutoBalance.conf` (`centurion/conf/`, the live realm's, "
+            "README.md:203-204), which the world server finds in its own conf's folder "
+            "(AutoBalanceConfig.cpp:177-213, 761). Never patched and never one of `files`; "
+            "Reset to default copies it from the checkout again."
+        ),
+    )
 
     @field_validator("playerbots_conf", "world_conf")
     @classmethod
@@ -972,6 +983,19 @@ class TrinityCoreConf(ConfPatchTable):
             raise ValueError(
                 f"{info.field_name} is a file name beside worldserver.conf, not a path: {value!r}"
             )
+        return value
+
+    @field_validator("from_checkout")
+    @classmethod
+    def _names_beside_the_conf_from_inside_the_checkout(
+        cls, value: dict[str, str]
+    ) -> dict[str, str]:
+        for name, source in value.items():
+            if not name or "/" in name or "\\" in name or name in (".", ".."):
+                raise ValueError(
+                    f"from_checkout names a file beside worldserver.conf, not a path: {name!r}"
+                )
+            _below(source, "from_checkout", "the checkout")
         return value
 
     @field_validator("files")
@@ -1003,6 +1027,12 @@ class TrinityCoreConf(ConfPatchTable):
                 raise ValueError(
                     f"{field} {name!r} is not one of the conf table's files {sorted(self.files)}"
                 )
+        both = sorted(set(self.from_checkout) & set(self.files))
+        if both:
+            raise ValueError(
+                f"{both} is both copied from the checkout and patched from the image's .dist; "
+                "one file has one source"
+            )
         if "Updates.EnableDatabases" not in self.files[self.world_conf].keys:
             raise ValueError(
                 f"the world conf {self.world_conf!r} must set Updates.EnableDatabases to 0: "

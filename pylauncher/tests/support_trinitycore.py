@@ -1,8 +1,8 @@
 """A TrinityCore entry shaped like Centurion, for the tests of the family's templates (T179).
 
-The shipped `wow-centurion` entry is a later task's; until it lands, the templates
-under `catalog/installers/shared/trinitycore/` and `wow-centurion/native/` are
-rendered from this one. Every value is either a Centurion fact
+The shipped `wow-centurion` entry (T179 Task 7) is the app's; this one is the
+tests' own copy of its shape, so a test can change a value without touching the
+catalog. Every value is either a Centurion fact
 (`.notes/tickets/T179-centurion-facts.md`, CENTURION @ faac5fc9) or a name this
 file chooses, and nothing here is read by the app.
 """
@@ -200,6 +200,9 @@ TRINITYCORE: dict[str, Any] = {
             },
         },
         "playerbots_conf": "playerbots.conf",
+        # The live realm's AutoBalance.conf, copied whole beside worldserver.conf
+        # (README.md:203-204; AutoBalanceConfig.cpp:177-213, 761). T179 Task 8.
+        "from_checkout": {"AutoBalance.conf": "centurion/conf/AutoBalance.conf"},
     },
     "sql": SQL,
     "required_maps": [0, 1, 530],

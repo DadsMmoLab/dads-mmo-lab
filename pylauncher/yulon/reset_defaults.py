@@ -25,7 +25,9 @@ Centurion (TrinityCore, T179) is the first case again: its install copies
 `worldserver.conf`, `authserver.conf` and `playerbots.conf` out of its image's
 `.dist` and patches its conf table into them (`Updates.EnableDatabases = 0`,
 the database strings, SOAP, the bot population), so its default is made the
-same way, from the same image.
+same way, from the same image. Its `AutoBalance.conf` is the exception the
+image cannot answer: the install copies it whole from the server's source
+(`conf.from_checkout`, T179 Task 8), so its default is that file, read there.
 
 **Only the server's own files.** A game's set is exactly its install conf
 table, or for WotLK `AZEROTHCORE_CORE_FILES` plus the override. A module's own
@@ -93,8 +95,22 @@ def core_files(entry: CatalogEntry) -> tuple[str, ...]:
         return (*AZEROTHCORE_CORE_FILES, composegen.OVERRIDE_FILE)
     table = _conf_table(entry)
     if table is not None:
-        return tuple(f"{ETC_DIR}/{name}" for name in table.files)
+        names = (*table.files, *_from_checkout(entry))
+        return tuple(f"{ETC_DIR}/{name}" for name in names)
     return ()
+
+
+def _from_checkout(entry: CatalogEntry) -> Mapping[str, str]:
+    """The confs an install copies whole from its checkout, by name -> server-dir-relative source.
+
+    A TrinityCore install's `conf.from_checkout` (Centurion's `AutoBalance.conf`, T179
+    Task 8), under its checkout; no other family copies a conf from its source tree.
+    """
+    native_block = entry.install.native
+    if native_block is None or native_block.trinitycore is None:
+        return {}
+    block = native_block.trinitycore
+    return {name: f"{block.checkout}/{source}" for name, source in block.conf.from_checkout.items()}
 
 
 def _conf_table(entry: CatalogEntry) -> ConfPatchTable | None:
@@ -159,6 +175,7 @@ DOCKER_SILENT = (
 COPY_FAILED = "the default files could not be copied out of the server's image: {exc}"
 NO_TEMPLATE = "the server's image has no {source}/{template} to reset it from"
 NO_DIST = "there is no {dist} beside it to reset it from"
+NO_CHECKOUT_COPY = "the server's source has no {source} to reset it from"
 UNREADABLE = "{what} could not be read ({exc})"
 NOT_UTF8 = "{what} is not UTF-8 text ({exc})"
 NO_DEFAULT = "Yu'lon does not know what {game} installs into this file"
@@ -446,6 +463,46 @@ def _clear_staging(path: Path) -> None:
 
 
 def _from_image(
+    entry: CatalogEntry,
+    server_dir: Path,
+    files: Sequence[str],
+    *,
+    wsl_distro: str | None,
+    seams: Seams,
+) -> Built:
+    """The image's templates patched by the table, and a `from_checkout` file's checkout copy.
+
+    A file the install copies whole from the server's source (Centurion's
+    `AutoBalance.conf`, T179 Task 8) has the checkout's file as its default, read
+    from disk: no image, password or Docker is asked about it, so a refusal of the
+    image's files never takes it along.
+    """
+    copied = _from_checkout(entry)
+    whole = [
+        file
+        for file in files
+        if file.startswith(f"{ETC_DIR}/") and file.removeprefix(f"{ETC_DIR}/") in copied
+    ]
+    rest = [file for file in files if file not in whole]
+    texts, reasons = (
+        _from_templates(entry, server_dir, rest, wsl_distro=wsl_distro, seams=seams)
+        if rest
+        else ({}, {})
+    )
+    for file in whole:
+        source = server_dir / copied[file.removeprefix(f"{ETC_DIR}/")]
+        try:
+            texts[file] = _read_text(source)
+        except FileNotFoundError:
+            reasons[file] = NO_CHECKOUT_COPY.format(source=source)
+        except UnicodeDecodeError as exc:
+            reasons[file] = NOT_UTF8.format(what=source, exc=exc)
+        except OSError as exc:
+            reasons[file] = UNREADABLE.format(what=source, exc=exc)
+    return texts, reasons
+
+
+def _from_templates(
     entry: CatalogEntry,
     server_dir: Path,
     files: Sequence[str],

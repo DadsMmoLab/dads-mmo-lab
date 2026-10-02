@@ -463,25 +463,30 @@ def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
     `.joining` file that is renamed only once the join matches the checksum;
     a join that does not match is removed. A joined file already in the cache
     is proved again before it is used, and joined afresh if it fails.
+
+    The zip (or its pieces) is looked for BEFORE its checksum is resolved (T179
+    Task 7 review): a checkout without the zip is named as missing the zip, not
+    as an `md5_file` with no line for it.
     """
     source = pack.source
     if source.kind != "checkout" or source.path is None:
         raise PackError(f"{pack.label} does not come from the server's checkout.")
     path = server_dir / source.path
-    expected = _expected_checkout(pack, server_dir)
-    version = _checkout_version(pack, path)
-    if path.is_file():
-        try:
-            return Fetched(path, version, _prove(pack, path, _FROM_SOURCES, expected=expected))
-        except PackError as exc:
-            raise PackError(f"{exc} The file is {path}.") from exc
-    parts = _whole_parts(pack, path)
-    if not parts:
+    plain = path.is_file()
+    parts = [] if plain else _whole_parts(pack, path)
+    if not plain and not parts:
         raise PackError(
             f"{pack.label}: this server's checkout has no {source.path} (nor its .partNN "
             "pieces) at the commit it is on, so Yu'lon cannot make its client. Update the "
             "server, or return it to the tested pin, and try again."
         )
+    expected = _expected_checkout(pack, server_dir)
+    version = _checkout_version(pack, path)
+    if plain:
+        try:
+            return Fetched(path, version, _prove(pack, path, _FROM_SOURCES, expected=expected))
+        except PackError as exc:
+            raise PackError(f"{exc} The file is {path}.") from exc
     folder = cache_dir() / "checkout" / expected[1]
     dest = folder / path.name
     if dest.is_file():

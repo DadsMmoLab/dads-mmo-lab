@@ -24,19 +24,17 @@ import pytest
 import yaml
 
 from tests.support_bash import bash_available
-from tests.support_trinitycore import centurion_like
 from yulon import docker, resources
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 
 TEMPLATES = resources.installers_dir()
 GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
-"""The shipped games, and `wow-centurion`: the TrinityCore family's template rendered from the
-test entry in `tests/support_trinitycore.py` until a shipped entry of that family exists (T179)."""
+"""The shipped games; `wow-centurion` is the TrinityCore family's entry (T179)."""
 
 
 def entry_for(game: str) -> CatalogEntry:
-    return centurion_like() if game == "wow-centurion" else load_catalog().get(game)
+    return load_catalog().get(game)
 
 
 # Which SQL client and which password variable each image family's script must use: the official
