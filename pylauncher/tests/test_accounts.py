@@ -1051,24 +1051,26 @@ def test_the_known_list_every_refusal_prints_comes_from_Scheme_itself() -> None:
     [
         (
             lambda sql: accounts.create_account(sql, "bob", "hunter2", scheme="trinitycore"),
-            "this app does not yet write an account row on a TrinityCore server, so nothing "
-            "was written.",
+            "This app does not yet write an account row on a TrinityCore server, so nothing "
+            "was written. Use the worldserver console: account create <name> <password>.",
         ),
         (
             lambda sql: accounts.reset_own_password(
                 sql, "YULON_243C46E3", "n3w-p@ssw0rd1234", scheme="trinitycore"
             ),
-            "this app does not yet change an account's password on a TrinityCore server, so "
-            "nothing was written.",
+            "This app does not yet change an account's password on a TrinityCore server, so "
+            "nothing was written. Use the worldserver console: account set password <name> "
+            "<password> <password>.",
         ),
         (
             lambda sql: accounts._grant_gm(sql, 106, 3, "trinitycore"),
-            "this app does not yet grant a GM level on a TrinityCore server, so nothing was "
-            "written.",
+            "This app does not yet grant a GM level on a TrinityCore server, so nothing was "
+            "written. Use the worldserver console: account set gmlevel <name> <level> -1.",
         ),
         (
             lambda sql: accounts._gm_level(sql, 106, "trinitycore"),
-            "this app does not yet read a GM level on a TrinityCore server, so nothing was read.",
+            "This app does not yet read a GM level on a TrinityCore server, so nothing was "
+            "read. Look the account up at the worldserver console instead.",
         ),
     ],
     ids=["create", "re-password", "grant", "read-level"],
@@ -1086,8 +1088,7 @@ def test_trinitycore_is_refused_by_name_at_every_dispatch_until_its_statements_e
     sql = _Recorder()
     with pytest.raises(accounts.AccountError) as caught:
         call(sql)
-    assert str(caught.value).startswith(said), str(caught.value)
-    assert "account create <name> <password>" in str(caught.value)
+    assert str(caught.value) == said
     assert sql.statements == [], "it touched the database before refusing"
 
 

@@ -19,7 +19,14 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from yulon import server_build_presses
 from yulon.docker import ContainerSpec
@@ -870,8 +877,16 @@ class TrinityCoreMmaps(MmapPlan):
 
 
 class TrinityCoreConf(ConfPatchTable):
-    """The conf table, plus the one file that must sit beside `worldserver.conf`."""
+    """The conf table, the world server's conf in it, and the file that must sit beside it."""
 
+    world_conf: str = Field(
+        default="worldserver.conf",
+        description=(
+            "The world server's conf, one of `files`. Its keys must set "
+            "`Updates.EnableDatabases` to 0: the `.dist` ships 7 (worldserver.conf.dist:1470, "
+            "facts §2), so a table that leaves the key out leaves the updater on."
+        ),
+    )
     playerbots_conf: str = Field(
         description=(
             "The bots' conf, one of `files`, written next to `worldserver.conf`: the worldserver "
@@ -880,12 +895,12 @@ class TrinityCoreConf(ConfPatchTable):
         ),
     )
 
-    @field_validator("playerbots_conf")
+    @field_validator("playerbots_conf", "world_conf")
     @classmethod
-    def _a_bare_file_name(cls, value: str) -> str:
+    def _a_bare_file_name(cls, value: str, info: ValidationInfo) -> str:
         if not value or "/" in value or "\\" in value or value in (".", ".."):
             raise ValueError(
-                f"playerbots_conf is a file name beside worldserver.conf, not a path: {value!r}"
+                f"{info.field_name} is a file name beside worldserver.conf, not a path: {value!r}"
             )
         return value
 
@@ -909,11 +924,19 @@ class TrinityCoreConf(ConfPatchTable):
         return value
 
     @model_validator(mode="after")
-    def _the_playerbots_conf_is_one_the_table_writes(self) -> TrinityCoreConf:
-        if self.playerbots_conf not in self.files:
+    def _the_named_confs_are_ones_the_table_writes(self) -> TrinityCoreConf:
+        for field, name in (
+            ("world_conf", self.world_conf),
+            ("playerbots_conf", self.playerbots_conf),
+        ):
+            if name not in self.files:
+                raise ValueError(
+                    f"{field} {name!r} is not one of the conf table's files {sorted(self.files)}"
+                )
+        if "Updates.EnableDatabases" not in self.files[self.world_conf].keys:
             raise ValueError(
-                f"playerbots_conf {self.playerbots_conf!r} is not one of the conf table's files "
-                f"{sorted(self.files)}"
+                f"the world conf {self.world_conf!r} must set Updates.EnableDatabases to 0: "
+                "its .dist ships 7, so leaving the key out leaves the updater on"
             )
         return self
 
@@ -1025,8 +1048,22 @@ class TrinityCoreData(_Strict):
     @field_validator("sparse_exclude")
     @classmethod
     def _exclusions_inside_the_checkout(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Plain paths inside the checkout, never git pattern syntax.
+
+        Git reads a sparse-checkout line as a pattern: `!` negates, `#` starts a
+        comment, `*`, `?` and `[` match. A path holding one would exclude
+        something other than itself, so it is refused rather than escaped. A
+        space is a plain character there and stays allowed: Centurion's own
+        `playerbot reference` has one.
+        """
         for path in value:
             _below(path, "sparse_exclude", "the checkout")
+            special = sorted(set(path) & set("!#*?["))
+            if special:
+                raise ValueError(
+                    f"sparse_exclude holds a git pattern character {special} in {path!r}; "
+                    "name plain paths only"
+                )
         return value
 
 
@@ -2414,13 +2451,16 @@ class CatalogEntry(_Strict):
 
     @model_validator(mode="after")
     def _the_trinitycore_block_agrees_with_the_entry(self) -> CatalogEntry:
-        """Its `checkout` is a source this entry clones; each rename lands on its own schema.
+        """The block's checkout, renames and account scheme agree with the rest of the entry.
 
-        Two relationships the block cannot see from inside: the sources live in
-        `emulator`, the schema names in `databases`. A checkout that is not a dest
-        is an install that clones and then reads paths from a folder nothing made;
-        a rename to a name that is not this entry's would point the dumps'
-        triggers and procedures at somebody else's database (import.sh:41-43).
+        Three relationships the block cannot see from inside. A checkout that is
+        not a dest of `emulator.sources` is an install that clones and then reads
+        paths from a folder nothing made. A rename to a name that is not one of
+        `databases` would point the dumps' triggers and procedures at somebody
+        else's database (import.sh:41-43). And `accounts.scheme` defaults to
+        AzerothCore's, whose `account_access(id, gmlevel)` is not TrinityCore's
+        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare
+        `trinitycore` or no scheme at all.
         """
         native = self.install.native
         block = native.trinitycore if native is not None else None
@@ -2431,6 +2471,12 @@ class CatalogEntry(_Strict):
             raise ValueError(
                 f"trinitycore.checkout is {block.checkout!r}, which is not a dest of any of "
                 f"this entry's sources {sorted(dests)}"
+            )
+        if self.accounts.scheme not in ("trinitycore", None):
+            raise ValueError(
+                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or null, got "
+                f"{self.accounts.scheme!r}: another core's columns write rows that look right "
+                "and grant nothing (an omitted accounts block inherits 'azerothcore')"
             )
         schemas = set(self.databases.schema_map().values())
         for old, new in block.sql.renames:

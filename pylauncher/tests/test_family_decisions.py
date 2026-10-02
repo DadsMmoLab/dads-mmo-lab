@@ -5,21 +5,21 @@ The defect this exists for is the shape most family branches had before T179:
 third family falls into the `else` at every one of them, silently, and nothing
 fails -- the feature is just absent. `yulon/catalog/families/decisions.py` is
 the registry that says, per site and per family, what that family gets there;
-this file holds it to two things:
+this file holds it to three things:
 
 * **completeness** -- every site names every member of `NativeInstall.family`,
   so adding a family to the Literal turns this red at every site until somebody
   decides it;
-* **coverage** -- an AST scan of `yulon/` finds every family branch (a compare
-  against a family's name, a family block's attribute, a dict keyed by family
-  names, an isinstance on a family's class, a `case` on a family's name) and
-  fails for one outside a registered site, and for a registered site the scan
-  no longer finds.
+* **coverage** -- an AST scan of `yulon/` finds every family branch (`_Scan`
+  lists the spellings) and fails for one outside a registered site, for a
+  registered site the scan no longer finds, and for a registered site whose
+  hits changed since it was decided (`Site.hits`);
+* **runway** -- `pending` is trinitycore's alone, and only while the shipped
+  catalog installs no trinitycore entry.
 
 The scan reads the AST, not text: a docstring or comment naming `cmangos` is
-not a branch, and `getattr(native, "cmangos")` would still be missed -- nothing
-in `yulon/` spells one today, and the control test below is what keeps the
-scanner's own rules honest.
+not a branch. The control test below holds each spelling it must catch,
+including the ones a review of the first version found it missing.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from typing import get_args
 
 import pytest
 
-from yulon.catalog.catalog import NativeInstall
+from yulon.catalog.catalog import NativeInstall, load_catalog
 from yulon.catalog.families import FAMILIES, decisions
 from yulon.catalog.families.decisions import FAMILY_DECISIONS, Site
 
@@ -57,22 +57,39 @@ def _block_classes() -> frozenset[str]:
 FAMILY_CLASSES = _block_classes()
 
 
-def _names_a_family(node: ast.AST) -> bool:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value in FAMILY_NAMES
-    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        return any(_names_a_family(element) for element in node.elts)
-    return False
+def _is_family_name(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and (node.value in FAMILY_NAMES)
+    )
 
 
-def _names_a_family_class(node: ast.AST) -> bool:
-    elements = node.elts if isinstance(node, ast.Tuple) else [node]
-    for element in elements:
-        if isinstance(element, ast.Name) and element.id in FAMILY_CLASSES:
-            return True
-        if isinstance(element, ast.Attribute) and element.attr in FAMILY_CLASSES:
-            return True
-    return False
+def _class_named(node: ast.AST) -> str | None:
+    """The family class `node` names (`X` or `pkg.X`), or None."""
+    if isinstance(node, ast.Name) and node.id in FAMILY_CLASSES:
+        return node.id
+    if isinstance(node, ast.Attribute) and node.attr in FAMILY_CLASSES:
+        return node.attr
+    return None
+
+
+def _is_literal_type(node: ast.Subscript) -> bool:
+    value = node.value
+    return (isinstance(value, ast.Name) and value.id == "Literal") or (
+        isinstance(value, ast.Attribute) and value.attr == "Literal"
+    )
+
+
+def _is_family_value(node: ast.AST) -> bool:
+    """`x.family`: the value a branch would be taken on.
+
+    Not a bare `family` name: `party.deploy()` loops `for family in <dirs>` over
+    Lua folders and calls `family.glob()`, which is no server family. A bare
+    name copied from `.family` and then compared is still caught, by the
+    constant it is compared against.
+    """
+    return isinstance(node, ast.Attribute) and node.attr == "family"
 
 
 class _Scan(ast.NodeVisitor):
@@ -80,14 +97,30 @@ class _Scan(ast.NodeVisitor):
 
     `scope` is the qualified name of the def or class around the branch
     (`Class.method`), or `<module>` at the top level, so a site survives edits
-    that move its line.
+    that move its line. What counts, each with its `kind`:
+
+    * `'cmangos'` -- ANY string constant equal to a family's name, wherever it
+      stands: a compare, a `case`, a dict key, a subscript, `.get(…)`,
+      `getattr(…)`, a default, a module constant. Only a `Literal[…]` type is
+      exempt: it declares the names, it does not branch on one. A docstring is
+      never exactly a family's name, so prose cannot be a hit;
+    * `.cmangos` -- a family block's attribute;
+    * `cmangos=` -- a keyword argument named after a family (`dict(cmangos=…)`);
+    * `isinstance CmangosData` / `case CmangosData()` -- a test on a family's
+      block or engine class;
+    * `FAMILY` -- a load of a module-level name bound to a family's name, so a
+      branch through a constant is caught where it is taken, not only where the
+      constant is written;
+    * `.family.startswith()` -- a method called on a family value, which
+      branches on the name without spelling it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, aliases: frozenset[str]) -> None:
+        self.aliases = aliases
         self.stack: list[str] = []
         self.hits: list[tuple[str, int, str]] = []
 
-    def _hit(self, node: ast.expr | ast.pattern, kind: str) -> None:
+    def _hit(self, node: ast.expr | ast.pattern | ast.keyword, kind: str) -> None:
         self.hits.append((".".join(self.stack) or "<module>", node.lineno, kind))
 
     def _scoped(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
@@ -99,9 +132,13 @@ class _Scan(ast.NodeVisitor):
     visit_AsyncFunctionDef = _scoped
     visit_ClassDef = _scoped
 
-    def visit_Compare(self, node: ast.Compare) -> None:
-        if any(_names_a_family(side) for side in (node.left, *node.comparators)):
-            self._hit(node, "compare")
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if _is_family_name(node):
+            self._hit(node, repr(node.value))
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if _is_literal_type(node):
+            return
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -109,36 +146,64 @@ class _Scan(ast.NodeVisitor):
             self._hit(node, f".{node.attr}")
         self.generic_visit(node)
 
-    def visit_Dict(self, node: ast.Dict) -> None:
-        if any(key is not None and _names_a_family(key) for key in node.keys):
-            self._hit(node, "dict")
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load) and node.id in self.aliases:
+            self._hit(node, node.id)
+
+    def visit_keyword(self, node: ast.keyword) -> None:
+        if node.arg in FAMILY_NAMES:
+            self._hit(node, f"{node.arg}=")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
-        if (
-            isinstance(func, ast.Name)
-            and func.id in ("isinstance", "issubclass")
-            and len(node.args) == 2
-            and _names_a_family_class(node.args[1])
-        ):
-            self._hit(node, "isinstance")
+        if isinstance(func, ast.Name) and func.id in ("isinstance", "issubclass") and node.args:
+            tested = node.args[-1]
+            for element in tested.elts if isinstance(tested, ast.Tuple) else [tested]:
+                named = _class_named(element)
+                if named is not None:
+                    self._hit(node, f"isinstance {named}")
+        if isinstance(func, ast.Attribute) and _is_family_value(func.value):
+            self._hit(node, f".family.{func.attr}()")
         self.generic_visit(node)
 
-    def visit_MatchValue(self, node: ast.MatchValue) -> None:
-        if _names_a_family(node.value):
-            self._hit(node, "case")
+    def visit_MatchClass(self, node: ast.MatchClass) -> None:
+        named = _class_named(node.cls)
+        if named is not None:
+            self._hit(node, f"case {named}()")
         self.generic_visit(node)
+
+
+def _aliases(tree: ast.Module) -> frozenset[str]:
+    """Module-level names bound to a family's name (`FAMILY = "cmangos"`)."""
+    names: set[str] = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and _is_family_name(statement.value):
+            names.update(t.id for t in statement.targets if isinstance(t, ast.Name))
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and statement.value is not None
+            and _is_family_name(statement.value)
+            and isinstance(statement.target, ast.Name)
+        ):
+            names.add(statement.target.id)
+    return frozenset(names)
 
 
 def scan(source: str) -> dict[str, list[str]]:
-    """`scope -> ["<line><kind>", …]` for every family branch in `source`."""
-    visitor = _Scan()
-    visitor.visit(ast.parse(source))
+    """`scope -> ["<line> <kind>", …]` for every family branch in `source`."""
+    tree = ast.parse(source)
+    visitor = _Scan(_aliases(tree))
+    visitor.visit(tree)
     found: dict[str, list[str]] = defaultdict(list)
-    for scope, line, kind in visitor.hits:
-        found[scope].append(f"{line}{kind}")
+    for scope, line, kind in sorted(visitor.hits, key=lambda hit: (hit[1], hit[2])):
+        found[scope].append(f"{line} {kind}")
     return dict(found)
+
+
+def kinds(hits: list[str]) -> tuple[str, ...]:
+    """The kinds of a scope's hits, without their lines, sorted: what the registry pins."""
+    return tuple(sorted(hit.split(" ", 1)[1] for hit in hits))
 
 
 def _module_name(path: Path) -> str:
@@ -203,26 +268,62 @@ def test_every_decision_that_withholds_something_says_why(site: Site) -> None:
             assert decision.note.startswith("Task "), (site.module, site.scope, family)
 
 
-def test_pending_is_trinitycores_alone_and_only_while_the_flag_allows_it() -> None:
-    """`pending` is T179's runway, not a fourth way to decide nothing.
+def _shipped_families() -> set[str]:
+    return {
+        entry.install.native.family
+        for entry in load_catalog().games
+        if entry.install.native is not None
+    }
 
-    Allowed for `trinitycore` only, and only while `TRINITYCORE_PENDING` is
-    True; the flag is turned off at the end of T179 (Task 8), after which every
-    site must say `supported`, `not-available` or `not-applicable`. And the flag
-    may not outlive the runway: on with nothing pending is a flag nobody turned
-    off.
+
+def test_pending_is_allowed_today_because_no_shipped_entry_is_trinitycore() -> None:
+    """`pending` is T179's runway: trinitycore only, and only while nothing ships on it."""
+    assert "trinitycore" not in _shipped_families()
+    assert decisions.pending_problems(FAMILY_DECISIONS, _shipped_families()) == []
+
+
+def test_pending_cannot_ship_a_catalog_that_installs_the_family() -> None:
+    """The lead's ruling: no manual flag; the shipped catalog is what closes the runway.
+
+    The day an entry with `family: trinitycore` lands in `catalog.json`, every
+    site still `pending` for it turns this red -- a Centurion that installs
+    while a tab silently lacks its branch cannot be released. A synthetic site
+    rather than the registry's own, so the rule is proved even after the last
+    real `pending` is gone.
     """
-    pending = [
-        (site.module, site.scope, family)
-        for site in FAMILY_DECISIONS
-        for family, decision in site.decisions.items()
-        if decision.kind == "pending"
+    site = Site(
+        "yulon.example",
+        "somewhere",
+        "a branch still owed",
+        {
+            "azerothcore": decisions.supported(),
+            "cmangos": decisions.supported(),
+            "trinitycore": decisions.pending("Task 5 (somewhere)"),
+        },
+    )
+    shipped = _shipped_families() | {"trinitycore"}
+    problems = decisions.pending_problems((site,), shipped)
+    assert problems == [
+        "yulon.example:somewhere is still pending for trinitycore (Task 5 (somewhere)), "
+        "and the shipped catalog installs trinitycore"
     ]
-    assert all(family == "trinitycore" for _, _, family in pending), pending
-    if decisions.TRINITYCORE_PENDING:
-        assert pending, "TRINITYCORE_PENDING is on but no site is pending: turn it off"
-    else:
-        assert not pending, pending
+    assert decisions.pending_problems((site,), _shipped_families()) == []
+
+
+def test_pending_is_trinitycores_alone() -> None:
+    site = Site(
+        "yulon.example",
+        "elsewhere",
+        "a branch",
+        {
+            "azerothcore": decisions.supported(),
+            "cmangos": decisions.pending("Task 5"),
+            "trinitycore": decisions.supported(),
+        },
+    )
+    assert decisions.pending_problems((site,), set()) == [
+        "yulon.example:elsewhere is pending for cmangos; pending is trinitycore's alone"
+    ]
 
 
 def test_no_site_is_registered_twice() -> None:
@@ -261,6 +362,26 @@ def test_every_registered_scanned_site_still_branches_on_a_family() -> None:
 
 
 @pytest.mark.parametrize(
+    "site", [site for site in FAMILY_DECISIONS if site.scanned], ids=lambda site: site.scope
+)
+def test_each_scanned_site_pins_the_branches_it_was_decided_on(site: Site) -> None:
+    """A decision is about the branches a scope had when it was made.
+
+    One registered scope could otherwise hide any number of new branches: a
+    second `if family == …` added inside `reset_defaults.core_files` is in a
+    site that is already "decided". Pinning the kinds of every hit -- not the
+    lines, which move with any edit above them -- turns that addition (or a
+    removal) red here, and the fix is to look at the decisions again and
+    update `hits`.
+    """
+    found = scanned_sites().get((site.module, site.scope), [])
+    assert kinds(found) == site.hits, (
+        f"{site.module}:{site.scope} now branches as {kinds(found)}, decided on "
+        f"{site.hits}: re-decide each family there, then update `hits`"
+    )
+
+
+@pytest.mark.parametrize(
     "site", [site for site in FAMILY_DECISIONS if not site.scanned], ids=lambda site: site.scope
 )
 def test_a_site_the_scan_cannot_see_still_exists_and_is_not_one_it_can(site: Site) -> None:
@@ -278,43 +399,81 @@ def test_a_site_the_scan_cannot_see_still_exists_and_is_not_one_it_can(site: Sit
 
 
 def test_the_scan_finds_each_kind_of_branch_and_nothing_in_prose() -> None:
-    """Green above must mean "registered", not "the scanner saw nothing"."""
-    family, other = sorted(FAMILY_NAMES)[:2]
-    block_class = sorted(FAMILY_CLASSES)[0]
-    source = (
-        f'"""A docstring naming {family} and .{other}."""\n'
-        "# a comment naming x.{family}\n"
-        "def compare(native):\n"
-        f"    return native.family == {family!r}\n"
-        "def membership(native):\n"
-        f"    return native.family not in ({family!r}, {other!r})\n"
-        "def block(native):\n"
-        f"    return native.{other}\n"
-        "def table():\n"
-        f"    return {{{family!r}: 1}}\n"
-        "class Engine:\n"
-        "    def check(self, engine):\n"
-        f"        return isinstance(engine, {block_class})\n"
-        "def matched(native):\n"
-        "    match native.family:\n"
-        f"        case {family!r}:\n"
-        "            return 1\n"
-        "def clean(native):\n"
-        "    return native.family == 'something else'\n"
-    )
-    found = scan(source)
-    assert set(found) == {
-        "compare",
-        "membership",
-        "block",
-        "table",
-        "Engine.check",
-        "matched",
+    """Green above must mean "registered", not "the scanner saw nothing".
+
+    One function per spelling of a branch, including the ones the first
+    version of the scan missed (review of 669246f5): a constant alias,
+    `getattr`, a subscript, `.get`, a method on `.family`, a `case` alternative,
+    a `case` on a block class, a lambda, a set, a keyword argument. Each is
+    expected by name, so a rule that stopped firing fails here, not as a green
+    scan of `yulon/`.
+    """
+    fam, other = sorted(FAMILY_NAMES)[:2]
+    block = sorted(FAMILY_CLASSES)[0]
+    source = f'''"""A docstring naming {fam} and .{other}."""
+# a comment naming x.{fam}
+from typing import Literal
+ALIAS = {fam!r}
+Kind = Literal[{fam!r}, {other!r}]
+def compare(n):
+    return n.family == {fam!r}
+def membership(n):
+    return n.family not in ({fam!r}, {other!r})
+def block(n):
+    return n.{other}
+def table():
+    return {{{fam!r}: 1}}
+class Engine:
+    def check(self, engine):
+        return isinstance(engine, {block})
+def matched(n):
+    match n.family:
+        case "x" | {fam!r}:
+            return 1
+def via_alias(n):
+    return n.family == ALIAS
+def via_getattr(n):
+    return getattr(n, {other!r})
+def via_subscript(table):
+    return table[{fam!r}]
+def via_get(table):
+    return table.get({fam!r})
+def via_method(n):
+    return n.family.startswith("x")
+def via_match_class(b):
+    match b:
+        case {block}():
+            return 1
+def via_lambda():
+    return lambda n: n.family == {fam!r}
+def via_set(n):
+    return n.family in {{{fam!r}}}
+def via_keyword(n):
+    return dict({fam}=1)[n.family]
+def annotated(x: Literal[{fam!r}]) -> None:
+    pass
+def clean(n, family):
+    return n.family == "something else" and family.glob("*.lua")
+'''
+    found = {scope: kinds(hits) for scope, hits in scan(source).items()}
+    assert found == {
+        "<module>": (repr(fam),),
+        "compare": (repr(fam),),
+        "membership": tuple(sorted((repr(fam), repr(other)))),
+        "block": (f".{other}",),
+        "table": (repr(fam),),
+        "Engine.check": (f"isinstance {block}",),
+        "matched": (repr(fam),),
+        "via_alias": ("ALIAS",),
+        "via_getattr": (repr(other),),
+        "via_subscript": (repr(fam),),
+        "via_get": (repr(fam),),
+        "via_method": (".family.startswith()",),
+        "via_match_class": (f"case {block}()",),
+        "via_lambda": (repr(fam),),
+        "via_set": (repr(fam),),
+        "via_keyword": (f"{fam}=",),
     }, found
-    assert found["compare"] == ["4compare"]
-    assert found["block"] == [f"8.{other}"]
-    assert found["Engine.check"] == ["13isinstance"]
-    assert found["matched"] == ["16case"]
 
 
 def test_the_scan_over_yulon_finds_the_branches_known_today() -> None:

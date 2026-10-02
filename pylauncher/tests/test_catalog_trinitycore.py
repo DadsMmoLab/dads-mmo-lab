@@ -232,6 +232,17 @@ def test_a_sparse_exclusion_outside_the_checkout_is_refused(path: str) -> None:
         NativeInstall.model_validate(_native(sparse_exclude=[path]))
 
 
+@pytest.mark.parametrize("path", ["!keep", "#note", "tools/*", "a?b", "[ab]"])
+def test_a_sparse_exclusion_holding_a_pattern_character_is_refused(path: str) -> None:
+    """Git reads these as sparse-checkout pattern syntax, so they are refused, not escaped.
+
+    A space stays allowed: `playerbot reference` is the very path Centurion
+    leaves out.
+    """
+    with pytest.raises(ValidationError, match="sparse_exclude holds a git pattern character"):
+        NativeInstall.model_validate(_native(sparse_exclude=[path]))
+
+
 @pytest.mark.parametrize("path", ["/centurion/dbc", "../dbc", "centurion/../../dbc", "."])
 def test_a_dbc_overlay_outside_the_checkout_is_refused(path: str) -> None:
     with pytest.raises(ValidationError, match="dbc_overlay_from must be a relative POSIX path"):
@@ -285,11 +296,33 @@ def test_the_database_updater_must_be_off_when_the_table_names_it(value: str) ->
         NativeInstall.model_validate(_native(conf__files=files))
 
 
-def test_a_table_that_does_not_name_the_updater_is_not_refused_for_it() -> None:
-    """authserver.conf ships 0 already (facts §4), so the rule binds only where it is named."""
+def test_the_world_conf_must_switch_the_updater_off() -> None:
+    """Absent is not off: the world conf's shipped value is 7 (worldserver.conf.dist:1470).
+
+    So the table that writes the world conf must say 0 itself; leaving the key
+    out leaves the `.dist`'s 7, and the worldserver replays stock updates over
+    the snapshot or shuts down (facts §2).
+    """
     files = copy.deepcopy(TRINITYCORE["conf"]["files"])
     del files["worldserver.conf"]["keys"]["Updates.EnableDatabases"]
-    assert NativeInstall.model_validate(_native(conf__files=files)).trinitycore is not None
+    with pytest.raises(ValidationError, match="must set Updates.EnableDatabases to 0"):
+        NativeInstall.model_validate(_native(conf__files=files))
+
+
+def test_the_world_conf_is_the_one_the_table_names() -> None:
+    with pytest.raises(ValidationError, match="world_conf 'world.conf' is not one of"):
+        NativeInstall.model_validate(_native(conf__world_conf="world.conf"))
+
+
+def test_the_auth_conf_may_leave_the_updater_out() -> None:
+    """authserver.conf.dist:258 already ships 0 (facts §4), so only a value there is checked."""
+    files = copy.deepcopy(TRINITYCORE["conf"]["files"])
+    assert "Updates.EnableDatabases" not in files["authserver.conf"]["keys"]
+    block = NativeInstall.model_validate(_native(conf__files=files)).trinitycore
+    assert block is not None and block.conf.world_conf == "worldserver.conf"
+    files["authserver.conf"]["keys"]["Updates.EnableDatabases"] = "7"
+    with pytest.raises(ValidationError, match="authserver.conf: Updates.EnableDatabases must be 0"):
+        NativeInstall.model_validate(_native(conf__files=files))
 
 
 @pytest.mark.parametrize("name", ["modules/playerbots.conf", "../playerbots.conf", ""])
@@ -329,6 +362,23 @@ def test_the_checkout_must_be_a_source_the_entry_clones() -> None:
     native = _native(checkout="src/other")
     with pytest.raises(ValidationError, match="'src/other', which is not a dest"):
         parse_catalog({"schema_version": 1, "games": [_entry(native)]})
+
+
+@pytest.mark.parametrize("scheme", ["azerothcore", "mangos_srp6", "mangos_sha"])
+def test_a_trinitycore_entry_cannot_take_another_cores_account_scheme(scheme: str) -> None:
+    """`Accounts.scheme` defaults to azerothcore, which a Centurion entry must not inherit.
+
+    AzerothCore's `account_access(id, gmlevel)` is not TrinityCore's
+    `account_access(AccountID, SecurityLevel)` (facts §5): an entry that forgot
+    its `accounts` block would write rows that look right and grant nothing.
+    """
+    with pytest.raises(ValidationError, match="a trinitycore entry's accounts.scheme"):
+        parse_catalog({"schema_version": 1, "games": [_entry(accounts={"scheme": scheme})]})
+
+
+def test_a_trinitycore_entry_may_declare_no_scheme() -> None:
+    entry = parse_catalog({"schema_version": 1, "games": [_entry(accounts={"scheme": None})]})
+    assert entry.get("wow-example").accounts.scheme is None
 
 
 def test_a_rename_must_land_on_one_of_the_entrys_own_schemas() -> None:

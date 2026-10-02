@@ -14,15 +14,20 @@ family in `NativeInstall.family`, one of
   another family's engine, reads another family's block, or the family keeps the
   same fact somewhere else), so there is nothing to offer or withhold;
 * `pending: Task N` -- `trinitycore` only, while T179 is being built: the site
-  will serve it, in the plan task named. `TRINITYCORE_PENDING` turns that
-  allowance off at the end of T179 (Task 8).
+  will serve it, in the plan task named. Allowed only while no entry of the
+  shipped catalog has `family: trinitycore` (`pending_problems()`), so a
+  Centurion entry cannot ship while any site still owes it a branch.
 
 `tests/test_family_decisions.py` holds it: every site decides every family, and an
-AST scan of `yulon/` finds every family branch -- a compare against a family's
-name, a family block's attribute, a dict keyed by family names, an isinstance on
-a family's class, a `case` on a family's name -- and fails for one that is not a
-site here. A few sites branch on an id or a data field the scan cannot see; they
-are listed with `scanned=False`, and the test keeps their scopes from rotting.
+AST scan of `yulon/` finds every family branch -- any string constant equal to a
+family's name outside a `Literal[...]` type, a family block's attribute, a keyword
+named after a family, an isinstance or `case` on a family's class, a load of a
+module constant bound to a family's name, a method called on `.family` -- and
+fails for one that is not a site here. Each scanned site pins the kinds of the
+hits it was decided on (`hits`), so a branch added inside a registered scope is
+red until somebody decides it. A few sites branch on an id or a data field the
+scan cannot see; they are listed with `scanned=False`, and the test keeps their
+scopes from rotting.
 
 A site is a scope -- `module` and the qualified name of the def or class holding
 the branch (`<module>` for a top-level one) -- not a line, so it survives edits.
@@ -31,14 +36,14 @@ Data only: no import of the code it describes.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
 Kind = Literal["supported", "not-available", "not-applicable", "pending"]
 
-TRINITYCORE_PENDING = True
-"""Whether `pending` is still accepted for `trinitycore`. Turned off at the end of T179."""
+PENDING_FAMILY = "trinitycore"
+"""The one family `pending` is allowed for: T179's, while it is being built."""
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,33 @@ class Site:
     scope: str
     what: str
     decisions: Mapping[str, Decision] = field(default_factory=dict)
+    hits: tuple[str, ...] = ()
+    """The sorted kinds of the scan's hits in this scope when it was decided."""
     scanned: bool = True
+
+
+def pending_problems(sites: Iterable[Site], shipped_families: Collection[str]) -> list[str]:
+    """Every `pending` decision the rules refuse, as a sentence; empty when there is none.
+
+    `pending` is `PENDING_FAMILY`'s alone, and only while `shipped_families` --
+    the families of the entries in the shipped catalog -- does not include it.
+    """
+    problems: list[str] = []
+    for site in sites:
+        for family, decision in site.decisions.items():
+            if decision.kind != "pending":
+                continue
+            where = f"{site.module}:{site.scope}"
+            if family != PENDING_FAMILY:
+                problems.append(
+                    f"{where} is pending for {family}; pending is {PENDING_FAMILY}'s alone"
+                )
+            elif family in shipped_families:
+                problems.append(
+                    f"{where} is still pending for {family} ({decision.note}), "
+                    f"and the shipped catalog installs {family}"
+                )
+    return problems
 
 
 _NOT_THE_ENGINE = "never reached: this is inside the CMaNGOS engine, which only its own entries run"
@@ -81,6 +112,8 @@ _CMANGOS_CONTROLLER = "never reached: only this CMaNGOS game's own controller pa
 _NO_SQL_PLAN = "AzerothCore's own database updater applies its updates; its block has no SQL plan"
 _NO_CONF_TABLE = "AzerothCore's confs are made by its image from their .dist; it has no conf table"
 _COUNT_IN_CONF = "this family's random-bot count is in a conf file, not the override's environment"
+_WOTLK_DEFAULTS = "WotLK's Reset to default does not read its image: its defaults are not there"
+_COSMETIC = "cosmetic: a game without its own entry here gets the generic fallback"
 _PARTY_REASON = "My Party needs AzerothCore's Lua bridge; it is WotLK-only."
 _DASHBOARD_REASON = (
     "The bot dashboard belongs to the Tortoise bot module, which this server does not run."
@@ -106,12 +139,27 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "NativeInstall._exactly_the_family_block",
         "family names exactly its block; the extract image is a built one",
         _all(supported()),
+        hits=(
+            "'azerothcore'",
+            "'cmangos'",
+            "'cmangos'",
+            "'trinitycore'",
+            "'trinitycore'",
+            ".azerothcore",
+            ".cmangos",
+            ".cmangos",
+            ".cmangos",
+            ".trinitycore",
+            ".trinitycore",
+            ".trinitycore",
+        ),
     ),
     Site(
         "yulon.catalog.catalog",
         "CatalogEntry._every_patch_names_a_source_this_entry_clones",
         "a CMaNGOS source patch names a cloned dest",
         _cmangos_only("this family's block carries no source patches"),
+        hits=(".cmangos",),
     ),
     Site(
         "yulon.catalog.catalog",
@@ -122,6 +170,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": not_applicable("only a trinitycore block has a checkout and renames"),
             "trinitycore": supported(),
         },
+        hits=("'trinitycore'", ".trinitycore"),
     ),
     # -- engine dispatch ---------------------------------------------------------------
     Site(
@@ -133,6 +182,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 3 (TrinityCoreInstaller)"),
         },
+        hits=("'azerothcore'", "'cmangos'"),
     ),
     Site(
         "yulon.catalog.families.azerothcore",
@@ -145,12 +195,14 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "TrinityCore writes its confs, playerbots.conf included, from its conf table"
             ),
         },
+        hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
         "yulon.catalog.families.cmangos",
         "CmangosInstaller._data",
         "the CMaNGOS engine reads its own block",
         _cmangos_only(_NOT_THE_ENGINE),
+        hits=(".cmangos",),
     ),
     # -- the install spine ---------------------------------------------------------------
     Site(
@@ -158,28 +210,32 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "no_rollback_confirmation",
         "the rebuild confirmation names Reset to default where it reads the image",
         {
-            "azerothcore": supported("WotLK's defaults are not in its image"),
+            "azerothcore": not_applicable(_WOTLK_DEFAULTS),
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Reset to default from the image's .dist)"),
         },
+        hits=("'cmangos'",),
     ),
     Site(
         "yulon.catalog.native",
         "update_phases",
         "the SQL phases an update of the server to its latest code applies",
         _cmangos_only(_NO_SQL_PLAN, pending("Task 6 (world tables re-import route)")),
+        hits=(".cmangos",),
     ),
     Site(
         "yulon.catalog.native",
         "correction_phases",
         "the SQL phases Apply database corrections offers (T129)",
         _cmangos_only(_NO_SQL_PLAN, pending("Task 6 (world tables re-import route)")),
+        hits=(".cmangos",),
     ),
     Site(
         "yulon.catalog.native",
         "StagedInstaller._conf_edits",
         "folder settings a compose repair sets in the confs (T169)",
         _cmangos_only(_NO_CONF_TABLE, pending("Task 3 (conf stage: DataDir, LogsDir)")),
+        hits=(".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.catalog.native",
@@ -213,6 +269,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
             "trinitycore": pending("Task 2 (TrinityCore compose templates)"),
         },
+        hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
         "yulon.catalog.composegen",
@@ -223,24 +280,28 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 2 (TrinityCore Dockerfile and compose tokens)"),
         },
+        hits=(".cmangos", ".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.catalog.composegen",
         "folder_target",
         "where a conf's *Dir value lands in the container",
         _cmangos_only(_NO_CONF_TABLE, pending("Task 2 (DataDir/LogsDir binds)")),
+        hits=(".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.catalog.composegen",
         "folder_settings",
         "the folder settings a conf table states, and their binds (T169)",
         _cmangos_only(_NO_CONF_TABLE, pending("Task 2 (DataDir/LogsDir binds)")),
+        hits=(".cmangos", ".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.catalog.composegen",
         "conf_texts",
         "the conf texts render() reads for folder settings",
         _cmangos_only(_NO_CONF_TABLE, pending("Task 2 (DataDir/LogsDir binds)")),
+        hits=(".cmangos", ".cmangos"),
     ),
     # -- preflight -----------------------------------------------------------------------
     Site(
@@ -251,6 +312,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "AzerothCore downloads its client data; it reads no client folder",
             pending("Task 3 (the temporary extraction client)"),
         ),
+        hits=(".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.catalog.preflight",
@@ -261,6 +323,38 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 2 (TrinityCore Dockerfile make_jobs)"),
         },
+        hits=(".cmangos", ".cmangos"),
+    ),
+    Site(
+        "yulon.catalog.families.azerothcore",
+        "AzerothCoreInstaller",
+        "the AzerothCore engine's own `family` name",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_applicable("the name the AzerothCore engine answers to"),
+            "trinitycore": not_applicable("the name the AzerothCore engine answers to"),
+        },
+        hits=("'azerothcore'",),
+    ),
+    Site(
+        "yulon.catalog.families.cmangos",
+        "CmangosInstaller",
+        "the CMaNGOS engine's own `family` name",
+        _cmangos_only("the name the CMaNGOS engine answers to"),
+        hits=("'cmangos'",),
+    ),
+    Site(
+        "yulon.catalog.catalog",
+        "Accounts",
+        "`accounts.scheme` defaults to AzerothCore's",
+        {
+            "azerothcore": supported("the default is its scheme"),
+            "cmangos": supported("its entries declare mangos_srp6 / mangos_sha"),
+            "trinitycore": supported(
+                "CatalogEntry refuses any scheme but trinitycore or null on its entries"
+            ),
+        },
+        hits=("'azerothcore'",),
     ),
     # -- tabs and their seams -------------------------------------------------------------
     Site(
@@ -272,6 +366,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Tuning: time zone)"),
         },
+        hits=("'azerothcore'", "'cmangos'"),
     ),
     Site(
         "yulon.catalog.time_zone",
@@ -282,6 +377,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Tuning: time zone)"),
         },
+        hits=("'cmangos'",),
     ),
     Site(
         "yulon.catalog.bot_count",
@@ -292,6 +388,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": not_applicable(_COUNT_IN_CONF),
             "trinitycore": not_applicable(_COUNT_IN_CONF + " (playerbots.conf)"),
         },
+        hits=(".azerothcore",),
     ),
     Site(
         "yulon.catalog.bot_dashboard",
@@ -302,6 +399,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported("where the entry's table names the switch: Tortoise"),
             "trinitycore": not_available(_DASHBOARD_REASON),
         },
+        hits=(".cmangos",),
     ),
     Site(
         "yulon.bot_population",
@@ -312,6 +410,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Bots: count in playerbots.conf)"),
         },
+        hits=("'azerothcore'", "'cmangos'", ".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.bot_population",
@@ -321,6 +420,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "AzerothCore's count is in the override's environment",
             pending("Task 5 (Bots: count in playerbots.conf)"),
         ),
+        hits=(".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.channel_setup",
@@ -333,6 +433,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "TrinityCore enables SOAP in its world server conf (operations.enable_conf)"
             ),
         },
+        hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
         "yulon.install_wiring",
@@ -343,6 +444,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Server tab: Repair server files)"),
         },
+        hits=("'azerothcore'", "'cmangos'"),
     ),
     Site(
         "yulon.install_wiring",
@@ -382,6 +484,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Tuning: Reset to default)"),
         },
+        hits=("'azerothcore'", "'cmangos'", ".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.reset_defaults",
@@ -392,21 +495,21 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Tuning: Reset to default)"),
         },
+        hits=("'azerothcore'", "'cmangos'"),
     ),
     Site(
         "yulon.reset_defaults",
         "_from_image",
         "defaults read from the server image",
-        _cmangos_only(
-            "WotLK's defaults are not in its image",
-            pending("Task 5 (Reset to default from the image's .dist)"),
-        ),
+        _cmangos_only(_WOTLK_DEFAULTS, pending("Task 5 (Reset to default from the image's .dist)")),
+        hits=("isinstance CmangosInstaller",),
     ),
     Site(
         "yulon.reset_defaults",
         "install_keys",
         "the keys the install table writes, which win over a carry-over",
         _cmangos_only(_NO_CONF_TABLE, pending("Task 5 (Tuning: Reset to default)")),
+        hits=(".cmangos", ".cmangos"),
     ),
     Site(
         "yulon.reset_defaults",
@@ -417,6 +520,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported(),
             "trinitycore": pending("Task 5 (Tuning: Reset to default)"),
         },
+        hits=("'cmangos'",),
     ),
     Site(
         "yulon.party",
@@ -439,6 +543,18 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported("mangos_srp6 / mangos_sha"),
             "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
         },
+        hits=("'azerothcore'", "'azerothcore'", "'trinitycore'"),
+    ),
+    Site(
+        "yulon.controller_wow_wotlk.accounts",
+        "create_account",
+        "create_account's default scheme, for callers that pass none",
+        {
+            "azerothcore": supported("the default is its scheme"),
+            "cmangos": supported("its callers pass the entry's scheme"),
+            "trinitycore": pending("Task 5 (the Centurion controller passes its scheme)"),
+        },
+        hits=("'azerothcore'",),
     ),
     Site(
         "yulon.controller_wow_wotlk.accounts",
@@ -449,6 +565,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported("mangos_srp6 / mangos_sha"),
             "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
         },
+        hits=("'azerothcore'", "'trinitycore'"),
     ),
     Site(
         "yulon.controller_wow_wotlk.accounts",
@@ -459,6 +576,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported("mangos_srp6 / mangos_sha"),
             "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
         },
+        hits=("'azerothcore'", "'trinitycore'"),
     ),
     Site(
         "yulon.controller_wow_wotlk.accounts",
@@ -469,6 +587,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "cmangos": supported("mangos_srp6 / mangos_sha"),
             "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
         },
+        hits=("'azerothcore'", "'trinitycore'"),
     ),
     # -- per-game controller packages that read their CMaNGOS block ---------------------
     Site(
@@ -476,24 +595,35 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "<module>",
         "the TBC controller binds its CMaNGOS block",
         _cmangos_only(_CMANGOS_CONTROLLER),
+        hits=(".cmangos",),
+    ),
+    Site(
+        "yulon.controller_wow_tortoise.game",
+        "<module>",
+        "the Tortoise controller's FAMILY constant",
+        _cmangos_only(_CMANGOS_CONTROLLER),
+        hits=("'cmangos'",),
     ),
     Site(
         "yulon.controller_wow_vanilla.repair",
         "sql_plan",
         "the Vanilla controller's SQL plan",
         _cmangos_only(_CMANGOS_CONTROLLER),
+        hits=(".cmangos",),
     ),
     Site(
         "yulon.controller_wow_tortoise.game",
         "cmangos",
         "the Tortoise controller's CMaNGOS block",
         _cmangos_only(_CMANGOS_CONTROLLER),
+        hits=(".cmangos", "FAMILY", "FAMILY", "FAMILY", "FAMILY"),
     ),
     Site(
         "yulon.controller_wow_tortoise.poolreset",
         "_with_value",
         "the Tortoise pool reset's bot conf table",
         _cmangos_only(_CMANGOS_CONTROLLER),
+        hits=(".cmangos",),
     ),
     # -- the UI's per-game tables (keyed on the entry id) ---------------------------------
     Site(
@@ -510,11 +640,57 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     Site(
         "yulon.ui.catalog_view",
         "_CAMPAIGN_GLYPHS",
-        "the catalog tile's glyph and subtitle per game (with a fallback)",
+        "the catalog tile's glyph per game id (with a fallback)",
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": pending("Task 5 (catalog glyph and subtitle)"),
+            "trinitycore": not_applicable(_COSMETIC),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.ui.catalog_view",
+        "_CAMPAIGN_SUBTITLES",
+        "the catalog tile's subtitle per game id (with a fallback)",
+        {
+            "azerothcore": supported(),
+            "cmangos": supported(),
+            "trinitycore": not_applicable(_COSMETIC),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.ui.widgets.dadcraft_decorations",
+        "DadcraftCampaignCard",
+        "the campaign card's particles and art per game id (with a plain fallback)",
+        {
+            "azerothcore": supported(),
+            "cmangos": supported("TBC and Vanilla; Tortoise draws the plain card"),
+            "trinitycore": not_applicable(_COSMETIC),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.controller",
+        "Controller.wait_ready",
+        "the base controller's ready check, which defaults to AzerothCore's log markers",
+        {
+            "azerothcore": supported(),
+            "cmangos": supported("each CMaNGOS controller overrides it from native.ready"),
+            "trinitycore": pending("Task 5 (the Centurion controller reads native.ready)"),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.catalog.native",
+        "StagedInstaller.adopt_gate",
+        "adopting an install this app did not make (T19): the marker gate",
+        {
+            "azerothcore": not_applicable(
+                "AzerothCore imports through a compose one-shot and writes no marker to adopt"
+            ),
+            "cmangos": supported("CmangosInstaller overrides it with its import gate"),
+            "trinitycore": pending("Task 3 (the marker-gated import's adopt gate)"),
         },
         scanned=False,
     ),

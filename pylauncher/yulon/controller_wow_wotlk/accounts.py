@@ -216,7 +216,24 @@ def _unknown_scheme(scheme: str, what: str, done: str = "nothing was written") -
     )
 
 
-def _trinitycore_not_yet(what: str, done: str = "nothing was written") -> AccountError:
+_TRINITYCORE_CONSOLE = {
+    "create": "Use the worldserver console: account create <name> <password>.",
+    "re-password": (
+        "Use the worldserver console: account set password <name> <password> <password>."
+    ),
+    "grant": "Use the worldserver console: account set gmlevel <name> <level> -1.",
+    "read": "Look the account up at the worldserver console instead.",
+}
+"""What a player types instead, per dispatch: TrinityCore's own commands
+(cs_account.cpp; `account set gmlevel <name> 3 -1`, README.md:230-233, facts §5).
+Here rather than from `entry.accounts.console_command`: these functions are
+handed a scheme, not an entry, and the one entry-wide command names creation
+only."""
+
+
+def _trinitycore_not_yet(
+    what: str, dispatch: str, done: str = "nothing was written"
+) -> AccountError:
     """The refusal every dispatch gives `trinitycore` until its statements exist (T179).
 
     Not `_unknown_scheme()`: that one says the scheme is not known and then
@@ -225,8 +242,8 @@ def _trinitycore_not_yet(what: str, done: str = "nothing was written") -> Accoun
     a guessed row is one that looks right and can never log in.
     """
     return AccountError(
-        f"this app does not yet {what} on a TrinityCore server, so {done}. Use the "
-        "worldserver console: account create <name> <password>."
+        f"This app does not yet {what} on a TrinityCore server, so {done}. "
+        f"{_TRINITYCORE_CONSOLE[dispatch]}"
     )
 
 
@@ -546,7 +563,7 @@ def reset_own_password(
         salt, verifier = registration_data(name, password)
         columns = f"salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)}"
     elif scheme == "trinitycore":
-        raise _trinitycore_not_yet("change an account's password")
+        raise _trinitycore_not_yet("change an account's password", "re-password")
     else:
         # Named, not defaulted. See this function's `Raises:` block: the branch
         # this replaces wrote AzerothCore's columns for every scheme it did not
@@ -650,7 +667,7 @@ def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
             f" {EXPANSION}, '', '', NOW())"
         )
     if scheme == "trinitycore":
-        raise _trinitycore_not_yet("write an account row")
+        raise _trinitycore_not_yet("write an account row", "create")
     raise _unknown_scheme(scheme, "write an account row for")
 
 
@@ -701,7 +718,7 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> N
         )
         return
     if scheme == "trinitycore":
-        raise _trinitycore_not_yet("grant a GM level")
+        raise _trinitycore_not_yet("grant a GM level", "grant")
     # `account_access` is AzerothCore's table alone, so it is a branch and not a
     # destination for everything unrecognised (T12).
     raise _unknown_scheme(scheme, "grant a GM level on")
@@ -763,7 +780,7 @@ def _gm_level(sql: SqlSeam, account_id: int, scheme: Scheme) -> int:
         level = _one_int(rows, f"read the GM level of account {account_id}")
         return NO_GM if level is None else level
     if scheme == "trinitycore":
-        raise _trinitycore_not_yet("read a GM level", "nothing was read")
+        raise _trinitycore_not_yet("read a GM level", "read", "nothing was read")
     # The read half of the same dispatch. Its refusal says "read" rather than
     # "written": no write was in question here, and a sentence claiming one
     # sends the reader looking for a row that was never attempted (T12).
