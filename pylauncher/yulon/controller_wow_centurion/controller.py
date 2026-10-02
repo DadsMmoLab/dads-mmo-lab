@@ -29,6 +29,9 @@ from yulon.controller_wow_centurion import docker_ctl
 class CenturionController(Controller):
     """Lifecycle controller for one TrinityCore (Centurion) install."""
 
+    entry: CatalogEntry
+    """Always set here, so narrower than the base's `CatalogEntry | None`."""
+
     def __init__(
         self,
         entry: CatalogEntry,
@@ -45,7 +48,6 @@ class CenturionController(Controller):
             pre_stop=pre_stop,
         )
         self.entry = entry
-        self._own_entry = entry
 
     def wait_ready(self, realm_host: str = "", realm_port: int = 0, **kwargs: float) -> bool:
         """Poll until the worldserver has printed the entry's ready line.
@@ -54,4 +56,4 @@ class CenturionController(Controller):
         AzerothCore's auth marker, and this entry names its own markers.
         """
         del realm_host, realm_port
-        return docker_ctl.wait_server_ready(self._own_entry, wsl_distro=self.wsl_distro, **kwargs)
+        return docker_ctl.wait_server_ready(self.entry, wsl_distro=self.wsl_distro, **kwargs)

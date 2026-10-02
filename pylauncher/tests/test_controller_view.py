@@ -5545,8 +5545,16 @@ def test_a_game_with_no_party_route_says_why_rather_than_showing_a_dead_panel(
     )
 
     assert view.party_panel is None
-    assert "WotLK server only" in view.my_party_absent.text()
-    assert view.my_party_absent.text() == decisions.PARTY_REASON
+    # The shipped games keep the wording they had before T179 (lead ruling, T179
+    # Task 5 fix round 1); only a trinitycore tab says the registry's note.
+    assert view.my_party_absent.text() == (
+        "Building a bot party from the launcher works on WoW WotLK only (owner decision, "
+        "2026-09-06). The route is a pair of AzerothCore modules — the mod-ale Lua bridge, "
+        "and mod-playerbots' own addclass — so WoW TBC would need a route of its own before "
+        "there could be a control here. One that sent these commands at it would be a "
+        "button that cannot work."
+    )
+    assert view.my_party_absent.text() != decisions.PARTY_REASON
 
 
 def test_a_finished_party_press_re_reads_the_bot_list(

@@ -569,6 +569,33 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         hits=("isinstance CmangosInstaller",),
     ),
     Site(
+        "yulon.reset_defaults",
+        "read_only_confs",
+        "the server's own confs the Tuning raw editor lists read-only (T43, T179 fix round 1)",
+        {
+            "azerothcore": supported("its three confs, `AZEROTHCORE_CORE_FILES`"),
+            "cmangos": supported(
+                "as before T179: handed WotLK's paths, which its install never has, so its raw "
+                "editor lists module confs only"
+            ),
+            "trinitycore": supported(
+                "the world and login servers' confs (spec §2); its bot conf is the bot card's"
+            ),
+        },
+        hits=(".trinitycore", ".trinitycore"),
+    ),
+    Site(
+        "yulon.ui.controller_view",
+        "_no_my_party",
+        "which sentence the My Party group says where there is no route (T179 fix round 1)",
+        {
+            "azerothcore": not_applicable("it has My Party; the sentence is never drawn"),
+            "cmangos": supported("its wording from before T179, unchanged (lead ruling)"),
+            "trinitycore": supported("the registry's own note, `PARTY_REASON`"),
+        },
+        hits=("'trinitycore'",),
+    ),
+    Site(
         "yulon.party",
         "InstallParty.for_entry_is_possible",
         "whether My Party is offered (keyed on the entry id)",

@@ -567,13 +567,14 @@ def _app_window(qapp: object) -> Iterator[Any]:
     from yulon.ui.widgets.update_bar import UpdateBar
 
     bar_said: list[str] = []
-    real_show = UpdateBar.show_message
 
-    def _show(self: Any, text: str, *, keep_details: bool = False) -> None:
+    def _offer(self: Any, text: str) -> None:
+        # Recorded, not shown: the window is shared, and a notice on the bar (or one
+        # waiting to be shown when it clears) would change what the update tests read.
+        # `test_update_bar_notice.py` holds what the bar does with it.
         bar_said.append(text)
-        real_show(self, text, keep_details=keep_details)
 
-    monkeypatch.setattr(UpdateBar, "show_message", _show)
+    monkeypatch.setattr(UpdateBar, "offer_notice", _offer)
 
     window = main.build_window()
     window.swept = swept
@@ -4534,3 +4535,23 @@ def test_a_copy_that_stays_is_logged_and_said_in_one_line(
     assert "temporary" in notice and "next time" in notice
     assert (foreign / "keep.txt").is_file(), "a folder that is not ours was touched"
     assert any(str(foreign) in record.getMessage() for record in caplog.records)
+
+    # Fix round 1 (M1): said once per folder, not at every start; the log still says it.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="main"):
+        assert _REAL_SWEEP(config_dir=tmp_path) is None
+    assert any(str(foreign) in record.getMessage() for record in caplog.records)
+    from yulon import ui_settings
+
+    remembered = ui_settings.load_ui_settings(ui_settings.ui_settings_path(tmp_path))
+    assert remembered.noticed_leftovers == [str(foreign)]
+
+    # A second folder left is new: one notice, for it.
+    other = tmp_path / "WoW 2 (Yu'lon map data, temporary)"
+    other.mkdir()
+    (other / "keep.txt").write_text("not Yu'lon's either", encoding="utf-8")
+    listed = json.loads((tmp_path / trinitycore.LEFTOVERS_FILE).read_text(encoding="utf-8"))
+    listed.append({"target": str(other), "game": "wow-centurion", "server_dir": str(tmp_path)})
+    (tmp_path / trinitycore.LEFTOVERS_FILE).write_text(json.dumps(listed), encoding="utf-8")
+    notice = _REAL_SWEEP(config_dir=tmp_path)
+    assert notice is not None and "a temporary copy of a game client" in notice

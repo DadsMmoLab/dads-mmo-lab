@@ -947,10 +947,10 @@ def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None
     return left.for_uninstall()
 
 
-def recorded_leftover_count(*, config_dir: Path | None = None) -> int | None:
-    """How many temporary client copies are still noted for removal; `None` if unreadable."""
+def recorded_leftover_targets(*, config_dir: Path | None = None) -> list[str] | None:
+    """The temporary client copies still noted for removal; `None` if the list is unreadable."""
     try:
-        return len(_read_leftovers(_leftovers_path(config_dir)))
+        return [entry["target"] for entry in _read_leftovers(_leftovers_path(config_dir))]
     except LeftoversUnreadable:
         return None
 

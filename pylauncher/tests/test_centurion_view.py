@@ -28,6 +28,7 @@ from yulon.controller_wow_wotlk.console import ConsoleReply
 from yulon.ui import controller_view as view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.tuning_panel import picker_label
 
 ENTRY = centurion_like()
 
@@ -365,3 +366,105 @@ def test_the_modules_tab_says_centurion_has_no_add_on_modules(qapp: object, tmp_
     view.reload_modules()
     assert view.modules_panel.empty_label.text() == view.services.no_modules_note
     assert view.modules_panel.empty_label.text().startswith("Centurion has no add-on modules")
+
+
+# -- fix round 1 ------------------------------------------------------------------------
+
+
+def test_the_raw_editor_lists_centurions_own_confs_read_only(qapp: object, tmp_path: Path) -> None:
+    """Spec §2: worldserver.conf (and authserver.conf) on Tuning, shown as AzerothCore's are."""
+    view = _view(tmp_path)
+    server = view.services.controller.server_dir
+    etc = server / "etc"
+    etc.mkdir(exist_ok=True)
+    for name in ("worldserver.conf", "authserver.conf", "playerbots.conf"):
+        (etc / name).write_text("Key = 1\n", encoding="utf-8")
+
+    files = view._tuning_files()
+    assert "etc/worldserver.conf" in files and "etc/authserver.conf" in files
+    assert view._tuning_core_files() == ("etc/worldserver.conf", "etc/authserver.conf")
+
+    view.reload_tuning()
+    labels = {button.toolTip(): button.text() for button in view.tuning_panel.file_buttons()}
+    assert labels["etc/worldserver.conf"] == picker_label(
+        "etc/worldserver.conf", duplicate=False, read_only=True
+    )
+    view.tuning_panel._file_picked("etc/worldserver.conf")
+    assert view.tuning_panel.current_file() == "etc/worldserver.conf"
+    assert view.tuning_panel.editor.isReadOnly()
+    assert not view.tuning_panel.file_save_button.isEnabled()
+    view.save_tuning_file("Key = 2\n")
+    assert (etc / "worldserver.conf").read_text(encoding="utf-8") == "Key = 1\n"
+
+
+def test_the_other_games_raw_editor_lists_what_it_always_did(qapp: object, tmp_path: Path) -> None:
+    from yulon.catalog.catalog import load_catalog
+
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
+        entry = load_catalog().get(game)
+        assert view_module.reset_defaults.read_only_confs(entry) == (
+            view_module.TUNING_CORE_FILES
+        ), game
+
+
+def test_my_party_on_centurion_is_the_registrys_note_and_the_shipped_games_keep_theirs(
+    tmp_path: Path,
+) -> None:
+    from yulon.catalog.catalog import load_catalog
+
+    assert view_module._no_my_party(ENTRY) == decisions.PARTY_REASON
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        entry = load_catalog().get(game)
+        said = view_module._no_my_party(entry)
+        assert said.startswith("Building a bot party from the launcher works on WoW WotLK only")
+        assert f"so {entry.name} would need a route of its own" in said
+
+
+def test_the_withheld_line_uses_a_dash() -> None:
+    said = view_module._withheld_sentence({"revive": "why"})
+    assert said == "Not offered on this server yet: Revive — why."
+
+
+class _Deferred:
+    """A job runner that holds every job until the test runs it, in the order it chooses."""
+
+    def __init__(self) -> None:
+        self.jobs: list[tuple[Any, Any, Any]] = []
+
+    def __call__(self, work: Any, on_done: Any, on_error: Any) -> None:
+        self.jobs.append((work, on_done, on_error))
+
+    def run(self, index: int) -> None:
+        work, on_done, on_error = self.jobs.pop(index)
+        try:
+            result = work()
+        except Exception as exc:  # noqa: BLE001 - delivered as the runner would
+            on_error(exc)
+            return
+        on_done(result)
+
+
+def test_a_reading_that_lands_after_a_press_and_its_own_reading_is_dropped(
+    qapp: object, tmp_path: Path
+) -> None:
+    """M2: the read out before Stop must not draw over the read made after it."""
+    fake = _Pathfinding(mmaps.MmapsStatus(state="running", percent=37))
+    jobs = _Deferred()
+    services = replace(
+        ControllerServices.for_entry(ENTRY, _server(tmp_path)), pathfinding=_seam(fake)
+    )
+    view = ControllerView(ENTRY, services, status_poll_ms=0, job_runner=jobs)
+    jobs.jobs.clear()  # whatever the tab queued while it was built
+
+    view.refresh_pathfinding()  # read 1 goes out...
+    stale_work, stale_done, _ = jobs.jobs.pop(0)
+    stale_answer = stale_work()  # ...and Docker answers "running 37 %" now
+    view.stop_pathfinding()  # the press
+    jobs.run(0)  # the press runs: stopped
+    assert len(jobs.jobs) == 1, "the press did not ask again"
+    jobs.run(0)  # read 2: "not started"
+    assert "has not been made yet" in view.pathfinding_label.text()
+
+    stale_done(stale_answer)  # read 1's answer lands last
+    assert "has not been made yet" in view.pathfinding_label.text(), "an older read drew"
+    assert not view.pathfinding_start_button.isHidden()

@@ -48,6 +48,10 @@ class UpdateBar(QWidget):
         super().__init__(parent)
         self.setObjectName("update-bar")
         self._text = ""
+        # T179: a notice (`offer_notice`) waiting for the bar to be idle, and whether
+        # the one on show now is one -- an offer or a message arriving over it wins.
+        self._waiting: str | None = None
+        self._notice_on_show = False
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 2, 14, 2)
         self.label = QLabel(self)
@@ -79,6 +83,7 @@ class UpdateBar(QWidget):
 
     def show_update(self, result: UpdateCheck) -> None:
         """An update is on offer: say which, and offer to show what is in it."""
+        self._step_aside()
         self._say(f"Yu'lon {result.latest} is available (you have {result.current}).")
         self.details_button.setVisible(True)
         self.setVisible(True)
@@ -92,14 +97,46 @@ class UpdateBar(QWidget):
         open, where hiding the button would take away the player's only
         remaining route back to the release notes.
         """
+        self._step_aside()
         self._say(text)
         if not keep_details:
             self.details_button.setVisible(False)
         self.setVisible(True)
 
+    def offer_notice(self, text: str) -> None:
+        """Say `text` when nothing else is being said (T179 Task 5, fix round 1).
+
+        A notice ranks below an update offer and an announcement ("Updated to
+        Yu'lon X"): over either it waits and is said when the bar clears, and an
+        offer or a message arriving over it puts it back to wait. One waits at a
+        time; a newer one replaces it.
+        """
+        if self.isHidden():
+            self._show_notice(text)
+        else:
+            self._waiting = text
+
     def clear(self) -> None:
-        """Nothing to say; the row gives its height back to the tabs."""
+        """Nothing to say; the row gives its height back to the tabs -- or a waiting notice."""
+        self._notice_on_show = False
+        waiting, self._waiting = self._waiting, None
+        if waiting is not None:
+            self._show_notice(waiting)
+            return
         self.setVisible(False)
+
+    def _show_notice(self, text: str) -> None:
+        self._say(text)
+        self.details_button.setVisible(False)
+        self.setVisible(True)
+        self._notice_on_show = True
+
+    def _step_aside(self) -> None:
+        """A notice on show waits again under what is about to be said instead."""
+        if self._notice_on_show:
+            self._notice_on_show = False
+            if self._waiting is None:
+                self._waiting = self._text
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

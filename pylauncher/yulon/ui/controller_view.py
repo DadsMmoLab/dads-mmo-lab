@@ -195,6 +195,15 @@ def _realm_badge_status(status: InstallStatus) -> str:
     return "stopped"
 
 
+class _PathfindingReadBroke(RuntimeError):
+    """A pathfinding read that raised, carried back with the generation it was asked in."""
+
+    def __init__(self, generation: int, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.generation = generation
+        self.cause = cause
+
+
 class _GearReadBroke(RuntimeError):
     """A Characters gear read that raised, carrying which selection it was for (T96)."""
 
@@ -502,17 +511,36 @@ makes a seventh button added to one and not the other raise on the first
 selection rather than silently mislabel.
 """
 
-_NO_MY_PARTY = decisions.PARTY_REASON
-"""The whole My Party surface on the games that have no route to it.
+_NO_MY_PARTY = (
+    "Building a bot party from the launcher works on WoW WotLK only (owner decision, "
+    "2026-09-06). The route is a pair of AzerothCore modules — the mod-ale Lua bridge, "
+    "and mod-playerbots' own addclass — so {game} would need a route of its own before "
+    "there could be a control here. One that sent these commands at it would be a "
+    "button that cannot work."
+)
+"""The whole My Party surface on the three games that have no route to it.
 
-The family-decision registry's own sentence (T179): the view says exactly what
-`catalog/families/decisions.py` records as the reason My Party is not available,
-so the two cannot drift. A sentence rather than a disabled panel, which is
-`_build_characters_tab`'s rule for the same situation: a control that cannot
-work is a promise this tab cannot keep. The scope is the owner's
-(`pyplan/phase8-parity-decisions.md:41`) and the reason is the engine's --
-`party.InstallParty.for_entry_is_possible` is the same rule spelled in the
-module this text is about."""
+A sentence rather than a disabled panel, which is `_build_characters_tab`'s rule
+for the same situation: a control that cannot work is a promise this tab cannot
+keep. The scope is the owner's (`pyplan/phase8-parity-decisions.md:41`, "My Party
+WotLK-only; Browse Bots on all four") and the reason is the engine's, which is
+why no later box can change it by measuring something —
+`party.InstallParty.for_entry_is_possible` is the same rule spelled in the module
+this text is about."""
+
+
+def _no_my_party(entry: CatalogEntry) -> str:
+    """What the My Party group says on a game with no route to it.
+
+    A TrinityCore server says the family-decision registry's own note
+    (`decisions.PARTY_REASON`, T179), so the registry and the tab cannot drift; the
+    shipped CMaNGOS games keep their wording from before T179 (lead ruling).
+    """
+    native_block = entry.install.native
+    if native_block is not None and native_block.family == "trinitycore":
+        return decisions.PARTY_REASON
+    return _NO_MY_PARTY.format(game=entry.name)
+
 
 NO_ADDON_MODULES = (
     "{game} has no add-on modules: its bots and its own features are built into the "
@@ -547,7 +575,7 @@ def _withheld_sentence(withheld: Mapping[str, str]) -> str:
         if verb in withheld:
             reasons.setdefault(withheld[verb], []).append(labels[verb])
     return " ".join(
-        f"Not offered on this server yet: {', '.join(names)} -- {reason}."
+        f"Not offered on this server yet: {', '.join(names)} — {reason}."
         for reason, names in reasons.items()
     )
 
@@ -6435,6 +6463,9 @@ class ControllerView(QWidget):
         self._pathfinding_status: mmaps.MmapsStatus | None = None
         self._pathfinding_pending = False
         self._pathfinding_pressing = False
+        # Bumped by every read and every press: a read whose generation is not
+        # the newest lands after the state it describes has changed, and is dropped.
+        self._pathfinding_generation = 0
         self.pathfinding_label = QLabel("", tab)
         self.pathfinding_label.setWordWrap(True)
         self.pathfinding_start_button = QPushButton(PATHFINDING_START, tab)
@@ -6982,10 +7013,22 @@ class ControllerView(QWidget):
         if seam is None or self._pathfinding_pending:
             return
         self._pathfinding_pending = True
-        self._run(seam.status, self._pathfinding_read, self._pathfinding_read_failed)
+        self._pathfinding_generation += 1
+        generation, ask = self._pathfinding_generation, seam.status
+
+        def read() -> tuple[int, mmaps.MmapsStatus]:
+            try:
+                return generation, ask()
+            except Exception as exc:  # noqa: BLE001 - carried to the GUI thread with its read
+                raise _PathfindingReadBroke(generation, exc) from exc
+
+        self._run(read, self._pathfinding_read, self._pathfinding_read_failed)
 
     @Slot(object)
-    def _pathfinding_read(self, status: object) -> None:
+    def _pathfinding_read(self, answer: object) -> None:
+        generation, status = cast(tuple[int, object], answer)
+        if generation != self._pathfinding_generation:
+            return  # a press or a newer read came after it: it describes the past
         self._pathfinding_pending = False
         if isinstance(status, mmaps.MmapsStatus):
             self._pathfinding_status = status
@@ -6994,6 +7037,10 @@ class ControllerView(QWidget):
     @Slot(object)
     def _pathfinding_read_failed(self, exc: object) -> None:
         """A reading that broke says so on its own line; the presses wait for a good one."""
+        if isinstance(exc, _PathfindingReadBroke):
+            if exc.generation != self._pathfinding_generation:
+                return
+            exc = exc.cause
         self._pathfinding_pending = False
         logger.warning(f"could not read the pathfinding data's progress: {exc}")
         self._pathfinding_status = None
@@ -7054,6 +7101,9 @@ class ControllerView(QWidget):
 
     def _press_pathfinding(self, press: Callable[[], str]) -> None:
         self._pathfinding_pressing = True
+        # Any read out now describes the job as it was before this press.
+        self._pathfinding_generation += 1
+        self._pathfinding_pending = False
         self._show_pathfinding()
         self._run(press, self._pathfinding_pressed, self._pathfinding_press_failed)
 
@@ -11938,7 +11988,7 @@ class ControllerView(QWidget):
         seam = self.services.my_party
         if seam is None:
             self.party_panel: PartyPanel | None = None
-            self.my_party_absent.setText(_NO_MY_PARTY)
+            self.my_party_absent.setText(_no_my_party(self.entry))
             inside.addWidget(self.my_party_absent)
             return group
         self.my_party_absent.setVisible(False)
@@ -15211,7 +15261,7 @@ class ControllerView(QWidget):
         # `TUNING_CORE_FILES` is a decision about who owns core configuration,
         # and a second copy of it inside a widget is a second place for it to
         # drift (T44 item 13).
-        self.tuning_panel.set_files(self._tuning_files(), read_only=TUNING_CORE_FILES)
+        self.tuning_panel.set_files(self._tuning_files(), read_only=self._tuning_core_files())
         self._set_tuning_revert_all()
         # T94: whether an undo has anything to put back, asked again of the
         # files -- off the GUI thread (final review): it lists up to five
@@ -15993,10 +16043,15 @@ class ControllerView(QWidget):
         for row in self._tuning_rows:
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
-        for name in TUNING_CORE_FILES:
+        for name in self._tuning_core_files():
             if name not in found and (server_dir / name).is_file():
                 found.append(name)
         return tuple(found)
+
+    def _tuning_core_files(self) -> tuple[str, ...]:
+        """The server's own confs this tab lists read-only: `TUNING_CORE_FILES` on WotLK,
+        a TrinityCore server's own (T179), `reset_defaults.read_only_confs()`."""
+        return reset_defaults.read_only_confs(self.entry)
 
     def _tuning_spec(self, family: str, module_id: str, file: str) -> dict[str, ConfKey]:
         """This module's declared keys for one file, so a value can be type-checked.
@@ -16174,7 +16229,7 @@ class ControllerView(QWidget):
     def open_tuning_file(self, file: str) -> None:
         """Show one conf in the raw editor, read-only when it is the server's own."""
         path = self.services.controller.server_dir / file
-        core = file in TUNING_CORE_FILES
+        core = file in self._tuning_core_files()
         try:
             with open(path, encoding="utf-8", newline="") as handle:
                 raw = handle.read()
@@ -16229,7 +16284,7 @@ class ControllerView(QWidget):
         if self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or file in TUNING_CORE_FILES:
+        if not file or file in self._tuning_core_files():
             return
         path = self.services.controller.server_dir / file
         backups = tuning.backups_of(path)
@@ -16261,7 +16316,7 @@ class ControllerView(QWidget):
         over a rule this shallow would be worse than the typo it caught.
         """
         file = self.tuning_panel.current_file()
-        if not file or file in TUNING_CORE_FILES:
+        if not file or file in self._tuning_core_files():
             return
         said = tuning.lint_sentence(tuning.lint(text))
         if said is not None:

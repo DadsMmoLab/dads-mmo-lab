@@ -384,7 +384,8 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> str | Non
     client made of HARD LINKS beside the original. An Uninstall that could not remove
     one notes it in Yu'lon's own folder (`trinitycore.LEFTOVERS_FILE`), and this is the
     retry it promised: once, at start, through the same link-safe remover. Every
-    warning goes to the log; one line is said when anything is still there. Runs off
+    warning goes to the log at every start; one line is said for a folder still there
+    the first time it is found left (`ui_settings.first_leftover_notices`). Runs off
     the GUI thread (`build_window()`): removing a client-sized folder of links takes
     a while on a slow disk.
     """
@@ -392,9 +393,15 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> str | Non
 
     for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir):
         logger.warning(warning)
-    left = trinitycore.recorded_leftover_count(config_dir=config_dir)
-    if left is None:
+    from yulon import ui_settings
+
+    targets = trinitycore.recorded_leftover_targets(config_dir=config_dir)
+    if targets is None:
         return LEFTOVER_LIST_UNREAD
+    # Once per folder (T179 Task 5 fix round 1): a copy left at every start is in the
+    # log every time, and said in the bar only the first time.
+    fresh = ui_settings.first_leftover_notices(targets, ui_settings.ui_settings_path(config_dir))
+    left = len(fresh)
     if left == 0:
         return None
     copies = (
@@ -2081,8 +2088,9 @@ def build_window() -> object:
     window.yulon_sweep_jobs = sweep_jobs
 
     def _swept(notice: object) -> None:
+        # Below an update offer and the "Updated to" announcement: it waits for them.
         if notice:
-            update_bar.show_message(str(notice))
+            update_bar.offer_notice(str(notice))
 
     def _sweep_failed(exc: object) -> None:
         logger.warning(f"could not retry removing the temporary client copies: {exc}")

@@ -109,6 +109,22 @@ def _conf_table(entry: CatalogEntry) -> ConfPatchTable | None:
     return None
 
 
+def read_only_confs(entry: CatalogEntry) -> tuple[str, ...]:
+    """The server's own confs the Tuning tab's raw editor lists READ-ONLY (T43, T179).
+
+    WotLK's three, as since T43. A TrinityCore server's own confs from its install
+    table -- `worldserver.conf` and `authserver.conf` -- except its bot conf, whose
+    keys the Tuning tab's bot card writes (T179, spec §2: worldserver.conf is shown
+    on Tuning). Every other game is handed WotLK's paths exactly as before, which
+    its install never has, so its raw editor still lists its module confs only.
+    """
+    native_block = entry.install.native
+    if native_block is not None and native_block.trinitycore is not None:
+        table = native_block.trinitycore.conf
+        return tuple(f"{ETC_DIR}/{name}" for name in table.files if name != table.playerbots_conf)
+    return AZEROTHCORE_CORE_FILES
+
+
 def label(file: str) -> str:
     """What the menu and the report call a file: its path under the game's etc folder."""
     for prefix in (f"{AZEROTHCORE_ETC}/", f"{ETC_DIR}/"):

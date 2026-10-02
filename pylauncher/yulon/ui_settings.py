@@ -90,6 +90,18 @@ class UiSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     launchers: dict[str, LauncherPlace] = Field(default_factory=dict)
+    noticed_leftovers: list[str] = Field(default_factory=list)
+    """T179: the temporary client copies Yu'lon has already said it could not remove,
+    by folder, so the start-up notice is said once per folder and not at every start."""
+
+    @field_validator("noticed_leftovers", mode="before")
+    @classmethod
+    def _only_paths(cls, value: object) -> list[str]:
+        return (
+            [str(item) for item in value if isinstance(item, str)]
+            if isinstance(value, list)
+            else []
+        )
 
 
 def launcher_key(game: str, server_dir: Path) -> str:
@@ -198,3 +210,21 @@ def forget_launcher(game: str, server_dir: Path, path: Path | None = None) -> bo
             return True
         del settings.launchers[key]
         return save_ui_settings(settings, path)
+
+
+def first_leftover_notices(targets: Iterable[str], path: Path | None = None) -> list[str]:
+    """The folders in `targets` not said before; all of `targets` remembered from now on.
+
+    What is remembered is exactly the folders still left, so one that is removed and
+    later left again is said again. If `ui.json` cannot be written, every folder is
+    new -- a notice said twice is better than one never said.
+    """
+    left = list(dict.fromkeys(targets))
+    with _LOCK:
+        settings = load_ui_settings(path)
+        fresh = [target for target in left if target not in settings.noticed_leftovers]
+        if settings.noticed_leftovers != left:
+            settings.noticed_leftovers = left
+            if not save_ui_settings(settings, path):
+                return left
+    return fresh
