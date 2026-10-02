@@ -554,8 +554,9 @@ def test_a_world_import_that_fails_rolls_back_and_the_record_names_every_file(
     # so the old build is put back but NOT started on them.
     assert box.world.running is False, "no start on half-imported world tables"
     assert (
-        "The build from before this rebuild was put back but not started: This server's last "
-        "update didn't finish importing its world tables. Press “Finish the world update” first."
+        "The build from before this rebuild was put back, and its servers were left STOPPED: "
+        "This server's last update didn't finish importing its world tables. Press “Finish the "
+        "world update” first."
     ) in said
     assert box.head() == OLD
 
@@ -1332,3 +1333,33 @@ def test_an_update_that_lands_forgets_the_refused_commit(box: Box) -> None:
     box.press()
     after = native.read_state(box.server_dir, valid=())
     assert after is not None and after.refused_updates == ()
+
+
+def test_a_rollback_that_leaves_the_servers_stopped_never_says_they_run(box: Box) -> None:
+    """The whole sentence, re-review of a073725d: put back, STOPPED, and no "running" in it."""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", f"{REPO_SQL}/world/version.sql"))
+    box.m.db.fail_on = "creature"
+    with pytest.raises(native.ServersLeftStopped) as failed:
+        box.press()
+    files = f"{WORLD_SQL}/creature.sql, {WORLD_SQL}/version.sql"
+    stopped = (
+        f"The import stopped: {WORLD_SQL}/creature.sql failed while loading into "
+        f"{WORLD} (ERROR 1419 (HY000) at line 80: You do not have the SUPER). Nothing after "
+        f"it was applied. {files} were not imported again."
+    )
+    assert str(failed.value) == (
+        f"{stopped} The build from before this rebuild was put back, and its servers were left "
+        f"STOPPED: {UNFINISHED} Before it was replaced, {ENTRY.containers.world} had printed:\n"
+        "TrinityCore rev. faac5fc9\nWorld initialized in 42 seconds\n"
+        "What the new build wrote into the database on its first start, if anything, is NOT "
+        "put back by this -- the lines above say whether its updater ran -- so the old build "
+        "will start on the database as the new one left it.\n"
+        "Press “Finish the world update” on the Server tab (or “Update the server to latest…” "
+        f"under “Server build ▾” again) to import {files} again. The world tables could not all "
+        f"be put back for the build from before this update: {stopped} If you took the backup "
+        "offered before the update, it has them as they were (Restore on the Maintenance tab). "
+        "The source folders were put back on the commits they were on, so what is on disk is "
+        "the build that was put back; it stays stopped until its world tables are in."
+    )
+    assert "running" not in str(failed.value)
+    assert box.world.running is False

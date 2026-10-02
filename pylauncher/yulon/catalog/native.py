@@ -1819,6 +1819,33 @@ Then the sources stay with it: putting the old commits back would leave the fold
 the running binary disagreeing, under a sentence saying they agree.
 """
 
+
+class ServersLeftStopped(InstallerError):
+    """A rebuild's rollback put the old build back and did NOT start it (T179 final round).
+
+    The update route's world tables could not all be put back for it, and no start
+    is allowed until "Finish the world update" has run (`start_refusal()`). Its own
+    type so the route's closing note says the server is stopped, not running.
+    """
+
+
+class _LeftStopped(str):
+    """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
+
+
+ROLLBACK_LEFT_STOPPED_DATABASE = (
+    "\nWhat the new build wrote into the database on its first start, if anything, is NOT put "
+    "back by this -- the lines above say whether its updater ran -- so the old build will start "
+    "on the database as the new one left it."
+)
+"""The rollback's database sentence for servers it left stopped: "will start", not "is running"."""
+
+SOURCES_PUT_BACK_STOPPED_NOTE = (
+    "The source folders were put back on the commits they were on, so what is on disk is the "
+    "build that was put back; it stays stopped until its world tables are in."
+)
+"""`SOURCES_PUT_BACK_NOTE` for a press whose rollback left the servers stopped (T179)."""
+
 SOURCES_PUT_BACK_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk and what "
     "your server is running agree again."
@@ -5675,6 +5702,8 @@ class StagedInstaller:
                 ctx, refs, kept, touched, str(exc), servers_down=servers_down
             )
             self._record_error(server_dir, ctx.state, message)
+            if isinstance(message, _LeftStopped):
+                raise ServersLeftStopped(str(message)) from exc
             raise InstallerError(message) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
@@ -6171,6 +6200,9 @@ class StagedInstaller:
                     work.settle()
                 if not sources_back:
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                if isinstance(exc, ServersLeftStopped):
+                    # T179: nothing runs, so the note must not say it does.
+                    raise ServersLeftStopped(f"{exc} {SOURCES_PUT_BACK_STOPPED_NOTE}") from exc
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
@@ -6865,20 +6897,24 @@ class StagedInstaller:
             "the old build is running on the database as the new one left it."
         )
         if servers_down is not None:
+            back_failed = ""
             try:
                 yield from servers_down.back(replace(ctx, cancel=None))
             except (InstallerError, OSError) as exc:
-                database = f"{database}\n{exc}"
+                back_failed = f"\n{exc}"
+            database = f"{database}{back_failed}"
             refused = self.start_refusal(ctx.server_dir)
             if refused is not None:
                 # T179 (lead ruling): the old build is not started on world tables
                 # its rollback could not all put back. Its servers stay stopped and
-                # the tags name it; the finish starts it (with a recreate).
+                # the tags name it; the finish starts it (with a recreate). Said
+                # without "running" anywhere: nothing of this server runs now.
                 yield from self._release(named)
                 yield from self._release(kept)
-                return (
-                    f"{failure} The build from before this rebuild was put back but not "
-                    f"started: {refused}{said}{database}"
+                return _LeftStopped(
+                    f"{failure} The build from before this rebuild was put back, and its servers "
+                    f"were left STOPPED: {refused}{said}{ROLLBACK_LEFT_STOPPED_DATABASE}"
+                    f"{back_failed}"
                 )
         try:
             yield from self.stage_recreate(ctx, rollback=True)
