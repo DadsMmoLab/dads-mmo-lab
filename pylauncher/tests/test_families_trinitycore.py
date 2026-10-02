@@ -19,11 +19,13 @@ phase, a half import being cleared and run again from the start (2).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import zipfile
@@ -44,14 +46,16 @@ from tests.support_trinitycore import (
     WORLD,
     centurion_like,
 )
-from yulon import client_packs, docker, play_client, resources
+from tests.test_purge import Recorder as PurgeRecorder
+from yulon import client_packs, docker, play_client, purge, resources, rmtree
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.families import FAMILIES, extract, family_for
+from yulon.catalog.families import FAMILIES, extract, family_for, trinitycore
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.families.trinitycore import (
-    EXTRACT_CLIENT_DIR,
+    EXTRACT_CLIENT_RECORD,
     TrinityCoreInstaller,
+    extraction_client_dir,
 )
 from yulon.catalog.installer import InstallerError, InstallOptions
 
@@ -322,12 +326,13 @@ class Extractors:
 
 
 def player_client(tmp_path: Path) -> Path:
-    """A 3.3.5a-shaped client folder that ALSO holds two optional packs' files.
+    """A 3.3.5a-shaped client folder that ALSO holds archives that are not stock.
 
     `Data/patch-F.MPQ` is the HD pack the player switched on for their own
-    ready-to-play client, and `Data/patch-Y.MPQ` the file the alternative-terrain
-    pack deletes when off -- both would be read into the map data if the copy kept
-    them (Review Focus 1).
+    ready-to-play client, `Data/patch-Y.MPQ` the file the alternative-terrain pack
+    deletes when off, and `Data/patch-4.MPQ` and `Data/enUS/Patch-enUS-5.MPQ` patches
+    the player installed for some other server -- every one would be read into the
+    map data if the copy kept it (Review Focus 1).
     """
     client = tmp_path / "World of Warcraft 3.3.5a"
     (client / "Data" / "enUS").mkdir(parents=True)
@@ -337,6 +342,8 @@ def player_client(tmp_path: Path) -> Path:
         (client / "Data" / "enUS" / f"{name}.MPQ").write_bytes(f"MPQ {name}".encode())
     (client / "Data" / "patch-F.MPQ").write_bytes(b"MPQ an HD pack the player switched on")
     (client / "Data" / "patch-Y.MPQ").write_bytes(b"MPQ the stock Alt-World terrain")
+    (client / "Data" / "patch-4.MPQ").write_bytes(b"MPQ another server's patch")
+    (client / "Data" / "enUS" / "Patch-enUS-5.MPQ").write_bytes(b"MPQ another server's locale")
     (client / "Wow.exe").write_bytes(b"MZ stock 12340")
     (client / "WTF").mkdir()
     (client / "WTF" / "Config.wtf").write_text('SET realmList "logon.example"\n')
@@ -463,6 +470,11 @@ def run_stage(
     return list(eng.stage_named(name).run(context(m)))
 
 
+def copy_dir(m: Machine) -> Path:
+    """Where this machine's extraction client is made: beside the player's client."""
+    return extraction_client_dir(m.client, m.server_dir)
+
+
 def lay_for_client_data(m: Machine) -> None:
     """The checkout `client-data` reads, without running the stages before it."""
     lay_checkout(m.server_dir / CHECKOUT)
@@ -523,7 +535,7 @@ def test_a_whole_install_runs_every_stage_in_order_and_ends_running(machine: Mac
     said = install(machine)
     assert [line[4:] for line in said if line.startswith("--- ")] == list(STAGES)
     assert said[-1] == f"{ENTRY.name} is installed and running in {machine.server_dir}"
-    assert not (machine.server_dir / EXTRACT_CLIENT_DIR).exists()
+    assert not (copy_dir(machine)).exists()
 
 
 def test_the_clone_is_sparse_on_the_named_branch_at_the_pin(machine: Machine) -> None:
@@ -559,36 +571,30 @@ def test_the_extraction_client_holds_the_required_packs_and_no_optional_pack_fil
         assert files["Data/lichking.MPQ"] == b"MPQ lichking", "the player's own archives are read"
 
 
-def test_a_ready_to_play_client_as_the_source_loses_its_recorded_optional_files_too(
+STOCK = {
+    *(f"Data/{name}.MPQ" for name in ("common", "common-2", "expansion", "lichking")),
+    *(f"Data/{name}.MPQ" for name in ("patch", "patch-2", "patch-3")),
+    "Data/enUS/locale-enUS.MPQ",
+    "Data/enUS/patch-enUS.MPQ",
+}
+
+
+def test_the_extraction_client_keeps_only_the_stock_archives_and_the_required_packs(
     machine: Machine,
 ) -> None:
-    """A pack's `*` rule names no file; the source's own pack record does, and is honoured."""
-    record = {
-        "version": 1,
-        "packs": {
-            "hd-characters": {
-                "version": "1.2",
-                "sha256": "0" * 64,
-                "files": {"Data/patch-F.MPQ": "0" * 64, "Interface/HD/portrait.blp": "0" * 64},
-            }
-        },
-        "exe": None,
-        "choices": {"packs": {"hd-characters": True}, "exe_options": {}},
-        "config_seeded": True,
-    }
-    (machine.client / client_packs.RECORD).write_text(json.dumps(record), encoding="utf-8")
-    (machine.client / "Interface" / "HD").mkdir(parents=True)
-    (machine.client / "Interface" / "HD" / "portrait.blp").write_bytes(b"BLP")
+    """Fix round 1, R3: an allow-list from the catalog, not a list of what to drop."""
     lay_for_client_data(machine)
     said = run_stage(machine, "client-data")
-    files = machine.tools.seen["mapextractor"]
-    assert "Interface/HD/portrait.blp" not in files
-    assert "Data/patch-F.MPQ" not in files
-    assert any(
-        line.startswith("Left out of the copy, because this server's map data is made without")
-        and "Interface/HD/portrait.blp" in line
-        for line in said
+    for program, files in machine.tools.seen.items():
+        archives = {rel for rel in files if rel.casefold().endswith(".mpq")}
+        assert archives == STOCK | {"Data/patch-X.MPQ", "Data/enUS/patch-enUS-A.MPQ"}, program
+    assert (
+        "Left out of the copy, because this server's map data is made from the stock archives "
+        "and its own packs only: Data/enUS/Patch-enUS-5.MPQ, Data/patch-4.MPQ, Data/patch-F.MPQ, "
+        "Data/patch-Y.MPQ." in said
     )
+    for rel in ("Data/patch-4.MPQ", "Data/patch-Y.MPQ", "Data/enUS/Patch-enUS-5.MPQ"):
+        assert (machine.client / rel).is_file(), f"{rel} went from the player's own client"
 
 
 def test_the_extractors_read_the_copy_read_only_and_never_the_players_client(
@@ -598,14 +604,14 @@ def test_the_extractors_read_the_copy_read_only_and_never_the_players_client(
     run_stage(machine, "client-data")
     assert machine.tools.client_mounts, "no extractor ran"
     for mount in machine.tools.client_mounts:
-        assert mount.host == machine.server_dir / EXTRACT_CLIENT_DIR
+        assert mount.host == copy_dir(machine)
         assert mount.read_only
 
 
 def test_the_temporary_client_is_gone_after_a_successful_extraction(machine: Machine) -> None:
     lay_for_client_data(machine)
     said = run_stage(machine, "client-data")
-    assert not os.path.lexists(machine.server_dir / EXTRACT_CLIENT_DIR)
+    assert not os.path.lexists(copy_dir(machine))
     assert "Removed the temporary copy of your client." in said
 
 
@@ -614,7 +620,7 @@ def test_the_temporary_client_is_gone_after_a_failed_extraction(machine: Machine
     lay_for_client_data(machine)
     with pytest.raises(InstallerError, match="vmap extract failed \\(exit 139\\)"):
         run_stage(machine, "client-data")
-    assert not os.path.lexists(machine.server_dir / EXTRACT_CLIENT_DIR)
+    assert not os.path.lexists(copy_dir(machine))
 
 
 def test_the_temporary_client_is_gone_after_a_pack_that_fails_its_checksum(
@@ -624,7 +630,7 @@ def test_the_temporary_client_is_gone_after_a_pack_that_fails_its_checksum(
     (machine.server_dir / PATCHES / "patch-enUS-A.zip").write_bytes(_zip("x.MPQ", b"other"))
     with pytest.raises(InstallerError, match="does not match its published checksum"):
         run_stage(machine, "client-data")
-    assert not os.path.lexists(machine.server_dir / EXTRACT_CLIENT_DIR)
+    assert not os.path.lexists(copy_dir(machine))
     assert machine.tools.seen == {}, "nothing was extracted from a copy missing a pack"
 
 
@@ -678,16 +684,35 @@ def test_the_evidence_names_the_players_client_and_a_changed_pack_extracts_again
 
 def test_a_leftover_copy_from_an_interrupted_press_is_removed_first(machine: Machine) -> None:
     lay_for_client_data(machine)
-    leftover = machine.server_dir / EXTRACT_CLIENT_DIR
+    leftover = copy_dir(machine)
     play_client.create(
         machine.client,
         leftover,
         game=ENTRY.id,
         server_dir=machine.server_dir,
-        allow_full_copy=True,
+        allow_full_copy=False,
     )
+    (leftover / "Data" / "left-by-the-crash.MPQ").write_bytes(b"MPQ")
     run_stage(machine, "client-data")
     assert not os.path.lexists(leftover)
+    assert "Data/left-by-the-crash.MPQ" not in machine.tools.seen["mapextractor"]
+
+
+def test_an_unfinished_copy_a_crash_inside_create_left_is_removed_first(machine: Machine) -> None:
+    """R1(a): a process that died inside `create()` leaves `<copy>.yulon-partial`."""
+    lay_for_client_data(machine)
+    target = copy_dir(machine)
+    play_client.create(
+        machine.client,
+        target,
+        game=ENTRY.id,
+        server_dir=machine.server_dir,
+        allow_full_copy=False,
+    )
+    partial = target.with_name(target.name + play_client.PARTIAL_SUFFIX)
+    target.rename(partial)
+    run_stage(machine, "client-data")
+    assert not os.path.lexists(partial) and not os.path.lexists(target)
     assert machine.tools.seen, "the extraction ran over a fresh copy"
 
 
@@ -695,10 +720,10 @@ def test_a_folder_in_the_copys_place_that_is_not_this_installs_is_refused(
     machine: Machine,
 ) -> None:
     lay_for_client_data(machine)
-    stranger = machine.server_dir / EXTRACT_CLIENT_DIR
+    stranger = copy_dir(machine)
     stranger.mkdir(parents=True)
     (stranger / "notes.txt").write_text("mine")
-    with pytest.raises(InstallerError, match="was not made by this install"):
+    with pytest.raises(InstallerError, match="it was not made by this install, so it was left"):
         run_stage(machine, "client-data")
     assert (stranger / "notes.txt").read_text() == "mine"
 
@@ -955,26 +980,204 @@ def test_a_compose_repair_offers_logs_dir_to_a_trinitycore_conf_left_at_upstream
     }
 
 
-def test_a_leftover_copy_is_gone_before_the_server_folder_is_relabelled(
+def test_the_copy_is_made_beside_the_players_client_and_never_in_the_server_folder(
     machine: Machine,
 ) -> None:
-    """`chcon -R` on the server folder would relabel the player's files through a hard link."""
+    """Fix round 1, R2: the same parent is the same drive, so the archives are shared.
+
+    And nothing that relabels or deletes the server folder (SELinux `chcon -R`,
+    Uninstall's tree removal) can reach the player's files through the copy's links.
+    """
     lay_for_client_data(machine)
-    leftover = machine.server_dir / EXTRACT_CLIENT_DIR
+    run_stage(machine, "client-data")
+    target = copy_dir(machine)
+    assert target.parent == machine.client.parent
+    assert target.name.startswith(
+        f"{machine.client.name} (Yu'lon map data for {machine.server_dir.name}, temporary "
+    )
+    assert not target.is_relative_to(machine.server_dir)
+    assert {mount.host for mount in machine.tools.client_mounts} == {target}
+
+
+def test_a_drive_that_cannot_share_the_archives_is_refused_and_never_copied_in_full(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAT32/exFAT: links fail with EPERM; a full copy would be ~17 GB of a 3.3.5a client."""
+    asked: list[bool] = []
+    real_create = play_client.create
+
+    def cannot_link(src: Path, dst: Path) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted", str(dst))
+
+    def create(*args: Any, **kwargs: Any) -> play_client.Marker:
+        asked.append(kwargs["allow_full_copy"])
+        return real_create(*args, link=cannot_link, reflink=lambda src, dst: False, **kwargs)
+
+    monkeypatch.setattr(play_client, "create", create)
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data")
+    message = str(caught.value)
+    assert asked == [False], "never a full copy"
+    assert "could not be made ([Errno 1] Operation not permitted" in message
+    assert "ordinary folder on an NTFS or ext4 drive" in message
+    assert "not under Program Files and not on a FAT32 or exFAT drive" in message
+    assert "your client was not changed" in message
+    target = copy_dir(machine)
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(target.with_name(target.name + play_client.PARTIAL_SUFFIX))
+    assert not (machine.server_dir / EXTRACT_CLIENT_RECORD).exists()
+    assert machine.tools.seen == {}
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="a POSIX folder mode, not root")
+def test_a_client_the_app_may_not_write_beside_is_refused_saying_what_to_do(
+    machine: Machine, tmp_path: Path
+) -> None:
+    """Program Files on Windows; a folder the user cannot write in elsewhere."""
+    lay_for_client_data(machine)
+    locked = tmp_path / "Program Files"
+    locked.mkdir()
+    machine.client = Path(shutil.move(str(machine.client), str(locked)))
+    before = snapshot(machine.client)
+    os.chmod(locked, 0o555)
+    try:
+        with pytest.raises(InstallerError, match="run Yu'lon with the rights to write beside it"):
+            run_stage(machine, "client-data")
+    finally:
+        os.chmod(locked, 0o755)
+    assert sorted(path.name for path in locked.iterdir()) == [machine.client.name]
+    assert snapshot(machine.client) == before
+
+
+def test_the_record_names_the_copy_while_it_exists_and_goes_with_it(machine: Machine) -> None:
+    """Written before the copy is made, so a crash anywhere leaves the way back to it."""
+    recorded: list[dict[str, Any]] = []
+    tools = machine.tools
+
+    def run(spec: docker.ContainerRun, **kwargs: Any) -> docker.AttachedRun:
+        record = machine.server_dir / EXTRACT_CLIENT_RECORD
+        recorded.append(json.loads(record.read_text(encoding="utf-8")))
+        return tools(spec, **kwargs)
+
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data", run_container=run)
+    assert recorded[0] == {
+        "version": 1,
+        "target": os.fspath(copy_dir(machine)),
+        "original": os.fspath(machine.client),
+    }
+    assert not (machine.server_dir / EXTRACT_CLIENT_RECORD).exists()
+
+
+# -- Uninstall and a copy a crash left behind (fix round 1, R1) -------------------------
+
+
+def leftover_copy(machine: Machine) -> Path:
+    """The state a press that died after making its copy leaves: the record and the copy."""
+    lay_for_client_data(machine)
+    target = copy_dir(machine)
+    trinitycore._write_record(machine.server_dir, target, machine.client)
     play_client.create(
-        machine.client, leftover, game=ENTRY.id, server_dir=machine.server_dir, allow_full_copy=True
+        machine.client,
+        target,
+        game=ENTRY.id,
+        server_dir=machine.server_dir,
+        allow_full_copy=False,
     )
-    there: list[bool] = []
+    return target
 
-    def relabel(path: Path) -> bool:
-        there.append(os.path.lexists(leftover))
-        return True
 
-    eng = engine(
-        machine,
-        relabel=relabel,
-        selinux_enforcing=lambda: True,
-        fs_type=lambda path: "ext4",
+@pytest.mark.skipif(os.name == "nt", reason="the hard link and the mode spy are POSIX here")
+def test_uninstall_removes_a_leftover_copy_safely_before_the_server_folder(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through `play_client.remove_folder()`, never `rmtree`, and before the record goes."""
+    archive = machine.client / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    target = leftover_copy(machine)
+    assert os.path.samefile(target / "Data" / "common.MPQ", archive), "the copy shares it"
+    before = snapshot(machine.client)
+    chmodded: list[Path] = []
+    real_chmod = os.chmod
+
+    def chmod(path: Any, mode: int, *args: Any, **kwargs: Any) -> None:
+        chmodded.append(Path(path))
+        real_chmod(path, mode, *args, **kwargs)
+
+    trees: list[Path] = []
+    real_remove_tree = rmtree.remove_tree
+
+    def remove_tree(path: Path) -> None:
+        trees.append(path)
+        real_remove_tree(path)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+    monkeypatch.setattr(rmtree, "remove_tree", remove_tree)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    assert report.warnings == ()
+    assert not os.path.lexists(target)
+    assert not machine.server_dir.exists()
+    assert trees == [machine.server_dir], "rmtree never pointed at the copy"
+    assert not [path for path in chmodded if path.is_relative_to(machine.client)]
+    assert snapshot(machine.client) == before, "bytes, times and the read-only mode kept"
+
+
+def test_uninstall_leaves_a_folder_at_the_recorded_path_that_is_not_this_installs(
+    machine: Machine,
+) -> None:
+    lay_for_client_data(machine)
+    stranger = copy_dir(machine)
+    stranger.mkdir()
+    (stranger / "notes.txt").write_text("mine")
+    trinitycore._write_record(machine.server_dir, stranger, machine.client)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    assert (stranger / "notes.txt").read_text() == "mine"
+    (warning,) = report.warnings
+    assert warning.startswith(f"{stranger} is in the way of this install's temporary copy")
+    assert warning.endswith("made for its map data; delete that folder yourself.")
+
+
+def test_uninstall_asks_for_the_copy_before_it_removes_the_server_folder(
+    machine: Machine,
+) -> None:
+    rec = PurgeRecorder(machine.server_dir)
+    machine.server_dir.mkdir(parents=True)
+    rec.uninstaller(
+        game=ENTRY.id, remove_extraction_client=lambda: rec.order.append("copy") or ""
+    ).run(keep_characters=False)
+    assert rec.order.index("copy") < rec.order.index(f"remove_folder:{machine.server_dir}")
+
+
+def test_the_record_is_on_disk_before_the_copy_is_begun(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process that dies INSIDE `create()` leaves a partial copy; the record must name it."""
+    on_disk: list[bool] = []
+    real_create = play_client.create
+
+    def create(*args: Any, **kwargs: Any) -> play_client.Marker:
+        on_disk.append((machine.server_dir / EXTRACT_CLIENT_RECORD).is_file())
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(play_client, "create", create)
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data")
+    assert on_disk == [True]
+
+
+def test_uninstall_removes_an_unfinished_copy_a_crash_inside_create_left(
+    machine: Machine,
+) -> None:
+    target = leftover_copy(machine)
+    partial = target.with_name(target.name + play_client.PARTIAL_SUFFIX)
+    target.rename(partial)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    assert report.warnings == ()
+    assert not os.path.lexists(partial)
+    assert (
+        sorted(path.name for path in machine.client.parent.iterdir() if "Yu'lon" in path.name) == []
     )
-    list(eng.stage_named("generate-compose").run(context(machine)))
-    assert there == [False], "relabelled while the copy (and its links) was still there"

@@ -873,10 +873,37 @@ class TrinityCoreExtractPlan(ExtractPlan):
     def _inside_the_checkout(cls, value: str) -> str:
         return _below(value, "dbc_overlay_from", "the checkout")
 
+    client_archives: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The game archives of the player's client the temporary extraction client keeps, "
+            "relative to its `Data/` folder; `{locale}` stands for a locale folder's name "
+            "(`{locale}/locale-{locale}.MPQ`). Every other `.MPQ` is left out before the "
+            "server's required packs are laid in: the patched extractors read every lettered "
+            "and numbered patch archive they find (map_extractor System.cpp:1152-1218, facts "
+            "§3), so a patch the player installed for another server, or an HD pack, would be "
+            "extracted into maps this server does not expect (T179 Task 3, fix round 1)."
+        ),
+    )
+
     @field_validator("dbc_overlay_to")
     @classmethod
     def _inside_the_data_folder(cls, value: str) -> str:
         return _below(value, "dbc_overlay_to", "data/")
+
+    @field_validator("client_archives")
+    @classmethod
+    def _archive_names_inside_data(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            _below(name, "client_archives", "the client's Data/ folder")
+            if not name.casefold().endswith(".mpq"):
+                raise ValueError(f"client_archives names game archives (.MPQ), got {name!r}")
+            if set(name.replace("{locale}", "")) & set("{}*?[]!"):
+                raise ValueError(
+                    f"client_archives takes plain names and the `{{locale}}` token only, "
+                    f"got {name!r}"
+                )
+        return value
 
 
 class TrinityCoreMmaps(MmapPlan):

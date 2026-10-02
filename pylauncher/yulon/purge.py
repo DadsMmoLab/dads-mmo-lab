@@ -303,6 +303,7 @@ class Uninstaller:
         remove_image: Callable[[str], str] | None = None,
         remove_folder: Callable[[Path], None] | None = None,
         forget_pending: Callable[[], None] | None = None,
+        remove_extraction_client: Callable[[], str] | None = None,
     ) -> None:
         self.game = game
         self.server_dir = server_dir
@@ -329,6 +330,11 @@ class Uninstaller:
         self._remove_folder = remove_folder if remove_folder is not None else remove_tree
         self._forget_pending = (
             forget_pending if forget_pending is not None else self._real_forget_pending
+        )
+        self._remove_extraction_client = (
+            remove_extraction_client
+            if remove_extraction_client is not None
+            else self._real_remove_extraction_client
         )
         # How the containers' removal is heard and steered while it waits for a
         # world that is still loading (T158, `docker.StopControl`). Set by the
@@ -384,6 +390,21 @@ class Uninstaller:
         from yulon import channel_setup
 
         channel_setup.remove_pending(self.game, composegen.install_id(self.server_dir))
+
+    def _real_remove_extraction_client(self) -> str:
+        """A temporary extraction client a crashed TrinityCore install left beside a client (T179).
+
+        It lives OUTSIDE the server folder, beside the player's own client, and its
+        game archives are hard links of the player's: the server folder's removal
+        never reaches it, and `rmtree` must never be pointed at it, because clearing
+        a read-only flag there clears it on the player's file. The family's own
+        remover finds it through the record in the server folder -- so it runs
+        BEFORE that folder goes -- and removes it through `play_client`'s.
+        Imported here rather than at module scope for `_default_claim`'s reason.
+        """
+        from yulon.catalog.families.trinitycore import remove_leftover_extraction_client
+
+        return remove_leftover_extraction_client(self.server_dir, self.game)
 
     def _pending_record(self) -> Path:
         """Where that record is, keyed as the channel keys it, for a sentence that names it."""
@@ -574,6 +595,14 @@ class Uninstaller:
                 warnings.append(f"{ref} was left behind: {problem}")
             else:
                 removed_images.append(ref)
+
+        # BEFORE the folder: the record of where a leftover copy is lives in it.
+        leftover = self._remove_extraction_client()
+        if leftover:
+            warnings.append(
+                f"{leftover} It is a temporary copy of your game client this server made for "
+                "its map data; delete that folder yourself."
+            )
 
         self._remove_folder(self.server_dir)
 

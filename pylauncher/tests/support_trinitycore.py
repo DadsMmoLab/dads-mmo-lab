@@ -98,6 +98,27 @@ SQL: dict[str, Any] = {
     ],
 }
 
+CLIENT_ARCHIVES = (
+    # A stock 3.3.5a client's archives, which the extraction client keeps; every other
+    # `.MPQ` in it is somebody's patch (T179 Task 3 fix round 1, the lead's list).
+    "common.MPQ",
+    "common-2.MPQ",
+    "expansion.MPQ",
+    "lichking.MPQ",
+    "patch.MPQ",
+    "patch-2.MPQ",
+    "patch-3.MPQ",
+    "{locale}/locale-{locale}.MPQ",
+    "{locale}/speech-{locale}.MPQ",
+    "{locale}/expansion-locale-{locale}.MPQ",
+    "{locale}/lichking-locale-{locale}.MPQ",
+    "{locale}/expansion-speech-{locale}.MPQ",
+    "{locale}/lichking-speech-{locale}.MPQ",
+    "{locale}/patch-{locale}.MPQ",
+    "{locale}/patch-{locale}-2.MPQ",
+    "{locale}/patch-{locale}-3.MPQ",
+)
+
 DB_STRING = '"{{{{DB_HOST}}}};3306;{{{{DB_USER}}}};{{{{DB_PASSWORD}}}};{db}"'
 
 TRINITYCORE: dict[str, Any] = {
@@ -130,6 +151,7 @@ TRINITYCORE: dict[str, Any] = {
             },
         ],
         "dbc_overlay_from": "centurion/dbc",
+        "client_archives": list(CLIENT_ARCHIVES),
     },
     "mmaps": {"argv": [f"{CORE_DIR}/bin/mmaps_generator"], "background": True},
     "conf": {

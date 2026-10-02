@@ -2754,14 +2754,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete raises PlayClientError naming the files already removed, rather than "
         "reporting files removed"
     ),
-    ("catalog/families/trinitycore.py", "_drop_optional_pack_files"): (
-        "T179 Task 3. Walks the TEMPORARY extraction client `play_client.create()` has just "
-        "made in `<server>/.yulon-extract-client` (its marker names this game and server) "
-        "for the files an optional client pack installs or removes when off, and unlinks "
-        "those NAMES from the copy, so the extractors never read them. The player's own "
-        "client is never listed or written: a name in the copy shared with one of its files "
-        "is removed as a name (`play_client._remove_file()`, which puts back a read-only flag "
-        "it had to clear), and the copy is deleted after the extraction either way"
+    ("catalog/families/trinitycore.py", "_drop_unlisted_archives"): (
+        "T179 Task 3 (fix round 1). Walks `Data/` of the TEMPORARY extraction client "
+        "`play_client.create()` has just made beside the player's client (its marker names "
+        "this game and server) for every `.MPQ` the block's `client_archives` does not keep, "
+        "and unlinks those NAMES from the copy, so the extractors never read another "
+        "server's patch or an HD pack. The player's own client is never listed or written: a "
+        "name in the copy shared with one of its files is removed as a name "
+        "(`play_client._remove_file()`, which puts back a read-only flag it had to clear), "
+        "and the copy is removed through `play_client.remove_folder()` either way"
     ),
     ("catalog/families/extract.py", "overlay_files"): (
         "T179 Task 3. Lists the server's own checkout folder `dbc_overlay_from` "

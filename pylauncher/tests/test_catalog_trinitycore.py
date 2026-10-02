@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any, get_args
 
 import pytest
@@ -73,6 +74,7 @@ TRINITYCORE: dict[str, Any] = {
             }
         ],
         "dbc_overlay_from": "centurion/dbc",
+        "client_archives": ["common.MPQ", "{locale}/locale-{locale}.MPQ"],
     },
     "mmaps": {"argv": ["/opt/trinitycore/bin/mmaps_generator"], "background": True},
     "conf": {
@@ -433,3 +435,28 @@ def test_the_dbc_overlay_lands_in_data_dbc_unless_the_entry_says_otherwise() -> 
 def test_a_dbc_overlay_target_outside_the_data_folder_is_refused(path: str) -> None:
     with pytest.raises(ValidationError, match="dbc_overlay_to must be a relative POSIX path"):
         NativeInstall.model_validate(_native(extract__dbc_overlay_to=path))
+
+
+def test_the_extraction_client_keeps_only_the_archives_the_entry_names() -> None:
+    block = NativeInstall.model_validate(NATIVE).trinitycore
+    assert block is not None
+    assert block.extract.client_archives == ("common.MPQ", "{locale}/locale-{locale}.MPQ")
+    native = _native()
+    del native["trinitycore"]["extract"]["client_archives"]
+    with pytest.raises(ValidationError, match="client_archives\n  Field required"):
+        NativeInstall.model_validate(native)
+
+
+@pytest.mark.parametrize(
+    ("name", "rule"),
+    [
+        ("../common.MPQ", "must be a relative POSIX path"),
+        ("/Data/common.MPQ", "must be a relative POSIX path"),
+        ("Wow.exe", "names game archives"),
+        ("patch-*.MPQ", "plain names and the `{locale}` token only"),
+        ("{lang}/locale.MPQ", "plain names and the `{locale}` token only"),
+    ],
+)
+def test_a_client_archive_that_is_not_a_plain_archive_name_is_refused(name: str, rule: str) -> None:
+    with pytest.raises(ValidationError, match=re.escape(rule)):
+        NativeInstall.model_validate(_native(extract__client_archives=[name]))
