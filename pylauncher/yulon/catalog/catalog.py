@@ -917,6 +917,15 @@ class TrinityCoreMmaps(MmapPlan):
             "It takes hours (README.md:193-194, facts §3) and the server starts without it."
         ),
     )
+    threads: Literal["half"] | Annotated[int, Field(ge=1)] = Field(
+        default="half",
+        description=(
+            "What `{{THREADS}}` in `argv` becomes (`mmaps_generator --threads N`). `half`: half "
+            "the cores of the Docker daemon that runs it (Docker Desktop's VM, not this host), at "
+            "least 1 -- the generator's own default is every core (PathGenerator.cpp:343), and "
+            "the world server runs beside it. A number: exactly that many."
+        ),
+    )
 
 
 class TrinityCoreConf(ConfPatchTable):

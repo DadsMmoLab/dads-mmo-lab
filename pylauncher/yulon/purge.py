@@ -77,11 +77,15 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from yulon import dbsecret, docker, forgetting, logsnap, platform, rmtree
 from yulon.catalog import composegen
 from yulon.log import get_logger
 from yulon.ownership import Ownership
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import CatalogEntry
 
 logger = get_logger(__name__)
 
@@ -266,6 +270,22 @@ def refusal_for(
     return sentence
 
 
+def catalog_entry(game: str) -> CatalogEntry | None:
+    """The shipped catalog's entry for `game`, or None when it cannot be read or has none.
+
+    For the one Uninstall step that must name a container its own record cannot
+    (T179 Task 4 fix round 1: a background job whose record is unreadable).
+    Imported here rather than at module scope for `_default_claim`'s reason.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    try:
+        return load_catalog().get(game)
+    except (OSError, ValueError, KeyError) as exc:
+        logger.warning(f"could not read the catalog entry of {game}: {exc}")
+        return None
+
+
 class Uninstaller:
     """One install's uninstall, with every reach into the world as a seam.
 
@@ -436,7 +456,7 @@ class Uninstaller:
         from yulon.catalog.families.mmaps import MmapsError, remove_for_uninstall
 
         try:
-            remove_for_uninstall(self.server_dir)
+            remove_for_uninstall(self.server_dir, entry_of=lambda: catalog_entry(self.game))
         except MmapsError as exc:
             raise PurgeError(str(exc)) from exc
 

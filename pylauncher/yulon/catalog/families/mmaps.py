@@ -52,7 +52,7 @@ import re
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -103,37 +103,61 @@ class MmapsError(InstallerError):
 # -- the docker seam ----------------------------------------------------------------
 
 
+STATUS_TIMEOUT = 30.0
+"""Seconds a READ may take (inspect, log tail, start time): a status poll's budget.
+
+Every Docker call here runs under `_LOCK`, so a daemon that hangs would hold every
+later poll -- and a rebuild's hook -- behind it for ever. A read that times out is
+an unanswered one (`docker._docker()` turns a timeout into a non-zero result)."""
+
+CHANGE_TIMEOUT = 120.0
+"""Seconds a CHANGE may take (`run -d`, `rm -f`, the daemon's CPU count before a run).
+One that times out raises, and a route that needed it does not start."""
+
+SKEW = timedelta(seconds=60)
+"""How far this host's clock (the switch's stamp) and the daemon's (the world server's
+`StartedAt`, in Docker Desktop's VM) may disagree before a start reads as "before"."""
+
+
 class Runner(Protocol):
-    """Everything the job asks Docker; faked by the tests, `DockerRunner` for real."""
+    """Everything the job asks Docker; faked by the tests, `DockerRunner` for real.
 
-    def run_detached(self, spec: docker.ContainerRun, name: str) -> str: ...
+    Every call carries its own timeout (`STATUS_TIMEOUT`, `CHANGE_TIMEOUT`).
+    """
 
-    def inspect(self, name: str) -> docker.ContainerExit: ...
+    def run_detached(self, spec: docker.ContainerRun, name: str, *, timeout: float) -> str: ...
 
-    def log_tail(self, name: str, lines: int) -> str | None: ...
+    def inspect(self, name: str, *, timeout: float) -> docker.ContainerExit: ...
 
-    def remove(self, name: str) -> None: ...
+    def log_tail(self, name: str, lines: int, *, timeout: float) -> str | None: ...
 
-    def started_at(self, container: str) -> str: ...
+    def remove(self, name: str, *, timeout: float) -> None: ...
+
+    def started_at(self, container: str, *, timeout: float) -> str: ...
+
+    def cpus(self, *, timeout: float) -> int | None: ...
 
 
 class DockerRunner:
     """The local daemon, through `docker`'s own functions."""
 
-    def run_detached(self, spec: docker.ContainerRun, name: str) -> str:
-        return docker.run_detached(spec, name)
+    def run_detached(self, spec: docker.ContainerRun, name: str, *, timeout: float) -> str:
+        return docker.run_detached(spec, name, timeout=timeout)
 
-    def inspect(self, name: str) -> docker.ContainerExit:
-        return docker.container_exit(name)
+    def inspect(self, name: str, *, timeout: float) -> docker.ContainerExit:
+        return docker.container_exit(name, timeout=timeout)
 
-    def log_tail(self, name: str, lines: int) -> str | None:
-        return docker.log_tail(name, lines)
+    def log_tail(self, name: str, lines: int, *, timeout: float) -> str | None:
+        return docker.log_tail(name, lines, timeout=timeout)
 
-    def remove(self, name: str) -> None:
-        docker.remove_container(name)
+    def remove(self, name: str, *, timeout: float) -> None:
+        docker.remove_container(name, timeout=timeout)
 
-    def started_at(self, container: str) -> str:
-        return docker.started_at(container)
+    def started_at(self, container: str, *, timeout: float) -> str:
+        return docker.container_state(container, timeout=timeout).started_at
+
+    def cpus(self, *, timeout: float) -> int | None:
+        return docker.daemon_cpus(timeout=timeout)
 
 
 Clock = Callable[[], datetime]
@@ -160,6 +184,9 @@ class Record:
     error: str = ""
     pathfinding_on_at: str = ""
     """When `mmap.enablePathFinding = 1` was written; empty until it was."""
+    unreadable: bool = False
+    """Read off a file that could not be read or parsed: says nothing about the container.
+    Never written."""
 
 
 def read_record(server_dir: Path) -> Record | None:
@@ -176,7 +203,9 @@ def read_record(server_dir: Path) -> Record | None:
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
-        return Record("failed", "", error=f"its record {path} could not be read ({exc}).")
+        return Record(
+            "failed", "", error=f"its record {path} could not be read ({exc}).", unreadable=True
+        )
     try:
         raw = json.loads(text)
         state = raw["state"]
@@ -194,7 +223,12 @@ def read_record(server_dir: Path) -> Record | None:
             pathfinding_on_at=str(raw.get("pathfinding_on_at", "")),
         )
     except (ValueError, KeyError, TypeError) as exc:
-        return Record("failed", "", error=f"its record {path} is not one Yu'lon wrote ({exc}).")
+        return Record(
+            "failed",
+            "",
+            error=f"its record {path} is not one Yu'lon wrote ({exc}).",
+            unreadable=True,
+        )
 
 
 def _int_or_none(value: object) -> int | None:
@@ -210,7 +244,8 @@ def _write_record(server_dir: Path, record: Record) -> None:
     path = server_dir / RECORD_FILE
     staged = path.with_name(path.name + ".yulon-new")
     try:
-        staged.write_text(json.dumps({"version": 1, **asdict(record)}, indent=2) + "\n", "utf-8")
+        fields = {key: value for key, value in asdict(record).items() if key != "unreadable"}
+        staged.write_text(json.dumps({"version": 1, **fields}, indent=2) + "\n", "utf-8")
         os.replace(staged, path)
     except OSError as exc:
         staged.unlink(missing_ok=True)
@@ -432,13 +467,14 @@ def start_mmaps(
             if user_args is not None
             else tuple(platform.container_user_args(platform_id=_platform_id(ask)))
         )
+        argv = _filled_argv(job, run)
         _remove_container(run, job.container)
         _clear_output(job)
         started = _stamp(now())
         _write_record(server_dir, Record("queued", job.container, started=started))
         spec = docker.ContainerRun(
             image=ref,
-            argv=tuple(job.block.mmaps.argv),
+            argv=argv,
             mounts=(
                 docker.Mount(data_dir, WORK_MOUNT, read_only=True),
                 docker.Mount(data_dir / MMAPS_DIR, f"{WORK_MOUNT}/{MMAPS_DIR}"),
@@ -448,7 +484,7 @@ def start_mmaps(
             security_args=extract.EXTRACT_HARDENING,
         )
         try:
-            cid = run.run_detached(spec, job.container)
+            cid = run.run_detached(spec, job.container, timeout=CHANGE_TIMEOUT)
         except docker.DockerCommandError as exc:
             _write_record(
                 server_dir,
@@ -514,24 +550,34 @@ def stop_for_route(
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
 ) -> str | None:
-    """Stop a queued or running job before `route` changes the server; None when none runs.
+    """Stop a job that may run before `route` changes the server; None when none can.
 
     The routes' hook (Rebuild, Update to latest, Return to the tested pin): asked
-    after their refusals and before their first change. Reads the record only, so
-    a server with no job asks Docker nothing. A stop that fails raises, and the
-    route does not start: the job must never run while the server is rebuilt.
+    after their refusals and before their first change. Reads the record first, so
+    a server with no record asks Docker nothing, and one whose record is a readable
+    `done` or `failed` (its container already removed) is left alone. Anything else
+    -- queued, running, or a record that cannot be read, which says nothing about
+    the container -- is stopped by this folder's DERIVED container name. A stop
+    that fails raises, and the route does not start: the job must never run while
+    the server is rebuilt.
     """
     if background_block(entry) is None:
         return None
     with _LOCK:
         record = read_record(server_dir)
-        if record is None or record.state not in ("queued", "running"):
+        if record is None:
+            return None
+        if not record.unreadable and record.state not in ("queued", "running"):
             return None
         job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
         run = runner or DockerRunner()
         # Reconciled first: a run that FINISHED since the last status is a complete
-        # set, switched on here, and never thrown away by the stop below.
-        if _reconcile(job, run, _utc_now).state not in ("queued", "running"):
+        # set, switched on here, and never thrown away by the stop below. An
+        # unreadable record has nothing to reconcile.
+        if not record.unreadable and _reconcile(job, run, _utc_now).state not in (
+            "queued",
+            "running",
+        ):
             return None
         try:
             _stop(job, run)
@@ -550,37 +596,48 @@ def stop_for_route(
 def remove_for_uninstall(
     server_dir: Path,
     *,
+    entry_of: Callable[[], CatalogEntry | None] | None = None,
     runner: Runner | None = None,
     platform_id: Callable[[], str] | None = None,
 ) -> None:
-    """Uninstall's call: remove this folder's job container, if its record names one.
+    """Uninstall's call: remove this folder's job container whenever a record says one existed.
 
     Before the containers and images go: a job left running would hold the
     server image and write into a folder being deleted. Its output goes with the
-    folder. The record's container is removed only when its name ends with THIS
-    folder's install id, so a record edited by hand cannot remove another
-    server's container.
+    folder. Nothing at all without a record (no Docker call, no catalog read).
+
+    Which container: the record's, when it ends with THIS folder's install id;
+    otherwise -- a record that cannot be read, or names something else -- the
+    DERIVED name (`container_name()`, from `entry_of()`, the server's catalog
+    entry), because such a record says nothing about whether the job still
+    runs, and a name read off it must never reach another server's container.
+    With no entry to derive from, nothing is removed and the log says so.
 
     Raises:
         MmapsError: Docker could not remove it.
     """
     with _LOCK:
         record = read_record(server_dir)
-        if record is None or not record.container:
+        if record is None:
             return
-        suffix = f"mmaps-{_install_id(server_dir, platform_id)}"
-        if not record.container.endswith(suffix):
-            logger.warning(
-                f"{server_dir / RECORD_FILE} names {record.container}, not this folder's job; "
-                "left alone"
-            )
-            return
+        ident = _install_id(server_dir, platform_id)
+        name = record.container
+        # An unreadable record has no name at all (`read_record()`), so it lands here too.
+        if not name.endswith(f"mmaps-{ident}"):
+            entry = entry_of() if entry_of is not None else None
+            if entry is None or background_block(entry) is None:
+                logger.warning(
+                    f"{server_dir / RECORD_FILE} does not name this folder's job and its game's "
+                    "entry is not known, so no movement-map container was removed"
+                )
+                return
+            name = container_name(entry, ident)
         try:
-            (runner or DockerRunner()).remove(record.container)
+            (runner or DockerRunner()).remove(name, timeout=CHANGE_TIMEOUT)
         except docker.DockerCommandError as exc:
             raise MmapsError(
                 f"The background job making this server's pathfinding data "
-                f"({record.container}) could not be stopped ({exc}), so nothing was removed. "
+                f"({name}) could not be stopped ({exc}), so nothing was removed. "
                 "Check that Docker is running, then press Uninstall again."
             ) from exc
 
@@ -603,7 +660,7 @@ def _reconcile(job: Job, run: Runner, now: Clock) -> MmapsStatus:
 def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
     # Always the name THIS folder's job has (`container_name()`), never one read
     # off the record: a record edited by hand must not point a removal elsewhere.
-    facts = run.inspect(job.container)
+    facts = run.inspect(job.container, timeout=STATUS_TIMEOUT)
     if not facts.status and not facts.missing:
         return replace(_status_of(record), docker_unanswered=True)
     if facts.missing:
@@ -613,7 +670,7 @@ def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsS
             else "it was interrupted while it was being started."
         )
         return _fail(job, record, why, run, now, remove=False)
-    tail = run.log_tail(job.container, LOG_TAIL_LINES)
+    tail = run.log_tail(job.container, LOG_TAIL_LINES, timeout=STATUS_TIMEOUT)
     percent, current = _progress(tail) if tail is not None else (None, None)
     if facts.status not in ("exited", "dead"):
         moved = replace(
@@ -658,7 +715,7 @@ def _finished(
     )
     _write_record(job.server_dir, done)
     try:
-        run.remove(job.container)
+        run.remove(job.container, timeout=CHANGE_TIMEOUT)
     except docker.DockerCommandError as exc:
         logger.warning(f"could not remove the finished {job.container}: {exc}")
     logger.info(f"{job.container} finished: {have} files in {job.data_dir / MMAPS_DIR}")
@@ -666,7 +723,17 @@ def _finished(
 
 
 def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
-    """A complete set: switched on once (retried until it was), and whether a restart is due."""
+    """A complete set: switched on once (retried until it was), and whether a restart is due.
+
+    Counted again first: a set emptied since (a new extraction, Task 6, or a hand)
+    is no set, so the switch goes back to 0 with it and the job is not started.
+    """
+    plan = job.block.mmaps
+    if extract.counts({MMAPS_DIR: plan.min_files}, job.data_dir)[MMAPS_DIR] < plan.min_files:
+        _clear_output(job)
+        _forget_record(job.server_dir)
+        logger.warning(f"{job.data_dir / MMAPS_DIR} no longer holds a whole set; not started")
+        return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if not record.pathfinding_on_at:
         try:
             conf.set_keys(job.world_conf, {PATHFINDING_KEY: "1"})
@@ -680,9 +747,9 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
         record = replace(record, pathfinding_on_at=_stamp(now()))
         _write_record(job.server_dir, record)
     on = _pathfinding_on(job)
-    started = _parse_stamp(run.started_at(job.world_container))
+    started = _parse_stamp(run.started_at(job.world_container, timeout=STATUS_TIMEOUT))
     switched = _parse_stamp(record.pathfinding_on_at)
-    due = on and switched is not None and (started is None or started < switched)
+    due = on and switched is not None and (started is None or started < switched - SKEW)
     return replace(_status_of(record), pathfinding_on=on, restart_needed=due)
 
 
@@ -692,7 +759,7 @@ def _fail(
     """Record a failed run: its container and partial output gone, pathfinding off."""
     if remove:
         try:
-            run.remove(job.container)
+            run.remove(job.container, timeout=CHANGE_TIMEOUT)
         except docker.DockerCommandError as exc:
             logger.warning(f"could not remove the failed {job.container}: {exc}")
     try:
@@ -710,7 +777,7 @@ def _stop(job: Job, run: Runner) -> None:
     """Container removed, partial output removed, record gone: not started."""
     name = job.container
     try:
-        run.remove(name)
+        run.remove(name, timeout=CHANGE_TIMEOUT)
     except docker.DockerCommandError as exc:
         raise MmapsError(
             f"The background job making the pathfinding data ({name}) could not be stopped "
@@ -721,9 +788,27 @@ def _stop(job: Job, run: Runner) -> None:
     logger.info(f"stopped {name} in {job.server_dir}")
 
 
+def _filled_argv(job: Job, run: Runner) -> tuple[str, ...]:
+    """The plan's argv with `{{THREADS}}` filled (`TrinityCoreMmaps.threads`).
+
+    `half` is half the DAEMON's CPUs, at least 1: on Docker Desktop that is the
+    VM's share, not this host's `os.cpu_count()`. A daemon that does not say is 1.
+    """
+    plan = job.block.mmaps
+    if isinstance(plan.threads, int):
+        threads = plan.threads
+    else:
+        cpus = run.cpus(timeout=CHANGE_TIMEOUT)
+        threads = max(1, (cpus or 1) // 2)
+    try:
+        return tuple(composegen.fill(arg, {"THREADS": str(threads)}) for arg in plan.argv)
+    except composegen.ComposeGenError as exc:
+        raise MmapsError(f"the generator's command could not be filled in: {exc}") from exc
+
+
 def _remove_container(run: Runner, name: str) -> None:
     try:
-        run.remove(name)
+        run.remove(name, timeout=CHANGE_TIMEOUT)
     except docker.DockerCommandError as exc:
         raise MmapsError(
             f"A container left by an earlier run ({name}) could not be removed ({exc}). "

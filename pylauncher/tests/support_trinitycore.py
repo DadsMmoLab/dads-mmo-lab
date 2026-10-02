@@ -156,7 +156,10 @@ TRINITYCORE: dict[str, Any] = {
         "dbc_overlay_from": "centurion/dbc",
         "client_archives": list(CLIENT_ARCHIVES),
     },
-    "mmaps": {"argv": [f"{CORE_DIR}/bin/mmaps_generator"], "background": True},
+    "mmaps": {
+        "argv": [f"{CORE_DIR}/bin/mmaps_generator", "--threads", "{{THREADS}}"],
+        "background": True,
+    },
     "conf": {
         "source_dir": f"{CORE_DIR}/etc",
         "files": {
@@ -293,11 +296,18 @@ class FakeMmapsDocker:
         self.refuse_run = ""
         self.refuse_remove = ""
         self.mmaps_at_run: list[list[str]] = []
+        self.ncpu: int | None = 8
+        self.hang = False
+        """Every call answers as one that timed out: unanswered reads, refused writes."""
+        self.timeouts: list[tuple[str, float]] = []
 
     # -- `mmaps.Runner` -------------------------------------------------------------
 
-    def run_detached(self, spec: docker.ContainerRun, name: str) -> str:
+    def run_detached(self, spec: docker.ContainerRun, name: str, *, timeout: float) -> str:
         self.calls.append(f"run:{name}")
+        self.timeouts.append(("run", timeout))
+        if self.hang:
+            raise docker.DockerCommandError("timed out")
         if self.refuse_run:
             raise docker.DockerCommandError(self.refuse_run)
         if name in self.jobs:
@@ -312,27 +322,37 @@ class FakeMmapsDocker:
         self.jobs[name] = FakeJob(spec, container_id)
         return container_id
 
-    def inspect(self, name: str) -> docker.ContainerExit:
+    def inspect(self, name: str, *, timeout: float) -> docker.ContainerExit:
         self.calls.append(f"inspect:{name}")
-        if not self.answers:
+        self.timeouts.append(("inspect", timeout))
+        if not self.answers or self.hang:
             return docker.ContainerExit()
         job = self.jobs.get(name)
         if job is None:
             return docker.ContainerExit(missing=True)
         return docker.ContainerExit(job.status, job.exit_code, "", job.container_id)
 
-    def log_tail(self, name: str, lines: int) -> str | None:
+    def log_tail(self, name: str, lines: int, *, timeout: float) -> str | None:
+        self.timeouts.append(("log_tail", timeout))
         job = self.jobs.get(name)
         return None if job is None else "\n".join(job.logs[-lines:])
 
-    def remove(self, name: str) -> None:
+    def remove(self, name: str, *, timeout: float) -> None:
         self.calls.append(f"remove:{name}")
+        self.timeouts.append(("remove", timeout))
+        if self.hang:
+            raise docker.DockerCommandError("timed out")
         if self.refuse_remove:
             raise docker.DockerCommandError(self.refuse_remove)
         self.jobs.pop(name, None)
 
-    def started_at(self, container: str) -> str:
-        return self.world_started_at
+    def started_at(self, container: str, *, timeout: float) -> str:
+        self.timeouts.append(("started_at", timeout))
+        return "" if self.hang else self.world_started_at
+
+    def cpus(self, *, timeout: float) -> int | None:
+        self.timeouts.append(("cpus", timeout))
+        return None if self.hang else self.ncpu
 
     # -- driving it -----------------------------------------------------------------
 

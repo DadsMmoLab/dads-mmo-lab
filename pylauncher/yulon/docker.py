@@ -5072,7 +5072,7 @@ def run_container(
     return run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
 
 
-def run_detached(spec: ContainerRun, name: str) -> str:
+def run_detached(spec: ContainerRun, name: str, *, timeout: float | None = None) -> str:
     """Start `spec` in the background as the container `name`; its id (T179's mmaps job).
 
     `ContainerRun.to_detached_argv()`: `-d --name`, and no `--rm`, so its exit code
@@ -5087,7 +5087,7 @@ def run_detached(spec: ContainerRun, name: str) -> str:
     """
     argv = spec.to_detached_argv(name)
     logger.info(f"run_detached(): `docker {' '.join(argv)}`")
-    return _run(argv).stdout.strip()
+    return _run(argv, timeout=timeout).stdout.strip()
 
 
 @dataclass(frozen=True)
@@ -5107,10 +5107,12 @@ class ContainerExit:
     missing: bool = False
 
 
-def container_exit(container: str, *, wsl_distro: str | None = None) -> ContainerExit:
-    """`ContainerExit` in one `docker inspect`; never raises."""
+def container_exit(
+    container: str, *, timeout: float | None = None, wsl_distro: str | None = None
+) -> ContainerExit:
+    """`ContainerExit` in one `docker inspect`; never raises. A timeout reads as unanswered."""
     fmt = "{{.Id}}\t{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.FinishedAt}}"
-    proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
+    proc = _docker(["inspect", container, "--format", fmt], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
@@ -5121,14 +5123,31 @@ def container_exit(container: str, *, wsl_distro: str | None = None) -> Containe
     return ContainerExit(status, exit_code, finished, cid)
 
 
-def remove_container(container: str, *, wsl_distro: str | None = None) -> None:
+def daemon_cpus(*, timeout: float | None = None, wsl_distro: str | None = None) -> int | None:
+    """How many CPUs the Docker DAEMON has (`docker info --format {{.NCPU}}`); None if unknown.
+
+    The daemon's, not this process's host: on Docker Desktop the containers run in
+    a VM given a share of the machine, and a job sized from `os.cpu_count()` would
+    ask for cores that VM does not have (T179's movement-map threads).
+    """
+    proc = _docker(["info", "--format", "{{.NCPU}}"], timeout=timeout, wsl_distro=wsl_distro)
+    text = proc.stdout.strip()
+    if proc.returncode != 0 or not text.isdigit() or int(text) < 1:
+        logger.warning(f"could not read the daemon's CPU count: {proc.stderr.strip()}")
+        return None
+    return int(text)
+
+
+def remove_container(
+    container: str, *, timeout: float | None = None, wsl_distro: str | None = None
+) -> None:
     """`docker rm -f <container>`; a container that is already gone is not a failure.
 
     Raises:
         DockerCliMissingError: there is no docker CLI.
-        DockerCommandError: docker refused for any other reason.
+        DockerCommandError: docker refused for any other reason, or did not answer in time.
     """
-    proc = _docker(["rm", "-f", container], wsl_distro=wsl_distro)
+    proc = _docker(["rm", "-f", container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode == 0:
         return
     if _cli_missing(proc):

@@ -130,7 +130,7 @@ def test_a_start_runs_the_generator_detached_and_records_it_running(server: Path
     assert "in the background" in said
     (spec,) = fake.started
     assert fake.calls[-1] == f"run:{NAME}"
-    assert spec.argv == (f"{CORE_DIR}/bin/mmaps_generator",)
+    assert spec.argv == (f"{CORE_DIR}/bin/mmaps_generator", "--threads", "4")
     assert (
         spec.image
         == composegen.built_image_refs(
@@ -550,11 +550,36 @@ def test_uninstall_refuses_when_the_job_cannot_be_removed(real_seam: Machine) ->
     assert box.server_dir.exists()
 
 
-def test_the_real_uninstall_seam_asks_docker_nothing_without_a_record(tmp_path: Path) -> None:
+class NoDocker:
+    """A runner that fails the test on ANY call: what "asks Docker nothing" means."""
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"the uninstall asked the job's Docker for {name}")
+
+
+def test_the_real_uninstall_seam_asks_docker_nothing_without_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Every other family's uninstall goes through it too: no record, no Docker."""
+    monkeypatch.setattr(mmaps, "DockerRunner", NoDocker)
+    monkeypatch.setattr(purge, "catalog_entry", NoDocker().__getattr__)
     rec = PurgeRecorder(tmp_path)
     rec.uninstaller().run(keep_characters=False)
-    assert rec.order.index("remove_containers") > 0
+    assert "remove_containers" in rec.order
+
+
+def test_uninstall_removes_a_job_whose_record_cannot_be_read_by_its_derived_name(
+    real_seam: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record nobody can read says nothing about the container, which may still run."""
+    box = real_seam
+    install(box)
+    name = job_name(box)
+    (box.server_dir / mmaps.RECORD_FILE).write_text("{torn", "utf-8")
+    monkeypatch.setattr(purge, "catalog_entry", lambda game: ENTRY if game == ENTRY.id else None)
+    rec = PurgeRecorder(box.server_dir, remove_folder=purge.remove_tree)
+    rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    assert f"remove:{name}" in box.mmaps.calls and name not in box.mmaps.jobs
 
 
 def test_uninstall_leaves_a_container_another_folder_named(tmp_path: Path) -> None:
@@ -638,3 +663,144 @@ def test_removing_a_container_that_is_already_gone_is_not_a_failure(
     _answer(monkeypatch, 1, err="permission denied")
     with pytest.raises(docker.DockerCommandError, match="permission denied"):
         docker.remove_container(NAME)
+
+
+# -- fix round 1 ----------------------------------------------------------------------------
+
+
+def test_a_route_stops_a_job_whose_record_cannot_be_read(server: Path) -> None:
+    """Unreadable is not "not running": the derived container goes, and its output."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(9)
+    (server / mmaps.RECORD_FILE).write_text("{torn", "utf-8")
+    said = mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+    assert said is not None and said.startswith("Stopped making the pathfinding data")
+    assert NAME not in fake.jobs and output(server) == []
+    assert not (server / mmaps.RECORD_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    ("threads", "cpus", "expected"),
+    [("half", 8, "4"), ("half", 13, "6"), ("half", 1, "1"), ("half", None, "1"), (3, 16, "3")],
+)
+def test_the_generators_threads_come_from_the_daemons_cores(
+    server: Path, threads: object, cpus: int | None, expected: str
+) -> None:
+    """Half the cores of the daemon running it (Docker Desktop's VM, not this host), at least 1."""
+    raw = ENTRY.model_dump(mode="json")
+    raw["install"]["native"]["trinitycore"]["mmaps"]["threads"] = threads
+    entry = type(ENTRY).model_validate(raw)
+    fake = FakeMmapsDocker()
+    fake.ncpu = cpus
+    mmaps.start_mmaps(
+        server,
+        entry,
+        runner=fake,
+        platform_id=lambda: "linux",
+        install_id=INSTALL_ID,
+        user_args=(),
+    )
+    assert fake.started[0].argv[-2:] == ("--threads", expected)
+
+
+def test_the_threads_option_refuses_nonsense() -> None:
+    raw = ENTRY.model_dump(mode="json")
+    for bad in (0, -2, "all", "half "):
+        raw["install"]["native"]["trinitycore"]["mmaps"]["threads"] = bad
+        with pytest.raises(ValueError):
+            type(ENTRY).model_validate(raw)
+
+
+def test_a_finished_set_that_was_emptied_goes_back_to_not_started_and_off(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.finish(0, tiles=MIN_FILES)
+    assert status(server, fake).pathfinding_on
+    for tile in (server / "data" / "mmaps").iterdir():
+        tile.unlink()
+    now = status(server, fake)
+    assert now.state == "not-started" and now.can_start and not now.pathfinding_on
+    assert "mmap.enablePathFinding = 0" in conf_text(server)
+    assert not (server / mmaps.RECORD_FILE).exists()
+
+
+def test_every_docker_call_is_bounded(server: Path) -> None:
+    """Under the lock, a hung daemon must not hold a poll or a rebuild's hook for ever."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    status(server, fake)
+    mmaps.stop_mmaps(server, ENTRY, runner=fake, install_id=INSTALL_ID)
+    reads = [t for call, t in fake.timeouts if call in ("inspect", "log_tail", "started_at")]
+    writes = [t for call, t in fake.timeouts if call in ("run", "remove", "cpus")]
+    assert reads and all(0 < t <= mmaps.STATUS_TIMEOUT == 30 for t in reads)
+    assert writes and all(0 < t <= mmaps.CHANGE_TIMEOUT == 120 for t in writes)
+    assert {call for call, _t in fake.timeouts} == {
+        "inspect",
+        "log_tail",
+        "run",
+        "remove",
+        "cpus",
+    }
+
+
+def test_a_hung_daemon_reads_as_unanswered_and_refuses_the_route(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.hang = True
+    assert status(server, fake).docker_unanswered
+    with pytest.raises(mmaps.MmapsError, match="the rebuild was not started"):
+        mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+    assert record(server)["state"] == "running"
+
+
+def test_the_real_runner_hands_every_call_its_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+
+    seen: list[tuple[str, object]] = []
+
+    def fake_docker(argv: list[str], *args: object, **kwargs: object) -> object:
+        seen.append((argv[0], kwargs.get("timeout")))
+        return subprocess.CompletedProcess(["docker", *argv], 0, "8\n", "")
+
+    monkeypatch.setattr(docker, "_docker", fake_docker)
+    run = mmaps.DockerRunner()
+    spec = docker.ContainerRun(image="img", argv=("x",))
+    run.run_detached(spec, NAME, timeout=111)
+    run.inspect(NAME, timeout=22)
+    run.log_tail(NAME, 5, timeout=23)
+    run.remove(NAME, timeout=112)
+    run.started_at("w", timeout=24)
+    assert run.cpus(timeout=25) == 8
+    assert seen == [
+        ("run", 111),
+        ("inspect", 22),
+        ("logs", 23),
+        ("rm", 112),
+        ("inspect", 24),
+        ("info", 25),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("world_started", "due"),
+    [
+        ("2026-10-02T14:59:30.000000000Z", False),
+        ("2026-10-02T15:00:45.000000000Z", False),
+        ("2026-10-02T14:58:30.000000000Z", True),
+    ],
+    ids=("30s-before-is-skew", "after", "90s-before"),
+)
+def test_restart_needed_allows_a_minute_of_clock_skew(
+    server: Path, world_started: str, due: bool
+) -> None:
+    """The switch's stamp is this host's clock and StartedAt is the daemon's (a VM's)."""
+    fake = FakeMmapsDocker()
+    clock = Clock()
+    start(server, fake, clock)
+    clock.now = datetime(2026, 10, 2, 15, 0, 0, tzinfo=UTC)
+    fake.finish(0, tiles=MIN_FILES)
+    fake.world_started_at = world_started
+    assert status(server, fake, clock).restart_needed is due
