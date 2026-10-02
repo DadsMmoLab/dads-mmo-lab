@@ -1340,7 +1340,7 @@ class CmangosInstaller(StagedInstaller):
                     charset=db.charset,
                     exec_stdin=self._seams.exec_stdin,
                 )
-            runs = sqlplan.expand(plan, ctx.server_dir, schemas, self._secret_tokens(ctx))
+            runs = self._expand(plan, ctx.server_dir, self._secret_tokens(ctx))
         except InstallerError:
             # Ahead of the broad clause, as everywhere else in this class:
             # `InstallerError` subclasses `RuntimeError`, and every refusal
@@ -1653,10 +1653,9 @@ class CmangosInstaller(StagedInstaller):
         writes two files.
         """
         try:
-            return sqlplan.expand(
+            return self._expand(
                 plan.model_copy(update={"phases": rerunnable_phases(plan)}),
                 ctx.server_dir,
-                self._schemas(),
                 self._secret_tokens(ctx),
             )
         except InstallerError:
@@ -1746,10 +1745,9 @@ class CmangosInstaller(StagedInstaller):
     ) -> tuple[sqlplan.PhaseRun, ...]:
         """`_rerunnable_runs()`'s expansion, for the subset of the plan's phases a press names."""
         try:
-            return sqlplan.expand(
+            return self._expand(
                 plan.model_copy(update={"phases": tuple(phases)}),
                 ctx.server_dir,
-                self._schemas(),
                 self._secret_tokens(ctx),
             )
         except InstallerError:
@@ -2041,6 +2039,18 @@ class CmangosInstaller(StagedInstaller):
         undecided, and it is left where it is recorded.
         """
         return cast("sqlplan.SqlQuery", self._seams.sql_query)
+
+    def _expand(
+        self, plan: SqlPlan, server_dir: Path, tokens: Mapping[str, str]
+    ) -> tuple[sqlplan.PhaseRun, ...]:
+        """`sqlplan.expand()` over this game's schemas: the ONE spelling of a plan's runs.
+
+        The import, the re-runnable phases and the corrections press all come
+        through here, so a family whose plan changes what a run streams -- the
+        TrinityCore family's database-name renames (T179) -- overrides one method
+        and every route that applies its SQL agrees with the import about it.
+        """
+        return sqlplan.expand(plan, server_dir, self._schemas(), tokens)
 
     def _schemas(self) -> dict[str, str]:
         """The identity mapping over this game's schema NAMES, keyed by name (A10).

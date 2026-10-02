@@ -2441,15 +2441,21 @@ def test_the_trinitycore_database_is_mysql_8_4_with_the_generated_root_password(
 
 
 def test_the_trinitycore_healthcheck_waits_for_the_real_server_over_tcp(tmp_path: Path) -> None:
-    """A socket probe answers during the image's --skip-networking init server; TCP cannot."""
+    """A socket probe answers during the image's --skip-networking init server; TCP cannot.
+
+    And healthy means root LOGS IN (T179 Task 2 review): `mysqladmin ping` exits 0 on
+    a refused login, so it proved "listening", not "the import can connect".
+    """
     db = tc_services(render_trinitycore(tmp_path / "wow"))["centurion-db"]
     test = db["healthcheck"]["test"]
     assert test[0] == "CMD-SHELL"
     probe = test[1]
-    assert "mysqladmin ping" in probe
-    assert "--protocol=TCP" in probe
+    assert "mysqladmin" not in probe, "ping answers 0 even when the login is refused"
+    assert probe.split(" mysql ", 1)[1].startswith("-h 127.0.0.1 --protocol=TCP -uroot -e")
+    assert "'SELECT 1'" in probe, "a statement, so the login is proved and not only the port"
     assert "-h 127.0.0.1" in probe, "loopback keeps the probe out of the shutdown hold's count"
-    assert 'MYSQL_PWD="$$MYSQL_ROOT_PASSWORD"' in probe, "the password stays out of argv"
+    assert probe.startswith('MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql ')
+    assert "-p" not in probe.split(), "the password stays out of argv"
 
 
 def test_the_trinitycore_ports_are_auth_world_and_a_loopback_channel(tmp_path: Path) -> None:

@@ -857,10 +857,26 @@ class TrinityCoreExtractPlan(ExtractPlan):
         ),
     )
 
+    dbc_overlay_to: str = Field(
+        default="dbc",
+        min_length=1,
+        description=(
+            "The folder under `data/` -- the world server's `DataDir` -- the overlay is copied "
+            "into: TrinityCore reads its DBCs from `<DataDir>/dbc/` (README.md:174-180, facts "
+            "§3). Data rather than a constant in the family module because it is a folder name "
+            "a CMaNGOS entry's catalog also spells."
+        ),
+    )
+
     @field_validator("dbc_overlay_from")
     @classmethod
     def _inside_the_checkout(cls, value: str) -> str:
         return _below(value, "dbc_overlay_from", "the checkout")
+
+    @field_validator("dbc_overlay_to")
+    @classmethod
+    def _inside_the_data_folder(cls, value: str) -> str:
+        return _below(value, "dbc_overlay_to", "data/")
 
 
 class TrinityCoreMmaps(MmapPlan):
@@ -1013,6 +1029,13 @@ class TrinityCoreData(_Strict):
             "below is relative to it. Must be a dest of the entry's own sources."
         ),
     )
+    client: ClientSpec = Field(
+        description=(
+            "What the player's client folder must look like before the client-data stage makes "
+            "its temporary extraction client from it (T179 Task 3), as `CmangosData.client` is "
+            "for the CMaNGOS extraction."
+        )
+    )
     sparse_exclude: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -1038,10 +1061,26 @@ class TrinityCoreData(_Strict):
     @field_validator("checkout")
     @classmethod
     def _checkout_inside_the_server_dir(cls, value: str) -> str:
+        """A plain folder strictly inside the server dir, and nothing a build file reads as syntax.
+
+        The checkout is spliced into the generated `.dockerignore` (`!{{CHECKOUT}}`) and
+        the Dockerfile's `COPY ["{{CHECKOUT}}", ...]` (Task 2). There `.` or an empty
+        name re-includes the whole server folder -- `.db_password`, `.env` and the confs
+        -- into the build context; `* ? [ ]` match other paths and `!` negates;
+        a leading `#` turns the line into a comment; and `"` or a backslash breaks out
+        of the JSON-form `COPY`. Refused rather than escaped: no TrinityCore tree has a
+        reason to be cloned under such a name.
+        """
         path = PurePosixPath(value)
-        if "\\" in value or path.is_absolute() or ".." in path.parts:
+        if "\\" in value or path.is_absolute() or ".." in path.parts or not path.parts:
             raise ValueError(
                 f"checkout must be a relative POSIX path inside the server dir, got {value!r}"
+            )
+        special = sorted(set(value) & set('*?[]!"'))
+        if special or value.startswith("#"):
+            raise ValueError(
+                f"checkout {value!r} holds {special or ['#']}, which the build's .dockerignore "
+                "or COPY line reads as syntax; name a plain folder"
             )
         return value
 

@@ -26,7 +26,7 @@ from yulon.catalog.catalog import (
     parse_catalog,
 )
 from yulon.catalog.families import family_for
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.families.trinitycore import TrinityCoreInstaller
 
 SQL: dict[str, Any] = {
     "create": ["c_auth", "c_characters", "c_world"],
@@ -57,6 +57,7 @@ SQL: dict[str, Any] = {
 
 TRINITYCORE: dict[str, Any] = {
     "checkout": "src/core",
+    "client": {"required_file": "Data/lichking.MPQ", "min_mpq": 6},
     "sparse_exclude": ["playerbot reference", "centurion/launcher"],
     "dockerfile": {
         "make_jobs": 2,
@@ -142,6 +143,7 @@ def test_a_minimal_trinitycore_block_loads_and_reads_back() -> None:
     assert native.family == "trinitycore"
     assert native.cmangos is None and native.azerothcore is None
     assert block.checkout == "src/core"
+    assert block.client.required_file == "Data/lichking.MPQ"
     assert block.sparse_exclude == ("playerbot reference", "centurion/launcher")
     assert block.dockerfile.cmake_options == ("-DPLAYERBOT=ON", "-DTOOLS=ON", "-DSCRIPTS=static")
     assert block.dockerfile.make_jobs == 2
@@ -191,14 +193,15 @@ def test_the_shipped_catalog_loads_unchanged_and_no_entry_is_trinitycore_yet() -
         assert entry.accounts.scheme != "trinitycore", entry.id
 
 
-def test_an_entry_of_the_family_is_refused_until_its_engine_is_registered() -> None:
-    """The model lands before the engine (Task 3): until then dispatch refuses, never falls back.
+def test_an_entry_of_the_family_dispatches_to_the_trinitycore_engine() -> None:
+    """Task 3 registered the engine: a trinitycore entry gets it, never another family's.
 
-    When `FAMILIES` gains `trinitycore` this test is the one to turn around.
+    Until Task 3 this test said the opposite -- dispatch refused the entry -- and
+    Task 1 named it as the one to turn around when `FAMILIES` gained the family.
     """
     entry = parse_catalog({"schema_version": 1, "games": [_entry()]}).get("wow-example")
-    with pytest.raises(InstallerError, match="install family this app does not have"):
-        family_for(entry)
+    assert family_for(entry) is TrinityCoreInstaller
+    assert TrinityCoreInstaller.family == "trinitycore"
 
 
 # -- the family names exactly its block -------------------------------------------
@@ -249,10 +252,43 @@ def test_a_dbc_overlay_outside_the_checkout_is_refused(path: str) -> None:
         NativeInstall.model_validate(_native(extract__dbc_overlay_from=path))
 
 
-@pytest.mark.parametrize("checkout", ["/src/core", "../core", "src\\core"])
+@pytest.mark.parametrize("checkout", ["/src/core", "../core", "src\\core", "."])
 def test_a_checkout_outside_the_server_dir_is_refused(checkout: str) -> None:
+    """`.` is the server dir itself: `!.` in the .dockerignore re-includes all of it."""
     with pytest.raises(ValidationError, match="checkout must be a relative POSIX path"):
         NativeInstall.model_validate(_native(checkout=checkout))
+
+
+def test_an_empty_checkout_is_refused() -> None:
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        NativeInstall.model_validate(_native(checkout=""))
+
+
+@pytest.mark.parametrize(
+    "checkout", ["src/core*", "src/c?re", "src/[core", "src/core]", "!src/core", 'src/"core']
+)
+def test_a_checkout_the_build_files_read_as_syntax_is_refused(checkout: str) -> None:
+    """Spliced into `!{{CHECKOUT}}` and `COPY ["{{CHECKOUT}}", ...]` (Task 2's templates)."""
+    with pytest.raises(ValidationError, match="reads as syntax; name a plain folder"):
+        NativeInstall.model_validate(_native(checkout=checkout))
+
+
+def test_a_checkout_starting_like_a_comment_is_refused() -> None:
+    with pytest.raises(ValidationError, match=r"holds \['#'\]"):
+        NativeInstall.model_validate(_native(checkout="#core"))
+
+
+def test_a_checkout_with_a_space_is_a_plain_folder() -> None:
+    """A space is not syntax in either file; Centurion's own excluded path has one."""
+    block = NativeInstall.model_validate(_native(checkout="src/my core")).trinitycore
+    assert block is not None and block.checkout == "src/my core"
+
+
+def test_the_client_rules_are_required() -> None:
+    native = _native()
+    del native["trinitycore"]["client"]
+    with pytest.raises(ValidationError, match="trinitycore.client\n  Field required"):
+        NativeInstall.model_validate(native)
 
 
 @pytest.mark.parametrize(
@@ -385,3 +421,15 @@ def test_a_rename_must_land_on_one_of_the_entrys_own_schemas() -> None:
     native = _native(sql__renames=[["legionnaireauth", "auth"]])
     with pytest.raises(ValidationError, match="'auth', which is not one of this entry's"):
         parse_catalog({"schema_version": 1, "games": [_entry(native)]})
+
+
+def test_the_dbc_overlay_lands_in_data_dbc_unless_the_entry_says_otherwise() -> None:
+    """TrinityCore reads `<DataDir>/dbc/` (README.md:174-180, facts §3)."""
+    block = NativeInstall.model_validate(NATIVE).trinitycore
+    assert block is not None and block.extract.dbc_overlay_to == "dbc"
+
+
+@pytest.mark.parametrize("path", ["/dbc", "../dbc", "dbc/../../x", ".", "a\\b"])
+def test_a_dbc_overlay_target_outside_the_data_folder_is_refused(path: str) -> None:
+    with pytest.raises(ValidationError, match="dbc_overlay_to must be a relative POSIX path"):
+        NativeInstall.model_validate(_native(extract__dbc_overlay_to=path))

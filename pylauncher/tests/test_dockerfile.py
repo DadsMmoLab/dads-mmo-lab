@@ -1653,6 +1653,30 @@ def test_the_centurion_build_compiles_the_bots_and_the_tools_with_the_catalogs_d
     assert f'COPY ["{CHECKOUT}", "/src/core"]' in lines
 
 
+def test_the_centurion_configure_never_asks_git_about_a_tree_with_no_repository() -> None:
+    """Build spike 2026-10-02: with `.git` left out of the context and `git` installed,
+    cmake/genrev.cmake read the revision as "+", skipped its "unknown" fallback and
+    failed configure at genrev.cmake:116. `-DWITHOUT_GIT=ON` (cmake/options.cmake:65)
+    is what built, and with it `git` is not needed in the builder at all."""
+    docker, ignore = centurion_pair()
+    lines = run_lines(docker)
+    (cmake,) = [line for line in lines if line.startswith("RUN cmake ")]
+    assert " -DWITHOUT_GIT=ON " in cmake
+    assert cmake.index("-DWITHOUT_GIT=ON") < cmake.index(CMAKE_OPTIONS[0]), "the template's own"
+    assert not in_build_context(ignore, f"{CHECKOUT}/.git/HEAD"), "why the define is needed"
+    builder_apt = next(line for line in lines if "apt-get install" in line)
+    assert " git " not in f"{builder_apt} ", "unused with WITHOUT_GIT=ON"
+
+
+def test_the_centurion_runtime_installs_the_boost_thread_library_the_worldserver_links() -> None:
+    """`ldd worldserver` names libboost_thread.so.1.83.0 (build spike 2026-10-02); it was in
+    the image only as another package's dependency, so it is named outright."""
+    lines = run_lines(centurion_pair()[0])
+    runtime = lines[[i for i, line in enumerate(lines) if line.startswith("FROM ")][1] :]
+    runtime_apt = next(line for line in runtime if "apt-get install" in line)
+    assert " libboost-thread1.83.0 " in runtime_apt
+
+
 def test_the_centurion_compile_keeps_its_objects_in_a_ccache_mount() -> None:
     """As AzerothCore's Dockerfile does: a killed build keeps what it compiled."""
     lines = run_lines(centurion_pair()[0])
@@ -1696,3 +1720,17 @@ def test_the_centurion_context_is_the_core_without_what_is_never_compiled() -> N
     for left_out in (".git", "build", "centurion/patches", "centurion/sql", "centurion/dbc", "sql"):
         assert f"{CHECKOUT}/{left_out}" in ignore, left_out
     assert f"{CHECKOUT}/src" not in ignore
+
+
+@pytest.mark.parametrize("never_compiled", ["centurion/launcher", "playerbot reference"])
+def test_what_centurion_never_compiles_stays_out_of_the_build_context(never_compiled: str) -> None:
+    """Asked of `.dockerignore`'s own rule (last match wins), not of the line's spelling.
+
+    `playerbot reference/` is a non-compiled copy of mod-playerbots (README.md:34,
+    0.96 GB) and `centurion/launcher/` is Centurion's own launcher; the sparse clone
+    leaves both out too (T179 Task 3), and the context must not depend on that.
+    """
+    ignore = centurion_pair()[1]
+    assert not in_build_context(ignore, f"{CHECKOUT}/{never_compiled}/src/main.cpp")
+    assert not in_build_context(ignore, f"{CHECKOUT}/{never_compiled}")
+    assert in_build_context(ignore, f"{CHECKOUT}/src/server/worldserver/Main.cpp")

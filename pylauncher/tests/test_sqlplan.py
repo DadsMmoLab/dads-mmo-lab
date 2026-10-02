@@ -2896,3 +2896,137 @@ def test_adoption_gaps_lets_a_database_that_will_not_answer_raise() -> None:
     server = _Server(databases=ALL, down="No such container: tbc-db")
     with pytest.raises(docker.DockerCommandError):
         _gate(server).adoption_gaps()
+
+
+# -- T179: the database-name renames `centurion/sql/import.sh` makes ---------------------
+
+RENAMES = (("legionnaireauth", "realmd"), ("centurionworld", "mangos"))
+SCHEMA_TEXT = (
+    "CREATE TRIGGER t AFTER UPDATE ON realmlist FOR EACH ROW "
+    "INSERT INTO legionnaireauth.audit_dml_log VALUES ('centurionworld', 'legionnaireauth');\n"
+)
+
+
+def _renaming_plan() -> SqlPlan:
+    return _plan(
+        SqlPhase(name="auth", into="realmd", files=("sql/auth/auth_schema.sql", "sql/auth/*.dat")),
+        SqlPhase(name="world", into="mangos", files=("sql/world/*.sql",)),
+    )
+
+
+def test_the_renames_ride_on_the_listed_files_runs_only(tmp_path: Path) -> None:
+    (tmp_path / "sql" / "auth").mkdir(parents=True)
+    (tmp_path / "sql" / "auth" / "auth_schema.sql").write_text(SCHEMA_TEXT, encoding="utf-8")
+    (tmp_path / "sql" / "auth" / "auth.dat").write_text(SCHEMA_TEXT, encoding="utf-8")
+    _touch(tmp_path / "sql" / "world", "_routines.sql", "creature.sql")
+    runs = sqlplan.expand(
+        _renaming_plan(),
+        tmp_path,
+        SCHEMAS,
+        TOKENS,
+        renames=RENAMES,
+        rename_files=("sql/auth/auth_schema.sql", "sql/world/_routines.sql"),
+    )
+    by_rel = {run.rel: run.renames for run in runs}
+    assert by_rel == {
+        "sql/auth/auth_schema.sql": RENAMES,
+        "sql/auth/auth.dat": (),
+        "sql/world/_routines.sql": RENAMES,
+        "sql/world/creature.sql": (),
+    }
+
+
+def test_a_renamed_file_streams_with_the_installed_names_and_others_as_they_lie(
+    tmp_path: Path,
+) -> None:
+    """`import.sh:41-43`'s `sed`, at the moment of streaming; the file on disk is never edited."""
+    (tmp_path / "sql" / "auth").mkdir(parents=True)
+    schema = tmp_path / "sql" / "auth" / "auth_schema.sql"
+    schema.write_text(SCHEMA_TEXT, encoding="utf-8", newline="")
+    (tmp_path / "sql" / "auth" / "auth.dat").write_text(SCHEMA_TEXT, encoding="utf-8", newline="")
+    (tmp_path / "sql" / "world").mkdir(parents=True)
+    runs = sqlplan.expand(
+        _plan(SqlPhase(name="auth", into="realmd", files=("sql/auth/*",))),
+        tmp_path,
+        SCHEMAS,
+        TOKENS,
+        renames=RENAMES,
+        rename_files=("sql/auth/auth_schema.sql",),
+    )
+    ex = _Exec()
+    said = _run_apply(runs, ex)
+    streamed = {call[2] for call in ex.calls}
+    assert streamed == {
+        SCHEMA_TEXT.encode(),
+        b"CREATE TRIGGER t AFTER UPDATE ON realmlist FOR EACH ROW "
+        b"INSERT INTO realmd.audit_dml_log VALUES ('mangos', 'realmd');\n",
+    }
+    assert schema.read_text(encoding="utf-8") == SCHEMA_TEXT
+    assert (
+        "auth: sql/auth/auth_schema.sql -> realmd "
+        "(database names legionnaireauth -> realmd, centurionworld -> mangos)" in said
+    )
+    assert "auth: sql/auth/auth.dat -> realmd" in said
+
+
+def test_a_rename_applies_to_a_gzipped_file_after_it_is_inflated(tmp_path: Path) -> None:
+    phase = SqlPhase(name="auth", into="realmd", files=("a.sql.gz",), gzip=True)
+    run = _file_run(tmp_path, "a.sql.gz", "USE legionnaireauth;\n", phase=phase, schema="realmd")
+    renamed = sqlplan.PhaseRun(phase, "realmd", run.path, None, True, run.rel, RENAMES)
+    ex = _Exec()
+    _run_apply((renamed,), ex)
+    assert ex.calls[0][2] == b"USE realmd;\n"
+
+
+def test_a_rename_to_a_database_the_game_does_not_have_is_refused(tmp_path: Path) -> None:
+    _touch(tmp_path / "sql" / "world", "_routines.sql")
+    with pytest.raises(InstallerError, match="renames 'centurionworld' to 'world', which is not"):
+        sqlplan.expand(
+            _plan(SqlPhase(name="world", into="mangos", files=("sql/world/*.sql",))),
+            tmp_path,
+            SCHEMAS,
+            TOKENS,
+            renames=(("centurionworld", "world"),),
+            rename_files=("sql/world/_routines.sql",),
+        )
+
+
+def test_a_listed_file_the_import_does_not_apply_is_refused(tmp_path: Path) -> None:
+    """A routines file missing from the sources: the procedures would silently not exist."""
+    _touch(tmp_path / "sql" / "world", "creature.sql")
+    with pytest.raises(InstallerError, match="sql/world/_routines.sql, but this import does not"):
+        sqlplan.expand(
+            _plan(SqlPhase(name="world", into="mangos", files=("sql/world/*.sql",))),
+            tmp_path,
+            SCHEMAS,
+            TOKENS,
+            renames=RENAMES,
+            rename_files=("sql/world/_routines.sql",),
+        )
+
+
+def test_a_plan_cut_to_other_phases_is_not_refused_for_a_listed_file_it_never_reaches(
+    tmp_path: Path,
+) -> None:
+    """The corrections and re-run routes expand a few phases; a file of another is not theirs."""
+    _touch(tmp_path / "sql" / "world", "creature.sql")
+    runs = sqlplan.expand(
+        _plan(SqlPhase(name="world", into="mangos", files=("sql/world/c*.sql",))),
+        tmp_path,
+        SCHEMAS,
+        TOKENS,
+        renames=RENAMES,
+        rename_files=("sql/auth/auth_schema.sql",),
+    )
+    assert [run.rel for run in runs] == ["sql/world/creature.sql"]
+    assert runs[0].renames == ()
+
+
+def test_without_renames_every_run_is_what_it_always_was(tmp_path: Path) -> None:
+    _touch(tmp_path / "Updates", "z1.sql")
+    phase = SqlPhase(name="content updates", into="mangos", files=("Updates/*.sql",))
+    (run,) = sqlplan.expand(_plan(phase), tmp_path, SCHEMAS, TOKENS)
+    assert run == sqlplan.PhaseRun(
+        phase, "mangos", tmp_path / "Updates" / "z1.sql", None, False, "Updates/z1.sql"
+    )
+    assert run.renames == ()

@@ -7568,7 +7568,12 @@ class StagedInstaller:
         return ctx.state.has(stage) and remote is not None
 
     def stage_clone_sources(
-        self, ctx: StageContext, sources: Sequence[EmulatorSource], *, recorded_as: str
+        self,
+        ctx: StageContext,
+        sources: Sequence[EmulatorSource],
+        *,
+        recorded_as: str,
+        sparse_exclude: Mapping[str, Sequence[str]] | None = None,
     ) -> Iterator[str]:
         """Clone every source at its `dest`, refusing what is not ours and touching what is done.
 
@@ -7576,6 +7581,11 @@ class StagedInstaller:
         tuple; the body cannot know it, and without it the record could not be
         consulted at all — which is how the AzerothCore stages came to fetch and
         reset on every resume. See `already_cloned()`.
+
+        `sparse_exclude` maps a source's `dest` to the folders its checkout leaves
+        out (`git.CloneSpec.sparse_exclude`); the TrinityCore family passes its
+        block's `sparse_exclude` for its core checkout (T179). A source not in it is
+        checked out whole, as every source was before.
 
         Disk evidence beats the state file in both directions: a `.git` whose
         `origin` is this source and a record of this stage is a finished clone
@@ -7622,6 +7632,7 @@ class StagedInstaller:
                     sparse_path=source.sparse_path,
                     depth=source.depth,
                     rev=source.rev,
+                    sparse_exclude=tuple((sparse_exclude or {}).get(source.dest, ())),
                 ),
                 recorded_as,
             )
@@ -8026,11 +8037,16 @@ class StagedInstaller:
         from yulon.catalog.families import conf
 
         native_block = self.entry.install.native
-        if native_block is None or native_block.cmangos is None:
+        # `composegen.built_here()`'s block, the one `folder_settings()` below reads
+        # too: a TrinityCore install's confs carry the same `DataDir`/`LogsDir` keys
+        # in the same kind of table (T179 Task 3), so the two cannot disagree about
+        # which table a repair is about.
+        built = None if native_block is None else composegen.built_here(native_block)
+        if built is None:
             return (), ()
         texts: dict[str, str] = {}
         paths: dict[str, Path] = {}
-        for name, patch in native_block.cmangos.conf.files.items():
+        for name, patch in built.conf.files.items():
             if not any(key in patch.keys for key in composegen.SERVER_FOLDER_KEYS):
                 continue
             path = server_dir / composegen.SERVER_CONF_DIR / name

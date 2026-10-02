@@ -3551,3 +3551,132 @@ def test_no_shipped_plan_lets_one_tool_fill_another_tools_produces() -> None:
             folders.extend(tool.produces)
         assert len(folders) == len(set(folders)), (entry.id, folders)
     assert seen == 3, seen
+
+
+# -- T179: a client mounted from one folder and identified by another -----------------
+
+
+def test_the_salt_is_folded_into_the_plan_hash_and_none_is_the_old_hash() -> None:
+    """Every CMaNGOS install recorded the unsalted hash; a salt of "" must reproduce it."""
+    assert extract.plan_hash(PLAN, "") == extract.plan_hash(PLAN)
+    assert extract.plan_hash(PLAN, '[["world","abc"]]') != extract.plan_hash(PLAN)
+    assert extract.plan_hash(PLAN, "a") != extract.plan_hash(PLAN, "b")
+
+
+def test_the_evidence_names_the_identity_client_and_the_salt_not_the_mounted_copy(
+    tmp_path: Path,
+) -> None:
+    """The TrinityCore copy is deleted after the run; the evidence names the player's client."""
+    original = client(tmp_path / "player")
+    copy = client(tmp_path / "server" / ".copy")
+    runner = Runner(FULL)
+    list(
+        extract.run_plan(
+            PLAN,
+            image_ref="yulon.local/x-server:1",
+            client_dir=copy,
+            data_dir=tmp_path / "server" / "data",
+            run_container=runner,
+            user_args=(),
+            sink=lambda _line: None,
+            cancel=None,
+            required_file=REQUIRED,
+            selinux_enforcing=lambda: None,
+            evidence_client_dir=original,
+            evidence_salt="packs-v1",
+        )
+    )
+    assert {mount.host for spec in runner.specs for mount in spec.mounts if mount.read_only} == {
+        copy
+    }, "the tools read the mounted copy"
+    evidence = extract.read_evidence(tmp_path / "server" / "data")
+    assert evidence is not None
+    assert evidence.client_path == str(original.resolve())
+    assert evidence.plan_hash == extract.plan_hash(PLAN, "packs-v1")
+    expected = extract.expected_evidence(PLAN, original, REQUIRED, salt="packs-v1")
+    assert all(
+        extract.tool_satisfied(tool, tmp_path / "server" / "data", evidence, expected)
+        for tool in PLAN.tools
+    )
+    other = extract.expected_evidence(PLAN, original, REQUIRED, salt="packs-v2")
+    assert not extract.tool_satisfied(AD, tmp_path / "server" / "data", evidence, other)
+
+
+# -- T179: the DBC overlay ------------------------------------------------------------
+
+
+def test_the_overlay_replaces_same_named_files_and_keeps_the_others(tmp_path: Path) -> None:
+    source, target = tmp_path / "centurion" / "dbc", tmp_path / "data" / "dbc"
+    source.mkdir(parents=True)
+    target.mkdir(parents=True)
+    (source / "Spell.dbc").write_bytes(b"server")
+    (source / "LiquidType.dbc").write_bytes(b"server liquid")
+    (target / "Spell.dbc").write_bytes(b"extracted, and longer")
+    (target / "Map.dbc").write_bytes(b"extracted map")
+    assert extract.overlay_files(source, target) == 2
+    assert (target / "Spell.dbc").read_bytes() == b"server"
+    assert (target / "LiquidType.dbc").read_bytes() == b"server liquid"
+    assert (target / "Map.dbc").read_bytes() == b"extracted map"
+    assert not list(target.glob("*.yulon-new")), "no temporary name is left behind"
+
+
+def test_a_second_overlay_copies_nothing_that_is_already_there(tmp_path: Path) -> None:
+    source, target = tmp_path / "src", tmp_path / "dst"
+    source.mkdir()
+    (source / "Spell.dbc").write_bytes(b"server")
+    assert extract.overlay_files(source, target) == 1
+    assert extract.overlay_files(source, target) == 0
+    (target / "Spell.dbc").write_bytes(b"edited")
+    assert extract.overlay_files(source, target) == 1, "a file that changed is laid again"
+    assert (target / "Spell.dbc").read_bytes() == b"server"
+
+
+@pytest.mark.parametrize("make", [False, True], ids=["missing", "empty"])
+def test_an_overlay_with_no_files_is_refused(tmp_path: Path, make: bool) -> None:
+    source = tmp_path / "dbc"
+    if make:
+        source.mkdir()
+    with pytest.raises(InstallerError, match="holds no files"):
+        extract.overlay_files(source, tmp_path / "data" / "dbc")
+
+
+# -- T179: the start check -----------------------------------------------------------
+
+
+def start_maps(data: Path, ids: Sequence[int]) -> None:
+    (data / "maps").mkdir(parents=True, exist_ok=True)
+    (data / "vmaps").mkdir(parents=True, exist_ok=True)
+    for map_id in ids:
+        (data / "maps" / f"{map_id:03}3232.map").write_bytes(b"MAPS")
+        (data / "vmaps" / f"{map_id:03}.vmtree").write_bytes(b"VMAP")
+
+
+def test_every_start_map_with_a_map_file_and_a_tree_passes(tmp_path: Path) -> None:
+    start_maps(tmp_path, (0, 1, 530))
+    assert extract.missing_map_data(tmp_path, (0, 1, 530)) == ()
+
+
+def test_a_start_map_missing_either_half_is_named_by_what_is_missing(tmp_path: Path) -> None:
+    start_maps(tmp_path, (0, 1))
+    (tmp_path / "maps" / "5303232.map").write_bytes(b"MAPS")
+    (tmp_path / "vmaps" / "001.vmtree").unlink()
+    assert extract.missing_map_data(tmp_path, (0, 1, 530)) == (
+        "map 1: no vmaps/001.vmtree",
+        "map 530: no vmaps/530.vmtree",
+    )
+
+
+def test_a_map_file_of_another_map_does_not_stand_in(tmp_path: Path) -> None:
+    """`Map::ExistMap()` opens `maps/{map:03}{gx:02}{gy:02}.map` (Map.cpp:121): exact names."""
+    start_maps(tmp_path, ())
+    for name in ("0103232.map", "000323.map", "00032321.map", "0003232.mmap"):
+        (tmp_path / "maps" / name).write_bytes(b"x")
+    (tmp_path / "vmaps" / "000.vmtree").write_bytes(b"VMAP")
+    assert extract.missing_map_data(tmp_path, (0,)) == ("map 0: no maps/000????.map",)
+
+
+def test_no_data_folder_at_all_is_every_half_missing(tmp_path: Path) -> None:
+    assert extract.missing_map_data(tmp_path / "nothing", (530,)) == (
+        "map 530: no maps/530????.map",
+        "map 530: no vmaps/530.vmtree",
+    )

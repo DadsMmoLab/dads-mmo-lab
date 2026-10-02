@@ -101,7 +101,7 @@ import stat as stat_module
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO, Protocol, cast
@@ -234,6 +234,15 @@ class PhaseRun:
     statement: str | None
     gzip: bool
     rel: str
+    renames: tuple[tuple[str, str], ...] = ()
+    """`(from, to)` database names substituted in this file's text as it is streamed (T179).
+
+    What `centurion/sql/import.sh:41-43` does with `sed` before it loads its three
+    schema and routine files: the dumps' triggers and procedures name the live
+    realm's databases, and they must name this install's. Empty for every run
+    whose file the plan does not list in `rename_files` -- every other file is
+    streamed exactly as it lies on disk, the module's rule (A10).
+    """
 
 
 def natural_key(name: str) -> tuple[object, ...]:
@@ -372,7 +381,13 @@ def _order(char: str) -> int:
 
 
 def expand(
-    plan: SqlPlan, server_dir: Path, schemas: Mapping[str, str], tokens: Mapping[str, str]
+    plan: SqlPlan,
+    server_dir: Path,
+    schemas: Mapping[str, str],
+    tokens: Mapping[str, str],
+    *,
+    renames: Sequence[tuple[str, str]] = (),
+    rename_files: Collection[str] = (),
 ) -> tuple[PhaseRun, ...]:
     """Every file and statement the plan applies, in the order it applies them. Pure.
 
@@ -395,14 +410,23 @@ def expand(
     "could not look" merge back into one answer — see the module docstring. No shipped
     plan needs one, so it is refused rather than half-supported.
 
+    `renames` and `rename_files` are `TrinityCoreSqlPlan`'s (T179): each run whose
+    `rel` is one of `rename_files` carries the renames, `to` turned into the server's
+    name for that schema, and `_open()` substitutes them as the file is streamed. No
+    other run carries any. A listed file this import does not apply is refused: the
+    procedures it holds would otherwise be missing, or loaded from another file
+    naming the live realm's databases, and neither says so anywhere.
+
     Raises:
         InstallerError: the plan or a phase names a schema outside `schemas`; a pattern
             escapes the server dir, is rooted, or wildcards a directory; a `fail` phase's
             pattern matched no file; a directory could not be listed or a matching entry
-            could not be examined (whatever the phase's `on_error` says); or a statement
-            carries a token `tokens` does not have.
+            could not be examined (whatever the phase's `on_error` says); a statement
+            carries a token `tokens` does not have; or a rename names a schema outside
+            `schemas`, or a file this import does not apply.
     """
     _check_plan_schemas(plan, schemas)
+    renamed = _renamed(renames, schemas)
     runs: list[PhaseRun] = []
     for phase in plan.phases:
         targets = _targets(phase, schemas)
@@ -415,8 +439,39 @@ def expand(
             for pattern in patterns:
                 for path in _matches(server_dir, pattern, phase):
                     rel = path.relative_to(server_dir).as_posix()
-                    runs.append(PhaseRun(phase, schema, path, None, phase.gzip, rel))
+                    swaps = renamed if rel in rename_files else ()
+                    runs.append(PhaseRun(phase, schema, path, None, phase.gzip, rel, swaps))
+    # Only the listed files THIS plan's globs reach: the corrections and re-run
+    # routes expand a plan cut down to a few phases, and a file of a phase they
+    # left out is not one they were ever going to apply.
+    globs = [glob for phase in plan.phases for glob in phase.files]
+    globs += [glob for phase in plan.phases for glob in (phase.into_each or {}).values()]
+    reached = {rel for rel in rename_files if any(fnmatch.fnmatchcase(rel, g) for g in globs)}
+    applied = {run.rel for run in runs if run.path is not None}
+    unapplied = sorted(reached - applied)
+    if unapplied:
+        raise InstallerError(
+            f"the SQL plan renames the databases named in {', '.join(unapplied)}, but this "
+            f"import does not apply {'it' if len(unapplied) == 1 else 'them'} -- the file is "
+            "not in the server's sources. Nothing was applied. The sources may not have "
+            "cloned completely."
+        )
     return tuple(runs)
+
+
+def _renamed(
+    renames: Sequence[tuple[str, str]], schemas: Mapping[str, str]
+) -> tuple[tuple[str, str], ...]:
+    """Each `(from, to)` with `to` as the server spells that schema, or a catalog refusal."""
+    resolved: list[tuple[str, str]] = []
+    for old, new in renames:
+        if new not in schemas:
+            raise InstallerError(
+                f"the SQL plan renames {old!r} to {new!r}, which is not one of this game's "
+                f"databases ({', '.join(schemas)}). {_CATALOG_ERROR}"
+            )
+        resolved.append((old, schemas[new]))
+    return tuple(resolved)
 
 
 def _check_plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> None:
@@ -691,6 +746,16 @@ def _open(run: PhaseRun) -> BinaryIO:
     """
     if run.path is None:
         return io.BytesIO((run.statement or "").encode("utf-8"))
+    if run.renames:
+        # Read whole and substituted, as `import.sh`'s `sed` does: the three files
+        # this applies to are the schema and routine dumps, tens of kilobytes. The
+        # names are `[A-Za-z0-9_]+` (the model's rule), so bytes are exact.
+        opened = gzip.open(run.path, "rb") if run.gzip else run.path.open("rb")
+        with opened as handle:
+            data = handle.read()
+        for old, new in run.renames:
+            data = data.replace(old.encode("ascii"), new.encode("ascii"))
+        return io.BytesIO(data)
     if run.gzip:
         # `GzipFile` is a `BufferedIOBase`, which typeshed does not spell as
         # `BinaryIO` although it reads exactly like one; the cast says so once.
@@ -712,9 +777,14 @@ def _describe(run: PhaseRun) -> str:
     By `rel`, never by the SQL: `CREATE USER ... IDENTIFIED BY` is a statement, and the
     install log is something users paste into bug reports.
     """
+    renamed = (
+        " (database names " + ", ".join(f"{old} -> {new}" for old, new in run.renames) + ")"
+        if run.renames
+        else ""
+    )
     if run.schema is None:
-        return f"{run.phase.name}: {run.rel} (no schema)"
-    return f"{run.phase.name}: {run.rel} -> {run.schema}"
+        return f"{run.phase.name}: {run.rel} (no schema){renamed}"
+    return f"{run.phase.name}: {run.rel} -> {run.schema}{renamed}"
 
 
 def _last_line(lines: Sequence[str]) -> str:

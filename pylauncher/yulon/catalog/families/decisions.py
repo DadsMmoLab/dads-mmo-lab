@@ -108,6 +108,9 @@ def pending_problems(sites: Iterable[Site], shipped_families: Collection[str]) -
 
 
 _NOT_THE_ENGINE = "never reached: this is inside the CMaNGOS engine, which only its own entries run"
+_NOT_THE_TC_ENGINE = (
+    "never reached: this is inside the TrinityCore engine, which only its own entries run"
+)
 _CMANGOS_CONTROLLER = "never reached: only this CMaNGOS game's own controller package reads it"
 _NO_SQL_PLAN = "AzerothCore's own database updater applies its updates; its block has no SQL plan"
 _NO_CONF_TABLE = "AzerothCore's confs are made by its image from their .dist; it has no conf table"
@@ -177,12 +180,8 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "yulon.catalog.families.__init__",
         "<module>",
         "FAMILIES: family id -> installer class",
-        {
-            "azerothcore": supported(),
-            "cmangos": supported(),
-            "trinitycore": pending("Task 3 (TrinityCoreInstaller)"),
-        },
-        hits=("'azerothcore'", "'cmangos'"),
+        _all(supported()),
+        hits=("'azerothcore'", "'cmangos'", "'trinitycore'"),
     ),
     Site(
         "yulon.catalog.families.azerothcore",
@@ -201,8 +200,36 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "yulon.catalog.families.cmangos",
         "CmangosInstaller._data",
         "the CMaNGOS engine reads its own block",
-        _cmangos_only(_NOT_THE_ENGINE),
+        _cmangos_only(
+            _NOT_THE_ENGINE,
+            not_applicable(
+                "never reached: TrinityCoreInstaller overrides `_data()` with a view of its own "
+                "block (T179 Task 3)"
+            ),
+        ),
         hits=(".cmangos",),
+    ),
+    Site(
+        "yulon.catalog.families.trinitycore",
+        "TrinityCoreInstaller",
+        "the TrinityCore engine's own `family` name",
+        {
+            "azerothcore": not_applicable("the name the TrinityCore engine answers to"),
+            "cmangos": not_applicable("the name the TrinityCore engine answers to"),
+            "trinitycore": supported(),
+        },
+        hits=("'trinitycore'",),
+    ),
+    Site(
+        "yulon.catalog.families.trinitycore",
+        "TrinityCoreInstaller._tc",
+        "the TrinityCore engine reads its own block",
+        {
+            "azerothcore": not_applicable(_NOT_THE_TC_ENGINE),
+            "cmangos": not_applicable(_NOT_THE_TC_ENGINE),
+            "trinitycore": supported(),
+        },
+        hits=(".trinitycore",),
     ),
     # -- the install spine ---------------------------------------------------------------
     Site(
@@ -232,13 +259,6 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.catalog.native",
-        "StagedInstaller._conf_edits",
-        "folder settings a compose repair sets in the confs (T169)",
-        _cmangos_only(_NO_CONF_TABLE, pending("Task 3 (conf stage: DataDir, LogsDir)")),
-        hits=(".cmangos", ".cmangos"),
-    ),
-    Site(
-        "yulon.catalog.native",
         "held_at_its_pin",
         "which sources stay on their pin when the server is updated (*-db repos)",
         {
@@ -255,7 +275,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": pending("Task 3 (the checkout's dest)"),
+            "trinitycore": supported(
+                "its checkout is a folder inside the server dir; the catalog refuses `.`"
+            ),
         },
         scanned=False,
     ),
@@ -276,15 +298,17 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     ),
     Site(
         "yulon.catalog.composegen",
-        "_built_here",
+        "built_here",
         "the family block whose Dockerfile, confs and folder binds this app writes: MAKE_JOBS, "
-        "CORE_DIR, and the conf table folder_target/folder_settings/conf_texts read (T169)",
+        "CORE_DIR, the conf table folder_target/folder_settings/conf_texts read (T169), "
+        "preflight's job count and client-folder rules, and the conf table a compose repair "
+        "edits (T179 Task 3)",
         {
             "azerothcore": not_applicable(
                 "its checkout ships its own Dockerfile and its image makes its confs"
             ),
             "cmangos": supported(),
-            "trinitycore": supported("T179 Task 2"),
+            "trinitycore": supported("T179 Tasks 2 and 3"),
         },
         hits=(".cmangos", ".cmangos", ".trinitycore"),
     ),
@@ -312,28 +336,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         },
         hits=(".trinitycore",),
     ),
-    # -- preflight -----------------------------------------------------------------------
-    Site(
-        "yulon.catalog.preflight",
-        "client_spec_for",
-        "the client-folder checks before an install reads the player's client",
-        _cmangos_only(
-            "AzerothCore downloads its client data; it reads no client folder",
-            pending("Task 3 (the temporary extraction client)"),
-        ),
-        hits=(".cmangos", ".cmangos"),
-    ),
-    Site(
-        "yulon.catalog.preflight",
-        "_build_jobs",
-        "how many compilers the build runs",
-        {
-            "azerothcore": supported("its Dockerfile runs nproc+1"),
-            "cmangos": supported(),
-            "trinitycore": supported("its make_jobs, as composegen fills {{MAKE_JOBS}}"),
-        },
-        hits=(".cmangos", ".cmangos", ".trinitycore", ".trinitycore"),
-    ),
+    # -- the engines' own names -------------------------------------------------------
     Site(
         "yulon.catalog.families.azerothcore",
         "AzerothCoreInstaller",
@@ -462,7 +465,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": not_applicable("CMaNGOS's import is the engine's marker-gated SQL plan"),
-            "trinitycore": pending("Task 3 (marker-gated import)"),
+            "trinitycore": not_applicable(
+                "TrinityCore's import is the engine's marker-gated SQL plan (CmangosInstaller's, "
+                "inherited)"
+            ),
         },
         scanned=False,
     ),
@@ -699,7 +705,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
                 "AzerothCore imports through a compose one-shot and writes no marker to adopt"
             ),
             "cmangos": supported("CmangosInstaller overrides it with its import gate"),
-            "trinitycore": pending("Task 3 (the marker-gated import's adopt gate)"),
+            "trinitycore": supported(
+                "TrinityCoreInstaller inherits CmangosInstaller's, over its own SQL plan"
+            ),
         },
         scanned=False,
     ),

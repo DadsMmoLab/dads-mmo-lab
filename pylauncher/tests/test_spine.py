@@ -2754,6 +2754,27 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete raises PlayClientError naming the files already removed, rather than "
         "reporting files removed"
     ),
+    ("catalog/families/trinitycore.py", "_drop_optional_pack_files"): (
+        "T179 Task 3. Walks the TEMPORARY extraction client `play_client.create()` has just "
+        "made in `<server>/.yulon-extract-client` (its marker names this game and server) "
+        "for the files an optional client pack installs or removes when off, and unlinks "
+        "those NAMES from the copy, so the extractors never read them. The player's own "
+        "client is never listed or written: a name in the copy shared with one of its files "
+        "is removed as a name (`play_client._remove_file()`, which puts back a read-only flag "
+        "it had to clear), and the copy is deleted after the extraction either way"
+    ),
+    ("catalog/families/extract.py", "overlay_files"): (
+        "T179 Task 3. Lists the server's own checkout folder `dbc_overlay_from` "
+        "(Centurion's `centurion/dbc`) to copy each file over the same name under "
+        "`data/dbc` in the server folder, through a temporary name renamed into place. "
+        "Read-only on the checkout; it writes only under the install's own `data/`, and a "
+        "folder with no files is a refusal, never a quiet no-op"
+    ),
+    ("catalog/families/extract.py", "missing_map_data"): (
+        "T179 Task 3. Lists `data/maps` under the server folder to ask whether a map file "
+        "exists for each map the world server checks at start. Read-only, and a listing that "
+        "fails reads as the maps missing, which refuses -- never as there"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 

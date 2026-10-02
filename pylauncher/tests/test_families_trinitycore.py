@@ -1,0 +1,980 @@
+"""Tests for the TrinityCore family engine (`yulon.catalog.families.trinitycore`, T179 Task 3).
+
+The machine is `tests/support_native.py`'s `Recorder`, with two doubles of this
+file's own: `FakeMysql`, a database that remembers which schemas, tables and
+marker rows exist, so the REAL `MarkerGate` decides the import's branch (Review
+Focus 2 is about that gate's reading of a half import, which a canned probe
+answer could not show); and `Extractors`, the `docker run` of the three map
+tools, which records what the client mount held at the moment each tool ran and
+lays map files under the names the world server's start check opens. The entry
+is `support_trinitycore.centurion_like()`, with client packs whose zips are
+built here, so their checksums are real.
+
+Nothing here proves a Centurion server installs: that is the live proof (Task 9).
+It proves the stage order, what each stage hands the machine, and the two Review
+Focus properties pinned in this task: the extraction client never holds an
+optional pack's file (1), and the import's marker is written only after the last
+phase, a half import being cleared and run again from the start (2).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import re
+import subprocess
+import threading
+import zipfile
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, BinaryIO
+
+import pytest
+
+from tests.support_native import Recorder
+from tests.support_trinitycore import (
+    AUTH,
+    CHARS,
+    CHECKOUT,
+    CORE_DIR,
+    SQL_DIR,
+    WORLD,
+    centurion_like,
+)
+from yulon import client_packs, docker, play_client, resources
+from yulon.catalog import native
+from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.families import FAMILIES, extract, family_for
+from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.catalog.families.trinitycore import (
+    EXTRACT_CLIENT_DIR,
+    TrinityCoreInstaller,
+)
+from yulon.catalog.installer import InstallerError, InstallOptions
+
+REV = "faac5fc9b0fe0934c26f08231793ca607d38327d"
+PATCHES = f"{CHECKOUT}/centurion/patches"
+
+
+def _zip(member: str, body: bytes) -> bytes:
+    """A pack zip with one member and a fixed date, so its checksum is the same every run."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(zipfile.ZipInfo(member, date_time=(2026, 9, 26, 0, 0, 0)), body)
+    return buffer.getvalue()
+
+
+PATCH_X = b"MPQ\x1a centurion world (patch-X from patch-Y.zip)"
+PATCH_A = b"MPQ\x1a centurion locale (patch-enUS-A)"
+ZIPS = {
+    f"{PATCHES}/patch-Y.zip": _zip("patch-X.MPQ", PATCH_X),
+    f"{PATCHES}/patch-enUS-A.zip": _zip("patch-enUS-A.MPQ", PATCH_A),
+}
+
+REQUIRED_PACKS: list[dict[str, Any]] = [
+    {
+        "id": "world",
+        "label": "Centurion world",
+        "source": {"kind": "checkout", "path": f"{PATCHES}/patch-Y.zip"},
+        "md5": hashlib.md5(ZIPS[f"{PATCHES}/patch-Y.zip"], usedforsecurity=False).hexdigest(),
+        "install": [{"member": "patch-X.MPQ", "to": "Data/patch-X.MPQ"}],
+    },
+    {
+        "id": "locale",
+        "label": "Centurion locale",
+        "source": {"kind": "checkout", "path": f"{PATCHES}/patch-enUS-A.zip"},
+        "md5": hashlib.md5(ZIPS[f"{PATCHES}/patch-enUS-A.zip"], usedforsecurity=False).hexdigest(),
+        "install": [{"member": "patch-enUS-A.MPQ", "to": "Data/enUS/patch-enUS-A.MPQ"}],
+    },
+]
+
+OPTIONAL_PACKS: list[dict[str, Any]] = [
+    {
+        "id": "hd-characters",
+        "label": "HD characters",
+        "source": {
+            "kind": "url",
+            "url": "https://centurionpvp.example/hd/patch-F.zip",
+            "version_url": "https://centurionpvp.example/hd/patch-F.version",
+        },
+        "install": [{"member": "patch-F.MPQ", "to": "Data/patch-F.MPQ"}],
+        "optional": True,
+        "default": True,
+    },
+    {
+        "id": "alt-world",
+        "label": "Alternative world terrain",
+        "source": {
+            "kind": "url",
+            "url": "https://centurionpvp.example/hd/alt.zip",
+            "version_url": "https://centurionpvp.example/hd/alt.version",
+        },
+        "install": [{"member": "patch-T.MPQ", "to": "Data/patch-T.MPQ"}],
+        "remove_when_off": ["Data/patch-Y.MPQ"],
+        "optional": True,
+    },
+]
+
+ENTRY = centurion_like(packs=[*REQUIRED_PACKS, *OPTIONAL_PACKS], rev=REV)
+TC = ENTRY.install.native.trinitycore if ENTRY.install.native is not None else None
+assert TC is not None
+DB_PASSWORD = "tc-0123456789abcdef"
+
+SERVER_DBC = {"Spell.dbc": b"the server's Spell.dbc", "LiquidType.dbc": b"the server's LiquidType"}
+
+SQL_FILES: dict[str, str] = {
+    "auth/auth_schema.sql": (
+        "CREATE TABLE realmlist (id INT);\n"
+        "CREATE TRIGGER trg_realmlist_au AFTER UPDATE ON realmlist FOR EACH ROW "
+        "INSERT INTO legionnaireauth.audit_dml_log VALUES ('centurionworld');\n"
+    ),
+    "auth/auth_data.sql": "-- dumped from legionnaireauth, which this file must keep saying\n",
+    "auth/auth_bots.sql": "INSERT INTO account VALUES (76, 'PLAYERBOTONE');\n",
+    "characters/characters_schema.sql": (
+        "CREATE PROCEDURE createTournamentKit() SELECT * FROM centurionworld.x;\n"
+    ),
+    "characters/characters_seed.sql": "INSERT INTO characters VALUES (1);\n",
+    "characters/characters_bots.sql": "INSERT INTO characters VALUES (100955);\n",
+    "world/_routines.sql": "CREATE PROCEDURE p() SELECT * FROM legionnaireauth.account;\n",
+    "world/creature.sql": "DROP TABLE IF EXISTS creature;\n",
+    "world/version.sql": "DROP TABLE IF EXISTS version;\n",
+    "world/broadcast_text_locale.1.sql": "DROP TABLE IF EXISTS broadcast_text_locale;\n",
+}
+
+WORLD_CONF_DIST = (
+    "[worldserver]\n"
+    "RealmID = 1\n"
+    'DataDir = "."\n'
+    'LogsDir = ""\n'
+    'LoginDatabaseInfo     = "127.0.0.1;3306;trinity;trinity;auth"\n'
+    'WorldDatabaseInfo     = "127.0.0.1;3306;trinity;trinity;world"\n'
+    'CharacterDatabaseInfo = "127.0.0.1;3306;trinity;trinity;characters"\n'
+    "WorldServerPort = 8085\n"
+    "Updates.EnableDatabases = 7\n"
+    "Console.Enable = 1\n"
+    "SOAP.Enabled = 0\n"
+    'SOAP.IP = "127.0.0.1"\n'
+    "SOAP.Port = 7878\n"
+    "mmap.enablePathFinding = 1\n"
+)
+AUTH_CONF_DIST = (
+    '[authserver]\nLogsDir = ""\nLoginDatabaseInfo = "127.0.0.1;3306;trinity;trinity;auth"\n'
+)
+PLAYERBOTS_CONF_DIST = "Playerbot.Enable = 0\n"
+
+
+# -- the database ------------------------------------------------------------------
+
+
+@dataclass
+class FakeMysql:
+    """A MySQL that remembers schemas, tables and marker rows -- enough for the real gate.
+
+    `CREATE DATABASE` / `DROP DATABASE` / `CREATE TABLE IF NOT EXISTS a.b` and the
+    marker's `INSERT` change what it holds; the probe's questions (`SHOW DATABASES`,
+    a table's existence, the newest marker) are answered from that. `fail_on` makes
+    every stream containing it exit 1 with a client-shaped stderr, as a trigger the
+    importer may not create does (the MySQL proof's ERROR 1419).
+    """
+
+    databases: set[str] = field(default_factory=set)
+    tables: set[tuple[str, str]] = field(default_factory=set)
+    markers: dict[str, list[str]] = field(default_factory=dict)
+    fail_on: str = ""
+    streams: list[tuple[tuple[str, ...], str]] = field(default_factory=list)
+    realm_row: str = "127.0.0.1\t127.0.0.1\n"
+
+    def exec_stdin(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        text = source.read().decode("utf-8")
+        self.streams.append((tuple(argv), text))
+        assert env == {"MYSQL_PWD": DB_PASSWORD}, "the password travels in the environment"
+        if self.fail_on and self.fail_on in text:
+            return subprocess.CompletedProcess(
+                list(argv), 1, "", "ERROR 1419 (HY000) at line 80: You do not have the SUPER"
+            )
+        for name in re.findall(r"CREATE DATABASE IF NOT EXISTS `([^`]+)`", text):
+            self.databases.add(name)
+        for name in re.findall(r"DROP DATABASE IF EXISTS `([^`]+)`", text):
+            self.databases.discard(name)
+            self.tables = {table for table in self.tables if table[0] != name}
+            self.markers.pop(name, None)
+        for schema, table in re.findall(r"CREATE TABLE IF NOT EXISTS `([^`]+)`\.`([^`]+)`", text):
+            self.tables.add((schema, table))
+        for schema, plan_hash in re.findall(
+            r"INSERT INTO `([^`]+)`\.`yulon_install` \(plan_hash, finished_unix\) "
+            r"VALUES \('([0-9a-f]+)'",
+            text,
+        ):
+            self.markers.setdefault(schema, []).append(plan_hash)
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    def sql_query(
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        if statement == "SHOW DATABASES":
+            return "".join(f"{name}\n" for name in sorted(self.databases))
+        exists = re.search(r"table_schema='([^']+)' AND table_name='([^']+)'", statement)
+        if exists:
+            return "1\n" if (exists[1], exists[2]) in self.tables else "0\n"
+        marker = re.search(r"SELECT plan_hash FROM `([^`]+)`", statement)
+        if marker:
+            rows = self.markers.get(marker[1], [])
+            return f"{rows[-1]}\n" if rows else ""
+        if statement.startswith("SELECT COUNT(*)"):
+            return "1\n"
+        if "realmlist" in statement:
+            return self.realm_row
+        raise AssertionError(f"FakeMysql was asked something it does not model: {statement}")
+
+    def files(self) -> list[tuple[str | None, str]]:
+        """`(schema, first line)` of every stream, in order: what landed where."""
+        return [
+            (argv[3] if len(argv) > 3 else None, text.splitlines()[0] if text else "")
+            for argv, text in self.streams
+        ]
+
+    def marker_streams(self) -> list[int]:
+        """The indexes of the streams that wrote a marker row."""
+        return [
+            index for index, (_, text) in enumerate(self.streams) if "`yulon_install` (" in text
+        ]
+
+
+# -- the extractors ------------------------------------------------------------------
+
+
+MAP_NAMES = ("0003232.map", "0013232.map", "5303232.map")
+VMAP_TREES = ("000.vmtree", "001.vmtree", "530.vmtree")
+
+
+@dataclass
+class Extractors:
+    """The three map tools' `docker run`: what the client held, and the files they leave.
+
+    `seen` maps each tool's program to the client mount's files at the moment it
+    ran, relative and `/`-separated, with each file's bytes -- read DURING the run,
+    because the copy is gone by the time a test could look. The maps tool lays the
+    three start maps (unless `missing` names one) and an extracted `dbc/` the
+    overlay must win over; the assembler lays the three `.vmtree` files.
+    """
+
+    rec: Recorder
+    missing: tuple[str, ...] = ()
+    fail_tool: str = ""
+    seen: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    client_mounts: list[docker.Mount] = field(default_factory=list)
+
+    def __call__(
+        self,
+        spec: docker.ContainerRun,
+        *,
+        sink: docker.OutputSink,
+        cancel: threading.Event | None = None,
+    ) -> docker.AttachedRun:
+        program = spec.argv[0].rsplit("/", 1)[-1]
+        client = next(mount for mount in spec.mounts if mount.guest == extract.CLIENT_MOUNT)
+        self.client_mounts.append(client)
+        self.seen[program] = {
+            path.relative_to(client.host).as_posix(): path.read_bytes()
+            for path in sorted(client.host.rglob("*"))
+            if path.is_file()
+        }
+        if program == self.fail_tool:
+            self.rec.container_runs.append(spec)
+            return docker.AttachedRun(139, ("Segmentation fault",))
+        run = self.rec.run_container(spec, sink=sink, cancel=cancel)
+        out = next(mount.host for mount in spec.mounts if mount.guest == extract.OUT_MOUNT)
+        if program == "mapextractor":
+            for name in MAP_NAMES:
+                if not any(name.startswith(f"{gone:03}") for gone in self.missing_ids()):
+                    (out / "maps" / name).write_bytes(b"MAPS")
+            (out / "dbc").mkdir(exist_ok=True)
+            (out / "dbc" / "Spell.dbc").write_bytes(b"the client's Spell.dbc")
+            (out / "dbc" / "Map.dbc").write_bytes(b"the client's Map.dbc")
+        if program == "vmap4assembler":
+            for name in VMAP_TREES:
+                (out / "vmaps" / name).write_bytes(b"VMAP_4.8")
+        return run
+
+    def missing_ids(self) -> tuple[int, ...]:
+        return tuple(int(name) for name in self.missing)
+
+
+# -- the machine -----------------------------------------------------------------------
+
+
+def player_client(tmp_path: Path) -> Path:
+    """A 3.3.5a-shaped client folder that ALSO holds two optional packs' files.
+
+    `Data/patch-F.MPQ` is the HD pack the player switched on for their own
+    ready-to-play client, and `Data/patch-Y.MPQ` the file the alternative-terrain
+    pack deletes when off -- both would be read into the map data if the copy kept
+    them (Review Focus 1).
+    """
+    client = tmp_path / "World of Warcraft 3.3.5a"
+    (client / "Data" / "enUS").mkdir(parents=True)
+    for name in ("common", "common-2", "expansion", "lichking", "patch", "patch-2", "patch-3"):
+        (client / "Data" / f"{name}.MPQ").write_bytes(f"MPQ {name}".encode())
+    for name in ("locale-enUS", "patch-enUS"):
+        (client / "Data" / "enUS" / f"{name}.MPQ").write_bytes(f"MPQ {name}".encode())
+    (client / "Data" / "patch-F.MPQ").write_bytes(b"MPQ an HD pack the player switched on")
+    (client / "Data" / "patch-Y.MPQ").write_bytes(b"MPQ the stock Alt-World terrain")
+    (client / "Wow.exe").write_bytes(b"MZ stock 12340")
+    (client / "WTF").mkdir()
+    (client / "WTF" / "Config.wtf").write_text('SET realmList "logon.example"\n')
+    return client
+
+
+def snapshot(folder: Path) -> dict[str, tuple[bytes, int, int]]:
+    """Every file under `folder`: its bytes, its modification time and its mode."""
+    found: dict[str, tuple[bytes, int, int]] = {}
+    for path in sorted(folder.rglob("*")):
+        if path.is_file():
+            stat = path.stat()
+            found[path.relative_to(folder).as_posix()] = (
+                path.read_bytes(),
+                stat.st_mtime_ns,
+                stat.st_mode,
+            )
+    return found
+
+
+def lay_checkout(dest: Path) -> None:
+    """What a clone of CENTURION leaves that the stages read: SQL, DBCs and pack zips."""
+    for rel, text in SQL_FILES.items():
+        path = dest / "centurion" / "sql" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for name, body in SERVER_DBC.items():
+        path = dest / "centurion" / "dbc" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    server_dir = dest.parents[1]
+    for rel, body in ZIPS.items():
+        path = server_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+
+
+@dataclass
+class Machine:
+    rec: Recorder
+    db: FakeMysql
+    tools: Extractors
+    server_dir: Path
+    client: Path
+
+
+@pytest.fixture
+def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Machine:
+    """A Recorder machine with this file's database and extractors, and a pack cache in tmp."""
+    monkeypatch.setattr(client_packs, "cache_dir", lambda: tmp_path / "pack-cache")
+    rec = Recorder()
+    rec.produce = {"maps": 100, "Buildings": 100, "vmaps": 100}
+    rec.conf_dist = {
+        "worldserver.conf.dist": WORLD_CONF_DIST,
+        "authserver.conf.dist": AUTH_CONF_DIST,
+        "playerbots.conf.dist": PLAYERBOTS_CONF_DIST,
+    }
+    rec.world_output = native.WorldOutput(
+        text="TrinityCore rev. faac5fc9\nWorld initialized in 42 seconds\n",
+        restarts=0,
+        status="running",
+    )
+    rec.on_clone = lay_checkout
+    return Machine(
+        rec=rec,
+        db=FakeMysql(),
+        tools=Extractors(rec),
+        server_dir=tmp_path / "wow-centurion-server",
+        client=player_client(tmp_path),
+    )
+
+
+def engine(m: Machine, *, entry: CatalogEntry = ENTRY, **overrides: object) -> TrinityCoreInstaller:
+    return TrinityCoreInstaller(
+        entry,
+        installers_root=resources.installers_dir(),
+        seams=m.rec.seams(
+            **{
+                "platform_id": lambda: "linux",
+                "exec_stdin": m.db.exec_stdin,
+                "sql_query": m.db.sql_query,
+                "run_container": m.tools,
+                **overrides,
+            }
+        ),
+    )
+
+
+def install(m: Machine, *, entry: CatalogEntry = ENTRY, **overrides: object) -> list[str]:
+    return list(
+        engine(m, entry=entry, **overrides).run(
+            InstallOptions(server_dir=m.server_dir, client_dir=m.client)
+        )
+    )
+
+
+@pytest.fixture(autouse=True)
+def known_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The generated password, fixed, so the database double can check it travels in env."""
+    monkeypatch.setattr(
+        native.StagedInstaller,
+        "resolve_secrets",
+        lambda self, server_dir: native.Secrets(db_password=DB_PASSWORD),
+    )
+
+
+def context(m: Machine, *, completed: Sequence[str] = ()) -> native.StageContext:
+    return native.StageContext(
+        server_dir=m.server_dir,
+        client_dir=m.client,
+        state=native.InstallState(
+            game_id=ENTRY.id, install_id="test", family="trinitycore", completed=tuple(completed)
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password=DB_PASSWORD),
+    )
+
+
+def run_stage(
+    m: Machine, name: str, *, entry: CatalogEntry = ENTRY, **overrides: object
+) -> list[str]:
+    """One stage body, called directly with a fresh context, through `_stream` and all."""
+    eng = engine(m, entry=entry, **overrides)
+    return list(eng.stage_named(name).run(context(m)))
+
+
+def lay_for_client_data(m: Machine) -> None:
+    """The checkout `client-data` reads, without running the stages before it."""
+    lay_checkout(m.server_dir / CHECKOUT)
+
+
+# -- identity -----------------------------------------------------------------------------
+
+
+STAGES = (
+    "clone-sources",
+    "db-password",
+    "write-dockerfile",
+    "generate-compose",
+    "build",
+    "client-data",
+    "conf",
+    "start-db",
+    "import",
+    "up",
+    "ready",
+)
+
+
+def test_the_stage_tuple_is_the_specs_and_the_names_agree(machine: Machine) -> None:
+    """T179 spec §1 steps 1-9; mmaps (step 10) is a background job after ready (Task 4)."""
+    assert TrinityCoreInstaller.STAGE_NAMES == STAGES
+    assert engine(machine).stage_names() == STAGES
+    eng = engine(machine)
+    recorded = {stage.name: stage.recorded for stage in eng.stages()}
+    assert [name for name, kept in recorded.items() if not kept] == [
+        "db-password",
+        "start-db",
+        "up",
+        "ready",
+    ]
+    assert eng.stage_named("client-data").cancel_note.endswith(
+        "The temporary copy of your client is removed either way."
+    )
+
+
+def test_a_trinitycore_entry_dispatches_here_and_is_its_own_family() -> None:
+    assert FAMILIES["trinitycore"] is TrinityCoreInstaller
+    assert family_for(ENTRY) is TrinityCoreInstaller
+    assert TrinityCoreInstaller.family == "trinitycore" != CmangosInstaller.family
+
+
+def test_the_inherited_bodies_read_this_block_and_no_cmangos_patches(machine: Machine) -> None:
+    """`_data()` is a view of the TrinityCore block: the same objects, and no source patches."""
+    data = engine(machine)._data()
+    assert data.sql is TC.sql and data.conf is TC.conf and data.extract is TC.extract
+    assert data.client is TC.client and data.patches == ()
+
+
+# -- a whole install ------------------------------------------------------------------------
+
+
+def test_a_whole_install_runs_every_stage_in_order_and_ends_running(machine: Machine) -> None:
+    said = install(machine)
+    assert [line[4:] for line in said if line.startswith("--- ")] == list(STAGES)
+    assert said[-1] == f"{ENTRY.name} is installed and running in {machine.server_dir}"
+    assert not (machine.server_dir / EXTRACT_CLIENT_DIR).exists()
+
+
+def test_the_clone_is_sparse_on_the_named_branch_at_the_pin(machine: Machine) -> None:
+    """`playerbot reference/` and `centurion/launcher/` never reach the disk (facts, repo-level)."""
+    said = install(machine)
+    (spec,) = machine.rec.clones
+    assert spec.dest == machine.server_dir / CHECKOUT
+    assert spec.sparse_exclude == ("playerbot reference", "centurion/launcher")
+    assert spec.branch == "CENTURION", "the repository's default branch is an old master"
+    assert spec.rev == REV
+    assert spec.sparse_path is None
+    assert (
+        f"The {CHECKOUT} checkout leaves out playerbot reference, centurion/launcher: nothing "
+        "in them is compiled." in said
+    )
+
+
+# -- client-data: the temporary extraction client (Review Focus 1) ----------------------------
+
+
+def test_the_extraction_client_holds_the_required_packs_and_no_optional_pack_file(
+    machine: Machine,
+) -> None:
+    """Required packs in, every optional pack's file out, whatever the player's client held."""
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data")
+    assert set(machine.tools.seen) == {"mapextractor", "vmap4extractor", "vmap4assembler"}
+    for program, files in machine.tools.seen.items():
+        assert files["Data/patch-X.MPQ"] == PATCH_X, program
+        assert files["Data/enUS/patch-enUS-A.MPQ"] == PATCH_A, program
+        for optional in ("Data/patch-F.MPQ", "Data/patch-Y.MPQ", "Data/patch-T.MPQ"):
+            assert optional not in files, (program, optional)
+        assert files["Data/lichking.MPQ"] == b"MPQ lichking", "the player's own archives are read"
+
+
+def test_a_ready_to_play_client_as_the_source_loses_its_recorded_optional_files_too(
+    machine: Machine,
+) -> None:
+    """A pack's `*` rule names no file; the source's own pack record does, and is honoured."""
+    record = {
+        "version": 1,
+        "packs": {
+            "hd-characters": {
+                "version": "1.2",
+                "sha256": "0" * 64,
+                "files": {"Data/patch-F.MPQ": "0" * 64, "Interface/HD/portrait.blp": "0" * 64},
+            }
+        },
+        "exe": None,
+        "choices": {"packs": {"hd-characters": True}, "exe_options": {}},
+        "config_seeded": True,
+    }
+    (machine.client / client_packs.RECORD).write_text(json.dumps(record), encoding="utf-8")
+    (machine.client / "Interface" / "HD").mkdir(parents=True)
+    (machine.client / "Interface" / "HD" / "portrait.blp").write_bytes(b"BLP")
+    lay_for_client_data(machine)
+    said = run_stage(machine, "client-data")
+    files = machine.tools.seen["mapextractor"]
+    assert "Interface/HD/portrait.blp" not in files
+    assert "Data/patch-F.MPQ" not in files
+    assert any(
+        line.startswith("Left out of the copy, because this server's map data is made without")
+        and "Interface/HD/portrait.blp" in line
+        for line in said
+    )
+
+
+def test_the_extractors_read_the_copy_read_only_and_never_the_players_client(
+    machine: Machine,
+) -> None:
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data")
+    assert machine.tools.client_mounts, "no extractor ran"
+    for mount in machine.tools.client_mounts:
+        assert mount.host == machine.server_dir / EXTRACT_CLIENT_DIR
+        assert mount.read_only
+
+
+def test_the_temporary_client_is_gone_after_a_successful_extraction(machine: Machine) -> None:
+    lay_for_client_data(machine)
+    said = run_stage(machine, "client-data")
+    assert not os.path.lexists(machine.server_dir / EXTRACT_CLIENT_DIR)
+    assert "Removed the temporary copy of your client." in said
+
+
+def test_the_temporary_client_is_gone_after_a_failed_extraction(machine: Machine) -> None:
+    machine.tools.fail_tool = "vmap4extractor"
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError, match="vmap extract failed \\(exit 139\\)"):
+        run_stage(machine, "client-data")
+    assert not os.path.lexists(machine.server_dir / EXTRACT_CLIENT_DIR)
+
+
+def test_the_temporary_client_is_gone_after_a_pack_that_fails_its_checksum(
+    machine: Machine,
+) -> None:
+    lay_for_client_data(machine)
+    (machine.server_dir / PATCHES / "patch-enUS-A.zip").write_bytes(_zip("x.MPQ", b"other"))
+    with pytest.raises(InstallerError, match="does not match its published checksum"):
+        run_stage(machine, "client-data")
+    assert not os.path.lexists(machine.server_dir / EXTRACT_CLIENT_DIR)
+    assert machine.tools.seen == {}, "nothing was extracted from a copy missing a pack"
+
+
+def test_the_players_own_client_is_byte_for_byte_what_it_was(machine: Machine) -> None:
+    """Bytes, modification times and modes of every file, and no file added or removed."""
+    before = snapshot(machine.client)
+    install(machine)
+    assert snapshot(machine.client) == before
+
+
+def test_the_players_client_is_untouched_by_a_failed_extraction_too(machine: Machine) -> None:
+    before = snapshot(machine.client)
+    machine.tools.fail_tool = "vmap4assembler"
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError):
+        run_stage(machine, "client-data")
+    assert snapshot(machine.client) == before
+
+
+def test_a_resume_the_evidence_vouches_for_makes_no_copy_and_runs_no_tool(
+    machine: Machine,
+) -> None:
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data")
+    runs = len(machine.rec.container_runs)
+    said = run_stage(machine, "client-data")
+    assert len(machine.rec.container_runs) == runs
+    assert not any("Making a temporary copy" in line for line in said)
+    assert said[0].startswith(f"The map data in {machine.server_dir / 'data'} was already made")
+
+
+def test_the_evidence_names_the_players_client_and_a_changed_pack_extracts_again(
+    machine: Machine,
+) -> None:
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data")
+    evidence = extract.read_evidence(machine.server_dir / "data")
+    assert evidence is not None
+    assert evidence.client_path == str(machine.client.resolve()), "not the deleted copy"
+    newer = _zip("patch-enUS-A.MPQ", b"MPQ\x1a centurion locale, a later version")
+    (machine.server_dir / PATCHES / "patch-enUS-A.zip").write_bytes(newer)
+    changed = [dict(pack) for pack in REQUIRED_PACKS]
+    changed[1]["md5"] = hashlib.md5(newer, usedforsecurity=False).hexdigest()
+    other = centurion_like(packs=[*changed, *OPTIONAL_PACKS], rev=REV)
+    machine.tools.seen.clear()
+    said = run_stage(machine, "client-data", entry=other)
+    assert "the extracted data is for another client or plan; extracting everything again" in said
+    seen = machine.tools.seen["mapextractor"]
+    assert seen["Data/enUS/patch-enUS-A.MPQ"] == b"MPQ\x1a centurion locale, a later version"
+
+
+def test_a_leftover_copy_from_an_interrupted_press_is_removed_first(machine: Machine) -> None:
+    lay_for_client_data(machine)
+    leftover = machine.server_dir / EXTRACT_CLIENT_DIR
+    play_client.create(
+        machine.client,
+        leftover,
+        game=ENTRY.id,
+        server_dir=machine.server_dir,
+        allow_full_copy=True,
+    )
+    run_stage(machine, "client-data")
+    assert not os.path.lexists(leftover)
+    assert machine.tools.seen, "the extraction ran over a fresh copy"
+
+
+def test_a_folder_in_the_copys_place_that_is_not_this_installs_is_refused(
+    machine: Machine,
+) -> None:
+    lay_for_client_data(machine)
+    stranger = machine.server_dir / EXTRACT_CLIENT_DIR
+    stranger.mkdir(parents=True)
+    (stranger / "notes.txt").write_text("mine")
+    with pytest.raises(InstallerError, match="was not made by this install"):
+        run_stage(machine, "client-data")
+    assert (stranger / "notes.txt").read_text() == "mine"
+
+
+def test_no_client_folder_is_a_refusal_naming_it(machine: Machine) -> None:
+    eng = engine(machine)
+    ctx = native.StageContext(
+        server_dir=machine.server_dir,
+        client_dir=None,
+        state=context(machine).state,
+        cancel=None,
+        secrets=native.Secrets(db_password=DB_PASSWORD),
+    )
+    with pytest.raises(InstallerError, match="no client folder was given"):
+        list(eng.stage_named("client-data").run(ctx))
+
+
+def test_a_required_pack_from_a_download_is_a_catalog_refusal(machine: Machine) -> None:
+    downloaded = {**OPTIONAL_PACKS[0], "id": "hd-required", "optional": False, "default": False}
+    downloaded["install"] = [{"member": "patch-H.MPQ", "to": "Data/patch-H.MPQ"}]
+    entry = centurion_like(packs=[*REQUIRED_PACKS, downloaded], rev=REV)
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError, match="makes HD characters a required client pack from"):
+        list(engine(machine, entry=entry).stage_named("client-data").run(context(machine)))
+    assert machine.tools.seen == {}
+
+
+# -- client-data: the DBC overlay and the start check ------------------------------------------
+
+
+def test_the_servers_dbc_files_replace_the_extracted_ones(machine: Machine) -> None:
+    """README.md:174-180: use Centurion's DBCs, not the ones the extractor writes."""
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data")
+    dbc = machine.server_dir / "data" / "dbc"
+    assert (dbc / "Spell.dbc").read_bytes() == SERVER_DBC["Spell.dbc"]
+    assert (dbc / "LiquidType.dbc").read_bytes() == SERVER_DBC["LiquidType.dbc"]
+    assert (dbc / "Map.dbc").read_bytes() == b"the client's Map.dbc", "an overlay, not a wipe"
+
+
+@pytest.mark.parametrize("gone", ["530", "0", "1"])
+def test_a_missing_start_map_is_refused_naming_the_step_to_run_again(
+    machine: Machine, gone: str
+) -> None:
+    machine.tools.missing = (gone,)
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data")
+    message = str(caught.value)
+    assert f"map {int(gone)}: no maps/{int(gone):03}????.map" in message
+    assert "Unable to load critical files" in message
+    assert "pressing Install again runs client-data again" in message
+    assert extract.read_evidence(machine.server_dir / "data") is None, "the next press extracts"
+
+
+def test_a_missing_start_map_stops_the_install_before_anything_is_started(
+    machine: Machine,
+) -> None:
+    machine.tools.missing = ("530",)
+    with pytest.raises(InstallerError, match="map 530"):
+        install(machine)
+    assert "start-db" not in machine.rec.calls and "start" not in machine.rec.calls
+
+
+# -- conf --------------------------------------------------------------------------------------
+
+
+def conf_value(text: str, key: str) -> str:
+    (line,) = [line for line in text.splitlines() if line.split("=", 1)[0].strip() == key]
+    return line.split("=", 1)[1].strip()
+
+
+def test_the_conf_stage_writes_the_tables_keys_over_the_images_dist(machine: Machine) -> None:
+    install(machine)
+    etc = machine.server_dir / "etc"
+    world = (etc / "worldserver.conf").read_text(encoding="utf-8")
+    assert conf_value(world, "Updates.EnableDatabases") == "0", "the .dist ships 7"
+    assert conf_value(world, "DataDir") == f'"{CORE_DIR}/data"'
+    assert conf_value(world, "LogsDir") == '"../logs"'
+    assert (
+        conf_value(world, "LoginDatabaseInfo") == f'"centurion-db;3306;root;{DB_PASSWORD};{AUTH}"'
+    )
+    assert (
+        conf_value(world, "WorldDatabaseInfo") == f'"centurion-db;3306;root;{DB_PASSWORD};{WORLD}"'
+    )
+    assert (
+        conf_value(world, "CharacterDatabaseInfo")
+        == f'"centurion-db;3306;root;{DB_PASSWORD};{CHARS}"'
+    )
+    assert conf_value(world, "SOAP.Enabled") == "1"
+    assert conf_value(world, "SOAP.Port") == "7878"
+    assert conf_value(world, "RealmID") == "1"
+    assert conf_value(world, "mmap.enablePathFinding") == "0", "until mmaps exist (Task 4)"
+    auth = (etc / "authserver.conf").read_text(encoding="utf-8")
+    assert conf_value(auth, "LogsDir") == '"../logs"'
+
+
+def test_playerbots_conf_is_written_beside_worldserver_conf(machine: Machine) -> None:
+    """worldserver/Main.cpp:242-250 reads it from that folder and nowhere else (facts §4)."""
+    said = install(machine)
+    world = machine.server_dir / "etc" / "worldserver.conf"
+    bots = machine.server_dir / "etc" / "playerbots.conf"
+    assert bots.parent == world.parent and bots.is_file()
+    assert conf_value(bots.read_text(encoding="utf-8"), "Playerbot.Enable") == "1"
+    assert (
+        f"playerbots.conf is beside worldserver.conf in {machine.server_dir / 'etc'}, the one "
+        "place the world server reads it." in said
+    )
+
+
+# -- import (Review Focus 2) -------------------------------------------------------------------
+
+
+def renamed(text: str) -> str:
+    """`import.sh:41-43`'s sed over one file: the live realm's names, this install's instead."""
+    return text.replace("legionnaireauth", AUTH).replace("centurionworld", WORLD)
+
+
+def test_the_import_follows_import_sh_order_as_root(machine: Machine) -> None:
+    install(machine)
+    landed = [
+        (argv[3] if len(argv) > 3 else None, text)
+        for argv, text in machine.db.streams
+        if "yulon_install" not in text and "realmlist SET" not in text
+    ]
+    creates = [text for schema, text in landed[:3]]
+    assert [re.search(r"`([^`]+)`", text)[1] for text in creates] == [AUTH, CHARS, WORLD]  # type: ignore[index]
+    assert all("COLLATE utf8mb4_unicode_ci" in text for text in creates), "import.sh:37-39"
+    order = [(schema, text) for schema, text in landed[3:]]
+    assert order == [
+        (AUTH, renamed(SQL_FILES["auth/auth_schema.sql"])),
+        (AUTH, SQL_FILES["auth/auth_data.sql"]),
+        (AUTH, SQL_FILES["auth/auth_bots.sql"]),
+        (CHARS, renamed(SQL_FILES["characters/characters_schema.sql"])),
+        (CHARS, SQL_FILES["characters/characters_seed.sql"]),
+        (CHARS, SQL_FILES["characters/characters_bots.sql"]),
+        (WORLD, renamed(SQL_FILES["world/_routines.sql"])),
+        (WORLD, SQL_FILES["world/broadcast_text_locale.1.sql"]),
+        (WORLD, SQL_FILES["world/creature.sql"]),
+        (WORLD, SQL_FILES["world/version.sql"]),
+    ], "the routines once, first; then every other world table file"
+    for argv, _ in machine.db.streams:
+        assert list(argv[:3]) == ["mysql", "-u", "root"], argv
+
+
+def test_the_renames_reach_the_listed_files_and_no_other(machine: Machine) -> None:
+    install(machine)
+    texts = [text for _, text in machine.db.streams]
+    schema = next(text for text in texts if "trg_realmlist_au" in text)
+    assert f"INSERT INTO {AUTH}.audit_dml_log VALUES ('{WORLD}')" in schema
+    assert f"FROM {WORLD}.x" in next(text for text in texts if "createTournamentKit" in text)
+    assert f"FROM {AUTH}.account" in next(text for text in texts if "CREATE PROCEDURE p()" in text)
+    assert SQL_FILES["auth/auth_data.sql"] in texts, "an unlisted file streams as it lies"
+    assert not any(
+        "legionnaireauth" in text or "centurionworld" in text
+        for text in texts
+        if text != SQL_FILES["auth/auth_data.sql"]
+    )
+    on_disk = machine.server_dir / SQL_DIR / "auth" / "auth_schema.sql"
+    assert on_disk.read_text(encoding="utf-8") == SQL_FILES["auth/auth_schema.sql"]
+
+
+def test_the_marker_is_written_once_and_after_the_last_phase(machine: Machine) -> None:
+    install(machine)
+    (index,) = machine.db.marker_streams()
+    last_world = max(
+        i for i, (_, text) in enumerate(machine.db.streams) if text.startswith("DROP TABLE")
+    )
+    assert index > last_world
+    assert machine.db.markers == {WORLD: [TC.sql.plan_hash()]}
+
+
+@pytest.mark.parametrize(
+    "fails_on",
+    ["trg_realmlist_au", "DROP TABLE IF EXISTS version"],
+    ids=["a trigger in the first phase", "the last world file"],
+)
+def test_a_half_import_writes_no_marker_and_the_next_press_clears_and_starts_over(
+    machine: Machine, fails_on: str
+) -> None:
+    machine.db.fail_on = fails_on
+    with pytest.raises(InstallerError, match="The import stopped"):
+        install(machine)
+    assert machine.db.marker_streams() == [], "no marker over a half import"
+    assert machine.db.markers == {}
+    assert machine.db.databases == {AUTH, CHARS, WORLD}, "the half-written schemas are there"
+
+    machine.db.fail_on = ""
+    machine.db.streams.clear()
+    said = install(machine)
+    assert any(line.startswith("The databases read as partial") for line in said)
+    assert any(line.startswith("Cleared ") for line in said)
+    drop = next(i for i, (_, text) in enumerate(machine.db.streams) if "DROP DATABASE" in text)
+    dropped = re.findall(r"DROP DATABASE IF EXISTS `([^`]+)`", machine.db.streams[drop][1])
+    assert sorted(dropped) == sorted([AUTH, CHARS, WORLD])
+    after = [text for _, text in machine.db.streams[drop + 1 :]]
+    assert after[0].startswith(f"CREATE DATABASE IF NOT EXISTS `{AUTH}`"), "from the start"
+    assert any("trg_realmlist_au" in text for text in after)
+    assert machine.db.markers == {WORLD: [TC.sql.plan_hash()]}
+
+
+def test_a_finished_import_is_left_alone_on_the_next_press(machine: Machine) -> None:
+    install(machine)
+    machine.db.streams.clear()
+    said = install(
+        machine,
+        ask_world_running=lambda container: False,
+    )
+    assert any(line.startswith("The databases read as imported") for line in said)
+    assert not any(text.startswith("CREATE DATABASE") for _, text in machine.db.streams)
+
+
+# -- ready -------------------------------------------------------------------------------------
+
+
+def test_the_realm_row_gets_the_lan_address_and_keeps_its_build(machine: Machine) -> None:
+    """`gamebuild 12342` stays: a stock-build realm shows offline to a 12342 client (facts §7)."""
+    said = install(machine)
+    updates = [text for _, text in machine.db.streams if "SET address" in text]
+    assert updates == [
+        f"UPDATE {AUTH}.realmlist SET address='192.168.1.25', "
+        "localAddress='192.168.1.25' WHERE id=1;"
+    ]
+    assert "gamebuild" not in updates[0]
+    assert any(line.startswith("The realm now advertises 192.168.1.25") for line in said)
+
+
+def test_ready_waits_for_the_entrys_own_world_marker(machine: Machine) -> None:
+    install(machine)
+    assert machine.rec.ready_specs, "ready never asked"
+    assert machine.rec.ready_specs[0].world == re.escape("World initialized")
+
+
+# -- the spine's conf repair reads this family's table too ------------------------------------
+
+
+def test_a_compose_repair_offers_logs_dir_to_a_trinitycore_conf_left_at_upstreams_empty(
+    machine: Machine,
+) -> None:
+    """`_conf_edits()` asks `composegen.built_here()`, so a TrinityCore install is not skipped.
+
+    Before Task 3 it read `native.cmangos` alone and answered nothing for this family;
+    the conf table states `LogsDir = "../logs"` in both servers' confs (Task 2's binds).
+    """
+    etc = machine.server_dir / "etc"
+    etc.mkdir(parents=True)
+    (etc / "worldserver.conf").write_text(WORLD_CONF_DIST, encoding="utf-8")
+    (etc / "authserver.conf").write_text(AUTH_CONF_DIST, encoding="utf-8")
+    edits, kept = engine(machine)._conf_edits(machine.server_dir, "services: {}\n")
+    assert kept == ()
+    assert {edit.path.name: edit.settings for edit in edits} == {
+        "worldserver.conf": ('LogsDir = "../logs" in etc/worldserver.conf',),
+        "authserver.conf": ('LogsDir = "../logs" in etc/authserver.conf',),
+    }
+
+
+def test_a_leftover_copy_is_gone_before_the_server_folder_is_relabelled(
+    machine: Machine,
+) -> None:
+    """`chcon -R` on the server folder would relabel the player's files through a hard link."""
+    lay_for_client_data(machine)
+    leftover = machine.server_dir / EXTRACT_CLIENT_DIR
+    play_client.create(
+        machine.client, leftover, game=ENTRY.id, server_dir=machine.server_dir, allow_full_copy=True
+    )
+    there: list[bool] = []
+
+    def relabel(path: Path) -> bool:
+        there.append(os.path.lexists(leftover))
+        return True
+
+    eng = engine(
+        machine,
+        relabel=relabel,
+        selinux_enforcing=lambda: True,
+        fs_type=lambda path: "ext4",
+    )
+    list(eng.stage_named("generate-compose").run(context(machine)))
+    assert there == [False], "relabelled while the copy (and its links) was still there"

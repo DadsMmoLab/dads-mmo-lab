@@ -392,11 +392,14 @@ def client_spec_for(entry: CatalogEntry) -> ClientSpec | None:
     Public (T36) so a caller outside a fresh install — the Server tab's
     "Set/Change client folder…" — can validate a folder against the same
     rules without re-deriving them.
+
+    The block is `composegen.built_here()`'s: a CMaNGOS game extracts from the
+    client, and a TrinityCore one makes its temporary extraction client from it
+    (T179 Task 3), so both read the player's folder and both carry the rules.
     """
     native = entry.install.native
-    if native is None or native.cmangos is None:
-        return None
-    return native.cmangos.client
+    built = None if native is None else composegen.built_here(native)
+    return None if built is None else built.client
 
 
 def _default_client_validate(free: Callable[[Path], int | None]) -> ClientValidate:
@@ -900,17 +903,16 @@ def _build_jobs(native: NativeInstall, cpus: int) -> tuple[int, bool]:
     `cmangos.dockerfile.make_jobs` — data, and the same number on a 4-core box
     and a 64-core one.
 
-    `native.cmangos` is the key rather than `family` or `dockerfile_dir`,
-    because it is the field `composegen` itself reads to fill that token: the
-    two cannot come to different conclusions about which build this is. A
-    TrinityCore entry (T179) builds from this repo's template too, and
-    `composegen.entry_tokens()` fills its `{{MAKE_JOBS}}` from
+    `composegen.built_here()` is the key rather than `family` or
+    `dockerfile_dir`, because it is the choice `composegen` itself makes to fill
+    that token: the two cannot come to different conclusions about which build
+    this is. A TrinityCore entry (T179) builds from this repo's template too,
+    and `composegen.entry_tokens()` fills its `{{MAKE_JOBS}}` from
     `trinitycore.dockerfile.make_jobs` the same way.
     """
-    if native.cmangos is not None:
-        return native.cmangos.dockerfile.make_jobs, False
-    if native.trinitycore is not None:
-        return native.trinitycore.dockerfile.make_jobs, False
+    built = composegen.built_here(native)
+    if built is not None:
+        return built.dockerfile.make_jobs, False
     return cpus + 1, True
 
 

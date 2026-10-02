@@ -170,6 +170,32 @@ def test_a_trinitycore_build_runs_the_job_count_its_catalog_says() -> None:
     assert composegen.entry_tokens(centurion_like())["MAKE_JOBS"] == str(jobs)
 
 
+def test_the_job_count_and_the_client_rules_follow_composegens_choice_of_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T179 Task 3 (review of Task 2): preflight asks `composegen.built_here()`, never re-derives.
+
+    Re-implementing the choice in preflight is how the two could disagree about which
+    build this is; pointing `built_here()` at another block moves both answers with it.
+    """
+    tbc = load_catalog().get("wow-tbc").install.native
+    assert NATIVE is not None and tbc is not None and tbc.cmangos is not None
+    block = tbc.cmangos
+    assert preflight._build_jobs(NATIVE, 15) == (16, True)
+    assert preflight.client_spec_for(ENTRY) is None
+    monkeypatch.setattr(composegen, "built_here", lambda native: block)
+    assert preflight._build_jobs(NATIVE, 15) == (block.dockerfile.make_jobs, False)
+    assert preflight.client_spec_for(ENTRY) is block.client
+
+
+def test_a_trinitycore_install_reads_the_players_client_under_its_blocks_rules() -> None:
+    """The temporary extraction client is made from the player's folder (T179 Task 3)."""
+    entry = centurion_like()
+    native = entry.install.native
+    assert native is not None and native.trinitycore is not None
+    assert preflight.client_spec_for(entry) is native.trinitycore.client
+
+
 def test_a_fixed_job_count_that_outruns_the_memory_does_not_name_the_cpu_count() -> None:
     """Lowering the CPUs cannot change a number that lives in `catalog.json`."""
     assert CLIENT_ENTRY is not None

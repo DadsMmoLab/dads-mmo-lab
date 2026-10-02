@@ -387,7 +387,7 @@ def _native_of(entry: CatalogEntry) -> NativeInstall:
     return entry.install.native
 
 
-def _built_here(native: NativeInstall) -> CmangosData | TrinityCoreData | None:
+def built_here(native: NativeInstall) -> CmangosData | TrinityCoreData | None:
     """The family block of a game whose Dockerfile, confs and folder binds this app writes.
 
     CMaNGOS (7.3) and TrinityCore (T179) both build from a `Dockerfile.tmpl` this
@@ -396,6 +396,11 @@ def _built_here(native: NativeInstall) -> CmangosData | TrinityCoreData | None:
     `dockerfile.make_jobs`, `conf.source_dir`, `conf.files` -- has the same shape on
     both. AzerothCore has none of it (its checkout ships the Dockerfile and its image
     makes the confs), so it answers None and every caller keeps its old answer.
+
+    Public since T179 Task 3: `preflight` asks it for the build's job count and the
+    client-folder rules (`client` has the same shape on both blocks), and the spine
+    for the conf table a compose repair edits, so the choice of block is made here
+    once rather than re-implemented by each caller.
     """
     if native.cmangos is not None:
         return native.cmangos
@@ -855,7 +860,7 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     — omitted, not blanked, when there is none, so a template that wants it
     fails in `fill()` instead of writing `;;` into a conf. `MAKE_JOBS` and
     `CORE_DIR` exist only for a family whose Dockerfile this app writes
-    (`_built_here()`: CMaNGOS, TrinityCore): `CORE_DIR` is the core's
+    (`built_here()`: CMaNGOS, TrinityCore): `CORE_DIR` is the core's
     in-image install prefix, derived as the parent of `conf.source_dir`
     (`/opt/mangos/etc` → `/opt/mangos`), which is where the binaries, the
     `etc/` bind and the `data/` bind all hang. A TrinityCore block adds two
@@ -887,7 +892,7 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     }
     if entry.databases.extra:
         tokens["LOGS_DB"] = entry.databases.extra[0]
-    built = _built_here(native)
+    built = built_here(native)
     if built is not None:
         tokens["MAKE_JOBS"] = str(built.dockerfile.make_jobs)
         tokens["CORE_DIR"] = str(PurePosixPath(built.conf.source_dir).parent)
@@ -953,7 +958,7 @@ def folder_confs(entry: CatalogEntry) -> Mapping[str, str]:
     """This entry's base-template folder tokens, each with the conf its service reads.
 
     An AzerothCore entry gets CMaNGOS's map, as it did before T179: its conf table is
-    empty (`_built_here()` is None), so every token renders to nothing, and its
+    empty (`built_here()` is None), so every token renders to nothing, and its
     templates spell none of them.
     """
     if _native_of(entry).trinitycore is not None:
@@ -1030,7 +1035,7 @@ def bound_folders(entry: CatalogEntry, text: str, conf: str) -> frozenset[str]:
 
 def folder_target(entry: CatalogEntry, value: str) -> str:
     """Where a `*Dir` value lands in the container, read from the servers' working directory."""
-    built = _built_here(_native_of(entry))
+    built = built_here(_native_of(entry))
     if built is None:
         return value
     core = PurePosixPath(built.conf.source_dir).parent
@@ -1132,7 +1137,7 @@ def folder_settings(
         ComposeGenError: a value the TABLE states is not a folder this engine can
             bind -- a catalog bug; a conf's own value never raises.
     """
-    built = _built_here(_native_of(entry))
+    built = built_here(_native_of(entry))
     if built is None:
         return ()
     core = PurePosixPath(built.conf.source_dir).parent
@@ -1181,7 +1186,7 @@ def conf_texts(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
     be read is left out and answered from the table. T106's check reads them
     strictly itself, and refuses on one it cannot read.
     """
-    built = _built_here(_native_of(entry))
+    built = built_here(_native_of(entry))
     if built is None:
         return {}
     texts: dict[str, str] = {}

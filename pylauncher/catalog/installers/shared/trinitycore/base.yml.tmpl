@@ -118,15 +118,15 @@ services:
       # and the volume, then stops it and starts the real one. A socket probe
       # answers during that first server, and an import let in then loses its
       # connection when it stops; a TCP probe cannot connect until the real
-      # server listens. `mysqladmin ping` exits 0 once the server answers
-      # (MySQL's manual: even when the login is refused), so this states that
-      # mysqld is up and listening -- the servers and the import then log in
-      # as root, which the image creates as root@% (MYSQL_ROOT_HOST's default;
-      # see WotLK's base template for that tripwire). 127.0.0.1 rather than
-      # this container's network name keeps the probe out of the shutdown
-      # hold's count above; MySQL binds every interface, so it is the same
-      # listener the other containers reach.
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 --protocol=TCP -uroot --silent"]
+      # server listens. A login and a statement rather than `mysqladmin ping`,
+      # which exits 0 even when the login is refused (MySQL's manual): healthy
+      # here means root can log in over TCP, which is what the import and both
+      # servers do next (root@%, MYSQL_ROOT_HOST's default; see WotLK's base
+      # template for that tripwire). The password travels in MYSQL_PWD, never
+      # in argv. 127.0.0.1 rather than this container's network name keeps the
+      # probe out of the shutdown hold's count above; MySQL binds every
+      # interface, so it is the same listener the other containers reach.
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysql -h 127.0.0.1 --protocol=TCP -uroot -e 'SELECT 1' >/dev/null"]
       interval: 5s
       timeout: 10s
       retries: 40
