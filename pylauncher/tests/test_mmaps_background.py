@@ -500,7 +500,9 @@ def test_the_update_routes_stop_the_job_after_the_source_checks_and_before_the_r
     )
     monkeypatch.setattr(eng, "_release_targets", lambda plan, ok=(): {})
     monkeypatch.setattr(
-        eng, "rebuild", lambda opts, cancel=None: iter([order.append("rebuild") or "rebuilt"])
+        eng,
+        "rebuild",
+        lambda opts, cancel=None, **_kw: iter([order.append("rebuild") or "rebuilt"]),
     )
     real_check = eng.check_moved_sources
 

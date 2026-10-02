@@ -1850,13 +1850,19 @@ def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
 
 
 def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
-    """The spine's hooks are no-ops: WotLK and TBC updates ask the same questions as before."""
+    """The spine's hooks are no-ops: WotLK and TBC updates ask the same questions as before.
+
+    And their rebuild replaces the containers in the one `recreate` call it always made:
+    no family work between a stop and a start (T179 Task 6, fix round 1).
+    """
     rec, server_dir = _ready(tmp_path / "wotlk")
     _press(rec, server_dir)
     assert not [call for call in rec.calls if call.startswith("changed-")]
+    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
     rec, server_dir, tbc = _tbc(tmp_path)
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert not [call for call in rec.calls if call.startswith("changed-")]
+    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
 
 
 def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_and_its_new_one(

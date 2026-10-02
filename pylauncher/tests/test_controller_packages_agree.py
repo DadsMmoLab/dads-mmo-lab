@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import party, serverlock
+from yulon import install_wiring, party, serverlock
 from yulon.catalog import bot_dashboard, native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import azerothcore, mmaps
@@ -559,6 +559,14 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # server is up (`mmaps.background_block`). Every shipped game makes its maps in
         # the install, so it is absent there, the reference included.
         unpathed = set() if mmaps.background_block(entry) is not None else {"pathfinding"}
+        # T179 Task 6's map-data and world-update lines: offered where the entry's
+        # engine leaves either owing after an update, read through the wiring the
+        # tab reads. Every shipped game's update leaves neither, the reference too.
+        unowed = (
+            set()
+            if install_wiring.world_reimport_for_app(entry, server_dir) is not None
+            else {"world_upkeep"}
+        )
         # T64's Update to latest, decided by the entry's own flag (the route's first
         # refusal); every shipped entry sets it. The trinitycore update route is T179
         # Task 6's, and the fixture does not set it until then.
@@ -599,6 +607,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         allowed = (
             unrepaired
             | unpathed
+            | unowed
             | unlatest
             | unconfed
             | unstocked
@@ -624,6 +633,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             reference = (
                 unprobed
                 | unpathed
+                | unowed
                 | unupdatable
                 | unadoptable
                 | unwindowed

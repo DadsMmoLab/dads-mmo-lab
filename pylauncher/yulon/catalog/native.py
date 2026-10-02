@@ -2483,6 +2483,31 @@ class Stage:
     cancel_note: str = ""
 
 
+@dataclass(frozen=True)
+class ServersDownWork:
+    """What a family does in a rebuild's window with the servers down (T179 Task 6, fix round 1).
+
+    The TrinityCore update route imports the world tables an update changed with
+    the NEW code's servers stopped and before they start, so a build that needs
+    the new tables meets them on its first start rather than failing its ready
+    wait on the old ones; and on a rollback it imports the same files from the
+    old checkout, so the old build meets its own tables again. Handed to
+    `rebuild()` by `update_to_latest()` (from `servers_down_work()`); a plain
+    Rebuild has none, and its recreate is the one compose call it always was.
+    """
+
+    prepare: Callable[[], Iterator[str]]
+    """Before the servers are stopped; a raise here leaves nothing touched."""
+    forward: Callable[[StageContext], Iterator[str]]
+    """Servers down, the new build tagged, before it starts; a raise rolls the rebuild back."""
+    back: Callable[[StageContext], Iterator[str]]
+    """The rollback's window: servers down, the old build tagged back, before it starts.
+
+    A raise is said in the rollback's sentence; the rollback goes on to start the
+    old build regardless.
+    """
+
+
 class ImportGate(Protocol):
     """What the import stage asks of a database: its state, and a way to clear a half-written one.
 
@@ -4068,6 +4093,17 @@ class StagedInstaller:
         """
         return iter(())
 
+    def servers_down_work(
+        self, server_dir: Path, changes: object, *, press: str
+    ) -> ServersDownWork | None:
+        """What the update route's rebuild does with its servers down (T179); None = nothing.
+
+        Asked by `update_to_latest()` with what `check_moved_sources()` returned,
+        after every refusal and before `rebuild()`. None on the spine, and then the
+        rebuild's recreate is the single compose call it always was.
+        """
+        return None
+
     # -- the contract ----------------------------------------------------
 
     def server_dir(self, options: InstallOptions) -> Path:
@@ -5182,8 +5218,17 @@ class StagedInstaller:
         *,
         before_replace: Callable[[], None] | None = None,
         rollback: bool = False,
+        servers_down: ServersDownWork | None = None,
     ) -> Iterator[str]:
         """Replace the long-running containers so the binary just built is the one running.
+
+        **With `servers_down` (T179's update route) the stop and the start are two
+        calls**, and the family's work runs between them: `prepare()` before
+        anything stops, the servers stopped (`stop_servers`, with T158's load wait
+        and `before_replace` as its `before_signal`), `forward()`, then the same
+        recreate as always -- its own stop finds nothing running. Without it, and on
+        a rollback (whose servers `_restore_rollback()` has already stopped), the
+        one `recreate` call below.
 
         The stage the whole feature turns on. Everything above it can be
         perfect -- an hour of compiler output, four fresh images -- and if the
@@ -5237,6 +5282,31 @@ class StagedInstaller:
         # `before_replace` is its `before_signal`: past it, something may have
         # been touched; a Cancel before it leaves nothing touched.
         control = _stop_control(ctx, rollback=rollback)
+        if servers_down is not None and not rollback:
+            yield from servers_down.prepare()
+
+            def stop_them(say: docker.OutputSink) -> None:
+                self._seams.stop_servers(
+                    spec,
+                    ctx.server_dir,
+                    control=replace(control, say=say),
+                    before_signal=before_replace,
+                )
+
+            try:
+                yield from _with_hint(_speaking(stop_them, control.abandon), REBUILD_WAIT_HINT)
+            except docker.StopAbandoned as exc:
+                raise InstallerError(
+                    "The rebuild was cancelled while the world was still loading, so its "
+                    "containers were not replaced -- the server you have is still the one that "
+                    "was running before this rebuild. Nothing was touched."
+                ) from exc
+            except docker.DockerCommandError as exc:
+                raise InstallerError(
+                    f"The server was rebuilt, but its servers could not be stopped to start the "
+                    f"new build: {exc}"
+                ) from exc
+            yield from servers_down.forward(ctx)
 
         def replace_them(say: docker.OutputSink) -> bool:
             return self._seams.recreate(
@@ -5270,8 +5340,13 @@ class StagedInstaller:
         *,
         cancel: threading.Event | None = None,
         missing_images_ok: bool = False,
+        servers_down: ServersDownWork | None = None,
     ) -> Iterator[str]:
         """Recompile this install and restart it on what was compiled. Yields output live.
+
+        `servers_down` is the update route's (T179): what the family does between
+        the recreate's stop and its start, and again in a rollback's window before
+        the old build starts (`ServersDownWork`). A Rebuild press passes none.
 
         The action `apply.ApplyReport.rebuild_required` has named since it was
         written -- "worldserver REBUILD required before this takes effect",
@@ -5429,7 +5504,9 @@ class StagedInstaller:
             # before the compose command is issued -- not at the stage's first yield
             # (round 2), which left a window between the readiness probe and the
             # command where a failure read as a partial replacement.
-            yield from self.stage_recreate(stage_ctx, before_replace=mark_touched)
+            yield from self.stage_recreate(
+                stage_ctx, before_replace=mark_touched, servers_down=servers_down
+            )
 
         # BY NAME, and it was positional (`first, second, *rest`) until
         # 2026-09-09. That was true of a tuple beginning with `build`, and T8
@@ -5519,7 +5596,9 @@ class StagedInstaller:
                 message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 raise InstallerError(message) from exc
-            message = yield from self._restore_rollback(ctx, refs, kept, touched, str(exc))
+            message = yield from self._restore_rollback(
+                ctx, refs, kept, touched, str(exc), servers_down=servers_down
+            )
             self._record_error(server_dir, ctx.state, message)
             raise InstallerError(message) from exc
         except BaseException:
@@ -5841,9 +5920,14 @@ class StagedInstaller:
            deliberately NOT a copy of the rebuild with sources bolted on: the
            image rollback, the recipe restore and the "nothing was touched"
            promise are that method's, they are hard-won, and a second
-           implementation of them would be a second one to keep correct.
+           implementation of them would be a second one to keep correct. What
+           the family does with the servers down rides into it
+           (`servers_down_work()`, T179: TrinityCore's changed world tables,
+           before the new build starts); its rollback half puts the sources back
+           first, so the old build's tables come from the old checkout.
         6. The family's after-work on the running build (`after_update()`, T179:
-           TrinityCore's changed world tables), before the closing line.
+           what was left as it was, the map data's sentence), before the closing
+           line.
 
         Every failure from step 3 through step 5 puts every moved source back on
         the commit it came from, so what is on disk and what the running image was
@@ -5951,13 +6035,29 @@ class StagedInstaller:
                 # round 2, 2026-09-16).
                 yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+            # T179: what the family does while the rebuild's servers are down. Its
+            # rollback half needs the OLD checkout, so the sources go back first,
+            # inside the rollback, and the handler below does not do it twice.
+            sources_back = False
+            work = self.servers_down_work(server_dir, changes, press=press)
+            if work is not None:
+                family_back = work.back
+
+                def back(stage_ctx: StageContext) -> Iterator[str]:
+                    nonlocal sources_back
+                    yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                    sources_back = True
+                    yield from family_back(stage_ctx)
+
+                work = replace(work, back=back)
             try:
-                yield from self.rebuild(opts, cancel=cancel)
+                yield from self.rebuild(opts, cancel=cancel, servers_down=work)
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
                 # It puts the IMAGE back; this puts the SOURCE back; and it is the
                 # pair that makes the folder and the running container agree again.
-                yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                if not sources_back:
+                    yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             self._record_source_revs(
                 server_dir,
@@ -6510,8 +6610,14 @@ class StagedInstaller:
         kept: Sequence[str],
         touched: bool,
         failure: str,
+        *,
+        servers_down: ServersDownWork | None = None,
     ) -> Generator[str, None, str]:
         """Put the old build back after a compile that finished and a server that did not.
+
+        `servers_down.back()` (T179's update route) runs once the tags are back and
+        before the old build starts, with no Cancel -- a rollback is finished, not
+        given up -- and a failure of it is added to the sentence, not raised.
 
         Returns the sentence the user reads -- the original failure first,
         then what was done about it and how that went -- because the panel
@@ -6616,6 +6722,11 @@ class StagedInstaller:
             "is NOT put back by this -- the lines above say whether its updater ran -- so "
             "the old build is running on the database as the new one left it."
         )
+        if servers_down is not None:
+            try:
+                yield from servers_down.back(replace(ctx, cancel=None))
+            except (InstallerError, OSError) as exc:
+                database = f"{database}\n{exc}"
         try:
             yield from self.stage_recreate(ctx, rollback=True)
             # The `-failed` names again, and the second attempt is the one that

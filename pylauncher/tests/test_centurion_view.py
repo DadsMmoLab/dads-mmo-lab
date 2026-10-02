@@ -9,16 +9,18 @@ feature is not offered, the sentence is the family-decision registry's own note
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests.conftest import process_events, wait_for_panel
 from tests.support_trinitycore import centurion_like
+from yulon import docker, purge, runner
 from yulon import play as play_module
-from yulon import purge, runner
-from yulon.catalog.families import decisions, mmaps
+from yulon.catalog.families import decisions, mmaps, trinitycore
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
@@ -80,6 +82,7 @@ def test_the_catalog_id_has_a_factory_and_it_builds_the_centurion_package(
         "time_zone",
         "bot_population",
         "pathfinding",
+        "world_upkeep",
         "database_alone",
     ):
         assert getattr(services, seam) is not None, seam
@@ -304,6 +307,154 @@ def test_a_server_without_the_job_draws_no_pathfinding_line(qapp: object, tmp_pa
     assert view.pathfinding_label.isHidden()
     assert view.pathfinding_start_button.isHidden()
     assert view.pathfinding_stop_button.isHidden()
+
+
+# -- what an update left owing: the map data, the world tables (Task 6, fix round 1) ----------
+
+
+class _Upkeep:
+    """The two sentences and the two presses; each press pays its own sentence."""
+
+    def __init__(self, map_data: str | None = None, world: str | None = None) -> None:
+        self.map_data, self.world = map_data, world
+        self.reextracts: list[dict[str, object]] = []
+        self.finishes: list[object] = []
+
+    def read(self) -> tuple[str | None, str | None]:
+        return self.map_data, self.world
+
+    def reextract(self, cancel: object = None, client_dir: Path | None = None) -> Iterator[str]:
+        self.reextracts.append({"cancel": cancel, "client_dir": client_dir})
+        yield "--- client-data"
+        self.map_data = None
+
+    def finish(self, cancel: object = None) -> Iterator[str]:
+        self.finishes.append(cancel)
+        yield "Importing 1 world tables again"
+        self.world = None
+
+
+def _upkeep(
+    fake: _Upkeep, *, reextract: bool = True, finish: bool = True
+) -> view_module.WorldUpkeep:
+    return view_module.WorldUpkeep(
+        read=fake.read,
+        reextract=fake.reextract if reextract else None,
+        finish_world=fake.finish if finish else None,
+    )
+
+
+MAP_SENTENCE = "Centurion's map data must be extracted again: ..."
+WORLD_SENTENCE = "Centurion's last update did not finish importing its world tables: ..."
+
+
+def test_the_server_tab_says_the_map_data_must_be_extracted_and_the_press_streams_it(
+    qapp: object, tmp_path: Path
+) -> None:
+    fake = _Upkeep(map_data=MAP_SENTENCE)
+    client = tmp_path / "World of Warcraft 3.3.5a"
+    view = _view(tmp_path, world_upkeep=_upkeep(fake), client_dir=client)
+
+    view.refresh_world_upkeep()
+
+    assert view.world_upkeep_label.text() == MAP_SENTENCE
+    assert not view.world_upkeep_label.isHidden()
+    assert not view.reextract_button.isHidden() and view.reextract_button.isEnabled()
+    assert view.reextract_button.text() == "Re-extract map data"
+    assert view.finish_world_button.isHidden()
+
+    assert view.reextract_map_data() is True
+    wait_for_panel(view.rebuild_log)
+    process_events()
+    (call,) = fake.reextracts
+    assert call["client_dir"] == client, "the tab's own client folder"
+    assert isinstance(call["cancel"], docker.CancelWithForce)
+    assert view.world_upkeep_label.isHidden(), "read again once the press ended"
+    assert view.reextract_button.isHidden()
+
+
+def test_finish_the_world_update_is_offered_and_streams_into_the_panel(
+    qapp: object, tmp_path: Path
+) -> None:
+    fake = _Upkeep(world=WORLD_SENTENCE)
+    view = _view(tmp_path, world_upkeep=_upkeep(fake))
+    view.refresh_world_upkeep()
+    assert view.world_upkeep_label.text() == WORLD_SENTENCE
+    assert view.reextract_button.isHidden()
+    assert not view.finish_world_button.isHidden() and view.finish_world_button.isEnabled()
+    assert view.finish_world_button.text() == "Finish the world update"
+
+    assert view.finish_world_update() is True
+    wait_for_panel(view.rebuild_log)
+    process_events()
+    assert len(fake.finishes) == 1
+    assert view.world_upkeep_label.isHidden()
+
+
+def test_both_presses_are_held_while_another_press_runs(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    told: list[str] = []
+    monkeypatch.setattr(
+        view_module.QMessageBox, "information", lambda _parent, _title, text: told.append(text)
+    )
+    fake = _Upkeep(map_data=MAP_SENTENCE, world=WORLD_SENTENCE)
+    view = _view(tmp_path, world_upkeep=_upkeep(fake))
+    view.refresh_world_upkeep()
+    assert view.reextract_button.isEnabled() and view.finish_world_button.isEnabled()
+
+    view._set_busy(True)  # what a Rebuild, an Update, a Start or an Uninstall press does
+    assert not view.reextract_button.isEnabled()
+    assert not view.finish_world_button.isEnabled()
+    assert view.reextract_map_data() is False
+    assert view.finish_world_update() is False
+    assert fake.reextracts == [] and fake.finishes == []
+    assert len(told) == 2 and "Nothing was started" in told[0]
+
+    view._set_busy(False)
+    assert view.reextract_button.isEnabled() and view.finish_world_button.isEnabled()
+
+
+def test_a_tab_with_no_press_for_a_sentence_draws_the_sentence_alone(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Inside a WSL distro the map data cannot be extracted from here: no button to name."""
+    fake = _Upkeep(map_data=MAP_SENTENCE, world=WORLD_SENTENCE)
+    view = _view(tmp_path, world_upkeep=_upkeep(fake, reextract=False, finish=False))
+    view.refresh_world_upkeep()
+    assert MAP_SENTENCE in view.world_upkeep_label.text()
+    assert WORLD_SENTENCE in view.world_upkeep_label.text()
+    assert view.reextract_button.isHidden() and view.finish_world_button.isHidden()
+
+
+def test_inside_a_wsl_distro_the_map_data_sentence_names_no_press_on_this_tab(
+    tmp_path: Path,
+) -> None:
+    server = _server(tmp_path)
+    (server / trinitycore.REEXTRACT_FILE).write_text(
+        '{"version": 1, "changed": ["src/centurion/centurion/dbc/Spell.dbc"]}', encoding="utf-8"
+    )
+    seam = view_module._world_upkeep(ENTRY, server, wsl_distro="Ubuntu")
+    assert seam is not None and seam.reextract is None
+    map_data, world = seam.read()
+    assert map_data is not None and "inside a WSL distro" in map_data
+    assert "Stop the server, then press" not in map_data
+    assert world is None
+    here = view_module._world_upkeep(ENTRY, server, wsl_distro=None)
+    assert here is not None and here.reextract is not None
+    said, _ = here.read()
+    assert said is not None and "Stop the server, then press" in said
+
+
+def test_a_server_with_nothing_owed_draws_no_upkeep_line(qapp: object, tmp_path: Path) -> None:
+    view = _view(tmp_path, world_upkeep=_upkeep(_Upkeep()))
+    view.refresh_world_upkeep()
+    assert view.world_upkeep_label.isHidden()
+    assert view.reextract_button.isHidden() and view.finish_world_button.isHidden()
+    (tmp_path / "none").mkdir()
+    view = _view(tmp_path / "none", world_upkeep=None)
+    view.refresh_world_upkeep()
+    assert view.world_upkeep_label.isHidden()
 
 
 def test_my_party_says_the_registrys_own_reason(qapp: object, tmp_path: Path) -> None:

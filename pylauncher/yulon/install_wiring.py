@@ -443,6 +443,44 @@ def reextract_for_app(
     return press
 
 
+WorldReimportPress = Callable[..., Iterator[str]]
+"""`press(cancel=None)`: the "Finish the world update" run, its lines live (T179)."""
+
+
+def world_reimport_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> WorldReimportPress | None:
+    """T179 Task 6's "Finish the world update" press for this install, or None when it has none.
+
+    Offered where the entry's family is the TrinityCore engine, whose update
+    route imports the world tables it changed and leaves a record when they did
+    not all go in (`trinitycore.pending_world_reimport()` says when). A server in
+    a WSL distro is offered it too: the press asks git, the database and the
+    world server, all of which `Seams.in_wsl()` addresses to the distro.
+    """
+    native = entry.install.native
+    if native is None or native.trinitycore is None:
+        return None
+
+    def press(cancel: threading.Event | None = None) -> Iterator[str]:
+        if wsl_distro is not None:
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
+        engine = installer_for_app(entry, wsl_distro=wsl_distro)
+        if not isinstance(engine, trinitycore.TrinityCoreInstaller):
+            raise InstallerError(
+                f"{entry.name}'s install engine cannot finish a world update. That is a bug in "
+                "this build. Nothing was started."
+            )
+        yield from engine.finish_world_reimport(
+            InstallOptions(server_dir=server_dir), cancel=cancel
+        )
+
+    return press
+
+
 def repair_compose_for_app(
     entry: CatalogEntry,
     server_dir: Path,

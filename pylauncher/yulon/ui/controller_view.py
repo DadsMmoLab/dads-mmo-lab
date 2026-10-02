@@ -111,7 +111,7 @@ from yulon.apply import (
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
 from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
-from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps
+from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, trinitycore
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
@@ -1508,6 +1508,47 @@ def _pathfinding(
     )
 
 
+@dataclass(frozen=True)
+class WorldUpkeep:
+    """T179 Task 6: what an update left a server owing, and the two presses that pay it.
+
+    `read` is a file read (`trinitycore.needs_reextract`, `pending_world_reimport`)
+    answering the map-data sentence and the world-update sentence, either None; the
+    Server tab asks it off the GUI thread. `reextract` is "Re-extract map data"
+    (None inside a WSL distro, where the sentence then says where the press is) and
+    `finish_world` is "Finish the world update"; both stream into the log panel.
+    """
+
+    read: Callable[[], tuple[str | None, str | None]]
+    reextract: install_wiring.ReextractPress | None
+    finish_world: install_wiring.WorldReimportPress | None
+
+
+def _world_upkeep(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> WorldUpkeep | None:
+    """The seam where the entry's update route can leave map data or world tables owing.
+
+    Read off the wiring (`install_wiring.world_reimport_for_app`), which offers the
+    retry for exactly the engines that leave such a record, so the tab names no
+    family. Inside a WSL distro the map data cannot be extracted from here
+    (`reextract_for_app` answers None), and the sentence says so instead of naming
+    a press the tab does not draw.
+    """
+    finish = install_wiring.world_reimport_for_app(entry, server_dir, wsl_distro=wsl_distro)
+    reextract = install_wiring.reextract_for_app(entry, server_dir, wsl_distro=wsl_distro)
+    if finish is None and reextract is None:
+        return None
+
+    def read() -> tuple[str | None, str | None]:
+        return (
+            trinitycore.needs_reextract(server_dir, entry, press_here=reextract is not None),
+            trinitycore.pending_world_reimport(server_dir, entry, press_here=finish is not None),
+        )
+
+    return WorldUpkeep(read=read, reextract=reextract, finish_world=finish)
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -1939,6 +1980,12 @@ class ControllerServices:
     """T179: the Server tab's movement-map line and its Start/Stop, where the entry has the job.
 
     `None` hides the line: every game whose movement maps come with the install.
+    """
+
+    world_upkeep: WorldUpkeep | None = None
+    """T179 Task 6: the Server tab's map-data and world-update lines and their presses.
+
+    `None` hides both: every game whose update route leaves neither owing.
     """
 
     characters_withheld: Mapping[str, str] = field(default_factory=dict)
@@ -2480,6 +2527,9 @@ def _assemble(
         # T179. HERE for T171's reason: whether a server makes its movement maps
         # in the background is a catalog fact (`mmaps.background_block`).
         pathfinding=_pathfinding(entry, server_dir, wsl_distro=wsl_distro),
+        # T179 Task 6. HERE for the same reason: whether an update can leave the
+        # map data or the world tables owing is the entry's engine's fact.
+        world_upkeep=_world_upkeep(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
@@ -4011,6 +4061,11 @@ PATHFINDING_START = "Make the pathfinding data"
 PATHFINDING_STOP = "Stop making the pathfinding data"
 PATHFINDING_ASKING = "Pathfinding data: asking how far it has got…"
 PATHFINDING_UNREAD = "Could not read how far the pathfinding data has got: {exc}"
+WORLD_UPKEEP_UNREAD = "Could not read whether the last update left anything to finish: {exc}"
+WORLD_UPKEEP_BUSY = (
+    "This server is busy with another action — wait for it to finish, then press this again. "
+    "Nothing was started."
+)
 
 REMOVE_IDLE = "Stop and remove containers…"
 REMOVE_ARMED = "Press again to remove"
@@ -6366,9 +6421,11 @@ class ControllerView(QWidget):
         self._timer.timeout.connect(self._tick)
         self._timer.timeout.connect(self.refresh_verdict)
         self._timer.timeout.connect(self.refresh_pathfinding)
+        self._timer.timeout.connect(self.refresh_world_upkeep)
         if status_poll_ms > 0:
             self._timer.start(status_poll_ms)
             self.refresh_pathfinding()
+            self.refresh_world_upkeep()
             # And once now. `QTimer.start()` fires nothing until the interval
             # has passed, so a tab opened over a running server spent its first
             # five seconds saying "status: unknown" with Start enabled
@@ -6473,6 +6530,18 @@ class ControllerView(QWidget):
         self.pathfinding_stop_button = QPushButton(PATHFINDING_STOP, tab)
         self.pathfinding_stop_button.clicked.connect(self.stop_pathfinding)
         self._show_pathfinding()
+        # T179 Task 6: what an update left owing -- map data to extract again, world
+        # tables still to import -- read off the GUI thread (a file each), with the
+        # press that pays each. Hidden for a server whose update leaves neither.
+        self._upkeep: tuple[str | None, str | None] = (None, None)
+        self._upkeep_pending = False
+        self.world_upkeep_label = QLabel("", tab)
+        self.world_upkeep_label.setWordWrap(True)
+        self.reextract_button = QPushButton(trinitycore.REEXTRACT_BUTTON, tab)
+        self.reextract_button.clicked.connect(self.reextract_map_data)
+        self.finish_world_button = QPushButton(trinitycore.FINISH_WORLD_BUTTON, tab)
+        self.finish_world_button.clicked.connect(self.finish_world_update)
+        self._show_world_upkeep()
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
         # `client` step or the Steam entry can use, and hiding the row there
@@ -6720,6 +6789,12 @@ class ControllerView(QWidget):
         pathfinding_row.addWidget(self.pathfinding_stop_button)
         pathfinding_row.addStretch(1)
         box.addLayout(pathfinding_row)
+        box.addWidget(self.world_upkeep_label)
+        upkeep_row = QHBoxLayout()
+        upkeep_row.addWidget(self.reextract_button)
+        upkeep_row.addWidget(self.finish_world_button)
+        upkeep_row.addStretch(1)
+        box.addLayout(upkeep_row)
         box.addWidget(self.client_dir_label)
         if self.set_client_dir_button is not None:
             box.addWidget(self.set_client_dir_button)
@@ -7121,6 +7196,117 @@ class ControllerView(QWidget):
         self.action_failed.emit(str(exc))
         self._pathfinding_pending = False
         self.refresh_pathfinding()
+
+    # ------------------------------- what an update left owing (T179 Task 6)
+
+    @Slot()
+    def refresh_world_upkeep(self) -> None:
+        """Read the map-data and world-update sentences, off the GUI thread (a file each).
+
+        Inside a WSL distro the read waits for the distro to run (T133): reading
+        the folder would boot it.
+        """
+        seam = self.services.world_upkeep
+        if seam is None or self._upkeep_pending:
+            return
+        if self._waits_for_the_distro("world upkeep", self.refresh_world_upkeep):
+            return
+        self._upkeep_pending = True
+        self._run(seam.read, self._world_upkeep_read, self._world_upkeep_read_failed)
+
+    @Slot(object)
+    def _world_upkeep_read(self, answer: object) -> None:
+        self._upkeep_pending = False
+        if isinstance(answer, tuple) and len(answer) == 2:
+            self._upkeep = cast(tuple[str | None, str | None], answer)
+        self._show_world_upkeep()
+
+    @Slot(object)
+    def _world_upkeep_read_failed(self, exc: object) -> None:
+        """A read that broke says so on its own line; the presses wait for a good one."""
+        self._upkeep_pending = False
+        logger.warning(f"could not read what the last update of {self.entry.id} left: {exc}")
+        self._upkeep = (None, None)
+        self._show_world_upkeep()
+        self.world_upkeep_label.setText(WORLD_UPKEEP_UNREAD.format(exc=exc))
+        self.world_upkeep_label.setVisible(True)
+
+    def _upkeep_held(self) -> bool:
+        """Another press of this tab runs: the log panel's job, or any `_busy` action."""
+        return self._busy or self.rebuild_log.running
+
+    def _show_world_upkeep(self) -> None:
+        """Draw the sentences and offer each press only where its sentence asks for it.
+
+        Both are held while another press runs (`_busy`, the log panel): each stops
+        or reads the server the other would be replacing.
+        """
+        if not hasattr(self, "world_upkeep_label"):
+            return  # `_set_busy()` before the Server tab exists
+        seam = self.services.world_upkeep
+        map_data, world = self._upkeep if seam is not None else (None, None)
+        said = [line for line in (world, map_data) if line]
+        self.world_upkeep_label.setText("\n\n".join(said))
+        self.world_upkeep_label.setVisible(bool(said))
+        held = hasattr(self, "rebuild_log") and self._upkeep_held()
+        can_reextract = seam is not None and seam.reextract is not None and map_data is not None
+        can_finish = seam is not None and seam.finish_world is not None and world is not None
+        self.reextract_button.setVisible(can_reextract)
+        self.reextract_button.setEnabled(can_reextract and not held)
+        self.finish_world_button.setVisible(can_finish)
+        self.finish_world_button.setEnabled(can_finish and not held)
+
+    @Slot()
+    def reextract_map_data(self) -> bool:
+        """Extract the map data again from the player's client; streams into the log panel.
+
+        The client folder is the one this tab already holds (Set the client
+        folder…), or, with none, the one the map data was last made from; the
+        press refuses with what to pick when neither is known. The engine refuses
+        while the world server may be running.
+        """
+        seam = self.services.world_upkeep
+        press = seam.reextract if seam is not None else None
+        if press is None:
+            return False
+        client_dir = self.services.client_dir
+        return self._run_upkeep_press(
+            lambda cancel: press(cancel=cancel, client_dir=client_dir),
+            title=f"Extracting {self.entry.name}'s map data again",
+        )
+
+    @Slot()
+    def finish_world_update(self) -> bool:
+        """Import the world tables the last update left waiting; streams into the log panel."""
+        seam = self.services.world_upkeep
+        press = seam.finish_world if seam is not None else None
+        if press is None:
+            return False
+        return self._run_upkeep_press(
+            lambda cancel: press(cancel=cancel),
+            title=f"Finishing {self.entry.name}'s world update",
+        )
+
+    def _run_upkeep_press(
+        self, press: Callable[[threading.Event], Iterator[str]], *, title: str
+    ) -> bool:
+        """`apply_database_corrections()`'s shape: refused while busy, run in the panel, shown."""
+        if self._upkeep_held():
+            QMessageBox.information(self, "Something else is running", WORLD_UPKEEP_BUSY)
+            return False
+        cancel = self._rebuild_cancel()
+        self._rebuild_is_compile = False
+        started = self.rebuild_log.run(
+            lambda: self._watch_for_load_wait(press(cancel)),
+            title=title,
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+        if started:
+            panel = self.rebuild_log.parentWidget()
+            if panel is not None:
+                self._tabs.setCurrentWidget(panel)
+        return started
 
     @Slot(object)
     def _verdict_failed(self, exc: object) -> None:
@@ -7626,6 +7812,8 @@ class ControllerView(QWidget):
         self._busy = busy
         # T179: the movement-map job's Start is held while any press runs.
         self._show_pathfinding()
+        # T179 Task 6: so are Re-extract map data and Finish the world update.
+        self._show_world_upkeep()
         if not busy:
             # T158: whatever job just ended, a load wait's words and its button
             # are over with it. `_tuning_job_done()` and the Bots tab's handlers
@@ -15002,6 +15190,11 @@ class ControllerView(QWidget):
         # T127/T162: an update press rebuilds the bot dashboard, and a rebuild
         # that failed leaves it stopped with a press on the Bots tab to retry.
         self.refresh_bot_dashboard()
+        # T179 Task 6: an update, a re-extraction or a world retry may have left
+        # (or paid) what the Server tab's two lines say, and the movement maps
+        # may have been started or stopped.
+        self.refresh_world_upkeep()
+        self.refresh_pathfinding()
         # Whatever just ran on this tab -- a rebuild, an updates press, an adopt
         # press -- may have changed what the databases read as, and one of them
         # changes it on purpose. So the remembered reading is dropped and the

@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 import pytest
 
@@ -47,10 +47,15 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
 )
 from yulon import docker
 from yulon.catalog import native
+from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import extract, mmaps, trinitycore
 from yulon.catalog.families.trinitycore import needs_reextract
 from yulon.catalog.installer import InstallerError, InstallOptions
-from yulon.install_wiring import reextract_for_app, update_to_latest_for_app
+from yulon.install_wiring import (
+    reextract_for_app,
+    update_to_latest_for_app,
+    world_reimport_for_app,
+)
 
 OLD = "a" * 40
 NEW = "b" * 40
@@ -63,11 +68,17 @@ MIN_FILES = 500
 
 @dataclass
 class World:
-    """The world server's container: up after the rebuild, down after a stop, up after a start."""
+    """The world server's container: up after the rebuild, down after a stop, up after a start.
+
+    `stop_servers` / `recreate` are the rebuild's two halves (fix round 1: the update
+    route imports between them); `stop` / `start` the retry press's.
+    """
 
     calls: list[str]
     running: bool | None = True
     refuse_stop: str = ""
+    stays_up: bool = False
+    """A world that is up again by the time it is read after its stop."""
 
     def ask(self, container: str) -> bool | None:
         return self.running
@@ -76,10 +87,37 @@ class World:
         if self.refuse_stop:
             raise docker.DockerCommandError(self.refuse_stop)
         self.calls.append(f"stop-world:{','.join(containers)}")
-        self.running = False
+        self.running = self.stays_up
 
     def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         self.calls.append("start")
+        self.running = True
+        return True
+
+    def stop_servers(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        control: docker.StopControl | None = None,
+        before_signal: Callable[[], None] | None = None,
+    ) -> None:
+        if before_signal is not None:
+            before_signal()
+        if self.refuse_stop:
+            raise docker.DockerCommandError(self.refuse_stop)
+        self.calls.append("stop_servers")
+        self.running = self.stays_up
+
+    def recreate(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        control: docker.StopControl | None = None,
+        before_signal: Callable[[], None] | None = None,
+    ) -> bool:
+        if before_signal is not None:
+            before_signal()
+        self.calls.append("recreate")
         self.running = True
         return True
 
@@ -91,6 +129,10 @@ class Box:
     m: Machine
     world: World
     sql: list[str] = field(default_factory=list)
+    ready: list[bool] = field(default_factory=lambda: [True])
+    """What each ready wait answers, in order, then the last for ever."""
+    old_files: dict[str, str] = field(default_factory=dict)
+    """World files (by name) as the OLD commit has them: written when a source is put back."""
 
     @property
     def server_dir(self) -> Path:
@@ -115,13 +157,53 @@ class Box:
             self.m.rec.calls.append("sql")
             return self.m.db.exec_stdin(container, argv, source, env=env, wsl_distro=wsl_distro)
 
+        def wait_ready(spec: object, ready: object) -> bool:
+            self.m.rec.calls.append("ready")
+            return self.ready.pop(0) if len(self.ready) > 1 else self.ready[0]
+
+        def restore_rev(dest: Path, rev: str) -> None:
+            self.m.rec.restore_rev(dest, rev)
+            for name, text in self.old_files.items():
+                (self.checkout / REPO_SQL / "world" / name).write_text(text, encoding="utf-8")
+
         return engine(
             self.m,
             world_running=self.world.ask,
             stop_world=self.world.stop,
             start=self.world.start,
+            stop_servers=self.world.stop_servers,
+            recreate=self.world.recreate,
+            wait_ready=wait_ready,
+            restore_rev=restore_rev,
             exec_stdin=exec_stdin,
         )
+
+    def moves_to(self, files: Mapping[str, str]) -> None:
+        """World files (by name) as the NEW commit has them: written when the move lands."""
+        lay = self.m.rec.on_clone
+
+        def move(dest: Path) -> None:
+            if lay is not None:
+                lay(dest)
+            for name, text in files.items():
+                (dest / REPO_SQL / "world" / name).write_text(text, encoding="utf-8")
+
+        self.m.rec.on_clone = move
+
+    def pending(self) -> dict[str, object] | None:
+        path = self.server_dir / trinitycore.WORLD_REIMPORT_FILE
+        if not path.exists():
+            return None
+        return cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
+
+    def leave_pending(self, reimport: Sequence[str] = (), parts: Sequence[str] = ()) -> None:
+        (self.server_dir / trinitycore.WORLD_REIMPORT_FILE).write_text(
+            json.dumps({"version": 1, "reimport": list(reimport), "parts": list(parts)}),
+            encoding="utf-8",
+        )
+
+    def finish(self) -> list[str]:
+        return list(self.engine().finish_world_reimport(InstallOptions(server_dir=self.server_dir)))
 
     def press(self, *, to_pin: bool = False) -> list[str]:
         return list(
@@ -286,12 +368,22 @@ def test_the_route_asks_git_only_about_the_folders_it_reads(box: Box) -> None:
     assert said[-1] == "Centurion is running on the newest upstream code."
 
 
-# -- the world tables: re-imported after the rebuild, only those, as root ------------------
+# -- the world tables: imported with the servers down, before the new build starts ----------
 
 
-def test_only_the_changed_world_tables_are_imported_again_as_root_after_the_rebuild(
+def calls_of(box: Box, *names: str) -> list[str]:
+    """The calls named (a `stop-world:` call by its prefix), in the order they happened."""
+    return [
+        call
+        for call in box.m.rec.calls
+        if call in names or any(name.endswith(":") and call.startswith(name) for name in names)
+    ]
+
+
+def test_the_changed_world_tables_go_in_while_the_servers_are_down_before_the_new_build_starts(
     box: Box,
 ) -> None:
+    """Fix round 1: a build whose code needs a new world column meets it on its first start."""
     added = box.checkout / REPO_SQL / "world" / "arena_season.sql"
     added.write_text("DROP TABLE IF EXISTS arena_season;\n", encoding="utf-8")
     box.changes(
@@ -305,17 +397,17 @@ def test_only_the_changed_world_tables_are_imported_again_as_root_after_the_rebu
     ], "only the two changed files, in the plan's order, into the world database"
     argvs = [argv for argv, _text in box.m.db.streams]
     assert all(argv[:3] == ("mysql", "-u", "root") for argv in argvs), "imported as root"
-    calls = box.m.rec.calls
-    order = [c for c in calls if c in ("build", "sql", "start") or c.startswith("stop-world")]
-    assert order == [
+    assert calls_of(box, "build", "stop_servers", "sql", "recreate", "ready") == [
         "build",
-        f"stop-world:{ENTRY.containers.world}",
+        "stop_servers",
         "sql",
         "sql",
-        "start",
-    ], "after the rebuild, with the world server stopped, and started again after"
+        "recreate",
+        "ready",
+    ], "after the compile, with the servers stopped, and before the new build starts"
     assert said[-1] == "Centurion is running on the newest upstream code."
     assert any("2 world tables" in line for line in said)
+    assert box.pending() is None, "the record goes once the last file is in"
 
 
 def test_the_routines_are_applied_again_with_the_renames_when_they_changed(box: Box) -> None:
@@ -342,6 +434,21 @@ def test_a_table_split_into_parts_is_imported_again_whole(box: Box) -> None:
     ]
 
 
+def test_a_split_table_that_lost_a_part_is_left_whole_and_said(box: Box) -> None:
+    """Fix round 1: `.1` alone would drop the rows `.2` held; the table is left, never cut."""
+    box.changes(
+        ("M", f"{REPO_SQL}/world/broadcast_text_locale.1.sql"),
+        ("D", f"{REPO_SQL}/world/broadcast_text_locale.2.sql"),
+    )
+    said = box.press()
+    assert box.streamed() == []
+    assert any(
+        f"{WORLD_SQL}/broadcast_text_locale.2.sql" in line
+        and "(broadcast_text_locale) is left" in line
+        for line in said
+    )
+
+
 def test_a_removed_world_file_leaves_its_table_and_says_so(box: Box) -> None:
     box.changes(("D", f"{REPO_SQL}/world/old_event.sql"))
     said = box.press()
@@ -358,28 +465,266 @@ def test_return_to_the_tested_pin_imports_the_tables_that_differ_from_the_pin(bo
     assert said[-1] == "Centurion is running on the commit this app was tested against."
 
 
-def test_a_world_import_that_fails_leaves_the_world_stopped_and_names_what_was_not_imported(
+def test_a_new_build_that_does_not_come_up_starts_the_old_one_on_its_own_tables(
     box: Box,
 ) -> None:
+    """Fix round 1: the rollback imports the same files again from the old checkout."""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    box.old_files = {"creature.sql": "DROP TABLE IF EXISTS creature; -- old\n"}
+    box.ready = [False, True]
+    with pytest.raises(InstallerError) as failed:
+        box.press()
+    assert first_lines(box) == [
+        "DROP TABLE IF EXISTS creature; -- new",
+        "DROP TABLE IF EXISTS creature; -- old",
+    ]
+    order = calls_of(box, "sql", "recreate", "ready", "restore:")
+    assert order == [
+        "sql",
+        "recreate",
+        "ready",
+        "restore:centurion->aaaaaaa",
+        "sql",
+        "recreate",
+        "ready",
+    ]
+    assert order.count("restore:centurion->aaaaaaa") == 1, "the sources go back once"
+    assert box.head() == OLD
+    assert "put back and is running again" in str(failed.value)
+    assert box.pending() is None
+    assert box.world.running is True
+
+
+def test_a_world_import_that_fails_rolls_back_and_the_record_names_every_file(
+    box: Box,
+) -> None:
+    """The file that failed and the ones after it; the old build was put back regardless."""
     box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", f"{REPO_SQL}/world/version.sql"))
     box.m.db.fail_on = "creature"
     with pytest.raises(InstallerError) as failed:
         box.press()
     said = str(failed.value)
-    assert f"{WORLD_SQL}/creature.sql" in said and f"{WORLD_SQL}/version.sql" in said
-    assert "world server was left stopped" in said
-    assert "backup" in said
-    assert box.world.running is False
-    assert box.head() == NEW, "the build is the new one; its sources stay with it"
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql", f"{WORLD_SQL}/version.sql"],
+        "parts": [],
+    }
+    assert (
+        "Press “Finish the world update” on the Server tab (or “Update the server "
+        f"to latest…” under “Server build ▾” again) to import "
+        f"{WORLD_SQL}/creature.sql, {WORLD_SQL}/version.sql again."
+    ) in said
+    assert "If you took the backup offered before the update" in said
+    assert box.world.running is True, "the old build was started"
+    assert box.head() == OLD
 
 
-def test_a_world_server_that_cannot_be_stopped_imports_nothing(box: Box) -> None:
+def test_a_return_that_fails_says_nothing_of_a_backup_it_never_offered(box: Box) -> None:
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), new=REV)
+    box.m.db.fail_on = "creature"
+    with pytest.raises(InstallerError) as failed:
+        box.press(to_pin=True)
+    said = str(failed.value)
+    assert "Finish the world update" in said
+    assert "backup" not in said
+
+
+def test_servers_that_cannot_be_stopped_import_nothing(box: Box) -> None:
     box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
     box.world.refuse_stop = "daemon not answering"
-    with pytest.raises(InstallerError, match="could not stop") as failed:
+    with pytest.raises(InstallerError, match="could not be stopped"):
         box.press()
     assert box.streamed() == []
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql"],
+        "parts": [],
+    }
+
+
+def test_a_record_that_cannot_be_written_stops_the_press_before_the_world_stops(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    real_write = Path.write_text
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name.startswith(trinitycore.WORLD_REIMPORT_FILE):
+            raise PermissionError(13, "Permission denied")
+        return real_write(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    with pytest.raises(InstallerError, match="world server was not stopped"):
+        box.press()
+    assert "stop_servers" not in box.m.rec.calls
+    assert box.streamed() == []
+    assert box.world.running is True
+    assert box.head() == OLD
+
+
+def test_a_world_that_is_up_again_before_the_first_table_imports_nothing(box: Box) -> None:
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.world.stays_up = True
+    with pytest.raises(InstallerError, match="is running again") as failed:
+        box.press()
+    assert box.streamed() == []
+    assert "left stopped" not in str(failed.value)
+
+
+# -- a world update that did not finish: the next press, and the retry ----------------------
+
+
+def test_the_next_update_with_no_new_change_imports_the_pending_files(box: Box) -> None:
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    box.changes()
+    box.press()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature;"]
+    assert box.pending() is None
+
+
+def test_a_pending_file_upstream_removed_is_left_and_said(box: Box) -> None:
+    box.leave_pending([f"{WORLD_SQL}/old_event.sql", f"{WORLD_SQL}/creature.sql"])
+    box.changes()
+    said = box.press()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature;"]
+    assert any(f"{WORLD_SQL}/old_event.sql" in line and "left" in line for line in said)
+
+
+def test_a_record_that_cannot_be_read_imports_every_world_table_and_says_so(box: Box) -> None:
+    (box.server_dir / trinitycore.WORLD_REIMPORT_FILE).write_text("{not json", encoding="utf-8")
+    box.changes()
+    said = box.press()
+    assert first_lines(box) == [
+        "CREATE PROCEDURE p() SELECT * FROM centurion_auth.account;",
+        "DROP TABLE IF EXISTS broadcast_text_locale;",
+        "DROP TABLE IF EXISTS creature;",
+        "DROP TABLE IF EXISTS version;",
+    ]
+    assert any("could not be read" in line for line in said)
+
+
+def test_the_tab_says_when_a_world_update_is_waiting(box: Box) -> None:
+    assert trinitycore.pending_world_reimport(box.server_dir, ENTRY) is None
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"], [f"{WORLD_SQL}/broadcast_text_locale"])
+    told = trinitycore.pending_world_reimport(box.server_dir, ENTRY)
+    assert told is not None
+    assert f"{WORLD_SQL}/creature.sql" in told and "broadcast_text_locale.*.sql" in told
+    assert "“Finish the world update”" in told
+    elsewhere = trinitycore.pending_world_reimport(box.server_dir, ENTRY, press_here=False)
+    assert elsewhere is not None and "Finish the world update" not in elsewhere
+    assert "“Update the server to latest…”" in elsewhere
+
+
+def on_the_built_commit(box: Box) -> None:
+    box.m.rec.heads[box.checkout] = REV
+
+
+def test_finish_imports_only_the_pending_files_and_does_not_build(box: Box) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    said = box.finish()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature;"]
+    assert calls_of(box, "build", "stop-world:", "sql", "start", "ready") == [
+        f"stop-world:{ENTRY.containers.world}",
+        "sql",
+        "start",
+        "ready",
+    ]
+    assert box.pending() is None
+    assert any("world update is finished" in line for line in said)
+
+
+def test_finish_refuses_a_checkout_on_another_commit_than_the_build(box: Box) -> None:
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    with pytest.raises(InstallerError, match="not on the commit the running build"):
+        box.finish()
+    assert box.streamed() == [] and box.world.running is True
+
+
+def test_finish_with_nothing_waiting_refuses(box: Box) -> None:
+    on_the_built_commit(box)
+    with pytest.raises(InstallerError, match="waiting"):
+        box.finish()
+
+
+def test_finish_that_fails_leads_with_the_press_and_keeps_the_record(box: Box) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    box.m.db.fail_on = "creature"
+    with pytest.raises(InstallerError) as failed:
+        box.finish()
+    said = str(failed.value)
+    assert said.startswith(
+        "Press “Finish the world update” on the Server tab (or the update again) to "
+        f"import {WORLD_SQL}/creature.sql again."
+    )
+    assert said.endswith("The world server was left stopped.")
+    assert box.pending() is not None
+    assert box.world.running is False
+
+
+def test_finish_whose_world_comes_back_up_imports_nothing_and_does_not_say_left_stopped(
+    box: Box,
+) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    box.world.stays_up = True
+    with pytest.raises(InstallerError, match="is running again") as failed:
+        box.finish()
+    assert box.streamed() == []
+    assert "left stopped" not in str(failed.value)
+
+
+def test_finish_whose_world_cannot_be_stopped_imports_nothing(box: Box) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    box.world.refuse_stop = "daemon not answering"
+    with pytest.raises(InstallerError, match="could not stop") as failed:
+        box.finish()
+    assert box.streamed() == []
     assert f"{WORLD_SQL}/creature.sql" in str(failed.value)
+
+
+def test_a_plain_rebuild_replaces_the_containers_in_one_call(box: Box) -> None:
+    """No update route, no work between the stop and the start: the rebuild as it always was."""
+    list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    assert "recreate" in box.m.rec.calls
+    assert "stop_servers" not in box.m.rec.calls
+
+
+# -- the realm row ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "note"),
+    [
+        ("(1,'Centurion','127.0.0.1')", "(1,'Centurion','10.0.0.5')", ""),
+        (
+            "(1,'Centurion','127.0.0.1','127.0.0.1','255.255.255.0',8085,1,0,1,0,0,12342)",
+            "(1,'Centurion','127.0.0.1','127.0.0.1','255.255.255.0',8085,1,0,1,0,0,12343)",
+            "gamebuild 12342 -> 12343",
+        ),
+        ("(1,'Centurion','127.0.0.1')", "(1,'Centurion PvP','127.0.0.1')", "name Centurion ->"),
+    ],
+    ids=["address", "gamebuild", "name"],
+)
+def test_a_realm_row_change_beyond_the_address_is_left_out_and_said(
+    box: Box, before: str, after: str, note: str
+) -> None:
+    path = f"{REPO_SQL}/auth/auth_data.sql"
+    box.changes(("M", path))
+    box.m.rec.diff_lines[(box.checkout, OLD, NEW, path)] = (
+        f"-INSERT INTO `realmlist` VALUES {before};",
+        f"+INSERT INTO `realmlist` VALUES {after};",
+    )
+    said = box.press()
+    assert box.streamed() == []
+    beyond = [line for line in said if "beyond the address" in line]
+    if note:
+        assert len(beyond) == 1 and note in beyond[0], said
+    else:
+        assert beyond == []
 
 
 # -- map data: flagged, and extracted again on a press ---------------------------------------
@@ -417,6 +762,23 @@ def test_return_to_the_tested_pin_flags_the_map_data_too(box: Box) -> None:
     assert needs_reextract(box.server_dir, ENTRY) is not None
 
 
+def test_the_press_that_flags_the_map_data_does_not_start_the_movement_maps(box: Box) -> None:
+    """Fix round 1: a set made from the map data being replaced would be thrown away."""
+    started = len(box.m.mmaps.started)
+    box.changes(("M", "centurion/dbc/Spell.dbc"))
+    said = box.press()
+    assert len(box.m.mmaps.started) == started
+    assert any("pathfinding data was not started" in line for line in said)
+
+
+def test_a_rolled_back_update_puts_the_map_data_flag_back(box: Box) -> None:
+    box.changes(("M", "centurion/dbc/Spell.dbc"))
+    box.ready = [False, True]
+    with pytest.raises(InstallerError):
+        box.press()
+    assert needs_reextract(box.server_dir, ENTRY) is None
+
+
 def test_a_refused_update_flags_nothing_even_when_the_dbc_files_changed(box: Box) -> None:
     box.changes(
         ("M", "centurion/dbc/Spell.dbc"),
@@ -436,11 +798,11 @@ def flagged(box: Box) -> None:
 def test_reextract_runs_the_client_data_stage_again_and_clears_the_movement_maps(
     box: Box,
 ) -> None:
-    flagged(box)
     fake: FakeMmapsDocker = box.m.mmaps
     fake.finish(0, tiles=MIN_FILES)
     assert box.engine().mmaps_status(box.server_dir).state == "done"
     assert "mmap.enablePathFinding = 1" in world_conf(box)
+    flagged(box)
     started = len(fake.started)
     box.m.tools.seen.clear()
     box.world.running = False
@@ -499,6 +861,13 @@ def test_the_app_wiring_offers_the_route_and_the_reextract(box: Box) -> None:
     assert update_to_latest_for_app(ENTRY, box.server_dir) is not None
     assert reextract_for_app(ENTRY, box.server_dir) is not None
     assert reextract_for_app(ENTRY, box.server_dir, wsl_distro="Ubuntu") is None
+    assert world_reimport_for_app(ENTRY, box.server_dir) is not None
+    assert world_reimport_for_app(ENTRY, box.server_dir, wsl_distro="Ubuntu") is not None
+
+
+def test_the_app_wiring_offers_no_world_retry_to_another_family(tmp_path: Path) -> None:
+    wotlk = load_catalog().get("wow-wotlk")
+    assert world_reimport_for_app(wotlk, tmp_path) is None
 
 
 # -- the catalog: what the route reads is data, and checked ----------------------------------

@@ -2785,6 +2785,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "player's file at the same path. Only ever inside a copy whose marker and place were "
         "checked; the player's own client is never listed or written"
     ),
+    ("catalog/families/trinitycore.py", "_parts_on_disk"): (
+        "T179 Task 6 (fix round 1). Lists one world SQL folder of the server's own checkout "
+        "to ask whether any `<stem>.<n>.sql` part of a split table a pending world update "
+        "names is still there. Read-only; it decides only whether that table is imported "
+        "again or left, never whether the app may write anywhere"
+    ),
     ("catalog/families/extract.py", "overlay_files"): (
         "T179 Task 3. Lists the server's own checkout folder `dbc_overlay_from` "
         "(Centurion's `centurion/dbc`) to copy each file over the same name under "

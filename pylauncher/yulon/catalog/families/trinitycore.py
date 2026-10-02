@@ -27,11 +27,14 @@ is overridden here, by name:
   as a background job once the server is up, and stop before any rebuild route
   (`families/mmaps.py`, Task 4).
 
-* `check_moved_sources()` / `after_update()` -- the update route's hooks (Task 6): what
-  the move changed in the tree's SQL snapshot is read before the compile (a change to
-  the characters' or accounts' layout refuses the update), the changed world tables
-  are imported again once the new build runs, and a change to the DBC files or a
-  required client pack flags the map data for `reextract()`.
+* `check_moved_sources()` / `servers_down_work()` / `after_update()` -- the update
+  route's hooks (Task 6): what the move changed in the tree's SQL snapshot is read
+  before the compile (a change to the characters' or accounts' layout refuses the
+  update), the changed world tables are imported again with the rebuild's servers
+  stopped, before the new build starts (and the old ones again on a rollback), and a
+  change to the DBC files or a required client pack flags the map data for
+  `reextract()`. A world update that did not finish is finished by the next update
+  or by `finish_world_reimport()` (fix round 1).
 
 The inherited "database updates" and corrections presses see a plan with no
 re-runnable and no correctable phases, because `native.update_phases()` and
@@ -74,6 +77,7 @@ from yulon.catalog.native import (
     IMPORT_STAGE_CANCEL_NOTE,
     InstallState,
     Seams,
+    ServersDownWork,
     Stage,
     StageContext,
     _speaking,
@@ -116,12 +120,52 @@ rewrite that record, and Uninstall removes it with the folder.
 REEXTRACT_BUTTON = "Re-extract map data"
 """The Server tab's press for `reextract()`, named in the sentences that ask for it."""
 
+WORLD_REIMPORT_FILE = ".yulon-world-reimport.json"
+"""In the server folder: world table files an update still has to import again (fix round 1).
+
+`{"version": 1, "reimport": [rel, ...], "parts": [stem, ...]}`, written whole (a
+temporary file renamed into place) BEFORE the world server is stopped for the
+tables, and removed only once the last of them went in. A failure, a Stop or a
+crash in between leaves it, and the next "Update the server to latest…" or
+"Return to the tested pin…" imports what it names along with its own changes, or
+"Finish the world update" (`TrinityCoreInstaller.finish_world_reimport()`) does
+without a compile. Its own file for `REEXTRACT_FILE`'s reasons.
+"""
+
+FINISH_WORLD_BUTTON = "Finish the world update"
+"""The Server tab's press for `finish_world_reimport()`, named in the sentences that ask for it."""
+
 WORLD_TABLES_CANCEL_NOTE = (
-    "Stopping now stops between two table files; a table already imported again stays so, and "
-    "the world server is left stopped. The backup offered before the update has the world "
-    "tables as they were."
+    "Stopping now stops between two table files, and the update is rolled back: the tables "
+    "already imported again are imported once more from the sources the old build was made from."
 )
-"""What a Stop costs while the changed world tables are imported again (Task 6)."""
+"""What a Stop costs while the update route imports the changed world tables (Task 6)."""
+
+FINISH_CANCEL_NOTE = (
+    "Stopping now stops between two table files; the world server is left stopped, and every "
+    f"file stays waiting for “{FINISH_WORLD_BUTTON}”."
+)
+"""What a Stop costs while "Finish the world update" imports the waiting tables (fix round 1)."""
+
+_REALM_TABLE = "INSERT INTO `realmlist`"
+_REALM_COLUMNS = (
+    "id",
+    "name",
+    "address",
+    "localAddress",
+    "localSubnetMask",
+    "port",
+    "icon",
+    "flag",
+    "timezone",
+    "allowedSecurityLevel",
+    "population",
+    "gamebuild",
+)
+"""TrinityCore's `realmlist` columns, in the order a dump without a column list writes them."""
+
+_YULONS_REALM_COLUMNS = frozenset({"address", "localAddress"})
+"""The realm row's columns Yu'lon sets itself (the Networking tab's address): never taken over."""
 
 _PART = re.compile(r"^(?P<stem>.+)\.\d+\.sql$")
 """A table dumped across numbered files: `broadcast_text_locale.1.sql`, `.2.sql` (facts §2).
@@ -147,10 +191,22 @@ class SnapshotChanges:
     """`_PART` stems (server-dir-relative) of split tables a part of which changed."""
     left: tuple[str, ...] = ()
     """World files removed upstream: their tables are left as they are."""
+    left_parts: tuple[str, ...] = ()
+    """Parts of split tables removed upstream: the whole table is left, never imported in part."""
     skipped: tuple[str, ...] = ()
     """Files changed only in `skip_lines` lines (the realm row): left out."""
     map_data: tuple[str, ...] = ()
     """Changed DBC files and required client packs: the map data must be extracted again."""
+    everything: bool = False
+    """An unreadable `WORLD_REIMPORT_FILE`: every file of the re-import phases goes in again."""
+    notes: tuple[str, ...] = ()
+    """What the press says after the update: a realm row change left out, a pending file gone."""
+    flagged_before: tuple[str, ...] | None = None
+    """`REEXTRACT_FILE` as it was before this press (None: absent), for a rollback to put back."""
+
+    def imports(self) -> bool:
+        """Is any world table file imported again?"""
+        return bool(self.reimport or self.parts or self.everything)
 
 
 class TrinityCoreInstaller(CmangosInstaller):
@@ -628,8 +684,17 @@ class TrinityCoreInstaller(CmangosInstaller):
         Owner decision 4: the install finishes and the player plays first. A job
         already running or a set already made is left alone (`mmaps.start_mmaps()`
         reconciles first), so a resumed install or a rebuild never starts a second.
+        Not while the map data is flagged stale (`REEXTRACT_FILE`, fix round 1):
+        a set made from it would be made again after "Re-extract map data", which
+        starts the job itself once the flag is gone.
         """
         if mmaps.background_block(self.entry) is None:
+            return
+        if _read_flag(server_dir) is not None:
+            yield (
+                "The pathfinding data was not started: the map data must be extracted again "
+                f"first (“{REEXTRACT_BUTTON}” on the Server tab), and it is made after that."
+            )
             return
         try:
             yield self.start_mmaps(server_dir)
@@ -700,8 +765,13 @@ class TrinityCoreInstaller(CmangosInstaller):
         upstream's. Before anything is built, written or stopped (owner decision
         2, Review Focus 4): a change to the characters' or the accounts' database
         refuses the whole press here, and the route puts the checkout back.
+
+        A world update an earlier press did not finish (`WORLD_REIMPORT_FILE`) is
+        merged in (fix round 1): its files go in again with this press's, so an
+        update with no new change of its own still finishes it.
         """
         tc = self._tc()
+        changes = SnapshotChanges()
         for source, dest, old in moved:
             if posixpath.normpath(source.dest) != posixpath.normpath(tc.checkout):
                 continue
@@ -719,14 +789,23 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"Nothing was changed."
                 )
             changes = self._read_changes(dest, old, new, pairs)
-            if changes.reimport or changes.parts:
-                count = len(changes.reimport) + len(changes.parts)
-                yield (
-                    f"The SQL snapshot in {tc.checkout} changed {count} world table file(s); they "
-                    "are imported again once the new build is running."
-                )
-            return changes
-        return SnapshotChanges()
+            break
+        changes = replace(
+            self._with_pending(server_dir, changes), flagged_before=_read_flag(server_dir)
+        )
+        if changes.everything:
+            yield (
+                f"Every world table file in {tc.checkout}'s SQL snapshot is imported again with "
+                "the new build's servers stopped, before it starts: an earlier world update did "
+                "not finish, and what it had left to do could not be read."
+            )
+        elif changes.reimport or changes.parts:
+            count = len(changes.reimport) + len(changes.parts)
+            yield (
+                f"{count} world table file(s) in {tc.checkout}'s SQL snapshot are imported again "
+                "with the new build's servers stopped, before it starts."
+            )
+        return changes
 
     def _watched_paths(self) -> tuple[str, ...]:
         """The checkout-relative folders the route asks git about: what the import and maps read."""
@@ -774,7 +853,13 @@ class TrinityCoreInstaller(CmangosInstaller):
     def _read_changes(
         self, dest: Path, old: str, new: str, pairs: Sequence[tuple[str, str]]
     ) -> SnapshotChanges:
-        """Sort each changed file into what the route does with it, or refuse the press."""
+        """Sort each changed file into what the route does with it, or refuse the press.
+
+        A split table (`_PART`) is imported again whole when any part changed, and
+        left whole when any part was removed (fix round 1): what is left of it
+        would not be the table upstream has, and importing it would drop the rows
+        the removed part held.
+        """
         tc = self._tc()
         updates = tc.updates
         reimport_phases = set(updates.reimport_phases) if updates is not None else set()
@@ -782,8 +867,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         reimport: list[str] = []
         parts: list[str] = []
         left: list[str] = []
+        left_parts: list[str] = []
         skipped: list[str] = []
         map_data: list[str] = []
+        notes: list[str] = []
         for status, path in pairs:
             rel = posixpath.join(tc.checkout, path)
             if self._is_map_data(rel):
@@ -795,7 +882,9 @@ class TrinityCoreInstaller(CmangosInstaller):
                 continue
             if phase.name in reimport_phases:
                 part = _PART.match(rel)
-                if part is not None:
+                if part is not None and status == "D":
+                    left_parts.append(rel)
+                elif part is not None:
                     parts.append(part["stem"])
                 elif status == "D":
                     left.append(rel)
@@ -807,14 +896,78 @@ class TrinityCoreInstaller(CmangosInstaller):
                 lines = self._seams.changed_lines(dest, old, new, path)
                 if lines and all(line[1:].startswith(tuple(prefixes)) for line in lines):
                     skipped.append(rel)
+                    beyond = _realm_change_beyond_the_address(lines)
+                    if beyond:
+                        logger.info(
+                            f"update: {rel}'s realm row changed beyond its address: {beyond}"
+                        )
+                        notes.append(
+                            f"{self.entry.name} changed its realm row in {rel} beyond the address "
+                            f"Yu'lon sets ({beyond}); Yu'lon keeps the realm row as it is, so "
+                            "that change is not applied."
+                        )
                     continue
             raise InstallerError(self._refusal(rel, phase))
+        gone = {cast(re.Match[str], _PART.match(rel))["stem"] for rel in left_parts}
         return SnapshotChanges(
             reimport=tuple(reimport),
-            parts=tuple(dict.fromkeys(parts)),
+            parts=tuple(stem for stem in dict.fromkeys(parts) if stem not in gone),
             left=tuple(left),
+            left_parts=tuple(left_parts),
             skipped=tuple(skipped),
             map_data=tuple(map_data),
+            notes=tuple(notes),
+        )
+
+    def _with_pending(self, server_dir: Path, changes: SnapshotChanges) -> SnapshotChanges:
+        """`changes` with the files a world update before this press did not finish (fix round 1).
+
+        A file it names that is no longer in the checkout is left, and said; a
+        split table any part of which this move removed is left whole. An
+        unreadable record imports every file of the re-import phases again: what
+        it named is lost, that something is waiting is not.
+        """
+        pending = _read_pending(server_dir)
+        if pending is None:
+            return changes
+        if pending.unreadable:
+            return replace(
+                changes,
+                everything=True,
+                notes=(
+                    *changes.notes,
+                    f"{server_dir / WORLD_REIMPORT_FILE} could not be read, so every world table "
+                    f"file of {self.entry.name}'s snapshot was imported again.",
+                ),
+            )
+        reimport = list(changes.reimport)
+        parts = list(changes.parts)
+        left = list(changes.left)
+        notes = list(changes.notes)
+        gone = {cast(re.Match[str], _PART.match(rel))["stem"] for rel in changes.left_parts}
+        for rel in pending.reimport:
+            if rel in reimport or rel in left:
+                continue
+            if not (server_dir / rel).is_file():
+                left.append(rel)
+                continue
+            reimport.append(rel)
+        for stem in pending.parts:
+            if stem in parts or stem in gone:
+                continue
+            if not _parts_on_disk(server_dir, stem):
+                notes.append(
+                    f"{stem}.*.sql is no longer in {self.entry.name}'s snapshot; its table is left "
+                    "in your world database as it is."
+                )
+                continue
+            parts.append(stem)
+        return replace(
+            changes,
+            reimport=tuple(reimport),
+            parts=tuple(parts),
+            left=tuple(left),
+            notes=tuple(notes),
         )
 
     def _refusal(self, rel: str, phase: SqlPhase) -> str:
@@ -846,6 +999,90 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"that into {whose} safely yet. Nothing was changed."
         )
 
+    def servers_down_work(
+        self, server_dir: Path, changes: object, *, press: str
+    ) -> ServersDownWork | None:
+        """The changed world tables, imported while the rebuild's servers are down (fix round 1).
+
+        Not after the new build is up, as until fix round 1: a build whose code
+        needs a new world column would fail its ready wait on the old table, and be
+        rolled back, on every press. So:
+
+        * `prepare()` -- before anything stops -- finds every file and writes
+          `WORLD_REIMPORT_FILE` naming them; a file missing from the checkout or
+          a record that cannot be written stops the press with nothing stopped;
+        * `forward()` -- the new build's servers stopped, before it starts --
+          flags the map data, then imports each file as root into the world
+          database (the world read again right before the first), and removes the
+          record once the last went in. A failure rolls the rebuild back;
+        * `back()` -- the rollback's window, the checkout already back on the old
+          commit -- puts the map-data flag back as it was and imports the same
+          files from the old checkout, so the old build meets its own tables (a
+          table only the new version has stays, unread by the old code). If that
+          fails, the record stays and the sentence says how to finish it.
+        """
+        if not isinstance(changes, SnapshotChanges):
+            return None
+        if not changes.imports() and not changes.map_data:
+            return None
+        runs: list[sqlplan.PhaseRun] = []
+
+        def prepare() -> Iterator[str]:
+            if not changes.imports():
+                return
+            ctx = self._world_ctx(server_dir, None)
+            runs[:] = self._reimport_runs(ctx, changes)
+            self._write_pending(server_dir, runs)
+            yield (
+                f"{server_dir / WORLD_REIMPORT_FILE} names the {len(runs)} world table file(s) "
+                "to import again, until the last is in."
+            )
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            if changes.map_data:
+                yield self._flag_map_data(server_dir, changes.map_data)
+            if not runs:
+                return
+            names = [run.rel for run in runs]
+            yield (
+                f"Importing {len(runs)} world tables again into {self.entry.databases.world} "
+                "while the servers are stopped, so the new build starts on them: each replaces "
+                "its table whole."
+            )
+            yield WORLD_TABLES_CANCEL_NOTE
+            self._refuse_unless_the_world_is_down(names)
+            yield from self._import_runs(ctx, runs, cancel_note=WORLD_TABLES_CANCEL_NOTE)
+            yield from self._forget_pending(server_dir)
+            yield f"The {len(runs)} world tables are in; the new build starts on them."
+
+        def back(ctx: StageContext) -> Iterator[str]:
+            if changes.map_data:
+                yield from self._put_flag_back(server_dir, changes.flagged_before)
+            if not changes.imports():
+                return
+            present = self._reimport_runs(ctx, changes, missing_ok=True)
+            names = [run.rel for run in present]
+            if not present:
+                yield from self._forget_pending(server_dir)
+                return
+            yield (
+                f"Importing the same {len(present)} world tables again from the sources the old "
+                "build was made from, so it starts on its own tables."
+            )
+            try:
+                self._write_pending(server_dir, present)
+                self._refuse_unless_the_world_is_down(names)
+                yield from self._import_runs(ctx, present, cancel_note="")
+            except InstallerError as exc:
+                raise InstallerError(
+                    f"{_finish_advice(names, press)} The world tables could not all be put back "
+                    f"for the build from before this update: {exc}{_backup_advice(press)}"
+                ) from exc
+            yield from self._forget_pending(server_dir)
+            yield f"The {len(present)} world tables are back as the old build had them."
+
+        return ServersDownWork(prepare=prepare, forward=forward, back=back)
+
     def after_update(
         self,
         server_dir: Path,
@@ -854,34 +1091,157 @@ class TrinityCoreInstaller(CmangosInstaller):
         press: str,
         cancel: threading.Event | None,
     ) -> Iterator[str]:
-        """Once the new build runs: flag the map data, then import the changed world tables again.
+        """Once the new build runs: what the update did not apply, and the map data's sentence.
 
-        The tables go in with the world server stopped (owner answer 7: nothing
-        writes into a database a running world holds in memory), as root and with
-        the plan's renames (`_expand()`), one file at a time so a failure can say
-        exactly which were not imported -- and the world server is started again
-        and waited for after them.
+        The world tables went in while the rebuild's servers were down
+        (`servers_down_work()`); this says what is left as it was and why.
         """
         if not isinstance(changes, SnapshotChanges):
             return
         if changes.map_data:
-            yield self._flag_map_data(server_dir, changes.map_data)
+            said = needs_reextract(server_dir, self.entry)
+            if said is not None:
+                yield said
         for rel in changes.skipped:
             yield (
-                f"{rel} changed only in rows Yu'lon sets itself (the realm's address and name), "
-                "so that change is left out."
+                f"{rel} changed only in the realm row, which Yu'lon sets itself, so that change "
+                "is left out."
             )
         for rel in changes.left:
             yield (
                 f"{rel} is no longer in {self.entry.name}'s snapshot; its table is left in your "
                 "world database as it is."
             )
-        if not changes.reimport and not changes.parts:
+        for rel in changes.left_parts:
+            stem = cast(re.Match[str], _PART.match(rel))["stem"]
+            yield (
+                f"{rel} is no longer in {self.entry.name}'s snapshot, so the table it is part of "
+                f"({posixpath.basename(stem)}) is left in your world database as it is: its "
+                "other parts alone are not the whole table."
+            )
+        yield from changes.notes
+
+    # -- finishing a world update that did not finish (fix round 1) -----------------
+
+    def finish_world_reimport(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Import the tables `WORLD_REIMPORT_FILE` names with no compile: "Finish the world update".
+
+        The retry for an update whose world tables did not all go in: a failure, a
+        Stop or a crash left the record. Refused unless the folder is one this app
+        rebuilds and the checkout is on the commit the running build was made
+        from -- the files are read from it. The world server is stopped (T158's
+        stop and wait) and read again right before the first file; the record goes
+        once the last is in; then the server is started and waited for.
+
+        Raises:
+            InstallerError: a refusal, or a file that did not go in; the record
+                stays, so the press is still offered.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        state = self._refuse_unless_rebuildable(server_dir)
+        pending = _read_pending(server_dir)
+        if pending is None:
+            raise InstallerError(
+                f"No world update of {self.entry.name}'s is waiting to be finished. Nothing was "
+                "changed."
+            )
+        self._refuse_unless_the_checkout_is_built(server_dir, state)
+        changes = SnapshotChanges(
+            reimport=pending.reimport, parts=pending.parts, everything=pending.unreadable
+        )
+        ctx = self._world_ctx(server_dir, cancel, state=state)
+        runs = self._reimport_runs(ctx, changes, missing_ok=True)
+        names = [run.rel for run in runs]
+        found = set(names)
+        for rel in pending.reimport:
+            if rel not in found:
+                yield (
+                    f"{rel} is no longer in {self.entry.name}'s sources; its table is left in "
+                    "your world database as it is."
+                )
+        if runs:
+            yield (
+                f"Importing {len(runs)} world tables again into {self.entry.databases.world}, "
+                "the ones the last update left waiting: each replaces its table whole."
+            )
+            yield FINISH_CANCEL_NOTE
+            yield from self._stop_the_world_for_tables(ctx, names)
+            self._refuse_unless_the_world_is_down(names)
+            try:
+                yield from self._import_runs(ctx, runs, cancel_note=FINISH_CANCEL_NOTE)
+            except InstallerError as exc:
+                raise InstallerError(
+                    f"{_finish_advice(names, None)} {exc} The world server was left stopped."
+                ) from exc
+        yield from self._forget_pending(server_dir)
+        yield f"The world update is finished. Starting {self.entry.name}'s world server again."
+        yield from self.stage_up(ctx)
+        yield from self.stage_ready(ctx)
+
+    def _refuse_unless_the_checkout_is_built(self, server_dir: Path, state: InstallState) -> None:
+        """The checkout must be on the commit the install record says the running build is from.
+
+        The files are read from the checkout; a checkout on another commit (a
+        crash part way through an update, before the commit was recorded) would
+        put another version's tables under the running build. The record's
+        `source_revs` row when there is one (`head_version`'s spelling), else the
+        catalog pin the install was made on.
+        """
+        tc = self._tc()
+        source = next(
+            (
+                source
+                for source in self.entry.emulator.sources
+                if posixpath.normpath(source.dest) == posixpath.normpath(tc.checkout)
+            ),
+            None,
+        )
+        if source is None:
             return
-        ctx = StageContext(
+        dest = server_dir / source.dest
+        recorded = state.rev_for(source.repo)
+        if recorded is not None:
+            now = self._seams.head_version(dest)
+            same = None if now is None else now == recorded.built
+            built = recorded.built
+        else:
+            sha = self._seams.head_sha(dest)
+            same = None if sha is None else sha == source.rev
+            built = (source.rev or "")[:7]
+        if same is None:
+            raise InstallerError(
+                f"Yu'lon could not read which commit {dest} is on, so it cannot tell whether its "
+                "world tables are the running build's. Nothing was changed."
+            )
+        if not same:
+            raise InstallerError(
+                f"{dest} is not on the commit the running build was made from ({built}), so its "
+                f"world tables may not be that build's. Press "
+                f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}"
+                " again: it builds and imports them together. Nothing was changed."
+            )
+
+    # -- the world tables' import, shared by the route and the retry -------------------
+
+    def _world_ctx(
+        self,
+        server_dir: Path,
+        cancel: threading.Event | None,
+        *,
+        state: InstallState | None = None,
+    ) -> StageContext:
+        """A context for the world-table import and the start after it, outside any stage."""
+        return StageContext(
             server_dir=server_dir,
             client_dir=None,
-            state=read_state(server_dir, valid=self.stage_names())
+            state=state
+            or read_state(server_dir, valid=self.stage_names())
             or InstallState(
                 game_id=self.entry.id,
                 install_id=self._install_id(server_dir),
@@ -890,20 +1250,15 @@ class TrinityCoreInstaller(CmangosInstaller):
             cancel=cancel,
             secrets=self.resolve_secrets(server_dir),
         )
-        runs = self._reimport_runs(ctx, changes)
-        names = [run.rel for run in runs]
-        world_db = self.entry.databases.world
-        yield (
-            f"Importing {len(runs)} world tables again into {world_db}, the ones this update "
-            f"changed: each replaces its table whole. The backup offered before the update has "
-            f"them as they were."
-        )
-        yield from self._stop_the_world_for_tables(ctx, names)
+
+    def _import_runs(
+        self, ctx: StageContext, runs: Sequence[sqlplan.PhaseRun], *, cancel_note: str
+    ) -> Iterator[str]:
+        """Each run through `sqlplan.apply()` as root, one at a time; a failure names the rest."""
         db = self._native().db
         container = self.entry.container_spec().db
         done = 0
         try:
-            self._refuse_unless_the_world_is_down(names)
             for run in runs:
 
                 def apply_one(
@@ -916,27 +1271,28 @@ class TrinityCoreInstaller(CmangosInstaller):
                         password=ctx.secrets.db_password,
                         exec_stdin=self._seams.exec_stdin,
                         sink=sink,
-                        cancel=cancel,
-                        cancel_note=WORLD_TABLES_CANCEL_NOTE,
+                        cancel=ctx.cancel,
+                        cancel_note=cancel_note,
                     )
 
-                yield from self._stream(apply_one, cancel=cancel, stage="world-tables")
+                yield from self._stream(apply_one, cancel=ctx.cancel, stage="world-tables")
                 done += 1
         except InstallerError as exc:
-            remaining = names[done:]
+            remaining = [run.rel for run in runs[done:]]
             raise InstallerError(
-                f"{exc} The world server was left stopped: {_listed(remaining)} "
-                f"{'was' if len(remaining) == 1 else 'were'} not imported again. "
-                f"{_RESTORE_ADVICE}"
+                f"{exc} {_listed(remaining)} {'was' if len(remaining) == 1 else 'were'} not "
+                "imported again."
             ) from exc
-        yield f"The {len(runs)} world tables are in. Starting the world server again on them."
-        yield from self.stage_up(ctx)
-        yield from self.stage_ready(ctx)
 
     def _reimport_runs(
-        self, ctx: StageContext, changes: SnapshotChanges
+        self, ctx: StageContext, changes: SnapshotChanges, *, missing_ok: bool = False
     ) -> tuple[sqlplan.PhaseRun, ...]:
-        """The re-import phases' runs for the changed files, in plan order, renames and all."""
+        """The re-import phases' runs for the changed files, in plan order, renames and all.
+
+        `missing_ok` is the rollback's and the retry's: a file that is not in the
+        checkout they read is a table the old build never had (or one upstream
+        removed), and it is left as it is.
+        """
         updates = self._tc().updates
         phases = set(updates.reimport_phases) if updates is not None else set()
         plan = self._tc().sql
@@ -950,7 +1306,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         except (RuntimeError, OSError) as exc:
             raise InstallerError(
                 f"The world tables this update changed could not be prepared ({exc}); nothing "
-                f"was imported again, and the world server was not stopped. {_RESTORE_ADVICE}"
+                "was imported again, and the world server was not stopped."
             ) from exc
         wanted = set(changes.reimport)
         stems = set(changes.parts)
@@ -958,17 +1314,62 @@ class TrinityCoreInstaller(CmangosInstaller):
             run
             for run in every
             if run.path is not None
-            and (run.rel in wanted or ((part := _PART.match(run.rel)) and part["stem"] in stems))
+            and (
+                changes.everything
+                or run.rel in wanted
+                or ((part := _PART.match(run.rel)) is not None and part["stem"] in stems)
+            )
         )
         found = {run.rel for run in runs}
         missing = sorted(wanted - found)
-        if missing:
+        if missing and not missing_ok:
             raise InstallerError(
                 f"The world tables this update changed are not all in the server's sources "
                 f"({_listed(missing)}); nothing was imported again, and the world server was "
-                f"not stopped. {_RESTORE_ADVICE}"
+                "not stopped."
             )
         return runs
+
+    def _write_pending(self, server_dir: Path, runs: Sequence[sqlplan.PhaseRun]) -> None:
+        """`WORLD_REIMPORT_FILE`, whole: what is waiting now, with what was waiting before.
+
+        Raises `InstallerError` when it cannot be written: then nothing is stopped
+        or imported, since a failure after it would leave nobody knowing what to
+        finish.
+        """
+        path = server_dir / WORLD_REIMPORT_FILE
+        before = _read_pending(server_dir)
+        reimport = {run.rel for run in runs if _PART.match(run.rel) is None}
+        parts = {match["stem"] for run in runs if (match := _PART.match(run.rel)) is not None}
+        if before is not None and not before.unreadable:
+            reimport |= set(before.reimport)
+            parts |= set(before.parts)
+        body = {"version": 1, "reimport": sorted(reimport), "parts": sorted(parts)}
+        staged = path.with_name(path.name + ".yulon-new")
+        try:
+            staged.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+            os.replace(staged, path)
+        except OSError as exc:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError as also:
+                logger.warning(f"could not remove {staged}: {also}")
+            raise InstallerError(
+                f"{path} could not be written ({exc}), and it is what says which world tables "
+                "are still to be imported if this stops part way, so the world server was not "
+                "stopped and nothing was imported again."
+            ) from exc
+
+    def _forget_pending(self, server_dir: Path) -> Iterator[str]:
+        """Remove `WORLD_REIMPORT_FILE` once every file it names went in; a warning if it stays."""
+        path = server_dir / WORLD_REIMPORT_FILE
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            yield (
+                f"warning: {path} could not be removed ({exc}); the Server tab will go on "
+                f"offering “{FINISH_WORLD_BUTTON}” for tables that are already in."
+            )
 
     def _stop_the_world_for_tables(self, ctx: StageContext, names: Sequence[str]) -> Iterator[str]:
         """Stop a running world server before its tables are replaced; T158's stop and wait."""
@@ -982,9 +1383,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         if running is None:
             raise InstallerError(
                 f"Yu'lon could not tell whether {self.entry.name}'s world server is running, so "
-                f"it could not stop it, and the world tables this update changed were not "
-                f"imported again: {_listed(names)}. Check that Docker is running. "
-                f"{_RESTORE_ADVICE}"
+                f"it could not stop it, and these world tables were not imported again: "
+                f"{_listed(names)}. Check that Docker is running, then press "
+                f"“{FINISH_WORLD_BUTTON}” again."
             )
         yield (
             f"Stopping the world server ({container}) so its tables can be replaced; it saves "
@@ -1005,37 +1406,39 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from _speaking(stop_it, control.abandon)
         except (docker.StopAbandoned, docker.DockerCommandError) as exc:
             raise InstallerError(
-                f"Yu'lon could not stop {self.entry.name}'s world server ({exc}), so the world "
-                f"tables this update changed were not imported again: {_listed(names)}. The "
-                f"server runs the new build on the tables it had. {_RESTORE_ADVICE}"
+                f"Yu'lon could not stop {self.entry.name}'s world server ({exc}), so these world "
+                f"tables were not imported again: {_listed(names)}. Press "
+                f"“{FINISH_WORLD_BUTTON}” again once it can be stopped."
             ) from exc
         yield "The world server is stopped."
 
     def _refuse_unless_the_world_is_down(self, names: Sequence[str]) -> None:
-        """The second reading, right before the first table is written: down, or nothing is."""
+        """The second reading, right before the first table is written: down, or nothing is.
+
+        Its own sentence, never followed by "the world server was left stopped":
+        a world that is running again was not left stopped (fix round 1).
+        """
         container = self.entry.container_spec().world
         try:
             running: bool | None = self._seams.ask_world_running(container)
         except Exception:  # noqa: BLE001 - any failure to ask is "could not ask"
             running = None
-        if running is not False:
-            raise InstallerError(
-                f"{self.entry.name}'s world server "
-                f"{'is running again' if running else 'could not be read'}, and it holds its "
-                f"tables in memory and writes back over them, so nothing was imported again."
-            )
+        if running is False:
+            return
+        raise InstallerError(
+            f"{self.entry.name}'s world server "
+            f"{'is running again' if running else 'could not be read'}, and it holds its "
+            "tables in memory and writes back over them, so none of these was imported again: "
+            f"{_listed(names)}."
+        )
 
     def _flag_map_data(self, server_dir: Path, changed: Sequence[str]) -> str:
         """Record that the map data must be extracted again; the Server tab's sentence."""
         path = server_dir / REEXTRACT_FILE
         before = _read_flag(server_dir) or ()
-        staged = path.with_name(path.name + ".yulon-new")
-        body = {"version": 1, "changed": sorted({*before, *changed})}
         try:
-            staged.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-            os.replace(staged, path)
+            _write_flag(server_dir, sorted({*before, *changed}))
         except OSError as exc:
-            staged.unlink(missing_ok=True)
             return (
                 f"warning: {_listed(changed)} changed, so {self.entry.name}'s map data must be "
                 f"extracted again, and {path} could not be written to remember it ({exc}): "
@@ -1044,6 +1447,20 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         said = needs_reextract(server_dir, self.entry)
         return said or f"{self.entry.name}'s map data must be extracted again."
+
+    def _put_flag_back(self, server_dir: Path, before: tuple[str, ...] | None) -> Iterator[str]:
+        """The rollback's half of `_flag_map_data()`: the flag as it was before this press."""
+        path = server_dir / REEXTRACT_FILE
+        try:
+            if before is None:
+                path.unlink(missing_ok=True)
+            else:
+                _write_flag(server_dir, before)
+        except OSError as exc:
+            yield (
+                f"warning: {path} could not be put back as it was ({exc}); the Server tab may ask "
+                "for an extraction the old build does not need."
+            )
 
     # -- extracting the map data again (Task 6) ---------------------------------
 
@@ -1179,11 +1596,32 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
 
-_RESTORE_ADVICE = (
-    "The backup offered before the update has the world tables as they were: restore it from "
-    "the Maintenance tab to put them back."
-)
-"""What a world-table re-import that did not finish leaves the player to do (Task 6)."""
+def _backup_advice(press: str | None) -> str:
+    """Where the tables as they were may be, for the press that changed them (fix round 1).
+
+    Only "Update the server to latest…" offers a backup before it starts, and
+    only if the player took it; "Return to the tested pin…" offers none, so it
+    says nothing about one.
+    """
+    if press != server_build_presses.UPDATE_TO_LATEST:
+        return ""
+    return (
+        " If you took the backup offered before the update, it has them as they were (Restore on "
+        "the Maintenance tab)."
+    )
+
+
+def _finish_advice(names: Sequence[str], press: str | None) -> str:
+    """The remedy for world tables that did not go in: the retry press, or the same press again."""
+    again = (
+        "the update again"
+        if press is None
+        else f"\u201c{press}\u201d under \u201c{server_build_presses.SERVER_BUILD}\u201d again"
+    )
+    return (
+        f"Press \u201c{FINISH_WORLD_BUTTON}\u201d on the Server tab (or {again}) to import "
+        f"{_listed(names)} again."
+    )
 
 
 def _listed(paths: Sequence[str]) -> str:
@@ -1214,12 +1652,189 @@ def _read_flag(server_dir: Path) -> tuple[str, ...] | None:
     return tuple(changed)
 
 
-def needs_reextract(server_dir: Path, entry: CatalogEntry) -> str | None:
+def _write_flag(server_dir: Path, changed: Sequence[str]) -> None:
+    """`REEXTRACT_FILE`, whole: a temporary file renamed into place, removed on failure."""
+    path = server_dir / REEXTRACT_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    try:
+        staged.write_text(
+            json.dumps({"version": 1, "changed": list(changed)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(staged, path)
+    except OSError:
+        staged.unlink(missing_ok=True)
+        raise
+
+
+@dataclass(frozen=True)
+class _Pending:
+    """What `WORLD_REIMPORT_FILE` names; `unreadable` when it is there and says nothing usable."""
+
+    reimport: tuple[str, ...] = ()
+    parts: tuple[str, ...] = ()
+    unreadable: bool = False
+
+
+def _read_pending(server_dir: Path) -> _Pending | None:
+    """The world update left waiting; None with no record. A record nobody can read still waits."""
+    path = server_dir / WORLD_REIMPORT_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); every world table is imported again")
+        return _Pending(unreadable=True)
+    try:
+        raw = json.loads(text)
+        reimport, parts = raw["reimport"], raw["parts"]
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            f"{path} is not one Yu'lon wrote ({exc}); every world table is imported again"
+        )
+        return _Pending(unreadable=True)
+    if not all(
+        isinstance(names, list) and all(isinstance(name, str) for name in names)
+        for names in (reimport, parts)
+    ):
+        return _Pending(unreadable=True)
+    return _Pending(reimport=tuple(reimport), parts=tuple(parts))
+
+
+def _parts_on_disk(server_dir: Path, stem: str) -> bool:
+    """Is any `<stem>.<n>.sql` part of a split table in the checkout?"""
+    folder = (server_dir / stem).parent
+    name = posixpath.basename(stem)
+    try:
+        return any(
+            (match := _PART.match(child.name)) is not None and match["stem"] == name
+            for child in folder.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def pending_world_reimport(
+    server_dir: Path, entry: CatalogEntry, *, press_here: bool = True
+) -> str | None:
+    """The Server tab's sentence when a world update did not finish; None when none waits (fix 1).
+
+    A file read and nothing else, like `needs_reextract()`. Set before an update
+    route stops the world for its tables, cleared once the last went in, by that
+    press or by `TrinityCoreInstaller.finish_world_reimport()`. `press_here` False
+    is a tab with no "Finish the world update": the update press is named instead.
+    """
+    native = entry.install.native
+    if native is None or native.trinitycore is None:
+        return None
+    pending = _read_pending(server_dir)
+    if pending is None:
+        return None
+    names = [*pending.reimport, *(f"{stem}.*.sql" for stem in pending.parts)]
+    what = _listed(names) if names and not pending.unreadable else "the world tables it changed"
+    said = (
+        f"{entry.name}'s last update did not finish importing its world tables: {what} still "
+        "have to go in, and the world server may be stopped until they do."
+    )
+    if not press_here:
+        update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+        return f"{said} Press {update} again to import them."
+    return f"{said} Press \u201c{FINISH_WORLD_BUTTON}\u201d on the Server tab to import them."
+
+
+def _realm_rows(
+    lines: Sequence[str],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """The realm rows the `-` and `+` lines insert, by id: `{id: {column: value}}` each side."""
+    sides: tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]] = ({}, {})
+    for line in lines:
+        side = sides[0] if line.startswith("-") else sides[1]
+        body = line[1:]
+        head, found, rest = body.partition(" VALUES ")
+        if not found:
+            head, found, rest = body.partition(" VALUES")
+        names: tuple[str, ...] = _REALM_COLUMNS
+        named = head[len(_REALM_TABLE) :].strip()
+        if named.startswith("("):
+            names = tuple(name.strip().strip("`") for name in named.strip("()").split(","))
+        for row in _sql_tuples(rest):
+            columns = dict(zip(names, row, strict=False))
+            side[columns.get("id", "")] = columns
+    return sides
+
+
+def _sql_tuples(text: str) -> list[list[str]]:
+    """`(1,'a,b','x'),(2,...)` as lists of raw values, quotes taken off; a crude dump reader."""
+    rows: list[list[str]] = []
+    row: list[str] | None = None
+    value: list[str] = []
+    quoted = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quoted:
+            if char == "\\" and index + 1 < len(text):
+                value.append(text[index + 1])
+                index += 2
+                continue
+            if char == "'":
+                if text[index + 1 : index + 2] == "'":
+                    value.append("'")
+                    index += 2
+                    continue
+                quoted = False
+            else:
+                value.append(char)
+        elif char == "'":
+            quoted = True
+        elif char == "(" and row is None:
+            row, value = [], []
+        elif char == "," and row is not None:
+            row.append("".join(value).strip())
+            value = []
+        elif char == ")" and row is not None:
+            row.append("".join(value).strip())
+            rows.append(row)
+            row, value = None, []
+        elif row is not None:
+            value.append(char)
+        index += 1
+    return rows
+
+
+def _realm_change_beyond_the_address(lines: Sequence[str]) -> str:
+    """What the realm row's change touches beyond the address Yu'lon sets; "" when nothing.
+
+    `gamebuild` 12342 -> 12343, a new `name`: said and logged, never applied
+    (fix round 1). A row added or removed, or lines that cannot be read as rows,
+    is said as such.
+    """
+    before, after = _realm_rows(lines)
+    if not before and not after:
+        return "lines Yu'lon could not read as realm rows"
+    said: list[str] = []
+    for ident in sorted({*before, *after}):
+        old, new = before.get(ident), after.get(ident)
+        if old is None or new is None:
+            said.append(f"realm {ident or '?'} {'added' if old is None else 'removed'}")
+            continue
+        for column in sorted({*old, *new} - _YULONS_REALM_COLUMNS):
+            if old.get(column) != new.get(column):
+                said.append(f"{column} {old.get(column, '?')} -> {new.get(column, '?')}")
+    return ", ".join(said)
+
+
+def needs_reextract(
+    server_dir: Path, entry: CatalogEntry, *, press_here: bool = True
+) -> str | None:
     """The Server tab's sentence when the map data must be extracted again; None when not (Task 6).
 
     A file read and nothing else -- no Docker, no git -- so the tab can ask it on
     every reload. Set by an update or a return that changed the server's DBC files
     or a required client pack; cleared by `TrinityCoreInstaller.reextract()`.
+    `press_here` False is a tab with no such press (a server inside a WSL distro,
+    fix round 1): the sentence says where the press is instead.
     """
     native = entry.install.native
     if native is None or native.trinitycore is None:
@@ -1228,10 +1843,16 @@ def needs_reextract(server_dir: Path, entry: CatalogEntry) -> str | None:
     if changed is None:
         return None
     what = _listed(changed) if changed else "the files its map data is made from"
+    said = f"{entry.name}'s map data must be extracted again: the server's update changed {what}."
+    if not press_here:
+        return (
+            f"{said} This Yu'lon cannot extract it for a server inside a WSL distro: open "
+            "Yu'lon inside that distro, stop the server and press "
+            f"\u201c{REEXTRACT_BUTTON}\u201d on its Server tab there."
+        )
     return (
-        f"{entry.name}'s map data must be extracted again: the server's update changed {what}. "
-        f"Stop the server, then press \u201c{REEXTRACT_BUTTON}\u201d on the Server tab; it "
-        "uses your game client, and the pathfinding data is made again after it."
+        f"{said} Stop the server, then press \u201c{REEXTRACT_BUTTON}\u201d on the Server tab; "
+        "it uses your game client, and the pathfinding data is made again after it."
     )
 
 

@@ -884,11 +884,58 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "azerothcore": not_applicable(_NO_SQL_PLAN),
             "cmangos": not_applicable(_DB_REPOS_STAY),
             "trinitycore": supported(
-                "TrinityCoreInstaller imports the changed world tables again and flags the map "
-                "data"
+                "TrinityCoreInstaller says what the update left as it was and that the map data "
+                "must be extracted again"
             ),
         },
         scanned=False,
+    ),
+    Site(
+        "yulon.catalog.native",
+        "StagedInstaller.servers_down_work",
+        "what the update route's rebuild does with its servers down, before the new build starts",
+        {
+            "azerothcore": not_applicable(_NO_SQL_PLAN),
+            "cmangos": not_applicable(_DB_REPOS_STAY),
+            "trinitycore": supported(
+                "TrinityCoreInstaller imports the changed world tables (and the old ones again "
+                "on a rollback)"
+            ),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.catalog.families.trinitycore",
+        "pending_world_reimport",
+        "the Server tab's sentence when a world update did not finish (Task 6, fix round 1)",
+        {
+            "azerothcore": not_applicable(_NO_SQL_PLAN),
+            "cmangos": not_applicable(_DB_REPOS_STAY),
+            "trinitycore": supported("an update whose world tables did not all go in"),
+        },
+        hits=(".trinitycore",),
+    ),
+    Site(
+        "yulon.install_wiring",
+        "world_reimport_for_app",
+        "the Finish the world update press (Task 6, fix round 1)",
+        {
+            "azerothcore": not_applicable(_NO_SQL_PLAN),
+            "cmangos": not_applicable(_DB_REPOS_STAY),
+            "trinitycore": supported("`TrinityCoreInstaller.finish_world_reimport`"),
+        },
+        hits=(".trinitycore",),
+    ),
+    Site(
+        "yulon.install_wiring",
+        "world_reimport_for_app.press",
+        "the Finish the world update press runs on the TrinityCore engine only",
+        {
+            "azerothcore": not_applicable(_NO_SQL_PLAN),
+            "cmangos": not_applicable(_DB_REPOS_STAY),
+            "trinitycore": supported(),
+        },
+        hits=("isinstance TrinityCoreInstaller",),
     ),
     Site(
         "yulon.purge",
