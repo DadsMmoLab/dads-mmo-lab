@@ -2764,6 +2764,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "player's own client is never listed or written, and the copy is removed through "
         "`play_client.remove_folder()` either way"
     ),
+    ("catalog/families/trinitycore.py", "_put_left_out_back"): (
+        "T179 Task 3 (fix round 3). Walks `.yulon-left-out/` of the TEMPORARY extraction "
+        "client beside the player's client to rename each archive moved aside there back to "
+        "its own path under the copy's `Data/` (and remove the emptied folders), before any "
+        "removal of the copy, so `play_client.remove_folder()` maps every name to the "
+        "player's file at the same path. Only ever inside a copy whose marker and place were "
+        "checked; the player's own client is never listed or written"
+    ),
     ("catalog/families/extract.py", "overlay_files"): (
         "T179 Task 3. Lists the server's own checkout folder `dbc_overlay_from` "
         "(Centurion's `centurion/dbc`) to copy each file over the same name under "

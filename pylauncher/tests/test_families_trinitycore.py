@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import zipfile
@@ -1345,3 +1346,137 @@ def test_a_copy_that_cannot_be_removed_after_a_success_says_uninstall_removes_it
     assert warning.startswith(f"warning: the temporary copy of your client {copy_dir(machine)}")
     assert warning.endswith("Uninstalling this server removes it.")
     assert "next press" not in warning
+
+
+# -- fix round 3: a moved-aside archive goes home before the copy is removed -----------------
+
+
+def windows_like_unlink(path: Any) -> None:
+    """Windows' rule on any platform: a read-only file (a flag every hard link shares) refuses
+    a delete. Linux deletes it by its folder's permission, which would hide the defect."""
+    if not os.lstat(path).st_mode & stat.S_IWRITE:
+        raise PermissionError(errno.EACCES, "Access is denied", str(path))
+    os.unlink(path)
+
+
+@pytest.fixture
+def windows_like_removal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`play_client.remove_folder` deleting the way Windows does, everything else as is."""
+    real = play_client.remove_folder
+
+    def remove_folder(folder: Path, **kwargs: Any) -> None:
+        real(folder, unlink=windows_like_unlink, **kwargs)
+
+    monkeypatch.setattr(play_client, "remove_folder", remove_folder)
+
+
+def read_only_patch(machine: Machine) -> Path:
+    """The player's self-installed, read-only `Data/patch-4.MPQ`, which the copy leaves out."""
+    archive = machine.client / "Data" / "patch-4.MPQ"
+    os.chmod(archive, 0o444)
+    return archive
+
+
+def mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@pytest.mark.usefixtures("windows_like_removal")
+def test_a_left_out_read_only_archive_keeps_its_flag_after_a_successful_extraction(
+    machine: Machine,
+) -> None:
+    archive = read_only_patch(machine)
+    before = snapshot(machine.client)
+    lay_for_client_data(machine)
+    said = run_stage(machine, "client-data")
+    assert "Removed the temporary copy of your client." in said
+    assert not os.path.lexists(copy_dir(machine))
+    assert mode(archive) == 0o444, "the player's own file left writable"
+    assert snapshot(machine.client) == before
+
+
+@pytest.mark.usefixtures("windows_like_removal")
+def test_a_left_out_read_only_archive_keeps_its_flag_after_a_failed_extraction(
+    machine: Machine,
+) -> None:
+    archive = read_only_patch(machine)
+    before = snapshot(machine.client)
+    machine.tools.fail_tool = "vmap4extractor"
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError, match="vmap extract failed"):
+        run_stage(machine, "client-data")
+    assert not os.path.lexists(copy_dir(machine))
+    assert mode(archive) == 0o444
+    assert snapshot(machine.client) == before
+
+
+def crashed_after_moving_aside(machine: Machine) -> Path:
+    """The copy a press that died after `_drop_unlisted_archives()` leaves, and its record."""
+    target = leftover_copy(machine)
+    aside = target / trinitycore.LEFT_OUT_DIR / "Data" / "patch-4.MPQ"
+    aside.parent.mkdir(parents=True)
+    os.rename(target / "Data" / "patch-4.MPQ", aside)
+    return target
+
+
+@pytest.mark.usefixtures("windows_like_removal")
+def test_uninstall_of_a_leftover_copy_keeps_the_flag_on_a_left_out_archive(
+    machine: Machine,
+) -> None:
+    archive = read_only_patch(machine)
+    target = crashed_after_moving_aside(machine)
+    before = snapshot(machine.client)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    assert report.warnings == ()
+    assert not os.path.lexists(target)
+    assert mode(archive) == 0o444
+    assert snapshot(machine.client) == before
+
+
+@pytest.mark.usefixtures("windows_like_removal")
+def test_an_archive_that_cannot_go_home_keeps_the_copy_and_says_so(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lead's ruling: no removal at all then -- leave it, keep the record, warn."""
+    archive = read_only_patch(machine)
+    target = crashed_after_moving_aside(machine)
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if trinitycore.LEFT_OUT_DIR in Path(src).parts:
+            raise PermissionError(errno.EACCES, "The process cannot access the file", str(src))
+        real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", rename)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
+    assert (target / trinitycore.LEFT_OUT_DIR / "Data" / "patch-4.MPQ").is_file(), "left"
+    assert (target / "Data" / "common.MPQ").is_file(), "nothing of the copy removed"
+    assert mode(archive) == 0o444
+    assert warning.startswith("The temporary copy of your game client this server made for its")
+    assert "could not be put back before removing it" in warning
+    assert warning.endswith("; delete that folder yourself.")
+
+
+def test_a_move_aside_refused_by_a_program_holding_the_file_says_to_close_it(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if Path(src).name == "patch-4.MPQ" and trinitycore.LEFT_OUT_DIR in Path(dst).parts:
+            raise PermissionError(errno.EACCES, "The process cannot access the file", str(src))
+        real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", rename)
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data")
+    message = str(caught.value)
+    assert message.endswith(
+        "Close World of Warcraft (and any program using the client's files), then press "
+        "Install again."
+    )
+    assert "NTFS" not in message and "Program Files" not in message
+    assert not os.path.lexists(copy_dir(machine)), "what was moved went home, then the copy"

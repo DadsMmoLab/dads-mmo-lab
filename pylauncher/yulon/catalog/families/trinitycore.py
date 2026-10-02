@@ -398,9 +398,11 @@ class TrinityCoreInstaller(CmangosInstaller):
         A RENAME into `LEFT_OUT_DIR` inside the copy, never a delete (fix round 2,
         the lead's ruling): the copy's archive is a hard link of the player's, and a
         read-only file a Windows delete refuses would need its flag cleared -- a flag
-        the inode shares with the player's own file. A rename needs no flag, the
-        extractors read `Data/` only, and the copy's final removal is
-        `play_client.remove_folder()`'s, which puts a flag back where it must clear one.
+        the inode shares with the player's own file. A rename needs no flag, and the
+        extractors read `Data/` only. Before the copy is removed, `_put_left_out_back()`
+        renames each one back to its own path (fix round 3): `play_client.remove_folder()`
+        puts a cleared flag back on the player's file at the SAME relative path, and
+        under `LEFT_OUT_DIR` there is no such file, so the flag would stay cleared.
         """
         kept = self._tc().extract.client_archives
         data = temp / "Data"
@@ -422,7 +424,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 raise InstallerError(
                     f"{path} could not be moved out of the temporary copy of your client's Data "
                     f"folder ({exc}), so the map data was not extracted: that archive would be "
-                    "read into it. Your own client was not changed."
+                    f"read into it. Your own client was not changed.{_held_open(exc)}"
                 ) from exc
             left_out.append(rel.as_posix())
         return sorted(left_out)
@@ -630,10 +632,12 @@ def remove_leftover_extraction_client(
     (`_is_ours()`: its marker names this game and this server folder AND it sits at
     the place `extraction_client_dir()` gives its own source client, so a record
     pointed at this server's ready-to-play client, whose marker is the same, cannot
-    reach it), and each through `play_client.remove_folder()`, which never enters a
-    link and puts back a read-only flag a Windows delete had to clear on a file the
-    player's client shares. Never `rmtree`. The record goes last, once nothing it
-    names is left.
+    reach it), each with its moved-aside archives put back home first
+    (`_put_left_out_back()`; a copy whose archives cannot go home is left, and the
+    record with it), and each through `play_client.remove_folder()`, which never
+    enters a link and puts back a read-only flag a Windows delete had to clear on a
+    file the player's client shares. Never `rmtree`. The record goes last, once
+    nothing it names is left.
 
     Returns what was left and why rather than raising: the stage refuses on `ours`
     and `foreign`, Uninstall reports each in its own words and goes on.
@@ -656,6 +660,11 @@ def remove_leftover_extraction_client(
             marker = play_client.read_marker(folder)
             if marker is None or not _is_ours(target, marker, game, server_dir):
                 return LeftoverProblem("foreign", folder)
+            put_back = _put_left_out_back(folder)
+            if put_back:
+                # Not removed: `remove_folder()` would clear the read-only flag on a
+                # name it cannot map to the player's file and leave it cleared there.
+                return LeftoverProblem("ours", folder, put_back)
             try:
                 play_client.remove_folder(folder, original=marker.source_client_dir)
             except OSError as exc:
@@ -665,6 +674,65 @@ def remove_leftover_extraction_client(
     except OSError as exc:
         logger.warning(f"could not remove {server_dir / EXTRACT_CLIENT_RECORD}: {exc}")
     return noted
+
+
+def _put_left_out_back(copy: Path) -> str:
+    """Rename every archive `_drop_unlisted_archives()` moved aside back to its own path.
+
+    Before ANY removal of the copy (fix round 3, the lead's ruling).
+    `play_client.remove_folder()` maps each name it removes to the player's file at
+    the same relative path, and on Windows -- where a read-only file must have its
+    flag cleared before it can be deleted, a flag every hard link shares -- it puts
+    the flag back on that file. `.yulon-left-out/Data/patch-4.MPQ` maps to nothing in
+    the player's client, so the flag would stay cleared on the player's own
+    `Data/patch-4.MPQ`. Back at `Data/patch-4.MPQ` it maps to it, as every other
+    archive does. A rename changes no flag.
+
+    A name already at the path is a required pack's file, laid in after the archive
+    was moved aside (a pack installs over the name the player's own patch had left
+    empty); it is the copy's own, never the player's, and it goes first.
+
+    Returns `""` when nothing is left aside, else what stopped it -- and then the
+    copy must NOT be removed.
+    """
+    aside_root = copy / LEFT_OUT_DIR
+    if not os.path.lexists(aside_root):
+        return ""
+    try:
+        for folder, _dirs, files in os.walk(aside_root):
+            for name in files:
+                aside = Path(folder) / name
+                home = copy / aside.relative_to(aside_root)
+                if os.path.lexists(home):
+                    os.unlink(home)
+                home.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(aside, home)
+        for folder, _dirs, _files in sorted(os.walk(aside_root), key=lambda x: -len(x[0])):
+            os.rmdir(folder)
+    except OSError as exc:
+        return (
+            f"an archive it had moved aside could not be put back before removing it ({exc}); "
+            f"it was left so your own client's read-only flags stay as they are.{_held_open(exc)}"
+        )
+    return ""
+
+
+_SHARING_VIOLATION = 32
+"""Windows' ERROR_SHARING_VIOLATION: another program has the file open."""
+
+
+def _held_open(exc: OSError) -> str:
+    """The remedy for a file another program holds open, when that is what `exc` is."""
+    if getattr(exc, "winerror", None) == _SHARING_VIOLATION or exc.errno in (
+        errno.EACCES,
+        errno.EPERM,
+        errno.EBUSY,
+    ):
+        return (
+            " Close World of Warcraft (and any program using the client's files), then press "
+            "Install again."
+        )
+    return ""
 
 
 def _is_ours(target: Path, marker: play_client.Marker, game: str, server_dir: Path) -> bool:
