@@ -375,7 +375,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "folder was given. Pick the client folder and try again."
             )
         packs = self._required_packs()
-        salt = _packs_salt(packs)
+        salt = _packs_salt(packs, ctx.server_dir)
         data_dir = self._data_dir(ctx)
         if self._extraction_vouched_for(data_dir, original, salt):
             yield (
@@ -1920,14 +1920,22 @@ def needs_reextract(
     )
 
 
-def _packs_salt(packs: Sequence[ClientPack]) -> str:
+def _packs_salt(packs: Sequence[ClientPack], server_dir: Path) -> str:
     """What the extraction was made from beyond the client: each required pack and its checksum.
 
-    A checkout pack always carries one (`ClientPack`'s rule), so a pack the
-    server's makers changed is a different salt, and the map data is extracted
-    again on the next press.
+    The checksum the pack must have in `server_dir`'s checkout as it is now
+    (`client_packs.checkout_checksum`): pinned in the catalog, or read from the
+    checkout's `md5_file`. So a pack the server's makers changed, with its line
+    in that file, is a different salt, and the map data is extracted again on
+    the next press instead of being vouched for from the old pack.
     """
-    return json.dumps([[pack.id, pack.sha256 or pack.md5] for pack in packs], separators=(",", ":"))
+    salted: list[list[str]] = []
+    for pack in packs:
+        try:
+            salted.append([pack.id, client_packs.checkout_checksum(pack, server_dir)])
+        except client_packs.PackError as exc:
+            raise InstallerError(f"{exc} The map data was not extracted.") from exc
+    return json.dumps(salted, separators=(",", ":"))
 
 
 def extraction_client_dir(original: Path, server_dir: Path) -> Path:

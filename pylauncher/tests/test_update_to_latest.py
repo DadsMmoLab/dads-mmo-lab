@@ -157,8 +157,8 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
     # "nine sources, seven shallow" when the catalog held ten and nine. A number
     # in prose that nothing recomputes is a number that was true once.
     every = [source for entry in load_catalog().games for source in entry.emulator.sources]
-    assert len(every) == 10, [s.repo for s in every]
-    assert sum(1 for s in every if s.depth is not None) == 9
+    assert len(every) == 11, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 10
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
@@ -168,6 +168,7 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         "wow-tbc": ("cmangos/mangos-tbc", "cmangos/playerbots"),
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
+        "wow-centurion": ("thomasjteachey/TrinityCore112",),
     }, moving
 
 
@@ -236,6 +237,7 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
         "wow-tbc": True,
         "wow-vanilla": True,
         "wow-tortoise": True,
+        "wow-centurion": True,
     }
     assert update_to_latest_for_app(ENTRY, Path("/srv/x")) is not None
     unflagged = ENTRY.install.native.model_copy(update={"update_to_latest": False})
@@ -1443,7 +1445,7 @@ def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:
 def test_a_shallow_clone_answers_could_not_count_rather_than_one_commit(
     origin: Path, tmp_path: Path
 ) -> None:
-    """Nine of the ten shipped sources are `depth: 1`, and the count lies on every one.
+    """Ten of the eleven shipped sources are `depth: 1`, and the count lies on every one.
 
     `Source.depth` defaults to 1 and only AzerothCore's core overrides it, and
     `_pin()` fetches at that depth (as `ContainerGit.clone()`'s update fetch

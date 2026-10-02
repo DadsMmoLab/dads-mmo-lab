@@ -1418,7 +1418,7 @@ class RunnerGit:
         remote. It is affordable on a tab reload for that reason.
 
         **A SHALLOW clone is refused outright, and that is what makes the number
-        trustworthy at all.** Nine of the ten sources this app ships are
+        trustworthy at all.** Ten of the eleven sources this app ships are
         `depth: 1` (`Source.depth` defaults to 1, and only AzerothCore's core
         overrides it), and a checkout whose HEAD is a graft -- `_pin()`'s
         depth-1 fetch makes one, and `ContainerGit.clone()` made one on every

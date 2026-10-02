@@ -346,7 +346,10 @@ def test_the_exe_patch_is_the_stock_3_3_5a_exe_from_the_owners_clean_client() ->
     assert patch.build == 12342
     assert patch.pe_large_address_aware is True
     assert list(patch.options) == ["borderless"]
-    assert patch.options["borderless"].default is True  # the launcher's (schemas.ts:56)
+    # Off by default, unlike the launcher's (schemas.ts:56): the lead's ruling, because the
+    # borderless path blanks other monitors and grabs the mouse under Wine or Proton, and
+    # Linux is a shipped platform. The option stays for a player who wants it.
+    assert patch.options["borderless"].default is False
 
 
 def test_the_exe_patch_writes_exactly_what_centurions_launcher_writes_both_ways() -> None:
@@ -357,7 +360,7 @@ def test_the_exe_patch_writes_exactly_what_centurions_launcher_writes_both_ways(
         ours = client_exe.patched(stock, patch, {"borderless": borderless})
         theirs = _centurion_launcher(stock, borderless=borderless)
         assert hashlib.sha256(ours).hexdigest() == hashlib.sha256(theirs).hexdigest(), borderless
-    assert client_exe.patched(stock, patch, {}) == _centurion_launcher(stock, borderless=True)
+    assert client_exe.patched(stock, patch, {}) == _centurion_launcher(stock, borderless=False)
 
 
 def test_the_hosts_a_download_may_reach_are_centurions_site_and_the_clean_client() -> None:

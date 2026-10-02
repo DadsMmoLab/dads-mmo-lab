@@ -50,7 +50,16 @@ from tests.support_trinitycore import (
     centurion_like,
 )
 from tests.test_purge import Recorder as PurgeRecorder
-from yulon import client_packs, docker, platform, play_client, purge, resources, rmtree
+from yulon import (
+    client_packs,
+    docker,
+    platform,
+    play_client,
+    purge,
+    resources,
+    rmtree,
+    server_build_presses,
+)
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import FAMILIES, extract, family_for, trinitycore
@@ -753,15 +762,6 @@ def test_a_pack_that_does_not_match_the_checkouts_md5_file_stops_the_extraction(
     assert not os.path.lexists(copy_dir(machine))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T179 Task 7 -> lead at the join: trinitycore._packs_salt() reads pack.sha256 or "
-        "pack.md5, which an md5_file pack has neither of, so its salt does not change with the "
-        "pack; it should read client_packs.checkout_checksum(pack, ctx.server_dir). "
-        "trinitycore.py is the other implementer's file in this round."
-    ),
-)
 def test_a_pack_updated_with_its_md5_line_is_noticed_by_the_evidence_without_a_press(
     machine: Machine,
 ) -> None:
@@ -777,6 +777,44 @@ def test_a_pack_updated_with_its_md5_line_is_noticed_by_the_evidence_without_a_p
     said = run_stage(machine, "client-data", entry=entry)
 
     assert "the extracted data is for another client or plan; extracting everything again" in said
+    seen = machine.tools.seen["mapextractor"]
+    assert seen["Data/enUS/patch-enUS-A.MPQ"] == b"MPQ\x1a centurion locale, 1.00155"
+
+
+def test_the_salt_follows_a_packs_line_in_the_checkouts_md5_file(machine: Machine) -> None:
+    """The salt is the checksum the pack must have NOW: for an `md5_file` pack, its line in
+    the checkout's file, so the evidence cannot vouch for maps made from the old pack."""
+    entry = centurion_like(packs=[*MD5_PACKS, *OPTIONAL_PACKS], rev=REV)
+    packs = [pack for pack in entry.client.packs if not pack.optional]
+    lay_for_client_data(machine)
+    _lay_md5_file(machine)
+    before = trinitycore._packs_salt(packs, machine.server_dir)
+
+    _update_locale_pack(machine)
+    after = trinitycore._packs_salt(packs, machine.server_dir)
+
+    assert after != before
+    newer = (machine.server_dir / PATCHES / "patch-enUS-A.zip").read_bytes()
+    assert hashlib.md5(newer, usedforsecurity=False).hexdigest() in after
+
+
+def test_a_resume_whose_md5_file_is_gone_names_the_pack_and_the_next_step(
+    machine: Machine,
+) -> None:
+    entry = centurion_like(packs=[*MD5_PACKS, *OPTIONAL_PACKS], rev=REV)
+    lay_for_client_data(machine)
+    _lay_md5_file(machine)
+    run_stage(machine, "client-data", entry=entry)
+    (machine.server_dir / MD5_FILE).unlink()
+    first = next(pack for pack in entry.client.packs if not pack.optional)
+
+    with pytest.raises(InstallerError) as raised:
+        run_stage(machine, "client-data", entry=entry)
+
+    said = str(raised.value)
+    assert first.label in said
+    assert server_build_presses.UPDATE_TO_LATEST in said
+    assert "The map data was not extracted." in said
 
 
 def test_a_leftover_copy_from_an_interrupted_press_is_removed_first(machine: Machine) -> None:

@@ -2129,8 +2129,8 @@
           ],
           "options": {
             "borderless": {
-              "label": "Borderless full screen (turn it off if other screens go dark under Wine or Proton)",
-              "default": true,
+              "label": "Borderless full screen (other screens may go dark under Wine or Proton)",
+              "default": false,
               "on": [
                 {
                   "offset": 3732,
