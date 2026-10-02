@@ -2744,6 +2744,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the player's own client is never chmodded and is left). Only in a folder whose step "
         "(a) marker was checked, never into a link, and never the player's own client"
     ),
+    ("launcher_reads.py", "_scandir"): (
+        "T187. Lists a ready-to-play client, its `Interface` and its `AddOns` -- one folder "
+        "each, never a walk -- for the NAMES the launcher window shows under Addons in this "
+        "client. It decides no write anywhere: the answer is a read-only list on screen. No "
+        "addon folder is entered, linked or not; an `Interface` or `AddOns` that is a link is "
+        "listed through once, because that is where the game reads its addons. A folder that "
+        "cannot be listed answers no names"
+    ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
         "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "
