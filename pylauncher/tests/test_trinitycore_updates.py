@@ -50,7 +50,7 @@ from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import extract, mmaps, trinitycore
 from yulon.catalog.families.trinitycore import needs_reextract
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, WorldStoppedAfterReadyError
 from yulon.install_wiring import (
     reextract_for_app,
     update_to_latest_for_app,
@@ -79,6 +79,8 @@ class World:
     refuse_stop: str = ""
     stays_up: bool = False
     """A world that is up again by the time it is read after its stop."""
+    abandon: bool = False
+    """The servers' stop is given up during the load wait, before anything was sent."""
 
     def ask(self, container: str) -> bool | None:
         return self.running
@@ -101,6 +103,8 @@ class World:
         control: docker.StopControl | None = None,
         before_signal: Callable[[], None] | None = None,
     ) -> None:
+        if self.abandon:
+            raise docker.StopAbandoned("the world was still loading")
         if before_signal is not None:
             before_signal()
         if self.refuse_stop:
@@ -133,6 +137,9 @@ class Box:
     """What each ready wait answers, in order, then the last for ever."""
     old_files: dict[str, str] = field(default_factory=dict)
     """World files (by name) as the OLD commit has them: written when a source is put back."""
+    world_output: native.WorldOutput | None = None
+    """What the world printed, when a test needs it to have stopped after its banner."""
+    distro: str | None = None
 
     @property
     def server_dir(self) -> Path:
@@ -176,6 +183,8 @@ class Box:
             wait_ready=wait_ready,
             restore_rev=restore_rev,
             exec_stdin=exec_stdin,
+            distro=self.distro,
+            **({"world_output": lambda spec: self.world_output} if self.world_output else {}),
         )
 
     def moves_to(self, files: Mapping[str, str]) -> None:
@@ -449,6 +458,20 @@ def test_a_split_table_that_lost_a_part_is_left_whole_and_said(box: Box) -> None
     )
 
 
+def test_a_split_table_rewritten_as_one_file_is_only_imported_again(box: Box) -> None:
+    whole = box.checkout / REPO_SQL / "world" / "broadcast_text_locale.sql"
+    whole.write_text("DROP TABLE IF EXISTS broadcast_text_locale; -- whole\n", encoding="utf-8")
+    (box.checkout / REPO_SQL / "world" / "broadcast_text_locale.1.sql").unlink()
+    box.changes(
+        ("A", f"{REPO_SQL}/world/broadcast_text_locale.sql"),
+        ("D", f"{REPO_SQL}/world/broadcast_text_locale.1.sql"),
+        ("D", f"{REPO_SQL}/world/broadcast_text_locale.2.sql"),
+    )
+    said = box.press()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS broadcast_text_locale; -- whole"]
+    assert not [line for line in said if "broadcast_text_locale" in line and "left" in line]
+
+
 def test_a_removed_world_file_leaves_its_table_and_says_so(box: Box) -> None:
     box.changes(("D", f"{REPO_SQL}/world/old_event.sql"))
     said = box.press()
@@ -530,17 +553,49 @@ def test_a_return_that_fails_says_nothing_of_a_backup_it_never_offered(box: Box)
     assert "backup" not in said
 
 
-def test_servers_that_cannot_be_stopped_import_nothing(box: Box) -> None:
+def test_servers_that_cannot_be_stopped_import_nothing_and_leave_the_record_as_it_was(
+    box: Box,
+) -> None:
+    """Fix round 2: nothing went in, so nothing more is waiting than before the press."""
+    box.leave_pending([f"{WORLD_SQL}/version.sql"])
+    before = box.pending()
     box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
     box.world.refuse_stop = "daemon not answering"
     with pytest.raises(InstallerError, match="could not be stopped"):
         box.press()
     assert box.streamed() == []
-    assert box.pending() == {
-        "version": 1,
-        "reimport": [f"{WORLD_SQL}/creature.sql"],
-        "parts": [],
-    }
+    assert box.pending() == before
+
+
+def test_a_stop_given_up_during_the_load_wait_leaves_no_record(box: Box) -> None:
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.world.abandon = True
+    with pytest.raises(InstallerError, match="Nothing was touched"):
+        box.press()
+    assert box.streamed() == []
+    assert box.pending() is None
+    assert box.head() == OLD
+
+
+def test_a_new_build_whose_world_stops_after_its_banner_keeps_its_sources_and_its_tables(
+    box: Box,
+) -> None:
+    """Fix round 2: the kept build (T71) runs on the new tables, from the new sources."""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    box.world_output = native.WorldOutput(
+        text="TrinityCore rev. faac5fc9\nWorld initialized in 42 seconds\nABORTED\n",
+        restarts=0,
+        status="exited",
+    )
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        box.press()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature; -- new"]
+    assert box.pending() is None
+    assert box.head() == NEW
+    assert not [call for call in box.m.rec.calls if call.startswith("restore:")]
+    assert needs_reextract(box.server_dir, ENTRY) is not None
+    assert str(raised.value).endswith(native.SOURCES_KEPT_NOTE)
 
 
 def test_a_record_that_cannot_be_written_stops_the_press_before_the_world_stops(
@@ -637,8 +692,11 @@ def test_finish_imports_only_the_pending_files_and_does_not_build(box: Box) -> N
 
 def test_finish_refuses_a_checkout_on_another_commit_than_the_build(box: Box) -> None:
     box.leave_pending([f"{WORLD_SQL}/creature.sql"])
-    with pytest.raises(InstallerError, match="not on the commit the running build"):
+    with pytest.raises(InstallerError, match="not on the commit the running build") as refused:
         box.finish()
+    said = str(refused.value)
+    assert "after an interrupted update" in said
+    assert "“Update the server to latest…”" in said
     assert box.streamed() == [] and box.world.running is True
 
 
@@ -706,25 +764,46 @@ def test_a_plain_rebuild_replaces_the_containers_in_one_call(box: Box) -> None:
             "gamebuild 12342 -> 12343",
         ),
         ("(1,'Centurion','127.0.0.1')", "(1,'Centurion PvP','127.0.0.1')", "name Centurion ->"),
+        (
+            "(`id`,`address`,`gamebuild`) VALUES (1,'127.0.0.1',12342)",
+            "(`id`,`address`,`gamebuild`) VALUES (1,'10.0.0.5',12343)",
+            "gamebuild 12342 -> 12343",
+        ),
+        (
+            "(id, address, gamebuild) VALUES (1,'127.0.0.1',12342)",
+            "(id, address, gamebuild) VALUES (1,'10.0.0.5',12342)",
+            "",
+        ),
     ],
-    ids=["address", "gamebuild", "name"],
+    ids=["address", "gamebuild", "name", "backticked-columns", "bare-columns"],
 )
-def test_a_realm_row_change_beyond_the_address_is_left_out_and_said(
+def test_a_realm_row_change_is_left_out_and_what_went_beyond_the_address_is_logged(
     box: Box, before: str, after: str, note: str
 ) -> None:
     path = f"{REPO_SQL}/auth/auth_data.sql"
     box.changes(("M", path))
+    values = "" if "VALUES" in before else "VALUES "
     box.m.rec.diff_lines[(box.checkout, OLD, NEW, path)] = (
-        f"-INSERT INTO `realmlist` VALUES {before};",
-        f"+INSERT INTO `realmlist` VALUES {after};",
+        f"-INSERT INTO `realmlist` {values}{before};",
+        f"+INSERT INTO `realmlist` {values}{after};",
     )
     said = box.press()
     assert box.streamed() == []
-    beyond = [line for line in said if "beyond the address" in line]
+    about = [line for line in said if "auth_data.sql" in line]
+    assert len(about) == 1, about
     if note:
-        assert len(beyond) == 1 and note in beyond[0], said
+        assert "changes beyond the address Yu'lon sets were logged" in about[0]
+        assert note in about[0]
     else:
-        assert beyond == []
+        assert "only the realm row's address" in about[0]
+
+
+def test_an_update_inside_a_wsl_distro_says_where_the_map_data_press_is(box: Box) -> None:
+    box.distro = "Ubuntu"
+    box.changes(("M", "centurion/dbc/Spell.dbc"))
+    said = box.press()
+    assert any("inside a WSL distro" in line for line in said)
+    assert not any("Stop the server, then press" in line for line in said)
 
 
 # -- map data: flagged, and extracted again on a press ---------------------------------------

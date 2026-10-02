@@ -1808,6 +1808,16 @@ this fixes anything -- the return restores the server and not the database, and
 `return_to_pin_confirmation()` is where that is spelled out.
 """
 
+SOURCES_KEPT_NOTE = (
+    "The source folders were left on the new commits, since the build that was kept was made "
+    "from them."
+)
+"""Appended when the rebuild KEPT the new build (`WorldStoppedAfterReadyError`, T71; T179).
+
+Then the sources stay with it: putting the old commits back would leave the folder and
+the running binary disagreeing, under a sentence saying they agree.
+"""
+
 SOURCES_PUT_BACK_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk and what "
     "your server is running agree again."
@@ -2505,6 +2515,12 @@ class ServersDownWork:
 
     A raise is said in the rollback's sentence; the rollback goes on to start the
     old build regardless.
+    """
+    settle: Callable[[], None] = lambda: None
+    """After a failed press (fix round 2): undo what `prepare()` wrote if `forward()` never began.
+
+    A stop given up during the load wait, or one that failed, imports nothing; a
+    record saying something is waiting would then be false. Must not raise.
     """
 
 
@@ -3785,6 +3801,13 @@ class Seams:
     so a press that could not tell leaves the database exactly as it found it.
     """
 
+    distro: str | None = None
+    """The WSL distro these seams address (`in_wsl()`), or None for this host (T179).
+
+    Not a seam: a name, so a sentence can say where a press is that this app can
+    only offer inside that distro (the TrinityCore map-data extraction).
+    """
+
     install_id: Callable[[Path], str] | None = None
     """The id this install's images and compose project are named after; None = hash the folder.
 
@@ -3939,6 +3962,7 @@ class Seams:
             stop_db=on(docker.stop_containers, wsl_distro=distro),
             stop_world=on(docker.stop_containers, wsl_distro=distro),
             install_id=recorded_install_id,
+            distro=distro,
         )
 
 
@@ -5932,6 +5956,9 @@ class StagedInstaller:
         Every failure from step 3 through step 5 puts every moved source back on
         the commit it came from, so what is on disk and what the running image was
         compiled from agree (a step-6 failure leaves them: they already agree).
+        The one step-5 exception is a build the rebuild KEPT
+        (`WorldStoppedAfterReadyError`, T71): its sources stay with it and are
+        recorded, for the same invariant (`SOURCES_KEPT_NOTE`, T179).
         That is the one invariant a user cannot check for themselves and the one
         that quietly breaks everything afterwards: a Modules tab reading a source
         tree that is a hundred commits ahead of the binary answering on the port
@@ -6052,10 +6079,26 @@ class StagedInstaller:
                 work = replace(work, back=back)
             try:
                 yield from self.rebuild(opts, cancel=cancel, servers_down=work)
+            except WorldStoppedAfterReadyError as exc:
+                # T71: the rebuild KEPT the new build -- it came up, then stopped
+                # on its data -- so the sources it was made from stay with it, and
+                # are recorded as what the running build is (T179 fix round 2).
+                # Putting the old commits back here would be this route's own
+                # invariant broken by its own recovery.
+                self._record_source_revs(
+                    server_dir,
+                    state,
+                    moved,
+                    {repo: said.tag for repo, said in targets.items() if said.tag},
+                )
+                yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
+                raise WorldStoppedAfterReadyError(f"{exc} {SOURCES_KEPT_NOTE}") from exc
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
                 # It puts the IMAGE back; this puts the SOURCE back; and it is the
                 # pair that makes the folder and the running container agree again.
+                if work is not None:
+                    work.settle()
                 if not sources_back:
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc

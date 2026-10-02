@@ -41,7 +41,7 @@ from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, WorldStoppedAfterReadyError
 from yulon.docker import AttachedRun
 
 PINNED = ENTRY.emulator.sources[0].rev or ""
@@ -1863,6 +1863,39 @@ def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert not [call for call in rec.calls if call.startswith("changed-")]
     assert "recreate" in rec.calls and "stop_servers" not in rec.calls
+
+
+ABORTED_AFTER_READY = native.WorldOutput(
+    text="ready...\nAvg Diff: 15ms\nWorld server is up and running\n>> ABORTED",
+    restarts=0,
+    status="exited",
+)
+"""A world that said ready, then stopped (T71): the rebuild keeps the new build."""
+
+
+def test_a_kept_build_keeps_the_sources_it_was_made_from_and_records_them(
+    tmp_path: Path,
+) -> None:
+    """T179 Task 6 fix round 2: the build is kept (T71), so its sources are too.
+
+    Putting the old commits back under a kept new build would leave the folder and
+    the running binary disagreeing -- the invariant this route exists for -- and
+    the sentence would say they agree again.
+    """
+    rec, server_dir = _ready(tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        list(
+            engine(rec, world_output=lambda spec: ABORTED_AFTER_READY).update_to_latest(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    said = str(raised.value)
+    assert set(_heads(rec, server_dir).values()) == {NEW}
+    assert not [call for call in rec.calls if call.startswith("restore:")], rec.calls
+    assert said.endswith(native.SOURCES_KEPT_NOTE)
+    assert native.SOURCES_PUT_BACK_NOTE not in said and "put back" not in said
+    state = native.read_state(server_dir, valid=())
+    assert state is not None and state.source_revs, "what the kept build was made from"
 
 
 def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_and_its_new_one(

@@ -147,7 +147,11 @@ FINISH_CANCEL_NOTE = (
 )
 """What a Stop costs while "Finish the world update" imports the waiting tables (fix round 1)."""
 
-_REALM_TABLE = "INSERT INTO `realmlist`"
+_REALM_INSERT = re.compile(
+    r"^\s*INSERT\s+INTO\s+`?realmlist`?\s*(?:\((?P<columns>[^)]*)\))?\s*VALUES\s*(?P<rest>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+"""One realm-row line of a dump: its column list (with or without backticks), then its rows."""
 _REALM_COLUMNS = (
     "id",
     "name",
@@ -193,8 +197,12 @@ class SnapshotChanges:
     """World files removed upstream: their tables are left as they are."""
     left_parts: tuple[str, ...] = ()
     """Parts of split tables removed upstream: the whole table is left, never imported in part."""
-    skipped: tuple[str, ...] = ()
-    """Files changed only in `skip_lines` lines (the realm row): left out."""
+    skipped: tuple[tuple[str, str], ...] = ()
+    """`(file, what went beyond the address)` changed only in `skip_lines` lines: left out.
+
+    The second is "" for a change to the address Yu'lon sets alone, else what the
+    realm row's change touched beyond it (`gamebuild 12342 -> 12343`), logged.
+    """
     map_data: tuple[str, ...] = ()
     """Changed DBC files and required client packs: the map data must be extracted again."""
     everything: bool = False
@@ -868,7 +876,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         parts: list[str] = []
         left: list[str] = []
         left_parts: list[str] = []
-        skipped: list[str] = []
+        skipped: list[tuple[str, str]] = []
         map_data: list[str] = []
         notes: list[str] = []
         for status, path in pairs:
@@ -895,23 +903,24 @@ class TrinityCoreInstaller(CmangosInstaller):
             if prefixes:
                 lines = self._seams.changed_lines(dest, old, new, path)
                 if lines and all(line[1:].startswith(tuple(prefixes)) for line in lines):
-                    skipped.append(rel)
                     beyond = _realm_change_beyond_the_address(lines)
                     if beyond:
                         logger.info(
                             f"update: {rel}'s realm row changed beyond its address: {beyond}"
                         )
-                        notes.append(
-                            f"{self.entry.name} changed its realm row in {rel} beyond the address "
-                            f"Yu'lon sets ({beyond}); Yu'lon keeps the realm row as it is, so "
-                            "that change is not applied."
-                        )
+                    skipped.append((rel, beyond))
                     continue
             raise InstallerError(self._refusal(rel, phase))
+        # A split table upstream rewrote as one file (`<stem>.sql` added, its parts
+        # removed) is imported again whole from that file, and nothing is left.
+        whole = {rel[: -len(".sql")] for rel in reimport}
+        left_parts = [
+            rel for rel in left_parts if cast(re.Match[str], _PART.match(rel))["stem"] not in whole
+        ]
         gone = {cast(re.Match[str], _PART.match(rel))["stem"] for rel in left_parts}
         return SnapshotChanges(
             reimport=tuple(reimport),
-            parts=tuple(stem for stem in dict.fromkeys(parts) if stem not in gone),
+            parts=tuple(stem for stem in dict.fromkeys(parts) if stem not in gone | whole),
             left=tuple(left),
             left_parts=tuple(left_parts),
             skipped=tuple(skipped),
@@ -1026,12 +1035,18 @@ class TrinityCoreInstaller(CmangosInstaller):
         if not changes.imports() and not changes.map_data:
             return None
         runs: list[sqlplan.PhaseRun] = []
+        # What `WORLD_REIMPORT_FILE` held before `prepare()` wrote it (`None`: absent),
+        # and whether `forward()` began: `settle()` puts the record back as it was
+        # when the press failed with nothing imported (fix round 2).
+        before: list[bytes | None] = []
+        started: list[bool] = []
 
         def prepare() -> Iterator[str]:
             if not changes.imports():
                 return
             ctx = self._world_ctx(server_dir, None)
             runs[:] = self._reimport_runs(ctx, changes)
+            before[:] = [_read_bytes(server_dir / WORLD_REIMPORT_FILE)]
             self._write_pending(server_dir, runs)
             yield (
                 f"{server_dir / WORLD_REIMPORT_FILE} names the {len(runs)} world table file(s) "
@@ -1039,6 +1054,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
 
         def forward(ctx: StageContext) -> Iterator[str]:
+            started.append(True)
             if changes.map_data:
                 yield self._flag_map_data(server_dir, changes.map_data)
             if not runs:
@@ -1081,7 +1097,12 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._forget_pending(server_dir)
             yield f"The {len(present)} world tables are back as the old build had them."
 
-        return ServersDownWork(prepare=prepare, forward=forward, back=back)
+        def settle() -> None:
+            if started or not before:
+                return
+            _put_back(server_dir / WORLD_REIMPORT_FILE, before[0])
+
+        return ServersDownWork(prepare=prepare, forward=forward, back=back, settle=settle)
 
     def after_update(
         self,
@@ -1099,13 +1120,19 @@ class TrinityCoreInstaller(CmangosInstaller):
         if not isinstance(changes, SnapshotChanges):
             return
         if changes.map_data:
-            said = needs_reextract(server_dir, self.entry)
+            said = needs_reextract(server_dir, self.entry, press_here=self._seams.distro is None)
             if said is not None:
                 yield said
-        for rel in changes.skipped:
+        for rel, beyond in changes.skipped:
+            if not beyond:
+                yield (
+                    f"{rel} changed only the realm row's address, which Yu'lon sets itself, so "
+                    "that change is left out."
+                )
+                continue
             yield (
-                f"{rel} changed only in the realm row, which Yu'lon sets itself, so that change "
-                "is left out."
+                f"{rel} changed the realm row, which is left as Yu'lon set it; the changes beyond "
+                f"the address Yu'lon sets were logged: {beyond}."
             )
         for rel in changes.left:
             yield (
@@ -1221,8 +1248,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         if not same:
             raise InstallerError(
-                f"{dest} is not on the commit the running build was made from ({built}), so its "
-                f"world tables may not be that build's. Press "
+                f"{dest} is not on the commit the running build was made from ({built}), as "
+                "after an interrupted update, so the world tables waiting there may not be that "
+                "build's. Press "
                 f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}"
                 " again: it builds and imports them together. Nothing was changed."
             )
@@ -1445,7 +1473,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"press “{REEXTRACT_BUTTON}” on the Server tab once the server is "
                 "stopped."
             )
-        said = needs_reextract(server_dir, self.entry)
+        said = needs_reextract(server_dir, self.entry, press_here=self._seams.distro is None)
         return said or f"{self.entry.name}'s map data must be extracted again."
 
     def _put_flag_back(self, server_dir: Path, before: tuple[str, ...] | None) -> Iterator[str]:
@@ -1667,6 +1695,34 @@ def _write_flag(server_dir: Path, changed: Sequence[str]) -> None:
         raise
 
 
+def _read_bytes(path: Path) -> bytes | None:
+    """A file's bytes, or None when there is none; an unreadable one reads as nothing to keep."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning(f"could not read {path} ({exc}); it is not put back after a failed press")
+        return None
+
+
+def _put_back(path: Path, body: bytes | None) -> None:
+    """`path` as it was: `body` written whole (staged and renamed), or removed. Never raises."""
+    staged = path.with_name(path.name + ".yulon-new")
+    try:
+        if body is None:
+            path.unlink(missing_ok=True)
+            return
+        staged.write_bytes(body)
+        os.replace(staged, path)
+    except OSError as exc:
+        logger.warning(f"could not put {path} back as it was before the press: {exc}")
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 @dataclass(frozen=True)
 class _Pending:
     """What `WORLD_REIMPORT_FILE` names; `unreadable` when it is there and says nothing usable."""
@@ -1750,15 +1806,13 @@ def _realm_rows(
     sides: tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]] = ({}, {})
     for line in lines:
         side = sides[0] if line.startswith("-") else sides[1]
-        body = line[1:]
-        head, found, rest = body.partition(" VALUES ")
-        if not found:
-            head, found, rest = body.partition(" VALUES")
+        found = _REALM_INSERT.match(line[1:])
+        if found is None:
+            continue
         names: tuple[str, ...] = _REALM_COLUMNS
-        named = head[len(_REALM_TABLE) :].strip()
-        if named.startswith("("):
-            names = tuple(name.strip().strip("`") for name in named.strip("()").split(","))
-        for row in _sql_tuples(rest):
+        if found["columns"] is not None:
+            names = tuple(name.strip().strip("`").strip() for name in found["columns"].split(","))
+        for row in _sql_tuples(found["rest"]):
             columns = dict(zip(names, row, strict=False))
             side[columns.get("id", "")] = columns
     return sides
