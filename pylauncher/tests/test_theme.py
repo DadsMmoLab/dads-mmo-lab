@@ -125,6 +125,30 @@ def test_the_tab_x_is_exempt_by_id_and_the_floor_rule_is_untouched() -> None:
     assert f"min-width: {_touch(30, 1.0)};" in floor, "the scroll arrows lost their floor"
 
 
+def test_the_tab_play_is_exempt_by_id_like_the_x() -> None:
+    """T187: the ▶ beside the × has the ×'s size, so the two fit across the rail."""
+    from yulon.ui.theme import LAUNCH_TAB_BUTTON, _build_qss
+
+    qss = _build_qss(1.0)
+    rule = qss.split(f"QTabBar QToolButton#{LAUNCH_TAB_BUTTON} {{")[1].split("}")[0]
+    assert "max-width: 18px" in rule and "max-height: 18px" in rule
+    assert "border: none" in rule
+    # Gold at rest (fix round 1), so it reads apart from the muted ×.
+    from yulon.ui.theme import COLOR_GOLD_LIGHT
+
+    assert f"color: {COLOR_GOLD_LIGHT};" in rule
+
+
+def test_the_play_menu_button_draws_one_arrow_not_two() -> None:
+    """Its label is the ▾; the style's own menu indicator was a second arrow (T181, fixed T187)."""
+    from yulon.ui.theme import PLAY_MENU_BUTTON, _build_qss
+
+    qss = _build_qss(1.0)
+    assert f"QPushButton#{PLAY_MENU_BUTTON}::menu-indicator" in qss
+    rule = qss.split(f"QPushButton#{PLAY_MENU_BUTTON}::menu-indicator")[1].split("}")[0]
+    assert "image: none" in rule and "width: 0px" in rule
+
+
 def test_the_button_base_state_draws_a_visible_hairline() -> None:
     # The base QPushButton rule must pair its panel fill with a hairline that is
     # visibly distinct from the fill — the near-black `#3C2D14` it once used on

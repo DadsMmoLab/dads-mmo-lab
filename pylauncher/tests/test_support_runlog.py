@@ -127,11 +127,13 @@ def _panel_runs(path: Path) -> list[tuple[str, bool]]:
 
 
 def test_every_install_and_rebuild_run_is_recorded_and_the_console_is_not() -> None:
-    """The seven callers, by name. The console follows `docker logs -f` forever and is not a run.
+    """The eight callers, by name. The console follows `docker logs -f` forever and is not a run.
 
-    The sixth `rebuild_log` run is T129's corrections press, on the same panel as the updates one.
+    The sixth `rebuild_log` run is T129's corrections press, on the same panel as the updates one;
+    the seventh is T179's Server-tab presses (Re-extract map data, Finish the world update), which
+    share one runner.
     """
     ui = Path(catalog_view.__file__).parent
     calls = _panel_runs(ui / "catalog_view.py") + _panel_runs(ui / "controller_view.py")
-    expected = [("self._log", True), ("self.console_log", False)] + [("self.rebuild_log", True)] * 6
+    expected = [("self._log", True), ("self.console_log", False)] + [("self.rebuild_log", True)] * 7
     assert sorted(calls) == sorted(expected), calls

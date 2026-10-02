@@ -45,7 +45,8 @@ INSIDE = "/home/pk/wow"
 NO_WSL_EXE = "/nonexistent/yulon-test/wsl"
 """What `wsl` resolves to here: a name that is SEEN when the app starts it, and runs nothing."""
 
-GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
+GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
+"""Every game with a tab, each a shipped catalog entry (`wow-centurion` since T179 Task 7)."""
 
 _THREADED = controller_view_module.threaded_job_runner
 """The view's real job runner, taken before `_inline_jobs` replaces it for each test."""
@@ -667,7 +668,7 @@ def _mysql_passwords(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return seen
 
 
-@pytest.mark.parametrize("game", ("wow-tbc", "wow-vanilla", "wow-tortoise"))
+@pytest.mark.parametrize("game", ("wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"))
 def test_a_generated_password_in_a_distro_is_read_at_its_first_use_and_only_then(
     disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch, game: str
 ) -> None:

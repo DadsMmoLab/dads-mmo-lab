@@ -21,6 +21,14 @@ file's default is what the install's compose stage renders (owner decision 4,
 the channel's own keys while its press is live. The time zone is kept (owner,
 2026-09-28, T171): the render lays the file's own `TZ` lines over the new one.
 
+Centurion (TrinityCore, T179) is the first case again: its install copies
+`worldserver.conf`, `authserver.conf` and `playerbots.conf` out of its image's
+`.dist` and patches its conf table into them (`Updates.EnableDatabases = 0`,
+the database strings, SOAP, the bot population), so its default is made the
+same way, from the same image. Its `AutoBalance.conf` is the exception the
+image cannot answer: the install copies it whole from the server's source
+(`conf.from_checkout`, T179 Task 8), so its default is that file, read there.
+
 **Only the server's own files.** A game's set is exactly its install conf
 table, or for WotLK `AZEROTHCORE_CORE_FILES` plus the override. A module's own
 conf file is never touched (the owner's decision); `reset()` refuses a file
@@ -47,8 +55,8 @@ from typing import Literal
 
 from yulon import dbsecret, docker, platform, resources, server_build_presses, tuning
 from yulon.catalog import bot_dashboard, composegen
-from yulon.catalog.catalog import CatalogEntry, ConfPatch
-from yulon.catalog.families import azerothcore, conf
+from yulon.catalog.catalog import CatalogEntry, ConfPatch, ConfPatchTable
+from yulon.catalog.families import azerothcore, conf, mmaps
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
 from yulon.catalog.native import Secrets
@@ -76,18 +84,61 @@ override is not a file that editor shows. `core_files()` adds it.
 def core_files(entry: CatalogEntry) -> tuple[str, ...]:
     """This game's own settings files, relative to the server folder, in table order.
 
-    A CMaNGOS game's are exactly its install conf table, under `etc/`; WotLK's
-    are its three confs and the compose override. Any other family has none,
-    and the tab draws no button.
+    A CMaNGOS or TrinityCore game's are exactly its install conf table, under
+    `etc/`; WotLK's are its three confs and the compose override. Any other
+    family has none, and the tab draws no button.
     """
     native_block = entry.install.native
     if native_block is None:
         return ()
     if native_block.family == "azerothcore":
         return (*AZEROTHCORE_CORE_FILES, composegen.OVERRIDE_FILE)
-    if native_block.family == "cmangos" and native_block.cmangos is not None:
-        return tuple(f"{ETC_DIR}/{name}" for name in native_block.cmangos.conf.files)
+    table = _conf_table(entry)
+    if table is not None:
+        names = (*table.files, *_from_checkout(entry))
+        return tuple(f"{ETC_DIR}/{name}" for name in names)
     return ()
+
+
+def _from_checkout(entry: CatalogEntry) -> Mapping[str, str]:
+    """The confs an install copies whole from its checkout, by name -> server-dir-relative source.
+
+    A TrinityCore install's `conf.from_checkout` (Centurion's `AutoBalance.conf`, T179
+    Task 8), under its checkout; no other family copies a conf from its source tree.
+    """
+    native_block = entry.install.native
+    if native_block is None or native_block.trinitycore is None:
+        return {}
+    block = native_block.trinitycore
+    return {name: f"{block.checkout}/{source}" for name, source in block.conf.from_checkout.items()}
+
+
+def _conf_table(entry: CatalogEntry) -> ConfPatchTable | None:
+    """The conf table a CMaNGOS or TrinityCore install writes into `etc/`, or `None`."""
+    native_block = entry.install.native
+    if native_block is None:
+        return None
+    if native_block.family == "cmangos" and native_block.cmangos is not None:
+        return native_block.cmangos.conf
+    if native_block.family == "trinitycore" and native_block.trinitycore is not None:
+        return native_block.trinitycore.conf
+    return None
+
+
+def read_only_confs(entry: CatalogEntry) -> tuple[str, ...]:
+    """The server's own confs the Tuning tab's raw editor lists READ-ONLY (T43, T179).
+
+    WotLK's three, as since T43. A TrinityCore server's own confs from its install
+    table -- `worldserver.conf` and `authserver.conf` -- except its bot conf, whose
+    keys the Tuning tab's bot card writes (T179, spec §2: worldserver.conf is shown
+    on Tuning). Every other game is handed WotLK's paths exactly as before, which
+    its install never has, so its raw editor still lists its module confs only.
+    """
+    native_block = entry.install.native
+    if native_block is not None and native_block.trinitycore is not None:
+        table = native_block.trinitycore.conf
+        return tuple(f"{ETC_DIR}/{name}" for name in table.files if name != table.playerbots_conf)
+    return AZEROTHCORE_CORE_FILES
 
 
 def label(file: str) -> str:
@@ -124,6 +175,7 @@ DOCKER_SILENT = (
 COPY_FAILED = "the default files could not be copied out of the server's image: {exc}"
 NO_TEMPLATE = "the server's image has no {source}/{template} to reset it from"
 NO_DIST = "there is no {dist} beside it to reset it from"
+NO_CHECKOUT_COPY = "the server's source has no {source} to reset it from"
 UNREADABLE = "{what} could not be read ({exc})"
 NOT_UTF8 = "{what} is not UTF-8 text ({exc})"
 NO_DEFAULT = "Yu'lon does not know what {game} installs into this file"
@@ -294,7 +346,7 @@ def default_texts(
             except (composegen.ComposeGenError, OSError) as exc:
                 reasons[composegen.OVERRIDE_FILE] = OVERRIDE_UNRENDERABLE.format(exc=exc)
         return texts, reasons
-    if family == "cmangos":
+    if family in ("cmangos", "trinitycore"):
         return _from_image(entry, server_dir, files, wsl_distro=wsl_distro, seams=seams)
     return {}, dict.fromkeys(files, NO_DEFAULT.format(game=entry.name))
 
@@ -418,7 +470,50 @@ def _from_image(
     wsl_distro: str | None,
     seams: Seams,
 ) -> Built:
-    """CMaNGOS/Tortoise: the image's template, patched by the install's table and tokens.
+    """The image's templates patched by the table, and a `from_checkout` file's checkout copy.
+
+    A file the install copies whole from the server's source (Centurion's
+    `AutoBalance.conf`, T179 Task 8) has the checkout's file as its default, read
+    from disk: no image, password or Docker is asked about it, so a refusal of the
+    image's files never takes it along.
+    """
+    copied = _from_checkout(entry)
+    whole = [
+        file
+        for file in files
+        if file.startswith(f"{ETC_DIR}/") and file.removeprefix(f"{ETC_DIR}/") in copied
+    ]
+    rest = [file for file in files if file not in whole]
+    texts, reasons = (
+        _from_templates(entry, server_dir, rest, wsl_distro=wsl_distro, seams=seams)
+        if rest
+        else ({}, {})
+    )
+    for file in whole:
+        source = server_dir / copied[file.removeprefix(f"{ETC_DIR}/")]
+        try:
+            texts[file] = _read_text(source)
+        except FileNotFoundError:
+            reasons[file] = NO_CHECKOUT_COPY.format(source=source)
+        except UnicodeDecodeError as exc:
+            reasons[file] = NOT_UTF8.format(what=source, exc=exc)
+        except OSError as exc:
+            reasons[file] = UNREADABLE.format(what=source, exc=exc)
+    return texts, reasons
+
+
+def _from_templates(
+    entry: CatalogEntry,
+    server_dir: Path,
+    files: Sequence[str],
+    *,
+    wsl_distro: str | None,
+    seams: Seams,
+) -> Built:
+    """CMaNGOS/Tortoise/TrinityCore: the image's template, patched by the install's table.
+
+    `TrinityCoreInstaller` is a `CmangosInstaller` (T179 Task 3): its conf stage is
+    the same two calls over its own table, which `conf_table()` answers.
 
     One `docker cp` of the whole source dir into `RESET_STAGING`, as
     `conf.materialise()` does into `etc/` -- but never into `etc/`, because
@@ -434,6 +529,8 @@ def _from_image(
     # install's own setting, not a drift from the default -- and this reset's
     # banner offers a recreate, not a Start, so nothing else would put them back.
     table = bot_dashboard.overlay(engine.conf_table(), entry, server_dir)
+    # T179 final round: a finished pathfinding set keeps `mmap.enablePathFinding = 1`.
+    table = mmaps.overlay(table, entry, server_dir)
     names: dict[str, str] = {}
     reasons: dict[str, str] = {}
     for file in files:
@@ -719,10 +816,10 @@ def install_keys(entry: CatalogEntry, file: str) -> frozenset[str]:
     is dropped too -- dropping more is the safe side. WotLK's confs have no
     table, so none.
     """
-    native_block = entry.install.native
-    if native_block is None or native_block.cmangos is None:
+    table = _conf_table(entry)
+    if table is None:
         return frozenset()
-    patch = native_block.cmangos.conf.files.get(file.removeprefix(f"{ETC_DIR}/"))
+    patch = table.files.get(file.removeprefix(f"{ETC_DIR}/"))
     if patch is None or not file.startswith(f"{ETC_DIR}/"):
         return frozenset()
     return frozenset(key.casefold() for key in patch.keys)
@@ -756,10 +853,7 @@ def install_writes(entry: CatalogEntry, file: str) -> bool:
         return True
     if file in azerothcore.confs_from_dist(entry):
         return True
-    native_block = entry.install.native
-    return (
-        native_block is not None and native_block.family == "cmangos" and file in core_files(entry)
-    )
+    return _conf_table(entry) is not None and file in core_files(entry)
 
 
 def _install_mode(entry: CatalogEntry, server_dir: Path, file: str) -> int:

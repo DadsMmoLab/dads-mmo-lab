@@ -290,6 +290,7 @@ _CAMPAIGN_GLYPHS = {
     "wow-tbc": "🔥",
     "wow-vanilla": "⚔️",
     "wow-tortoise": "🐢",
+    "wow-centurion": "🛡️",
 }
 
 _CAMPAIGN_SUBTITLES = {
@@ -297,6 +298,7 @@ _CAMPAIGN_SUBTITLES = {
     "wow-tbc": "The Burning Crusade (2.4.3)",
     "wow-vanilla": "Classic Vanilla (1.12.1)",
     "wow-tortoise": "Turtle WoW Solo (1.17.2)",
+    "wow-centurion": "Level-60 PvP with bots (3.3.5a)",
 }
 
 

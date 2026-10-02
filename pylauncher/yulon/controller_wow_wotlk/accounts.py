@@ -173,7 +173,7 @@ def fold(text: str) -> str:
     return "".join(chr(ord(ch) - 0x20) if "a" <= ch <= "z" else ch for ch in text)
 
 
-Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6"]
+Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"]
 """How a core stores an account's credentials and its GM level.
 
 `azerothcore` is SRP6 in binary `salt`/`verifier` with the level in a separate
@@ -181,9 +181,12 @@ Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6"]
 `sha_pass_hash` column and the level in `account.rank`, with `v`/`s` left NULL
 for the auth server to fill on first login. `mangos_srp6` is CMaNGOS proper
 (TBC, Vanilla): the SAME SRP6 arithmetic as AzerothCore, stored as uppercase
-hex text in `v`/`s` and with the level in `account.gmlevel`.
+hex text in `v`/`s` and with the level in `account.gmlevel`. `trinitycore` (T179)
+is AzerothCore's parent: the same binary `salt`/`verifier`, and the level in
+`account_access(AccountID, SecurityLevel, RealmID)` -- its own column names
+(`TRINITYCORE_ACCESS`).
 
-Three cores, three shapes, and the difference between them is three statements:
+Four schemes, and the difference between them is three statements:
 the insert, reading the level, writing the level. Everything else -- the
 validation, the id lookup, the realmcharacters seeding, the convergence rules --
 is the same on all of them.
@@ -210,6 +213,22 @@ def _unknown_scheme(scheme: str, what: str, done: str = "nothing was written") -
         f"{scheme!r} is not an account scheme this app knows how to {what}, so "
         f"{done}. Known: {KNOWN_SCHEMES}."
     )
+
+
+TRINITYCORE_ACCESS: tuple[str, str, str, str] = (
+    "account_access",
+    "AccountID",
+    "SecurityLevel",
+    "RealmID",
+)
+"""TrinityCore's GM-level table and its three columns: (table, account, level, realm).
+
+Read at CENTURION faac5fc9 from the dump the install imports
+(`centurion/sql/auth/auth_schema.sql:49-55`, primary key `(AccountID, RealmID)`)
+and from the core's own statements (`LoginDatabase.cpp:79-83`). Named once, here,
+because they are confirmed on a live Centurion server in T179 Task 9 before the
+entry ships; a wrong name is an `Unknown column` from every grant, not a silent row.
+"""
 
 
 def checked_scheme(declared: Scheme | None, game: str) -> Scheme:
@@ -524,7 +543,9 @@ def reset_own_password(
         # stay NULL; that core derives them on first login, and writing them
         # here would hand it a pair it did not choose.
         columns = f"sha_pass_hash = {_text_literal(mangos_password_hash(name, password))}"
-    elif scheme == "azerothcore":
+    elif scheme in ("azerothcore", "trinitycore"):
+        # The same two binary columns on both: TrinityCore's own re-password is
+        # `LOGIN_UPD_LOGON`, `UPDATE account SET salt = ?, verifier = ?`.
         salt, verifier = registration_data(name, password)
         columns = f"salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)}"
     else:
@@ -629,6 +650,16 @@ def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
             f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
             f" {EXPANSION}, '', '', NOW())"
         )
+    if scheme == "trinitycore":
+        # `LOGIN_INS_ACCOUNT` (CENTURION faac5fc9, `LoginDatabase.cpp:63`), column for
+        # column. No `expansion`: the column's default is 2 on Centurion's schema
+        # (`auth_schema.sql:33`), which is what the core's own `account create` leaves.
+        salt, verifier = registration_data(name, password)
+        return (
+            "INSERT INTO account (username, salt, verifier, reg_mail, email, joindate)"
+            f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
+            " '', '', NOW())"
+        )
     raise _unknown_scheme(scheme, "write an account row for")
 
 
@@ -675,6 +706,29 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> N
             f"INSERT INTO account_access (id, gmlevel, RealmID)"
             f" VALUES ({account_id}, {gm_level}, {ALL_REALMS})"
             f" ON DUPLICATE KEY UPDATE gmlevel = {gm_level}",
+            f"grant GM level {gm_level} to account {account_id}",
+        )
+        return
+    if scheme == "trinitycore":
+        # Two statements, each of which only ever RAISES, so a press that dies
+        # between them is finished by the next. TrinityCore reads a realm's own
+        # row before the -1 row (`ORDER BY RealmID DESC`, `LoginDatabase.cpp:83`),
+        # so a realm row below the level would outrank the new -1 row: it is
+        # raised first. A realm row above it is left where it is -- the level is
+        # a floor, never a demotion. The core's own `account set gmlevel ... -1`
+        # deletes every row first; this app does not take a level away.
+        table, account, level, realm = TRINITYCORE_ACCESS
+        _run(
+            sql,
+            f"UPDATE {table} SET {level} = {gm_level}"
+            f" WHERE {account} = {account_id} AND {level} < {gm_level}",
+            f"grant GM level {gm_level} to account {account_id}",
+        )
+        _run(
+            sql,
+            f"INSERT INTO {table} ({account}, {level}, {realm})"
+            f" VALUES ({account_id}, {gm_level}, {ALL_REALMS})"
+            f" ON DUPLICATE KEY UPDATE {level} = GREATEST({level}, {gm_level})",
             f"grant GM level {gm_level} to account {account_id}",
         )
         return
@@ -738,6 +792,19 @@ def _gm_level(sql: SqlSeam, account_id: int, scheme: Scheme) -> int:
         )
         level = _one_int(rows, f"read the GM level of account {account_id}")
         return NO_GM if level is None else level
+    if scheme == "trinitycore":
+        # The level the account holds on EVERY realm, at least: with no -1 row a
+        # realm without a row of its own sees 0; with one, every realm sees its
+        # own row or that one, so the lowest row is a floor under all of them.
+        table, account, column, realm = TRINITYCORE_ACCESS
+        rows = _query_rows(
+            sql,
+            f"SELECT IF(SUM({realm} = {ALL_REALMS}) > 0, MIN({column}), 0) FROM {table}"
+            f" WHERE {account} = {account_id}",
+            f"read the GM level of account {account_id}",
+        )
+        found = _one_int(rows, f"read the GM level of account {account_id}")
+        return NO_GM if found is None else found
     # The read half of the same dispatch. Its refusal says "read" rather than
     # "written": no write was in question here, and a sentence claiming one
     # sends the reader looking for a row that was never attempted (T12).

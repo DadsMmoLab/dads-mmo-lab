@@ -123,7 +123,32 @@ class WorldStoppedAfterReadyError(InstallerError):
 
     Everything that only needs to stop, stops: it is an `InstallerError`, and
     the install spine, the UI and the CLI catch it as one.
+
+    `sources_kept` is the update route's typed outcome (T179 Task 6, fix round
+    3): True when "Update the server to latest…" or "Return to the tested pin…"
+    left the moved sources on their new commits with the kept build, so the
+    Modules tab drops the counts the move made stale, as after a finished press.
     """
+
+    def __init__(self, *args: object, sources_kept: bool = False) -> None:
+        super().__init__(*args)
+        self.sources_kept = sources_kept
+
+
+class UpdateRefused(InstallerError):
+    """An update refused for what one upstream commit brings, which a second press cannot change.
+
+    T179: TrinityCore's update reads what the move changed in the tree's SQL
+    snapshot, and a change to the characters' or accounts' database is refused.
+    `repo` and `commit` name the source and the upstream commit refused, so
+    "Update the server to latest…" remembers it in the install record and the
+    Server tab stops offering that same commit (`StagedInstaller.upstream_news`).
+    """
+
+    def __init__(self, *args: object, repo: str, commit: str) -> None:
+        super().__init__(*args)
+        self.repo = repo
+        self.commit = commit
 
 
 class DockerUnavailableError(InstallerError):

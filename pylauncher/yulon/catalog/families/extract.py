@@ -122,14 +122,20 @@ def argv_hash(argv: Sequence[str]) -> str:
     return _short_digest(json.dumps(list(argv), separators=(",", ":")))
 
 
-def plan_hash(plan: ExtractPlan) -> str:
-    """Digest of the whole plan, so an edited catalog block re-extracts rather than skips."""
-    return _short_digest(
-        json.dumps(plan.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    )
+def plan_hash(plan: ExtractPlan, salt: str = "") -> str:
+    """Digest of the whole plan, so an edited catalog block re-extracts rather than skips.
+
+    `salt` is what else the extraction was made from, beyond the plan and the
+    client folder (T179: the client packs laid into the temporary extraction
+    client). Empty is the plan alone, the digest every CMaNGOS install recorded.
+    """
+    canonical = json.dumps(plan.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return _short_digest(canonical if not salt else f"{canonical}\n{salt}")
 
 
-def expected_evidence(plan: ExtractPlan, client_dir: Path, required_file: str | None) -> Evidence:
+def expected_evidence(
+    plan: ExtractPlan, client_dir: Path, required_file: str | None, *, salt: str = ""
+) -> Evidence:
     """The stage-level facts THIS run would write, with no tool records yet.
 
     The required file's size and mtime are the cheapest proof that the client
@@ -169,7 +175,9 @@ def expected_evidence(plan: ExtractPlan, client_dir: Path, required_file: str | 
             complete = False
         else:
             size, mtime = stat.st_size, int(stat.st_mtime)
-    return Evidence(plan_hash(plan), client_path, size, mtime, (), client_facts_complete=complete)
+    return Evidence(
+        plan_hash(plan, salt), client_path, size, mtime, (), client_facts_complete=complete
+    )
 
 
 def read_evidence(data_dir: Path) -> Evidence | None:
@@ -876,8 +884,21 @@ def run_plan(
     required_file: str | None = None,
     client_build: int | None = None,
     selinux_enforcing: Callable[[], bool | None] | None = None,
+    evidence_client_dir: Path | None = None,
+    evidence_salt: str = "",
+    client_named: str | None = None,
 ) -> Iterator[str]:
     """Run every tool the evidence does not vouch for, recording each as it finishes.
+
+    `evidence_client_dir` and `evidence_salt` are for a client that is MOUNTED
+    from one folder and IDENTIFIED by another (T179): the TrinityCore family
+    extracts from a temporary copy of the player's client with its server's
+    packs laid in, deletes the copy afterwards, and makes a new one on a press
+    that has to extract again. The evidence names the player's own client
+    (`evidence_client_dir`, whose required file the copy shares) and the packs
+    (`evidence_salt`, folded into the plan hash), so a resume can be vouched for
+    before any copy is made, and a changed pack re-extracts. Both default to
+    the mounted client and no salt, which is what every CMaNGOS install records.
 
     The evidence file is rewritten after every successful tool, not at the end,
     so a Stop between tools loses nothing — that is the cancel note's whole
@@ -887,6 +908,9 @@ def run_plan(
 
     `required_file` is the client spec's; `client_build` is only spoken, in the
     shortfall refusal, because the count gate is the real check of the build.
+    `client_named` replaces that clause where the client the player gives is not
+    the build the server names (T179 final round: Centurion's realm is 12342, which
+    only its ready-to-play copy reports; the player's own client is a stock 12340).
 
     Every tool the evidence does not vouch for is asked one question
     (`blocking_output()`) in a single pass BEFORE the first of them is run:
@@ -942,7 +966,12 @@ def run_plan(
     data_dir.mkdir(parents=True, exist_ok=True)
     ask = selinux_enforcing if selinux_enforcing is not None else platform.selinux_enforcing
     security_args = container_security_args(enforcing=ask())
-    expected = expected_evidence(plan, client_dir, required_file)
+    expected = expected_evidence(
+        plan,
+        evidence_client_dir if evidence_client_dir is not None else client_dir,
+        required_file,
+        salt=evidence_salt,
+    )
     current = read_evidence(data_dir)
     if current is not None and not same_stage(current, expected):
         yield "the extracted data is for another client or plan; extracting everything again"
@@ -1099,11 +1128,19 @@ def run_plan(
                     client_build,
                     staged=plan.stage_client,
                     retried=True,
+                    client_named=client_named,
                 )
                 yield f"{again.name}: done ({_counts_text(seen)})"
             continue
         current, seen = _conclude(
-            tool, run, data_dir, current, cancel, client_build, staged=plan.stage_client
+            tool,
+            run,
+            data_dir,
+            current,
+            cancel,
+            client_build,
+            staged=plan.stage_client,
+            client_named=client_named,
         )
         yield f"{tool.name}: done ({_counts_text(seen)})"
 
@@ -1118,6 +1155,7 @@ def _conclude(
     *,
     staged: bool = False,
     retried: bool = False,
+    client_named: str | None = None,
 ) -> tuple[Evidence, dict[str, int]]:
     """Turn one tool's exit into a record, or into the refusal that explains it.
 
@@ -1181,7 +1219,10 @@ def _conclude(
             f"{folder}: {have} files, at least {need} expected"
             for folder, (have, need) in short.items()
         )
-        build = f" for client build {client_build}" if client_build is not None else ""
+        if client_named is not None:
+            build = f" for {client_named}"
+        else:
+            build = f" for client build {client_build}" if client_build is not None else ""
         raise InstallerError(
             f"{tool.name} finished but produced too little ({told}){build}. The server WILL "
             f"fail to load maps from this, so nothing was recorded. Check that the client "
@@ -1797,3 +1838,93 @@ def run_mmaps(
     record = ToolRecord(MMAPS_TOOL, argv_hash(plan.argv), int(time.time()))
     write_evidence(data_dir, with_record(current, record))
     yield f"mmaps: done ({_counts_text(seen)})"
+
+
+# ------------------------------------- T179: the tree's own DBCs, and the start check
+
+MAPS_DIR = "maps"
+VMAPS_DIR = "vmaps"
+"""Where TrinityCore's map files and vmaps live under `DataDir`.
+
+The names the world server opens at start, read at CENTURION faac5fc9:
+`Map::ExistMap()` opens `maps/{map:03}{gx:02}{gy:02}.map`
+(src/server/game/Maps/Map.cpp:121) and `StaticMapTree::CanLoadMap()` the tree
+file `vmaps/{map:03}.vmtree` (src/common/Collision/Maps/MapTree.cpp:245, the
+name from `VMapManager2::getMapFileName()`, VMapManager2.cpp:75-81).
+"""
+
+
+def overlay_files(source: Path, target: Path) -> int:
+    """Copy every file under `source` over the same path under `target`; the count copied.
+
+    A file whose copy is already there -- same size and modification time, which
+    `copy2` carries over -- is left alone, so a resume rewrites nothing. Each copy
+    lands under a temporary name and is renamed over its target, so a stop part
+    way leaves every file whole: the old one or the new one. Files under `target`
+    that `source` does not have are kept: this lays one set over another, it does
+    not replace a folder.
+
+    Raises:
+        InstallerError: `source` holds no file at all, or a file could not be read
+            or written.
+    """
+    try:
+        files = sorted(path for path in source.rglob("*") if path.is_file())
+    except OSError as exc:
+        raise InstallerError(f"{source} could not be read ({exc}); nothing was copied.") from exc
+    if not files:
+        raise InstallerError(
+            f"{source} holds no files, so there is nothing to lay over {target}. Nothing was "
+            "copied."
+        )
+    copied = 0
+    for path in files:
+        dest = target / path.relative_to(source)
+        try:
+            have, want = (dest.stat() if dest.is_file() else None), path.stat()
+            if have is not None and (have.st_size, have.st_mtime_ns) == (
+                want.st_size,
+                want.st_mtime_ns,
+            ):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + ".yulon-new")
+            shutil.copy2(path, tmp)
+            os.replace(tmp, dest)
+        except OSError as exc:
+            raise InstallerError(
+                f"{path} could not be copied to {dest} ({exc}). Free some space and check "
+                "that the server folder can be written, then press Install again."
+            ) from exc
+        copied += 1
+    return copied
+
+
+_GRID_SUFFIX = re.compile(r"\d{4}\.map")
+"""What follows the map id in a map file's name: `{gx:02}{gy:02}.map`."""
+
+
+def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
+    """What the world server's start check would not find, one phrase each; `()` when all is there.
+
+    The worldserver exits "Unable to load critical files" unless map AND vmap
+    files exist for the starting areas of maps 0 and 1, and 530 with
+    `Expansion = 2` (World.cpp:1811-1823, facts §3). This asks the coarser
+    question the stage can answer without the grid maths: for each map, at
+    least one `.map` file named after it under `maps/`, and its `.vmtree`
+    under `vmaps/`. A listing that fails reads as missing, never as there.
+    """
+    try:
+        names = [entry.name for entry in (data_dir / MAPS_DIR).iterdir()]
+    except OSError:
+        names = []
+    missing: list[str] = []
+    for map_id in map_ids:
+        key = f"{map_id:03}"
+        if not any(
+            name.startswith(key) and _GRID_SUFFIX.fullmatch(name[len(key) :]) for name in names
+        ):
+            missing.append(f"map {map_id}: no {MAPS_DIR}/{key}????.map")
+        if not (data_dir / VMAPS_DIR / f"{key}.vmtree").is_file():
+            missing.append(f"map {map_id}: no {VMAPS_DIR}/{key}.vmtree")
+    return tuple(missing)

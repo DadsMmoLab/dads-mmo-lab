@@ -383,6 +383,9 @@ def test_a_read_only_git_question_mounts_read_only_and_keeps_nothing_it_does_not
     for dest, ask in (
         (tmp_path / "read-remote", lambda impl, path: impl.remote_url(path)),
         (tmp_path / "read-status", lambda impl, path: impl.is_unmodified(path, "x")),
+        # T179: the update route's two diff questions are reads like these.
+        (tmp_path / "read-diff", lambda impl, path: impl.changed_files(path, "a", "b", ["sql"])),
+        (tmp_path / "read-lines", lambda impl, path: impl.changed_lines(path, "a", "b", "x.sql")),
     ):
         (dest / ".git").mkdir(parents=True)
         ask(git.ContainerGit(selinux_enforcing=lambda: True, filesystem_type=_labelling_fs), dest)
@@ -686,9 +689,16 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
     ran = len(seen)
     native._git_restore_rev(dest, "f82e7d6")
     assert len(seen) == ran + 1, "the restore route reached a container"
+    # T179's two: what changed between two commits, and how one file changed.
+    ran = len(seen)
+    native._git_changed_files(dest, "a" * 40, "b" * 40, ["centurion/sql"])
+    assert len(seen) == ran + 1, "the changed-files route reached a container"
+    ran = len(seen)
+    native._git_changed_lines(dest, "a" * 40, "b" * 40, "centurion/sql/auth/auth_data.sql")
+    assert len(seen) == ran + 1, "the changed-lines route reached a container"
     native.Seams()
 
-    assert made == [{}] * 9, "a production ContainerGit that carries a seam is not bare"
+    assert made == [{}] * 11, "a production ContainerGit that carries a seam is not bare"
 
     tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
     calls = [
@@ -3031,3 +3041,220 @@ def test_the_version_line_equals_what_git_log_prints_by_hand(tmp_path: Path) -> 
     ).stdout.split()
 
     assert git.RunnerGit().head_version(dest) == f"{by_hand[0]} · {by_hand[1]}"
+
+
+# -- T179: a checkout that leaves folders out (`CloneSpec.sparse_exclude`) ---------------
+
+_EXCLUDED = ("playerbot reference", "centurion/launcher")
+
+
+def _centurion_like_upstream(tmp_path: Path) -> tuple[str, str, str]:
+    """A bare `file://` upstream on branch CENTURION with two commits; (url, first, second).
+
+    `uploadpack.allowFilter` because GitHub serves `--filter=blob:none` and a local
+    upstream does not unless told to -- without it the clone would quietly be a full
+    one and the "never downloaded" half of the test would prove nothing.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def git_(*argv: str, cwd: Path = work) -> str:
+        done = subprocess.run(
+            ["git", *_AUTHOR, *argv], cwd=cwd, check=True, capture_output=True, text=True
+        )
+        return done.stdout.strip()
+
+    git_("init", "-q", "-b", "CENTURION", ".")
+    for rel in (
+        "playerbot reference/PlayerbotAI.cpp",
+        "centurion/launcher/main.js",
+        "centurion/dbc/Spell.dbc",
+        "centurion/sql/import.sh",
+        "src/server/worldserver/Main.cpp",
+        "README.md",
+    ):
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(f"{rel}\n", encoding="utf-8")
+    git_("add", "-A")
+    git_("commit", "-qm", "one")
+    first = git_("rev-parse", "HEAD")
+    (work / "src" / "later.cpp").write_text("later\n", encoding="utf-8")
+    git_("add", "-A")
+    git_("commit", "-qm", "two")
+    second = git_("rev-parse", "HEAD")
+    bare = tmp_path / "up.git"
+    git_("init", "-q", "--bare", "-b", "CENTURION", str(bare))
+    git_("push", "-q", str(bare), "CENTURION")
+    git_("config", "uploadpack.allowFilter", "true", cwd=bare)
+    git_("config", "uploadpack.allowAnySHA1InWant", "true", cwd=bare)
+    return bare.as_uri(), first, second
+
+
+def _tree(dest: Path) -> list[str]:
+    return sorted(
+        path.relative_to(dest).as_posix()
+        for path in dest.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(dest).parts
+    )
+
+
+def _missing_blobs(dest: Path) -> set[str]:
+    """Paths whose blob the clone does not hold, asked without fetching them (`--missing=print`)."""
+    listed = subprocess.run(
+        ["git", "rev-list", "--objects", "--missing=print", "HEAD"],
+        cwd=dest,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    missing = {line[1:] for line in listed if line.startswith("?")}
+    tree = subprocess.run(
+        ["git", "ls-tree", "-r", "HEAD"], cwd=dest, check=True, capture_output=True, text=True
+    ).stdout.splitlines()
+    return {line.split("\t", 1)[1] for line in tree if line.split()[2] in missing}
+
+
+_KEPT_AT_FIRST = [
+    "README.md",
+    "centurion/dbc/Spell.dbc",
+    "centurion/sql/import.sh",
+    "src/server/worldserver/Main.cpp",
+]
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("streamed", [False, True], ids=["clone", "clone_lines"])
+@pytest.mark.parametrize("name", ["host", "container"])
+@pytest.mark.parametrize("pinned", [False, True], ids=["tip", "pin"])
+def test_a_sparse_exclude_clone_leaves_the_folders_out_and_never_downloads_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, streamed: bool, pinned: bool
+) -> None:
+    url, first, second = _centurion_like_upstream(tmp_path)
+    spec = git.CloneSpec(
+        url=url,
+        dest=tmp_path / "srv" / "src" / "centurion",
+        branch="CENTURION",
+        rev=first if pinned else None,
+        sparse_exclude=_EXCLUDED,
+    )
+    impl = _impl(name, monkeypatch)
+    if streamed:
+        list(impl.clone_lines(spec))
+    else:
+        impl.clone(spec)
+    expected = _KEPT_AT_FIRST if pinned else sorted([*_KEPT_AT_FIRST, "src/later.cpp"])
+    assert _tree(spec.dest) == expected
+    assert _rev(spec.dest, "HEAD") == (first if pinned else second)
+    assert _missing_blobs(spec.dest) == {
+        "playerbot reference/PlayerbotAI.cpp",
+        "centurion/launcher/main.js",
+    }, "the left-out files were downloaded"
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_an_update_of_a_sparse_exclude_checkout_keeps_leaving_them_out(tmp_path: Path) -> None:
+    url, first, second = _centurion_like_upstream(tmp_path)
+    spec = git.CloneSpec(
+        url=url, dest=tmp_path / "core", branch="CENTURION", rev=first, sparse_exclude=_EXCLUDED
+    )
+    git.RunnerGit().clone(spec)
+    git.RunnerGit().clone(dataclasses.replace(spec, rev=second))
+    assert _tree(spec.dest) == sorted([*_KEPT_AT_FIRST, "src/later.cpp"])
+
+
+def test_the_patterns_keep_everything_and_drop_each_folder_anchored() -> None:
+    assert git.sparse_exclude_patterns(("playerbot reference", "centurion/launcher/")) == [
+        "/*",
+        "!/playerbot reference/",
+        "!/centurion/launcher/",
+    ]
+
+
+def test_a_spec_cannot_keep_one_folder_and_leave_others_out(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="not both"):
+        git.CloneSpec(
+            url="https://x/y.git", dest=tmp_path, sparse_path="guides", sparse_exclude=("a",)
+        )
+
+
+def test_the_container_clone_sets_the_patterns_non_cone_before_any_checkout(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Cone mode keeps folders and cannot say "all but"; the checkout must follow the patterns."""
+    spec = git.CloneSpec(
+        url="https://example/c.git",
+        dest=tmp_path / "core",
+        branch="CENTURION",
+        sparse_exclude=_EXCLUDED,
+    )
+    git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda path: "ext4").clone(
+        spec
+    )
+    clone = next(argv for argv in seen if "clone" in argv)
+    assert "--filter=blob:none" in clone and "--no-checkout" in clone
+    assert clone[clone.index("--branch") + 1] == "CENTURION"
+    sparse = next(i for i, argv in enumerate(seen) if "sparse-checkout" in argv)
+    assert seen[sparse][-5:] == [
+        "set",
+        "--no-cone",
+        "/*",
+        "!/playerbot reference/",
+        "!/centurion/launcher/",
+    ]
+    checkout = next(i for i, argv in enumerate(seen) if argv[-1] == "checkout")
+    assert sparse < checkout
+
+
+# -- T179: the diff questions' argv and parse ------------------------------------------
+
+
+def test_the_diff_questions_ask_git_for_no_renames_and_no_repository_programs(
+    seen: list[list[str]], tmp_path: Path
+) -> None:
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    reader = git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _p: "ext4")
+    reader.changed_files(dest, "a" * 40, "b" * 40, ["centurion/sql", "centurion/dbc"])
+    tail = seen[-1][seen[-1].index("diff") :]
+    assert tail == [
+        "diff",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--name-status",
+        "-z",
+        "a" * 40,
+        "b" * 40,
+        "--",
+        "centurion/sql",
+        "centurion/dbc",
+    ]
+
+
+def test_the_name_status_parse_reads_pairs_and_refuses_what_it_cannot_read() -> None:
+    assert git.parse_changed_files("M\0a b.sql\0A\0c.sql\0D\0d.sql\0") == (
+        ("M", "a b.sql"),
+        ("A", "c.sql"),
+        ("D", "d.sql"),
+    )
+    assert git.parse_changed_files("") == ()
+    assert git.parse_changed_files("M\0a.sql\0A\0") is None, "an odd count is not an answer"
+
+
+def test_the_changed_lines_parse_keeps_hunk_lines_only() -> None:
+    raw = (
+        "diff --git a/x.sql b/x.sql\n"
+        "index 1..2 100644\n"
+        "--- a/x.sql\n"
+        "+++ b/x.sql\n"
+        "@@ -1 +1 @@\n"
+        "--- a removed comment\n"
+        "+INSERT INTO `realmlist` VALUES (2);\n"
+        "\\ No newline at end of file\n"
+    )
+    assert git.parse_changed_lines(raw) == (
+        "--- a removed comment",
+        "+INSERT INTO `realmlist` VALUES (2);",
+    )
+    assert git.parse_changed_lines("Binary files a/x and b/x differ\n") == ()

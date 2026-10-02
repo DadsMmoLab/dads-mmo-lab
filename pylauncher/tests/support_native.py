@@ -415,6 +415,21 @@ class Recorder:
     diverged: set[Path] = field(default_factory=set)
     """Checkouts carrying commits upstream does not — `no_local_commits()` answering False."""
 
+    diffs: dict[tuple[Path, str, str], tuple[tuple[str, str], ...] | None] = field(
+        default_factory=dict
+    )
+    """T179: `changed_files()`'s answer per `(checkout, old, new)`: `(status, path)` pairs.
+
+    Absent is "nothing changed between them"; `None` is git that could not say.
+    Filtered by the pathspecs asked, as git filters, so a test sees the route ask
+    about the folders it reads and not the whole tree.
+    """
+
+    diff_lines: dict[tuple[Path, str, str, str], tuple[str, ...] | None] = field(
+        default_factory=dict
+    )
+    """T179: `changed_lines()`'s answer per `(checkout, old, new, path)`; absent is None."""
+
     restore_error: Exception | None = None
     """What `restore_rev()` RAISES instead of moving the head, or None to move it.
 
@@ -475,6 +490,23 @@ class Recorder:
         if not self.git_reads:
             return None
         return 0 if self.heads.get(dest) == rev else 12
+
+    def changed_files(
+        self, dest: Path, old: str, new: str, paths: Sequence[str]
+    ) -> tuple[tuple[str, str], ...] | None:
+        self.calls.append(f"changed-files:{dest.name}:{old[:7]}..{new[:7]}")
+        said = self.diffs.get((dest, old, new), ())
+        if said is None:
+            return None
+        return tuple(
+            (status, path)
+            for status, path in said
+            if any(path == spec or path.startswith(f"{spec.rstrip('/')}/") for spec in paths)
+        )
+
+    def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
+        self.calls.append(f"changed-lines:{dest.name}:{path}")
+        return self.diff_lines.get((dest, old, new, path))
 
     def restore_rev(self, dest: Path, rev: str) -> None:
         self.calls.append(f"restore:{dest.name}->{rev[:7]}")
@@ -729,6 +761,8 @@ class Recorder:
             head_version=self.head_version,
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
+            changed_files=self.changed_files,
+            changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
             build=build,

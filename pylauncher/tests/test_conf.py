@@ -940,7 +940,7 @@ def test_the_conf_mode_stays_owner_only_only_while_the_images_run_as_root() -> N
     """
     installers = resources.installers_dir()
     dockerfiles = sorted(installers.glob("*/native/Dockerfile.tmpl"))
-    compose = sorted((installers / "shared" / "cmangos").glob("*.yml.tmpl"))
+    compose = sorted(installers.glob("shared/*/*.yml.tmpl"))
     assert dockerfiles and compose, "the templates moved; this guard is now vacuous"
     offenders = []
     for path in dockerfiles:
@@ -1230,3 +1230,44 @@ def test_the_shipped_tbc_table_materialises_and_patches_from_its_own_dist_names(
         assert "{{" not in text
         for key in file_table.keys:
             assert f"{key} = " in text
+
+
+# -- T179: the TrinityCore conf table over Centurion-shaped `.dist` files ----------------
+
+
+def test_the_trinitycore_table_turns_the_updater_off_and_points_the_folders(
+    tmp_path: Path,
+) -> None:
+    """`Updates.EnableDatabases` ships 7 (worldserver.conf.dist:1470) and must read 0; `LogsDir`
+    ships "" and must name `../logs`, the folder both servers bind (Task 2's compose)."""
+    from tests.support_trinitycore import CORE_DIR, centurion_like
+
+    native = centurion_like().install.native
+    assert native is not None and native.trinitycore is not None
+    table = native.trinitycore.conf
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "worldserver.conf").write_text(
+        'DataDir = "."\nLogsDir = ""\nUpdates.EnableDatabases = 7\nmmap.enablePathFinding = 1\n'
+        'LoginDatabaseInfo = "127.0.0.1;3306;trinity;trinity;auth"\n',
+        encoding="utf-8",
+    )
+    (etc / "authserver.conf").write_text(
+        'LogsDir = ""\nLoginDatabaseInfo = "127.0.0.1;3306;trinity;trinity;auth"\n',
+        encoding="utf-8",
+    )
+    (etc / "playerbots.conf").write_text("Playerbot.Enable = 0\n", encoding="utf-8")
+    tokens = {
+        **composegen.entry_tokens(centurion_like()),
+        "DB_PASSWORD": "tc-secret",
+        "WORLD_PORT": "8085",
+    }
+    conf.apply_table(table, etc, tokens)
+    world = (etc / "worldserver.conf").read_text(encoding="utf-8")
+    assert "Updates.EnableDatabases = 0\n" in world
+    assert 'LogsDir = "../logs"\n' in world
+    assert f'DataDir = "{CORE_DIR}/data"\n' in world
+    assert "mmap.enablePathFinding = 0\n" in world
+    assert 'LoginDatabaseInfo = "centurion-db;3306;root;tc-secret;centurion_auth"\n' in world
+    assert 'LogsDir = "../logs"\n' in (etc / "authserver.conf").read_text(encoding="utf-8")
+    assert "Playerbot.Enable = 1\n" in (etc / "playerbots.conf").read_text(encoding="utf-8")

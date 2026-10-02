@@ -45,12 +45,15 @@ from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from yulon.log import get_logger
 from yulon.steam import client_executable
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import ExePatch
 
 logger = get_logger(__name__)
 
@@ -824,6 +827,23 @@ def _players_own(rel: Path) -> bool:
     return bool(rel.parts) and rel.parts[0].lower() in PLAYERS_OWN
 
 
+def _packs_installed(play_dir: Path) -> frozenset[Path]:
+    """Files a client pack installed here (T181 b/c): treated like a module's, kept as they are.
+
+    Imported here because `client_packs` imports this module.
+    """
+    from yulon import client_packs
+
+    return client_packs.pack_files(play_dir)
+
+
+def _exe_record(play_dir: Path) -> dict[str, Any] | None:
+    """The Wow.exe patch record of a ready-to-play client, or None where it has none (T181 c)."""
+    from yulon import client_packs
+
+    return client_packs.read_record(play_dir).exe
+
+
 def _kept(keep: Collection[Path]) -> Callable[[Path], bool]:
     """Whether a relative path is one of `keep`, compared the way the OS compares names."""
     names = {os.path.normcase(os.fspath(rel)) for rel in keep}
@@ -912,7 +932,7 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
     client under a name the original also has is that module's file, and
     listing it would have Refresh put the original's back over it.
     """
-    is_kept = _kept(keep)
+    is_kept = _kept({*keep, *_packs_installed(play_dir)})
     if not (original / "Data").is_dir():
         logger.warning(
             "ready-to-play client %s: its original %s has no Data folder, not compared",
@@ -932,13 +952,18 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
                 "ready-to-play client: could not compare %s", play_dir / rel, exc_info=True
             )
     mine, theirs = client_executable(play_dir), client_executable(original)
+    rec_exe = _exe_record(play_dir)
     try:
-        if (
-            not is_kept(Path(mine.name))
-            and mine.is_file()
-            and theirs.is_file()
-            and not _same_bytes(mine, theirs)
-        ):
+        if is_kept(Path(mine.name)):
+            pass
+        elif rec_exe is not None:
+            # A patched exe differs from the original's by design: it is stale only when it is
+            # no longer what Yu'lon made, and that is `refresh()`'s to re-patch, never to copy over.
+            from yulon import client_exe
+
+            if client_exe.exe_stale(play_dir, original, rec_exe):
+                found.append(Path(mine.name))
+        elif mine.is_file() and theirs.is_file() and not _same_bytes(mine, theirs):
             found.append(Path(mine.name))
     except OSError:
         logger.warning("ready-to-play client: could not compare %s", mine, exc_info=True)
@@ -996,6 +1021,9 @@ def refresh(
     link: Callable[[Path, Path], None] = os.link,
     reflink: Callable[[Path, Path], bool] = try_reflink,
     keep: Collection[Path] = (),
+    exe_patch: ExePatch | None,
+    catalog_always: Mapping[str, str],
+    opener: Any = None,
 ) -> tuple[Path, ...]:
     """Bring what `stale()` lists back in step with the original; return what was changed.
 
@@ -1012,6 +1040,11 @@ def refresh(
 
     `keep` (relative paths, a module's files) is never touched, whatever `stale()`
     answers: the filter is applied here, to its list, so no list can reach past it.
+
+    `exe_patch` has no default on purpose: `None` means the catalog entry has no exe
+    patch, so a recorded patched exe is replaced by the original's. A caller must say so.
+    `catalog_always` (the entry's Config.wtf `always`, `{}` without one) likewise has
+    none: where it sets the window, a window pick leaves `borderless` alone.
     """
     marker = read_marker(play_dir)
     if marker is None:
@@ -1037,12 +1070,33 @@ def refresh(
             "from. Nothing was changed. Put your client back there, or delete the "
             "ready-to-play client and make it again from where your client is now."
         )
-    is_kept = _kept(keep)
+    is_kept = _kept({*keep, *_packs_installed(play_dir)})
+    done: list[Path] = []
+    if exe_patch is None and _exe_record(play_dir) is not None:
+        # The catalog dropped the exe patch: the patched exe goes, the original's comes back.
+        if restore_original_exe(play_dir, original, game=game, server_dir=server_dir):
+            done.append(Path(client_executable(play_dir).name))
     todo = [rel for rel in stale(play_dir, original) if not _players_own(rel) and not is_kept(rel)]
     exe = client_executable(original)
-    done: list[Path] = []
+    rec_exe = _exe_record(play_dir)
     for rel in todo:
         archive = rel.suffix.lower() in LINKED_SUFFIXES
+        if not archive and rec_exe is not None:
+            # A patched exe is made again from stock bytes, never copied from the original.
+            if exe_patch is None:
+                continue
+            _reapply_exe(
+                play_dir,
+                original,
+                exe_patch,
+                opener,
+                rec_exe,
+                game=game,
+                server_dir=server_dir,
+                catalog_always=catalog_always,
+            )
+            done.append(rel)
+            continue
         src, dst = (original / rel if archive else exe), play_dir / rel
         tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
         try:
@@ -1089,6 +1143,93 @@ def refresh(
     if done:
         logger.info("ready-to-play client %s refreshed: %s", play_dir, ", ".join(map(str, done)))
     return tuple(done)
+
+
+def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_dir: Path) -> bool:
+    """Put the original's Wow.exe back over a patched one, and forget the patch. True if done.
+
+    For a catalog entry that no longer has an `exe_patch`. A real copy through a
+    temporary name renamed into place (never a link, never a write through the
+    old name), then the record's `exe` is cleared. An original exe that cannot be read
+    (moved, drive unplugged): False, the patched exe and the record stay, so the next
+    Play tries again.
+    """
+    from yulon import client_packs
+
+    src, dst = client_executable(original), client_executable(play_dir)
+    try:
+        readable = _original_file(src) is not None
+    except OSError:
+        readable = False  # permission denied, device not ready: the same as missing
+    if not readable:
+        logger.info("ready-to-play client: %s has no readable Wow.exe, patched exe kept", original)
+        return False
+    tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
+    try:
+        _drop_temp(tmp, src)
+        shutil.copy2(src, tmp)
+        _replace(tmp, dst)
+    except (OSError, _Stop) as exc:
+        try:
+            _drop_temp(tmp, src)
+        except OSError:
+            logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
+        raise PlayClientError(
+            f"Putting your own Wow.exe back into {play_dir} failed: {exc}. Nothing else "
+            "was changed. Fix the cause and press Play again."
+        ) from exc
+    record = client_packs.read_record(play_dir)
+    try:
+        client_packs.write_record(
+            play_dir,
+            client_packs.PackRecord(
+                record.packs, None, record.choices, record.config_seeded, record.launcher
+            ),
+            game=game,
+            server_dir=server_dir,
+        )
+    except client_packs.PackError as exc:
+        raise PlayClientError(str(exc)) from exc
+    return True
+
+
+def _reapply_exe(
+    play_dir: Path,
+    original: Path,
+    patch: ExePatch,
+    opener: Any,
+    rec_exe: dict[str, Any],
+    *,
+    game: str,
+    server_dir: Path,
+    catalog_always: Mapping[str, str],
+) -> None:
+    """Make the patched Wow.exe again from stock bytes, with the options it was made with."""
+    from yulon import client_exe, client_packs
+
+    record = client_packs.read_record(play_dir)
+    chosen = {**(rec_exe.get("options") or {}), **record.choices.get("exe_options", {})}
+    # A launcher window pick saved since the last Play decides `borderless`, as Play does.
+    chosen = client_packs.launcher_exe_options(
+        record.launcher, chosen, patch.options, catalog_always=catalog_always
+    )
+    options = client_exe.options_for(patch, chosen)
+    try:
+        kwargs = {} if opener is None else {"opener": opener}
+        made = client_exe.apply(play_dir, original, patch, options, **kwargs)
+        client_packs.write_record(
+            play_dir,
+            client_packs.PackRecord(
+                record.packs, made, record.choices, record.config_seeded, record.launcher
+            ),
+            game=game,
+            server_dir=server_dir,
+        )
+    except (client_exe.ExeError, client_packs.PackError) as exc:
+        raise PlayClientError(
+            f"Refreshing the patched Wow.exe in {play_dir} failed: {exc} Your own client was "
+            "left as it was."
+        ) from exc
 
 
 def _on_windows() -> bool:
@@ -1218,7 +1359,7 @@ def left_out_archives(
     """
     if not (original / "Data").is_dir():
         return ()
-    is_ignored = _kept(ignore)
+    is_ignored = _kept({*ignore, *_packs_installed(play_dir)})
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(original, followlinks=False):
         here = Path(dirpath)

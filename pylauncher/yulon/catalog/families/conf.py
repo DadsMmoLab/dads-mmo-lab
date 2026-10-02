@@ -305,6 +305,27 @@ def apply_table(
     return tuple(changed)
 
 
+def set_keys(path: Path, keys: Mapping[str, str]) -> bool:
+    """Set `keys` in the conf at `path` in place, by `patch()`'s rules; True if its bytes changed.
+
+    For a key changed after the install (T179: `mmap.enablePathFinding` once the
+    movement maps are finished), through the same reader, patcher and writer the
+    conf stage uses, so the file keeps its line endings, its other keys and its
+    mode, and is never half-written. Written only on change, so asking twice is
+    harmless. The values are literal: no `{{TOKEN}}` is filled.
+
+    Raises:
+        InstallerError: the file could not be read or written.
+    """
+    before = _read(path)
+    after = patch(before, ConfPatch(keys=dict(keys)), {})
+    if after == before:
+        return False
+    replace_file(path, after)
+    logger.info(f"set {', '.join(keys)} in {path}")
+    return True
+
+
 def replace_file(path: Path, text: str, *, mode: int | None = None) -> None:
     """Replace the file at `path` with `text`, atomically, keeping its mode (T94's reset).
 

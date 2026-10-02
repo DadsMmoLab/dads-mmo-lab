@@ -576,7 +576,7 @@ def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
     every tree has a level command, or none has, would make one direction of
     this assert nothing at all.
     """
-    with_control, without_control = [], []
+    with_control, without_control, withheld = [], [], []
     for entry in load_catalog().games:
         if entry.play is None:  # pragma: no cover - none shipped since 8.4d
             continue
@@ -585,6 +585,17 @@ def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
         )
         view.refresh_characters()
         view.character_list.setCurrentRow(0)
+        if "set_level" in view.services.characters_withheld:
+            # The tree has the command and it is withheld until a live server has been
+            # watched running it (Centurion, T179): neither the control nor the "this
+            # tree has none" sentence, but the one line that names what is held back.
+            assert entry.play.set_level_command is not None, entry.id
+            assert not _in_the_layout(view.set_level_button), entry.id
+            assert not _shown(view.set_level_button), entry.id
+            assert not _shown(view.set_level_absent), entry.id
+            assert _shown(view.characters_withheld_label), entry.id
+            withheld.append(entry.id)
+            continue
         has_command = entry.play.set_level_command is not None
         (with_control if has_command else without_control).append(entry.id)
 
@@ -607,6 +618,7 @@ def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
 
     assert with_control, "no tree drew the control, so one direction proved nothing"
     assert without_control, "no tree withheld it, so the other direction proved nothing"
+    assert withheld == ["wow-centurion"], withheld
 
 
 def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(

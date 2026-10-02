@@ -130,8 +130,43 @@ def validate(
             )
             return tuple(checks)
         checks.append(Check(REQUIRED_CHECK, "pass", f"{spec.required_file} is there"))
+    wrong_locale = _wrong_locale(client_dir, data, spec)
+    if wrong_locale is not None:
+        checks.append(wrong_locale)
+        return tuple(checks)
     checks.extend(_warnings(client_dir, data, spec, free_bytes))
     return tuple(checks)
+
+
+def _wrong_locale(client_dir: Path, data: Path, spec: ClientSpec) -> Check | None:
+    """The refusal for a client of none of `spec.locales`, or None (T179 Task 7).
+
+    A server whose client patches exist for some locales only (Centurion's are
+    `patch-enUS-*`) cannot use a client of another: its maps would be extracted
+    without the server's own patches and its ready-to-play client would load the
+    stock interface. Only a folder that WAS listed refuses -- one that could
+    not be is the locale rule's `unchecked`, below, never a refusal on a guess.
+    """
+    if not spec.locales:
+        return None
+    found = _locales(data)
+    if found is None:
+        return None
+    wanted = {name.casefold() for name in spec.locales}
+    if any(folder.name.casefold() in wanted for folder in found):
+        return None
+    named = " or ".join(spec.locales)
+    have = (
+        f"{client_dir} is a {', '.join(folder.name for folder in found)} client"
+        if found
+        else f"there is no locale folder holding archives under {data}"
+    )
+    return Check(
+        LOCALE_CHECK,
+        "refuse",
+        f"{have}, and this server's client patches are made for {named} only",
+        f"Pick a {named} client of this expansion, then try again.",
+    )
 
 
 def _warnings(client_dir: Path, data: Path, spec: ClientSpec, free_bytes: FreeBytes) -> list[Check]:

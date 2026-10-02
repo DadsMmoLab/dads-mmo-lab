@@ -202,6 +202,8 @@ def test_only_a_server_build_press_runs_the_recreate_stage() -> None:
     Measured here instead of argued: every shipped entry's install tuple ends
     in `up` and holds no `stage_recreate`, and only `rebuild_stages()` does.
     """
+    # T179: the trinitycore engine too -- `wow-centurion` is one of the shipped entries.
+    assert any(entry.id == "wow-centurion" for entry in load_catalog().games)
     for entry in load_catalog().games:
         engine = installer_for(entry, platform_id=lambda: "linux")
         assert isinstance(engine, native.StagedInstaller), entry.id

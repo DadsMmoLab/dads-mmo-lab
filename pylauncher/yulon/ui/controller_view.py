@@ -26,15 +26,17 @@ import os
 import re
 import shutil
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
+import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -70,6 +72,9 @@ from yulon import bot_population as botpop
 from yulon import (
     botlist,
     channel_setup,
+    client_config,
+    client_exe,
+    client_packs,
     commands,
     dbreads,
     docker,
@@ -105,10 +110,20 @@ from yulon.apply import (
     required_prompts,
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
-from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.families import azerothcore, clientdir
-from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
+from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
+from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, trinitycore
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    WorldStoppedAfterReadyError,
+    rebuild_confirmation,
+)
 from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller_wow_centurion import accounts as centurion_accounts
+from yulon.controller_wow_centurion import characters as centurion_characters
+from yulon.controller_wow_centurion import console as centurion_console
+from yulon.controller_wow_centurion import controller as centurion_controller
+from yulon.controller_wow_centurion import maintenance as centurion_maintenance
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -148,6 +163,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_GOLD,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_WARNING,
+    PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
@@ -182,6 +198,15 @@ def _realm_badge_status(status: InstallStatus) -> str:
     if status.any_running:
         return "starting"
     return "stopped"
+
+
+class _PathfindingReadBroke(RuntimeError):
+    """A pathfinding read that raised, carried back with the generation it was asked in."""
+
+    def __init__(self, generation: int, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.generation = generation
+        self.cause = cause
 
 
 class _GearReadBroke(RuntimeError):
@@ -508,6 +533,26 @@ why no later box can change it by measuring something —
 `party.InstallParty.for_entry_is_possible` is the same rule spelled in the module
 this text is about."""
 
+
+def _no_my_party(entry: CatalogEntry) -> str:
+    """What the My Party group says on a game with no route to it.
+
+    A TrinityCore server says the family-decision registry's own note
+    (`decisions.PARTY_REASON`, T179), so the registry and the tab cannot drift; the
+    shipped CMaNGOS games keep their wording from before T179 (lead ruling).
+    """
+    native_block = entry.install.native
+    if native_block is not None and native_block.family == "trinitycore":
+        return decisions.PARTY_REASON
+    return _NO_MY_PARTY.format(game=entry.name)
+
+
+NO_ADDON_MODULES = (
+    "{game} has no add-on modules: its bots and its own features are built into the "
+    "server itself, so there is nothing to add or remove here."
+)
+"""The Modules tab of a game whose server takes no add-ons (T179: Centurion)."""
+
 _RENAME_OFFLINE_LABEL = "has to be logged in to be renamed"
 """What the button says when the tree's entry refuses an offline rename.
 
@@ -521,6 +566,23 @@ server: it is the field's own definition read back ("what to say instead of
 offering the at-login rename to a character who is NOT logged in"), and it is
 the same shape the revive refusal beside it takes.
 """
+
+
+def _withheld_sentence(withheld: Mapping[str, str]) -> str:
+    """One line naming the Characters verbs this tree does not offer, and why (T179).
+
+    Grouped by reason, in the tab's own order, with the tab's own labels: the verbs
+    a person would have looked for, not their ids.
+    """
+    labels = dict(zip(play_module.VERBS, _CHARACTER_ACTIONS, strict=True))
+    reasons: dict[str, list[str]] = {}
+    for verb in play_module.VERBS:
+        if verb in withheld:
+            reasons.setdefault(withheld[verb], []).append(labels[verb])
+    return " ".join(
+        f"Not offered on this server yet: {', '.join(names)} — {reason}."
+        for reason, names in reasons.items()
+    )
 
 
 def _highest_level(entry: CatalogEntry) -> int:
@@ -699,6 +761,7 @@ MAKE_PLAY_CLIENT_LABEL = "Make a ready-to-play client…"
 PLAY_LABEL = "Play"
 REFRESH_PLAY_CLIENT_LABEL = "Refresh from your original client"
 DELETE_PLAY_CLIENT_LABEL = "Delete ready-to-play client…"
+CLIENT_OPTIONS_LABEL = "Client options…"
 PLAY_CLIENT_ADDRESS = "127.0.0.1"
 """What a ready-to-play client's realmlist names (spec §1, amended 2026-09-30).
 
@@ -708,6 +771,44 @@ public address would be wrong here: a router often does not loop a machine's
 own public address back to it. The world address comes from the realm row the
 Networking tab manages, not from this file.
 """
+
+
+def _realm_address(record: client_packs.PackRecord) -> str:
+    """The address the ready-to-play client points at: the launcher's pick, else this machine."""
+    return str(record.launcher.get("realm_address") or PLAY_CLIENT_ADDRESS)
+
+
+def _launcher_writes(record: client_packs.PackRecord) -> bool:
+    """Whether the launcher's picks (T187) put a key into, or take one out of, Config.wtf.
+
+    Asked only of an entry without `config_wtf`, whose realmlist.wtf carries
+    this computer's address (`_address_written_elsewhere`).
+    """
+    return bool(
+        client_packs.launcher_config_keys(record.launcher, catalog_always={})
+        or client_packs.launcher_config_removals(
+            record.launcher, catalog_always={}, default_address_written=True
+        )
+    )
+
+
+def _catalog_always(cfg: ConfigWtf | None) -> dict[str, str]:
+    """The Config.wtf keys the catalog sets for every player; none without a `config_wtf`."""
+    return dict(cfg.always) if cfg is not None else {}
+
+
+def _address_written_elsewhere(cfg: ConfigWtf | None) -> bool:
+    """Whether this computer's address reaches the game without a typed one in Config.wtf.
+
+    Through realmlist.wtf (no `config_wtf`, or one that keeps the locale
+    realmlists, which Play writes) or through the catalog's own `realmList`.
+    Then "Use this computer" may take a typed address's lines back out of
+    Config.wtf (T187 fix 1); otherwise they are the only address there is.
+    """
+    if cfg is None or not cfg.remove_locale_realmlists:
+        return True
+    return "realmlist" in {key.casefold() for key in cfg.always}
+
 
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
 
@@ -740,6 +841,12 @@ def left_out_sentence(names: Collection[Path]) -> str:
     )
 
 
+PLAY_PIPELINE_RUNNING = (
+    "Yu'lon is getting this server's ready-to-play client ready for Play (packs, Wow.exe, "
+    "settings). Press Cancel beside Play to stop it, then close the window. Closing now "
+    "would leave the client with some of its files installed; Play carries on from there."
+)
+
 PLAY_CLIENT_RUNNING = (
     "Yu'lon is still writing this server's ready-to-play client. Closing now would "
     "leave it half made or half refreshed. This window will close normally once it "
@@ -767,6 +874,7 @@ class PlayClientOffer:
     addons: tuple[str, ...]
     replan: Callable[[Path], play_client.BuildPlan]
     free_space: Callable[[Path], int | None]
+    client: Client | None = None
 
     @property
     def originals(self) -> tuple[Path, ...]:
@@ -780,10 +888,174 @@ class PlayClientChoice:
     target: Path
     full_copy: bool
     remove_originals: bool
+    client_choices: dict[str, Any] | None = None
 
 
 PlayClientAsker = Callable[[QWidget, PlayClientOffer], PlayClientChoice | None]
 """How the tab asks the creation dialog: a seam, so a test answers it without a modal."""
+
+
+def has_client_data(client: Client) -> bool:
+    """Whether the entry describes anything to put in a ready-to-play client (T181 b/c)."""
+    return bool(client.packs or client.exe_patch is not None or client.config_wtf is not None)
+
+
+def has_client_choices(client: Client) -> bool:
+    """Whether a player can choose anything: an optional pack or a Wow.exe option."""
+    return any(pack.optional for pack in client.packs) or bool(
+        client.exe_patch is not None and client.exe_patch.options
+    )
+
+
+class ClientOptionsBox(QWidget):
+    """The packs and Wow.exe options of a server's client, as checkboxes (T181 b/c).
+
+    Shared by the creation dialog and "Client options…", so the two cannot
+    disagree about what a choice is. `choices()` is the record's shape:
+    `{"packs": {id: bool}, "exe_options": {name: bool}}`. Only OPTIONAL packs are
+    boxes (a required pack is not a choice), and the required download size
+    (URL packs' `size_hint`; a checkout pack is already on the disk) is a line of
+    its own. An `unavailable` pack (its address answered 404) says so, and is
+    greyed unless an installed copy exists, which the player may still switch off.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        choices: Mapping[str, Any] | None = None,
+        *,
+        installed: Collection[str] = (),
+        unavailable: Collection[str] = (),
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        picked = choices or {}
+        chosen_packs = picked.get("packs") or {}
+        chosen_exe = picked.get("exe_options") or {}
+        self._client = client
+        box = QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        required = sum(
+            pack.size_hint or 0
+            for pack in client.packs
+            if not pack.optional and pack.source.kind == "url"
+        )
+        self.required_label = QLabel("", self)
+        self.required_label.setWordWrap(True)
+        self.required_label.setText(
+            f"Required download: {size_text(required)}." if required else "Nothing to download."
+        )
+        self.required_label.setVisible(bool(client.packs))
+        box.addWidget(self.required_label)
+        self.extra_label = QLabel("", self)
+        self.extra_label.setWordWrap(True)
+        box.addWidget(self.extra_label)
+        self.pack_boxes: dict[str, QCheckBox] = {}
+        self._sizes: dict[str, int] = {}
+        for pack in client.packs:
+            if not pack.optional:
+                continue
+            gone = pack.id in unavailable
+            check = QCheckBox(self._pack_text(pack, gone), self)
+            check.setChecked(bool(chosen_packs.get(pack.id, pack.default)))
+            if gone and pack.id not in installed:
+                check.setChecked(False)
+                check.setEnabled(False)
+            if pack.source.kind == "url":
+                self._sizes[pack.id] = pack.size_hint or 0
+            check.toggled.connect(self._update_extra)
+            self.pack_boxes[pack.id] = check
+            box.addWidget(check)
+        self.exe_boxes: dict[str, QCheckBox] = {}
+        if client.exe_patch is not None:
+            for name, option in client.exe_patch.options.items():
+                check = QCheckBox(option.label, self)
+                check.setChecked(bool(chosen_exe.get(name, option.default)))
+                self.exe_boxes[name] = check
+                box.addWidget(check)
+        self._update_extra()
+
+    @staticmethod
+    def _pack_text(pack: ClientPack, gone: bool) -> str:
+        text = pack.label
+        if pack.description:
+            text += f" — {pack.description}"
+        if pack.size_hint:
+            text += f" ({size_text(pack.size_hint)})"
+        if gone:
+            text += " — unavailable: the server's site no longer has it"
+        return text
+
+    def _update_extra(self) -> None:
+        extra = sum(
+            size
+            for pack_id, size in self._sizes.items()
+            if self.pack_boxes[pack_id].isChecked() and self.pack_boxes[pack_id].isEnabled()
+        )
+        self.extra_label.setText(f"The ticked packs add {size_text(extra)}." if extra else "")
+        self.extra_label.setVisible(bool(extra))
+
+    def choices(self) -> dict[str, Any]:
+        return {
+            "packs": {pack_id: check.isChecked() for pack_id, check in self.pack_boxes.items()},
+            "exe_options": {name: check.isChecked() for name, check in self.exe_boxes.items()},
+        }
+
+
+@dataclass(frozen=True)
+class ClientOptionsOffer:
+    """What "Client options…" shows: the client section, the record's choices, what is where.
+
+    `installed` are the pack ids the record says are in the ready-to-play client;
+    `unavailable` the optional packs whose address answered 404 at the last Play.
+    """
+
+    client: Client
+    choices: dict[str, Any]
+    installed: frozenset[str]
+    unavailable: frozenset[str]
+
+
+ClientOptionsAsker = Callable[[QWidget, ClientOptionsOffer], dict[str, Any] | None]
+"""How the tab asks "Client options…": a seam, so a test answers it without a modal."""
+
+
+class ClientOptionsDialog(QDialog):
+    """ "Client options…": the checkboxes, Save and Cancel. Save applies at the next Play."""
+
+    def __init__(self, offer: ClientOptionsOffer, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(CLIENT_OPTIONS_LABEL.rstrip("…"))
+        box = QVBoxLayout(self)
+        intro = QLabel(
+            "Choose what this server's ready-to-play client has. A change takes effect "
+            "at your next Play: packs are downloaded and installed, or removed, then.",
+            self,
+        )
+        intro.setWordWrap(True)
+        box.addWidget(intro)
+        self.options = ClientOptionsBox(
+            offer.client,
+            offer.choices,
+            installed=offer.installed,
+            unavailable=offer.unavailable,
+            parent=self,
+        )
+        box.addWidget(self.options)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel, self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        box.addWidget(buttons)
+
+
+def ask_client_options(parent: QWidget, offer: ClientOptionsOffer) -> dict[str, Any] | None:
+    """The real `ClientOptionsAsker`: the dialog, modal; None for Cancel."""
+    dialog = ClientOptionsDialog(offer, parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
+    return dialog.options.choices()
 
 
 def _gb_text(size: int) -> str:
@@ -808,7 +1080,7 @@ def _play_size_text(plan: play_client.BuildPlan, free: int | None) -> str:
     if plan.same_volume:
         return (
             f"{_gb_text(plan.shared_bytes)} of game files are shared with your client and "
-            f"take no extra space; its own files take {_size_text(plan.own_bytes)}{space}."
+            f"take no extra space; its own files take {size_text(plan.own_bytes)}{space}."
         )
     return (
         "This folder is on another drive than your client, so its game files cannot be "
@@ -901,6 +1173,12 @@ class PlayClientDialog(QDialog):
         self.addons_label.setWordWrap(True)
         self.addons_label.setVisible(bool(offer.addons))
         box.addWidget(self.addons_label)
+        # T181 b/c: the server's packs and Wow.exe options, when its entry has any.
+        self.client_options: ClientOptionsBox | None = None
+        client = offer.client
+        if client is not None and (client.packs or has_client_choices(client)):
+            self.client_options = ClientOptionsBox(client, parent=self)
+            box.addWidget(self.client_options)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
         )
@@ -1034,6 +1312,9 @@ class PlayClientDialog(QDialog):
             full_copy=full_copy,
             remove_originals=bool(self._offer.originals)
             and self.remove_originals_check.isChecked(),
+            client_choices=(
+                self.client_options.choices() if self.client_options is not None else None
+            ),
         )
 
 
@@ -1087,6 +1368,73 @@ class _MadePlayClient:
     target: Path
     realmlist_problem: str | None
     copies: tuple[apply_module.ClientCopy, ...]
+    choices_problem: str | None = None
+
+
+class _PackStopped(Exception):
+    """A pack could not be fetched or installed; Play asks what to do (T181 b).
+
+    `pack` is the catalog's; `reason` is the engine's own sentence (or the
+    checkout's, naming the file and commit); the question is the view's.
+    """
+
+    def __init__(self, pack: ClientPack, reason: str) -> None:
+        super().__init__(reason)
+        self.pack = pack
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class _Prepared:
+    """What the Play pipeline did, read on the GUI thread: lines to show, and 404 packs."""
+
+    notes: tuple[str, ...]
+    unavailable: frozenset[str]
+
+
+def _half_installed(entry: Mapping[str, Any]) -> bool:
+    """A record entry a `PartialInstall` left: no version, no checksum, a mix of files."""
+    return entry.get("version") is None and entry.get("sha256") is None
+
+
+def _checkout_commit(server_dir: Path, rel: str, wsl_distro: str | None = None) -> str | None:
+    """The commit the checkout holding `rel` is on, read the way the Server build section does."""
+    folder = (server_dir / rel).parent
+    for candidate in (folder, *folder.parents):
+        if (candidate / ".git").exists():
+            return tortoise_botpool.head_sha(candidate, wsl_distro=wsl_distro)
+        if candidate == server_dir:
+            break
+    return None
+
+
+def _checkout_refusal(
+    pack: ClientPack,
+    server_dir: Path,
+    wsl_distro: str | None = None,
+    again: str = PLAY_LABEL,
+) -> str | None:
+    """The refusal for a checkout pack whose file is not there (decision 3), or None.
+
+    Names the file and the commit the server is on, and points at the Server
+    build menu: a newer commit (or the tested pin) is what has the file. `again`
+    is the press to make afterwards: Play, or Make… when nothing was built.
+    """
+    rel = pack.source.path
+    if pack.source.kind != "checkout" or rel is None:
+        return None
+    path = server_dir / rel
+    if path.is_file() or any(path.parent.glob(f"{path.name}.part*")):
+        return None
+    commit = _checkout_commit(server_dir, rel, wsl_distro=wsl_distro)
+    on = f"commit {commit[:10]}" if commit else "the commit it is on"
+    return (
+        f"“{pack.label}” is needed, but this server's checkout has no {rel} at {on}. Use "
+        f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} to "
+        f"get a commit that has it (or "
+        f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)}), "
+        f"then press {again} again."
+    )
 
 
 @dataclass(frozen=True)
@@ -1129,6 +1477,81 @@ report: whether a module's SQL was applied is only knowable from what the
 importer printed (`>> Applying update <file>.sql`), so the lines are the result
 and the sink is not a nicety.
 """
+
+
+@dataclass(frozen=True)
+class Pathfinding:
+    """T179: the background movement-map job's reading and its two presses, for one install.
+
+    `status` asks Docker (`mmaps.mmaps_status`), so the Server tab asks it off the
+    GUI thread; `start`/`stop` answer with the sentence they want shown and raise
+    `mmaps.MmapsError` with the refusal. One object, so the reading and the presses
+    cannot be wired to two different servers.
+    """
+
+    status: Callable[[], mmaps.MmapsStatus]
+    start: Callable[[], str]
+    stop: Callable[[], str]
+
+
+def _pathfinding(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> Pathfinding | None:
+    """The job's seam where the entry makes its movement maps in the background.
+
+    A catalog fact (`mmaps.background_block`), so it is wired in `_assemble` for
+    every game the way the time zone is. Not for a server inside a WSL distro: the
+    job runs on THIS host's Docker (`mmaps.DockerRunner`), which would be asked about
+    a container it has never heard of.
+    """
+    if wsl_distro is not None or mmaps.background_block(entry) is None:
+        return None
+    return Pathfinding(
+        status=lambda: mmaps.mmaps_status(server_dir, entry),
+        start=lambda: mmaps.start_mmaps(server_dir, entry),
+        stop=lambda: mmaps.stop_mmaps(server_dir, entry),
+    )
+
+
+@dataclass(frozen=True)
+class WorldUpkeep:
+    """T179 Task 6: what an update left a server owing, and the two presses that pay it.
+
+    `read` is a file read (`trinitycore.needs_reextract`, `pending_world_reimport`)
+    answering the map-data sentence and the world-update sentence, either None; the
+    Server tab asks it off the GUI thread. `reextract` is "Re-extract map data"
+    (None inside a WSL distro, where the sentence then says where the press is) and
+    `finish_world` is "Finish the world update"; both stream into the log panel.
+    """
+
+    read: Callable[[], tuple[str | None, str | None]]
+    reextract: install_wiring.ReextractPress | None
+    finish_world: install_wiring.WorldReimportPress | None
+
+
+def _world_upkeep(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> WorldUpkeep | None:
+    """The seam where the entry's update route can leave map data or world tables owing.
+
+    Read off the wiring (`install_wiring.world_reimport_for_app`), which offers the
+    retry for exactly the engines that leave such a record, so the tab names no
+    family. Inside a WSL distro the map data cannot be extracted from here
+    (`reextract_for_app` answers None), and the sentence says so instead of naming
+    a press the tab does not draw.
+    """
+    finish = install_wiring.world_reimport_for_app(entry, server_dir, wsl_distro=wsl_distro)
+    reextract = install_wiring.reextract_for_app(entry, server_dir, wsl_distro=wsl_distro)
+    if finish is None and reextract is None:
+        return None
+
+    def read() -> tuple[str | None, str | None]:
+        return (
+            trinitycore.needs_reextract(server_dir, entry, press_here=reextract is not None),
+            trinitycore.pending_world_reimport(server_dir, entry, press_here=finish is not None),
+        )
+
+    return WorldUpkeep(read=read, reextract=reextract, finish_world=finish)
 
 
 @dataclass
@@ -1556,6 +1979,32 @@ class ControllerServices:
     another server also has a receipt for is never offered. Bound by `main.py`
     from the live `AppState`; `None` (every factory) offers this server's own.
     A WSL-distro install is left out: reading its folder boots its distro (T133).
+    """
+
+    pathfinding: Pathfinding | None = None
+    """T179: the Server tab's movement-map line and its Start/Stop, where the entry has the job.
+
+    `None` hides the line: every game whose movement maps come with the install.
+    """
+
+    world_upkeep: WorldUpkeep | None = None
+    """T179 Task 6: the Server tab's map-data and world-update lines and their presses.
+
+    `None` hides both: every game whose update route leaves neither owing.
+    """
+
+    characters_withheld: Mapping[str, str] = field(default_factory=dict)
+    """Characters verbs (`play.VERBS`) this tree does not offer, each with why (T179).
+
+    The tab draws none of them and says the reasons instead; `play.InstallPlay`
+    refuses a press of one as well. Empty everywhere but a tree whose verbs have
+    not all been watched to work (Centurion, until T179 Task 9).
+    """
+
+    no_modules_note: str = ""
+    """What the Modules tab says in place of an empty list, for a game with no add-ons.
+
+    Empty keeps the panel's own sentence (`modules_panel.NO_MODULES_NOTE`).
     """
 
     @classmethod
@@ -2080,6 +2529,12 @@ def _assemble(
         # T171. HERE for T99's reason: the file and the services are catalog
         # facts, and it is files only, so a server inside a WSL distro is served.
         time_zone=server_time_zone.time_zone_route(entry, server_dir),
+        # T179. HERE for T171's reason: whether a server makes its movement maps
+        # in the background is a catalog fact (`mmaps.background_block`).
+        pathfinding=_pathfinding(entry, server_dir, wsl_distro=wsl_distro),
+        # T179 Task 6. HERE for the same reason: whether an update can leave the
+        # map data or the world tables owing is the entry's engine's fact.
+        world_upkeep=_world_upkeep(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
@@ -2835,6 +3290,142 @@ def _for_vanilla(
     )
 
 
+def _for_centurion(
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """Centurion (TrinityCore, T179), through `controller_wow_centurion`.
+
+    Every seam is the entry's: the package takes the entry rather than reading
+    the shipped catalog, because `wow-centurion` lands there only in T179 Task 7.
+
+    The measured surfaces follow the entry's own blocks, as on every other tree
+    (`test_controller_packages_agree`): the dashboard, the log snapshot and Browse
+    bots ride on `observability`; Accounts on `accounts.level`; Characters on
+    `play`. What is not offered is said where it would be: My Party (the
+    registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
+    verb not yet watched to work on a live Centurion server
+    (`centurion_characters.withheld`).
+
+    No `import_probe`: the import is the install engine's marker-gated SQL plan,
+    and the Repair button's only action, `docker.repair_import()`, refuses an
+    entry with no import service. No `client_dir` use beyond the Steam entry: a
+    Centurion "module" does not exist.
+    """
+    password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    spec = entry.container_spec()
+    measured = entry.observability is not None
+    recorder = (
+        logsnap.Recorder(
+            spec,
+            server_dir,
+            game=entry.id,
+            logs_dir=platform.config_dir() / "logs",
+            wsl_distro=wsl_distro,
+        )
+        if measured
+        else None
+    )
+    watcher = (
+        dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+        if measured
+        else None
+    )
+    # SOAP on `urn:TC` at 127.0.0.1:7878, switched on in `etc/worldserver.conf`
+    # (`operations.enable_conf`): TrinityCore reads no environment.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: centurion_accounts.create_account(
+            entry, sql, name, pw, gm_level=level
+        ),
+        reset=lambda name, pw: centurion_accounts.reset_own_password(entry, sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
+    accounts_admin = (
+        useraccounts.InstallAccounts(
+            entry,
+            server_dir,
+            sql=sql,
+            channel_for_saved=channel.live_channel,
+            app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+        )
+        if entry.accounts.level is not None
+        else None
+    )
+    withheld = centurion_characters.withheld(entry)
+    characters_admin = (
+        play_module.InstallPlay(
+            entry,
+            server_dir,
+            sql=sql,
+            channel_for_saved=channel.live_channel,
+            withheld=withheld,
+        )
+        if entry.play is not None
+        else None
+    )
+    services = _assemble(
+        entry,
+        server_dir,
+        client_dir=client_dir,
+        wsl_distro=wsl_distro,
+        dashboard=watcher.tick if watcher is not None else None,
+        log_snapshot=recorder,
+        channel_setup=channel,
+        accounts=accounts_admin,
+        play=characters_admin,
+        bots=_BotBrowser(entry, server_dir, sql) if measured else None,
+        # The Uninstall of the gated families, over this engine's two extras:
+        # the movement-map job is removed before the containers and the
+        # temporary extraction client through its link-safe remover (T179
+        # Tasks 3 and 4, `purge.Uninstaller`'s own seams).
+        uninstall=purge.Uninstaller(
+            game=entry.id,
+            server_dir=server_dir,
+            spec=spec,
+            image_refs=composegen.built_image_refs(entry, server_dir),
+            logs_dir=platform.config_dir() / "logs",
+            wsl_distro=wsl_distro,
+            forget=forget_record(entry.id, server_dir),
+        ),
+        controller=centurion_controller.CenturionController(
+            entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
+        sql=sql,
+        send_console=lambda cmd: centurion_console.send_command(entry, cmd, wsl_distro=wsl_distro),
+        create_account=lambda name, pw, gm: centurion_accounts.create_account(
+            entry, sql, name, pw, gm_level=gm
+        ),
+        store=_no_manifest_store(entry),
+        applier=None,
+        backup=lambda: centurion_maintenance.backup(
+            entry, server_dir, mysql, wsl_distro=wsl_distro
+        ),
+        plan_restore=lambda path: centurion_maintenance.plan_restore(
+            entry, path, server_dir, wsl_distro=wsl_distro
+        ),
+        restore=lambda plan: centurion_maintenance.restore(
+            entry, plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
+        ),
+    )
+    return replace(
+        services,
+        characters_withheld=withheld,
+        no_modules_note=NO_ADDON_MODULES.format(game=entry.name),
+    )
+
+
 ADDONS_PARENT = "Interface"
 """The folder a client addon is written under, and the one a client must already have.
 
@@ -3177,6 +3768,9 @@ _FACTORIES: dict[str, _Factory] = {
     "wow-tbc": _for_tbc,
     "wow-vanilla": _for_vanilla,
     "wow-tortoise": _for_tortoise,
+    # T179: the `trinitycore` family's first game. Its catalog entry is T179
+    # Task 7's; until it ships, nothing in the catalog reaches this row.
+    "wow-centurion": _for_centurion,
 }
 """Catalog id → the wiring for that game. `for_entry()` is the only reader.
 
@@ -3467,6 +4061,16 @@ SERVER_BUILD_TIP = (
     "commit this app was tested against. Every entry asks first."
 )
 """The menu button's own tooltip; each entry keeps the one its button had (T89)."""
+
+PATHFINDING_START = "Make the pathfinding data"
+PATHFINDING_STOP = "Stop making the pathfinding data"
+PATHFINDING_ASKING = "Pathfinding data: asking how far it has got…"
+PATHFINDING_UNREAD = "Could not read how far the pathfinding data has got: {exc}"
+WORLD_UPKEEP_UNREAD = "Could not read whether the last update left anything to finish: {exc}"
+WORLD_UPKEEP_BUSY = (
+    "This server is busy with another action — wait for it to finish, then press this again. "
+    "Nothing was started."
+)
 
 REMOVE_IDLE = "Stop and remove containers…"
 REMOVE_ARMED = "Press again to remove"
@@ -5459,7 +6063,7 @@ everything under it.
 """
 
 
-def _size_text(size: int) -> str:
+def size_text(size: int) -> str:
     """Bytes as the dialog says them: decimal units, one decimal place.
 
     Decimal rather than binary because that is what a user's file manager and
@@ -5538,6 +6142,17 @@ class ControllerView(QWidget):
     rebuilt tab writes modules into the new folder (or back into the original).
     """
 
+    play_state_changed = Signal()
+    """Play's line, its Cancel, or a lock on the ready-to-play client changed (T187).
+
+    The client launcher window shows the same line and Cancel as the Server tab
+    and greys its settings while `play_client_busy()` says so; it reads both off
+    this view when this fires rather than keeping a second copy of either.
+    """
+
+    launcher_saved = Signal(str)
+    """A `save_launcher_picks()` write ended: `""` when saved, else what went wrong (T187)."""
+
     def __init__(
         self,
         entry: CatalogEntry,
@@ -5550,16 +6165,27 @@ class ControllerView(QWidget):
         folder_asker: FolderAsker | None = None,
         pick_client_dir: DirPicker = _qt_dir_picker,
         play_client_asker: PlayClientAsker | None = None,
+        client_options_asker: ClientOptionsAsker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.entry = entry
         self.services = services
+        # T187: the client launcher window driving this tab, while its press is
+        # the one being answered: the play-side dialogs open over it rather
+        # than over the main window (`_play_parent`). Set by the launcher before
+        # each of its presses, cleared by this tab's own.
+        self.dialog_host: QWidget | None = None
+        # T187: opens this server's launcher window; `main.py` sets it. While it
+        # is None (a tab outside the app's window) Play plays directly, as before.
+        self.open_launcher: Callable[[], None] | None = None
         # T181's creation dialog, a seam for `prompt_asker`'s reason. The real
         # one is the dialog, with this tab's own folder picker behind "Change…".
         self._play_client_asker: PlayClientAsker = play_client_asker or (
             lambda parent, offer: ask_play_client(parent, offer, self._pick_client_dir, self._jobs)
         )
+        # T181 b/c: "Client options…" for the same reason.
+        self._client_options_asker: ClientOptionsAsker = client_options_asker or ask_client_options
         # A Make…, Refresh or Delete writing the ready-to-play client: it holds
         # the close (`busy_reason()`) the way the import does.
         self._play_client_running = False
@@ -5681,6 +6307,9 @@ class ControllerView(QWidget):
         # the same folders without moving them, so its finish must not drop a
         # count of how far behind they are.
         self._rebuild_moves_sources = False
+        # T179 Task 6 fix round 3: an update press ended with its new build kept
+        # (`WorldStoppedAfterReadyError.sources_kept`), so its sources stayed moved.
+        self._update_sources_kept = False
         # T64: a `mysqldump` is running off the GUI thread, chained in front of
         # an update. `_busy` is the LOG PANEL's flag and a backup is not a job in
         # that panel, so without this nothing on the tab knows -- see
@@ -5799,8 +6428,12 @@ class ControllerView(QWidget):
         # T95: through `_tick`, so a tick never marks the poll in flight stale.
         self._timer.timeout.connect(self._tick)
         self._timer.timeout.connect(self.refresh_verdict)
+        self._timer.timeout.connect(self.refresh_pathfinding)
+        self._timer.timeout.connect(self.refresh_world_upkeep)
         if status_poll_ms > 0:
             self._timer.start(status_poll_ms)
+            self.refresh_pathfinding()
+            self.refresh_world_upkeep()
             # And once now. `QTimer.start()` fires nothing until the interval
             # has passed, so a tab opened over a running server spent its first
             # five seconds saying "status: unknown" with Start enabled
@@ -5889,6 +6522,34 @@ class ControllerView(QWidget):
         self.upstream_label = QLabel("", tab)
         self.upstream_label.setWordWrap(True)
         self.upstream_label.setVisible(False)
+        # T179: how far the background movement-map job has got, read off the
+        # GUI thread on the poll, with Start where a run could begin and Stop
+        # where one is running. Hidden for a server without the job.
+        self._pathfinding_status: mmaps.MmapsStatus | None = None
+        self._pathfinding_pending = False
+        self._pathfinding_pressing = False
+        # Bumped by every read and every press: a read whose generation is not
+        # the newest lands after the state it describes has changed, and is dropped.
+        self._pathfinding_generation = 0
+        self.pathfinding_label = QLabel("", tab)
+        self.pathfinding_label.setWordWrap(True)
+        self.pathfinding_start_button = QPushButton(PATHFINDING_START, tab)
+        self.pathfinding_start_button.clicked.connect(self.start_pathfinding)
+        self.pathfinding_stop_button = QPushButton(PATHFINDING_STOP, tab)
+        self.pathfinding_stop_button.clicked.connect(self.stop_pathfinding)
+        self._show_pathfinding()
+        # T179 Task 6: what an update left owing -- map data to extract again, world
+        # tables still to import -- read off the GUI thread (a file each), with the
+        # press that pays each. Hidden for a server whose update leaves neither.
+        self._upkeep: tuple[str | None, str | None] = (None, None)
+        self._upkeep_pending = False
+        self.world_upkeep_label = QLabel("", tab)
+        self.world_upkeep_label.setWordWrap(True)
+        self.reextract_button = QPushButton(trinitycore.REEXTRACT_BUTTON, tab)
+        self.reextract_button.clicked.connect(self.reextract_map_data)
+        self.finish_world_button = QPushButton(trinitycore.FINISH_WORLD_BUTTON, tab)
+        self.finish_world_button.clicked.connect(self.finish_world_update)
+        self._show_world_upkeep()
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
         # `client` step or the Steam entry can use, and hiding the row there
@@ -6061,6 +6722,7 @@ class ControllerView(QWidget):
         if self.play_button is not None and self.play_menu_button is not None:
             row.addWidget(self.play_button)
             row.addWidget(self.play_menu_button)
+            row.addWidget(self.play_cancel_button)
         for b in (self.refresh_button, self.remove_button, self.repair_button):
             row.addWidget(b)
         if self.steam_button is not None:
@@ -6129,6 +6791,18 @@ class ControllerView(QWidget):
         box.addWidget(self.status_label)
         box.addWidget(self.distro_label)
         box.addWidget(self.upstream_label)
+        box.addWidget(self.pathfinding_label)
+        pathfinding_row = QHBoxLayout()
+        pathfinding_row.addWidget(self.pathfinding_start_button)
+        pathfinding_row.addWidget(self.pathfinding_stop_button)
+        pathfinding_row.addStretch(1)
+        box.addLayout(pathfinding_row)
+        box.addWidget(self.world_upkeep_label)
+        upkeep_row = QHBoxLayout()
+        upkeep_row.addWidget(self.reextract_button)
+        upkeep_row.addWidget(self.finish_world_button)
+        upkeep_row.addStretch(1)
+        box.addLayout(upkeep_row)
         box.addWidget(self.client_dir_label)
         if self.set_client_dir_button is not None:
             box.addWidget(self.set_client_dir_button)
@@ -6188,7 +6862,7 @@ class ControllerView(QWidget):
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._play_client_running:
-            return PLAY_CLIENT_RUNNING
+            return PLAY_PIPELINE_RUNNING if self._play_preparing else PLAY_CLIENT_RUNNING
         if self._module_sql_running:
             return (
                 "The module importer is still running. It cannot be stopped, and closing now "
@@ -6408,6 +7082,239 @@ class ControllerView(QWidget):
         """No verdict line: the distro is not known to run, so no world to describe (T133)."""
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
+
+    # ------------------------------------------- the movement-map job (T179)
+
+    @Slot()
+    def refresh_pathfinding(self) -> None:
+        """Ask the job how far it has got, off the GUI thread (it asks Docker).
+
+        Its own in-flight guard, for `refresh_verdict()`'s reason: a reading slower
+        than the poll must not queue up behind itself.
+        """
+        seam = self.services.pathfinding
+        if seam is None or self._pathfinding_pending:
+            return
+        self._pathfinding_pending = True
+        self._pathfinding_generation += 1
+        generation, ask = self._pathfinding_generation, seam.status
+
+        def read() -> tuple[int, mmaps.MmapsStatus]:
+            try:
+                return generation, ask()
+            except Exception as exc:  # noqa: BLE001 - carried to the GUI thread with its read
+                raise _PathfindingReadBroke(generation, exc) from exc
+
+        self._run(read, self._pathfinding_read, self._pathfinding_read_failed)
+
+    @Slot(object)
+    def _pathfinding_read(self, answer: object) -> None:
+        generation, status = cast(tuple[int, object], answer)
+        if generation != self._pathfinding_generation:
+            return  # a press or a newer read came after it: it describes the past
+        self._pathfinding_pending = False
+        if isinstance(status, mmaps.MmapsStatus):
+            self._pathfinding_status = status
+        self._show_pathfinding()
+
+    @Slot(object)
+    def _pathfinding_read_failed(self, exc: object) -> None:
+        """A reading that broke says so on its own line; the presses wait for a good one."""
+        if isinstance(exc, _PathfindingReadBroke):
+            if exc.generation != self._pathfinding_generation:
+                return
+            exc = exc.cause
+        self._pathfinding_pending = False
+        logger.warning(f"could not read the pathfinding data's progress: {exc}")
+        self._pathfinding_status = None
+        self.pathfinding_label.setText(PATHFINDING_UNREAD.format(exc=exc))
+        self.pathfinding_label.setVisible(True)
+        self.pathfinding_start_button.setVisible(False)
+        self.pathfinding_stop_button.setVisible(False)
+
+    def _show_pathfinding(self) -> None:
+        """Draw the line and its two presses from the last reading.
+
+        Start is offered where a run could begin and is held while a press of this
+        tab runs (`_busy`): a Rebuild, an Update, a Return to the tested build or an
+        Uninstall each stop the job themselves (`before_rebuild`, Uninstall's own
+        seam), and a job started beside one would run against the server the press
+        is replacing or removing.
+        """
+        if not hasattr(self, "pathfinding_label"):
+            return  # `_set_busy()` before the Server tab exists
+        seam, status = self.services.pathfinding, self._pathfinding_status
+        if seam is None:
+            for widget in (
+                self.pathfinding_label,
+                self.pathfinding_start_button,
+                self.pathfinding_stop_button,
+            ):
+                widget.setVisible(False)
+            return
+        self.pathfinding_label.setVisible(True)
+        if status is None:
+            self.pathfinding_label.setText(PATHFINDING_ASKING)
+        else:
+            self.pathfinding_label.setText(status.line())
+        can_start = status is not None and status.can_start
+        can_stop = status is not None and status.can_stop
+        self.pathfinding_start_button.setVisible(can_start)
+        self.pathfinding_stop_button.setVisible(can_stop)
+        self.pathfinding_start_button.setEnabled(
+            can_start and not self._busy and not self._pathfinding_pressing
+        )
+        self.pathfinding_stop_button.setEnabled(can_stop and not self._pathfinding_pressing)
+
+    @Slot()
+    def start_pathfinding(self) -> None:
+        """Start the job: offered after a failure, or where it never started."""
+        seam = self.services.pathfinding
+        if seam is None or self._busy or self._pathfinding_pressing:
+            return
+        self._press_pathfinding(seam.start)
+
+    @Slot()
+    def stop_pathfinding(self) -> None:
+        """Stop a running job: its container and its partial output go, nothing is switched on."""
+        seam = self.services.pathfinding
+        if seam is None or self._pathfinding_pressing:
+            return
+        self._press_pathfinding(seam.stop)
+
+    def _press_pathfinding(self, press: Callable[[], str]) -> None:
+        self._pathfinding_pressing = True
+        # Any read out now describes the job as it was before this press.
+        self._pathfinding_generation += 1
+        self._pathfinding_pending = False
+        self._show_pathfinding()
+        self._run(press, self._pathfinding_pressed, self._pathfinding_press_failed)
+
+    @Slot(object)
+    def _pathfinding_pressed(self, said: object) -> None:
+        self._pathfinding_pressing = False
+        self.problem_label.setText(str(said))
+        self._pathfinding_pending = False
+        self.refresh_pathfinding()
+
+    @Slot(object)
+    def _pathfinding_press_failed(self, exc: object) -> None:
+        self._pathfinding_pressing = False
+        self.problem_label.setText(str(exc))
+        self.action_failed.emit(str(exc))
+        self._pathfinding_pending = False
+        self.refresh_pathfinding()
+
+    # ------------------------------- what an update left owing (T179 Task 6)
+
+    @Slot()
+    def refresh_world_upkeep(self) -> None:
+        """Read the map-data and world-update sentences, off the GUI thread (a file each).
+
+        Inside a WSL distro the read waits for the distro to run (T133): reading
+        the folder would boot it.
+        """
+        seam = self.services.world_upkeep
+        if seam is None or self._upkeep_pending:
+            return
+        if self._waits_for_the_distro("world upkeep", self.refresh_world_upkeep):
+            return
+        self._upkeep_pending = True
+        self._run(seam.read, self._world_upkeep_read, self._world_upkeep_read_failed)
+
+    @Slot(object)
+    def _world_upkeep_read(self, answer: object) -> None:
+        self._upkeep_pending = False
+        if isinstance(answer, tuple) and len(answer) == 2:
+            self._upkeep = cast(tuple[str | None, str | None], answer)
+        self._show_world_upkeep()
+
+    @Slot(object)
+    def _world_upkeep_read_failed(self, exc: object) -> None:
+        """A read that broke says so on its own line; the presses wait for a good one."""
+        self._upkeep_pending = False
+        logger.warning(f"could not read what the last update of {self.entry.id} left: {exc}")
+        self._upkeep = (None, None)
+        self._show_world_upkeep()
+        self.world_upkeep_label.setText(WORLD_UPKEEP_UNREAD.format(exc=exc))
+        self.world_upkeep_label.setVisible(True)
+
+    def _upkeep_held(self) -> bool:
+        """Another press of this tab runs: the log panel's job, or any `_busy` action."""
+        return self._busy or self.rebuild_log.running
+
+    def _show_world_upkeep(self) -> None:
+        """Draw the sentences and offer each press only where its sentence asks for it.
+
+        Both are held while another press runs (`_busy`, the log panel): each stops
+        or reads the server the other would be replacing.
+        """
+        if not hasattr(self, "world_upkeep_label"):
+            return  # `_set_busy()` before the Server tab exists
+        seam = self.services.world_upkeep
+        map_data, world = self._upkeep if seam is not None else (None, None)
+        said = [line for line in (world, map_data) if line]
+        self.world_upkeep_label.setText("\n\n".join(said))
+        self.world_upkeep_label.setVisible(bool(said))
+        held = hasattr(self, "rebuild_log") and self._upkeep_held()
+        can_reextract = seam is not None and seam.reextract is not None and map_data is not None
+        can_finish = seam is not None and seam.finish_world is not None and world is not None
+        self.reextract_button.setVisible(can_reextract)
+        self.reextract_button.setEnabled(can_reextract and not held)
+        self.finish_world_button.setVisible(can_finish)
+        self.finish_world_button.setEnabled(can_finish and not held)
+
+    @Slot()
+    def reextract_map_data(self) -> bool:
+        """Extract the map data again from the player's client; streams into the log panel.
+
+        The client folder is the one this tab already holds (Set the client
+        folder…), or, with none, the one the map data was last made from; the
+        press refuses with what to pick when neither is known. The engine refuses
+        while the world server may be running.
+        """
+        seam = self.services.world_upkeep
+        press = seam.reextract if seam is not None else None
+        if press is None:
+            return False
+        client_dir = self.services.client_dir
+        return self._run_upkeep_press(
+            lambda cancel: press(cancel=cancel, client_dir=client_dir),
+            title=f"Extracting {self.entry.name}'s map data again",
+        )
+
+    @Slot()
+    def finish_world_update(self) -> bool:
+        """Import the world tables the last update left waiting; streams into the log panel."""
+        seam = self.services.world_upkeep
+        press = seam.finish_world if seam is not None else None
+        if press is None:
+            return False
+        return self._run_upkeep_press(
+            lambda cancel: press(cancel=cancel),
+            title=f"Finishing {self.entry.name}'s world update",
+        )
+
+    def _run_upkeep_press(
+        self, press: Callable[[threading.Event], Iterator[str]], *, title: str
+    ) -> bool:
+        """`apply_database_corrections()`'s shape: refused while busy, run in the panel, shown."""
+        if self._upkeep_held():
+            QMessageBox.information(self, "Something else is running", WORLD_UPKEEP_BUSY)
+            return False
+        cancel = self._rebuild_cancel()
+        self._rebuild_is_compile = False
+        started = self.rebuild_log.run(
+            lambda: self._watch_for_load_wait(press(cancel)),
+            title=title,
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+        if started:
+            panel = self.rebuild_log.parentWidget()
+            if panel is not None:
+                self._tabs.setCurrentWidget(panel)
+        return started
 
     @Slot(object)
     def _verdict_failed(self, exc: object) -> None:
@@ -6911,6 +7818,10 @@ class ControllerView(QWidget):
         not have its greyed button handed back by a job ending.
         """
         self._busy = busy
+        # T179: the movement-map job's Start is held while any press runs.
+        self._show_pathfinding()
+        # T179 Task 6: so are Re-extract map data and Finish the world update.
+        self._show_world_upkeep()
         if not busy:
             # T158: whatever job just ended, a load wait's words and its button
             # are over with it. `_tuning_job_done()` and the Bots tab's handlers
@@ -7092,6 +8003,8 @@ class ControllerView(QWidget):
             # T162: back to what the dashboard's files last said, never unconditionally.
             if self.dashboard_log is not None:
                 self._set_rebuild_dashboard_button()
+        # T187: the launcher window greys its settings while this tab is busy.
+        self.play_state_changed.emit()
 
     @Slot()
     def start_server(self) -> None:
@@ -7640,7 +8553,7 @@ class ControllerView(QWidget):
             return
         keep = self.keep_characters_check.isChecked()
         lines = [
-            f"This removes {plan.server_dir} ({_size_text(plan.folder_bytes)}) and this "
+            f"This removes {plan.server_dir} ({size_text(plan.folder_bytes)}) and this "
             f"server's Docker project {plan.project}:",
             f"  containers: {', '.join(plan.containers) or 'none left'}",
             f"  images: {len(plan.images)} built for this install",
@@ -7691,7 +8604,9 @@ class ControllerView(QWidget):
         if self._play_client_running:
             # T181: Make…, Refresh or Delete is writing the ready-to-play
             # client, and the uninstall may delete that very folder.
-            self.uninstall_label.setText(PLAY_CLIENT_RUNNING)
+            self.uninstall_label.setText(
+                PLAY_PIPELINE_RUNNING if self._play_preparing else PLAY_CLIENT_RUNNING
+            )
             return
         if self._play_pending:
             # T181: a Play is on its way and still writes the realmlist into,
@@ -7967,22 +8882,47 @@ class ControllerView(QWidget):
         self._play_holds_busy = False
         self._play_pending = False
         self._play_left_out: tuple[Path, ...] = ()
+        self._play_notes: tuple[str, ...] = ()
+        self._skipped: frozenset[str] = frozenset()
+        self._play_preparing = False
+        # T181 b/c: set by the Cancel button, read by the download between reads.
+        self._play_cancel = threading.Event()
+        # Optional packs whose address answered 404 at the last Play (spec §4).
+        self._client_unavailable: frozenset[str] = frozenset()
+        # The download's lines come from the worker through a signal, never a call.
+        self._play_relay = LineRelay(self)
+        self._play_relay.line.connect(self._play_progress)
+        self.play_cancel_button = QPushButton("Cancel", tab)
+        self.play_cancel_button.setToolTip(
+            "Stop getting the client ready. A download stops between reads, so a stalled one "
+            "can take a moment; what arrived is kept for next time."
+        )
+        self.play_cancel_button.setVisible(False)
+        self.play_cancel_button.clicked.connect(self._cancel_play_download)
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
         self.play_menu.setToolTipsVisible(True)
+        self.client_options_action: QAction | None = None
+        if has_client_choices(self.entry.client):
+            self.client_options_action = self.play_menu.addAction(CLIENT_OPTIONS_LABEL)
+            self.client_options_action.setToolTip(
+                "Choose this server's optional client packs and Wow.exe options. Takes "
+                "effect at your next Play."
+            )
+            self.client_options_action.triggered.connect(self.client_options)
         self.refresh_play_client_action = self.play_menu.addAction(REFRESH_PLAY_CLIENT_LABEL)
         self.refresh_play_client_action.setToolTip(
             "Bring the game files and Wow.exe back in step with your own client after a "
             "patch. Your settings (WTF) and addons (Interface) are never touched."
         )
-        self.refresh_play_client_action.triggered.connect(self.refresh_play_client)
+        self.refresh_play_client_action.triggered.connect(self._from_tab(self.refresh_play_client))
         self.delete_play_client_action = self.play_menu.addAction(DELETE_PLAY_CLIENT_LABEL)
         self.delete_play_client_action.setToolTip(
             "Delete the ready-to-play client. Your own client keeps all its files. Asks first."
         )
-        self.delete_play_client_action.triggered.connect(self.delete_play_client)
+        self.delete_play_client_action.triggered.connect(self._from_tab(self.delete_play_client))
         self.play_label = QLabel("", tab)
         self.play_label.setWordWrap(True)
         self.play_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -8002,9 +8942,11 @@ class ControllerView(QWidget):
                 "Make a copy of your client set up for this server, without changing your "
                 "own client. Game files are shared, so it takes little extra space."
             )
-        self.play_button.clicked.connect(self.play)
+        self.play_button.clicked.connect(self._play_pressed)
         self.play_button.setVisible(has_play or self.services.client_dir is not None)
         self.play_menu_button = QPushButton("▾", tab)
+        # Its label is the arrow: the style's own indicator would be a second (T187).
+        self.play_menu_button.setObjectName(PLAY_MENU_BUTTON)
         self.play_menu_button.setToolTip("More for the ready-to-play client")
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
@@ -8012,12 +8954,57 @@ class ControllerView(QWidget):
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)
+        self.play_state_changed.emit()
+
+    def _from_tab(self, press: Callable[[], None]) -> Callable[..., None]:
+        """`press` as this tab's own button makes it: its dialogs open over the tab (T187)."""
+
+        def pressed(*_args: object) -> None:
+            self.dialog_host = None
+            press()
+
+        return pressed
+
+    @Slot()
+    def _play_pressed(self) -> None:
+        """The tab's Play opens the server's launcher window (T187); its Make… stays a Make….
+
+        Without a ready-to-play client the button reads "Make a ready-to-play
+        client…" and does exactly that. With one, PLAY is in the launcher, which
+        is where the realm address, the account and the display are chosen.
+        """
+        self.dialog_host = None
+        if self.services.play_client_dir is not None and self.open_launcher is not None:
+            self.open_launcher()
+            return
+        self.play()
+
+    def _play_parent(self) -> QWidget:
+        """Where a Make…/Play/Refresh/Delete dialog opens: the launcher that pressed, or this tab.
+
+        Only a launcher still on screen: one closed or minimized since its press
+        has nobody looking at it, and a dialog over it is a dialog nobody sees.
+        """
+        host = self.dialog_host
+        if (
+            host is not None
+            and shiboken6.isValid(host)
+            and host.isVisible()
+            and not host.isMinimized()
+        ):
+            return host
+        return self
+
+    @Slot(str)
+    def _play_progress(self, text: str) -> None:
+        """A line from the Play pipeline's worker (through `_play_relay`), on the GUI thread."""
+        self._say_play(text)
 
     def _play_refused(self, message: str) -> None:
         """A Play-side refusal, on the label, in the log and in front of the player."""
         self._say_play(message)
         self.action_failed.emit(message)
-        QMessageBox.warning(self, self.entry.name, message)
+        QMessageBox.warning(self._play_parent(), self.entry.name, message)
 
     def _play_client_refusal(self) -> str | None:
         """Why Make…, Play, Refresh or Delete may not start now, or None.
@@ -8047,7 +9034,7 @@ class ControllerView(QWidget):
         """
         if not self._play_pending:
             return False
-        QMessageBox.information(self, "Something else is running", PLAY_PENDING)
+        QMessageBox.information(self._play_parent(), "Something else is running", PLAY_PENDING)
         return True
 
     def _play_client_blocked(self) -> bool:
@@ -8055,7 +9042,7 @@ class ControllerView(QWidget):
         refusal = self._play_client_refusal()
         if refusal is None:
             return False
-        QMessageBox.information(self, "Something else is running", refusal)
+        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
         return True
 
     def _hold_busy(self) -> None:
@@ -8065,9 +9052,11 @@ class ControllerView(QWidget):
     def _release_play_client(self) -> None:
         """End a Make…, Refresh or Delete: give back the lock only if this took it."""
         self._play_client_running = False
+        self._play_preparing = False
         if self._play_holds_busy:
             self._play_holds_busy = False
             self._set_busy(False)
+        self.play_state_changed.emit()
 
     def _is_this_servers(self, marker: play_client.Marker | None) -> bool:
         return (
@@ -8110,7 +9099,7 @@ class ControllerView(QWidget):
         said = self._play_client_gone_text(play)
         self._say_play(said)
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "The ready-to-play client is gone",
             f"{said}\n\nMake a ready-to-play client for this server again?",
             "Make it again",
@@ -8130,7 +9119,7 @@ class ControllerView(QWidget):
         original = self.services.client_dir
         if original is None:
             QMessageBox.information(
-                self,
+                self._play_parent(),
                 MAKE_PLAY_CLIENT_LABEL,
                 "A ready-to-play client is made from your own client folder, and none is "
                 "set for this server. Press “Set client folder…” on this tab "
@@ -8200,6 +9189,18 @@ class ControllerView(QWidget):
         would break that server's client, and the hash cannot tell them apart.
         """
         server_dir = self.services.controller.server_dir
+        # Packs are fetched at Play, but a required one the checkout lacks cannot be
+        # fetched later either: refuse before anything is built (existence only).
+        for pack in self.entry.client.packs:
+            if not pack.optional:
+                missing = _checkout_refusal(
+                    pack,
+                    server_dir,
+                    wsl_distro=self.services.controller.wsl_distro,
+                    again=f"“{MAKE_PLAY_CLIENT_LABEL}”",
+                )
+                if missing is not None:
+                    raise play_client.PlayClientError(missing)
         if self._is_this_servers(play_client.read_marker(target)):
             return target
         build = self._replan(original, target)
@@ -8224,6 +9225,7 @@ class ControllerView(QWidget):
             addons=addons,
             replan=lambda chosen: self._replan(original, chosen),
             free_space=lambda chosen: _free_bytes(chosen.parent),
+            client=self.entry.client if has_client_data(self.entry.client) else None,
         )
 
     def _make_refused_now(self) -> bool:
@@ -8261,7 +9263,7 @@ class ControllerView(QWidget):
             self._release_play_client()
             return
         offer = result
-        choice = self._play_client_asker(self, offer)
+        choice = self._play_client_asker(self._play_parent(), offer)
         if choice is None:
             self._release_play_client()
             self._say_play("No ready-to-play client was made.")
@@ -8298,7 +9300,23 @@ class ControllerView(QWidget):
             )
         except OSError as exc:
             problem = str(exc)
-        return _MadePlayClient(choice.target, problem, copies)
+        saved: str | None = None
+        if choice.client_choices is not None:
+            try:
+                client_packs.write_record(
+                    choice.target,
+                    client_packs.PackRecord(
+                        {},
+                        None,
+                        choice.client_choices,
+                        launcher=client_packs.read_record(choice.target).launcher,
+                    ),
+                    game=self.entry.id,
+                    server_dir=self.services.controller.server_dir,
+                )
+            except client_packs.PackError as exc:
+                saved = str(exc)
+        return _MadePlayClient(choice.target, problem, copies, saved)
 
     @Slot(object)
     def _play_client_made(self, result: object) -> None:
@@ -8346,15 +9364,23 @@ class ControllerView(QWidget):
         said.append(f"The ticked files could not be removed from your own client: {exc}.")
         self._finish_make(made.target, said)
 
-    @staticmethod
     def _made_sentences(
-        made: _MadePlayClient, removed: tuple[str, ...], left: tuple[str, ...]
+        self, made: _MadePlayClient, removed: tuple[str, ...], left: tuple[str, ...]
     ) -> list[str]:
         said = [f"The ready-to-play client is at {made.target}. Press Play to start it."]
         if made.realmlist_problem is not None:
             said.append(
                 f"Its realmlist could not be written yet ({made.realmlist_problem}); "
                 "Play writes it again first."
+            )
+        if made.choices_problem is not None:
+            again = (
+                f"choose them again under “{CLIENT_OPTIONS_LABEL}” in the ▾ menu."
+                if has_client_choices(self.entry.client)
+                else "the defaults will be used."
+            )
+            said.append(
+                f"Your client choices could not be saved yet ({made.choices_problem}); {again}"
             )
         if removed:
             said.append("Removed from your own client: " + "; ".join(removed) + ".")
@@ -8384,7 +9410,7 @@ class ControllerView(QWidget):
     def _finish_make(self, target: Path, said: list[str]) -> None:
         """Say what Make… did, and have the tab rebuilt over the new folder."""
         self._release_play_client()
-        QMessageBox.information(self, "Ready-to-play client", "\n\n".join(said))
+        QMessageBox.information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
             self.entry.id, self.services.controller.server_dir, target
@@ -8433,8 +9459,10 @@ class ControllerView(QWidget):
         """The Play under way is over, started or not."""
         self._play_pending = False
         self._play_left_out = ()
+        self._play_notes = ()
         if said is not None:
             self._say_play(said)
+        self.play_state_changed.emit()
 
     def _play_still_usable(self) -> play_client.Marker | None:
         """`_usable_play_client()` part-way through a Play: a gone folder ends it first."""
@@ -8458,7 +9486,7 @@ class ControllerView(QWidget):
         if refusal is None:
             return False
         self._play_end("Nothing was started.")
-        QMessageBox.information(self, "Something else is running", refusal)
+        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
         return True
 
     @Slot(object)
@@ -8469,7 +9497,7 @@ class ControllerView(QWidget):
             self._play_check_stale()
             return
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "Start the server?",
             "The server is stopped. Start it first?",
             "Start and play",
@@ -8511,7 +9539,7 @@ class ControllerView(QWidget):
             return
         left = f"\n\n{left_out_sentence(compared.left_out)}" if compared.left_out else ""
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "Your client was patched",
             f"These files of your own client changed since the ready-to-play client was "
             f"made: {', '.join(names)}. Refresh it from your original client first? "
@@ -8528,11 +9556,412 @@ class ControllerView(QWidget):
             self._play_end("Nothing was started.")
 
     def _play_launch(self) -> None:
+        """The last step before the game: the client's packs, exe and config, then the launch."""
+        if self.services.play_client_dir is None or self._play_still_usable() is None:
+            return
+        play = self.services.play_client_dir
+        recorded = client_packs.read_record(play) if play is not None else None
+        # Also when the catalog no longer has client data but the record still lists
+        # packs or a patched exe: step 1 takes them out. And for the launcher's picks
+        # alone (T187): on an entry with no client data -- every shipped game today --
+        # its display and account choices are Config.wtf keys only the pipeline writes.
+        if has_client_data(self.entry.client) or (
+            recorded is not None
+            and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
+        ):
+            self._skipped = frozenset()
+            self._play_prepare()
+            return
+        self._play_start_game()
+
+    def _play_start_game(self) -> None:
         play = self.services.play_client_dir
         if play is None or self._play_still_usable() is None:
             return
         self._say_play("Starting World of Warcraft…")
         self._run(lambda: self._launch(play), self._play_launched, self._play_failed)
+
+    # -- the client's packs, Wow.exe and Config.wtf (T181 b/c) -------------
+
+    def _show_cancel(self, shown: bool) -> None:
+        self.play_cancel_button.setText("Cancel")
+        self.play_cancel_button.setEnabled(True)
+        self.play_cancel_button.setVisible(shown)
+        self.play_state_changed.emit()
+
+    @Slot()
+    def _cancel_play_download(self) -> None:
+        """Stop the whole preparation; it is checked between steps, so a stalled read waits."""
+        self._play_cancel.set()
+        self.play_cancel_button.setEnabled(False)
+        self.play_cancel_button.setText("Cancelling…")
+        self.play_state_changed.emit()
+
+    def _play_prepare(self) -> None:
+        """Run the pipeline on the worker; `_skipped` are optional packs played without.
+
+        Holds the lock the way Refresh does: it writes into the ready-to-play
+        client, so a module install, Make… or a Server action must wait, and so
+        must the close. Not the Play's own wait (`_play_pending` stays set).
+        """
+        marker = self._play_still_usable()
+        play = self.services.play_client_dir
+        if marker is None or play is None:
+            return
+        if self._play_stopped_by_another_action():
+            return
+        self._play_cancel.clear()
+        self._play_client_running = True
+        self._play_preparing = True
+        self._hold_busy()
+        self._show_cancel(True)
+        self._say_play("Getting the ready-to-play client ready…")
+        source = marker.source_client_dir
+        skip = self._skipped
+        self._run(
+            lambda: self._prepare_client(play, source, skip),
+            self._play_prepared,
+            self._play_prepare_failed,
+        )
+
+    def _prepare_client(self, play: Path, source: Path, skip: frozenset[str]) -> _Prepared:
+        """Off the GUI thread: packs, then the exe, then Config.wtf (spec §2, §3).
+
+        Every record write happens as each step finishes, so a Cancel or a
+        failure part-way keeps what was done and the next Play carries on.
+        Talks to the GUI only through `_play_relay`.
+        """
+        client = self.entry.client
+        game = self.entry.id
+        server_dir = self.services.controller.server_dir
+        say = self._play_relay.emit_line
+        cancelled = self._play_cancel.is_set
+        record = client_packs.read_record(play)
+        packs = dict(record.packs)
+        exe = record.exe
+        seeded = record.config_seeded
+        choices = record.choices
+        notes: list[str] = []
+        unavailable: set[str] = set()
+
+        def save() -> None:
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(packs, exe, choices, seeded, record.launcher),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        def check_cancel() -> None:
+            if cancelled():
+                raise client_packs.Cancelled("Cancelled. Nothing was started.")
+
+        wanted = {pack.id for pack in client_packs.wanted(client, record.choices)}
+        # "Play without" a pack whose update was cut half way: its files are a mix of old
+        # and new, so they go (and the entry) before the game starts.
+        for pack_id in sorted(skip):
+            half = packs.get(pack_id)
+            if half is not None and _half_installed(half):
+                gone = next((p for p in client.packs if p.id == pack_id), None)
+                say(f"Removing the half-installed {client_packs.pack_label(gone)}…")
+                left = client_packs.remove(
+                    play, half, gone, game=game, server_dir=server_dir, when_off=False
+                )
+                files = half.get("files")
+                client_packs.restore_asides(
+                    play,
+                    list(files) if isinstance(files, dict) else [],
+                    game=game,
+                    server_dir=server_dir,
+                )
+                del packs[pack_id]
+                save()
+                notes += self._removal_notes(play, source, half, gone, left)
+        in_catalog = {pack.id: pack for pack in client.packs}
+        # 1a. Switched off, or gone from the catalog: its recorded files go.
+        for pack_id in list(packs):
+            if pack_id in wanted:
+                continue
+            check_cancel()
+            gone = in_catalog.get(pack_id)
+            say(f"Removing {client_packs.pack_label(gone)}…")
+            entry = packs[pack_id]
+            left = client_packs.remove(play, entry, gone, game=game, server_dir=server_dir)
+            del packs[pack_id]
+            save()
+            notes += self._removal_notes(play, source, entry, gone, left)
+        # 1b. Wanted: fetch, and install when what is there differs.
+        for pack in client.packs:
+            if pack.id not in wanted or pack.id in skip:
+                continue
+            check_cancel()
+            say(f"Getting {pack.label}…")
+            try:
+                if pack.source.kind == "checkout":
+                    fetched = client_packs.fetch_checkout(pack, server_dir)
+                else:
+                    fetched = client_packs.fetch_url(
+                        pack,
+                        entry_id=game,
+                        allowed_hosts=client.hosts(),
+                        progress=self._download_progress(pack),
+                        cancelled=cancelled,
+                    )
+            except client_packs.Cancelled:
+                raise
+            except client_packs.PackUnavailable as exc:
+                if pack.optional:
+                    unavailable.add(pack.id)
+                    notes.append(
+                        f"{pack.label} is unavailable: the server's site no longer has it. "
+                        "What is installed stays until you switch it off."
+                    )
+                    continue
+                raise _PackStopped(pack, str(exc)) from exc
+            except client_packs.PackError as exc:
+                raise _PackStopped(
+                    pack,
+                    _checkout_refusal(
+                        pack, server_dir, wsl_distro=self.services.controller.wsl_distro
+                    )
+                    or str(exc),
+                ) from exc
+            have = packs.get(pack.id)
+            if (
+                have is not None
+                and have.get("sha256") == fetched.sha256
+                and have.get("version") == fetched.version
+            ):
+                continue
+            say(f"Installing {pack.label}…")
+            try:
+                done = client_packs.install(
+                    play, pack, fetched, game=game, server_dir=server_dir, previous=have
+                )
+            except client_packs.PartialInstall as exc:
+                packs[pack.id] = exc.entry
+                save()
+                raise _PackStopped(pack, str(exc)) from exc
+            except client_packs.PackError as exc:
+                raise _PackStopped(pack, str(exc)) from exc
+            packs[pack.id] = done
+            save()
+            left_behind = done.get("left_behind")
+            if left_behind:
+                notes.append(
+                    f"{pack.label}: left alone because you changed them: "
+                    + ", ".join(left_behind)
+                    + "."
+                )
+        # 2. Wow.exe.
+        if client.exe_patch is not None:
+            check_cancel()
+            say("Checking Wow.exe…")
+            # A window pick decides `borderless`, and is saved as that exe option (T187).
+            picked_exe = client_packs.launcher_exe_options(
+                record.launcher,
+                record.choices["exe_options"],
+                client.exe_patch.options,
+                catalog_always=_catalog_always(client.config_wtf),
+            )
+            choices = {**record.choices, "exe_options": picked_exe}
+            options = client_exe.options_for(client.exe_patch, picked_exe)
+            exe = client_exe.apply(play, source, client.exe_patch, options)
+            try:
+                save()
+            except client_packs.PackError as exc:
+                raise client_exe.ExeError(
+                    f"Wow.exe was patched, but the note of it could not be saved ({exc}). "
+                    "Press Play again: it is checked and noted then. If Play offers to refresh "
+                    "Wow.exe first, say yes."
+                ) from exc
+        elif exe is not None:
+            # The catalog dropped the patch: the original's Wow.exe comes back.
+            say("Putting your own Wow.exe back…")
+            if play_client.restore_original_exe(play, source, game=game, server_dir=server_dir):
+                exe = None
+        # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
+        cfg = client.config_wtf
+        catalog_always = _catalog_always(cfg)
+        written_elsewhere = _address_written_elsewhere(cfg)
+        picked = client_packs.launcher_config_keys(
+            record.launcher,
+            catalog_always=catalog_always,
+            # Config.wtf the only channel: "Use this computer" writes this computer there.
+            default_address=None if written_elsewhere else PLAY_CLIENT_ADDRESS,
+        )
+        removed = client_packs.launcher_config_removals(
+            record.launcher,
+            catalog_always=catalog_always,
+            default_address_written=written_elsewhere,
+        )
+        if cfg is None and (picked or removed):
+            # An entry without `config_wtf` still gets the launcher's picks (T187); its
+            # realmlist stays `_launch`'s, and no seed was written, so none is used up.
+            check_cancel()
+            say("Setting up Config.wtf…")
+            client_config.merge_config_wtf(
+                play, ConfigWtf(always=picked), first_run=False, remove=removed
+            )
+        elif cfg is not None:
+            check_cancel()
+            say("Setting up Config.wtf…")
+            if cfg.remove_locale_realmlists:
+                client_config.remove_locale_realmlists(play)
+            else:
+                try:
+                    networking.write_ready_to_play_realmlists(
+                        play, _realm_address(record), client.realmlist_file
+                    )
+                except OSError as exc:
+                    raise play_client.PlayClientError(
+                        f"The realmlist in {play} could not be written ({exc}), so nothing was "
+                        "started. Check that you can write to that folder, then press Play again."
+                    ) from exc
+            # The catalog's `always` is the server's own: `launcher_config_keys` dropped every
+            # pick it sets except a typed address's `realmList`/`patchList`, which win (lead
+            # ruling). A pick, or a removal, also takes a seed's place.
+            taken = {key.casefold() for key in (*picked, *removed)}
+            cfg = cfg.model_copy(
+                update={
+                    "always": {
+                        **{k: v for k, v in cfg.always.items() if k.casefold() not in taken},
+                        **picked,
+                    },
+                    "seed": {k: v for k, v in cfg.seed.items() if k.casefold() not in taken},
+                }
+            )
+            client_config.merge_config_wtf(
+                play, cfg, first_run=not record.config_seeded, remove=removed
+            )
+            seeded = True
+            save()
+        return _Prepared(tuple(notes), frozenset(unavailable))
+
+    def _download_progress(self, pack: ClientPack) -> Callable[[int, int], None]:
+        """A progress callback for `pack`'s download: at most five lines a second."""
+        say = self._play_relay.emit_line
+        last = [-1, 0.0]  # percent, time
+
+        def report(done: int, total: int) -> None:
+            percent = int(done * 100 / total) if total else 0
+            now = time.monotonic()
+            if percent == last[0] or (percent < 100 and last[0] >= 0 and now - last[1] < 0.2):
+                return
+            last[0], last[1] = percent, now
+            of = f" of {size_text(total)}" if total else ""
+            say(f"Downloading {pack.label}… {percent}% ({size_text(done)}{of})")
+
+        return report
+
+    @staticmethod
+    def _removal_notes(
+        play: Path,
+        source: Path,
+        entry: Mapping[str, Any],
+        pack: ClientPack | None,
+        left: Collection[str],
+    ) -> list[str]:
+        """What to tell the player about a pack taken out (decision 4 and the edited files)."""
+        label = client_packs.pack_label(pack)
+        notes: list[str] = []
+        if left:
+            notes.append(
+                f"{label}: left in place because you changed them: " + ", ".join(left) + "."
+            )
+        files = entry.get("files")
+        candidates = [
+            *(files if isinstance(files, dict) else ()),
+            *(pack.remove_when_off if pack else ()),
+        ]
+        replaced = sorted(
+            rel
+            for rel in dict.fromkeys(candidates)
+            if rel not in left and not (play / rel).exists() and (source / rel).exists()
+        )
+        if replaced:
+            notes.append(
+                f"{label} had replaced {', '.join(replaced)} from your own client, which the "
+                "ready-to-play client now lacks. To bring it back, press "
+                f"“{DELETE_PLAY_CLIENT_LABEL}” and then “{MAKE_PLAY_CLIENT_LABEL}” again."
+            )
+        return notes
+
+    def _torn_down_during_play(self) -> bool:
+        """The tab was dropped while the pipeline ran: no dialog, no launch, locks given back."""
+        if not getattr(self, "_closed", False):
+            return False
+        self._release_play_client()
+        self._play_end()
+        return True
+
+    @Slot(object)
+    def _play_prepared(self, result: object) -> None:
+        if self._torn_down_during_play():
+            return
+        self._release_play_client()
+        self._show_cancel(False)
+        if self._play_cancel.is_set():
+            # Pressed after the last check: the player asked to stop, so nothing starts.
+            self._play_end("Cancelled. Nothing was started.")
+            return
+        if isinstance(result, _Prepared):
+            self._client_unavailable = result.unavailable
+            self._play_notes = result.notes
+        self._play_start_game()
+
+    @Slot(object)
+    def _play_prepare_failed(self, exc: object) -> None:
+        if self._torn_down_during_play():
+            return
+        self._release_play_client()
+        self._show_cancel(False)
+        if isinstance(exc, _PackStopped):
+            self._play_pack_stopped(exc)
+        elif isinstance(exc, client_packs.Cancelled):
+            self._play_end("Cancelled. Nothing was started.")
+        elif isinstance(
+            exc, (client_packs.PackError, client_exe.ExeError, play_client.PlayClientError)
+        ):
+            self._play_end()
+            self._play_refused(str(exc))
+        else:
+            self._play_failed(exc)
+
+    def _play_pack_stopped(self, stopped: _PackStopped) -> None:
+        """A pack failed: a required one blocks Play (Retry); an optional one may be left out."""
+        pack = stopped.pack
+        self.action_failed.emit(f"{self.entry.id}: {stopped.reason}")
+        self._say_play(stopped.reason)
+        if pack.optional:
+            play = self.services.play_client_dir
+            held = client_packs.read_record(play).packs.get(pack.id) if play is not None else None
+            have = held is not None and not _half_installed(held)
+            if have:
+                text = (
+                    f"{stopped.reason}\n\nPlay with the version of “{pack.label}” you have "
+                    "this time, or try again?"
+                )
+                skip: str | None = "Play with the version you have"
+            else:
+                text = f"{stopped.reason}\n\nPlay without “{pack.label}” this time, or try again?"
+                skip = f"Play without {pack.label}"
+        else:
+            text = (
+                f"“{pack.label}” is needed to play on this server, so nothing was started: "
+                f"{stopped.reason}\n\nTry again?"
+            )
+            skip = None
+        answer = _ask_with(
+            self._play_parent(), f"{pack.label} could not be set up", text, "Retry", skip
+        )
+        if answer == "yes":
+            self._play_prepare()
+        elif answer == "save":
+            self._skipped = self._skipped | {pack.id}
+            self._play_prepare()
+        else:
+            self._play_end("Nothing was started.")
 
     def _launch(self, play: Path) -> None:
         """Off the GUI thread: the realmlist again, then the game, detached.
@@ -8541,15 +9970,20 @@ class ControllerView(QWidget):
         `OSError` from starting the process (a Proton that is not executable, a
         Wine that went away) comes through `launch()` raw and is worded here.
         """
-        try:
-            networking.write_ready_to_play_realmlists(
-                play, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
-            )
-        except OSError as exc:
-            raise play_launch.LaunchRefusal(
-                f"The realmlist in {play} could not be written ({exc}), so nothing was "
-                "started. Check that you can write to that folder, then press Play again."
-            ) from exc
+        if self.entry.client.config_wtf is None:
+            # An entry with a `config_wtf` had its Config.wtf merged (and the locale
+            # realmlists removed) by the pipeline; every other entry is step (a)'s.
+            try:
+                networking.write_ready_to_play_realmlists(
+                    play,
+                    _realm_address(client_packs.read_record(play)),
+                    self.entry.client.realmlist_file,
+                )
+            except OSError as exc:
+                raise play_launch.LaunchRefusal(
+                    f"The realmlist in {play} could not be written ({exc}), so nothing was "
+                    "started. Check that you can write to that folder, then press Play again."
+                ) from exc
         spec = play_launch.launch_spec(
             play,
             game=self.entry.id,
@@ -8573,6 +10007,8 @@ class ControllerView(QWidget):
         said = "World of Warcraft is starting. Closing Yu'lon does not close it."
         if self._play_left_out:
             said += " " + left_out_sentence(self._play_left_out)
+        if self._play_notes:
+            said += " " + " ".join(self._play_notes)
         self._play_end(said)
 
     @Slot(object)
@@ -8586,6 +10022,164 @@ class ControllerView(QWidget):
                 "▾ menu beside Play first."
             )
         self._play_refused(str(exc))
+
+    # -- Client options… ---------------------------------------------------
+
+    @Slot()
+    def client_options(self) -> None:
+        """Choose the optional packs and Wow.exe options; the next Play applies them (T181 c)."""
+        play = self.services.play_client_dir
+        if self.services.set_play_client_dir is None or play is None:
+            return
+        if self._play_waits_for_play() or self._play_client_blocked():
+            return
+        if self._usable_play_client() is None:
+            return
+        record = client_packs.read_record(play)
+        offer = ClientOptionsOffer(
+            client=self.entry.client,
+            choices=record.choices,
+            installed=frozenset(record.packs),
+            unavailable=self._client_unavailable,
+        )
+        chosen = self._client_options_asker(self, offer)
+        if chosen is None:
+            return
+        # Again: the dialog is modal, and a job may have started behind it.
+        if self._play_waits_for_play() or self._play_client_blocked():
+            return
+        game, server_dir = self.entry.id, self.services.controller.server_dir
+        self._play_client_running = True
+        self._hold_busy()
+        self._say_play("Saving your client choices…")
+
+        def save() -> None:
+            current = client_packs.read_record(play)
+            launcher = current.launcher
+            borderless = chosen.get("exe_options", {}).get("borderless")
+            if isinstance(borderless, bool):
+                # T187: one source -- the launcher's window pick follows this box,
+                # or the next Play would put back what the player just changed.
+                launcher = client_packs.launcher_following_borderless(launcher, borderless)
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(
+                    current.packs, current.exe, chosen, current.config_seeded, launcher
+                ),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        self._run(save, self._client_options_saved, self._play_client_job_failed)
+
+    @Slot(object)
+    def _client_options_saved(self, _result: object) -> None:
+        self._release_play_client()
+        self._say_play("Your client choices are saved. They take effect at your next Play.")
+
+    # -- the client launcher window's hooks (T187) --------------------------
+
+    @property
+    def play_unavailable(self) -> frozenset[str]:
+        """The optional packs whose address answered 404 at the last Play (spec §4)."""
+        return self._client_unavailable
+
+    def play_client_busy(self) -> str | None:
+        """Why the ready-to-play client's record may not be written now, or None (T187).
+
+        A Play on its way (it reads the record and writes it back as each step
+        ends), any Server action, and Make…/Refresh/Delete/Client options and a
+        launcher save (`_play_client_running`). A module job is not here: it
+        never writes the record, and the launcher's saves have no reason to wait
+        for one -- its PLAY, Refresh and Delete still go through
+        `_play_client_refusal()`, which does ask about it.
+        """
+        if self._play_pending:
+            return PLAY_PENDING
+        if self._busy or self._play_client_running:
+            return (
+                "This server is busy with another action — wait for it to finish, then "
+                "change this again. Nothing was changed."
+            )
+        return None
+
+    def save_launcher_picks(
+        self,
+        *,
+        launcher: Mapping[str, Any] | None = None,
+        drop: Collection[str] = (),
+        packs: Mapping[str, bool] | None = None,
+        exe_options: Mapping[str, bool] | None = None,
+    ) -> str | None:
+        """Save the launcher window's choices into the record, off the GUI thread (T187).
+
+        `launcher` keys replace the saved ones and `drop` removes keys (a realm
+        address put back to this computer); `packs` and `exe_options` are merged
+        into the choices "Client options…" saves, which are the same record. A
+        window pick also sets the `borderless` exe option where the catalog's
+        patch has one (`launcher_exe_options`), so the two never disagree.
+
+        Read, changed and written in one job under `_play_client_running`, the
+        lock Client options takes: Play's pipeline reads the record and writes it
+        back, and a save landing between the two would be lost. Answers the
+        refusal (nothing is started) or None; the outcome comes through
+        `launcher_saved`. Nothing is downloaded or written into the client here:
+        the next Play applies it.
+        """
+        play = self.services.play_client_dir
+        if self.services.set_play_client_dir is None or play is None:
+            return (
+                "This server has no ready-to-play client to save that in. Make one first. "
+                "Nothing was changed."
+            )
+        refusal = self.play_client_busy()
+        if refusal is not None:
+            return refusal
+        game, server_dir = self.entry.id, self.services.controller.server_dir
+        patch = self.entry.client.exe_patch
+        always = _catalog_always(self.entry.client.config_wtf)
+        changes = dict(launcher or {})
+        gone = frozenset(drop)
+
+        def save() -> None:
+            current = client_packs.read_record(play)
+            picks = {k: v for k, v in current.launcher.items() if k not in gone}
+            picks.update(changes)
+            chosen_packs = {**current.choices["packs"], **(packs or {})}
+            chosen_exe = {**current.choices["exe_options"], **(exe_options or {})}
+            if patch is not None:
+                chosen_exe = client_packs.launcher_exe_options(
+                    picks, chosen_exe, patch.options, catalog_always=always
+                )
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(
+                    current.packs,
+                    current.exe,
+                    {"packs": chosen_packs, "exe_options": chosen_exe},
+                    current.config_seeded,
+                    picks,
+                ),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        self._play_client_running = True
+        self.play_state_changed.emit()
+        self._run(save, self._launcher_picks_saved, self._launcher_picks_failed)
+        return None
+
+    @Slot(object)
+    def _launcher_picks_saved(self, _result: object) -> None:
+        self._release_play_client()
+        self.launcher_saved.emit("")
+
+    @Slot(object)
+    def _launcher_picks_failed(self, exc: object) -> None:
+        self._release_play_client()
+        if not isinstance(exc, client_packs.PackError):
+            logger.warning(f"{self.entry.id}: saving the launcher's choices: {exc!r}")
+        self.launcher_saved.emit(str(exc) or "Your choice could not be saved.")
 
     # -- Refresh and Delete ------------------------------------------------
 
@@ -8623,6 +10217,8 @@ class ControllerView(QWidget):
                 game=self.entry.id,
                 server_dir=server_dir,
                 keep=module_kept_files(server_dir, play, client_dir),
+                exe_patch=self.entry.client.exe_patch,
+                catalog_always=_catalog_always(self.entry.client.config_wtf),
             )
             return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
 
@@ -8665,6 +10261,7 @@ class ControllerView(QWidget):
             "since the ready-to-play client was made live only in it, so your own client "
             "lacks them until those modules are reinstalled or updated. Yu'lon can make a "
             "ready-to-play client again at any time.",
+            self._play_parent(),
         ):
             return
         # Again: a module job may have started while the question was open.
@@ -9198,9 +10795,34 @@ class ControllerView(QWidget):
         self.set_level_absent = QLabel("", actions)
         self.set_level_absent.setWordWrap(True)
         self.set_level_absent.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow("Teleport to", self.teleport_where)
-        form.addRow(self.teleport_button)
-        if self._set_level_command() is not None:
+        # T179: a verb this tree withholds is neither drawn nor named on a button;
+        # one line below the form names them and says why (the entry's own reason,
+        # `services.characters_withheld`).
+        withheld = self.services.characters_withheld
+        self.characters_withheld_label = QLabel(_withheld_sentence(withheld), actions)
+        self.characters_withheld_label.setWordWrap(True)
+        self.characters_withheld_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.characters_withheld_label.setVisible(bool(withheld))
+        for verb, widgets in (
+            ("teleport", (self.teleport_where, self.teleport_button)),
+            ("rename", (self.rename_button,)),
+            ("revive", (self.revive_button,)),
+            ("mail_gold", (self.gold_amount, self.mail_gold_button)),
+            ("send_gear", (self.send_gear_button,)),
+        ):
+            if verb in withheld:
+                for widget in widgets:
+                    widget.setVisible(False)
+        if "teleport" not in withheld:
+            form.addRow("Teleport to", self.teleport_where)
+            form.addRow(self.teleport_button)
+        if "set_level" in withheld:
+            self.new_level.setVisible(False)
+            self.set_level_button.setVisible(False)
+            self.set_level_absent.setVisible(False)
+        elif self._set_level_command() is not None:
             form.addRow("Level", self.new_level)
             form.addRow(self.set_level_button)
             self.set_level_absent.setVisible(False)
@@ -9215,11 +10837,17 @@ class ControllerView(QWidget):
             self.set_level_absent.setVisible(bool(reason))
             if reason:
                 form.addRow(self.set_level_absent)
-        form.addRow(self.rename_button)
-        form.addRow(self.revive_button)
-        form.addRow("Gold", self.gold_amount)
-        form.addRow(self.mail_gold_button)
-        form.addRow(self.send_gear_button)
+        if "rename" not in withheld:
+            form.addRow(self.rename_button)
+        if "revive" not in withheld:
+            form.addRow(self.revive_button)
+        if "mail_gold" not in withheld:
+            form.addRow("Gold", self.gold_amount)
+            form.addRow(self.mail_gold_button)
+        if "send_gear" not in withheld:
+            form.addRow(self.send_gear_button)
+        if withheld:
+            form.addRow(self.characters_withheld_label)
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
@@ -9288,10 +10916,13 @@ class ControllerView(QWidget):
             self.send_gear_button,
         )
         drawn = self._set_level_command() is not None
+        withheld = self.services.characters_withheld
         return tuple(
             (button, label)
-            for button, label in zip(every, _CHARACTER_ACTIONS, strict=True)
-            if drawn or button is not self.set_level_button
+            for button, label, verb in zip(
+                every, _CHARACTER_ACTIONS, play_module.VERBS, strict=True
+            )
+            if (drawn or button is not self.set_level_button) and verb not in withheld
         )
 
     def character_buttons(self) -> tuple[QPushButton, ...]:
@@ -9366,6 +10997,8 @@ class ControllerView(QWidget):
         # (yulon-win11, 2026-09-23), so every arrow key through the list, and
         # every refresh that kept a row selected, froze the window for about
         # half a second. Until the answer lands the button promises nothing.
+        if "send_gear" in self.services.characters_withheld:
+            return  # T179: not drawn, so nothing to read for it
         self.send_gear_button.setText(f"Reading what {name} is wearing…")
         self.send_gear_button.setEnabled(False)
         self._ask_for_gear(self._gear_generation, name)
@@ -10551,7 +12184,7 @@ class ControllerView(QWidget):
         seam = self.services.my_party
         if seam is None:
             self.party_panel: PartyPanel | None = None
-            self.my_party_absent.setText(_NO_MY_PARTY.format(game=self.entry.name))
+            self.my_party_absent.setText(_no_my_party(self.entry))
             inside.addWidget(self.my_party_absent)
             return group
         self.my_party_absent.setVisible(False)
@@ -11883,6 +13516,10 @@ class ControllerView(QWidget):
         if self.services.store is None:
             self._manifests.clear()
             self.modules_panel.set_rows(())
+            if self.services.no_modules_note:
+                # T179: a game whose server takes no add-ons says so, not "no
+                # manifests yet", which reads as something still to come.
+                self.modules_panel.empty_label.setText(self.services.no_modules_note)
             self._refresh_rebuild_banner()
             return
         if self._waits_for_the_distro("modules", self.reload_modules):
@@ -13182,8 +14819,9 @@ class ControllerView(QWidget):
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = True
+        self._update_sources_kept = False
         return self.rebuild_log.run(
-            lambda: self._watch_for_load_wait(route.press(cancel)),
+            lambda: self._watch_for_load_wait(self._noting_kept_sources(route.press(cancel))),
             title=f"Updating {self.entry.name} to the newest code",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -13223,8 +14861,9 @@ class ControllerView(QWidget):
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = True
+        self._update_sources_kept = False
         return self.rebuild_log.run(
-            lambda: self._watch_for_load_wait(route.to_pin(cancel)),
+            lambda: self._watch_for_load_wait(self._noting_kept_sources(route.to_pin(cancel))),
             title=f"Returning {self.entry.name} to the tested commit",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -13515,6 +15154,21 @@ class ControllerView(QWidget):
         self._rebuild_force = cancel.anyway
         return cancel
 
+    def _noting_kept_sources(self, lines: Iterator[str]) -> Iterator[str]:
+        """Pass an update press's lines through, noting the typed "sources kept" outcome.
+
+        T179 Task 6 fix round 3: a failure that KEPT the new build
+        (`WorldStoppedAfterReadyError.sources_kept`) left the sources on their new
+        commits, so `_rebuild_finished()` drops the counts the move made stale, as
+        after a finished press. Runs on the panel's worker; the flag is read on the
+        GUI thread once the job has ended.
+        """
+        try:
+            yield from lines
+        except WorldStoppedAfterReadyError as exc:
+            self._update_sources_kept = exc.sources_kept
+            raise
+
     def _watch_for_load_wait(self, lines: Iterator[str]) -> Iterator[str]:
         """Pass a rebuild-panel job's lines through, noticing a load wait (T158).
 
@@ -13561,6 +15215,11 @@ class ControllerView(QWidget):
         # T127/T162: an update press rebuilds the bot dashboard, and a rebuild
         # that failed leaves it stopped with a press on the Bots tab to retry.
         self.refresh_bot_dashboard()
+        # T179 Task 6: an update, a re-extraction or a world retry may have left
+        # (or paid) what the Server tab's two lines say, and the movement maps
+        # may have been started or stopped.
+        self.refresh_world_upkeep()
+        self.refresh_pathfinding()
         # Whatever just ran on this tab -- a rebuild, an updates press, an adopt
         # press -- may have changed what the databases read as, and one of them
         # changes it on purpose. So the remembered reading is dropped and the
@@ -13583,11 +15242,13 @@ class ControllerView(QWidget):
                 self._compose_again = True
             else:
                 self.check_server_files()
-        if ok and moved and not self.rebuild_log.cancelled:
+        kept, self._update_sources_kept = self._update_sources_kept, False
+        if moved and ((ok and not self.rebuild_log.cancelled) or kept):
             # T146, on `_rebuild_owed`'s terms below: only a press that finished
             # and was not stopped. A failed one puts every source back on the
             # commit it was on (`StagedInstaller._put_sources_back()`), so its
-            # counts are still the counts.
+            # counts are still the counts -- unless its new build was KEPT, which
+            # keeps its sources too (`sources_kept`, T179 Task 6 fix round 3).
             self._forget_what_the_server_update_moved()
         # THREE questions, not one, and every one of them has bitten this clause.
         #
@@ -13817,10 +15478,10 @@ class ControllerView(QWidget):
         self._tuning_rows = rows
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
-        # `TUNING_CORE_FILES` is a decision about who owns core configuration,
+        # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
         # and a second copy of it inside a widget is a second place for it to
         # drift (T44 item 13).
-        self.tuning_panel.set_files(self._tuning_files(), read_only=TUNING_CORE_FILES)
+        self.tuning_panel.set_files(self._tuning_files(), read_only=self._tuning_core_files())
         self._set_tuning_revert_all()
         # T94: whether an undo has anything to put back, asked again of the
         # files -- off the GUI thread (final review): it lists up to five
@@ -13863,16 +15524,17 @@ class ControllerView(QWidget):
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
-    def _confirm(self, title: str, question: str) -> bool:
+    def _confirm(self, title: str, question: str, parent: QWidget | None = None) -> bool:
         """One Yes/No dialog, defaulting to No, read through `said_yes()`.
 
         `said_yes()` and never `== StandardButton.Yes` by hand: PySide6's
         static `question()` returns a plain int on some builds, which is T33's
         closed bug, and one helper is the one place that can be got right.
+        `parent` is for a question the launcher window asked (T187); the tab otherwise.
         """
         return said_yes(
             QMessageBox.question(
-                self,
+                parent if parent is not None else self,
                 title,
                 question,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -14292,6 +15954,7 @@ class ControllerView(QWidget):
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
         start by hand is a server left down by a control that promised a restart."""
         controller = self.services.controller
+        controller.refuse_start()  # T179: before the stop, so a refusal leaves it running
         stopped = controller.stop()
         controller.start()
         return stopped
@@ -14301,6 +15964,7 @@ class ControllerView(QWidget):
         characters are not touched and the next start creates the containers again --
         the Server tab's own sentence for the same pair of calls."""
         controller = self.services.controller
+        controller.refuse_start()  # T179: before the removal, so a refusal leaves it as it was
         removed = controller.remove()
         controller.start()
         return removed
@@ -14601,10 +16265,15 @@ class ControllerView(QWidget):
         for row in self._tuning_rows:
             if row.editable and row.file not in found and (server_dir / row.file).is_file():
                 found.append(row.file)
-        for name in TUNING_CORE_FILES:
+        for name in self._tuning_core_files():
             if name not in found and (server_dir / name).is_file():
                 found.append(name)
         return tuple(found)
+
+    def _tuning_core_files(self) -> tuple[str, ...]:
+        """The server's own confs this tab lists read-only: `TUNING_CORE_FILES` on WotLK,
+        a TrinityCore server's own (T179), `reset_defaults.read_only_confs()`."""
+        return reset_defaults.read_only_confs(self.entry)
 
     def _tuning_spec(self, family: str, module_id: str, file: str) -> dict[str, ConfKey]:
         """This module's declared keys for one file, so a value can be type-checked.
@@ -14621,7 +16290,7 @@ class ControllerView(QWidget):
         rule for an ambiguity `_key_for()` already settles once, in the one
         place that has to guess.
         """
-        if (family, module_id) == botpop.CARD and file == botpop.CONF_FILE:
+        if (family, module_id) == botpop.CARD and file == botpop.card_file(self.entry):
             return botpop.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:
@@ -14782,7 +16451,7 @@ class ControllerView(QWidget):
     def open_tuning_file(self, file: str) -> None:
         """Show one conf in the raw editor, read-only when it is the server's own."""
         path = self.services.controller.server_dir / file
-        core = file in TUNING_CORE_FILES
+        core = file in self._tuning_core_files()
         try:
             with open(path, encoding="utf-8", newline="") as handle:
                 raw = handle.read()
@@ -14837,7 +16506,7 @@ class ControllerView(QWidget):
         if self._put_back_refused("Revert"):
             return
         file = self.tuning_panel.current_file()
-        if not file or file in TUNING_CORE_FILES:
+        if not file or file in self._tuning_core_files():
             return
         path = self.services.controller.server_dir / file
         backups = tuning.backups_of(path)
@@ -14869,7 +16538,7 @@ class ControllerView(QWidget):
         over a rule this shallow would be worse than the typo it caught.
         """
         file = self.tuning_panel.current_file()
-        if not file or file in TUNING_CORE_FILES:
+        if not file or file in self._tuning_core_files():
             return
         said = tuning.lint_sentence(tuning.lint(text))
         if said is not None:

@@ -10,12 +10,24 @@ must supply (README §3a) — is data here, not Python (style-guide §3). Acrony
 
 from __future__ import annotations
 
+import builtins
+import fnmatch
 import hashlib
 import json
+import re
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from yulon import server_build_presses
 from yulon.docker import ContainerSpec
@@ -276,6 +288,14 @@ class ClientSpec(_Strict):
             "Warn when the client's volume has less free space than this (extraction scratch)."
         ),
     )
+    locales: tuple[Annotated[str, Field(pattern=r"^[A-Za-z]{4}$")], ...] = Field(
+        default=(),
+        description=(
+            "The locale folders (`enUS`) this server's client patches are made for; a client "
+            "holding none of them is refused. Empty: any locale. Centurion's patches are "
+            "`patch-enUS-*` only (T179 Task 7)."
+        ),
+    )
 
     @field_validator("mpq_depth")
     @classmethod
@@ -283,6 +303,15 @@ class ClientSpec(_Strict):
         if isinstance(value, int) and value < 1:
             raise ValueError("mpq_depth must be >= 1 or 'recursive'")
         return value
+
+    @model_validator(mode="after")
+    def _named_locales_are_required(self) -> ClientSpec:
+        if self.locales and not self.locale_mpq_required:
+            raise ValueError(
+                "a client spec naming locales needs locale_mpq_required: the locale is then a "
+                "folder the client must have, and its rule reports one that cannot be read"
+            )
+        return self
 
 
 class DockerfileSpec(_Strict):
@@ -783,6 +812,482 @@ class CmangosData(_Strict):
     )
 
 
+def _below(value: str, field: str, root: str) -> str:
+    """`value` as a relative POSIX path strictly below `root`, or a refusal naming `field`.
+
+    One rule, shared by the TrinityCore block's paths: no absolute path, no
+    `..`, no backslash, and not `root` itself (`.` or empty) -- a path that
+    names the whole of what it is meant to be inside is not a path into it.
+    """
+    path = PurePosixPath(value)
+    if "\\" in value or path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError(f"{field} must be a relative POSIX path inside {root}, got {value!r}")
+    return value
+
+
+_SQL_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+"""A database name a rename may name: `centurion/sql/import.sh:21-26` refuses anything else
+(facts §2, CENTURION @ faac5fc9), and the names are substituted into SQL text."""
+
+_CMAKE_DEFINE = re.compile(r"^-D[A-Za-z_][A-Za-z0-9_]*(:[A-Z]+)?=[A-Za-z0-9_.,/+=-]*$")
+"""One `-DNAME=VALUE` (optionally `-DNAME:TYPE=VALUE`), and no character a shell or a
+Dockerfile `RUN` line would read as anything but part of the value."""
+
+
+class TrinityCoreDockerfile(DockerfileSpec):
+    """The TrinityCore Dockerfile's tokens: `make -j` and the CMake defines.
+
+    Data because they are facts about one tree: Centurion's realm comes up with no
+    bots unless the build says `-DPLAYERBOT=ON` (`cmake/options.cmake:12` defaults
+    it to 0, facts §1, CENTURION @ faac5fc9), and `-DTOOLS=ON` is what builds the
+    extractors the client-data stage runs.
+    """
+
+    cmake_options: tuple[str, ...] = Field(
+        min_length=1,
+        description="`-DNAME=VALUE` defines passed to cmake, in order.",
+    )
+
+    @field_validator("cmake_options")
+    @classmethod
+    def _each_is_one_define(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        bad = [option for option in value if not _CMAKE_DEFINE.match(option)]
+        if bad:
+            raise ValueError(
+                f"cmake_options must each be one `-DNAME=VALUE` with no shell characters, got {bad}"
+            )
+        return value
+
+
+class TrinityCoreExtractPlan(ExtractPlan):
+    """The extraction stage, plus the tree's own DBC files laid over what it extracted.
+
+    Centurion ships its DBCs in the checkout (`centurion/dbc`, 246 files) and says
+    to use them, not the extractor's (README.md:174-180, facts §3): the client's
+    copies differ from the server's in places.
+    """
+
+    dbc_overlay_from: str = Field(
+        min_length=1,
+        description=(
+            "Directory inside the checkout (relative to `TrinityCoreData.checkout`) whose files "
+            "are copied over the extracted `data/dbc` after the extractors ran."
+        ),
+    )
+
+    dbc_overlay_to: str = Field(
+        default="dbc",
+        min_length=1,
+        description=(
+            "The folder under `data/` -- the world server's `DataDir` -- the overlay is copied "
+            "into: TrinityCore reads its DBCs from `<DataDir>/dbc/` (README.md:174-180, facts "
+            "§3). Data rather than a constant in the family module because it is a folder name "
+            "a CMaNGOS entry's catalog also spells."
+        ),
+    )
+
+    @field_validator("dbc_overlay_from")
+    @classmethod
+    def _inside_the_checkout(cls, value: str) -> str:
+        return _below(value, "dbc_overlay_from", "the checkout")
+
+    client_archives: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The game archives of the player's client the temporary extraction client keeps, "
+            "relative to its `Data/` folder; `{locale}` stands for a locale folder's name "
+            "(`{locale}/locale-{locale}.MPQ`). Every other `.MPQ` is left out before the "
+            "server's required packs are laid in: the patched extractors read every lettered "
+            "and numbered patch archive they find (map_extractor System.cpp:1152-1218, facts "
+            "§3), so a patch the player installed for another server, or an HD pack, would be "
+            "extracted into maps this server does not expect (T179 Task 3, fix round 1)."
+        ),
+    )
+
+    @field_validator("dbc_overlay_to")
+    @classmethod
+    def _inside_the_data_folder(cls, value: str) -> str:
+        return _below(value, "dbc_overlay_to", "data/")
+
+    @field_validator("client_archives")
+    @classmethod
+    def _archive_names_inside_data(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            _below(name, "client_archives", "the client's Data/ folder")
+            if not name.casefold().endswith(".mpq"):
+                raise ValueError(f"client_archives names game archives (.MPQ), got {name!r}")
+            if set(name.replace("{locale}", "")) & set("{}*?[]!"):
+                raise ValueError(
+                    f"client_archives takes plain names and the `{{locale}}` token only, "
+                    f"got {name!r}"
+                )
+        return value
+
+
+class TrinityCoreMmaps(MmapPlan):
+    """The movement-map generator, which on this family runs after the server is up."""
+
+    background: bool = Field(
+        default=True,
+        description=(
+            "True: `mmaps_generator` runs as a background job after `ready`, with pathfinding "
+            "switched on at the next restart once it finished (owner decision 4, T179 spec). "
+            "It takes hours (README.md:193-194, facts §3) and the server starts without it."
+        ),
+    )
+    threads: Literal["half"] | Annotated[StrictInt, Field(ge=1)] = Field(
+        default="half",
+        description=(
+            "What `{{THREADS}}` in `argv` becomes (`mmaps_generator --threads N`). `half`: half "
+            "the cores of the Docker daemon that runs it (Docker Desktop's VM, not this host), at "
+            "least 1 -- the generator's own default is every core (PathGenerator.cpp:343), and "
+            "the world server runs beside it. A number: exactly that many."
+        ),
+    )
+
+
+class TrinityCoreConf(ConfPatchTable):
+    """The conf table, the world server's conf in it, and the file that must sit beside it."""
+
+    world_conf: str = Field(
+        default="worldserver.conf",
+        description=(
+            "The world server's conf, one of `files`. Its keys must set "
+            "`Updates.EnableDatabases` to 0: the `.dist` ships 7 (worldserver.conf.dist:1470, "
+            "facts §2), so a table that leaves the key out leaves the updater on."
+        ),
+    )
+    playerbots_conf: str = Field(
+        description=(
+            "The bots' conf, one of `files`, written next to `worldserver.conf`: the worldserver "
+            "loads it from that directory and nowhere else (worldserver/Main.cpp:242-250, facts "
+            "§4), and a missing one leaves every bot setting at the `.dist`'s off."
+        ),
+    )
+    from_checkout: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "File name beside `worldserver.conf` -> the checkout-relative file it is copied "
+            "from when it is missing. For a conf the image does not install and the tree ships "
+            "whole: Centurion's `AutoBalance.conf` (`centurion/conf/`, the live realm's, "
+            "README.md:203-204), which the world server finds in its own conf's folder "
+            "(AutoBalanceConfig.cpp:177-213, 761). Never patched and never one of `files`; "
+            "Reset to default copies it from the checkout again."
+        ),
+    )
+
+    @field_validator("playerbots_conf", "world_conf")
+    @classmethod
+    def _a_bare_file_name(cls, value: str, info: ValidationInfo) -> str:
+        if not value or "/" in value or "\\" in value or value in (".", ".."):
+            raise ValueError(
+                f"{info.field_name} is a file name beside worldserver.conf, not a path: {value!r}"
+            )
+        return value
+
+    @field_validator("from_checkout")
+    @classmethod
+    def _names_beside_the_conf_from_inside_the_checkout(
+        cls, value: dict[str, str]
+    ) -> dict[str, str]:
+        for name, source in value.items():
+            if not name or "/" in name or "\\" in name or name in (".", ".."):
+                raise ValueError(
+                    f"from_checkout names a file beside worldserver.conf, not a path: {name!r}"
+                )
+            _below(source, "from_checkout", "the checkout")
+        return value
+
+    @field_validator("files")
+    @classmethod
+    def _the_database_updater_stays_off(cls, value: dict[str, ConfPatch]) -> dict[str, ConfPatch]:
+        """`Updates.EnableDatabases`, wherever the table names it, is `0`.
+
+        Centurion's database is a snapshot that already contains TrinityCore's
+        updates; the worldserver's updater must not replay them over it
+        (README.md:213-214), and with the shipped `7` and no source tree at run
+        time the worldserver shuts down (DBUpdater.cpp:215-218; facts §2).
+        """
+        for name, patch in value.items():
+            setting = patch.keys.get("Updates.EnableDatabases")
+            if setting is not None and setting.strip() != "0":
+                raise ValueError(
+                    f"{name}: Updates.EnableDatabases must be 0 on this family (the snapshot "
+                    f"already holds the updates), got {setting!r}"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _the_named_confs_are_ones_the_table_writes(self) -> TrinityCoreConf:
+        for field, name in (
+            ("world_conf", self.world_conf),
+            ("playerbots_conf", self.playerbots_conf),
+        ):
+            if name not in self.files:
+                raise ValueError(
+                    f"{field} {name!r} is not one of the conf table's files {sorted(self.files)}"
+                )
+        both = sorted(set(self.from_checkout) & set(self.files))
+        if both:
+            raise ValueError(
+                f"{both} is both copied from the checkout and patched from the image's .dist; "
+                "one file has one source"
+            )
+        if "Updates.EnableDatabases" not in self.files[self.world_conf].keys:
+            raise ValueError(
+                f"the world conf {self.world_conf!r} must set Updates.EnableDatabases to 0: "
+                "its .dist ships 7, so leaving the key out leaves the updater on"
+            )
+        return self
+
+
+class TrinityCoreSqlPlan(SqlPlan):
+    """The import, plus the database-name renames `centurion/sql/import.sh` makes.
+
+    The dumps' triggers and procedures name the live realm's databases
+    (`legionnaireauth`, `centurionworld`); import.sh substitutes the target names
+    into exactly three files before it loads them (import.sh:41-43, facts §2).
+    This plan says the same: which names become which, in which files only.
+    """
+
+    renames: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description=(
+            "`(from, to)` database names substituted in `rename_files`; `to` is one of the "
+            "entry's own schemas (`CatalogEntry` checks)."
+        ),
+    )
+    rename_files: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "The files the renames apply to, relative to the server dir; each must be a file a "
+            "phase imports. No other file is touched."
+        ),
+    )
+
+    @field_validator("renames")
+    @classmethod
+    def _plain_names(cls, value: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+        for pair in value:
+            bad = [name for name in pair if not _SQL_NAME.match(name)]
+            if bad:
+                raise ValueError(
+                    f"a rename names databases matching ^[A-Za-z0-9_]+$ only, got {bad} in {pair}"
+                )
+        return value
+
+    @field_validator("rename_files")
+    @classmethod
+    def _inside_the_server_dir(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for file in value:
+            _below(file, "rename_files", "the server dir")
+        return value
+
+    @model_validator(mode="after")
+    def _every_renamed_file_is_one_a_phase_imports(self) -> TrinityCoreSqlPlan:
+        globs = [glob for phase in self.phases for glob in phase.files]
+        globs += [glob for phase in self.phases for glob in (phase.into_each or {}).values()]
+        for file in self.rename_files:
+            if not any(fnmatch.fnmatchcase(file, glob) for glob in globs):
+                raise ValueError(
+                    f"rename_files names {file!r}, which no phase imports; a rename there "
+                    "would change nothing"
+                )
+        return self
+
+
+class TrinityCoreUpdates(_Strict):
+    """What "Update the server to latest…" does with a change to the tree's SQL snapshot (T179).
+
+    The owner's decision 2 (T179 spec §3): the snapshot moves with the code, and an
+    update compares the commit it left with the one it landed on. A changed file of
+    a `reimport_phases` phase is imported again -- each is a whole-table dump that
+    drops and re-creates its own table (Centurion's `world/`, facts §2). Every other
+    file the import reads goes into a database holding the player's own accounts or
+    characters, and a change there refuses the whole update -- unless every line it
+    changed starts with one of `skip_lines`' prefixes for that file, which leaves the
+    change out (the realm row is Yu'lon's). Data rather than a rule in the family
+    module, because which phases are whole-table dumps is a fact about one tree.
+    """
+
+    reimport_phases: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Names of the SQL plan's phases whose changed files are imported again; each must "
+            "write into the entry's world database, and each file must DROP and CREATE its own "
+            "table."
+        ),
+    )
+    layout_files: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Server-dir-relative files that hold a database's layout (its schema dump): a "
+            "change to one is refused as a layout change, in the owner's words, naming the file."
+        ),
+    )
+    skip_lines: dict[str, tuple[str, ...]] = Field(
+        default_factory=dict,
+        description=(
+            "Server-dir-relative file -> line prefixes. A change to that file whose every "
+            "added and removed line starts with one of them is left out instead of refused: "
+            "Centurion's `auth_data.sql` row for the realm, whose address Yu'lon sets itself."
+        ),
+    )
+
+    @field_validator("layout_files")
+    @classmethod
+    def _layout_files_inside_the_server_dir(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for file in value:
+            _below(file, "layout_files", "the server dir")
+        return value
+
+    @field_validator("skip_lines")
+    @classmethod
+    def _skip_lines_name_files_and_prefixes(
+        cls, value: dict[str, tuple[str, ...]]
+    ) -> dict[str, tuple[str, ...]]:
+        for file, prefixes in value.items():
+            _below(file, "skip_lines", "the server dir")
+            if not prefixes or any(not prefix.strip() for prefix in prefixes):
+                raise ValueError(
+                    f"skip_lines[{file!r}] needs at least one non-blank line prefix; an empty "
+                    "one would leave out any change at all"
+                )
+        return value
+
+
+class TrinityCoreData(_Strict):
+    """Everything the TrinityCore family needs that differs per game (T179).
+
+    Shaped after `CmangosData`, with what Centurion (a TrinityCore 3.3.5 fork)
+    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout, mmaps
+    in the background, a `playerbots.conf` beside `worldserver.conf`, renames in
+    the import, and the maps the start check requires. The facts are in
+    `.notes/tickets/T179-centurion-facts.md` (CENTURION @ faac5fc9).
+    """
+
+    checkout: str = Field(
+        min_length=1,
+        description=(
+            "The `dest` of the emulator source that is the core; every checkout-relative path "
+            "below is relative to it. Must be a dest of the entry's own sources."
+        ),
+    )
+    client: ClientSpec = Field(
+        description=(
+            "What the player's client folder must look like before the client-data stage makes "
+            "its temporary extraction client from it (T179 Task 3), as `CmangosData.client` is "
+            "for the CMaNGOS extraction."
+        )
+    )
+    sparse_exclude: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Paths inside the checkout the clone leaves out. Centurion's `playerbot reference/` "
+            "is never compiled (README.md:34) and is 0.96 GB of a 3.15 GB checkout (facts, "
+            "repo-level)."
+        ),
+    )
+    dockerfile: TrinityCoreDockerfile
+    extract: TrinityCoreExtractPlan
+    mmaps: TrinityCoreMmaps
+    conf: TrinityCoreConf
+    sql: TrinityCoreSqlPlan
+    required_maps: tuple[Annotated[int, Field(ge=0)], ...] = Field(
+        min_length=1,
+        description=(
+            "Map ids whose maps and vmaps must exist before the server is started: without them "
+            "the worldserver exits 'Unable to load critical files' (World.cpp:1811-1823, facts "
+            "§3) -- 0 and 1, and 530 with `Expansion = 2`."
+        ),
+    )
+    updates: TrinityCoreUpdates | None = Field(
+        default=None,
+        description=(
+            "What an update to the latest code, or a return to the tested pin, does with a "
+            "change to the SQL snapshot (T179 Task 6). Required when the entry offers "
+            "`update_to_latest`."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_update_rules_name_what_the_plan_imports(self) -> TrinityCoreData:
+        """Every phase and file `updates` names is one this plan has and imports.
+
+        A misspelt phase would re-import nothing and say so nowhere; a misspelt
+        file would turn a refusal or a skip into the refusal for any change.
+        """
+        if self.updates is None:
+            return self
+        names = {phase.name for phase in self.sql.phases}
+        unknown = [name for name in self.updates.reimport_phases if name not in names]
+        if unknown:
+            raise ValueError(
+                f"updates.reimport_phases names {unknown}, which the SQL plan does not have "
+                f"(its phases: {sorted(names)})"
+            )
+        globs = [glob for phase in self.sql.phases for glob in phase.files]
+        globs += [glob for phase in self.sql.phases for glob in (phase.into_each or {}).values()]
+        for field_name, files in (
+            ("layout_files", self.updates.layout_files),
+            ("skip_lines", tuple(self.updates.skip_lines)),
+        ):
+            for file in files:
+                if not any(fnmatch.fnmatchcase(file, glob) for glob in globs):
+                    raise ValueError(
+                        f"updates.{field_name} names {file!r}, which no phase imports; a rule "
+                        "for it would never apply"
+                    )
+        return self
+
+    @field_validator("checkout")
+    @classmethod
+    def _checkout_inside_the_server_dir(cls, value: str) -> str:
+        """A plain folder strictly inside the server dir, and nothing a build file reads as syntax.
+
+        The checkout is spliced into the generated `.dockerignore` (`!{{CHECKOUT}}`) and
+        the Dockerfile's `COPY ["{{CHECKOUT}}", ...]` (Task 2). There `.` or an empty
+        name re-includes the whole server folder -- `.db_password`, `.env` and the confs
+        -- into the build context; `* ? [ ]` match other paths and `!` negates;
+        a leading `#` turns the line into a comment; and `"` or a backslash breaks out
+        of the JSON-form `COPY`. Refused rather than escaped: no TrinityCore tree has a
+        reason to be cloned under such a name.
+        """
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts or not path.parts:
+            raise ValueError(
+                f"checkout must be a relative POSIX path inside the server dir, got {value!r}"
+            )
+        special = sorted(set(value) & set('*?[]!"'))
+        if special or value.startswith("#"):
+            raise ValueError(
+                f"checkout {value!r} holds {special or ['#']}, which the build's .dockerignore "
+                "or COPY line reads as syntax; name a plain folder"
+            )
+        return value
+
+    @field_validator("sparse_exclude")
+    @classmethod
+    def _exclusions_inside_the_checkout(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Plain paths inside the checkout, never git pattern syntax.
+
+        Git reads a sparse-checkout line as a pattern: `!` negates, `#` starts a
+        comment, `*`, `?` and `[` match. A path holding one would exclude
+        something other than itself, so it is refused rather than escaped. A
+        space is a plain character there and stays allowed: Centurion's own
+        `playerbot reference` has one.
+        """
+        for path in value:
+            _below(path, "sparse_exclude", "the checkout")
+            special = sorted(set(path) & set("!#*?["))
+            if special:
+                raise ValueError(
+                    f"sparse_exclude holds a git pattern character {special} in {path!r}; "
+                    "name plain paths only"
+                )
+        return value
+
+
 class NativeInstall(_Strict):
     """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
@@ -800,14 +1305,16 @@ class NativeInstall(_Strict):
             "Directory of this game's compose templates, relative to catalog/installers/."
         ),
     )
-    family: Literal["azerothcore", "cmangos"] = Field(
+    family: Literal["azerothcore", "cmangos", "trinitycore"] = Field(
         description=(
             "Which family engine installs this game; must equal the engine's `family`. "
             "This Literal is the first file a new lineage's data touches, so the policy "
             "is stated here too: a family with no registered engine is a DEFECT and not "
             "a supported window — `installer_for()` refuses the entry rather than "
             "falling back to anything. A new lineage is a class in `catalog/families/`, "
-            "a line in `FAMILIES`, and then a member here."
+            "a line in `FAMILIES`, and then a member here. `trinitycore` was the exception: "
+            "added with its model and `families/decisions.py` (T179 Task 1) ahead of its "
+            "engine (Task 3) and its first entry (Task 7)."
         )
     )
     images: tuple[str, ...] = Field(
@@ -876,6 +1383,9 @@ class NativeInstall(_Strict):
         default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
     )
     cmangos: CmangosData | None = None
+    trinitycore: TrinityCoreData | None = Field(
+        default=None, description="Present exactly when `family` is trinitycore (T179)."
+    )
     soap_port: int = Field(default=7878, gt=0, lt=65536)
     min_ram_gb: float = Field(
         default=6.0,
@@ -922,18 +1432,26 @@ class NativeInstall(_Strict):
         Also pins `extract.image` to a built image, so the extractors run from something
         the build overlay produces.
         """
-        blocks = {"azerothcore": self.azerothcore, "cmangos": self.cmangos}
+        blocks = {
+            "azerothcore": self.azerothcore,
+            "cmangos": self.cmangos,
+            "trinitycore": self.trinitycore,
+        }
         present = sorted(name for name, block in blocks.items() if block is not None)
         if present != [self.family]:
             raise ValueError(
                 f"family is {self.family!r} but the blocks present are {present}; "
                 f"exactly the `{self.family}` block must be present"
             )
-        if self.cmangos is not None and self.cmangos.extract.image not in self.images:
-            raise ValueError(
-                f"cmangos.extract.image {self.cmangos.extract.image!r} is not one of images "
-                f"{list(self.images)}"
-            )
+        extract_images = {
+            "cmangos": self.cmangos.extract.image if self.cmangos is not None else None,
+            "trinitycore": self.trinitycore.extract.image if self.trinitycore is not None else None,
+        }
+        for family, image in extract_images.items():
+            if image is not None and image not in self.images:
+                raise ValueError(
+                    f"{family}.extract.image {image!r} is not one of images {list(self.images)}"
+                )
         return self
 
 
@@ -1199,13 +1717,15 @@ class Accounts(_Strict):
     correct and can never log in.
     """
 
-    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6"] | None = Field(
+    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"] | None = Field(
         default="azerothcore",
         description=(
             "How this core stores an account: `azerothcore` is SRP6 in binary salt/verifier "
             "with the level in account_access; `mangos_sha` is sha_pass_hash with the level "
             "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
-            "text in v/s with the level in account.gmlevel. None means this app does not "
+            "text in v/s with the level in account.gmlevel; `trinitycore` is TrinityCore's "
+            "salt/verifier with the level in account_access(AccountID, SecurityLevel, RealmID) "
+            "with RealmID -1 (T179). None means this app does not "
             "write accounts for this core and "
             "the Accounts tab points at `console_command` instead. Never defaulted onto a "
             "core that has not been measured — a wrong scheme inserts a row that looks "
@@ -1393,13 +1913,482 @@ class Console(_Strict):
     )
 
 
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+Md5 = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+# A Config.wtf line is `SET key "value"`: a key is one word, and a value may not
+# hold the quote or the line break that would end it and start a line of its own.
+WtfKey = Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*$")]
+WtfValue = Annotated[str, Field(pattern=r'^[^"\r\n]*$')]
+
+
+def _https_url(value: str, field: str) -> str:
+    """Refuse anything but an https URL with a host and no credentials in it.
+
+    Every URL in the client section is something Yu'lon downloads from, or
+    sends a person to, without asking. Plain http would let anyone on the path
+    swap a 1.4 GB MPQ or a Wow.exe; a user:password@ part would put a secret in
+    a catalog that is public and in every log line that names the URL.
+    """
+    parts = urlsplit(value)
+    if parts.scheme != "https" or not parts.hostname:
+        raise ValueError(f"{field} must be an https URL with a host, got {value!r}")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(f"{field} must not carry credentials, got {value!r}")
+    return value
+
+
+def _inside(value: str, field: str, *, names_a_file: bool) -> str:
+    """Refuse a path that could leave the folder it is relative to.
+
+    The rule the other relative paths in this file follow, plus `:`: these
+    paths land in a WoW client folder, which is a Windows folder for most
+    players, and `C:/Windows/x` is relative to PurePosixPath and absolute to
+    Windows.
+    """
+    path = PurePosixPath(value)
+    if "\\" in value or ":" in value or path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"{field} must be a relative POSIX path that stays inside its folder, got {value!r}"
+        )
+    if names_a_file and not path.parts:
+        raise ValueError(f"{field} must name a file, got {value!r}")
+    return value
+
+
+class PackSource(_Strict):
+    """Where one client pack's zip comes from: the server's own checkout, or a URL.
+
+    One shape for both so a pack is one list entry either way; `kind` says
+    which half is filled, and the validator holds the two halves apart so a
+    pack can never be ambiguous about which of two places it trusts.
+    """
+
+    kind: Literal["checkout", "url"]
+    path: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The zip, relative to the server dir (`src/<core>/centurion/patches/patch-Y.zip`). "
+            "Where the plain file is absent, its `<path>.partNN` files are joined in name order."
+        ),
+    )
+    url: str | None = Field(default=None, description="The zip's https URL.")
+    version_url: str | None = Field(
+        default=None,
+        description=(
+            "An https URL whose body is the pack's current version string, so a changed pack "
+            "is noticed without downloading it again. URL packs only: a checkout pack's "
+            "version is the commit it was checked out at."
+        ),
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _path_stays_inside_the_server_dir(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "source.path", names_a_file=True)
+
+    @field_validator("url", "version_url")
+    @classmethod
+    def _urls_are_https(cls, value: str | None) -> str | None:
+        return value if value is None else _https_url(value, "source url")
+
+    @model_validator(mode="after")
+    def _kind_matches_the_half_that_is_filled(self) -> PackSource:
+        if self.kind == "checkout" and (
+            self.path is None or self.url is not None or self.version_url is not None
+        ):
+            raise ValueError("a checkout source names a path, and no url or version_url")
+        if self.kind == "url" and (self.url is None or self.path is not None):
+            raise ValueError("a url source names a url, and no path")
+        return self
+
+
+class InstallRule(_Strict):
+    """One zip member and where it goes in the ready-to-play client.
+
+    A named member goes to a named file, which is how `patch-Y.MPQ` becomes
+    `Data/patch-X.MPQ`; `"*"` unpacks the whole zip under a folder, which is how
+    21 addon folders reach `Interface/AddOns/`. Exactly one target, and the
+    target must suit the member: a named member with only a folder would leave
+    the engine guessing the file name, and `"*"` with a file name cannot fit.
+    """
+
+    member: str = Field(
+        min_length=1, description='A member name inside the zip, or "*" for all of them.'
+    )
+    to: str | None = Field(
+        default=None, description="The target file, relative to the client folder."
+    )
+    to_dir: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            'The target folder for "*", relative to the client folder; "." is the folder itself.'
+        ),
+    )
+
+    @field_validator("member")
+    @classmethod
+    def _member_is_star_or_a_relative_name(cls, value: str) -> str:
+        return value if value == "*" else _inside(value, "install.member", names_a_file=True)
+
+    @field_validator("to")
+    @classmethod
+    def _to_stays_inside_the_client(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "install.to", names_a_file=True)
+
+    @field_validator("to_dir")
+    @classmethod
+    def _to_dir_stays_inside_the_client(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "install.to_dir", names_a_file=False)
+
+    @model_validator(mode="after")
+    def _the_target_suits_the_member(self) -> InstallRule:
+        if self.member == "*":
+            if self.to_dir is None or self.to is not None:
+                raise ValueError(f'member "*" installs into to_dir, and names no to: {self!r}')
+        elif self.to is None or self.to_dir is not None:
+            raise ValueError(
+                f"a named member installs to a file: it takes to, and no to_dir: {self!r}"
+            )
+        return self
+
+
+class ClientPack(_Strict):
+    """One zip of files a server's ready-to-play client needs, or may have (T181 b).
+
+    A required pack (`optional` false) is installed on every ready-to-play
+    client of this server; an optional one only when the player switched it
+    on, and `default` is its state before they choose. A checkout pack must
+    carry a checksum, because the server's own repo publishes one
+    (`patches.md5`) and a joined set of parts is exactly where a missing piece
+    goes unnoticed; a URL pack may have none, since the server's site may
+    publish none, and then size, zip CRC and the recorded version stand in.
+
+    A checkout pack's checksum is pinned here (`sha256`/`md5`) or read from a
+    file of the checkout itself (`md5_file`, T179 Task 7, the lead's ruling):
+    a pinned one would refuse every pack the server's makers update, and
+    "Update to latest" is meant to bring their new patches along. Reading it
+    from their repo moves the trust from Yu'lon's pin to that repo -- the same
+    trust as the server code built from it.
+    """
+
+    id: Slug
+    label: str = Field(min_length=1)
+    description: str = ""
+    source: PackSource
+    sha256: Sha256 | None = None
+    md5: Md5 | None = None
+    md5_file: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Checkout packs only: a file of `md5sum` lines, relative to the server dir like "
+            "`source.path` (`src/centurion/centurion/patches/patches.md5`), whose line for this "
+            "zip -- named relative to the file's own folder -- is the md5 the zip must have, "
+            "read at the commit the checkout is on."
+        ),
+    )
+    install: tuple[InstallRule, ...] = Field(min_length=1)
+    remove_when_off: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Files, relative to the client folder, deleted when the pack is off -- beyond the "
+            "ones it recorded installing. Centurion's launcher deletes `Data/patch-Y.MPQ` when "
+            "world-terrain is off, whoever put it there."
+        ),
+    )
+    optional: bool = False
+    default: bool = Field(default=False, description="An optional pack's state before a choice.")
+    size_hint: int | None = Field(
+        default=None, ge=0, description="Bytes, for the download size the dialog shows."
+    )
+
+    @field_validator("remove_when_off")
+    @classmethod
+    def _removals_stay_inside_the_client(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            _inside(item, "remove_when_off", names_a_file=True)
+        return value
+
+    @field_validator("md5_file")
+    @classmethod
+    def _md5_file_stays_inside_the_server_dir(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "md5_file", names_a_file=True)
+
+    @model_validator(mode="after")
+    def _checksum_and_choice_are_coherent(self) -> ClientPack:
+        given = [self.sha256, self.md5, self.md5_file]
+        if sum(item is not None for item in given) > 1:
+            raise ValueError(
+                f"pack {self.id!r}: a pack takes exactly one of sha256, md5 and md5_file"
+            )
+        if self.md5_file is not None:
+            if self.source.kind != "checkout" or self.source.path is None:
+                raise ValueError(
+                    f"pack {self.id!r}: only a checkout pack takes md5_file, which is read from "
+                    "the server's checkout"
+                )
+            folder = PurePosixPath(self.md5_file).parent
+            if not PurePosixPath(self.source.path).is_relative_to(folder):
+                raise ValueError(
+                    f"pack {self.id!r}: its zip {self.source.path!r} must be inside the folder of "
+                    f"its md5_file {self.md5_file!r}, whose lines name files relative to it"
+                )
+        if self.source.kind == "checkout" and all(item is None for item in given):
+            raise ValueError(
+                f"pack {self.id!r}: a checkout pack needs a checksum: exactly one of sha256, "
+                "md5 and md5_file"
+            )
+        if (
+            self.source.kind == "url"
+            and self.sha256 is None
+            and self.md5 is None
+            and self.source.version_url is None
+        ):
+            raise ValueError(
+                f"pack {self.id!r}: a url pack needs a checksum or a version_url, or a "
+                "changed pack would never be fetched again"
+            )
+        if self.default and not self.optional:
+            raise ValueError(
+                f"pack {self.id!r}: default only means something on an optional pack; "
+                "a required pack is always installed"
+            )
+        return self
+
+
+class ExeWrite(_Strict):
+    """Bytes written into Wow.exe at one offset: given in hex, or one byte repeated.
+
+    `fill` + `count` exists because Centurion's patch set NOPs runs of 11 and
+    22 bytes, and 44 hex digits of `90` is a typo waiting to happen.
+    """
+
+    offset: int = Field(ge=0)
+    bytes: str | None = Field(
+        default=None,
+        pattern=r"^(?:[0-9a-fA-F]{2})+$",
+        description='The bytes, as hex pairs (`"eb"`, `"313233343200"`).',
+    )
+    fill: int | None = Field(default=None, ge=0, le=255, description="One byte value, repeated.")
+    count: int | None = Field(default=None, gt=0, description="How many times `fill` repeats.")
+
+    @model_validator(mode="after")
+    def _one_way_of_saying_the_bytes(self) -> ExeWrite:
+        if (self.bytes is None) == (self.fill is None):
+            raise ValueError(f"a write takes exactly one of bytes and fill, at {self.offset:#x}")
+        if (self.count is None) != (self.fill is None):
+            raise ValueError(f"count goes with fill, and only with fill, at {self.offset:#x}")
+        return self
+
+    @property
+    def length(self) -> int:
+        """How many bytes this write covers."""
+        if self.bytes is not None:
+            return len(self.bytes) // 2
+        assert self.count is not None  # the validator pairs count with fill
+        return self.count
+
+    def payload(self) -> builtins.bytes:
+        """The bytes this write puts at `offset`."""
+        if self.bytes is not None:
+            return builtins.bytes.fromhex(self.bytes)
+        assert self.fill is not None and self.count is not None
+        return builtins.bytes([self.fill]) * self.count
+
+
+class ExeOption(_Strict):
+    """A player's on/off choice over some Wow.exe bytes (Centurion: a borderless window).
+
+    `off` may be empty: the exe is always patched from stock bytes, so an
+    option whose off state IS stock has nothing to write.
+    """
+
+    label: str = Field(min_length=1)
+    default: bool
+    on: tuple[ExeWrite, ...] = Field(min_length=1)
+    off: tuple[ExeWrite, ...]
+
+
+class CleanSource(_Strict):
+    """A zip holding a stock Wow.exe, from which only that member is fetched by range requests."""
+
+    url: str
+    member: str = Field(min_length=1, description="The exe's member name inside the zip.")
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https(cls, value: str) -> str:
+        return _https_url(value, "clean_sources.url")
+
+    @field_validator("member")
+    @classmethod
+    def _member_is_a_relative_name(cls, value: str) -> str:
+        return _inside(value, "clean_sources.member", names_a_file=True)
+
+
+class ExePatch(_Strict):
+    """Byte patches to the ready-to-play client's Wow.exe, applied to stock bytes only (T181 c).
+
+    `expect_sha256`/`expect_size` name the stock exe the offsets were measured
+    on; a different exe is never patched, because the same offset in another
+    build is another instruction. Every write -- the fixed ones and both
+    states of every option -- must end inside `expect_size`, checked here
+    once rather than discovered as a short file at Play.
+    """
+
+    expect_sha256: Sha256
+    expect_size: int = Field(gt=0)
+    clean_sources: tuple[CleanSource, ...] = Field(
+        min_length=1, description="Where a stock exe is fetched from, tried in order."
+    )
+    fallback_page: str | None = Field(
+        default=None,
+        description="A page for a whole clean client, named in the refusal when no source answers.",
+    )
+    writes: tuple[ExeWrite, ...]
+    options: dict[Slug, ExeOption] = Field(default_factory=dict)
+    pe_large_address_aware: bool = Field(
+        default=False, description="Set IMAGE_FILE_LARGE_ADDRESS_AWARE in the PE header."
+    )
+    build: int = Field(gt=0, description="The build the patched exe reports, for messages.")
+
+    @field_validator("fallback_page")
+    @classmethod
+    def _fallback_page_is_https(cls, value: str | None) -> str | None:
+        return value if value is None else _https_url(value, "fallback_page")
+
+    @model_validator(mode="after")
+    def _every_write_ends_inside_the_stock_exe(self) -> ExePatch:
+        named: list[tuple[str, ExeWrite]] = [("writes", write) for write in self.writes]
+        for name, option in self.options.items():
+            named += [(f"options.{name}.on", write) for write in option.on]
+            named += [(f"options.{name}.off", write) for write in option.off]
+        for where, write in named:
+            if write.offset + write.length > self.expect_size:
+                raise ValueError(
+                    f"{where}: the write at {write.offset:#x} of {write.length} bytes runs past "
+                    f"the end of the stock exe ({self.expect_size} bytes)"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _no_two_writes_that_can_apply_together_overlap(self) -> ExePatch:
+        # The fixed writes always apply; one state of each option applies on
+        # top. The two states of ONE option never apply together, so they may
+        # share bytes (Centurion's borderless on/off do exactly that).
+        tagged: list[tuple[str, tuple[str, str] | None, ExeWrite]] = [
+            ("writes", None, write) for write in self.writes
+        ]
+        for name, option in self.options.items():
+            tagged += [(f"options.{name}.on", (name, "on"), w) for w in option.on]
+            tagged += [(f"options.{name}.off", (name, "off"), w) for w in option.off]
+        for index, (where_a, tag_a, a) in enumerate(tagged):
+            for where_b, tag_b, b in tagged[index + 1 :]:
+                if tag_a and tag_b and tag_a[0] == tag_b[0] and tag_a != tag_b:
+                    continue  # the on and off of one option: only one applies
+                if a.offset < b.offset + b.length and b.offset < a.offset + a.length:
+                    raise ValueError(
+                        f"{where_a} at {a.offset:#x} and {where_b} at {b.offset:#x} "
+                        "write the same bytes of the stock exe"
+                    )
+        return self
+
+
+class ConfigWtf(_Strict):
+    """Settings merged into the ready-to-play client's `WTF/Config.wtf`.
+
+    `always` is set at every Play (where the server is); `seed` only where
+    the key is absent (a first-run preference the player may change after).
+    A key in both would be a seed that is never a seed, so it is refused.
+    """
+
+    always: dict[WtfKey, WtfValue] = Field(default_factory=dict)
+    seed: dict[WtfKey, WtfValue] = Field(default_factory=dict)
+    remove_locale_realmlists: bool = Field(
+        default=False,
+        description=(
+            "Delete `Data/*/realmlist.wtf` in the ready-to-play client, never the original's."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_key_is_either_always_or_seeded(self) -> ConfigWtf:
+        always = {key.casefold() for key in self.always}
+        both = sorted(key for key in self.seed if key.casefold() in always)
+        if both:
+            raise ValueError(f"Config.wtf keys {both} are in both always and seed")
+        return self
+
+
 class Client(_Strict):
-    """The client the USER supplies (README §3a) and how to point it at the server."""
+    """The client the USER supplies (README §3a) and how to point it at the server.
+
+    `packs`, `exe_patch` and `config_wtf` describe what this server's
+    ready-to-play client needs beyond the user's own files (T181 b/c). All
+    three are optional, and an entry without them behaves exactly as before.
+    """
 
     version: str = Field(min_length=1)
     build: int = Field(gt=0)
     realmlist_file: str = "realmlist.wtf"
     notes: tuple[str, ...] = ()
+    packs: tuple[ClientPack, ...] = ()
+    exe_patch: ExePatch | None = None
+    config_wtf: ConfigWtf | None = None
+
+    @model_validator(mode="after")
+    def _packs_are_distinct(self) -> Client:
+        """Ids are unique, and no two packs install the same file.
+
+        The install record is kept per pack id, and switching a pack off removes
+        the files it recorded: two packs sharing an id would share a record, and
+        two writing one file would let switching one off delete the other's.
+        A pack's `remove_when_off` may not name a file another pack installs, for the
+        same reason: switching one pack off must never delete another pack's file.
+        Compared casefolded, because the client folder is usually on Windows.
+        """
+        ids = [pack.id for pack in self.packs]
+        doubled = sorted({pack_id for pack_id in ids if ids.count(pack_id) > 1})
+        if doubled:
+            raise ValueError(f"pack ids must be unique, got {doubled} more than once")
+        owner: dict[str, str] = {}
+        for pack in self.packs:
+            for rule in pack.install:
+                if rule.to is None:
+                    continue
+                target = PurePosixPath(rule.to).as_posix().casefold()
+                if owner.get(target, pack.id) != pack.id:
+                    raise ValueError(
+                        f"two packs install {rule.to!r}: {owner[target]!r} and {pack.id!r}"
+                    )
+                owner[target] = pack.id
+        for pack in self.packs:
+            for item in pack.remove_when_off:
+                target = PurePosixPath(item).as_posix().casefold()
+                if owner.get(target, pack.id) != pack.id:
+                    raise ValueError(
+                        f"pack {pack.id!r} removes {item!r} when off, which pack "
+                        f"{owner[target]!r} installs: switching one off must never delete "
+                        "the other's file"
+                    )
+        return self
+
+    def hosts(self) -> frozenset[str]:
+        """Every host a download for this client may reach: packs and clean exe sources.
+
+        The allow-list later steps check every fetch against, so a redirect to
+        anywhere else is refused. Not `fallback_page`: that is a page a person
+        is sent to, never fetched.
+        """
+        urls: list[str | None] = []
+        for pack in self.packs:
+            urls += [pack.source.url, pack.source.version_url]
+        if self.exe_patch is not None:
+            urls += [source.url for source in self.exe_patch.clean_sources]
+        hosts = (urlsplit(url).hostname for url in urls if url is not None)
+        return frozenset(host for host in hosts if host)
 
 
 class BotRegistry(_Strict):
@@ -1438,11 +2427,27 @@ class BotMarker(_Strict):
             "(`botid.rs:33-38`)."
         ),
     )
-    prefix_conf_file: str = Field(
-        min_length=1, description="Where the live prefix lives, relative to the server dir."
+    prefix_conf_file: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Where the live prefix lives, relative to the server dir; null for a tree whose "
+            "bot accounts are fixed rows with no prefix setting at all (T179: Centurion's "
+            "PLAYERBOTONE..FOUR, `auth_bots.sql`), where `account_prefix` is the whole marker."
+        ),
     )
-    prefix_conf_key: str = Field(min_length=1)
+    prefix_conf_key: str | None = Field(default=None, min_length=1)
     registry: BotRegistry | None = None
+
+    @model_validator(mode="after")
+    def _a_conf_file_names_its_key(self) -> BotMarker:
+        """Both or neither: a file with no key, or a key in no file, reads nothing."""
+        if (self.prefix_conf_file is None) != (self.prefix_conf_key is None):
+            raise ValueError(
+                "prefix_conf_file and prefix_conf_key go together: "
+                f"file={self.prefix_conf_file!r}, key={self.prefix_conf_key!r}"
+            )
+        return self
 
 
 class CharacterTable(_Strict):
@@ -1720,6 +2725,63 @@ class CatalogEntry(_Strict):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _the_trinitycore_block_agrees_with_the_entry(self) -> CatalogEntry:
+        """The block's checkout, renames and account scheme agree with the rest of the entry.
+
+        Three relationships the block cannot see from inside. A checkout that is
+        not a dest of `emulator.sources` is an install that clones and then reads
+        paths from a folder nothing made. A rename to a name that is not one of
+        `databases` would point the dumps' triggers and procedures at somebody
+        else's database (import.sh:41-43). And `accounts.scheme` defaults to
+        AzerothCore's, whose `account_access(id, gmlevel)` is not TrinityCore's
+        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare
+        `trinitycore` or no scheme at all.
+        """
+        native = self.install.native
+        block = native.trinitycore if native is not None else None
+        if block is None:
+            return self
+        dests = {source.dest for source in self.emulator.sources}
+        if block.checkout not in dests:
+            raise ValueError(
+                f"trinitycore.checkout is {block.checkout!r}, which is not a dest of any of "
+                f"this entry's sources {sorted(dests)}"
+            )
+        if self.accounts.scheme not in ("trinitycore", None):
+            raise ValueError(
+                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or null, got "
+                f"{self.accounts.scheme!r}: another core's columns write rows that look right "
+                "and grant nothing (an omitted accounts block inherits 'azerothcore')"
+            )
+        schemas = set(self.databases.schema_map().values())
+        for old, new in block.sql.renames:
+            if new not in schemas:
+                raise ValueError(
+                    f"rename {old!r} -> {new!r} lands on {new!r}, which is not one of this "
+                    f"entry's schemas {sorted(schemas)}"
+                )
+        # T179 Task 6: the update route re-imports into the world database only. A
+        # whole-table dump imported again over the characters' or the accounts'
+        # database would DROP the player's own rows.
+        if native is not None and native.update_to_latest and block.updates is None:
+            raise ValueError(
+                "a trinitycore entry with update_to_latest must say what an update does with its "
+                "SQL snapshot (trinitycore.updates)"
+            )
+        if block.updates is not None:
+            phases = {phase.name: phase for phase in block.sql.phases}
+            for name in block.updates.reimport_phases:
+                phase = phases[name]
+                if phase.into != self.databases.world or phase.into_each:
+                    raise ValueError(
+                        f"updates.reimport_phases names {name!r}, which writes into "
+                        f"{phase.into or sorted(phase.into_each or {})!r}, not the world database "
+                        f"{self.databases.world!r}: imported again, its dumps would drop that "
+                        "database's tables"
+                    )
+        return self
+
     def schema_map(self) -> dict[Db, str]:
         """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""
         return self.databases.schema_map()
@@ -1771,4 +2833,20 @@ def parse_catalog(data: object) -> Catalog:
 def load_catalog(path: Path = CATALOG_FILE) -> Catalog:
     """Read + validate `catalog.json` (the bundled one by default)."""
     with path.open(encoding="utf-8") as fh:
-        return parse_catalog(json.load(fh))
+        return parse_catalog(json.load(fh, object_pairs_hook=_refuse_duplicate_keys))
+
+
+def _refuse_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Refuse an object that names one key twice, which `json` would resolve silently.
+
+    JSON keeps the LAST of two equal keys, so two exe options of one name, or
+    two `client` blocks in one entry, would load as one and the loser would
+    vanish without a word. Refused here because no model can see it: by the
+    time pydantic gets a dict, the duplicate is already gone.
+    """
+    seen: dict[str, object] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r} in one object of the catalog file")
+        seen[key] = value
+    return seen

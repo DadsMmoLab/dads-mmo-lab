@@ -358,6 +358,11 @@ class InstallAccounts:
         self._channel_for_saved = channel_for_saved
         self.app_account = app_account
 
+    @property
+    def sql(self) -> SqlReader:
+        """The reader the listing uses; the client launcher reads with the same one (T187)."""
+        return self._sql
+
     def listing(self) -> Listing:
         """The accounts, with this install's live bot marker."""
         answer = resolve_marker(self.entry, self.server_dir)

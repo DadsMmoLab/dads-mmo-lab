@@ -259,6 +259,9 @@ _GIT_FIELDS = {
     "head_version",
     "commits_since",
     "restore_rev",
+    # T179 Task 6: the TrinityCore update route's two diff questions.
+    "changed_files",
+    "changed_lines",
 }
 """The seams that are git questions: bound to a `ContainerGit` that names the distro."""
 
@@ -282,6 +285,8 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "install_id": "the id the install RECORDED (`recorded_install_id`), tested on its own",
     "host_zone": "a new install's zone (T171); a rebuild or update of an installed server "
     "carries its own off the override, and Windows is the computer the player sits at",
+    "distro": "not a seam but the distro's own name, so a sentence can say where a press is "
+    "(T179); asserted equal to it below",
 }
 
 
@@ -325,6 +330,11 @@ def test_every_seam_that_can_name_a_daemon_names_the_distro() -> None:
                 "need not; bind it in Seams.in_wsl or add it to _NOT_ADDRESSED_TO_THE_DISTRO"
             )
     assert unbound == [], f"these seams would ask Windows' own Docker: {unbound}"
+
+
+def test_the_wsl_seams_name_their_distro_and_the_local_ones_none() -> None:
+    assert native.Seams.in_wsl(DISTRO).distro == DISTRO
+    assert native.Seams().distro is None
 
 
 def test_the_wsl_seams_answer_linux_and_ask_the_distros_daemon(

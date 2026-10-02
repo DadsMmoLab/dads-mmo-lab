@@ -2631,6 +2631,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`Known.missing`, because a password it could not see is one it cannot promise to "
         "have removed"
     ),
+    ("ui/controller_view.py", "_checkout_refusal"): (
+        "T181. Lists the folder of a client pack's zip for its `.partNN` pieces, only to word "
+        "the refusal when Play finds the pack missing from the server's checkout (the file, "
+        "the commit, what to press); reads only, writes nothing. A listing that finds pieces "
+        "answers None and leaves the engine's own message to say what is wrong"
+    ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
@@ -2664,6 +2670,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "this app's own directory, that is more than a day old - old enough that it cannot "
         "belong to a write still in flight in another copy of Yu'lon. It touches nothing of "
         "a server's and answers an empty listing by doing nothing"
+    ),
+    ("ui_settings.py", "_sweep_stale_temporaries"): (
+        "T187: `update_state._sweep_stale_temporaries` for `ui.json` - lists the config dir "
+        "for `ui.json.*.tmp` a killed save left, and deletes only a file this app named "
+        "itself, in its own directory, more than a day old. Nothing of a server's"
     ),
     ("play_client.py", "plan"): (
         "T181a. Walks the player's own client to sort its files into hard-linked (`*.MPQ`, "
@@ -2702,6 +2713,95 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "(under a temporary name, then renamed into place), never a write into the "
         "original; `refresh()` refuses a folder without the marker, or an original other "
         "than the one it names, before it lists anything"
+    ),
+    ("client_packs.py", "_numbered_parts"): (
+        "T181b. Lists the folder of a checkout pack's zip in the server's own checkout for "
+        "its `<name>.zip.partNN` pieces, which are then READ and joined into a `.joining` "
+        "file in Yu'lon's download cache (`client-packs/checkout/<checksum>/`, in "
+        "`%LOCALAPPDATA%` on Windows), renamed into place only once the join matches the "
+        "pack's checksum. Read-only on the checkout: nothing there is written or deleted "
+        "because of it. A folder that cannot be listed answers no parts, and "
+        "`fetch_checkout()` then refuses naming the file"
+    ),
+    ("client_packs.py", "prune_cache"): (
+        "T181 b/c. Lists one pack's folder in Yu'lon's own download cache "
+        "(`client-packs/<entry>/<pack>/`) for the cached "
+        "versions other than the one just installed, and removes them, with any "
+        "orphaned `.part` there, once a newer version of that pack is installed. Only names that "
+        "are one plain folder name are looked at, a link is removed as a name and never followed, "
+        "and the kept version is never touched. It deletes only inside Yu'lon's cache, never in a "
+        "client or a server's checkout, and a failure is logged and ignored"
+    ),
+    ("client_packs.py", "_prune_after_install"): (
+        "T181 b/c. Lists `client-packs/extracted/` in Yu'lon's own cache for the extracted "
+        "`.MPQ` copies of the pack that was just installed from an older version of itself "
+        "(folders named `<server>~<pack>~<checksum>`), and removes those. Cache only: "
+        "a client's file "
+        "hard-linked to one keeps its own name and bytes, since removing a name never changes "
+        "another name of the same file"
+    ),
+    ("client_packs.py", "_strays"): (
+        "T181 b/c. Lists the folder of ONE install target in a ready-to-play client for the "
+        "`<name>.yulon-pack-old[.n]` files a crashed pack install left beside it, before that "
+        "install stages anything. The listing decides a rename or a delete of those aside "
+        "names only: a missing target gets its first aside put back, any other aside is "
+        "deleted (a read-only one with a single name is made writable first; one shared with "
+        "the player's own client is never chmodded and is left). Only in a folder whose step "
+        "(a) marker was checked, never into a link, and never the player's own client"
+    ),
+    ("launcher_reads.py", "_scandir"): (
+        "T187. Lists a ready-to-play client, its `Interface` and its `AddOns` -- one folder "
+        "each, never a walk -- for the NAMES the launcher window shows under Addons in this "
+        "client. It decides no write anywhere: the answer is a read-only list on screen. No "
+        "addon folder is entered, linked or not; an `Interface` or `AddOns` that is a link is "
+        "listed through once, because that is where the game reads its addons. A folder that "
+        "cannot be listed answers no names"
+    ),
+    ("client_config.py", "remove_locale_realmlists"): (
+        "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
+        "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "
+        "launcher does. The listing decides a delete, but only inside a folder whose step (a) "
+        "marker was read first, only one level under `Data/`, and never into a link: a locale "
+        "folder linked to the player's own client is skipped (and named in a warning), so the "
+        "original's file is never reached. A failure to list raises OSError and a failure to "
+        "delete raises PlayClientError naming the files already removed, rather than "
+        "reporting files removed"
+    ),
+    ("catalog/families/trinitycore.py", "_drop_unlisted_archives"): (
+        "T179 Task 3 (fix round 1). Walks `Data/` of the TEMPORARY extraction client "
+        "`play_client.create()` has just made beside the player's client (its marker names "
+        "this game and server) for every `.MPQ` the block's `client_archives` does not keep, "
+        "and RENAMES each into `.yulon-left-out/` inside the same copy (fix round 2), so the "
+        "extractors, which read `Data/` only, never see another server's patch or an HD pack. "
+        "A rename changes no flag on the inode the copy shares with the player's file; the "
+        "player's own client is never listed or written, and the copy is removed through "
+        "`play_client.remove_folder()` either way"
+    ),
+    ("catalog/families/trinitycore.py", "_put_left_out_back"): (
+        "T179 Task 3 (fix round 3). Walks `.yulon-left-out/` of the TEMPORARY extraction "
+        "client beside the player's client to rename each archive moved aside there back to "
+        "its own path under the copy's `Data/` (and remove the emptied folders), before any "
+        "removal of the copy, so `play_client.remove_folder()` maps every name to the "
+        "player's file at the same path. Only ever inside a copy whose marker and place were "
+        "checked; the player's own client is never listed or written"
+    ),
+    ("catalog/families/trinitycore.py", "_parts_on_disk"): (
+        "T179 Task 6 (fix round 1). Lists one world SQL folder of the server's own checkout "
+        "to ask whether any `<stem>.<n>.sql` part of a split table a pending world update "
+        "names is still there. Read-only; it decides only whether that table is imported "
+        "again or left, never whether the app may write anywhere"
+    ),
+    ("catalog/families/extract.py", "overlay_files"): (
+        "T179 Task 3. Lists the server's own checkout folder `dbc_overlay_from` "
+        "(Centurion's `centurion/dbc`) to copy each file over the same name under "
+        "`data/dbc` in the server folder, through a temporary name renamed into place. "
+        "Read-only on the checkout; it writes only under the install's own `data/`, and a "
+        "folder with no files is a refusal, never a quiet no-op"
+    ),
+    ("catalog/families/extract.py", "missing_map_data"): (
+        "T179 Task 3. Lists `data/maps` under the server folder to ask whether a map file "
+        "exists for each map the world server checks at start. Read-only, and a listing that "
+        "fails reads as the maps missing, which refuses -- never as there"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.

@@ -7,6 +7,7 @@ daemon or a database. The two tests that pin argv/env drive the real
 
 from __future__ import annotations
 
+import functools
 import io
 import subprocess
 from datetime import datetime
@@ -1158,13 +1159,17 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
     monkeypatch.setattr("yulon.platform.docker_program", lambda: None)
     _client_cache.clear()
 
+    from yulon.controller_wow_centurion import maintenance as centurion
+
+    catalog = load_catalog()
     factories = {
         "wow-wotlk": maintenance.mysql_for,
         "wow-tbc": tbc.mysql_for,
         "wow-vanilla": vanilla.mysql_for,
         "wow-tortoise": tortoise.mysql_for,
+        # Centurion's package takes its entry (T179 Task 5).
+        "wow-centurion": functools.partial(centurion.mysql_for, catalog.get("wow-centurion")),
     }
-    catalog = load_catalog()
     assert set(factories) == {
         game.id for game in catalog.games
     }, "a game was added to the catalog without a backup client binding"

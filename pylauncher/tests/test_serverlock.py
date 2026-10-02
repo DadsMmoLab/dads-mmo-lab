@@ -38,7 +38,7 @@ from tests.test_playerbots_conf import CONF, SHIPPED, put_dist
 from tests.test_winacl import BUILT_IN_ADMINISTRATOR, PROFILE_DEFAULT, SDDL_ALIASES, USER
 from yulon import docker, platform, runner, serverlock, winacl
 from yulon.catalog import native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import cmangos, conf
 from yulon.catalog.installer import InstallerError
 from yulon.ui import controller_view as controller_view_module
@@ -323,11 +323,16 @@ def test_a_press_windows_accepted_and_did_not_keep_is_a_failure(
 # -- where it is offered -------------------------------------------------------
 
 
+def _managed(game: str) -> CatalogEntry:
+    """A game the app has a tab for: every one is shipped (Centurion since T179 Task 7)."""
+    return load_catalog().get(game)
+
+
 @pytest.mark.parametrize("game", sorted(game.id for game in load_catalog().games))
 def test_on_windows_every_game_is_offered_the_lock(
     windows: FakeWindows, tmp_path: Path, game: str
 ) -> None:
-    entry = load_catalog().get(game)
+    entry = _managed(game)
     if entry.install.password.file:
         (tmp_path / entry.install.password.file).write_text("hunter2", encoding="utf-8")
     route = ControllerServices.for_entry(entry, tmp_path).lock_folder

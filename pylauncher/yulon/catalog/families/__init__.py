@@ -19,12 +19,14 @@ from collections.abc import Mapping
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.catalog.families.trinitycore import TrinityCoreInstaller
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import StagedInstaller
 
 FAMILIES: Mapping[str, type[StagedInstaller]] = {
     "azerothcore": AzerothCoreInstaller,
     "cmangos": CmangosInstaller,
+    "trinitycore": TrinityCoreInstaller,
 }
 
 
