@@ -515,6 +515,9 @@ The sentence a person reads never waits for this: the server's own words appear
 the moment they arrive, and only the LIST is scheduled.
 """
 
+_LEVEL_ROLE = Qt.ItemDataRole.UserRole + 2
+"""Where a character row keeps its level, for the Level box to start from (T188 A6)."""
+
 _ROW_SETTLE_TRIES = 4
 """How many times to re-read before giving up on the row catching up.
 
@@ -4315,6 +4318,10 @@ the gate this tab really has rather than a second confirmation idiom nobody
 here has learned.
 """
 
+UNINSTALL_KEEP_CHARACTERS = "Uninstall this server and keep my characters"
+UNINSTALL_DELETE_CHARACTERS = "Uninstall this server and delete my characters"
+"""The confirm press, named for the Keep my characters choice it carries out (T188 A14)."""
+
 
 IMPORT_RUNNING = (
     "Running the database import. A full one takes 10-30 minutes and cannot be stopped once "
@@ -6573,6 +6580,10 @@ class ControllerView(QWidget):
         self.console_probe_label.setVisible(False)
         self.enable_channel_button = QPushButton("Turn on the command channel", tab)
         self.enable_channel_button.setVisible(self.services.channel_setup is not None)
+        # T188 A4: set by a press that wrote the channel on. The setup state
+        # stays Idle until the next Start proves it, so the state alone would
+        # keep offering a press that has already been made.
+        self._channel_written = False
         self.enable_channel_button.clicked.connect(self.enable_channel)
         # Hidden until the server has actually refused the saved credential.
         # This is the one control on the tab that can break a channel that
@@ -6739,6 +6750,7 @@ class ControllerView(QWidget):
             "Keep my characters (the database volume is left alone)", tab
         )
         self.keep_characters_check.setChecked(False)  # owner answer 2: unticked by default
+        # Shown only once a plan is on screen (T188 A14), like the T181 box below.
         self.keep_characters_check.setVisible(False)
         # T181 §4: Remove server offers to delete its ready-to-play client too.
         # Ticked by default, and shown only once a plan is on screen and the
@@ -6776,7 +6788,6 @@ class ControllerView(QWidget):
             self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
             self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
             self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
-            self.keep_characters_check.setVisible(True)
             self.uninstall_label.setVisible(True)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
@@ -6894,9 +6905,11 @@ class ControllerView(QWidget):
         box.addWidget(self.repair_label)
         if self.uninstall_button is not None:
             box.addWidget(self.uninstall_button)
+            # T188 A14: the choices come after the plan they change and just
+            # above the press that acts on them, read in that order.
+            box.addWidget(self.uninstall_label)
             box.addWidget(self.keep_characters_check)
             box.addWidget(self.delete_play_client_check)
-            box.addWidget(self.uninstall_label)
             box.addWidget(self.uninstall_confirm_button)
         box.addStretch(1)
         self._add_panel_tab(tab, "server", "Server")
@@ -7421,6 +7434,7 @@ class ControllerView(QWidget):
             "The command channel is written into this install's configuration. It is checked "
             "the next time you start the server."
         )
+        self._channel_written = True
         self.refresh_channel()
 
     @Slot()
@@ -7487,6 +7501,16 @@ class ControllerView(QWidget):
         self.channel_label.setText(_channel_sentence(state))
         self.channel_label.setVisible(True)
         self.repair_channel_button.setVisible(isinstance(state, channel_setup.Refused))
+        # T188 A4: offered only while there is something to turn on -- not under
+        # "verified as …", not while an account waits to be proved, not where
+        # Repair is the answer, and not again after a press that took.
+        self.enable_channel_button.setVisible(
+            self.services.channel_setup is not None
+            and not self._channel_written
+            and not isinstance(
+                state, channel_setup.Verified | channel_setup.Pending | channel_setup.Refused
+            )
+        )
 
     @Slot()
     def repair_channel(self) -> None:
@@ -8354,6 +8378,8 @@ class ControllerView(QWidget):
                 f"The server could not start: port {operations.port} on this machine is in use "
                 "by something else. Free it, or stop whatever holds it, and start again."
             )
+        # The press is undone, and the sentence below asks for it again (T188 A4).
+        self._channel_written = False
         self.refresh_channel()
         return (
             f"The server could not start: port {operations.port} on this machine is in use by "
@@ -8581,6 +8607,7 @@ class ControllerView(QWidget):
             return
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
         self._play_delete_offered = False
         self.delete_play_client_check.setVisible(False)
         self.uninstall_label.setText("Working out what would be removed\u2026")
@@ -8596,10 +8623,12 @@ class ControllerView(QWidget):
             # visible Uninstall button would be an offer the app cannot keep.
             self._uninstall_plan = None
             self.uninstall_confirm_button.setVisible(False)
+            self.keep_characters_check.setVisible(False)
             self.uninstall_label.setText(result.refusal)
             return
         self._uninstall_plan = result
         self.uninstall_confirm_button.setVisible(True)
+        self.keep_characters_check.setVisible(True)
         # T181 §4: offered only for a folder that still carries this server's
         # marker -- `play_client.delete()` would refuse any other, and an offer
         # the press cannot keep is worse than none.
@@ -8623,6 +8652,10 @@ class ControllerView(QWidget):
         if plan is None:
             return
         keep = self.keep_characters_check.isChecked()
+        # T188 A14: the press names the choice it carries out.
+        self.uninstall_confirm_button.setText(
+            UNINSTALL_KEEP_CHARACTERS if keep else UNINSTALL_DELETE_CHARACTERS
+        )
         lines = [
             f"This removes {plan.server_dir} ({size_text(plan.folder_bytes)}) and this "
             f"server's Docker project {plan.project}:",
@@ -8721,6 +8754,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
         play_said: str | None = None
         if isinstance(result, _UninstallOutcome):
             report, play_said = result.report, result.play_client
@@ -8771,6 +8805,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
         message = str(exc)
         self.uninstall_label.setText(message)
         self.action_failed.emit(message)
@@ -11026,6 +11061,11 @@ class ControllerView(QWidget):
             return
         name = str(item.data(Qt.ItemDataRole.UserRole) or "")
         online = bool(item.data(Qt.ItemDataRole.UserRole + 1))
+        # T188 A6: the box starts at this character's own level. It said 1 for
+        # everybody, so one press of "Set level Guglu" took a 78 to level 1.
+        level = item.data(_LEVEL_ROLE)
+        if isinstance(level, int):
+            self.new_level.setValue(level)
         for button, label in self._character_actions():
             button.setText(f"{label} {name}")
             button.setEnabled(True)
@@ -11286,6 +11326,7 @@ class ControllerView(QWidget):
             )
             item.setData(Qt.ItemDataRole.UserRole, character.name)
             item.setData(Qt.ItemDataRole.UserRole + 1, bool(character.online))
+            item.setData(_LEVEL_ROLE, int(character.level))
             self.character_list.addItem(item)
             if character.name == chosen:
                 self.character_list.setCurrentItem(item)
@@ -11334,6 +11375,21 @@ class ControllerView(QWidget):
         play, name = self.services.play, self._chosen_character()
         level = self.new_level.value()
         if play is None or not name:
+            return
+        # T188 A6: lowering resets the character's experience, the one change a
+        # second press cannot undo, so it alone is asked about. Default No.
+        item = self.character_list.currentItem()
+        now = item.data(_LEVEL_ROLE) if item is not None else None
+        if (
+            isinstance(now, int)
+            and level < now
+            and not self._confirm(
+                f"Lower {name}'s level?",
+                f"Set {name} from level {now} down to level {level}? Lowering a level "
+                "resets the character's experience, and raising it again does not "
+                "give that back.",
+            )
+        ):
             return
         self._character_action(
             "Setting the level of", lambda: play.set_level(name, level)  # type: ignore[attr-defined]

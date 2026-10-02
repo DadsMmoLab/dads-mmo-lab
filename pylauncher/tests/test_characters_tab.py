@@ -210,7 +210,8 @@ def test_each_action_reaches_the_seam_with_the_chosen_character(tmp_path: Path) 
 
     view.teleport_where.setText("Stormwind")
     view.teleport_character()
-    view.new_level.setValue(60)
+    # A raise (T188): lowering asks first, and this test is about the seam.
+    view.new_level.setValue(80)
     view.set_character_level()
     view.rename_character()
     view.revive_character()
@@ -229,7 +230,7 @@ def test_each_action_reaches_the_seam_with_the_chosen_character(tmp_path: Path) 
         "mail_gold",
     ]
     assert ("teleport", ("Guglu", "Stormwind")) in play.calls
-    assert ("set_level", ("Guglu", 60)) in play.calls
+    assert ("set_level", ("Guglu", 80)) in play.calls
     assert ("mail_gold", ("Guglu", 5)) in play.calls
 
 
@@ -1041,3 +1042,111 @@ def test_the_gear_read_does_not_reach_back_into_the_view_from_its_worker(
     work = held[-1][0]
     generation, name, (pieces, mails, refusal) = work()  # type: ignore[operator, misc]
     assert (name, pieces, mails, refusal) == ("Ganaar", 19, 2, None)
+
+
+# -- T188 A6: the Level box starts at the chosen character's level -----------
+
+
+class _LevelServer(_Play):
+    """A server whose list follows a level change, capped at WotLK's 80.
+
+    The cap is what makes the second read answer differently from the typed
+    value: a box that only kept what was typed would still say 85.
+    """
+
+    def set_level(self, character: str, level: int) -> object:
+        self.characters = tuple(
+            (
+                Character(c.guid, c.name, min(level, 80), c.online, c.account)
+                if c.name == character
+                else c
+            )
+            for c in self.characters
+        )
+        return super().set_level(character, level)
+
+
+def test_choosing_a_character_puts_their_own_level_in_the_level_box(tmp_path: Path) -> None:
+    """Audit A6: the box said 1 for Guglu at 78, so one press of Set level made him 1."""
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(0)
+    assert view.new_level.value() == 78
+
+    view.character_list.setCurrentRow(1)
+    assert view.new_level.value() == 7
+
+
+def test_after_a_level_change_the_refreshed_row_puts_the_new_level_in_the_box(
+    tmp_path: Path,
+) -> None:
+    play = _LevelServer(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+
+    view.new_level.setValue(85)
+    view.set_level_button.click()
+    pump_until(
+        lambda: "level 80" in view.character_list.item(0).text(),
+        "the list re-read after Set level",
+    )
+
+    assert view.character_list.currentRow() == 0
+    assert view.new_level.value() == 80, "the box kept the typed 85, not what the server says"
+
+
+def _asking(view: ControllerView, answer: bool) -> list[tuple[str, str]]:
+    asked: list[tuple[str, str]] = []
+
+    def confirm(title: str, question: str, parent: object = None) -> bool:
+        asked.append((title, question))
+        return answer
+
+    view._confirm = confirm  # type: ignore[method-assign]
+    return asked
+
+
+def test_lowering_a_level_asks_first_and_no_leaves_the_character_alone(tmp_path: Path) -> None:
+    """Lowering resets the character's experience: the one change a second press can't undo."""
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+    asked = _asking(view, False)
+
+    view.new_level.setValue(60)
+    view.set_level_button.click()
+
+    assert len(asked) == 1
+    assert "Guglu" in asked[0][1] and "78" in asked[0][1] and "60" in asked[0][1], asked
+    assert [c for c in play.calls if c[0] == "set_level"] == []
+
+
+def test_lowering_a_level_and_answering_yes_sends_the_typed_level(tmp_path: Path) -> None:
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+    asked = _asking(view, True)
+
+    view.new_level.setValue(60)
+    view.set_level_button.click()
+
+    assert len(asked) == 1
+    assert [c for c in play.calls if c[0] == "set_level"] == [("set_level", ("Guglu", 60))]
+
+
+def test_raising_a_level_never_asks(tmp_path: Path) -> None:
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(1)
+    asked = _asking(view, False)
+
+    view.new_level.setValue(20)
+    view.set_level_button.click()
+
+    assert asked == []
+    assert [c for c in play.calls if c[0] == "set_level"] == [("set_level", ("Ganaar", 20))]

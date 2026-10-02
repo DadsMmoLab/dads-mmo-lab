@@ -5690,6 +5690,98 @@ def test_the_soap_trees_keep_their_button(qapp: object, ps: _Ps, tmp_path: Path)
     assert view.enable_channel_button.isVisibleTo(view) is True
 
 
+# -- T188 A4: the enable button is offered only while there is something to turn on
+
+
+_CHANNEL_STATES = {
+    "verified": (channel_setup.Verified(account="YULON_AB", password="pw", at="x"), True),
+    "pending": (channel_setup.Pending(account="YULON_AB", password="pw"), True),
+    "refused": (channel_setup.Refused(account="YULON_AB", password="pw", reason="no"), True),
+    "idle": (channel_setup.Idle(), False),
+    "gave-up": (channel_setup.GaveUp(account="YULON_AB", reason="three tries"), False),
+}
+
+
+@pytest.mark.parametrize("name", list(_CHANNEL_STATES))
+def test_the_enable_button_shows_only_while_the_channel_is_not_set_up(
+    qapp: object, ps: _Ps, tmp_path: Path, name: str
+) -> None:
+    """Audit A4: "Turn on the command channel" sat under "verified as YULON_…"."""
+    state, hidden = _CHANNEL_STATES[name]
+    view = ControllerView(
+        WOTLK,
+        _with_channel(ps, tmp_path, _StubSetup(state=state)),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
+
+    assert view.enable_channel_button.isHidden() is hidden, view.channel_label.text()
+
+
+def test_a_later_verdict_does_not_bring_the_enable_button_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A stopped verdict is the one that ENABLES the press: it must not also show it."""
+    services = _with_channel(
+        ps, tmp_path, _StubSetup(state=channel_setup.Verified(account="YULON_AB", password="pw"))
+    )
+    services.dashboard = lambda: dashboard.Verdict("stopped")
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is True, "the verdict did run"
+    assert view.enable_channel_button.isHidden() is True
+
+
+def test_a_successful_press_hides_the_enable_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The state stays Idle until the next Start proves it, so the state alone cannot hide it."""
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+
+    assert stub.presses == 1
+    assert isinstance(stub.setup_state(), channel_setup.Idle)
+    assert view.enable_channel_button.isHidden() is True
+
+
+def test_a_refused_press_leaves_the_enable_button_where_it_was(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(state=channel_setup.Idle(), refuse="stop the server first")
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+
+    assert stub.presses == 1
+    assert view.enable_channel_button.isHidden() is False
+
+
+def test_a_channel_rolled_back_off_a_taken_port_offers_the_enable_button_again(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The rollback sentence says "turn the channel on again": the button has to be there."""
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+    assert view.enable_channel_button.isHidden() is True
+
+    view._start_failed(
+        docker.DockerCommandError(
+            "driver failed programming external connectivity on endpoint ac-worldserver: "
+            "Bind for 127.0.0.1:7878 failed: port is already allocated"
+        )
+    )
+
+    assert stub.rollbacks == 1
+    assert view.enable_channel_button.isHidden() is False
+
+
 class _Probe:
     """Stands in for the console channel the tab is handed."""
 
@@ -6073,6 +6165,70 @@ def test_keep_my_characters_is_unticked_by_default_and_is_what_reaches_run(
     view.show_uninstall_plan()
     view.run_uninstall()
     assert fake.runs == [False, True]
+
+
+# -- T188 A14: Keep my characters sits with the plan it changes ---------------
+
+
+def _server_box_index(view: ControllerView, widget: Any) -> int:
+    return view.uninstall_label.parentWidget().layout().indexOf(widget)
+
+
+def test_keep_my_characters_is_hidden_until_a_plan_is_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.keep_characters_check.isHidden() is True
+
+    view.uninstall_button.click()
+
+    assert view.keep_characters_check.isHidden() is False
+
+
+def test_a_refused_plan_offers_no_keep_my_characters(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    fake = _FakeUninstall(tmp_path, refusal="ac-worldserver: still running. Stop the server first.")
+    view = _uninstall_view(ps, tmp_path, fake)
+
+    view.uninstall_button.click()
+
+    assert view.keep_characters_check.isHidden() is True
+
+
+def test_keep_my_characters_sits_between_the_plan_and_the_confirm_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Audit A14: it sat above the plan, read before the thing it changes."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.uninstall_button.click()
+
+    keep = _server_box_index(view, view.keep_characters_check)
+    assert _server_box_index(view, view.uninstall_label) < keep
+    assert keep < _server_box_index(view, view.uninstall_confirm_button)
+
+
+def test_the_confirm_button_names_what_happens_to_the_characters(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.uninstall_button.click()
+    assert view.uninstall_confirm_button.text() == (
+        "Uninstall this server and delete my characters"
+    )
+
+    view.keep_characters_check.click()
+    assert view.uninstall_confirm_button.text() == "Uninstall this server and keep my characters"
+
+    view.keep_characters_check.click()
+    assert view.uninstall_confirm_button.text() == (
+        "Uninstall this server and delete my characters"
+    )
+
+    view.keep_characters_check.click()
+    view.uninstall_confirm_button.click()
+    assert fake.runs == [True]
 
 
 def test_a_ticked_uninstall_says_where_the_kept_database_password_went(
