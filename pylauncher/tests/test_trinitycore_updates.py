@@ -81,6 +81,11 @@ class World:
     """A world that is up again by the time it is read after its stop."""
     abandon: bool = False
     """The servers' stop is given up during the load wait, before anything was sent."""
+    fail_first_stop: bool = False
+    """The rebuild's own stop signals, then fails; the rollback's stop then works."""
+    explode: bool = False
+    """The servers' stop raises something that is not an `InstallerError` (a bug)."""
+    stops: int = 0
 
     def ask(self, container: str) -> bool | None:
         return self.running
@@ -103,10 +108,15 @@ class World:
         control: docker.StopControl | None = None,
         before_signal: Callable[[], None] | None = None,
     ) -> None:
+        self.stops += 1
+        if self.explode:
+            raise RuntimeError("a bug in the stop")
         if self.abandon:
             raise docker.StopAbandoned("the world was still loading")
         if before_signal is not None:
             before_signal()
+        if self.fail_first_stop and self.stops == 1:
+            raise docker.DockerCommandError("first stop timed out")
         if self.refuse_stop:
             raise docker.DockerCommandError(self.refuse_stop)
         self.calls.append("stop_servers")
@@ -577,6 +587,58 @@ def test_a_stop_given_up_during_the_load_wait_leaves_no_record(box: Box) -> None
     assert box.head() == OLD
 
 
+def test_a_rollback_import_that_fails_after_a_failed_stop_keeps_its_record(box: Box) -> None:
+    """Fix round 3 (the reviewer's probe): `back` wrote the record and dropped a table.
+
+    The rebuild's stop signalled and failed, so `forward` never ran; the rollback's
+    own stop worked and `back` began importing the old files, and failed part way.
+    The record it wrote is what "Finish the world update" works from: it stays.
+    """
+    box.world.fail_first_stop = True
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.m.db.fail_on = "creature"
+    with pytest.raises(InstallerError) as failed:
+        box.press()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature;"], "back began importing"
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql"],
+        "parts": [],
+    }
+    assert "Finish the world update" in str(failed.value)
+
+
+def test_a_press_that_dies_of_a_bug_before_importing_puts_the_record_back(box: Box) -> None:
+    """Fix round 3: `settle()` runs on every way out, not only an `InstallerError`."""
+    box.leave_pending([f"{WORLD_SQL}/version.sql"])
+    before = box.pending()
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.world.explode = True
+    with pytest.raises(RuntimeError, match="a bug in the stop"):
+        box.press()
+    assert box.streamed() == []
+    assert box.pending() == before
+
+
+def test_a_flag_that_cannot_be_written_inside_a_wsl_distro_says_where_the_press_is(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box.distro = "Ubuntu"
+    box.changes(("M", "centurion/dbc/Spell.dbc"))
+    real_write = Path.write_text
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name.startswith(trinitycore.REEXTRACT_FILE):
+            raise PermissionError(13, "Permission denied")
+        return real_write(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    said = box.press()
+    (warning,) = [line for line in said if line.startswith("warning:")]
+    assert "inside a WSL distro" in warning
+    assert "on the Server tab once" not in warning
+
+
 def test_a_new_build_whose_world_stops_after_its_banner_keeps_its_sources_and_its_tables(
     box: Box,
 ) -> None:
@@ -596,6 +658,7 @@ def test_a_new_build_whose_world_stops_after_its_banner_keeps_its_sources_and_it
     assert not [call for call in box.m.rec.calls if call.startswith("restore:")]
     assert needs_reextract(box.server_dir, ENTRY) is not None
     assert str(raised.value).endswith(native.SOURCES_KEPT_NOTE)
+    assert raised.value.sources_kept is True
 
 
 def test_a_record_that_cannot_be_written_stops_the_press_before_the_world_stops(

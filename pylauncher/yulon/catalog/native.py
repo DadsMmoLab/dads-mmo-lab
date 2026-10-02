@@ -2517,7 +2517,8 @@ class ServersDownWork:
     old build regardless.
     """
     settle: Callable[[], None] = lambda: None
-    """After a failed press (fix round 2): undo what `prepare()` wrote if `forward()` never began.
+    """After a failed press, on every way out (fix rounds 2-3): undo what `prepare()` wrote
+    when neither `forward()` nor `back()` began.
 
     A stop given up during the load wait, or one that failed, imports nothing; a
     record saying something is waiting would then be false. Must not raise.
@@ -6091,8 +6092,16 @@ class StagedInstaller:
                     moved,
                     {repo: said.tag for repo, said in targets.items() if said.tag},
                 )
-                yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
-                raise WorldStoppedAfterReadyError(f"{exc} {SOURCES_KEPT_NOTE}") from exc
+                # Guarded: the kept build is the sentence this press ends on, and
+                # a failure of the after-work is added to it, never in its place.
+                also = ""
+                try:
+                    yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
+                except InstallerError as after:
+                    also = f" {after}"
+                raise WorldStoppedAfterReadyError(
+                    f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
+                ) from exc
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
                 # It puts the IMAGE back; this puts the SOURCE back; and it is the
@@ -6102,6 +6111,13 @@ class StagedInstaller:
                 if not sources_back:
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+            except BaseException:
+                # Not a refusal: a bug, an interrupt, a reader that went away. The
+                # record of tables to import is put back if nothing was imported
+                # (fix round 3); nothing may be yielded here (`rebuild()`'s reason).
+                if work is not None:
+                    work.settle()
+                raise
             self._record_source_revs(
                 server_dir,
                 state,

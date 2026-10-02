@@ -1036,8 +1036,8 @@ class TrinityCoreInstaller(CmangosInstaller):
             return None
         runs: list[sqlplan.PhaseRun] = []
         # What `WORLD_REIMPORT_FILE` held before `prepare()` wrote it (`None`: absent),
-        # and whether `forward()` began: `settle()` puts the record back as it was
-        # when the press failed with nothing imported (fix round 2).
+        # and whether `forward()` or `back()` began: `settle()` puts the record back
+        # as it was only when neither did, so nothing was imported (fix rounds 2-3).
         before: list[bytes | None] = []
         started: list[bool] = []
 
@@ -1072,6 +1072,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield f"The {len(runs)} world tables are in; the new build starts on them."
 
         def back(ctx: StageContext) -> Iterator[str]:
+            # Like `forward()`: from here the record may name a table this press
+            # dropped, so `settle()` must leave it (fix round 3).
+            started.append(True)
             if changes.map_data:
                 yield from self._put_flag_back(server_dir, changes.flagged_before)
             if not changes.imports():
@@ -1467,11 +1470,18 @@ class TrinityCoreInstaller(CmangosInstaller):
         try:
             _write_flag(server_dir, sorted({*before, *changed}))
         except OSError as exc:
+            where = (
+                f"press \u201c{REEXTRACT_BUTTON}\u201d on the Server tab once the server is "
+                "stopped"
+                if self._seams.distro is None
+                else "open Yu'lon inside the WSL distro this server lives in, stop the server "
+                f"and press \u201c{REEXTRACT_BUTTON}\u201d on its Server tab there (this server "
+                "is inside a WSL distro)"
+            )
             return (
                 f"warning: {_listed(changed)} changed, so {self.entry.name}'s map data must be "
                 f"extracted again, and {path} could not be written to remember it ({exc}): "
-                f"press “{REEXTRACT_BUTTON}” on the Server tab once the server is "
-                "stopped."
+                f"{where}."
             )
         said = needs_reextract(server_dir, self.entry, press_here=self._seams.distro is None)
         return said or f"{self.entry.name}'s map data must be extracted again."

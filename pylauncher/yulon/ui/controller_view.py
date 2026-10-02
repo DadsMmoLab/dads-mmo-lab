@@ -112,7 +112,12 @@ from yulon.apply import (
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
 from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
 from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, trinitycore
-from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    WorldStoppedAfterReadyError,
+    rebuild_confirmation,
+)
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
@@ -6302,6 +6307,9 @@ class ControllerView(QWidget):
         # the same folders without moving them, so its finish must not drop a
         # count of how far behind they are.
         self._rebuild_moves_sources = False
+        # T179 Task 6 fix round 3: an update press ended with its new build kept
+        # (`WorldStoppedAfterReadyError.sources_kept`), so its sources stayed moved.
+        self._update_sources_kept = False
         # T64: a `mysqldump` is running off the GUI thread, chained in front of
         # an update. `_busy` is the LOG PANEL's flag and a backup is not a job in
         # that panel, so without this nothing on the tab knows -- see
@@ -14811,8 +14819,9 @@ class ControllerView(QWidget):
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = True
+        self._update_sources_kept = False
         return self.rebuild_log.run(
-            lambda: self._watch_for_load_wait(route.press(cancel)),
+            lambda: self._watch_for_load_wait(self._noting_kept_sources(route.press(cancel))),
             title=f"Updating {self.entry.name} to the newest code",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -14852,8 +14861,9 @@ class ControllerView(QWidget):
         cancel = self._rebuild_cancel()
         self._rebuild_is_compile = True
         self._rebuild_moves_sources = True
+        self._update_sources_kept = False
         return self.rebuild_log.run(
-            lambda: self._watch_for_load_wait(route.to_pin(cancel)),
+            lambda: self._watch_for_load_wait(self._noting_kept_sources(route.to_pin(cancel))),
             title=f"Returning {self.entry.name} to the tested commit",
             cancel=cancel,
             record_as=self._run_record_kind(),
@@ -15144,6 +15154,21 @@ class ControllerView(QWidget):
         self._rebuild_force = cancel.anyway
         return cancel
 
+    def _noting_kept_sources(self, lines: Iterator[str]) -> Iterator[str]:
+        """Pass an update press's lines through, noting the typed "sources kept" outcome.
+
+        T179 Task 6 fix round 3: a failure that KEPT the new build
+        (`WorldStoppedAfterReadyError.sources_kept`) left the sources on their new
+        commits, so `_rebuild_finished()` drops the counts the move made stale, as
+        after a finished press. Runs on the panel's worker; the flag is read on the
+        GUI thread once the job has ended.
+        """
+        try:
+            yield from lines
+        except WorldStoppedAfterReadyError as exc:
+            self._update_sources_kept = exc.sources_kept
+            raise
+
     def _watch_for_load_wait(self, lines: Iterator[str]) -> Iterator[str]:
         """Pass a rebuild-panel job's lines through, noticing a load wait (T158).
 
@@ -15217,11 +15242,13 @@ class ControllerView(QWidget):
                 self._compose_again = True
             else:
                 self.check_server_files()
-        if ok and moved and not self.rebuild_log.cancelled:
+        kept, self._update_sources_kept = self._update_sources_kept, False
+        if moved and ((ok and not self.rebuild_log.cancelled) or kept):
             # T146, on `_rebuild_owed`'s terms below: only a press that finished
             # and was not stopped. A failed one puts every source back on the
             # commit it was on (`StagedInstaller._put_sources_back()`), so its
-            # counts are still the counts.
+            # counts are still the counts -- unless its new build was KEPT, which
+            # keeps its sources too (`sources_kept`, T179 Task 6 fix round 3).
             self._forget_what_the_server_update_moved()
         # THREE questions, not one, and every one of them has bitten this clause.
         #

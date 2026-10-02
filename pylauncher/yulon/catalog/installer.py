@@ -123,7 +123,16 @@ class WorldStoppedAfterReadyError(InstallerError):
 
     Everything that only needs to stop, stops: it is an `InstallerError`, and
     the install spine, the UI and the CLI catch it as one.
+
+    `sources_kept` is the update route's typed outcome (T179 Task 6, fix round
+    3): True when "Update the server to latest…" or "Return to the tested pin…"
+    left the moved sources on their new commits with the kept build, so the
+    Modules tab drops the counts the move made stale, as after a finished press.
     """
+
+    def __init__(self, *args: object, sources_kept: bool = False) -> None:
+        super().__init__(*args)
+        self.sources_kept = sources_kept
 
 
 class DockerUnavailableError(InstallerError):

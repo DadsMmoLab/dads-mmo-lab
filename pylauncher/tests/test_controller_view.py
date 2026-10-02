@@ -63,7 +63,7 @@ from yulon.catalog.catalog import (
     load_catalog,
 )
 from yulon.catalog.families import decisions, sqlplan
-from yulon.catalog.installer import InstallerError
+from yulon.catalog.installer import InstallerError, WorldStoppedAfterReadyError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -12251,6 +12251,56 @@ def test_a_stopped_server_update_keeps_the_server_cloned_count(
     pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update stopped")
 
     assert view.rebuild_log.cancelled is True, "the ground for the assertion below"
+    assert view._behind.get(("module", "mod-playerbots")) == 4
+
+
+def test_an_update_whose_build_was_kept_drops_the_server_cloned_count(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T179 Task 6 fix round 3: a failure that KEPT the new build kept its sources too.
+
+    The checkout is on upstream's commit, so "4 commits behind" is a figure about
+    one it moved off -- dropped as a finished update drops it. Read off the
+    route's typed outcome (`WorldStoppedAfterReadyError.sources_kept`), never off
+    the message.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, _ = _server_cloned_view(ps, tmp_path)
+    route = view.services.update_to_latest
+    assert route is not None
+
+    def kept(cancel: object = None) -> Iterator[str]:
+        yield "--- update-sources"
+        raise WorldStoppedAfterReadyError(
+            "The world server came up and then stopped.", sources_kept=True
+        )
+
+    view.services.update_to_latest = replace(route, press=kept)
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update ended")
+
+    assert ("module", "mod-playerbots") not in view._behind
+    assert view._behind.get(("module", "mod-transmog")) == 3
+
+
+def test_an_update_that_failed_and_put_its_sources_back_keeps_the_count(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, _ = _server_cloned_view(ps, tmp_path)
+    route = view.services.update_to_latest
+    assert route is not None
+
+    def fails(cancel: object = None) -> Iterator[str]:
+        yield "--- update-sources"
+        raise WorldStoppedAfterReadyError("The world server came up and then stopped.")
+
+    view.services.update_to_latest = replace(route, press=fails)
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update ended")
+
     assert view._behind.get(("module", "mod-playerbots")) == 4
 
 

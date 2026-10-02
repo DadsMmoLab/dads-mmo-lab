@@ -1896,6 +1896,28 @@ def test_a_kept_build_keeps_the_sources_it_was_made_from_and_records_them(
     assert native.SOURCES_PUT_BACK_NOTE not in said and "put back" not in said
     state = native.read_state(server_dir, valid=())
     assert state is not None and state.source_revs, "what the kept build was made from"
+    assert raised.value.sources_kept is True, "the outcome the tab reads, typed"
+
+
+def test_a_kept_build_whose_after_work_fails_still_says_the_build_was_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3: the after-work's failure is added to the sentence, never in its place."""
+    rec, server_dir = _ready(tmp_path)
+    made = engine(rec, world_output=lambda spec: ABORTED_AFTER_READY)
+
+    def breaks(*_args: object, **_kwargs: object) -> Iterator[str]:
+        raise InstallerError("the after-work broke")
+        yield ""  # pragma: no cover - makes this a generator
+
+    monkeypatch.setattr(made, "after_update", breaks)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "came up and then stopped" in said
+    assert "the after-work broke" in said
+    assert native.SOURCES_KEPT_NOTE in said
+    assert raised.value.sources_kept is True
 
 
 def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_and_its_new_one(
