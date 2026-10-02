@@ -39,7 +39,7 @@ from tests import catalog_provenance
 from yulon import resources
 from yulon.catalog import composegen, families, native
 from yulon.catalog.catalog import CATALOG_FILE, CatalogEntry, NativeInstall, load_catalog
-from yulon.catalog.families import FAMILIES
+from yulon.catalog.families import FAMILIES, decisions
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
 
@@ -334,7 +334,17 @@ def test_the_named_template_dirs_and_the_shipped_ones_are_the_same_set() -> None
             for name in DOCKERFILE_TEMPLATES:
                 assert (build_context / name).is_file(), f"{entry.id}: {build_context / name}"
     orphans = sorted(str(path.relative_to(TEMPLATES)) for path in on_disk - named)
+    # T179: the TrinityCore family's templates land before the entry that names them, the same
+    # way its family-decision sites may be `pending` -- and only while no shipped entry is of
+    # that family. From the day one is, they must be named like every other set.
+    if decisions.PENDING_FAMILY not in {native_of(entry).family for entry in ENTRIES}:
+        orphans = [p for p in orphans if p.replace("\\", "/") not in AWAITING_THEIR_ENTRY]
     assert not orphans, f"template directories no catalog entry names: {orphans}"
+
+
+AWAITING_THEIR_ENTRY = ("shared/trinitycore", "wow-centurion/native")
+"""Template sets of the `trinitycore` family (T179 Task 2) whose catalog entry is a later task's;
+`tests/support_trinitycore.py` renders them meanwhile."""
 
 
 # -- what `render()` writes ---------------------------------------------------
@@ -500,7 +510,7 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
                 # T165: a folder token may follow the label; what it renders is
                 # counted below, and every line it renders is held to `:z` there.
                 bare = line.rstrip()
-                for token in composegen.SERVER_FOLDER_CONFS:
+                for token in composegen.folder_confs(entry):
                     bare = bare.removesuffix("{{" + token + "}}")
                 assert bare.endswith("{{BIND_LABEL}}"), f"{entry.id} {name}: {item}"
                 if name != "build.yml.tmpl":
@@ -528,7 +538,7 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
     ]
     folders = sum(
         len(composegen.server_folders(entry, conf))
-        for conf in composegen.SERVER_FOLDER_CONFS.values()
+        for conf in composegen.folder_confs(entry).values()
     )
     assert len(rendered) == labelled + folders, (entry.id, len(rendered), labelled, folders)
     assert all(line.rstrip().endswith(":z") for line in rendered), (entry.id, rendered)

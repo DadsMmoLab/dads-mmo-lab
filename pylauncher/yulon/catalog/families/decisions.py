@@ -267,41 +267,50 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": not_applicable("CMaNGOS sets its server through its conf table"),
-            "trinitycore": pending("Task 2 (TrinityCore compose templates)"),
+            "trinitycore": not_applicable(
+                "TrinityCore sets its servers through its conf table; its override template "
+                "carries no environment block"
+            ),
         },
         hits=(".azerothcore", ".azerothcore"),
     ),
     Site(
         "yulon.catalog.composegen",
-        "entry_tokens",
-        "MAKE_JOBS and CORE_DIR template tokens",
+        "_built_here",
+        "the family block whose Dockerfile, confs and folder binds this app writes: MAKE_JOBS, "
+        "CORE_DIR, and the conf table folder_target/folder_settings/conf_texts read (T169)",
         {
-            "azerothcore": supported("its checkout ships its own Dockerfile"),
+            "azerothcore": not_applicable(
+                "its checkout ships its own Dockerfile and its image makes its confs"
+            ),
             "cmangos": supported(),
-            "trinitycore": pending("Task 2 (TrinityCore Dockerfile and compose tokens)"),
+            "trinitycore": supported("T179 Task 2"),
         },
-        hits=(".cmangos", ".cmangos", ".cmangos"),
+        hits=(".cmangos", ".cmangos", ".trinitycore"),
     ),
     Site(
         "yulon.catalog.composegen",
-        "folder_target",
-        "where a conf's *Dir value lands in the container",
-        _cmangos_only(_NO_CONF_TABLE, pending("Task 2 (DataDir/LogsDir binds)")),
-        hits=(".cmangos", ".cmangos"),
+        "entry_tokens",
+        "the TrinityCore Dockerfile's CHECKOUT and CMAKE_OPTIONS tokens",
+        {
+            "azerothcore": not_applicable("its checkout ships its own Dockerfile"),
+            "cmangos": not_applicable("its Dockerfile templates spell the cmake defines"),
+            "trinitycore": supported("T179 Task 2"),
+        },
+        hits=(".trinitycore", ".trinitycore", ".trinitycore"),
     ),
     Site(
         "yulon.catalog.composegen",
-        "folder_settings",
-        "the folder settings a conf table states, and their binds (T169)",
-        _cmangos_only(_NO_CONF_TABLE, pending("Task 2 (DataDir/LogsDir binds)")),
-        hits=(".cmangos", ".cmangos", ".cmangos"),
-    ),
-    Site(
-        "yulon.catalog.composegen",
-        "conf_texts",
-        "the conf texts render() reads for folder settings",
-        _cmangos_only(_NO_CONF_TABLE, pending("Task 2 (DataDir/LogsDir binds)")),
-        hits=(".cmangos", ".cmangos"),
+        "folder_confs",
+        "the base template's per-service folder tokens and the conf each service reads",
+        {
+            "azerothcore": not_applicable(
+                "it has no conf table, so no folder is bound whatever the map"
+            ),
+            "cmangos": supported("REALMD_FOLDERS / MANGOSD_FOLDERS"),
+            "trinitycore": supported("AUTHSERVER_FOLDERS / WORLDSERVER_FOLDERS (T179 Task 2)"),
+        },
+        hits=(".trinitycore",),
     ),
     # -- preflight -----------------------------------------------------------------------
     Site(
@@ -321,9 +330,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported("its Dockerfile runs nproc+1"),
             "cmangos": supported(),
-            "trinitycore": pending("Task 2 (TrinityCore Dockerfile make_jobs)"),
+            "trinitycore": supported("its make_jobs, as composegen fills {{MAKE_JOBS}}"),
         },
-        hits=(".cmangos", ".cmangos"),
+        hits=(".cmangos", ".cmangos", ".trinitycore", ".trinitycore"),
     ),
     Site(
         "yulon.catalog.families.azerothcore",

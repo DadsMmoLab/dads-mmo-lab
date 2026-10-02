@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_trinitycore import centurion_like
 from yulon import docker, git
 from yulon import platform as platform_module
 from yulon.catalog import composegen, preflight
@@ -154,6 +155,19 @@ def test_the_jobs_warning_counts_the_jobs_this_entry_s_build_actually_runs() -> 
     warned = [c for c in azerothcore.checks if c.name == preflight.JOBS_CHECK][0]
     assert warned.verdict == "warn"
     assert "16 parallel jobs" in warned.detail
+
+
+def test_a_trinitycore_build_runs_the_job_count_its_catalog_says() -> None:
+    """T179: the Centurion Dockerfile's `-j` is `{{MAKE_JOBS}}` from the catalog, as CMaNGOS's.
+
+    Before T179 a third family fell to the `nproc + 1` answer that is AzerothCore's alone,
+    and the check would have warned about 16 compilers on a build running two.
+    """
+    native = centurion_like().install.native
+    assert native is not None and native.trinitycore is not None
+    jobs = native.trinitycore.dockerfile.make_jobs
+    assert preflight._build_jobs(native, 15) == (jobs, False)
+    assert composegen.entry_tokens(centurion_like())["MAKE_JOBS"] == str(jobs)
 
 
 def test_a_fixed_job_count_that_outruns_the_memory_does_not_name_the_cpu_count() -> None:

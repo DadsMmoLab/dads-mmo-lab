@@ -24,12 +24,20 @@ import pytest
 import yaml
 
 from tests.support_bash import bash_available
+from tests.support_trinitycore import centurion_like
 from yulon import docker, resources
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 
 TEMPLATES = resources.installers_dir()
-GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
+GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
+"""The shipped games, and `wow-centurion`: the TrinityCore family's template rendered from the
+test entry in `tests/support_trinitycore.py` until a shipped entry of that family exists (T179)."""
+
+
+def entry_for(game: str) -> CatalogEntry:
+    return centurion_like() if game == "wow-centurion" else load_catalog().get(game)
+
 
 # Which SQL client and which password variable each image family's script must use: the official
 # mariadb images read MARIADB_ROOT_PASSWORD and ship `mariadb`; mysql:8.4 reads
@@ -78,7 +86,7 @@ def _family(db: dict) -> str:
 @pytest.mark.parametrize("game", GAMES)
 def test_the_database_grace_covers_the_world_grace(game: str, tmp_path: Path) -> None:
     """A daemon shutdown SIGKILLs a container at ITS OWN grace, so the DB's must not be shorter."""
-    db, world = _db_and_world(load_catalog().get(game), tmp_path)
+    db, world = _db_and_world(entry_for(game), tmp_path)
     assert "stop_grace_period" in db, "the database takes Docker's 10 s default"
     assert _seconds(db["stop_grace_period"]) >= _seconds(world["stop_grace_period"])
 
@@ -94,7 +102,7 @@ def test_the_database_waits_for_the_servers_inside_every_stop_grace(
     for an outside client (a SQL tool on the published port). 60 s is left for the database's own
     shutdown, which was measured at 1.4-2.6 s.
     """
-    db, _ = _db_and_world(load_catalog().get(game), tmp_path)
+    db, _ = _db_and_world(entry_for(game), tmp_path)
     bound = re.search(r"-lt (\d+) ", _script(db))
     assert bound, "the wait has no visible bound"
     assert int(bound.group(1)) + 60 <= docker.STOP_GRACE_SECONDS
@@ -104,13 +112,26 @@ def test_the_database_waits_for_the_servers_inside_every_stop_grace(
 @pytest.mark.parametrize("game", GAMES)
 def test_the_wrapper_runs_the_images_own_entrypoint_and_server(game: str, tmp_path: Path) -> None:
     """Setting `entrypoint:` clears the image's CMD, so the server binary must be named again."""
-    db, _ = _db_and_world(load_catalog().get(game), tmp_path)
+    db, _ = _db_and_world(entry_for(game), tmp_path)
     family = _family(db)
     assert db["command"] == ["mariadbd" if family == "mariadb" else "mysqld"]
     script = _script(db)
     assert 'docker-entrypoint.sh "$@" &' in script
     client, password = CLIENT[family]
     assert f'MYSQL_PWD="${password}" {client} ' in script
+
+
+def test_the_trinitycore_hold_is_the_mysql_script_wotlk_runs(tmp_path: Path) -> None:
+    """Both families run mysql:8.4, so their hold scripts are one script, character for character.
+
+    The behaviour tests below run it under bash; this is what lets a fix to one be checked
+    against the other.
+    """
+    wotlk, _ = _db_and_world(entry_for("wow-wotlk"), tmp_path / "wotlk")
+    centurion, _ = _db_and_world(entry_for("wow-centurion"), tmp_path / "centurion")
+    assert _family(centurion) == "mysql"
+    assert _script(centurion) == _script(wotlk)
+    assert centurion["command"] == wotlk["command"] == ["mysqld"]
 
 
 # --- behaviour: the rendered script under bash, with the database stubbed ---------------------
@@ -156,7 +177,7 @@ def _failures(where: Path) -> list[str]:
 
 
 def _start(game: str, tmp_path: Path, *, widen: bool = False) -> tuple[subprocess.Popen[str], Path]:
-    db, _ = _db_and_world(load_catalog().get(game), tmp_path)
+    db, _ = _db_and_world(entry_for(game), tmp_path)
     client, _ = CLIENT[_family(db)]
     stubs = tmp_path / "bin"
     stubs.mkdir()
@@ -206,7 +227,7 @@ def _until(check, what: str, seconds: float = 10.0) -> None:
 
 
 @needs_bash
-@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise", "wow-centurion"))
 @pytest.mark.slow
 def test_sigterm_is_held_while_a_server_is_connected(game: str, tmp_path: Path) -> None:
     proc, where = _start(game, tmp_path)
@@ -223,7 +244,7 @@ def test_sigterm_is_held_while_a_server_is_connected(game: str, tmp_path: Path) 
 
 
 @needs_bash
-@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise", "wow-centurion"))
 def test_with_no_server_connected_the_database_stops_at_once(game: str, tmp_path: Path) -> None:
     """The app's own Stop reaches the DB after the world is gone: nothing may be added there."""
     proc, where = _start(game, tmp_path)
@@ -239,7 +260,7 @@ def test_with_no_server_connected_the_database_stops_at_once(game: str, tmp_path
 
 
 @needs_bash
-@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise", "wow-centurion"))
 @pytest.mark.slow
 def test_a_database_that_stays_unanswerable_is_stopped_after_five_tries(
     game: str, tmp_path: Path
@@ -266,7 +287,7 @@ def test_a_database_that_stays_unanswerable_is_stopped_after_five_tries(
 
 
 @needs_bash
-@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise", "wow-centurion"))
 @pytest.mark.slow
 def test_a_count_that_fails_for_a_moment_keeps_the_hold(game: str, tmp_path: Path) -> None:
     """Codex review: one failed query used to end the hold under a still-connected world.
@@ -309,7 +330,7 @@ def test_the_count_leaves_out_this_containers_own_connections(tmp_path: Path) ->
 
 
 @needs_bash
-@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise", "wow-centurion"))
 @pytest.mark.slow
 def test_a_signal_before_the_server_started_still_stops_it(game: str, tmp_path: Path) -> None:
     """The early-signal line: TERM before `db=$!` exists must reach the server once it does.

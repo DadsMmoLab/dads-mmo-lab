@@ -902,10 +902,15 @@ def _build_jobs(native: NativeInstall, cpus: int) -> tuple[int, bool]:
 
     `native.cmangos` is the key rather than `family` or `dockerfile_dir`,
     because it is the field `composegen` itself reads to fill that token: the
-    two cannot come to different conclusions about which build this is.
+    two cannot come to different conclusions about which build this is. A
+    TrinityCore entry (T179) builds from this repo's template too, and
+    `composegen.entry_tokens()` fills its `{{MAKE_JOBS}}` from
+    `trinitycore.dockerfile.make_jobs` the same way.
     """
     if native.cmangos is not None:
         return native.cmangos.dockerfile.make_jobs, False
+    if native.trinitycore is not None:
+        return native.trinitycore.dockerfile.make_jobs, False
     return cpus + 1, True
 
 

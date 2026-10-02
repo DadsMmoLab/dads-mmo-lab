@@ -940,7 +940,7 @@ def test_the_conf_mode_stays_owner_only_only_while_the_images_run_as_root() -> N
     """
     installers = resources.installers_dir()
     dockerfiles = sorted(installers.glob("*/native/Dockerfile.tmpl"))
-    compose = sorted((installers / "shared" / "cmangos").glob("*.yml.tmpl"))
+    compose = sorted(installers.glob("shared/*/*.yml.tmpl"))
     assert dockerfiles and compose, "the templates moved; this guard is now vacuous"
     offenders = []
     for path in dockerfiles:
