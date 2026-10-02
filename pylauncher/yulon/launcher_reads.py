@@ -1,6 +1,7 @@
-"""The three reads the client launcher window shows (T187).
+"""The reads the client launcher window shows (T187).
 
 * **Log in as** -- the server's game accounts, by name.
+* **Realm address** -- the address the server's realm row announces.
 * **N bots and M players online** -- the banner's count.
 * **Addons in this client** -- the ready-to-play client's `Interface/AddOns`.
 
@@ -23,7 +24,7 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager as ContextManager
 from pathlib import Path
 
-from yulon import dbreads, useraccounts
+from yulon import dbreads, networking, useraccounts
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import Marker, SqlReader
 from yulon.log import get_logger
@@ -42,23 +43,78 @@ def login_accounts(
 ) -> tuple[str, ...]:
     """The account names a person may log in as, sorted; empty when they cannot be read.
 
+    `account_names()` with "could not be read" as no names, for a caller that
+    only lists them.
+    """
+    return account_names(sql, entry, marker, app_account=app_account) or ()
+
+
+def account_names(
+    sql: SqlReader, entry: CatalogEntry, marker: Marker, *, app_account: str
+) -> tuple[str, ...] | None:
+    """The account names a person may log in as, sorted; `None` when they could not be read.
+
     `useraccounts.accounts()` is the read, so the bot accounts, every `YULON_`
     command-channel account and the auction-house bot are already left out in
     its WHERE. The app's own account is left out once more here by name,
     casefolded, because a dropdown that offered it would hand a person the
-    credential every server feature rides on, whatever its name looks like.
+    credential every server feature rides on, whatever its name looks like;
+    and so is every name `useraccounts` reserves for a command channel
+    (`APP_PREFIX`, the rule its writes refuse by), for a row that comes back
+    with a space or another case the SQL comparison did not see.
+
+    `None` and not an empty tuple on a failure, because the launcher answers
+    the two differently (T187 Review Focus 2): an account saved earlier that
+    is not among the names READ is gone and falls back to "Ask in the game",
+    while one that could not be looked for is kept.
+
+    A blank marker is refused before any SQL: `bot_clause()` would make it
+    `LIKE '%'`, call every account a bot and list none, which would read as
+    "this server has no accounts" -- and as every saved account gone.
     """
+    if not marker.prefix.strip():
+        logger.info(
+            "Log in as offers no accounts: this install's bot marker is blank, so the "
+            "bot accounts cannot be told from a person's"
+        )
+        return None
     try:
         listing = useraccounts.accounts(sql, entry, marker, app_account=app_account)
     except Exception as exc:  # noqa: BLE001 - on a worker, a raise is a lost window
         logger.warning(f"could not read {entry.id}'s accounts for Log in as: {exc}")
-        return ()
+        return None
     if listing.problem:
         logger.info(f"Log in as offers no accounts: {listing.problem}")
-        return ()
+        return None
     own = app_account.strip().casefold()
-    names = {a.username for a in listing.accounts if a.username.strip().casefold() != own}
+    names = {
+        a.username
+        for a in listing.accounts
+        if a.username.strip().casefold() != own
+        and not a.username.strip().upper().startswith(useraccounts.APP_PREFIX)
+    }
     return tuple(sorted(names, key=lambda name: (name.casefold(), name)))
+
+
+def announced_address(sql: SqlReader, entry: CatalogEntry) -> str | None:
+    """The address this server's realm row hands a client after login, or `None`.
+
+    `networking.realmlist_address_query()`, the SELECT the installer's own
+    realm step compares with, read for its first column (`address`). `None`
+    when the read fails or does not come back as exactly one row with an
+    address in it: the launcher's "you will be sent to ..." hint is left out
+    rather than shown about an address nobody read.
+    """
+    try:
+        raw = sql.query("auth", networking.realmlist_address_query(entry))
+    except Exception as exc:  # noqa: BLE001 - on a worker, a raise is a lost window
+        logger.info(f"could not read {entry.id}'s realm address: {exc}")
+        return None
+    rows = [line for line in raw.splitlines() if line.strip()]
+    if len(rows) != 1:
+        return None
+    address = rows[0].split("\t")[0].strip()
+    return address or None
 
 
 def online_counts(sql: SqlReader, entry: CatalogEntry, marker: Marker) -> tuple[int, int] | None:

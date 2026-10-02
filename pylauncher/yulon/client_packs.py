@@ -870,6 +870,28 @@ def launcher_exe_options(
     return out
 
 
+def launcher_following_borderless(launcher: Mapping[str, Any], borderless: bool) -> dict[str, Any]:
+    """The launcher picks with the window mode brought in step with a `borderless` exe choice.
+
+    The other half of `launcher_exe_options` (T187): "Client options…" ticking
+    Borderless makes a saved window pick "borderless", and unticking it makes a
+    saved "borderless" pick "windowed" -- else the next Play would put back what
+    the player just changed, because the window pick decides that exe option.
+    No window pick saved leaves the picks as they are: the exe option alone
+    decides then.
+    """
+    picks = clean_launcher(launcher)
+    display = dict(picks.get("display", {}))
+    window = display.get("window")
+    if window is None:
+        return picks
+    if borderless and window != "borderless":
+        display["window"] = "borderless"
+    elif not borderless and window == "borderless":
+        display["window"] = "windowed"
+    return {**picks, "display": display}
+
+
 def _empty_record() -> PackRecord:
     return PackRecord(packs={}, exe=None, choices={"packs": {}, "exe_options": {}})
 

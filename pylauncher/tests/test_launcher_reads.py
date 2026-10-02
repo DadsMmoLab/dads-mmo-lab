@@ -138,6 +138,73 @@ def test_a_tree_whose_gm_level_store_is_unmeasured_offers_no_accounts() -> None:
     assert sql.asked == []
 
 
+def test_a_command_channel_name_the_database_hands_back_is_never_offered() -> None:
+    """`useraccounts`' rule in Python as well: no `YULON_` name, whatever its case or spacing.
+
+    The statement leaves them out with `LEFT(...) <> 'YULON_'`, which a name
+    stored as ` yulon_ab12` (a space, lower case) gets past on a case-sensitive
+    collation; the writes refuse such a name by `.strip().upper()`, and so must
+    the dropdown, or it offers a person another install's channel credential.
+    """
+    sql = _Reader("1\tALICE\t0\n2\t yulon_ab12\t3\n3\tYULON_OTHER\t3\n4\tBOB\t0\n")
+
+    names = launcher_reads.login_accounts(sql, WOTLK, MARKER, app_account=APP)
+
+    assert names == ("ALICE", "BOB")
+
+
+def test_a_blank_marker_offers_no_accounts_says_why_and_asks_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`LIKE '%'` would call every account a bot: no list, a reason in the log, no SQL."""
+    import logging
+
+    sql = _Reader("1\tALICE\t0\n")
+    blank = dbreads.Marker(prefix="  ", source="default")
+
+    with caplog.at_level(logging.INFO, logger="yulon"):
+        assert launcher_reads.login_accounts(sql, WOTLK, blank, app_account=APP) == ()
+        assert launcher_reads.account_names(sql, WOTLK, blank, app_account=APP) is None
+
+    assert sql.asked == []
+    assert "marker is blank" in caplog.text
+
+
+def test_account_names_tells_could_not_read_from_no_accounts() -> None:
+    """The launcher keeps a saved account it could not look for, and drops one that is gone."""
+    assert launcher_reads.account_names(_Broken(), WOTLK, MARKER, app_account=APP) is None
+    assert launcher_reads.account_names(_Reader("x\n"), WOTLK, MARKER, app_account=APP) is None
+    assert launcher_reads.account_names(_Reader(""), WOTLK, MARKER, app_account=APP) == ()
+    names = launcher_reads.account_names(_Reader("1\tBOB\t0\n"), TBC, MARKER, app_account=APP)
+    assert names == ("BOB",)
+
+
+# -- Realm address -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("entry", "auth", "characters"), FAMILIES)
+def test_the_announced_address_is_the_realm_rows_own_read(
+    entry: CatalogEntry, auth: str, characters: str
+) -> None:
+    """The SELECT the installer's realm step compares with, read for its `address` column."""
+    from yulon import networking
+
+    sql = _Reader("192.168.1.20\t127.0.0.1\n")
+
+    assert launcher_reads.announced_address(sql, entry) == "192.168.1.20"
+    assert sql.asked == [("auth", networking.realmlist_address_query(entry))]
+    assert f"FROM {auth}." in sql.asked[0][1]
+
+
+@pytest.mark.parametrize("answer", ["", "\n", "a\nb\n", "\t127.0.0.1\n"])
+def test_an_announced_address_that_is_not_one_row_is_not_known(answer: str) -> None:
+    assert launcher_reads.announced_address(_Reader(answer), WOTLK) is None
+
+
+def test_an_announced_address_that_cannot_be_read_is_not_known() -> None:
+    assert launcher_reads.announced_address(_Broken(), WOTLK) is None
+
+
 # -- N bots and M players online --------------------------------------------
 
 

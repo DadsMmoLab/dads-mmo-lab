@@ -720,6 +720,14 @@ def _realm_address(record: client_packs.PackRecord) -> str:
     return str(record.launcher.get("realm_address") or PLAY_CLIENT_ADDRESS)
 
 
+def _launcher_writes(record: client_packs.PackRecord) -> bool:
+    """Whether the launcher's picks (T187) put a key into, or take one out of, Config.wtf."""
+    return bool(
+        client_packs.launcher_config_keys(record.launcher, catalog_always={})
+        or client_packs.launcher_config_removals(record.launcher, catalog_always={})
+    )
+
+
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
 
 PLAY_PENDING = (
@@ -5796,6 +5804,17 @@ class ControllerView(QWidget):
     rebuilt tab writes modules into the new folder (or back into the original).
     """
 
+    play_state_changed = Signal()
+    """Play's line, its Cancel, or a lock on the ready-to-play client changed (T187).
+
+    The client launcher window shows the same line and Cancel as the Server tab
+    and greys its settings while `play_client_busy()` says so; it reads both off
+    this view when this fires rather than keeping a second copy of either.
+    """
+
+    launcher_saved = Signal(str)
+    """A `save_launcher_picks()` write ended: `""` when saved, else what went wrong (T187)."""
+
     def __init__(
         self,
         entry: CatalogEntry,
@@ -7354,6 +7373,8 @@ class ControllerView(QWidget):
             # T162: back to what the dashboard's files last said, never unconditionally.
             if self.dashboard_log is not None:
                 self._set_rebuild_dashboard_button()
+        # T187: the launcher window greys its settings while this tab is busy.
+        self.play_state_changed.emit()
 
     @Slot()
     def start_server(self) -> None:
@@ -8301,6 +8322,7 @@ class ControllerView(QWidget):
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)
+        self.play_state_changed.emit()
 
     @Slot(str)
     def _play_progress(self, text: str) -> None:
@@ -8363,6 +8385,7 @@ class ControllerView(QWidget):
         if self._play_holds_busy:
             self._play_holds_busy = False
             self._set_busy(False)
+        self.play_state_changed.emit()
 
     def _is_this_servers(self, marker: play_client.Marker | None) -> bool:
         return (
@@ -8768,6 +8791,7 @@ class ControllerView(QWidget):
         self._play_notes = ()
         if said is not None:
             self._say_play(said)
+        self.play_state_changed.emit()
 
     def _play_still_usable(self) -> play_client.Marker | None:
         """`_usable_play_client()` part-way through a Play: a gone folder ends it first."""
@@ -8867,9 +8891,12 @@ class ControllerView(QWidget):
         play = self.services.play_client_dir
         recorded = client_packs.read_record(play) if play is not None else None
         # Also when the catalog no longer has client data but the record still lists
-        # packs or a patched exe: step 1 takes them out.
+        # packs or a patched exe: step 1 takes them out. And for the launcher's picks
+        # alone (T187): on an entry with no client data -- every shipped game today --
+        # its display and account choices are Config.wtf keys only the pipeline writes.
         if has_client_data(self.entry.client) or (
-            recorded is not None and (recorded.packs or recorded.exe is not None)
+            recorded is not None
+            and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
         ):
             self._skipped = frozenset()
             self._play_prepare()
@@ -8889,6 +8916,7 @@ class ControllerView(QWidget):
         self.play_cancel_button.setText("Cancel")
         self.play_cancel_button.setEnabled(True)
         self.play_cancel_button.setVisible(shown)
+        self.play_state_changed.emit()
 
     @Slot()
     def _cancel_play_download(self) -> None:
@@ -8896,6 +8924,7 @@ class ControllerView(QWidget):
         self._play_cancel.set()
         self.play_cancel_button.setEnabled(False)
         self.play_cancel_button.setText("Cancelling…")
+        self.play_state_changed.emit()
 
     def _play_prepare(self) -> None:
         """Run the pipeline on the worker; `_skipped` are optional packs played without.
@@ -9342,10 +9371,16 @@ class ControllerView(QWidget):
 
         def save() -> None:
             current = client_packs.read_record(play)
+            launcher = current.launcher
+            borderless = chosen.get("exe_options", {}).get("borderless")
+            if isinstance(borderless, bool):
+                # T187: one source -- the launcher's window pick follows this box,
+                # or the next Play would put back what the player just changed.
+                launcher = client_packs.launcher_following_borderless(launcher, borderless)
             client_packs.write_record(
                 play,
                 client_packs.PackRecord(
-                    current.packs, current.exe, chosen, current.config_seeded, current.launcher
+                    current.packs, current.exe, chosen, current.config_seeded, launcher
                 ),
                 game=game,
                 server_dir=server_dir,
@@ -9357,6 +9392,107 @@ class ControllerView(QWidget):
     def _client_options_saved(self, _result: object) -> None:
         self._release_play_client()
         self._say_play("Your client choices are saved. They take effect at your next Play.")
+
+    # -- the client launcher window's hooks (T187) --------------------------
+
+    @property
+    def play_unavailable(self) -> frozenset[str]:
+        """The optional packs whose address answered 404 at the last Play (spec §4)."""
+        return self._client_unavailable
+
+    def play_client_busy(self) -> str | None:
+        """Why the ready-to-play client's record may not be written now, or None (T187).
+
+        A Play on its way (it reads the record and writes it back as each step
+        ends), any Server action, and Make…/Refresh/Delete/Client options and a
+        launcher save (`_play_client_running`). A module job is not here: it
+        never writes the record, and the launcher's saves have no reason to wait
+        for one -- its PLAY, Refresh and Delete still go through
+        `_play_client_refusal()`, which does ask about it.
+        """
+        if self._play_pending:
+            return PLAY_PENDING
+        if self._busy or self._play_client_running:
+            return (
+                "This server is busy with another action — wait for it to finish, then "
+                "change this again. Nothing was changed."
+            )
+        return None
+
+    def save_launcher_picks(
+        self,
+        *,
+        launcher: Mapping[str, Any] | None = None,
+        drop: Collection[str] = (),
+        packs: Mapping[str, bool] | None = None,
+        exe_options: Mapping[str, bool] | None = None,
+    ) -> str | None:
+        """Save the launcher window's choices into the record, off the GUI thread (T187).
+
+        `launcher` keys replace the saved ones and `drop` removes keys (a realm
+        address put back to this computer); `packs` and `exe_options` are merged
+        into the choices "Client options…" saves, which are the same record. A
+        window pick also sets the `borderless` exe option where the catalog's
+        patch has one (`launcher_exe_options`), so the two never disagree.
+
+        Read, changed and written in one job under `_play_client_running`, the
+        lock Client options takes: Play's pipeline reads the record and writes it
+        back, and a save landing between the two would be lost. Answers the
+        refusal (nothing is started) or None; the outcome comes through
+        `launcher_saved`. Nothing is downloaded or written into the client here:
+        the next Play applies it.
+        """
+        play = self.services.play_client_dir
+        if self.services.set_play_client_dir is None or play is None:
+            return (
+                "This server has no ready-to-play client to save that in. Make one first. "
+                "Nothing was changed."
+            )
+        refusal = self.play_client_busy()
+        if refusal is not None:
+            return refusal
+        game, server_dir = self.entry.id, self.services.controller.server_dir
+        patch = self.entry.client.exe_patch
+        changes = dict(launcher or {})
+        gone = frozenset(drop)
+
+        def save() -> None:
+            current = client_packs.read_record(play)
+            picks = {k: v for k, v in current.launcher.items() if k not in gone}
+            picks.update(changes)
+            chosen_packs = {**current.choices["packs"], **(packs or {})}
+            chosen_exe = {**current.choices["exe_options"], **(exe_options or {})}
+            if patch is not None:
+                chosen_exe = client_packs.launcher_exe_options(picks, chosen_exe, patch.options)
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(
+                    current.packs,
+                    current.exe,
+                    {"packs": chosen_packs, "exe_options": chosen_exe},
+                    current.config_seeded,
+                    picks,
+                ),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        self._play_client_running = True
+        self.play_state_changed.emit()
+        self._run(save, self._launcher_picks_saved, self._launcher_picks_failed)
+        return None
+
+    @Slot(object)
+    def _launcher_picks_saved(self, _result: object) -> None:
+        self._release_play_client()
+        self.launcher_saved.emit("")
+
+    @Slot(object)
+    def _launcher_picks_failed(self, exc: object) -> None:
+        self._release_play_client()
+        if not isinstance(exc, client_packs.PackError):
+            logger.warning(f"{self.entry.id}: saving the launcher's choices: {exc!r}")
+        self.launcher_saved.emit(str(exc) or "Your choice could not be saved.")
 
     # -- Refresh and Delete ------------------------------------------------
 

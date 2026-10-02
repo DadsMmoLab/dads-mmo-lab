@@ -122,6 +122,14 @@ style would otherwise draw -- and reserve width for -- beside it: two arrows.
 """
 
 
+LAUNCHER_PLAY_BUTTON = "launcher-play"
+"""objectName of the client launcher window's big PLAY (T187).
+
+It is a primary button (`primary="true"`, the amber fill); this rule only makes
+it the size the launcher is built around, in the theme's colours.
+"""
+
+
 # --- Handheld geometry floors -------------------------------------------------
 # The launcher ships on the Steam Deck (1280x800, 7"), driven by controller and
 # touch. Every interactive widget gets a floor of at least `TOUCH_TARGET_PX` in
@@ -430,6 +438,15 @@ QPushButton[objectName^="install-"]:disabled {{
     background-color: #2A2418;
     color: #7A6A48;
     border: 1px solid {COLOR_BRASS_DEEP};
+}}
+
+/* T187: the client launcher's PLAY -- a primary button, the size of the window's purpose. */
+QPushButton#{LAUNCHER_PLAY_BUTTON} {{
+    font-size: {_px(26, scale)};
+    font-weight: bold;
+    letter-spacing: 3px;
+    min-height: {_touch(58, scale)};
+    border-radius: 4px;
 }}
 
 /* Destructive actions (Stop, Purge, Uninstall). */
