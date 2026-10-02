@@ -460,9 +460,11 @@ def downloads_dir() -> Path:
 
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
+    import shiboken6
     from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
-    from PySide6.QtGui import QDesktopServices, QGuiApplication, QHoverEvent
+    from PySide6.QtGui import QCloseEvent, QDesktopServices, QGuiApplication, QHoverEvent
     from PySide6.QtWidgets import (
+        QHBoxLayout,
         QMainWindow,
         QMenu,
         QMessageBox,
@@ -472,7 +474,7 @@ def build_window() -> object:
         QWidget,
     )
 
-    from yulon import __version__, forgetting
+    from yulon import __version__, forgetting, ui_settings
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
     from yulon.selfupdate.apply import (
@@ -498,9 +500,15 @@ def build_window() -> object:
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_app_icon, get_tab_icon
+    from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
     from yulon.ui.tab_titles import retitle_controller_tabs
-    from yulon.ui.theme import FORGET_TAB_BUTTON, apply_dadcraft_theme
+    from yulon.ui.theme import (
+        FORGET_TAB_BUTTON,
+        LAUNCH_TAB_BUTTON,
+        TAB_BUTTONS,
+        apply_dadcraft_theme,
+    )
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
@@ -544,6 +552,22 @@ def build_window() -> object:
         # The sidebar's right-click menu, built and not shown (T95): a test
         # drives the builder, because `QMenu.exec` cannot be replaced.
         yulon_tab_menu: Callable[[QPoint], QMenu | None]
+        # T187: each server's client launcher window, by the key its tab has,
+        # and the one way one is opened (the sidebar ▶, the Server tab's Play).
+        yulon_launchers: dict[tuple[str, Path], LauncherWindow]
+        yulon_open_launcher: Callable[[str, object], LauncherWindow | None]
+
+        def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
+            """The app is closing: its launcher windows go with it (T187).
+
+            Only a close that was accepted: `main()`'s guard refuses one while
+            a job runs, and that guard is an event filter, so a refused close
+            never reaches here and the launchers stay. Each is its own window,
+            so left open it would keep the app running with no main window.
+            """
+            super().closeEvent(event)
+            if event.isAccepted():
+                close_launchers(self)
 
         def resizeEvent(self, event: object) -> None:
             """Re-scale the theme's font sizes with the window width.
@@ -693,6 +717,79 @@ def build_window() -> object:
     # distro comparison both reach into `services` and `console_log`.
     controllers: dict[tuple[str, Path], ControllerView] = {}
     controller_views: list[QWidget] = []
+    # T187: one launcher window per server, keyed as its tab is. Made on the
+    # first ▶ and kept (closing one hides it) until its server goes.
+    launchers: dict[tuple[str, Path], LauncherWindow] = {}
+    window.yulon_launchers = launchers
+
+    def open_launcher(game: str, server_dir: object) -> LauncherWindow | None:
+        """Show this server's launcher window, made the first time; again, it comes forward.
+
+        Its size and place, and the realm addresses typed into it, come back
+        from `ui.json` (`ui_settings`), and go back there when it closes and
+        when an address is typed. It is its own top-level window with no
+        parent: owned by this window, Windows would keep it above the main
+        window, and "Server tab…" could never bring that forward.
+        """
+        key = (game, Path(str(server_dir)))
+        view = controllers.get(key)
+        if view is None:
+            return None
+        launcher = launchers.get(key)
+        if launcher is not None and not shiboken6.isValid(launcher):
+            launchers.pop(key, None)
+            launcher = None
+        if launcher is None:
+            place = ui_settings.launcher_place(*key)
+            launcher = LauncherWindow(view, addresses=place.addresses)
+            launcher.setWindowIcon(get_app_icon())
+            if place.geometry is not None:
+                launcher.restore_geometry_text(place.geometry)
+            launcher.closed.connect(
+                lambda k=key, w=launcher: ui_settings.remember_launcher(
+                    *k, geometry=w.geometry_text()
+                )
+            )
+            launcher.addresses_changed.connect(
+                lambda addresses, k=key: ui_settings.remember_launcher(*k, addresses=addresses)
+            )
+            launcher.server_tab_requested.connect(show_server_tab)
+            launchers[key] = launcher
+        elif launcher.view is not view:  # pragma: no cover - `add_controller` re-points it
+            launcher.set_view(view)
+        _bring_to_front(launcher)
+        return launcher
+
+    window.yulon_open_launcher = open_launcher
+
+    def _launcher_opener(key: tuple[str, Path]) -> Callable[[], None]:
+        """`ControllerView.open_launcher` for one tab: its Play opens this server's launcher."""
+
+        def open_it() -> None:
+            open_launcher(*key)
+
+        return open_it
+
+    def close_launcher(key: tuple[str, Path]) -> None:
+        """The server is going (removed, uninstalled): its launcher closes, before its tab.
+
+        Closed first, so nothing in it can reach the view `drop_controller()`
+        is about to destroy (Review Focus 4); its place in `ui.json` goes too,
+        with the addresses typed for a server that is no longer on the list.
+        """
+        launcher = launchers.pop(key, None)
+        if launcher is not None and shiboken6.isValid(launcher):
+            launcher.close()
+            launcher.deleteLater()
+        ui_settings.forget_launcher(*key)
+
+    def show_server_tab(game: str, server_dir: object) -> None:
+        """The launcher's "Server tab…": this window, on that server's tab."""
+        view = controllers.get((game, Path(str(server_dir))))
+        if view is None:
+            return
+        tabs.setCurrentWidget(view)
+        _bring_to_front(window)
 
     def drop_controller(key: tuple[str, Path]) -> None:
         """Tear one live tab down completely, mirroring `_stop_background_threads()`.
@@ -845,6 +942,7 @@ def build_window() -> object:
         folder = Path(str(server_dir))
         state.forget(game, folder)
         key = (game, folder)
+        close_launcher(key)
         if key in controllers:
             drop_controller(key)
             # What tells two tabs apart is the shortest tail they do NOT share,
@@ -1004,7 +1102,7 @@ def build_window() -> object:
             self.sync()
             return False
 
-        def attach(self, index: int, button: QToolButton) -> None:
+        def attach(self, index: int, button: QWidget) -> None:
             self._bar.setTabButton(index, FORGET_SIDE, button)
             self.sync()
 
@@ -1012,8 +1110,12 @@ def build_window() -> object:
         def sync(self) -> None:
             current = self._bar.currentIndex()
             for index in range(self._bar.count()):
-                button = self._bar.tabButton(index, FORGET_SIDE)
-                if button is not None:
+                strip = self._bar.tabButton(index, FORGET_SIDE)
+                if strip is None:
+                    continue
+                # The strip's buttons, not the strip (T187): each keeps its room
+                # hidden (`_tab_buttons`), so the tab's length never moves.
+                for button in strip.findChildren(QToolButton):
                     button.setVisible(index in (current, self._hovered))
 
         @Slot(int)
@@ -1029,12 +1131,42 @@ def build_window() -> object:
     tabs.tabBar().installEventFilter(forget_buttons)
     tabs.currentChanged.connect(forget_buttons.current_changed)
 
-    def _forget_button(key: tuple[str, Path], name: str) -> QToolButton:
-        """The × for one server tab. Parented to the bar, which deletes it with its tab.
+    def _tab_buttons(key: tuple[str, Path], name: str) -> QWidget:
+        """A server tab's ▶ and × side by side (T187), on the side T95's × alone had.
+
+        Side by side, not stacked: on this West rail Qt hands a tab button its
+        sizeHint as it stands, so a 42 x 18 strip fits across the 64px rail and
+        the tab is no longer than the × made it (measured offscreen 2026-10-02).
+        Each button keeps its room while hidden, so showing them moves nothing.
+        Parented to the bar, which deletes the strip with its tab.
+        """
+        strip = QWidget(tabs.tabBar())
+        strip.setObjectName(TAB_BUTTONS)
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        play = QToolButton(strip)
+        play.setObjectName(LAUNCH_TAB_BUTTON)
+        play.setText("▶")
+        play.setAutoRaise(True)
+        # Not a gamepad stop, for the ×'s reason: the Server tab's Play is the pad's way.
+        play.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        play.setToolTip(f"Play: open the game launcher for {name}")
+        play.setAccessibleName("Play")
+        play.clicked.connect(lambda _checked=False, k=key: open_launcher(*k))
+        for button in (play, _forget_button(key, name, strip)):
+            policy = button.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            button.setSizePolicy(policy)
+            row.addWidget(button)
+        return strip
+
+    def _forget_button(key: tuple[str, Path], name: str, parent: QWidget) -> QToolButton:
+        """The × for one server tab, in its strip (`_tab_buttons`).
 
         `QTabBar.removeTab()` deletes a tab's buttons (measured offscreen, 2026-09-24).
         """
-        button = QToolButton(tabs.tabBar())
+        button = QToolButton(parent)
         button.setObjectName(FORGET_TAB_BUTTON)
         button.setText("×")
         button.setAutoRaise(True)
@@ -1186,6 +1318,8 @@ def build_window() -> object:
         # T95: the Server tab's "Remove from Yu'lon…", and the stop a removal waits for.
         view.remove_requested.connect(request_removal)
         view.stopped_for_removal.connect(on_stopped_for_removal)
+        # T187: the Server tab's Play opens this server's launcher window.
+        view.open_launcher = _launcher_opener(key)
         # Every failure this view reports also lands in the app log. Each one is
         # already shown on its own tab, but the log is what a user pastes into a
         # bug report, and until now none of them reached it (review, 2026-08-22).
@@ -1199,7 +1333,7 @@ def build_window() -> object:
         tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
         # T95: the ×, on a server page only. Catalog (and T93's Logs) never get
         # one, because only this function attaches it and only to a ControllerView.
-        forget_buttons.attach(tabs.indexOf(view), _forget_button(key, entry.name))
+        forget_buttons.attach(tabs.indexOf(view), _tab_buttons(key, entry.name))
         # A new page entered the tree; the navigator's focus chain is stale.
         navigator.invalidate()
         # The leaf folder alone was the title, and it is the one part of the
@@ -1211,6 +1345,11 @@ def build_window() -> object:
         # first one's title wrong.
         retitle_controller_tabs(tabs, controllers.values())
         tabs.setCurrentWidget(view)
+        # T187: a tab rebuilt over a new ready-to-play client (Make…, Delete), a
+        # new client folder or distro: its open launcher drives the new view.
+        launcher = launchers.get(key)
+        if launcher is not None and shiboken6.isValid(launcher):
+            launcher.set_view(view)
 
     for install in state.installs:
         try:
@@ -2282,6 +2421,8 @@ def _stop_background_threads(window: object) -> list[str]:
     # why - a list put through `setProperty()` comes back as a copy frozen at
     # that call, and the tabs that matter here are the ones opened after it.
     unjoined: list[str] = []
+    # T187: a launcher window drives a view; it goes before the views shut down.
+    close_launchers(window)
     for view in getattr(window, "yulon_controllers", []):
         view.shutdown()
     for panel in getattr(window, "yulon_log_panels", []):
@@ -2315,6 +2456,24 @@ def _stop_background_threads(window: object) -> list[str]:
     # own join may have finished during `wait_all`'s, and is not stuck now.
     held = in_flight().still_running()
     return held + [name for name in unjoined if name not in held and _still_joined(window, name)]
+
+
+def close_launchers(window: object) -> None:
+    """Close and let go of every client launcher window the main window opened (T187).
+
+    Each closes the way a person closes it, so where it was is remembered.
+    Deleted later rather than now: this runs inside the main window's close.
+    """
+    import shiboken6
+
+    launchers = getattr(window, "yulon_launchers", None)
+    if not isinstance(launchers, dict):
+        return
+    for launcher in list(launchers.values()):
+        if shiboken6.isValid(launcher):
+            launcher.close()
+            launcher.deleteLater()
+    launchers.clear()
 
 
 def _still_joined(window: object, name: str) -> bool:

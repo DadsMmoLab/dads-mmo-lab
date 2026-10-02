@@ -165,7 +165,7 @@ def line(verdict: Verdict) -> str:
     parts: list[str] = []
     if verdict.state == "restart_loop":
         head = f"restart loop — {verdict.restarts} restarts"
-        parts.append(head + (f", this run {_uptime(verdict.uptime)}" if verdict.uptime else ""))
+        parts.append(head + (f", this run {uptime_text(verdict.uptime)}" if verdict.uptime else ""))
     else:
         counts = (
             f"{verdict.players} players, {verdict.bots} bots"
@@ -174,7 +174,7 @@ def line(verdict: Verdict) -> str:
         )
         parts.append(f"up — {counts}" if counts else "up")
         if verdict.uptime is not None:
-            parts[-1] += f", {_uptime(verdict.uptime)}"
+            parts[-1] += f", {uptime_text(verdict.uptime)}"
         if verdict.after_a_loop:
             minutes = int(SETTLED_AFTER.total_seconds() // 60)
             parts.append(
@@ -188,8 +188,12 @@ def line(verdict: Verdict) -> str:
     return " · ".join(parts)
 
 
-def _uptime(uptime: timedelta | None) -> str:
-    """`up 2h 14m`, and `up 42s` for a run that has not seen a minute yet."""
+def uptime_text(uptime: timedelta | None) -> str:
+    """`up 2h 14m`, and `up 42s` for a run that has not seen a minute yet.
+
+    Public since T187: the client launcher's banner says a run's length in the
+    same words as the Server tab's verdict line.
+    """
     if uptime is None:
         return ""
     seconds = int(uptime.total_seconds())
@@ -337,21 +341,28 @@ class Dashboard:
         )
 
     def _uptime(self, started_at: str) -> timedelta | None:
-        """How long the current run has lasted, or `None` if that cannot be read.
+        """How long the current run has lasted (`run_length`), at this watcher's clock."""
+        return run_length(started_at, self._now())
 
-        Docker prints nine fractional digits and `fromisoformat` accepts three
-        or six, so the fraction is trimmed rather than the whole timestamp
-        thrown away. A timestamp that still will not parse leaves the uptime
-        absent — an absent duration is honest, a wrong one is not.
-        """
-        if not started_at:
-            return None
-        text = _DOCKER_FRACTION.sub(lambda m: "." + m.group(1)[:6], started_at.strip())
-        try:
-            started = datetime.fromisoformat(text)
-        except ValueError:
-            logger.debug(f"could not read the container's start time {started_at!r}")
-            return None
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=UTC)
-        return self._now() - started
+
+def run_length(started_at: str, now: datetime) -> timedelta | None:
+    """How long a run that docker says started at `started_at` has lasted, or `None`.
+
+    Docker prints nine fractional digits and `fromisoformat` accepts three
+    or six, so the fraction is trimmed rather than the whole timestamp
+    thrown away. A timestamp that still will not parse leaves the uptime
+    absent — an absent duration is honest, a wrong one is not. A module
+    function since T187, so the client launcher reads a start time the way
+    the dashboard does.
+    """
+    if not started_at:
+        return None
+    text = _DOCKER_FRACTION.sub(lambda m: "." + m.group(1)[:6], started_at.strip())
+    try:
+        started = datetime.fromisoformat(text)
+    except ValueError:
+        logger.debug(f"could not read the container's start time {started_at!r}")
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return now - started
