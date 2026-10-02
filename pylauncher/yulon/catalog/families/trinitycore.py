@@ -35,6 +35,7 @@ import errno
 import hashlib
 import json
 import os
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -292,7 +293,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "Yu'lon did not make it, so it was left as it was. Move it away, then press "
                 "Install again. Nothing was extracted."
             )
-        if left is not None and left.kind == "ours":
+        if left is not None and left.kind in ("ours", "linked"):
             raise InstallerError(f"{left.for_install()} Nothing was extracted.")
         if left is not None:
             yield f"warning: {left.for_uninstall()}"
@@ -332,7 +333,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         except BaseException:
             left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id)
             if left is not None:
-                logger.warning(left.for_uninstall())
+                logger.warning(left.for_install())
             raise
         left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id)
         if left is None:
@@ -579,7 +580,7 @@ def _recorded_target(server_dir: Path) -> Path | None:
     return Path(target) if isinstance(target, str) and target else None
 
 
-Leftover = Literal["ours", "foreign", "record"]
+Leftover = Literal["ours", "foreign", "record", "linked"]
 """What a `LeftoverProblem` is about, because each is said and handled differently.
 
 `ours`: this install's own copy (its marker and its place both check out) that
@@ -588,7 +589,9 @@ deleting it outside Yu'lon (Explorer) clears the read-only flag on archives the
 player's own client shares; Yu'lon retries (fix round 4). `foreign`: a folder at a
 path this install would use that Yu'lon did not make there -- left alone, and not
 to be deleted on our word. `record`: the record names no folder this install could
-have made; nothing is touched and nothing is blocked on it.
+have made; nothing is touched and nothing is blocked on it. `linked`: our copy holds a
+link where Yu'lon sets archives aside, which Yu'lon did not make; the copy is not
+removed through it, now or later.
 """
 
 _DO_NOT_DELETE = "don't delete it yourself -- that can change your own client's files"
@@ -625,6 +628,12 @@ class LeftoverProblem:
                 f"({self.why}). {self.close_first()}Yu'lon will remove it safely the next time it "
                 f"starts; {_DO_NOT_DELETE}."
             )
+        if self.kind == "linked":
+            return (
+                f"The temporary copy of your game client at {self.path} holds a link Yu'lon did "
+                f"not make ({self.why}), so Yu'lon will not remove the copy through it; it was "
+                "left as it is."
+            )
         if self.kind == "foreign":
             return (
                 f"{self.path} is where this server would keep a temporary copy of your client, "
@@ -642,8 +651,8 @@ class LeftoverProblem:
             return self.for_uninstall()
         return (
             f"A temporary copy of your game client at {self.path} could not be removed yet "
-            f"({self.why}); {_DO_NOT_DELETE}. {self.close_first()}Press Install again: it is "
-            "removed safely first."
+            f"({self.why}); {_DO_NOT_DELETE}. {self.close_first()}The next press of Install, or "
+            "Uninstalling this server, removes it safely."
         )
 
 
@@ -727,29 +736,74 @@ def _leftovers_path(config_dir: Path | None) -> Path:
     return (config_dir if config_dir is not None else platform.config_dir()) / LEFTOVERS_FILE
 
 
+class LeftoversUnreadable(OSError):
+    """`LEFTOVERS_FILE` is there and could not be read (or set aside): never treat it as empty.
+
+    Reading it as an empty list and writing back would forget every copy it notes, and
+    those copies are ones nobody else will remove safely (fix round 5).
+    """
+
+
 def _read_leftovers(path: Path) -> list[dict[str, str]]:
+    """The noted copies; `[]` only when there is no file at all.
+
+    Any other failure to read is `LeftoversUnreadable`. A file that reads but does not
+    parse as the list this module writes is moved aside to
+    `<name>.corrupt-<stamp>` -- kept for the person or for support, never dropped --
+    and reads as empty; if it cannot be moved aside, that too is `LeftoversUnreadable`.
+    """
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
-    if not isinstance(raw, list):
-        return []
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LeftoversUnreadable(f"{path} could not be read ({exc})") from exc
     keys = ("target", "game", "server_dir")
-    return [
-        {key: str(item[key]) for key in keys}
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        raw = None
+    if isinstance(raw, list) and all(
+        isinstance(item, dict) and all(isinstance(item.get(key), str) for key in keys)
         for item in raw
-        if isinstance(item, dict) and all(isinstance(item.get(key), str) for key in keys)
-    ]
+    ):
+        return [{key: str(item[key]) for key in keys} for item in raw]
+    aside = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+    try:
+        os.replace(path, aside)
+    except OSError as exc:
+        raise LeftoversUnreadable(
+            f"{path} is not a list Yu'lon wrote and could not be set aside ({exc})"
+        ) from exc
+    logger.warning(f"{path} was not a list Yu'lon wrote; kept as {aside}")
+    return []
 
 
 def _write_leftovers(path: Path, entries: Sequence[dict[str, str]]) -> None:
+    """The list, whole or not at all: a temporary file renamed into place, removed on failure."""
     if not entries:
         path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     staged = path.with_name(path.name + ".yulon-new")
-    staged.write_text(json.dumps(list(entries), indent=2) + "\n", encoding="utf-8")
-    os.replace(staged, path)
+    try:
+        staged.write_text(json.dumps(list(entries), indent=2) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"could not remove {staged}: {exc}")
+        raise
+
+
+class LeftoverNotNoted(RuntimeError):
+    """Uninstall could neither remove our copy nor note it anywhere else: keep the server folder.
+
+    The record in the server folder is then the only way back to the copy, so the
+    folder must not go (fix round 5, the lead's ruling); `purge` turns this into its
+    refusal after the containers and images, before the folder.
+    """
 
 
 def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None = None) -> str:
@@ -758,6 +812,10 @@ def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None
     Our own copy that cannot be removed yet is remembered in `LEFTOVERS_FILE` --
     BEFORE the server folder, and the record in it, are removed -- for
     `remove_recorded_leftovers()` to retry. `""` when nothing is left.
+
+    Raises:
+        LeftoverNotNoted: our copy could not be removed and the note could not be
+            written (or the list could not be read): the server folder must be kept.
     """
     recorded = _recorded_target(server_dir)
     left = remove_leftover_extraction_client(server_dir, game)
@@ -770,11 +828,14 @@ def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None
             entries = [item for item in _read_leftovers(path) if item != entry]
             _write_leftovers(path, [*entries, entry])
         except OSError as exc:
-            return (
-                f"A temporary copy of your game client at {left.path} could not be removed "
-                f"({left.why}), and Yu'lon could not note it to remove later ({exc}); "
+            raise LeftoverNotNoted(
+                f"The server folder {server_dir} was kept: a temporary copy of your game client "
+                f"at {left.path} could not be removed yet ({left.why}), and Yu'lon could not note "
+                f"it anywhere else ({exc}), so the note in that folder is the only way to remove "
+                "it safely. The containers and images are already gone. Close World of Warcraft "
+                f"and any other program using the client's files, then press Uninstall again; "
                 f"{_DO_NOT_DELETE}."
-            )
+            ) from exc
     return left.for_uninstall()
 
 
@@ -784,12 +845,20 @@ def remove_recorded_leftovers(*, config_dir: Path | None = None) -> list[str]:
     Meant for the app's start (T179 Task 5 wires it from the main window; this task
     may not edit it). The same `_remove_target()` every other route uses, so the same
     checks hold: a folder that is not ours at its place is never touched, and stays
-    listed with a warning rather than being forgotten.
+    listed with a warning rather than being forgotten. A list that cannot be read is
+    left exactly as it is, with one warning; it is never rewritten from nothing.
     """
     path = _leftovers_path(config_dir)
+    try:
+        entries = _read_leftovers(path)
+    except LeftoversUnreadable as exc:
+        return [
+            f"Yu'lon could not read its list of temporary client copies to remove ({exc}); it "
+            "was left as it is and is tried again the next time Yu'lon starts."
+        ]
     kept: list[dict[str, str]] = []
     warnings: list[str] = []
-    for entry in _read_leftovers(path):
+    for entry in entries:
         target = Path(entry["target"])
         if not target.name:
             warnings.append(LeftoverProblem("record", target).for_uninstall())
@@ -799,7 +868,7 @@ def remove_recorded_leftovers(*, config_dir: Path | None = None) -> list[str]:
         if problem is None:
             continue
         kept.append(entry)
-        if problem.kind == "foreign":
+        if problem.kind in ("foreign", "linked"):
             warnings.append(problem.for_uninstall())
         else:
             logger.info(f"the temporary client copy {target} is still there: {problem.why}")
@@ -836,12 +905,11 @@ def _put_left_out_back(copy: Path) -> LeftoverProblem | None:
         return None
     # T179: `_is_link` public after T187 merges (play_client.py is T187's now).
     if play_client._is_link(aside_root):
-        return LeftoverProblem(
-            "ours",
-            copy,
-            f"{aside_root} is a link to another folder, not the folder Yu'lon sets archives "
-            "aside in, so nothing in it was moved",
+        logger.warning(
+            f"{aside_root} is a link Yu'lon did not make; the copy {copy} is not removed "
+            "through it"
         )
+        return LeftoverProblem("linked", copy, f"{aside_root} is a link to another folder")
     try:
         for folder, _dirs, files in os.walk(aside_root):
             for name in files:

@@ -399,12 +399,21 @@ class Uninstaller:
         never reaches it, and `rmtree` must never be pointed at it, because clearing
         a read-only flag there clears it on the player's file. The family's own
         remover finds it through the record in the server folder -- so it runs
-        BEFORE that folder goes -- and removes it through `play_client`'s.
+        BEFORE that folder goes -- and removes it through `play_client`'s, or notes
+        it in Yu'lon's own folder for the next start. When it can do neither, the
+        server folder holds the only note of it, so this raises and the folder is
+        kept (T179 fix round 5).
         Imported here rather than at module scope for `_default_claim`'s reason.
-        """
-        from yulon.catalog.families.trinitycore import remove_for_uninstall
 
-        return remove_for_uninstall(self.server_dir, self.game)
+        Raises:
+            PurgeError: the copy could not be removed and could not be noted.
+        """
+        from yulon.catalog.families.trinitycore import LeftoverNotNoted, remove_for_uninstall
+
+        try:
+            return remove_for_uninstall(self.server_dir, self.game)
+        except LeftoverNotNoted as exc:
+            raise PurgeError(str(exc)) from exc
 
     def _pending_record(self) -> Path:
         """Where that record is, keyed as the channel keys it, for a sentence that names it."""
@@ -596,10 +605,12 @@ class Uninstaller:
             else:
                 removed_images.append(ref)
 
-        # BEFORE the folder: the record of where a leftover copy is lives in it.
+        # BEFORE the folder: the record of where a leftover copy is lives in it. A
+        # copy it could neither remove nor note elsewhere raises here, and the
+        # folder and the install's record are kept (T179 fix round 5).
         leftover = self._remove_extraction_client()
         if leftover:
-            # Its own words: only a copy this install made is offered for deleting.
+            # Its own words, which never ask the person to delete the copy by hand.
             warnings.append(leftover)
 
         self._remove_folder(self.server_dir)

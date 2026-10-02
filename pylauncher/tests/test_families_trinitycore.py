@@ -23,6 +23,7 @@ import errno
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -1574,7 +1575,8 @@ def test_a_copy_the_install_cannot_clear_first_says_never_to_delete_it_by_hand(
     assert message.startswith(f"A temporary copy of your game client at {target} could not be")
     assert "don't delete it yourself -- that can change your own client's files" in message
     assert message.endswith(
-        "Press Install again: it is removed safely first. Nothing was extracted."
+        "The next press of Install, or Uninstalling this server, removes it safely. Nothing "
+        "was extracted."
     )
     assert "yourself, then" not in message
 
@@ -1589,7 +1591,11 @@ def test_a_left_out_folder_that_is_a_link_is_never_walked_and_the_copy_is_kept(
     (target / trinitycore.LEFT_OUT_DIR).symlink_to(elsewhere, target_is_directory=True)
     rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
     (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
-    assert "is a link to another folder" in warning
+    assert warning.startswith(
+        f"The temporary copy of your game client at {target} holds a link Yu'lon did not make"
+    )
+    assert warning.endswith("so Yu'lon will not remove the copy through it; it was left as it is.")
+    assert "next time it starts" not in warning
     assert (elsewhere / "Data" / "theirs.MPQ").read_bytes() == b"theirs"
     assert not (target / "Data" / "theirs.MPQ").exists(), "nothing renamed out of the link"
     assert (target / "Data" / "common.MPQ").is_file(), "the copy kept"
@@ -1612,3 +1618,131 @@ def test_a_plain_permission_refusal_is_not_called_a_file_held_open(
         run_stage(machine, "client-data")
     assert "Permission denied" in str(caught.value)
     assert "Close World of Warcraft" not in str(caught.value)
+
+
+# -- fix round 5 -------------------------------------------------------------------
+
+
+def noted_list(config_dir: Path, entries: list[dict[str, str]]) -> Path:
+    path = config_dir / trinitycore.LEFTOVERS_FILE
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries), encoding="utf-8")
+    return path
+
+
+ENTRY_NOTE = {"target": "/somewhere/copy", "game": "wow-centurion", "server_dir": "/srv/x"}
+
+
+def refuse_reading(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The list is there and will not open: a sharing violation, a permission."""
+    real_read = Path.read_text
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name == trinitycore.LEFTOVERS_FILE:
+            raise sharing_violation(self)
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+def test_a_list_that_cannot_be_read_is_left_untouched_with_one_warning(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = noted_list(config_dir, [ENTRY_NOTE])
+    before = path.read_bytes()
+    refuse_reading(monkeypatch)
+    (warning,) = trinitycore.remove_recorded_leftovers()
+    assert warning.startswith("Yu'lon could not read its list of temporary client copies")
+    assert path.read_bytes() == before, "never rewritten from nothing"
+
+
+def test_a_list_that_does_not_parse_is_kept_aside_and_never_dropped(config_dir: Path) -> None:
+    path = config_dir / trinitycore.LEFTOVERS_FILE
+    config_dir.mkdir()
+    path.write_text('[{"target": "/half', encoding="utf-8")
+    assert trinitycore.remove_recorded_leftovers() == []
+    (aside,) = config_dir.glob(f"{trinitycore.LEFTOVERS_FILE}.corrupt-*")
+    assert aside.read_text(encoding="utf-8") == '[{"target": "/half'
+    assert not path.exists()
+
+
+def test_a_list_that_is_not_ours_in_shape_is_kept_aside_too(config_dir: Path) -> None:
+    path = noted_list(config_dir, [ENTRY_NOTE])
+    path.write_text(json.dumps([ENTRY_NOTE, {"target": 3}]), encoding="utf-8")
+    assert trinitycore.remove_recorded_leftovers() == []
+    (aside,) = config_dir.glob(f"{trinitycore.LEFTOVERS_FILE}.corrupt-*")
+    assert json.loads(aside.read_text(encoding="utf-8"))[0] == ENTRY_NOTE
+
+
+def uninstall_that_cannot_note(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, PurgeRecorder, str]:
+    target = leftover_copy(machine)
+    monkeypatch.setattr(play_client, "remove_folder", failing_removal(target))
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    with pytest.raises(purge.PurgeError) as caught:
+        rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    return target, rec, str(caught.value)
+
+
+def test_uninstall_keeps_the_server_folder_when_it_cannot_note_the_copy(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lead's ruling: the record in the folder is then the only way back to the copy."""
+
+    def cannot_write(path: Path, entries: Any) -> None:
+        raise PermissionError(errno.EACCES, "Access is denied", str(path))
+
+    monkeypatch.setattr(trinitycore, "_write_leftovers", cannot_write)
+    target, rec, message = uninstall_that_cannot_note(machine, monkeypatch)
+    assert machine.server_dir.is_dir()
+    assert (machine.server_dir / EXTRACT_CLIENT_RECORD).is_file()
+    assert os.path.lexists(target)
+    assert f"remove_folder:{machine.server_dir}" not in rec.order
+    assert rec.forgotten == 0, "the install stays recorded, so Uninstall can be pressed again"
+    assert any(step.startswith("remove_image:") for step in rec.order), "after the images"
+    assert message.startswith(f"The server folder {machine.server_dir} was kept: a temporary")
+    assert f"copy of your game client at {target} could not be removed yet" in message
+    assert "then press Uninstall again" in message
+    assert "don't delete it yourself" in message
+
+
+def test_uninstall_keeps_the_folder_when_the_list_is_there_and_unreadable(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    path = noted_list(config_dir, [ENTRY_NOTE])
+    before = path.read_bytes()
+    refuse_reading(monkeypatch)
+    target, rec, message = uninstall_that_cannot_note(machine, monkeypatch)
+    assert machine.server_dir.is_dir() and rec.forgotten == 0
+    assert path.read_bytes() == before, "the other copies it notes are not lost"
+    assert "could not note it anywhere else" in message
+
+
+def test_a_failed_write_of_the_list_leaves_no_temporary_file(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(src: Any, dst: Any) -> None:
+        raise PermissionError(errno.EACCES, "Access is denied", str(dst))
+
+    monkeypatch.setattr(os, "replace", refuse)
+    path = config_dir / trinitycore.LEFTOVERS_FILE
+    with pytest.raises(PermissionError):
+        trinitycore._write_leftovers(path, [ENTRY_NOTE])
+    assert list(config_dir.iterdir()) == []
+
+
+def test_the_crash_path_log_names_install_and_uninstall_not_the_next_start(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    machine.tools.fail_tool = "vmap4extractor"
+    monkeypatch.setattr(play_client, "remove_folder", failing_removal(copy_dir(machine)))
+    lay_for_client_data(machine)
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.families.trinitycore"):
+        with pytest.raises(InstallerError, match="vmap extract failed"):
+            run_stage(machine, "client-data")
+    (record,) = [r for r in caplog.records if "could not be removed yet" in r.getMessage()]
+    assert record.getMessage().endswith(
+        "The next press of Install, or Uninstalling this server, removes it safely."
+    )
+    assert "next time it starts" not in record.getMessage()
