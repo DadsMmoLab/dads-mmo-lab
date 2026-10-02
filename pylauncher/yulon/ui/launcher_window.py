@@ -23,22 +23,37 @@ only time out -- and never while a WSL server's distro is not known to run
 (T133: a read there would start it).
 
 Opening, raising, remembering the window's size and closing it with its server
-are `main.py`'s (Task 4). `set_view()` points an open window at the tab
+are `main.py`'s (Task 4): the window hands over what to remember (`closed`,
+`geometry_text()`, `addresses_changed`) and is given it back (`addresses`,
+`restore_geometry_text()`). `set_view()` points an open window at the tab
 `main.py` rebuilds after Make…/Delete; a view that is destroyed with nothing to
 replace it leaves the window greyed rather than calling into it.
+
+The view's own dialogs for a press made here open over this window: each press
+sets `ControllerView.dialog_host` first. B on a controller closes the window
+(`gamepad.BACK_CLOSES`), as it closes a dialog.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+import base64
+import binascii
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
 import shiboken6
-from PySide6.QtCore import Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QResizeEvent
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QGuiApplication,
+    QHideEvent,
+    QResizeEvent,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -55,7 +70,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import client_packs, dashboard, dbreads, docker, launcher_reads, play_client, wsl
+from yulon import (
+    client_packs,
+    dashboard,
+    dbreads,
+    docker,
+    launcher_reads,
+    play_client,
+    ui_settings,
+    wsl,
+)
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 from yulon.ui import theme
@@ -66,6 +90,7 @@ from yulon.ui.controller_view import (
     module_kept_files,
     size_text,
 )
+from yulon.ui.gamepad import BACK_CLOSES
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.job import JobRunner, threaded_job_runner
@@ -94,6 +119,18 @@ VIEW_GONE = (
     "This server's tab was closed, so nothing can be started from here. Open the launcher "
     "again from the server."
 )
+
+MINIMUM_SIZE = QSize(960, 640)
+DEFAULT_SIZE = QSize(1100, 760)
+"""The size a launcher opens at the first time: the mockup's, on a Steam Deck and up.
+
+Never the screen's whole width (a 1920-wide stretch spreads two columns apart
+for nothing); smaller where the screen is (`fitted_size`)."""
+
+ONLINE_REFRESH_MS = 60_000
+"""How often the banner's count and uptime are read again while the window shows the
+realm up. A minute: the uptime is shown to the minute, and each read is two small
+queries and one `docker inspect`, on a worker."""
 
 ADDON_ROWS = 3
 """How many rows of "Addons in this client" always show; the list grows into spare height."""
@@ -132,6 +169,15 @@ COMMON_RESOLUTIONS: tuple[tuple[int, int], ...] = (
 """The sizes offered beside this screen's own. All of them, not only the ones that fit
 this screen: the game may run on another monitor, and a window larger than the
 screen is the player's to choose."""
+
+
+def fitted_size(available: QSize) -> QSize:
+    """`DEFAULT_SIZE` where the screen's free area has room, smaller where not, never
+    under `MINIMUM_SIZE` (the window cannot be made smaller than that anyway)."""
+    return QSize(
+        max(MINIMUM_SIZE.width(), min(DEFAULT_SIZE.width(), available.width())),
+        max(MINIMUM_SIZE.height(), min(DEFAULT_SIZE.height(), available.height())),
+    )
 
 
 # -- what the window reads ------------------------------------------------------
@@ -338,6 +384,10 @@ class LauncherWindow(QWidget):
 
     server_tab_requested = Signal(str, object)
     """"Server tab…": bring the main window to this server's tab (game id, server_dir)."""
+    closed = Signal()
+    """The window was closed: `main.py` remembers where it was (`geometry_text()`)."""
+    addresses_changed = Signal(list)
+    """The typed realm addresses to offer again, newest first (`ui_settings.recent_addresses`)."""
 
     def __init__(
         self,
@@ -346,6 +396,7 @@ class LauncherWindow(QWidget):
         reads: LauncherReads | None = None,
         job_runner: JobRunner | None = None,
         open_folder: Callable[[Path], bool] | None = None,
+        addresses: Sequence[str] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent, Qt.WindowType.Window)
@@ -359,19 +410,32 @@ class LauncherWindow(QWidget):
         self.reads: LauncherReads = reads or ViewReads(view)
         self._client: ClientReading | None = None
         self._server: ServerReading | None = None
-        self._typed: list[str] = []
+        # Offered again in the realm box, newest first: what `main.py` remembered
+        # for this server, cleaned again here (only addresses, never this computer).
+        self._typed: list[str] = ui_settings.recent_addresses(addresses)
         self._stale_account: str | None = None
         self._reconcile_owed = False
         self._was_busy = False
         self._client_asked = 0
         self._server_asked = 0
+        self._online_asked = 0
         self.pack_boxes: dict[str, QCheckBox] = {}
         self.pack_sizes: dict[str, QLabel] = {}
         self._always: dict[str, str] = {}
         self._borderless = False
         self._compact = False
-        self.setMinimumSize(960, 640)
-        self.resize(1100, 760)
+        self.setMinimumSize(MINIMUM_SIZE)
+        screen = QGuiApplication.primaryScreen()
+        self.resize(
+            fitted_size(screen.availableGeometry().size()) if screen is not None else DEFAULT_SIZE
+        )
+        # B on a controller closes this window as it closes a dialog (T187).
+        self.setProperty(BACK_CLOSES, True)
+        # The banner's count and uptime, read again while the window shows the
+        # realm up (`_sync_online_timer`); stopped whenever it is hidden.
+        self.online_timer = QTimer(self)
+        self.online_timer.setInterval(ONLINE_REFRESH_MS)
+        self.online_timer.timeout.connect(self._refresh_online)
         self._build()
         self.set_view(view, reads=reads)
 
@@ -401,6 +465,7 @@ class LauncherWindow(QWidget):
         self._reload_client()
         if self.realm_badge.status == "running":
             self._reload_server()
+        self._sync_online_timer()
         if self._has_play():
             self.play_button.setFocus()
         else:
@@ -413,6 +478,11 @@ class LauncherWindow(QWidget):
             (view.realm_badge.status_changed, self._realm_changed),
             (view.destroyed, self._view_gone),
         ]
+
+    @property
+    def view(self) -> ControllerView | None:
+        """The Server tab this window drives; None once it is gone."""
+        return self._alive()
 
     def _alive(self) -> ControllerView | None:
         view = self._view
@@ -500,6 +570,9 @@ class LauncherWindow(QWidget):
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Not a stop of its own: up from PLAY is Log in as, not the column around
+        # it (the pad's first press from the first focus, T187 Task 4).
+        area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         area.setStyleSheet(
             f"QScrollArea#{name}, QScrollArea#{name} > QWidget > QWidget "
             "{ background: transparent; border: none; }"
@@ -831,6 +904,44 @@ class LauncherWindow(QWidget):
         self._server = UNREAD
         self._render()
 
+    def _sync_online_timer(self) -> None:
+        """Read the count again only while someone can see it and the realm is up."""
+        if self.isVisible() and self.realm_badge.status == "running":
+            if not self.online_timer.isActive():
+                self.online_timer.start()
+        else:
+            self.online_timer.stop()
+            self._online_asked += 1  # a refresh still on its worker is not wanted now
+
+    @Slot()
+    def _refresh_online(self) -> None:
+        """The timer: the count and uptime only, on the runner like every read.
+
+        Not a whole `_reload_server()`: that re-renders the account box, which
+        would rebuild a dropdown under the player once a minute. Its own ask
+        number, so it never makes a whole read's answer look stale.
+        """
+        if not self.isVisible() or self.realm_badge.status != "running":
+            return
+        self._online_asked += 1
+        asked = self._online_asked
+        reads = self.reads
+        self._jobs(lambda: (asked, reads.server()), self._online_read, self._online_failed)
+
+    @Slot(object)
+    def _online_read(self, answer: object) -> None:
+        if not isinstance(answer, tuple) or answer[0] != self._online_asked:
+            return
+        result = answer[1]
+        if not isinstance(result, ServerReading) or self._server is None:
+            return  # the first whole read brings the count with it
+        self._server = replace(self._server, online=result.online)
+        self._render_banner()
+
+    @Slot(object)
+    def _online_failed(self, exc: object) -> None:
+        logger.info(f"the launcher could not read the online count again: {exc!r}")
+
     def _record(self) -> client_packs.PackRecord | None:
         return self._client.record if self._client is not None else None
 
@@ -862,6 +973,7 @@ class LauncherWindow(QWidget):
         self.realm_badge.set_status(status)
         if status == "running":
             self._reload_server()
+        self._sync_online_timer()
         self._render()
 
     @Slot()
@@ -879,12 +991,17 @@ class LauncherWindow(QWidget):
         self.cancel_button.setEnabled(source.isEnabled())
         self.cancel_button.setText(source.text())
         busy = view.play_client_busy() is not None
-        if self._was_busy and not busy:
+        reloading = self._was_busy and not busy
+        if reloading:
             # A Make…, Refresh, Play, Client options or save just ended: what
             # the client holds may have changed under the window.
             self._reload_client()
         self._was_busy = busy
-        if not busy and self._reconcile_owed:
+        if not busy and not reloading and self._reconcile_owed:
+            # Only when no reading is on its way: run now, an owed check would
+            # judge the record the window read BEFORE the job, and could save
+            # "Ask" over the account the job left there. `_client_read` runs it
+            # on the fresh reading instead.
             self._reconcile_account()
         self._render_enabled()
 
@@ -894,6 +1011,33 @@ class LauncherWindow(QWidget):
         self.settings_note.setVisible(bool(problem))
 
     # -- rendering ---------------------------------------------------------
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's own name
+        super().showEvent(event)
+        self._sync_online_timer()
+
+    def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 - Qt's own name
+        super().hideEvent(event)
+        self._sync_online_timer()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
+        super().closeEvent(event)
+        if event.isAccepted():
+            self.closed.emit()
+
+    def geometry_text(self) -> str:
+        """Where the window is and how big, as text `ui_settings` can keep."""
+        return base64.b64encode(self.saveGeometry().data()).decode("ascii")
+
+    def restore_geometry_text(self, text: str) -> bool:
+        """Put the window back where `geometry_text()` said; False (nothing moved) for rubbish."""
+        if not text:
+            return False
+        try:
+            raw = base64.b64decode(text.encode("ascii"), validate=True)
+        except (binascii.Error, UnicodeEncodeError, ValueError):
+            return False
+        return bool(self.restoreGeometry(QByteArray(raw)))
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt's own name
         super().resizeEvent(event)
@@ -1286,8 +1430,10 @@ class LauncherWindow(QWidget):
             self.realm_note.setVisible(True)
             self._render_realm(force=True)
             return
-        if typed not in self._typed:
-            self._typed.append(typed)
+        history = ui_settings.recent_addresses([typed, *self._typed])
+        if history != self._typed:
+            self._typed = history
+            self.addresses_changed.emit(list(history))
         self._save(launcher={"realm_address": typed})
 
     @Slot()
@@ -1305,34 +1451,36 @@ class LauncherWindow(QWidget):
     def _pack_toggled(self, pack_id: str, on: bool) -> None:
         self._save(packs={pack_id: on})
 
+    def _pressing(self) -> ControllerView | None:
+        """The live view, told that the dialogs of the press about to be made are this window's."""
+        view = self._alive()
+        if view is not None:
+            view.dialog_host = self
+        return view
+
     @Slot()
     def _play(self) -> None:
-        view = self._alive()
-        if view is not None and self._has_play():
+        if self._has_play() and (view := self._pressing()) is not None:
             view.play()
 
     @Slot()
     def _make(self) -> None:
-        view = self._alive()
-        if view is not None:
+        if (view := self._pressing()) is not None:
             view.make_play_client()
 
     @Slot()
     def _refresh(self) -> None:
-        view = self._alive()
-        if view is not None and self._has_play():
+        if self._has_play() and (view := self._pressing()) is not None:
             view.refresh_play_client()
 
     @Slot()
     def _delete(self) -> None:
-        view = self._alive()
-        if view is not None and self._has_play():
+        if self._has_play() and (view := self._pressing()) is not None:
             view.delete_play_client()
 
     @Slot()
     def _cancel(self) -> None:
-        view = self._alive()
-        if view is not None:
+        if (view := self._pressing()) is not None:
             view.play_cancel_button.click()
 
     def _open(self, path: Path | None) -> None:

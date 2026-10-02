@@ -122,6 +122,7 @@ def _launcher(
     options_asker: Any = None,
     job_runner: Any = run_inline,
     opened: list[Path] | None = None,
+    addresses: tuple[str, ...] = (),
 ) -> tuple[LauncherWindow, ControllerView, Path | None]:
     """A launcher over a Server tab whose ready-to-play client is real (or not made yet)."""
     original = _game_client(tmp_path / "clients" / "WoW")
@@ -144,6 +145,7 @@ def _launcher(
         reads=reads,
         job_runner=job_runner,
         open_folder=lambda path: sink.append(path) is None,
+        addresses=addresses,
     )
     return window, view, play_dir
 
@@ -1053,3 +1055,318 @@ def test_the_addons_list_takes_the_right_columns_spare_height(
     assert heights[(1280, 800)] >= 3 * row, heights
     assert heights[(1920, 1080)] > heights[(1280, 800)] + 200, heights
     assert window.right_scroll.verticalScrollBar().maximum() == 0
+
+
+# -- Task 4: what Task 3's reviews left to the window's opening -----------------------
+
+
+class _HeldRunner:
+    """A job runner that keeps each job until `run_all()`: a read still on its worker."""
+
+    def __init__(self) -> None:
+        self.jobs: list[tuple[Callable[[], object], Any, Any]] = []
+
+    def __call__(self, work: Callable[[], object], done: Any, failed: Any) -> None:
+        self.jobs.append((work, done, failed))
+
+    def run_all(self) -> None:
+        while self.jobs:
+            work, done, failed = self.jobs.pop(0)
+            try:
+                result = work()
+            except Exception as exc:  # noqa: BLE001 - handed on, as the real runner does
+                failed(exc)
+            else:
+                done(result)
+
+
+def test_an_owed_account_check_waits_for_the_fresh_reading_and_never_saves_over_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """4a: ALICE was stale and owed while a Play held the record; the record now says BOB.
+
+    When the Play ends the client is read again. The owed check must wait for that
+    reading: run on the old one it saw ALICE, and wrote "Ask" over a valid BOB.
+    """
+    held = _HeldRunner()
+    answer = ServerReading(accounts=("BOB",), online=UP, announced=None)
+    window, view, play = _launcher(
+        ps, tmp_path, answer=answer, launcher={"account": "ALICE"}, job_runner=held
+    )
+    assert play is not None
+    held.run_all()
+    view._play_pending = True
+    view._say_play("Starting the game…")  # the window sees the view busy
+    _online(view)
+    held.run_all()
+    assert _picks(play) == {"account": "ALICE"}, "saved while the Play held the record"
+
+    _save(play, {"account": "BOB"})  # what the record says by the time the Play ends
+    view._play_end()
+    assert _picks(play) == {"account": "BOB"}, "the owed check ran on the stale reading"
+    held.run_all()
+
+    assert _picks(play) == {"account": "BOB"}
+    assert window.account_combo.currentData() == account_data("BOB")
+
+
+def test_an_owed_account_check_still_runs_once_the_fresh_reading_lands(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other half of 4a: still stale after the reload, it is saved as Ask then."""
+    held = _HeldRunner()
+    answer = ServerReading(accounts=("BOB",), online=UP, announced=None)
+    window, view, play = _launcher(
+        ps, tmp_path, answer=answer, launcher={"account": "ALICE"}, job_runner=held
+    )
+    held.run_all()
+    view._play_pending = True
+    view._say_play("Starting the game…")
+    _online(view)
+    held.run_all()
+
+    view._play_end()
+    held.run_all()
+
+    assert _picks(play) == {"account": None}
+    assert "ALICE" in window.account_note.text()
+
+
+def test_the_online_count_is_read_again_while_the_window_shows_the_realm_up(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    """4b: a timer, reading on the runner, only while shown and only while the realm is up."""
+    window, view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    reads = window.reads
+    assert isinstance(reads, _Reads)
+    timer = window.online_timer
+    assert timer.interval() == launcher_window.ONLINE_REFRESH_MS == 60_000
+
+    _shown(window, (1280, 800))
+    assert not timer.isActive(), "running while the realm is down"
+    _online(view)
+    assert timer.isActive()
+    assert "2 players" in window.online_label.text() and "up 3h 12m" in window.online_label.text()
+    names = [window.account_combo.itemText(i) for i in range(window.account_combo.count())]
+    asked = reads.asked
+
+    reads.answer = ServerReading(
+        accounts=("ALICE", "BOB", "CAROL"),
+        online=Online(bots=400, players=5, uptime=timedelta(hours=4, minutes=1)),
+        announced="127.0.0.1",
+    )
+    timer.timeout.emit()
+
+    assert reads.asked == asked + 1, "the refresh did not go through the runner"
+    assert window.online_label.text() == "400 bots and 5 players online · up 4h 1m"
+    after = [window.account_combo.itemText(i) for i in range(window.account_combo.count())]
+    assert after == names, "a refresh of the count rebuilt the account box under the player"
+
+    window.hide()
+    process_events()
+    assert not timer.isActive(), "still reading for a window nobody sees"
+    window.show()
+    process_events()
+    assert timer.isActive()
+    view.realm_badge.set_status("stopped")
+    assert not timer.isActive()
+
+
+def test_a_refresh_landing_after_the_realm_went_down_changes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    """A count read for a realm that has since stopped is dropped, not kept for the next start."""
+    held = _HeldRunner()
+    window, view, _ = _launcher(ps, tmp_path, job_runner=held)
+    closing.append(window)
+    reads = window.reads
+    assert isinstance(reads, _Reads)
+    _shown(window, (1280, 800))
+    _online(view)
+    held.run_all()
+    reads.answer = ServerReading(accounts=("ALICE", "BOB"), online=Online(9, 9), announced=None)
+    window.online_timer.timeout.emit()
+    view.realm_badge.set_status("stopped")
+    held.run_all()
+
+    assert window.online_label.text() == launcher_window.STOPPED_BANNER
+    view.realm_badge.set_status("running")  # the banner shows what it holds until the read lands
+    assert window.online_label.text().startswith("412 bots and 2 players online")
+
+
+def test_the_views_dialogs_from_a_launcher_press_open_over_the_launcher(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    closing: list[LauncherWindow],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """4c: a refusal for PLAY pressed in the launcher is the launcher's, not the main window's."""
+    window, view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    _shown(window, (1280, 800))
+    parents: list[object] = []
+    box = controller_view_module.QMessageBox
+    monkeypatch.setattr(box, "information", lambda parent, *_a, **_k: parents.append(parent))
+    view._module_pending = "Install Transmog"
+
+    window.play_button.click()
+    window.refresh_button.click()
+    window.delete_button.click()
+    assert parents == [window, window, window]
+
+    # The same refusals from the Server tab's own ▾ menu open over the tab.
+    view.refresh_play_client_action.trigger()
+    view.delete_play_client_action.trigger()
+    assert parents[3:] == [view, view]
+
+
+def test_start_the_server_is_asked_over_the_launcher(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    closing: list[LauncherWindow],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    _shown(window, (1280, 800))
+    asked: list[tuple[object, str]] = []
+    monkeypatch.setattr(
+        controller_view_module,
+        "_ask_with",
+        lambda parent, title, *_a, **_k: asked.append((parent, title)),
+    )
+
+    window.play_button.click()
+
+    assert asked == [(window, "Start the server?")]
+
+
+def test_a_closed_launcher_does_not_take_the_tabs_dialogs(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, view, _ = _launcher(ps, tmp_path)
+    _shown(window, (1280, 800))
+    parents: list[object] = []
+    box = controller_view_module.QMessageBox
+    monkeypatch.setattr(box, "information", lambda parent, *_a, **_k: parents.append(parent))
+    view._module_pending = "Install Transmog"
+    window.play_button.click()
+    window.close()
+
+    view.play()
+
+    assert parents == [window, view]
+
+
+def test_typed_addresses_are_offered_again_and_handed_over_newest_first(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """4d: the window offers the remembered history and says what to remember; main.py keeps it."""
+    window, _view, _ = _launcher(ps, tmp_path, addresses=("old.lan", "me@pw", "127.0.0.1"))
+    offered = [window.realm_combo.itemText(i) for i in range(window.realm_combo.count())]
+    assert "old.lan" in offered
+    assert "me@pw" not in offered, "a refused address came back from the history"
+    told: list[list[str]] = []
+    window.addresses_changed.connect(told.append)
+
+    _type_address(window, "10.0.0.5")
+    assert told == [["10.0.0.5", "old.lan"]]
+    _type_address(window, "bad address!")
+    assert len(told) == 1, "a refused address was handed over to be remembered"
+    _type_address(window, "old.lan")
+    assert told[-1] == ["old.lan", "10.0.0.5"]
+    for n in range(6):
+        _type_address(window, f"host{n}.lan")
+    assert told[-1] == ["host5.lan", "host4.lan", "host3.lan", "host2.lan", "host1.lan"]
+
+
+def test_b_on_the_pad_closes_the_launcher_and_the_dpad_walks_it(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    """4e: the app's one navigator drives the launcher as the active window; B closes it."""
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Action, Direction, Navigator
+
+    window, _view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    nav = Navigator()
+    _shown(window, (1280, 800))
+    assert QApplication.activeWindow() is window
+    assert QApplication.focusWidget() is window.play_button, "PLAY is not the first stop"
+
+    nav.navigate(Direction.UP)
+    assert QApplication.focusWidget() is window.account_combo
+    nav.navigate(Direction.UP)
+    assert QApplication.focusWidget() is window.realm_combo
+
+    assert nav.perform(Action.BACK)
+    assert window.isHidden()
+
+
+def test_b_closes_an_open_dropdown_before_the_launcher(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    from yulon.ui.gamepad import Action, Navigator
+
+    window, _view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    nav = Navigator()
+    _shown(window, (1280, 800))
+    window.account_combo.showPopup()
+    process_events()
+
+    assert nav.perform(Action.BACK)
+    process_events()
+
+    assert not window.isHidden(), "B closed the window under an open dropdown"
+
+
+def test_the_window_opens_at_its_size_clamped_to_the_screen() -> None:
+    """3: about 1100 x 760, never past the screen and never under the 960 x 640 minimum."""
+    from PySide6.QtCore import QSize
+
+    assert launcher_window.fitted_size(QSize(1920, 1040)) == QSize(1100, 760)
+    assert launcher_window.fitted_size(QSize(1280, 760)) == QSize(1100, 760)
+    assert launcher_window.fitted_size(QSize(1024, 700)) == QSize(1024, 700)
+    assert launcher_window.fitted_size(QSize(800, 560)) == QSize(960, 640)
+
+
+def test_the_geometry_round_trips_as_text_and_rubbish_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    from PySide6.QtCore import QSize
+
+    window, _view, _ = _launcher(ps, tmp_path)
+    closing.append(window)
+    _shown(window, (1000, 700))
+    text = window.geometry_text()
+    assert isinstance(text, str) and text
+
+    other, _v, _ = _launcher(ps, tmp_path / "other")
+    closing.append(other)
+    assert other.restore_geometry_text(text)
+    # The height as saved. The width is kept on the screen by Qt, and the
+    # offscreen screen is 800 wide, so 1000 comes back as the 960 minimum
+    # (measured: a plain QWidget does the same).
+    assert other.size() == QSize(960, 700)
+    assert window.size() == QSize(1000, 700)
+    assert not other.restore_geometry_text("not base64 at all!")
+    assert not other.restore_geometry_text("")
+
+
+def test_closing_the_launcher_says_so(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    window, _view, _ = _launcher(ps, tmp_path)
+    said: list[int] = []
+    window.closed.connect(lambda: said.append(1))
+    _shown(window, (1280, 800))
+
+    window.close()
+
+    assert said == [1] and window.isHidden()

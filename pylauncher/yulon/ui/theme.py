@@ -119,6 +119,17 @@ from the tab-bar tool-button touch floor.
 """
 
 
+LAUNCH_TAB_BUTTON = "tab-play"
+"""objectName of the ▶ beside the × on a server's sidebar tab: opens its launcher (T187).
+
+Sized and exempted from the touch floor exactly as the × is, for the same reason;
+the Server tab's Play is the pad's and the thumb's way to the same window.
+"""
+
+TAB_BUTTONS = "tab-buttons"
+"""objectName of the strip that holds a server tab's ▶ and × side by side (T187)."""
+
+
 SERVER_BUILD_BUTTON = "server-build"
 """objectName of the Modules toolbar's "Server build ▾" menu button (T89).
 
@@ -342,6 +353,28 @@ QTabBar QToolButton#{FORGET_TAB_BUTTON} {{
 
 QTabBar QToolButton#{FORGET_TAB_BUTTON}:hover {{
     color: {COLOR_DANGER};
+}}
+
+/* T187: the ▶ beside it opens the server's launcher. The same exemption and the
+   same size, so the two sit side by side across the 64px rail and the tab is no
+   longer than the × alone made it; gold on hover, where the × goes red. */
+QTabBar QToolButton#{LAUNCH_TAB_BUTTON} {{
+    background-color: transparent;
+    border: none;
+    color: {COLOR_TEXT_MUTED};
+    padding: 0px;
+    min-width: 16px;
+    min-height: 16px;
+    max-width: 18px;
+    max-height: 18px;
+}}
+
+QTabBar QToolButton#{LAUNCH_TAB_BUTTON}:hover {{
+    color: {COLOR_GOLD_BRIGHT};
+}}
+
+QTabBar QWidget#{TAB_BUTTONS} {{
+    background: transparent;
 }}
 
 /* --- Buttons: flat sheets with a hairline, amber on interaction --- */

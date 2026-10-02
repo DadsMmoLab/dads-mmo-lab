@@ -34,6 +34,7 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, cast
 
+import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
@@ -5852,6 +5853,14 @@ class ControllerView(QWidget):
         super().__init__(parent)
         self.entry = entry
         self.services = services
+        # T187: the client launcher window driving this tab, while its press is
+        # the one being answered: the play-side dialogs open over it rather
+        # than over the main window (`_play_parent`). Set by the launcher before
+        # each of its presses, cleared by this tab's own.
+        self.dialog_host: QWidget | None = None
+        # T187: opens this server's launcher window; `main.py` sets it. While it
+        # is None (a tab outside the app's window) Play plays directly, as before.
+        self.open_launcher: Callable[[], None] | None = None
         # T181's creation dialog, a seam for `prompt_asker`'s reason. The real
         # one is the dialog, with this tab's own folder picker behind "Change…".
         self._play_client_asker: PlayClientAsker = play_client_asker or (
@@ -8306,12 +8315,12 @@ class ControllerView(QWidget):
             "Bring the game files and Wow.exe back in step with your own client after a "
             "patch. Your settings (WTF) and addons (Interface) are never touched."
         )
-        self.refresh_play_client_action.triggered.connect(self.refresh_play_client)
+        self.refresh_play_client_action.triggered.connect(self._from_tab(self.refresh_play_client))
         self.delete_play_client_action = self.play_menu.addAction(DELETE_PLAY_CLIENT_LABEL)
         self.delete_play_client_action.setToolTip(
             "Delete the ready-to-play client. Your own client keeps all its files. Asks first."
         )
-        self.delete_play_client_action.triggered.connect(self.delete_play_client)
+        self.delete_play_client_action.triggered.connect(self._from_tab(self.delete_play_client))
         self.play_label = QLabel("", tab)
         self.play_label.setWordWrap(True)
         self.play_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -8331,7 +8340,7 @@ class ControllerView(QWidget):
                 "Make a copy of your client set up for this server, without changing your "
                 "own client. Game files are shared, so it takes little extra space."
             )
-        self.play_button.clicked.connect(self.play)
+        self.play_button.clicked.connect(self._play_pressed)
         self.play_button.setVisible(has_play or self.services.client_dir is not None)
         self.play_menu_button = QPushButton("▾", tab)
         self.play_menu_button.setToolTip("More for the ready-to-play client")
@@ -8343,6 +8352,40 @@ class ControllerView(QWidget):
         self.play_label.setText(text)
         self.play_state_changed.emit()
 
+    def _from_tab(self, press: Callable[[], None]) -> Callable[..., None]:
+        """`press` as this tab's own button makes it: its dialogs open over the tab (T187)."""
+
+        def pressed(*_args: object) -> None:
+            self.dialog_host = None
+            press()
+
+        return pressed
+
+    @Slot()
+    def _play_pressed(self) -> None:
+        """The tab's Play opens the server's launcher window (T187); its Make… stays a Make….
+
+        Without a ready-to-play client the button reads "Make a ready-to-play
+        client…" and does exactly that. With one, PLAY is in the launcher, which
+        is where the realm address, the account and the display are chosen.
+        """
+        self.dialog_host = None
+        if self.services.play_client_dir is not None and self.open_launcher is not None:
+            self.open_launcher()
+            return
+        self.play()
+
+    def _play_parent(self) -> QWidget:
+        """Where a Make…/Play/Refresh/Delete dialog opens: the launcher that pressed, or this tab.
+
+        Only a launcher still on screen: one closed since its press has nobody
+        looking at it, and a dialog over a hidden window is a dialog nobody sees.
+        """
+        host = self.dialog_host
+        if host is not None and shiboken6.isValid(host) and host.isVisible():
+            return host
+        return self
+
     @Slot(str)
     def _play_progress(self, text: str) -> None:
         """A line from the Play pipeline's worker (through `_play_relay`), on the GUI thread."""
@@ -8352,7 +8395,7 @@ class ControllerView(QWidget):
         """A Play-side refusal, on the label, in the log and in front of the player."""
         self._say_play(message)
         self.action_failed.emit(message)
-        QMessageBox.warning(self, self.entry.name, message)
+        QMessageBox.warning(self._play_parent(), self.entry.name, message)
 
     def _play_client_refusal(self) -> str | None:
         """Why Make…, Play, Refresh or Delete may not start now, or None.
@@ -8382,7 +8425,7 @@ class ControllerView(QWidget):
         """
         if not self._play_pending:
             return False
-        QMessageBox.information(self, "Something else is running", PLAY_PENDING)
+        QMessageBox.information(self._play_parent(), "Something else is running", PLAY_PENDING)
         return True
 
     def _play_client_blocked(self) -> bool:
@@ -8390,7 +8433,7 @@ class ControllerView(QWidget):
         refusal = self._play_client_refusal()
         if refusal is None:
             return False
-        QMessageBox.information(self, "Something else is running", refusal)
+        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
         return True
 
     def _hold_busy(self) -> None:
@@ -8447,7 +8490,7 @@ class ControllerView(QWidget):
         said = self._play_client_gone_text(play)
         self._say_play(said)
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "The ready-to-play client is gone",
             f"{said}\n\nMake a ready-to-play client for this server again?",
             "Make it again",
@@ -8467,7 +8510,7 @@ class ControllerView(QWidget):
         original = self.services.client_dir
         if original is None:
             QMessageBox.information(
-                self,
+                self._play_parent(),
                 MAKE_PLAY_CLIENT_LABEL,
                 "A ready-to-play client is made from your own client folder, and none is "
                 "set for this server. Press “Set client folder…” on this tab "
@@ -8611,7 +8654,7 @@ class ControllerView(QWidget):
             self._release_play_client()
             return
         offer = result
-        choice = self._play_client_asker(self, offer)
+        choice = self._play_client_asker(self._play_parent(), offer)
         if choice is None:
             self._release_play_client()
             self._say_play("No ready-to-play client was made.")
@@ -8758,7 +8801,7 @@ class ControllerView(QWidget):
     def _finish_make(self, target: Path, said: list[str]) -> None:
         """Say what Make… did, and have the tab rebuilt over the new folder."""
         self._release_play_client()
-        QMessageBox.information(self, "Ready-to-play client", "\n\n".join(said))
+        QMessageBox.information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
             self.entry.id, self.services.controller.server_dir, target
@@ -8834,7 +8877,7 @@ class ControllerView(QWidget):
         if refusal is None:
             return False
         self._play_end("Nothing was started.")
-        QMessageBox.information(self, "Something else is running", refusal)
+        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
         return True
 
     @Slot(object)
@@ -8845,7 +8888,7 @@ class ControllerView(QWidget):
             self._play_check_stale()
             return
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "Start the server?",
             "The server is stopped. Start it first?",
             "Start and play",
@@ -8887,7 +8930,7 @@ class ControllerView(QWidget):
             return
         left = f"\n\n{left_out_sentence(compared.left_out)}" if compared.left_out else ""
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "Your client was patched",
             f"These files of your own client changed since the ready-to-play client was "
             f"made: {', '.join(names)}. Refresh it from your original client first? "
@@ -9291,7 +9334,9 @@ class ControllerView(QWidget):
                 f"{stopped.reason}\n\nTry again?"
             )
             skip = None
-        answer = _ask_with(self, f"{pack.label} could not be set up", text, "Retry", skip)
+        answer = _ask_with(
+            self._play_parent(), f"{pack.label} could not be set up", text, "Retry", skip
+        )
         if answer == "yes":
             self._play_prepare()
         elif answer == "save":
@@ -9594,6 +9639,7 @@ class ControllerView(QWidget):
             "since the ready-to-play client was made live only in it, so your own client "
             "lacks them until those modules are reinstalled or updated. Yu'lon can make a "
             "ready-to-play client again at any time.",
+            self._play_parent(),
         ):
             return
         # Again: a module job may have started while the question was open.
@@ -14792,16 +14838,17 @@ class ControllerView(QWidget):
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
-    def _confirm(self, title: str, question: str) -> bool:
+    def _confirm(self, title: str, question: str, parent: QWidget | None = None) -> bool:
         """One Yes/No dialog, defaulting to No, read through `said_yes()`.
 
         `said_yes()` and never `== StandardButton.Yes` by hand: PySide6's
         static `question()` returns a plain int on some builds, which is T33's
         closed bug, and one helper is the one place that can be got right.
+        `parent` is for a question the launcher window asked (T187); the tab otherwise.
         """
         return said_yes(
             QMessageBox.question(
-                self,
+                parent if parent is not None else self,
                 title,
                 question,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
