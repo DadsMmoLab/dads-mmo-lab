@@ -173,7 +173,7 @@ def fold(text: str) -> str:
     return "".join(chr(ord(ch) - 0x20) if "a" <= ch <= "z" else ch for ch in text)
 
 
-Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6"]
+Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"]
 """How a core stores an account's credentials and its GM level.
 
 `azerothcore` is SRP6 in binary `salt`/`verifier` with the level in a separate
@@ -181,7 +181,11 @@ Scheme = Literal["azerothcore", "mangos_sha", "mangos_srp6"]
 `sha_pass_hash` column and the level in `account.rank`, with `v`/`s` left NULL
 for the auth server to fill on first login. `mangos_srp6` is CMaNGOS proper
 (TBC, Vanilla): the SAME SRP6 arithmetic as AzerothCore, stored as uppercase
-hex text in `v`/`s` and with the level in `account.gmlevel`.
+hex text in `v`/`s` and with the level in `account.gmlevel`. `trinitycore` (T179)
+is declared ahead of its statements: TrinityCore keeps SRP6 in `salt`/`verifier`
+and the level in `account_access(AccountID, SecurityLevel, RealmID)`, columns
+to be confirmed on a live server (T179 Task 5), and until then every dispatch
+below refuses it by name rather than writing a row that looks right.
 
 Three cores, three shapes, and the difference between them is three statements:
 the insert, reading the level, writing the level. Everything else -- the
@@ -209,6 +213,20 @@ def _unknown_scheme(scheme: str, what: str, done: str = "nothing was written") -
     return AccountError(
         f"{scheme!r} is not an account scheme this app knows how to {what}, so "
         f"{done}. Known: {KNOWN_SCHEMES}."
+    )
+
+
+def _trinitycore_not_yet(what: str, done: str = "nothing was written") -> AccountError:
+    """The refusal every dispatch gives `trinitycore` until its statements exist (T179).
+
+    Not `_unknown_scheme()`: that one says the scheme is not known and then
+    lists it among the known ones. This scheme is known and deliberately not
+    written yet -- its column names are confirmed on a live server first, since
+    a guessed row is one that looks right and can never log in.
+    """
+    return AccountError(
+        f"this app does not yet {what} on a TrinityCore server, so {done}. Use the "
+        "worldserver console: account create <name> <password>."
     )
 
 
@@ -527,6 +545,8 @@ def reset_own_password(
     elif scheme == "azerothcore":
         salt, verifier = registration_data(name, password)
         columns = f"salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)}"
+    elif scheme == "trinitycore":
+        raise _trinitycore_not_yet("change an account's password")
     else:
         # Named, not defaulted. See this function's `Raises:` block: the branch
         # this replaces wrote AzerothCore's columns for every scheme it did not
@@ -629,6 +649,8 @@ def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
             f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
             f" {EXPANSION}, '', '', NOW())"
         )
+    if scheme == "trinitycore":
+        raise _trinitycore_not_yet("write an account row")
     raise _unknown_scheme(scheme, "write an account row for")
 
 
@@ -678,6 +700,8 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> N
             f"grant GM level {gm_level} to account {account_id}",
         )
         return
+    if scheme == "trinitycore":
+        raise _trinitycore_not_yet("grant a GM level")
     # `account_access` is AzerothCore's table alone, so it is a branch and not a
     # destination for everything unrecognised (T12).
     raise _unknown_scheme(scheme, "grant a GM level on")
@@ -738,6 +762,8 @@ def _gm_level(sql: SqlSeam, account_id: int, scheme: Scheme) -> int:
         )
         level = _one_int(rows, f"read the GM level of account {account_id}")
         return NO_GM if level is None else level
+    if scheme == "trinitycore":
+        raise _trinitycore_not_yet("read a GM level", "nothing was read")
     # The read half of the same dispatch. Its refusal says "read" rather than
     # "written": no write was in question here, and a sentence claiming one
     # sends the reader looking for a row that was never attempted (T12).

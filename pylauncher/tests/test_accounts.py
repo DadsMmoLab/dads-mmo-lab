@@ -16,6 +16,7 @@ implementation still matches on a pure-ASCII password.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import get_args
 
 import pytest
@@ -926,7 +927,7 @@ def test_an_unknown_scheme_is_refused_by_name_instead_of_defaulting() -> None:
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to re-password, so "
-        "nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
+        "nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
@@ -960,7 +961,7 @@ def test_an_unknown_scheme_stops_the_account_row_before_the_database_is_touched(
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to write an account row "
-        "for, so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
+        "for, so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
@@ -980,7 +981,7 @@ def test_an_unknown_scheme_stops_the_gm_grant_instead_of_writing_account_access(
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to grant a GM level on, "
-        "so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
+        "so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
@@ -999,7 +1000,7 @@ def test_an_unknown_scheme_stops_the_gm_level_read_instead_of_reading_account_ac
 
     assert str(caught.value) == (
         "'mangos_srp7' is not an account scheme this app knows how to read a GM level from, "
-        "so nothing was read. Known: azerothcore, mangos_sha, mangos_srp6."
+        "so nothing was read. Known: azerothcore, mangos_sha, mangos_srp6, trinitycore."
     )
     assert sql.statements == [], "it touched the database before refusing"
 
@@ -1016,7 +1017,7 @@ def test_the_known_list_every_refusal_prints_comes_from_Scheme_itself() -> None:
     a constant nothing prints proves nothing about what a user is told.
     """
     known = get_args(accounts.Scheme)
-    assert len(known) == 3, known  # the alias itself, in case it lost a member
+    assert len(known) == 4, known  # the alias itself, in case it lost a member
     sql = _Recorder()
     messages = []
     for call in (
@@ -1040,6 +1041,54 @@ def test_the_known_list_every_refusal_prints_comes_from_Scheme_itself() -> None:
             assert name in message, message
         assert accounts.KNOWN_SCHEMES in message, message
     assert accounts.KNOWN_SCHEMES == ", ".join(known)
+
+
+# -- trinitycore: a scheme declared ahead of its statements (T179) -------------
+
+
+@pytest.mark.parametrize(
+    ("call", "said"),
+    [
+        (
+            lambda sql: accounts.create_account(sql, "bob", "hunter2", scheme="trinitycore"),
+            "this app does not yet write an account row on a TrinityCore server, so nothing "
+            "was written.",
+        ),
+        (
+            lambda sql: accounts.reset_own_password(
+                sql, "YULON_243C46E3", "n3w-p@ssw0rd1234", scheme="trinitycore"
+            ),
+            "this app does not yet change an account's password on a TrinityCore server, so "
+            "nothing was written.",
+        ),
+        (
+            lambda sql: accounts._grant_gm(sql, 106, 3, "trinitycore"),
+            "this app does not yet grant a GM level on a TrinityCore server, so nothing was "
+            "written.",
+        ),
+        (
+            lambda sql: accounts._gm_level(sql, 106, "trinitycore"),
+            "this app does not yet read a GM level on a TrinityCore server, so nothing was read.",
+        ),
+    ],
+    ids=["create", "re-password", "grant", "read-level"],
+)
+def test_trinitycore_is_refused_by_name_at_every_dispatch_until_its_statements_exist(
+    call: Callable[[_Recorder], object], said: str
+) -> None:
+    """`Scheme` grew `trinitycore` because the catalog's `Accounts.scheme` did (T179 Task 1).
+
+    Its columns are confirmed on a live server before they are written down
+    (Task 5), so until then each dispatch says so -- not "not a scheme this app
+    knows", which would list it among the known ones in the same sentence -- and
+    asks the database nothing.
+    """
+    sql = _Recorder()
+    with pytest.raises(accounts.AccountError) as caught:
+        call(sql)
+    assert str(caught.value).startswith(said), str(caught.value)
+    assert "account create <name> <password>" in str(caught.value)
+    assert sql.statements == [], "it touched the database before refusing"
 
 
 def test_an_entry_that_declares_no_scheme_is_refused_rather_than_defaulted() -> None:

@@ -11,8 +11,10 @@ must supply (README §3a) — is data here, not Python (style-guide §3). Acrony
 from __future__ import annotations
 
 import builtins
+import fnmatch
 import hashlib
 import json
+import re
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -785,6 +787,249 @@ class CmangosData(_Strict):
     )
 
 
+def _below(value: str, field: str, root: str) -> str:
+    """`value` as a relative POSIX path strictly below `root`, or a refusal naming `field`.
+
+    One rule, shared by the TrinityCore block's paths: no absolute path, no
+    `..`, no backslash, and not `root` itself (`.` or empty) -- a path that
+    names the whole of what it is meant to be inside is not a path into it.
+    """
+    path = PurePosixPath(value)
+    if "\\" in value or path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError(f"{field} must be a relative POSIX path inside {root}, got {value!r}")
+    return value
+
+
+_SQL_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+"""A database name a rename may name: `centurion/sql/import.sh:21-26` refuses anything else
+(facts §2, CENTURION @ faac5fc9), and the names are substituted into SQL text."""
+
+_CMAKE_DEFINE = re.compile(r"^-D[A-Za-z_][A-Za-z0-9_]*(:[A-Z]+)?=[A-Za-z0-9_.,/+=-]*$")
+"""One `-DNAME=VALUE` (optionally `-DNAME:TYPE=VALUE`), and no character a shell or a
+Dockerfile `RUN` line would read as anything but part of the value."""
+
+
+class TrinityCoreDockerfile(DockerfileSpec):
+    """The TrinityCore Dockerfile's tokens: `make -j` and the CMake defines.
+
+    Data because they are facts about one tree: Centurion's realm comes up with no
+    bots unless the build says `-DPLAYERBOT=ON` (`cmake/options.cmake:12` defaults
+    it to 0, facts §1, CENTURION @ faac5fc9), and `-DTOOLS=ON` is what builds the
+    extractors the client-data stage runs.
+    """
+
+    cmake_options: tuple[str, ...] = Field(
+        min_length=1,
+        description="`-DNAME=VALUE` defines passed to cmake, in order.",
+    )
+
+    @field_validator("cmake_options")
+    @classmethod
+    def _each_is_one_define(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        bad = [option for option in value if not _CMAKE_DEFINE.match(option)]
+        if bad:
+            raise ValueError(
+                f"cmake_options must each be one `-DNAME=VALUE` with no shell characters, got {bad}"
+            )
+        return value
+
+
+class TrinityCoreExtractPlan(ExtractPlan):
+    """The extraction stage, plus the tree's own DBC files laid over what it extracted.
+
+    Centurion ships its DBCs in the checkout (`centurion/dbc`, 246 files) and says
+    to use them, not the extractor's (README.md:174-180, facts §3): the client's
+    copies differ from the server's in places.
+    """
+
+    dbc_overlay_from: str = Field(
+        min_length=1,
+        description=(
+            "Directory inside the checkout (relative to `TrinityCoreData.checkout`) whose files "
+            "are copied over the extracted `data/dbc` after the extractors ran."
+        ),
+    )
+
+    @field_validator("dbc_overlay_from")
+    @classmethod
+    def _inside_the_checkout(cls, value: str) -> str:
+        return _below(value, "dbc_overlay_from", "the checkout")
+
+
+class TrinityCoreMmaps(MmapPlan):
+    """The movement-map generator, which on this family runs after the server is up."""
+
+    background: bool = Field(
+        default=True,
+        description=(
+            "True: `mmaps_generator` runs as a background job after `ready`, with pathfinding "
+            "switched on at the next restart once it finished (owner decision 4, T179 spec). "
+            "It takes hours (README.md:193-194, facts §3) and the server starts without it."
+        ),
+    )
+
+
+class TrinityCoreConf(ConfPatchTable):
+    """The conf table, plus the one file that must sit beside `worldserver.conf`."""
+
+    playerbots_conf: str = Field(
+        description=(
+            "The bots' conf, one of `files`, written next to `worldserver.conf`: the worldserver "
+            "loads it from that directory and nowhere else (worldserver/Main.cpp:242-250, facts "
+            "§4), and a missing one leaves every bot setting at the `.dist`'s off."
+        ),
+    )
+
+    @field_validator("playerbots_conf")
+    @classmethod
+    def _a_bare_file_name(cls, value: str) -> str:
+        if not value or "/" in value or "\\" in value or value in (".", ".."):
+            raise ValueError(
+                f"playerbots_conf is a file name beside worldserver.conf, not a path: {value!r}"
+            )
+        return value
+
+    @field_validator("files")
+    @classmethod
+    def _the_database_updater_stays_off(cls, value: dict[str, ConfPatch]) -> dict[str, ConfPatch]:
+        """`Updates.EnableDatabases`, wherever the table names it, is `0`.
+
+        Centurion's database is a snapshot that already contains TrinityCore's
+        updates; the worldserver's updater must not replay them over it
+        (README.md:213-214), and with the shipped `7` and no source tree at run
+        time the worldserver shuts down (DBUpdater.cpp:215-218; facts §2).
+        """
+        for name, patch in value.items():
+            setting = patch.keys.get("Updates.EnableDatabases")
+            if setting is not None and setting.strip() != "0":
+                raise ValueError(
+                    f"{name}: Updates.EnableDatabases must be 0 on this family (the snapshot "
+                    f"already holds the updates), got {setting!r}"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _the_playerbots_conf_is_one_the_table_writes(self) -> TrinityCoreConf:
+        if self.playerbots_conf not in self.files:
+            raise ValueError(
+                f"playerbots_conf {self.playerbots_conf!r} is not one of the conf table's files "
+                f"{sorted(self.files)}"
+            )
+        return self
+
+
+class TrinityCoreSqlPlan(SqlPlan):
+    """The import, plus the database-name renames `centurion/sql/import.sh` makes.
+
+    The dumps' triggers and procedures name the live realm's databases
+    (`legionnaireauth`, `centurionworld`); import.sh substitutes the target names
+    into exactly three files before it loads them (import.sh:41-43, facts §2).
+    This plan says the same: which names become which, in which files only.
+    """
+
+    renames: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description=(
+            "`(from, to)` database names substituted in `rename_files`; `to` is one of the "
+            "entry's own schemas (`CatalogEntry` checks)."
+        ),
+    )
+    rename_files: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "The files the renames apply to, relative to the server dir; each must be a file a "
+            "phase imports. No other file is touched."
+        ),
+    )
+
+    @field_validator("renames")
+    @classmethod
+    def _plain_names(cls, value: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+        for pair in value:
+            bad = [name for name in pair if not _SQL_NAME.match(name)]
+            if bad:
+                raise ValueError(
+                    f"a rename names databases matching ^[A-Za-z0-9_]+$ only, got {bad} in {pair}"
+                )
+        return value
+
+    @field_validator("rename_files")
+    @classmethod
+    def _inside_the_server_dir(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for file in value:
+            _below(file, "rename_files", "the server dir")
+        return value
+
+    @model_validator(mode="after")
+    def _every_renamed_file_is_one_a_phase_imports(self) -> TrinityCoreSqlPlan:
+        globs = [glob for phase in self.phases for glob in phase.files]
+        globs += [glob for phase in self.phases for glob in (phase.into_each or {}).values()]
+        for file in self.rename_files:
+            if not any(fnmatch.fnmatchcase(file, glob) for glob in globs):
+                raise ValueError(
+                    f"rename_files names {file!r}, which no phase imports; a rename there "
+                    "would change nothing"
+                )
+        return self
+
+
+class TrinityCoreData(_Strict):
+    """Everything the TrinityCore family needs that differs per game (T179).
+
+    Shaped after `CmangosData`, with what Centurion (a TrinityCore 3.3.5 fork)
+    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout, mmaps
+    in the background, a `playerbots.conf` beside `worldserver.conf`, renames in
+    the import, and the maps the start check requires. The facts are in
+    `.notes/tickets/T179-centurion-facts.md` (CENTURION @ faac5fc9).
+    """
+
+    checkout: str = Field(
+        min_length=1,
+        description=(
+            "The `dest` of the emulator source that is the core; every checkout-relative path "
+            "below is relative to it. Must be a dest of the entry's own sources."
+        ),
+    )
+    sparse_exclude: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Paths inside the checkout the clone leaves out. Centurion's `playerbot reference/` "
+            "is never compiled (README.md:34) and is 0.96 GB of a 3.15 GB checkout (facts, "
+            "repo-level)."
+        ),
+    )
+    dockerfile: TrinityCoreDockerfile
+    extract: TrinityCoreExtractPlan
+    mmaps: TrinityCoreMmaps
+    conf: TrinityCoreConf
+    sql: TrinityCoreSqlPlan
+    required_maps: tuple[Annotated[int, Field(ge=0)], ...] = Field(
+        min_length=1,
+        description=(
+            "Map ids whose maps and vmaps must exist before the server is started: without them "
+            "the worldserver exits 'Unable to load critical files' (World.cpp:1811-1823, facts "
+            "§3) -- 0 and 1, and 530 with `Expansion = 2`."
+        ),
+    )
+
+    @field_validator("checkout")
+    @classmethod
+    def _checkout_inside_the_server_dir(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                f"checkout must be a relative POSIX path inside the server dir, got {value!r}"
+            )
+        return value
+
+    @field_validator("sparse_exclude")
+    @classmethod
+    def _exclusions_inside_the_checkout(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for path in value:
+            _below(path, "sparse_exclude", "the checkout")
+        return value
+
+
 class NativeInstall(_Strict):
     """What the native install engine needs that is a fact about THIS game (roadmap 6.2, 7.1).
 
@@ -802,14 +1047,16 @@ class NativeInstall(_Strict):
             "Directory of this game's compose templates, relative to catalog/installers/."
         ),
     )
-    family: Literal["azerothcore", "cmangos"] = Field(
+    family: Literal["azerothcore", "cmangos", "trinitycore"] = Field(
         description=(
             "Which family engine installs this game; must equal the engine's `family`. "
             "This Literal is the first file a new lineage's data touches, so the policy "
             "is stated here too: a family with no registered engine is a DEFECT and not "
             "a supported window — `installer_for()` refuses the entry rather than "
             "falling back to anything. A new lineage is a class in `catalog/families/`, "
-            "a line in `FAMILIES`, and then a member here."
+            "a line in `FAMILIES`, and then a member here. `trinitycore` was the exception: "
+            "added with its model and `families/decisions.py` (T179 Task 1) ahead of its "
+            "engine (Task 3) and its first entry (Task 7)."
         )
     )
     images: tuple[str, ...] = Field(
@@ -878,6 +1125,9 @@ class NativeInstall(_Strict):
         default=None, description="Present exactly when `family` is azerothcore (7.3 validates)."
     )
     cmangos: CmangosData | None = None
+    trinitycore: TrinityCoreData | None = Field(
+        default=None, description="Present exactly when `family` is trinitycore (T179)."
+    )
     soap_port: int = Field(default=7878, gt=0, lt=65536)
     min_ram_gb: float = Field(
         default=6.0,
@@ -924,18 +1174,26 @@ class NativeInstall(_Strict):
         Also pins `extract.image` to a built image, so the extractors run from something
         the build overlay produces.
         """
-        blocks = {"azerothcore": self.azerothcore, "cmangos": self.cmangos}
+        blocks = {
+            "azerothcore": self.azerothcore,
+            "cmangos": self.cmangos,
+            "trinitycore": self.trinitycore,
+        }
         present = sorted(name for name, block in blocks.items() if block is not None)
         if present != [self.family]:
             raise ValueError(
                 f"family is {self.family!r} but the blocks present are {present}; "
                 f"exactly the `{self.family}` block must be present"
             )
-        if self.cmangos is not None and self.cmangos.extract.image not in self.images:
-            raise ValueError(
-                f"cmangos.extract.image {self.cmangos.extract.image!r} is not one of images "
-                f"{list(self.images)}"
-            )
+        extract_images = {
+            "cmangos": self.cmangos.extract.image if self.cmangos is not None else None,
+            "trinitycore": self.trinitycore.extract.image if self.trinitycore is not None else None,
+        }
+        for family, image in extract_images.items():
+            if image is not None and image not in self.images:
+                raise ValueError(
+                    f"{family}.extract.image {image!r} is not one of images {list(self.images)}"
+                )
         return self
 
 
@@ -1201,13 +1459,16 @@ class Accounts(_Strict):
     correct and can never log in.
     """
 
-    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6"] | None = Field(
+    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"] | None = Field(
         default="azerothcore",
         description=(
             "How this core stores an account: `azerothcore` is SRP6 in binary salt/verifier "
             "with the level in account_access; `mangos_sha` is sha_pass_hash with the level "
             "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
-            "text in v/s with the level in account.gmlevel. None means this app does not "
+            "text in v/s with the level in account.gmlevel; `trinitycore` is TrinityCore's "
+            "salt/verifier with the level in account_access(AccountID, SecurityLevel, RealmID) "
+            "(facts §5), declared ahead of its statements (T179 Task 5), so until then every "
+            "account write on it refuses by name. None means this app does not "
             "write accounts for this core and "
             "the Accounts tab points at `console_command` instead. Never defaulted onto a "
             "core that has not been measured — a wrong scheme inserts a row that looks "
@@ -2148,6 +2409,35 @@ class CatalogEntry(_Strict):
                 raise ValueError(
                     f"patch {spec.file!r} applies inside {spec.source!r}, which is not a dest "
                     f"of any of this entry's sources {sorted(dests)}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _the_trinitycore_block_agrees_with_the_entry(self) -> CatalogEntry:
+        """Its `checkout` is a source this entry clones; each rename lands on its own schema.
+
+        Two relationships the block cannot see from inside: the sources live in
+        `emulator`, the schema names in `databases`. A checkout that is not a dest
+        is an install that clones and then reads paths from a folder nothing made;
+        a rename to a name that is not this entry's would point the dumps'
+        triggers and procedures at somebody else's database (import.sh:41-43).
+        """
+        native = self.install.native
+        block = native.trinitycore if native is not None else None
+        if block is None:
+            return self
+        dests = {source.dest for source in self.emulator.sources}
+        if block.checkout not in dests:
+            raise ValueError(
+                f"trinitycore.checkout is {block.checkout!r}, which is not a dest of any of "
+                f"this entry's sources {sorted(dests)}"
+            )
+        schemas = set(self.databases.schema_map().values())
+        for old, new in block.sql.renames:
+            if new not in schemas:
+                raise ValueError(
+                    f"rename {old!r} -> {new!r} lands on {new!r}, which is not one of this "
+                    f"entry's schemas {sorted(schemas)}"
                 )
         return self
 
