@@ -56,7 +56,7 @@ from typing import Literal
 from yulon import dbsecret, docker, platform, resources, server_build_presses, tuning
 from yulon.catalog import bot_dashboard, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatch, ConfPatchTable
-from yulon.catalog.families import azerothcore, conf
+from yulon.catalog.families import azerothcore, conf, mmaps
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
 from yulon.catalog.native import Secrets
@@ -529,6 +529,8 @@ def _from_templates(
     # install's own setting, not a drift from the default -- and this reset's
     # banner offers a recreate, not a Start, so nothing else would put them back.
     table = bot_dashboard.overlay(engine.conf_table(), entry, server_dir)
+    # T179 final round: a finished pathfinding set keeps `mmap.enablePathFinding = 1`.
+    table = mmaps.overlay(table, entry, server_dir)
     names: dict[str, str] = {}
     reasons: dict[str, str] = {}
     for file in files:

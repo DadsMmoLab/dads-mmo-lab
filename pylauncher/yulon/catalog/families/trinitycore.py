@@ -55,7 +55,7 @@ import threading
 import time
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, cast
 
 from yulon import client_packs, docker, platform, play_client, server_build_presses
@@ -71,7 +71,7 @@ from yulon.catalog.catalog import (
 )
 from yulon.catalog.families import conf, extract, mmaps, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, UpdateRefused
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -95,6 +95,9 @@ Written BEFORE the copy is made and removed only after the copy is gone, so a pr
 that died part way -- inside `play_client.create()` included -- leaves the next
 press and Uninstall the path to clean up (T179 Task 3 fix round 1).
 """
+
+STOCK_BUILDS: Mapping[str, int] = {"3.3.5a": 12340}
+"""The build a stock client of each version reports; a player's own client is one."""
 
 LEFT_OUT_DIR = ".yulon-left-out"
 """Inside the temporary copy, beside its `Data/`: where the archives it must not hold are moved.
@@ -247,9 +250,10 @@ class TrinityCoreInstaller(CmangosInstaller):
     ) -> None:
         """The spine's constructor, plus the Docker seam of the movement-map job (Task 4).
 
-        Its own seam and not a `Seams` field: only this family has the job, and
-        `Seams.in_wsl()` binds every docker seam to a distro -- a server this
-        family installs never lives in one (an install is local).
+        Its own seam and not a `Seams` field: only this family has the job. With
+        none given it is bound to the distro the engine's seams are (`Seams.in_wsl`,
+        T179 final round): an update of a server inside a WSL distro asks about and
+        stops the job through that distro's Docker, never this host's.
         """
         super().__init__(
             entry,
@@ -258,7 +262,11 @@ class TrinityCoreInstaller(CmangosInstaller):
             reset_unfinished=reset_unfinished,
             seams=seams,
         )
-        self._mmaps_runner = mmaps_runner if mmaps_runner is not None else mmaps.DockerRunner()
+        self._mmaps_runner = (
+            mmaps_runner
+            if mmaps_runner is not None
+            else mmaps.DockerRunner(wsl_distro=self._seams.distro)
+        )
 
     def stages(self) -> tuple[Stage, ...]:
         """The family's stage tuple, in `STAGE_NAMES` order (T179 spec §1, steps 1-9)."""
@@ -405,7 +413,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         website serves on the day, and nothing in this stage could tell a resume
         that it had changed.
         """
-        packs = tuple(pack for pack in self.entry.client.packs if not pack.optional)
+        packs = self._map_inputs()
         downloads = [pack.label for pack in packs if pack.source.kind != "checkout"]
         if downloads:
             raise InstallerError(
@@ -414,6 +422,35 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"own checkout. Nothing was extracted. {CATALOG_ERROR_TAIL}"
             )
         return packs
+
+    def _players_client(self) -> str | None:
+        """The PLAYER's client, as the shortfall refusal names it (T179 final round).
+
+        The entry's `build` is the realm's: with an exe patch only the ready-to-play
+        copy reports it (Centurion: 12342), and the client the map data is made from
+        is the player's own stock one. None (the entry's build is said) without a
+        patch, or for a version whose stock build this table does not know.
+        """
+        client = self.entry.client
+        stock = STOCK_BUILDS.get(client.version)
+        if client.exe_patch is None or stock is None:
+            return None
+        return (
+            f"your {client.version} client, build {stock} (the build {client.build} is what "
+            f"{self.entry.name}'s patches make its ready-to-play copy report)"
+        )
+
+    def _map_inputs(self) -> tuple[ClientPack, ...]:
+        """The required packs that lay a game archive under `Data/`: the map data's inputs.
+
+        The extractors read `Data/` only (`-i /client`, `-d /client/Data/`), so a
+        pack of addons (`Interface/AddOns`) or a `dinput8.dll` is no input of the
+        map data (T179 final round): it is not laid into the extraction copy, not
+        part of the salt, and a change to it never asks for a re-extraction.
+        """
+        return tuple(
+            pack for pack in self.entry.client.packs if not pack.optional and _lays_archives(pack)
+        )
 
     def _extraction_vouched_for(self, data_dir: Path, original: Path, salt: str) -> bool:
         """Does `data/`'s evidence vouch for every tool, for this client and these packs?
@@ -490,6 +527,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     selinux_enforcing=self._seams.ask_selinux,
                     evidence_client_dir=original,
                     evidence_salt=salt,
+                    client_named=self._players_client(),
                 ),
                 cancel=ctx.cancel,
                 stage="client-data",
@@ -651,6 +689,8 @@ class TrinityCoreInstaller(CmangosInstaller):
             if ctx.state.has("conf")
             else tc.conf
         )
+        # A finished pathfinding set stays switched on (T179 final round).
+        table = mmaps.overlay(table, self.entry, ctx.server_dir)
         image_ref = self._image_ref(ctx, tc.extract.image)
         try:
             copied = conf.materialise(
@@ -800,7 +840,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"would change the layout of your characters' or accounts' databases. "
                     f"Nothing was changed."
                 )
-            changes = self._read_changes(dest, old, new, pairs)
+            changes = self._read_changes(dest, old, new, pairs, repo=source.repo, to_pin=to_pin)
             break
         changes = replace(
             self._with_pending(server_dir, changes), flagged_before=_read_flag(server_dir)
@@ -834,11 +874,7 @@ class TrinityCoreInstaller(CmangosInstaller):
 
     def _map_packs(self) -> tuple[ClientPack, ...]:
         """The required packs the map data is made from: the server's own, in its checkout."""
-        return tuple(
-            pack
-            for pack in self.entry.client.packs
-            if not pack.optional and pack.source.kind == "checkout"
-        )
+        return tuple(pack for pack in self._map_inputs() if pack.source.kind == "checkout")
 
     def _is_map_data(self, rel: str) -> bool:
         """Is this server-dir-relative file one the map data is made from?"""
@@ -863,7 +899,14 @@ class TrinityCoreInstaller(CmangosInstaller):
         return None
 
     def _read_changes(
-        self, dest: Path, old: str, new: str, pairs: Sequence[tuple[str, str]]
+        self,
+        dest: Path,
+        old: str,
+        new: str,
+        pairs: Sequence[tuple[str, str]],
+        *,
+        repo: str = "",
+        to_pin: bool = False,
     ) -> SnapshotChanges:
         """Sort each changed file into what the route does with it, or refuse the press.
 
@@ -914,7 +957,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                         )
                     skipped.append((rel, beyond))
                     continue
-            raise InstallerError(self._refusal(rel, phase))
+            raise UpdateRefused(self._refusal(rel, phase, to_pin=to_pin), repo=repo, commit=new)
         # A split table upstream rewrote as one file (`<stem>.sql` added, its parts
         # removed) is imported again whole from that file, and nothing is left.
         whole = {rel[: -len(".sql")] for rel in reimport}
@@ -983,12 +1026,19 @@ class TrinityCoreInstaller(CmangosInstaller):
             notes=tuple(notes),
         )
 
-    def _refusal(self, rel: str, phase: SqlPhase) -> str:
+    def _refusal(self, rel: str, phase: SqlPhase, *, to_pin: bool = False) -> str:
         """The sentence for a change the route will not apply: which database, which file.
 
         The owner's words for a characters layout change (Review Focus 4), and the
-        same shape for the accounts and for what either database starts with.
+        same shape for the accounts and for what either database starts with --
+        then what the player can do next (T179 final round): the server keeps its
+        version; after an update, the way back stays available and the update can
+        be taken once Yu'lon supports the change.
         """
+        return f"{self._refused_change(rel, phase)} {_refusal_next(to_pin)}"
+
+    def _refused_change(self, rel: str, phase: SqlPhase) -> str:
+        """`_refusal()`'s first half: what changed, where, and that nothing was changed."""
         tc = self._tc()
         name = self.entry.name
         databases = self.entry.databases
@@ -1011,6 +1061,10 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"{name} changed what its {what} database starts with ({rel}); Yu'lon can't merge "
             f"that into {whose} safely yet. Nothing was changed."
         )
+
+    def start_refusal(self, server_dir: Path) -> str | None:
+        """No start while a world update is unfinished: `world_update_start_refusal` (T179)."""
+        return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
 
     def servers_down_work(
         self, server_dir: Path, changes: object, *, press: str
@@ -1215,8 +1269,37 @@ class TrinityCoreInstaller(CmangosInstaller):
                 ) from exc
         yield from self._forget_pending(server_dir)
         yield f"The world update is finished. Starting {self.entry.name}'s world server again."
-        yield from self.stage_up(ctx)
+        yield from self._start_after_finish(ctx)
         yield from self.stage_ready(ctx)
+
+    def _start_after_finish(self, ctx: StageContext) -> Iterator[str]:
+        """Start the servers once the finish removed the record: replaced, not just started.
+
+        A rollback that could not put every world table back leaves the old build's
+        tags and the failed build's STOPPED containers (it will not start a server
+        on half its tables, T179 final round). Whether a plain `compose up` replaces
+        a container whose image tag moved is not recorded anywhere in this repo
+        (`docker.staged_up_argv`), so the finish asks for the replacement outright,
+        as a rebuild does; on a server with nothing to replace it costs a recreate
+        of containers whose world was already stopped. The volumes are untouched.
+        """
+        yield "Starting the server."
+        warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
+        spec = self.entry.container_spec()
+        control = _stop_control(ctx, rollback=False)
+        try:
+            self._seams.recreate(spec, ctx.server_dir, control=control)
+        except docker.StopAbandoned as exc:
+            raise InstallerError(
+                f"The world update is finished, but starting the server was cancelled: {exc}. "
+                "Press Start on the Server tab."
+            ) from exc
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The world update is finished, but the server would not start: {exc}"
+            ) from exc
 
     def _refuse_unless_the_checkout_is_built(self, server_dir: Path, state: InstallState) -> None:
         """The checkout must be on the commit the install record says the running build is from.
@@ -1685,6 +1768,18 @@ def place_from_checkout(tc: TrinityCoreData, server_dir: Path, etc_dir: Path) ->
     return tuple(made)
 
 
+def _refusal_next(to_pin: bool) -> str:
+    """What a refused update or return leaves the player able to do (T179 final round)."""
+    keeps = "Your server keeps running the version it has."
+    if to_pin:
+        return keeps
+    back = server_build_presses.RETURN_TO_PIN
+    return (
+        f"{keeps} \u201c{back}\u201d stays available; this update can be taken once Yu'lon "
+        "supports the change."
+    )
+
+
 def _backup_advice(press: str | None) -> str:
     """Where the tables as they were may be, for the press that changed them (fix round 1).
 
@@ -1817,6 +1912,35 @@ def _read_pending(server_dir: Path) -> _Pending | None:
     ):
         return _Pending(unreadable=True)
     return _Pending(reimport=tuple(reimport), parts=tuple(parts))
+
+
+WORLD_UPDATE_UNFINISHED = (
+    "This server's last update didn't finish importing its world tables. Press "
+    f"\u201c{FINISH_WORLD_BUTTON}\u201d first."
+)
+"""Why no start is allowed while `WORLD_REIMPORT_FILE` is there (T179 final round, lead ruling)."""
+
+
+def world_update_start_refusal(server_dir: Path, *, press_here: bool = True) -> str | None:
+    """Why this server must not start now: a world update left unfinished, or None.
+
+    The world server would load tables half of one version and half of another.
+    A record that is there but cannot be read refuses too: what it named is lost,
+    that something waits is not (`_read_pending`). Asked by every start -- the
+    controller's `start_guard` and the engine's `start_refusal()` -- except the
+    finish itself, which removes the record before it starts the server.
+    `press_here` False is a tab with no "Finish the world update" (a server in a
+    WSL distro): the update press, which finishes it too, is named instead.
+    """
+    if _read_pending(server_dir) is None:
+        return None
+    if press_here:
+        return WORLD_UPDATE_UNFINISHED
+    update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+    return (
+        "This server's last update didn't finish importing its world tables. Press "
+        f"{update} again first."
+    )
 
 
 def _parts_on_disk(server_dir: Path, stem: str) -> bool:
@@ -1969,6 +2093,25 @@ def needs_reextract(
         f"{said} Stop the server, then press \u201c{REEXTRACT_BUTTON}\u201d on the Server tab; "
         "it uses your game client, and the pathfinding data is made again after it."
     )
+
+
+def _lays_archives(pack: ClientPack) -> bool:
+    """Does `pack` put a `.MPQ` under the client's `Data/`, where the extractors read?
+
+    A named member counts when its target is a `Data/...MPQ` file; a whole-zip
+    member (`"*"`) when its folder is under `Data/`, whose files cannot be named
+    here and may be archives.
+    """
+    for rule in pack.install:
+        target = rule.to if rule.to is not None else rule.to_dir
+        if target is None:
+            continue
+        parts = PurePosixPath(target).parts
+        if not parts or parts[0].casefold() != "data":
+            continue
+        if rule.to is None or rule.to.casefold().endswith(".mpq"):
+            return True
+    return False
 
 
 def _packs_salt(packs: Sequence[ClientPack], server_dir: Path) -> str:

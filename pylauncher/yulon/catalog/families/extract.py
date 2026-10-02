@@ -886,6 +886,7 @@ def run_plan(
     selinux_enforcing: Callable[[], bool | None] | None = None,
     evidence_client_dir: Path | None = None,
     evidence_salt: str = "",
+    client_named: str | None = None,
 ) -> Iterator[str]:
     """Run every tool the evidence does not vouch for, recording each as it finishes.
 
@@ -907,6 +908,9 @@ def run_plan(
 
     `required_file` is the client spec's; `client_build` is only spoken, in the
     shortfall refusal, because the count gate is the real check of the build.
+    `client_named` replaces that clause where the client the player gives is not
+    the build the server names (T179 final round: Centurion's realm is 12342, which
+    only its ready-to-play copy reports; the player's own client is a stock 12340).
 
     Every tool the evidence does not vouch for is asked one question
     (`blocking_output()`) in a single pass BEFORE the first of them is run:
@@ -1124,11 +1128,19 @@ def run_plan(
                     client_build,
                     staged=plan.stage_client,
                     retried=True,
+                    client_named=client_named,
                 )
                 yield f"{again.name}: done ({_counts_text(seen)})"
             continue
         current, seen = _conclude(
-            tool, run, data_dir, current, cancel, client_build, staged=plan.stage_client
+            tool,
+            run,
+            data_dir,
+            current,
+            cancel,
+            client_build,
+            staged=plan.stage_client,
+            client_named=client_named,
         )
         yield f"{tool.name}: done ({_counts_text(seen)})"
 
@@ -1143,6 +1155,7 @@ def _conclude(
     *,
     staged: bool = False,
     retried: bool = False,
+    client_named: str | None = None,
 ) -> tuple[Evidence, dict[str, int]]:
     """Turn one tool's exit into a record, or into the refusal that explains it.
 
@@ -1206,7 +1219,10 @@ def _conclude(
             f"{folder}: {have} files, at least {need} expected"
             for folder, (have, need) in short.items()
         )
-        build = f" for client build {client_build}" if client_build is not None else ""
+        if client_named is not None:
+            build = f" for {client_named}"
+        else:
+            build = f" for client build {client_build}" if client_build is not None else ""
         raise InstallerError(
             f"{tool.name} finished but produced too little ({told}){build}. The server WILL "
             f"fail to load maps from this, so nothing was recorded. Check that the client "

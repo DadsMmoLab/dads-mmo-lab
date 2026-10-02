@@ -61,7 +61,7 @@ from yulon import (
     server_build_presses,
 )
 from yulon.catalog import native
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import FAMILIES, extract, family_for, trinitycore
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.families.trinitycore import (
@@ -88,6 +88,8 @@ PATCH_A = b"MPQ\x1a centurion locale (patch-enUS-A)"
 ZIPS = {
     f"{PATCHES}/patch-Y.zip": _zip("patch-X.MPQ", PATCH_X),
     f"{PATCHES}/patch-enUS-A.zip": _zip("patch-enUS-A.MPQ", PATCH_A),
+    f"{PATCHES}/addons.zip": _zip("CenturionUI/CenturionUI.toc", b"## Title: CenturionUI"),
+    f"{PATCHES}/client-tweaks.zip": _zip("dinput8.dll", b"MZ client tweaks"),
 }
 
 REQUIRED_PACKS: list[dict[str, Any]] = [
@@ -104,6 +106,25 @@ REQUIRED_PACKS: list[dict[str, Any]] = [
         "source": {"kind": "checkout", "path": f"{PATCHES}/patch-enUS-A.zip"},
         "md5": hashlib.md5(ZIPS[f"{PATCHES}/patch-enUS-A.zip"], usedforsecurity=False).hexdigest(),
         "install": [{"member": "patch-enUS-A.MPQ", "to": "Data/enUS/patch-enUS-A.MPQ"}],
+    },
+]
+
+NON_MAP_PACKS: list[dict[str, Any]] = [
+    # Required, from the checkout, and laying nothing under `Data/`: Centurion's addons
+    # and its dinput8.dll. No input of the map data (T179 final round).
+    {
+        "id": "addons",
+        "label": "Centurion's addons",
+        "source": {"kind": "checkout", "path": f"{PATCHES}/addons.zip"},
+        "md5": hashlib.md5(ZIPS[f"{PATCHES}/addons.zip"], usedforsecurity=False).hexdigest(),
+        "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+    },
+    {
+        "id": "client-tweaks",
+        "label": "Client tweaks",
+        "source": {"kind": "checkout", "path": f"{PATCHES}/client-tweaks.zip"},
+        "md5": hashlib.md5(ZIPS[f"{PATCHES}/client-tweaks.zip"], usedforsecurity=False).hexdigest(),
+        "install": [{"member": "dinput8.dll", "to": "dinput8.dll"}],
     },
 ]
 
@@ -623,6 +644,54 @@ def test_the_extraction_client_keeps_only_the_stock_archives_and_the_required_pa
     )
     for rel in ("Data/patch-4.MPQ", "Data/patch-Y.MPQ", "Data/enUS/Patch-enUS-5.MPQ"):
         assert (machine.client / rel).is_file(), f"{rel} went from the player's own client"
+
+
+def test_packs_that_lay_nothing_under_data_are_no_input_of_the_map_data(machine: Machine) -> None:
+    """T179 final round: addons and a dinput8.dll are not laid into the extraction copy."""
+    with_extras = centurion_like(packs=[*REQUIRED_PACKS, *NON_MAP_PACKS, *OPTIONAL_PACKS], rev=REV)
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data", entry=with_extras)
+    for program, files in machine.tools.seen.items():
+        assert "dinput8.dll" not in files, program
+        assert not any(rel.startswith("Interface/AddOns/") for rel in files), program
+    salted = extract.read_evidence(machine.server_dir / "data")
+    made = engine(machine, entry=with_extras)
+    assert [pack.id for pack in made._map_packs()] == ["world", "locale"]
+    assert trinitycore._packs_salt(made._map_inputs(), machine.server_dir) == (
+        trinitycore._packs_salt(engine(machine)._map_inputs(), machine.server_dir)
+    ), "the same salt as without them: adding them asks for no new extraction"
+    assert salted is not None
+
+
+def test_a_changed_addons_or_tweaks_zip_never_flags_the_map_data(machine: Machine) -> None:
+    with_extras = engine(
+        machine, entry=centurion_like(packs=[*REQUIRED_PACKS, *NON_MAP_PACKS], rev=REV)
+    )
+    assert with_extras._is_map_data(f"{PATCHES}/patch-Y.zip")
+    assert with_extras._is_map_data(f"{PATCHES}/patch-Y.zip.part03")
+    assert not with_extras._is_map_data(f"{PATCHES}/addons.zip")
+    assert not with_extras._is_map_data(f"{PATCHES}/client-tweaks.zip")
+    assert not with_extras._is_map_data(f"{PATCHES}/client-tweaks.zip.part01")
+
+
+@pytest.mark.parametrize(
+    ("install", "lays"),
+    [
+        ({"member": "patch-X.MPQ", "to": "Data/patch-X.MPQ"}, True),
+        ({"member": "patch-enUS-6.MPQ", "to": "data/enUS/patch-enUS-6.mpq"}, True),
+        ({"member": "*", "to_dir": "Data/enUS"}, True),
+        ({"member": "*", "to_dir": "Interface/AddOns"}, False),
+        ({"member": "dinput8.dll", "to": "dinput8.dll"}, False),
+        ({"member": "notes.txt", "to": "Data/notes.txt"}, False),
+    ],
+)
+def test_a_pack_is_a_map_input_when_it_lays_an_archive_under_data(
+    install: dict[str, str], lays: bool
+) -> None:
+    pack = centurion_like(
+        packs=[{**NON_MAP_PACKS[0], "id": "p", "install": [install]}]
+    ).client.packs[0]
+    assert trinitycore._lays_archives(pack) is lays
 
 
 def test_the_extractors_read_the_copy_read_only_and_never_the_players_client(
@@ -1930,3 +1999,14 @@ def test_the_crash_path_log_names_install_and_uninstall_not_the_next_start(
         "The next press of Install, or Uninstalling this server, removes it safely."
     )
     assert "next time it starts" not in record.getMessage()
+
+
+def test_the_shortfall_names_the_players_stock_client_not_the_realms_build() -> None:
+    """T179 final round: the map data is made from YOUR 3.3.5a 12340 client; 12342 is the copy's."""
+    shipped = load_catalog().get("wow-centurion")
+    made = TrinityCoreInstaller(shipped, installers_root=resources.installers_dir())
+    assert made._players_client() == (
+        "your 3.3.5a client, build 12340 (the build 12342 is what Centurion's patches make its "
+        "ready-to-play copy report)"
+    )
+    assert TrinityCoreInstaller(ENTRY)._players_client() is None, "no exe patch: its own build"

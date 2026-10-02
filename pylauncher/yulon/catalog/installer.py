@@ -135,6 +135,22 @@ class WorldStoppedAfterReadyError(InstallerError):
         self.sources_kept = sources_kept
 
 
+class UpdateRefused(InstallerError):
+    """An update refused for what one upstream commit brings, which a second press cannot change.
+
+    T179: TrinityCore's update reads what the move changed in the tree's SQL
+    snapshot, and a change to the characters' or accounts' database is refused.
+    `repo` and `commit` name the source and the upstream commit refused, so
+    "Update the server to latest…" remembers it in the install record and the
+    Server tab stops offering that same commit (`StagedInstaller.upstream_news`).
+    """
+
+    def __init__(self, *args: object, repo: str, commit: str) -> None:
+        super().__init__(*args)
+        self.repo = repo
+        self.commit = commit
+
+
 class DockerUnavailableError(InstallerError):
     """No Docker daemon is reachable and automatic provisioning is not available yet."""
 

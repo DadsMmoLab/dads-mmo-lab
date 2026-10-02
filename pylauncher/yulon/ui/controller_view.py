@@ -15954,6 +15954,7 @@ class ControllerView(QWidget):
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
         start by hand is a server left down by a control that promised a restart."""
         controller = self.services.controller
+        controller.refuse_start()  # T179: before the stop, so a refusal leaves it running
         stopped = controller.stop()
         controller.start()
         return stopped
@@ -15963,6 +15964,7 @@ class ControllerView(QWidget):
         characters are not touched and the next start creates the containers again --
         the Server tab's own sentence for the same pair of calls."""
         controller = self.services.controller
+        controller.refuse_start()  # T179: before the removal, so a refusal leaves it as it was
         removed = controller.remove()
         controller.start()
         return removed

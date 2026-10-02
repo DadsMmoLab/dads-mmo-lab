@@ -20,7 +20,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, cast
 
@@ -40,6 +40,7 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
     ENTRY,
     REV,
     Machine,
+    context,
     engine,
     install,
     known_password,
@@ -549,7 +550,13 @@ def test_a_world_import_that_fails_rolls_back_and_the_record_names_every_file(
         f"{WORLD_SQL}/creature.sql, {WORLD_SQL}/version.sql again."
     ) in said
     assert "If you took the backup offered before the update" in said
-    assert box.world.running is True, "the old build was started"
+    # T179 final round (lead ruling): its tables could not all be put back either,
+    # so the old build is put back but NOT started on them.
+    assert box.world.running is False, "no start on half-imported world tables"
+    assert (
+        "The build from before this rebuild was put back but not started: This server's last "
+        "update didn't finish importing its world tables. Press “Finish the world update” first."
+    ) in said
     assert box.head() == OLD
 
 
@@ -743,10 +750,12 @@ def test_finish_imports_only_the_pending_files_and_does_not_build(box: Box) -> N
     box.leave_pending([f"{WORLD_SQL}/creature.sql"])
     said = box.finish()
     assert first_lines(box) == ["DROP TABLE IF EXISTS creature;"]
-    assert calls_of(box, "build", "stop-world:", "sql", "start", "ready") == [
+    # A recreate, not a plain start (T179 final round): a rollback that could not put
+    # its tables back left the failed build's containers stopped under the old tags.
+    assert calls_of(box, "build", "stop-world:", "sql", "start", "recreate", "ready") == [
         f"stop-world:{ENTRY.containers.world}",
         "sql",
-        "start",
+        "recreate",
         "ready",
     ]
     assert box.pending() is None
@@ -1146,3 +1155,180 @@ def test_a_record_that_cannot_be_forgotten_is_a_status_and_not_a_crash(
     status = mmaps.mmaps_status(server_dir, ENTRY, runner=FakeMmapsDocker(), install_id="0123abcd")
     assert status.state == "failed"
     assert "Permission denied" in status.error
+
+
+# -- no start while a world update is unfinished (T179 final round, lead ruling) ------------
+
+UNFINISHED = (
+    "This server's last update didn't finish importing its world tables. Press "
+    "“Finish the world update” first."
+)
+
+
+def test_a_rebuild_is_refused_before_anything_while_a_world_update_is_unfinished(
+    box: Box,
+) -> None:
+    """A Rebuild ends in a start and does not finish the tables: refused before the compile."""
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    with pytest.raises(InstallerError) as refused:
+        list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    assert str(refused.value) == f"{UNFINISHED} Nothing was changed."
+    assert box.m.rec.calls == [], "nothing built, stopped or started"
+    assert box.world.running is True
+
+
+@pytest.mark.parametrize("record", ["names", "unreadable"])
+def test_the_engines_own_start_is_refused_while_a_world_update_is_unfinished(
+    box: Box, record: str
+) -> None:
+    """The install's `up` stage: the same door, below every press that ends in it."""
+    if record == "names":
+        box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    else:
+        (box.server_dir / trinitycore.WORLD_REIMPORT_FILE).write_text("{", encoding="utf-8")
+    box.world.running = False
+    engine = box.engine()
+    with pytest.raises(InstallerError) as refused:
+        list(engine.stage_named("up").run(context(box.m)))
+    assert str(refused.value) == f"{UNFINISHED} The server was not started."
+    assert "start" not in box.m.rec.calls and box.world.running is False
+
+
+def test_finish_is_the_one_start_allowed_and_it_starts_once_the_record_is_gone(box: Box) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    box.finish()
+    assert box.pending() is None
+    assert box.world.running is True
+
+
+def test_inside_a_wsl_distro_the_engine_names_the_update_press(box: Box) -> None:
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    box.distro = "Ubuntu"
+    refused = box.engine().start_refusal(box.server_dir)
+    assert refused is not None and "“Update the server to latest…”" in refused
+    assert "Finish the world update" not in refused
+
+
+# -- the movement-map job of a server inside a WSL distro (T179 final round) ------------------
+
+
+def test_inside_a_wsl_distro_the_engines_mmaps_runner_asks_that_distros_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`installer_for_app(..., wsl_distro=)` binds every seam to the distro; the job's too."""
+    from yulon.install_wiring import installer_for_app
+
+    asked: list[tuple[str, object]] = []
+
+    def record(name: str) -> Callable[..., object]:
+        def call(*args: object, **kwargs: object) -> object:
+            asked.append((name, kwargs.get("wsl_distro")))
+            return docker.ContainerExit(missing=True) if name == "inspect" else None
+
+        return call
+
+    monkeypatch.setattr(docker, "container_exit", record("inspect"))
+    monkeypatch.setattr(docker, "remove_container", record("remove"))
+    monkeypatch.setattr(docker, "log_tail", record("log_tail"))
+    monkeypatch.setattr(docker, "daemon_cpus", record("cpus"))
+    made = installer_for_app(ENTRY, wsl_distro="Ubuntu-yulon")
+    assert isinstance(made, trinitycore.TrinityCoreInstaller)
+    runner = made._mmaps_runner
+    assert isinstance(runner, mmaps.DockerRunner)
+
+    runner.inspect("job", timeout=1)
+    runner.remove("job", timeout=1)
+    runner.log_tail("job", 5, timeout=1)
+    runner.cpus(timeout=1)
+    assert asked == [
+        ("inspect", "Ubuntu-yulon"),
+        ("remove", "Ubuntu-yulon"),
+        ("log_tail", "Ubuntu-yulon"),
+        ("cpus", "Ubuntu-yulon"),
+    ]
+    monkeypatch.setattr(docker, "run_detached", record("run"))
+    with pytest.raises(docker.DockerCommandError, match="inside the WSL distro Ubuntu-yulon"):
+        runner.run_detached(docker.ContainerRun(image="i", argv=("x",)), "job", timeout=1)
+    assert ("run", None) not in asked, "never started on this host's daemon"
+
+
+def test_on_this_host_the_engines_mmaps_runner_is_the_local_daemon() -> None:
+    from yulon.install_wiring import installer_for_app
+
+    made = installer_for_app(ENTRY)
+    assert isinstance(made, trinitycore.TrinityCoreInstaller)
+    runner = made._mmaps_runner
+    assert isinstance(runner, mmaps.DockerRunner) and runner.wsl_distro is None
+
+
+# -- a refused update says what is next, and is not offered again (T179 final round) ---------
+
+NEXT_AFTER_UPDATE = (
+    "Your server keeps running the version it has. “Return to the tested pin…” stays "
+    "available; this update can be taken once Yu'lon supports the change."
+)
+
+
+def test_a_refused_update_says_the_server_keeps_its_version_and_what_stays_available(
+    box: Box,
+) -> None:
+    box.changes(("M", f"{REPO_SQL}/characters/characters_schema.sql"))
+    with pytest.raises(InstallerError) as refused:
+        box.press()
+    assert NEXT_AFTER_UPDATE in str(refused.value)
+
+
+def test_a_refused_return_says_the_server_keeps_its_version_and_no_more(box: Box) -> None:
+    box.changes(("M", f"{REPO_SQL}/characters/characters_schema.sql"), new=REV)
+    with pytest.raises(InstallerError) as refused:
+        box.press(to_pin=True)
+    said = str(refused.value)
+    assert "Your server keeps running the version it has." in said
+    assert "stays available" not in said
+    assert native.read_state(box.server_dir, valid=()).refused_updates == ()  # type: ignore[union-attr]
+
+
+def _github(upstream_at: str) -> Callable[[str, str], bytes]:
+    """GitHub's compare, answered by base: upstream's branch is at `upstream_at`."""
+
+    def get(url: str, accept: str) -> bytes:
+        base = url.split("/compare/", 1)[1].split("...", 1)[0]
+        ahead = 0 if base == upstream_at else 3
+        status = "identical" if ahead == 0 else "ahead"
+        return json.dumps({"status": status, "ahead_by": ahead, "behind_by": 0}).encode()
+
+    return get
+
+
+def _news_line(box: Box, upstream_at: str) -> str:
+    from yulon.catalog import upstream
+
+    upstream.forget(box.server_dir)
+    made = engine(box.m, upstream_get=_github(upstream_at))
+    return upstream.line(made.upstream_news(InstallOptions(server_dir=box.server_dir)))
+
+
+def test_the_refused_commit_is_remembered_and_not_offered_again(box: Box) -> None:
+    repo = ENTRY.emulator.sources[0].repo
+    assert "Upstream has new code" in _news_line(box, NEW), "offered before the press"
+
+    box.changes(("M", f"{REPO_SQL}/characters/characters_schema.sql"))
+    with pytest.raises(InstallerError):
+        box.press()
+
+    state = native.read_state(box.server_dir, valid=())
+    assert state is not None and state.refused_updates == ((repo, NEW),)
+    assert _news_line(box, NEW) == "", "upstream still on the refused commit: nothing offered"
+    assert "Upstream has new code" in _news_line(box, "c" * 40), "a newer commit offers again"
+
+
+def test_an_update_that_lands_forgets_the_refused_commit(box: Box) -> None:
+    repo = ENTRY.emulator.sources[0].repo
+    state = native.read_state(box.server_dir, valid=())
+    assert state is not None
+    native.write_state(box.server_dir, replace(state, refused_updates=((repo, "d" * 40),)))
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.press()
+    after = native.read_state(box.server_dir, valid=())
+    assert after is not None and after.refused_updates == ()

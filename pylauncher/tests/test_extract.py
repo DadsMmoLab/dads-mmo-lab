@@ -1153,6 +1153,34 @@ def test_a_tool_that_exits_zero_but_falls_short_is_refused_naming_counts_and_bui
     assert evidence is not None and evidence.tools == ()
 
 
+def test_a_shortfall_names_the_players_client_where_the_server_names_another_build(
+    tmp_path: Path,
+) -> None:
+    """T179 final round: Centurion's realm build (12342) is the ready-to-play copy's, not yours."""
+    runner = Runner({**FULL, "/opt/bin/ad": {"dbc": 3, "maps": 1}})
+    folder = client(tmp_path)
+    with pytest.raises(InstallerError) as caught:
+        list(
+            extract.run_plan(
+                PLAN,
+                image_ref="yulon.local/x-server:1",
+                client_dir=folder,
+                data_dir=tmp_path / "server" / "data",
+                run_container=runner,
+                user_args=(),
+                sink=lambda _line: None,
+                cancel=None,
+                required_file=REQUIRED,
+                client_build=12342,
+                selinux_enforcing=lambda: None,
+                client_named="your 3.3.5a client, build 12340",
+            )
+        )
+    message = str(caught.value)
+    assert "for your 3.3.5a client, build 12340." in message
+    assert "client build 12342" not in message
+
+
 def test_the_shortfall_refusal_does_not_blame_the_client_for_a_folder_nobody_could_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -58,7 +58,7 @@ from typing import Literal, Protocol, cast
 
 from yulon import docker, platform, rmtree, server_build_presses
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry, TrinityCoreData
+from yulon.catalog.catalog import CatalogEntry, ConfPatchTable, TrinityCoreData
 from yulon.catalog.families import conf, extract
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
@@ -139,25 +139,45 @@ class Runner(Protocol):
 
 
 class DockerRunner:
-    """The local daemon, through `docker`'s own functions."""
+    """The daemon that runs the server, through `docker`'s own functions.
+
+    `wsl_distro` (T179 final round): a server inside a WSL distro is asked about,
+    stopped and removed through THAT distro's Docker, as every other seam of an
+    engine built for it (`install_wiring.installer_for_app`, `Seams.in_wsl`) -- this
+    host's daemon would answer that the job's container does not exist. Starting a
+    job there is refused: `docker.run_detached` mounts paths on this machine, which
+    the distro's daemon cannot see; the route that would start it says so as a
+    warning and the server runs without the maps.
+    """
+
+    def __init__(self, wsl_distro: str | None = None) -> None:
+        self.wsl_distro = wsl_distro
 
     def run_detached(self, spec: docker.ContainerRun, name: str, *, timeout: float) -> str:
+        if self.wsl_distro is not None:
+            raise docker.DockerCommandError(
+                f"the pathfinding job cannot be started from here for a server inside the WSL "
+                f"distro {self.wsl_distro}; open Yu'lon inside that distro and start it on the "
+                "server's Server tab there"
+            )
         return docker.run_detached(spec, name, timeout=timeout)
 
     def inspect(self, name: str, *, timeout: float) -> docker.ContainerExit:
-        return docker.container_exit(name, timeout=timeout)
+        return docker.container_exit(name, timeout=timeout, wsl_distro=self.wsl_distro)
 
     def log_tail(self, name: str, lines: int, *, timeout: float) -> str | None:
-        return docker.log_tail(name, lines, timeout=timeout)
+        return docker.log_tail(name, lines, timeout=timeout, wsl_distro=self.wsl_distro)
 
     def remove(self, name: str, *, timeout: float) -> None:
-        docker.remove_container(name, timeout=timeout)
+        docker.remove_container(name, timeout=timeout, wsl_distro=self.wsl_distro)
 
     def started_at(self, container: str, *, timeout: float) -> str:
-        return docker.container_state(container, timeout=timeout).started_at
+        return docker.container_state(
+            container, timeout=timeout, wsl_distro=self.wsl_distro
+        ).started_at
 
     def cpus(self, *, timeout: float) -> int | None:
-        return docker.daemon_cpus(timeout=timeout)
+        return docker.daemon_cpus(timeout=timeout, wsl_distro=self.wsl_distro)
 
 
 Clock = Callable[[], datetime]
@@ -339,6 +359,31 @@ def background_block(entry: CatalogEntry) -> TrinityCoreData | None:
     if block is None or not block.mmaps.background:
         return None
     return block
+
+
+def overlay(table: ConfPatchTable, entry: CatalogEntry, server_dir: Path) -> ConfPatchTable:
+    """The install's conf table with pathfinding ON while a finished set is there (T179).
+
+    The table says `mmap.enablePathFinding = 0` -- right for a fresh install, whose
+    maps are made afterwards -- and the switch to 1 is written ONCE, when a run
+    completes (`_done_status`). Anything that writes the table again (the conf
+    stage on a resume, Reset to default) would put the 0 back for good: the record
+    already says it was switched on, so nothing switches it again. So while the
+    record says `done`, the table carries 1, the way `bot_dashboard.overlay` lays
+    the dashboard's keys over it. A set emptied since is caught by the next status
+    (`_done_status` counts it again and turns the switch off with it).
+    """
+    block = background_block(entry)
+    if block is None:
+        return table
+    record = read_record(server_dir)
+    world = block.conf.world_conf
+    if record is None or record.state != "done" or world not in table.files:
+        return table
+    patch = table.files[world]
+    keys = {**patch.keys, PATHFINDING_KEY: "1"}
+    files = {**table.files, world: patch.model_copy(update={"keys": keys})}
+    return table.model_copy(update={"files": files})
 
 
 @dataclass(frozen=True)

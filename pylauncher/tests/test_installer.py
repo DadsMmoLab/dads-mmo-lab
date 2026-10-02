@@ -179,6 +179,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     # rebuild must NOT roll the images back for. An exception type, not
     # machinery — this module still runs no subprocess.
     "WorldStoppedAfterReadyError",
+    # Added deliberately with T179's final round: an update refused for one
+    # upstream commit, which the update route remembers so the tab stops
+    # offering it. An exception type, not machinery.
+    "UpdateRefused",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",

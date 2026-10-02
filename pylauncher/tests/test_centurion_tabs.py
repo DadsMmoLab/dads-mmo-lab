@@ -11,16 +11,25 @@ from __future__ import annotations
 
 import secrets
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.support_trinitycore import FakeMmapsDocker, centurion_like
-from yulon import bot_population, docker, install_wiring, reset_defaults, tuning
+from yulon import (
+    bot_population,
+    docker,
+    install_wiring,
+    reset_defaults,
+    server_build_presses,
+    tuning,
+)
 from yulon.catalog import composegen, native, time_zone
-from yulon.catalog.families import azerothcore, decisions
+from yulon.catalog.families import azerothcore, conf, decisions, mmaps, trinitycore
 from yulon.catalog.families.cmangos import ETC_DIR
 from yulon.catalog.families.trinitycore import TrinityCoreInstaller
 from yulon.catalog.installer import InstallerError
+from yulon.controller import StartRefused
 from yulon.controller_wow_centurion import controller as centurion_controller
 from yulon.controller_wow_centurion import docker_ctl as centurion_docker
 
@@ -461,3 +470,164 @@ def test_no_family_decision_is_still_pending_for_task_5() -> None:
         if decision.kind == "pending" and decision.note.startswith("Task 5")
     ]
     assert left == []
+
+
+# -- no start while a world update is unfinished (T179 final round, lead ruling) ------------
+
+UNFINISHED = (
+    "This server's last update didn't finish importing its world tables. Press "
+    "“Finish the world update” first."
+)
+
+
+def _leave_pending(server: Path, text: str | None = None) -> None:
+    (server / trinitycore.WORLD_REIMPORT_FILE).write_text(
+        text if text is not None else '{"version": 1, "reimport": ["x.sql"], "parts": []}',
+        encoding="utf-8",
+    )
+
+
+class _Docker:
+    """Every docker call a controller's start, stop and remove make; none reaches Docker."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.calls: list[str] = []
+        for name in ("start_staged", "stop_staged", "remove_staged", "stop_containers"):
+            monkeypatch.setattr(docker, name, self._record(name))
+        monkeypatch.setattr(docker, "port_conflicts_for", self._conflicts)
+        monkeypatch.setattr(docker, "container_project", lambda name, **kw: None)
+
+    def _record(self, name: str) -> Any:
+        def call(*args: object, **kwargs: object) -> bool:
+            self.calls.append(name)
+            return True
+
+        return call
+
+    def _conflicts(self, spec: object, **kwargs: object) -> list[str]:
+        self.calls.append("port_conflicts")
+        return []
+
+
+@pytest.mark.parametrize(
+    "record",
+    [None, "not json at all"],
+    ids=["a record naming the tables", "a record nobody can read"],
+)
+def test_start_is_refused_while_a_world_update_is_unfinished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: str | None
+) -> None:
+    fake = _Docker(monkeypatch)
+    server, _ = _server(tmp_path)
+    _leave_pending(server, record)
+    made = centurion_controller.CenturionController(ENTRY, server)
+    with pytest.raises(StartRefused) as refused:
+        made.start()
+    assert str(refused.value) == UNFINISHED
+    assert fake.calls == [], "nothing asked of Docker, nothing started"
+
+    (server / trinitycore.WORLD_REIMPORT_FILE).unlink()
+    made.start()
+    assert fake.calls[-1] == "start_staged", "once finished, Start starts"
+
+
+def test_stopping_the_other_server_to_start_this_one_is_refused_before_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _Docker(monkeypatch)
+    server, _ = _server(tmp_path)
+    _leave_pending(server)
+    made = centurion_controller.CenturionController(ENTRY, server)
+    with pytest.raises(StartRefused, match="Finish the world update"):
+        made.stop_conflicting_and_start()
+    assert fake.calls == [], "the other server was not stopped"
+
+
+def test_inside_a_wsl_distro_the_refusal_names_the_update_press(tmp_path: Path) -> None:
+    server, _ = _server(tmp_path)
+    _leave_pending(server)
+    made = centurion_controller.CenturionController(ENTRY, server, wsl_distro="Ubuntu")
+    assert made.start_guard is not None
+    assert made.start_guard() == (
+        "This server's last update didn't finish importing its world tables. Press "
+        f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} "
+        "again first."
+    )
+
+
+# -- a finished pathfinding set stays switched on (T179 final round) --------------------------
+
+
+def _finished_pathfinding(server: Path, world_started_at: str) -> tuple[mmaps.Job, FakeMmapsDocker]:
+    """A complete set, switched on at 11:00 as `_done_status` does; the world started after."""
+    job = mmaps.job_for(server, ENTRY, "test")
+    out = job.data_dir / mmaps.MMAPS_DIR
+    out.mkdir(parents=True)
+    for index in range(ENTRY.install.native.trinitycore.mmaps.min_files):  # type: ignore[union-attr]
+        (out / f"{index:04}.mmtile").write_bytes(b"tile")
+    conf.set_keys(job.world_conf, {mmaps.PATHFINDING_KEY: "1"})
+    mmaps._write_record(
+        server,
+        mmaps.Record(
+            state="done",
+            container=job.container,
+            finished="2026-10-02T10:59:00Z",
+            percent=100,
+            pathfinding_on_at="2026-10-02T11:00:00Z",
+        ),
+    )
+    runner = FakeMmapsDocker()
+    runner.world_started_at = world_started_at
+    return job, runner
+
+
+def _pathfinding_value(job: mmaps.Job) -> str:
+    lines = job.world_conf.read_text(encoding="utf-8").splitlines()
+    (line,) = [line for line in lines if line.startswith(f"{mmaps.PATHFINDING_KEY} =")]
+    return line.split("=", 1)[1].strip()
+
+
+def test_reset_to_default_keeps_a_finished_pathfinding_set_switched_on(tmp_path: Path) -> None:
+    server, password = _server(tmp_path)
+    list(_engine()._conf(_context(server, password)))
+    job, runner = _finished_pathfinding(server, "2026-10-02T12:00:00Z")
+
+    report = reset_defaults.reset(
+        ENTRY,
+        server,
+        (f"{ETC_DIR}/worldserver.conf",),
+        seams=reset_defaults.Seams(
+            copy_from_image=_FakeImage(),
+            image_present=lambda refs: True,
+            platform_id=_linux,
+            bind_label=lambda server_dir: "",
+        ),
+    )
+
+    assert [result.outcome for result in report.results] in (["reset"], ["already"])
+    assert _pathfinding_value(job) == "1"
+    status = mmaps.mmaps_status(server, ENTRY, runner=runner, install_id="test")
+    assert status.line() == "Pathfinding data is ready and in use."
+
+
+def test_the_conf_stage_run_again_keeps_a_finished_pathfinding_set_switched_on(
+    tmp_path: Path,
+) -> None:
+    server, password = _server(tmp_path)
+    engine = _engine()
+    list(engine._conf(_context(server, password)))
+    job, _runner = _finished_pathfinding(server, "2026-10-02T12:00:00Z")
+
+    list(engine._conf(_context(server, password, done=("conf",))))
+
+    assert _pathfinding_value(job) == "1"
+
+
+def test_without_a_finished_set_the_table_keeps_pathfinding_off(tmp_path: Path) -> None:
+    server, password = _server(tmp_path)
+    engine = _engine()
+    list(engine._conf(_context(server, password)))
+    job = mmaps.job_for(server, ENTRY, "test")
+    conf.set_keys(job.world_conf, {mmaps.PATHFINDING_KEY: "1"})
+    list(engine._conf(_context(server, password, done=("conf",))))
+    assert _pathfinding_value(job) == "0", "no set made: the table's 0"

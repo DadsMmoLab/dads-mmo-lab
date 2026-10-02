@@ -7,9 +7,12 @@ worldserver log for a line that server never prints and answer False after the
 whole budget -- an install that serves, read as one that never came up. The
 override takes the markers from the entry through `docker_ctl.ready_spec()`.
 
-The entry is handed in and kept (`Controller.entry`), because it is not in the
-shipped catalog the base class looks entries up in (`controller._entry_for`) until
-T179 Task 7, and the time zone put back before every start needs it.
+The entry is handed in and kept (`Controller.entry`): the time zone put back
+before every start needs it, and the base class need not look it up by names.
+
+Its `start_guard` (T179 final round, lead ruling): no start while a world update
+is unfinished (`trinitycore.world_update_start_refusal`), below the UI so every
+Start, Start and play, the launcher's PLAY, Restart and recreate is refused alike.
 
 No `import_probe` and no `reset_unfinished`: the Repair button's only action is
 `docker.repair_import()`, which refuses an entry with no import service, and this
@@ -22,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.families import trinitycore
 from yulon.controller import Controller
 from yulon.controller_wow_centurion import docker_ctl
 
@@ -46,6 +50,11 @@ class CenturionController(Controller):
             server_dir,
             wsl_distro=wsl_distro,
             pre_stop=pre_stop,
+            # Inside a WSL distro the tab has no "Finish the world update": the
+            # sentence names the update press, which finishes it too.
+            start_guard=lambda: trinitycore.world_update_start_refusal(
+                server_dir, press_here=wsl_distro is None
+            ),
         )
         self.entry = entry
 

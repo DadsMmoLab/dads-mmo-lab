@@ -1778,3 +1778,32 @@ def test_as_the_game_remembers_it_is_offered_after_a_name_is_picked(
     assert _picks(play) == {}
     assert window.account_combo.currentData() == ACCOUNT_KEEP
     assert window.account_combo.currentText() == "As the game remembers it"
+
+
+def test_play_on_a_stopped_server_whose_start_is_refused_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T179 final round: the launcher's PLAY reaches the controller's one start door.
+
+    A world update left unfinished refuses every start there (`start_guard`); the
+    launcher shows the view's sentence and neither the server nor the game starts.
+    """
+    refused = (
+        "This server's last update didn't finish importing its world tables. Press "
+        "“Finish the world update” first."
+    )
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "exec",
+        lambda self: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    window, view, _play = _launcher(ps, tmp_path)
+    view.services.controller.start_guard = lambda: refused
+    ps.names = ""
+
+    window.play_button.click()
+
+    assert launched == []
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+    assert view.problem_label.text() == refused
+    assert window.progress_label.text() == controller_view_module.PLAY_START_FAILED

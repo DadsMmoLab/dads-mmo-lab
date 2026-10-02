@@ -20159,6 +20159,86 @@ def test_play_with_the_world_down_asks_starts_and_then_plays(
     assert launched[0].argv == (str(play / "Wow.exe"),)  # type: ignore[attr-defined]
 
 
+REFUSED_START = (
+    "This server's last update didn't finish importing its world tables. Press "
+    "“Finish the world update” first."
+)
+"""T179 final round: what a `start_guard` says while a world update is unfinished."""
+
+
+def _guarded(view: ControllerView) -> None:
+    """The controller's `start_guard` refuses (T179): every start path says it, starts nothing."""
+    view.services.controller.start_guard = lambda: REFUSED_START
+
+
+def _started_or_stopped(ps: _Ps) -> list[list[str]]:
+    return [
+        c for c in ps.calls if c[:3] in (["docker", "compose", "up"], ["docker", "compose", "stop"])
+    ]
+
+
+def test_a_refused_start_from_the_start_button_starts_nothing_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _guarded(view)
+    view.start_server()
+    assert view.problem_label.text() == REFUSED_START
+    assert _started_or_stopped(ps) == []
+
+
+def test_a_refused_start_and_play_starts_neither_the_server_nor_the_game(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    _guarded(view)
+    ps.names = ""
+
+    view.play()
+
+    assert _started_or_stopped(ps) == []
+    assert launched == []
+    assert view.problem_label.text() == REFUSED_START
+    assert view.play_label.text() == controller_view_module.PLAY_START_FAILED
+
+
+@pytest.mark.parametrize("press", ["restart", "recreate"])
+def test_a_refused_restart_or_recreate_from_tuning_stops_and_removes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: str
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(view, "_confirm", lambda title, question: True)
+    spec = WOTLK.container_spec()
+    ps.names = "".join(f"{n}\n" for n in (spec.db, spec.auth, spec.world))
+    _guarded(view)
+    calls_before = len(ps.calls)
+
+    view.restart_server() if press == "restart" else view.recreate_containers()
+
+    assert view.tuning_report.toPlainText() == f"FAILED: {REFUSED_START}"
+    after = ps.calls[calls_before:]
+    assert not any(
+        c[:3] in (["docker", "compose", "up"], ["docker", "compose", "stop"]) for c in after
+    )
+    assert not any(
+        c[:3] == ["docker", "compose", "rm"] or c[:3] == ["docker", "compose", "down"]
+        for c in after
+    )
+
+
+def test_a_refused_start_after_stopping_the_other_server_stops_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _guarded(view)
+    view.stop_other_and_start()
+    assert REFUSED_START in view.problem_label.text()
+    assert not any(c[:2] == ["docker", "stop"] for c in ps.calls)
+    assert _started_or_stopped(ps) == []
+
+
 def test_play_with_the_world_down_and_cancel_starts_and_plays_nothing(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
 ) -> None:

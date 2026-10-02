@@ -102,6 +102,7 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     UnsupportedPlatformError,
+    UpdateRefused,
     WorldStoppedAfterReadyError,
     docker_unavailable,
     generated_compose_files,
@@ -2089,6 +2090,16 @@ class InstallState:
     something mutable. `rev_for()` is the lookup.
     """
 
+    refused_updates: tuple[tuple[str, str], ...] = ()
+    """`(repo, commit)`: an upstream commit "Update the server to latest…" refused (T179).
+
+    Written when a family refuses what an update would bring in a way no second
+    press can change (`UpdateRefused`: TrinityCore's characters- or accounts-database
+    change), so the Server tab stops offering that same commit
+    (`upstream_news()`); upstream moving past it offers again. Cleared for a repo
+    by an update that lands. ADDITIVE, for `source_revs`' reason.
+    """
+
     def rev_for(self, repo: str) -> SourceRev | None:
         """This install's record for `repo`, or None if it has none."""
         return next((rev for rev in self.source_revs if rev.repo == repo), None)
@@ -2263,6 +2274,27 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         version=version if isinstance(version, int) else STATE_VERSION,
         unknown=unknown,
         source_revs=_parse_source_revs(parsed.get("source_revs"), path),
+        refused_updates=_parse_refused(parsed.get("refused_updates")),
+    )
+
+
+def _refused_for(record: InstallState | None, source: EmulatorSource) -> str:
+    """The commit an update of `source` refused, for a branch-following source; else ""."""
+    if record is None or source.follow == "releases":
+        return ""
+    return next((sha for repo, sha in record.refused_updates if repo == source.repo), "")
+
+
+def _parse_refused(raw: object) -> tuple[tuple[str, str], ...]:
+    """`refused_updates` as `(repo, commit)` pairs; anything else is no record (T179)."""
+    if not isinstance(raw, dict):
+        return ()
+    return tuple(
+        sorted(
+            (repo, sha)
+            for repo, sha in raw.items()
+            if isinstance(repo, str) and isinstance(sha, str) and sha
+        )
     )
 
 
@@ -2350,6 +2382,8 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         # in existence would be a change to a file other things read, made for a
         # feature most installs will never press.
         payload["source_revs"] = {rev.repo: _rev_record(rev) for rev in state.source_revs}
+    if state.refused_updates:
+        payload["refused_updates"] = dict(state.refused_updates)
     tmp = path.with_name(path.name + ".new")
     try:
         server_dir.mkdir(parents=True, exist_ok=True)
@@ -4129,6 +4163,16 @@ class StagedInstaller:
         """
         return None
 
+    def start_refusal(self, server_dir: Path) -> str | None:
+        """Why the server must not be started now, or None (T179); the spine never refuses.
+
+        Asked by `stage_up()`, by `rebuild()` before anything (a press that would
+        start the server and does not finish what stops it), and by the rollback
+        before it starts the old build again. TrinityCore's: a world update left
+        unfinished (`trinitycore.world_update_start_refusal`).
+        """
+        return None
+
     # -- the contract ----------------------------------------------------
 
     def server_dir(self, options: InstallOptions) -> Path:
@@ -5464,6 +5508,12 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         state = self._refuse_unless_rebuildable(server_dir)
+        if servers_down is None:
+            # T179: a rebuild ends in a start, and this press does not finish what
+            # refuses one (the update route's `servers_down` does).
+            refused = self.start_refusal(server_dir)
+            if refused is not None:
+                raise InstallerError(f"{refused} Nothing was changed.")
         planned = self.rebuild_stages()
         renders = any(stage.name == DOCKERFILE_STAGE for stage in planned)
         # Read BEFORE the first stage and only for the families that have one,
@@ -5702,7 +5752,7 @@ class StagedInstaller:
                 continue
             asked = True
             label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
-            stands, release = self._behind(server_dir, source)
+            stands, release = self._behind(server_dir, source, refused=_refused_for(record, source))
             found.append(
                 upstream.SourceNews(
                     repo=source.repo,
@@ -5722,7 +5772,7 @@ class StagedInstaller:
         return news
 
     def _behind(
-        self, server_dir: Path, source: EmulatorSource
+        self, server_dir: Path, source: EmulatorSource, *, refused: str = ""
     ) -> tuple[upstream.Comparison | None, str]:
         """How upstream stands to one source and, for a releases source, the newest release.
 
@@ -5744,7 +5794,15 @@ class StagedInstaller:
             if release is None:
                 return None, ""
             return upstream.compare(slug, head, release.sha, get=get), release.tag
-        return upstream.compare(slug, head, source.branch or "HEAD", get=get), ""
+        branch = source.branch or "HEAD"
+        if refused:
+            # T179: an update refused this exact commit. While upstream's branch
+            # is still on it (nothing past it), there is nothing to offer: the
+            # press would refuse again. A commit past it is offered as usual.
+            past = upstream.compare(slug, refused, branch, get=get)
+            if past is not None and past.ahead == 0 and past.behind == 0:
+                return upstream.Comparison(ahead=0, behind=0, status="identical"), ""
+        return upstream.compare(slug, head, branch, get=get), ""
 
     def sources_that_move(self) -> tuple[EmulatorSource, ...]:
         """Which of this entry's sources an update to latest moves. The `*-db` ones do not.
@@ -6053,6 +6111,9 @@ class StagedInstaller:
                 # checks refuse must leave it running. A stop that fails restores.
                 yield from self.before_rebuild(server_dir, route, press)
             except (InstallerError, OSError) as exc:
+                if isinstance(exc, UpdateRefused) and not to_pin:
+                    # T179: the same commit is not offered again (`upstream_news`).
+                    self._remember_refused(server_dir, exc)
                 # `OSError` as well, and not for symmetry: everything between the
                 # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
                 # renders WotLK's three compose files, `apply_carried_patches()` writes into
@@ -6500,7 +6561,29 @@ class StagedInstaller:
         # not visit it would delete a true reading.
         keep = {rev.repo for rev in found}
         merged = tuple(rev for rev in fresh.source_revs if rev.repo not in keep) + tuple(found)
-        write_state(server_dir, replace(fresh, source_revs=tuple(sorted(merged, key=_by_repo))))
+        # A source that landed has no refused commit any more (T179).
+        refused = tuple(pair for pair in fresh.refused_updates if pair[0] not in keep)
+        write_state(
+            server_dir,
+            replace(
+                fresh,
+                source_revs=tuple(sorted(merged, key=_by_repo)),
+                refused_updates=refused,
+            ),
+        )
+
+    def _remember_refused(self, server_dir: Path, refused: UpdateRefused) -> None:
+        """Record the upstream commit an update refused, so the tab stops offering it (T179).
+
+        Best-effort, as every write through `write_state()`: a record that could
+        not be written costs one more offer of a press that will refuse again.
+        """
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            return
+        kept = tuple(pair for pair in fresh.refused_updates if pair[0] != refused.repo)
+        pairs = tuple(sorted((*kept, (refused.repo, refused.commit))))
+        write_state(server_dir, replace(fresh, refused_updates=pairs))
 
     def _keep_rollback(
         self, ctx: StageContext, refs: Sequence[str], *, missing_ok: bool = False
@@ -6786,6 +6869,17 @@ class StagedInstaller:
                 yield from servers_down.back(replace(ctx, cancel=None))
             except (InstallerError, OSError) as exc:
                 database = f"{database}\n{exc}"
+            refused = self.start_refusal(ctx.server_dir)
+            if refused is not None:
+                # T179 (lead ruling): the old build is not started on world tables
+                # its rollback could not all put back. Its servers stay stopped and
+                # the tags name it; the finish starts it (with a recreate).
+                yield from self._release(named)
+                yield from self._release(kept)
+                return (
+                    f"{failure} The build from before this rebuild was put back but not "
+                    f"started: {refused}{said}{database}"
+                )
         try:
             yield from self.stage_recreate(ctx, rollback=True)
             # The `-failed` names again, and the second attempt is the one that
@@ -8994,6 +9088,9 @@ class StagedInstaller:
         `up` can never select the one-shot import — the thing `dml-start.sh`
         warns about in as many words.
         """
+        refused = self.start_refusal(ctx.server_dir)
+        if refused is not None:
+            raise InstallerError(f"{refused} The server was not started.")
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
