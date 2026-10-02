@@ -1479,3 +1479,92 @@ def test_a_minimized_launcher_does_not_take_the_tabs_dialogs(
     view.play()
 
     assert parents == [window, view]
+
+
+# -- Task 5: what Task 4's review left ----------------------------------------------
+
+
+def test_an_owed_account_check_after_a_failed_client_read_waits_for_a_good_one(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    """The read after the Play fails: the reading held is still the ALICE one, too old to judge."""
+    held, window, view, play = _owed_alice_then_bob(ps, tmp_path)
+    closing.append(window)
+    view._play_end()
+    assert window._client_pending
+
+    def unreadable(_play: Path) -> launcher_window.ClientReading:
+        raise OSError("client unreadable")
+
+    reads = window.reads
+    assert isinstance(reads, _Reads)
+    good = reads.client
+    setattr(reads, "client", unreadable)  # noqa: B010 - a seam swapped mid-test
+    held.run_all()
+    assert not window._client_pending
+    view.play_state_changed.emit()  # the view says "idle" again: still nothing to judge by
+
+    assert _picks(play) == {"account": "BOB"}, "the owed check judged the reading the failure left"
+
+    setattr(reads, "client", good)  # noqa: B010 - put back
+    window.show()
+    window.close()
+    window.show()  # opened again: read again, and this time it works
+    held.run_all()
+    assert _picks(play) == {"account": "BOB"}
+    assert window.account_combo.currentData() == account_data("BOB")
+
+
+def test_a_server_read_landing_before_the_client_read_does_not_judge_the_old_reading(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    held, window, view, play = _owed_alice_then_bob(ps, tmp_path)
+    view._play_end()
+    assert window._client_pending
+    view.realm_badge.set_status("stopped")
+    view.realm_badge.set_status("running")  # the server read again while the client read is out
+    server = [job for job in held.jobs if job[1] == window._server_read]
+    held.jobs = [job for job in held.jobs if job[1] != window._server_read]
+    assert server
+
+    for work, done, _failed in server:
+        done(work())
+    assert _picks(play) == {"account": "BOB"}, "the server read judged the stale client reading"
+    held.run_all()
+
+    assert _picks(play) == {"account": "BOB"}
+
+
+def test_reopening_the_launcher_while_a_client_read_is_out_stays_consistent(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    held, window, view, play = _owed_alice_then_bob(ps, tmp_path)
+    closing.append(window)
+    view._play_end()
+    window.show()
+    window.close()
+    window.show()
+
+    held.run_all()
+
+    assert not window._client_pending
+    assert _picks(play) == {"account": "BOB"}
+
+
+def test_reads_asked_for_the_old_view_never_land_after_set_view(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Make…/Delete rebuilt the tab while a read was on its worker: its answer is the old view's."""
+    held = _HeldRunner()
+    window, old, play = _launcher(ps, tmp_path, launcher={"account": "ALICE"}, job_runner=held)
+    assert play is not None
+    _online(old)
+    assert any(job[1] == window._client_read for job in held.jobs)
+    assert any(job[1] == window._server_read for job in held.jobs)
+    new, _ = _play_view(ps, tmp_path, original=tmp_path / "clients" / "WoW", play=None)
+
+    window.set_view(new)
+    held.run_all()
+
+    assert window._client is None and window._server is None
+    assert not window._client_pending, "the dropped answer left the window waiting for ever"

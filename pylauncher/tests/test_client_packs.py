@@ -2105,6 +2105,20 @@ def test_a_key_the_catalog_always_sets_is_dropped_whatever_its_spelling() -> Non
     assert got == {"gxMaximize": "0", "gxResolution": "1280x720", "accountName": "BOB"}
 
 
+def test_a_password_handed_to_the_launcher_keys_never_becomes_a_config_line() -> None:
+    """Whatever reaches these functions raw, no password comes out of them (T187).
+
+    `read_record` already drops a `password` key; this holds the functions that
+    turn picks into Config.wtf lines to the same rule on their own.
+    """
+    raw = {"account": "BOB", "password": "s3cret", "accountPassword": "s3cret"}
+    keys = client_packs.launcher_config_keys(raw, catalog_always={})
+    assert keys == {"accountName": "BOB"}
+    assert "password" not in client_packs.clean_launcher(raw)
+    removals = client_packs.launcher_config_removals(raw, catalog_always={})
+    assert not [key for key in removals if "password" in key.lower()]
+
+
 def test_borderless_follows_the_window_pick_only_where_the_patch_has_it() -> None:
     mode = {"display": {"window": "borderless"}}
     assert client_packs.launcher_exe_options(mode, {}, ["borderless"]) == {"borderless": True}

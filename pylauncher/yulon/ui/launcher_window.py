@@ -418,6 +418,9 @@ class LauncherWindow(QWidget):
         # A client read is on its worker: the owed account check waits for its
         # answer rather than judging the reading it replaces (fix round 1).
         self._client_pending = False
+        # The last client read failed: the reading held is the one from before
+        # it, too old to judge a saved account by (Task 5 fix).
+        self._client_unread = False
         # Hidden by a close (not a minimize): what it shows may be old by the
         # time it is opened again, so the next show reads it again.
         self._reread_on_show = False
@@ -463,6 +466,13 @@ class LauncherWindow(QWidget):
         self._client = None
         self._server = None
         self._stale_account = None
+        # A read still on its worker was asked for the old view: its answer must
+        # not land on this one (Task 5 fix). The fresh reads below re-check.
+        self._client_asked += 1
+        self._server_asked += 1
+        self._client_pending = False
+        self._client_unread = False
+        self._reconcile_owed = False
         self._was_busy = view.play_client_busy() is not None
         self._bind_entry(view.entry, view.services.controller.server_dir)
         self.realm_badge.set_status(view.realm_badge.status)
@@ -892,12 +902,14 @@ class LauncherWindow(QWidget):
         if not isinstance(result, ClientReading):
             return
         self._client = result
+        self._client_unread = False
         self._reconcile_account()
         self._render()
 
     @Slot(object)
     def _client_failed(self, exc: object) -> None:
         self._client_pending = False
+        self._client_unread = True
         logger.warning(f"the launcher could not read the ready-to-play client: {exc!r}")
         self._render()
 
@@ -967,6 +979,12 @@ class LauncherWindow(QWidget):
 
     def _reconcile_account(self) -> None:
         """Review Focus 2: a saved account the server no longer has falls back to Ask."""
+        if self._client_pending or self._client_unread:
+            # The reading held is older than the client (a read is on its way,
+            # or the last one failed): judged on it, a valid account could be
+            # saved over with "Ask". The next good `_client_read` runs this.
+            self._reconcile_owed = True
+            return
         record, server = self._record(), self._server
         if record is None or server is None or server.accounts is None:
             return
