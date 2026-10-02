@@ -1086,7 +1086,12 @@ class TrinityCoreInstaller(CmangosInstaller):
           commit -- puts the map-data flag back as it was and imports the same
           files from the old checkout, so the old build meets its own tables (a
           table only the new version has stays, unread by the old code). If that
-          fails, the record stays and the sentence says how to finish it.
+          fails, the record stays and the sentence says how to finish it;
+        * `keep()` -- the rollback stopped before the old build was back on its
+          tags (T197), so the new build stays: when `forward()` never began, the
+          record `prepare()` wrote (or, if it never ran, writes now) and the map
+          data's flag are left for the new build, so it does not start on the old
+          tables -- "Finish the world update" imports them from its checkout.
         """
         if not isinstance(changes, SnapshotChanges):
             return None
@@ -1098,8 +1103,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         # as it was only when neither did, so nothing was imported (fix rounds 2-3).
         before: list[bytes | None] = []
         started: list[bool] = []
+        prepared: list[bool] = []
 
         def prepare() -> Iterator[str]:
+            prepared.append(True)
             if not changes.imports():
                 return
             ctx = self._world_ctx(server_dir, None)
@@ -1163,7 +1170,19 @@ class TrinityCoreInstaller(CmangosInstaller):
                 return
             _put_back(server_dir / WORLD_REIMPORT_FILE, before[0])
 
-        return ServersDownWork(prepare=prepare, forward=forward, back=back, settle=settle)
+        def keep() -> Iterator[str]:
+            if started:
+                # `forward()` began: it flagged the map data first, and what it did
+                # not import is still in the record it leaves.
+                return
+            if not prepared:
+                yield from prepare()
+            if changes.map_data:
+                yield self._flag_map_data(server_dir, changes.map_data)
+
+        return ServersDownWork(
+            prepare=prepare, forward=forward, back=back, settle=settle, keep=keep
+        )
 
     def after_update(
         self,

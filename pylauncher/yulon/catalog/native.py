@@ -101,6 +101,7 @@ from yulon.catalog.installer import (
     DockerUnavailableError,
     InstallerError,
     InstallOptions,
+    RollbackNotDone,
     UnsupportedPlatformError,
     UpdateRefused,
     WorldStoppedAfterReadyError,
@@ -1819,6 +1820,17 @@ Then the sources stay with it: putting the old commits back would leave the fold
 the running binary disagreeing, under a sentence saying they agree.
 """
 
+SOURCES_LEFT_NOTE = (
+    "The source folders were left on the new commits, because the build from before this "
+    "update was not put back: what is on disk is what the new build was made from."
+)
+"""Appended when the rebuild's rollback stopped early (`RollbackNotDone`, T197).
+
+The tags still name the new build (or are mixed, which the sentence in front says), so
+a start runs it: the old commits put back under it would disagree with every start,
+under `SOURCES_PUT_BACK_NOTE`'s "agree again".
+"""
+
 
 class ServersLeftStopped(InstallerError):
     """A rebuild's rollback put the old build back and did NOT start it (T179 final round).
@@ -1831,6 +1843,13 @@ class ServersLeftStopped(InstallerError):
 
 class _LeftStopped(str):
     """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
+
+
+class _NotPutBack(str):
+    """`_restore_rollback()`'s sentence when it stopped before the old build was back (T197).
+
+    `rebuild()` raises it as `RollbackNotDone`, so the update route keeps the new sources.
+    """
 
 
 ROLLBACK_LEFT_STOPPED_DATABASE = (
@@ -2583,6 +2602,13 @@ class ServersDownWork:
 
     A stop given up during the load wait, or one that failed, imports nothing; a
     record saying something is waiting would then be false. Must not raise.
+    """
+    keep: Callable[[], Iterator[str]] = lambda: iter(())
+    """Instead of `settle()`, when the rollback stopped before the old build was back (T197).
+
+    The new build stays on its tags, so what it needs and `forward()` did not get to
+    is left waiting for it rather than undone: there, a record naming the tables to
+    import is true. A raise is said in the press's sentence, not in its place.
     """
 
 
@@ -5502,7 +5528,9 @@ class StagedInstaller:
         * **...and docker refused to NAME or to MOVE a tag** -- the `-rollback`
           names are KEPT, deliberately: the restore did not happen, so they are
           the only copy of the old build there is, and the sentence the user
-          reads says exactly that;
+          reads says exactly that. That exit, and a stop of the new build's
+          servers that failed, raise `RollbackNotDone` (T197), so the update
+          route leaves its sources with the build the tags still name;
         * **anything that is not an `InstallerError`** -- released if no compile
           finished, kept and logged if one did.
 
@@ -5704,6 +5732,10 @@ class StagedInstaller:
             self._record_error(server_dir, ctx.state, message)
             if isinstance(message, _LeftStopped):
                 raise ServersLeftStopped(str(message)) from exc
+            if isinstance(message, _NotPutBack):
+                # T197: the tags still name the new build (or are mixed), so the
+                # update route must not put the old sources back under it.
+                raise RollbackNotDone(str(message)) from exc
             raise InstallerError(message) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
@@ -6044,9 +6076,11 @@ class StagedInstaller:
         Every failure from step 3 through step 5 puts every moved source back on
         the commit it came from, so what is on disk and what the running image was
         compiled from agree (a step-6 failure leaves them: they already agree).
-        The one step-5 exception is a build the rebuild KEPT
-        (`WorldStoppedAfterReadyError`, T71): its sources stay with it and are
-        recorded, for the same invariant (`SOURCES_KEPT_NOTE`, T179).
+        The step-5 exceptions are a build the rebuild KEPT
+        (`WorldStoppedAfterReadyError`, T71) and a rollback that stopped before the
+        old build was back on its tags (`RollbackNotDone`, T197): either way the
+        new build is what the tags name, so its sources stay with it and are
+        recorded, for the same invariant (`SOURCES_KEPT_NOTE`, T179; `SOURCES_LEFT_NOTE`).
         That is the one invariant a user cannot check for themselves and the one
         that quietly breaks everything afterwards: a Modules tab reading a source
         tree that is a hundred commits ahead of the binary answering on the port
@@ -6191,6 +6225,32 @@ class StagedInstaller:
                     also = f" {after}"
                 raise WorldStoppedAfterReadyError(
                     f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
+                ) from exc
+            except RollbackNotDone as exc:
+                # T197: the rollback stopped before the old build was back on its
+                # tags, which still name the NEW build (or are mixed, which its
+                # sentence says), and a start runs them. Its sources stay with it and
+                # are recorded, as for the kept build above; putting the old commits
+                # back would leave them under a build they did not make, with a
+                # sentence saying the two agree again.
+                also = ""
+                if work is not None:
+                    try:
+                        yield from work.keep()
+                    except (InstallerError, OSError) as kept_failed:
+                        also = f" {kept_failed}"
+                self._record_source_revs(
+                    server_dir,
+                    state,
+                    moved,
+                    {repo: said.tag for repo, said in targets.items() if said.tag},
+                )
+                try:
+                    yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
+                except InstallerError as after:
+                    also = f"{also} {after}"
+                raise RollbackNotDone(
+                    f"{exc} {SOURCES_LEFT_NOTE}{also}", sources_kept=True
                 ) from exc
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
@@ -6828,7 +6888,7 @@ class StagedInstaller:
             try:
                 yield from _with_hint(_speaking(stop_it, control.abandon), ROLLBACK_WAIT_HINT)
             except docker.DockerCommandError as exc:
-                return (
+                return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build's servers could not be stopped ({exc}); "
                     f"the tags still name the new build, all of them. The old images are on "
@@ -6845,7 +6905,7 @@ class StagedInstaller:
             problem = self._seams.tag_image(ref, name)
             if problem:
                 yield from self._release(named)
-                return (
+                return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
                     f"onto ({problem}); the tags still name the new build, all of them. The "
@@ -6860,14 +6920,14 @@ class StagedInstaller:
                 mixed = [r for r in moved if r not in undone]
                 yield from self._release(named)
                 if mixed:
-                    return (
+                    return _NotPutBack(
                         f"{failure} Putting the build from before this rebuild back failed "
                         f"part-way ({problem}) and undoing it failed too, so the tags are "
                         f"MIXED: {', '.join(mixed)} name the old build and the rest name the "
                         f"new one. Do not start this server until they agree; the old images "
                         f"are under their {ROLLBACK_TAG_SUFFIX} tags."
                     )
-                return (
+                return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back failed "
                     f"({problem}), and the {len(undone)} tag(s) already moved were moved back, "
                     f"so the tags still name the new build, all of them. The old images are "

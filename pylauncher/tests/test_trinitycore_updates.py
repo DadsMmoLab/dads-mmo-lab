@@ -51,7 +51,12 @@ from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import extract, mmaps, trinitycore
 from yulon.catalog.families.trinitycore import needs_reextract
-from yulon.catalog.installer import InstallerError, InstallOptions, WorldStoppedAfterReadyError
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    RollbackNotDone,
+    WorldStoppedAfterReadyError,
+)
 from yulon.install_wiring import (
     reextract_for_app,
     update_to_latest_for_app,
@@ -151,6 +156,8 @@ class Box:
     world_output: native.WorldOutput | None = None
     """What the world printed, when a test needs it to have stopped after its banner."""
     distro: str | None = None
+    seams: dict[str, object] = field(default_factory=dict)
+    """Further seam overrides (T197: `tag_image`, `docker_ready`), by name."""
 
     @property
     def server_dir(self) -> Path:
@@ -196,6 +203,7 @@ class Box:
             exec_stdin=exec_stdin,
             distro=self.distro,
             **({"world_output": lambda spec: self.world_output} if self.world_output else {}),
+            **self.seams,
         )
 
     def moves_to(self, files: Mapping[str, str]) -> None:
@@ -571,18 +579,30 @@ def test_a_return_that_fails_says_nothing_of_a_backup_it_never_offered(box: Box)
     assert "backup" not in said
 
 
-def test_servers_that_cannot_be_stopped_import_nothing_and_leave_the_record_as_it_was(
+def test_servers_that_cannot_be_stopped_import_nothing_and_the_record_waits_for_the_new_build(
     box: Box,
 ) -> None:
-    """Fix round 2: nothing went in, so nothing more is waiting than before the press."""
+    """Fix round 2, as T197 left it: nothing went in, and the new build is what stays.
+
+    The rollback's own stop failed too, so the old build was never put back: the
+    tags name the new build and its sources stay. The record then names what that
+    build still needs -- the file this update changed and the one waiting from
+    before -- and no start is allowed until "Finish the world update" imports them.
+    """
     box.leave_pending([f"{WORLD_SQL}/version.sql"])
-    before = box.pending()
     box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
     box.world.refuse_stop = "daemon not answering"
-    with pytest.raises(InstallerError, match="could not be stopped"):
+    with pytest.raises(RollbackNotDone, match="could not be stopped") as failed:
         box.press()
     assert box.streamed() == []
-    assert box.pending() == before
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql", f"{WORLD_SQL}/version.sql"],
+        "parts": [],
+    }
+    assert box.head() == NEW
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    assert str(failed.value).endswith(native.SOURCES_LEFT_NOTE)
 
 
 def test_a_stop_given_up_during_the_load_wait_leaves_no_record(box: Box) -> None:
@@ -1363,3 +1383,97 @@ def test_a_rollback_that_leaves_the_servers_stopped_never_says_they_run(box: Box
     )
     assert "running" not in str(failed.value)
     assert box.world.running is False
+
+
+# -- T197: a rollback that stops early keeps the new build, its sources and its tables ----
+
+
+def _refuse_the_failed_name(box: Box) -> None:
+    """The rollback cannot give the new build its `-failed` name: it stops before any tag moves."""
+
+    def tag_image(src: str, dst: str) -> str:
+        box.m.rec.calls.append(f"tag:{src}->{dst}")
+        return "read-only layer store" if dst.endswith(native.FAILED_TAG_SUFFIX) else ""
+
+    box.seams["tag_image"] = tag_image
+
+
+def test_a_rollback_that_stops_early_after_the_import_keeps_the_new_tables_and_sources(
+    box: Box,
+) -> None:
+    """T197: the new tables are in, the new build stays on its tags, so its sources stay too.
+
+    Putting the old checkout back here left the old sources under the new build
+    and the new tables, with a sentence saying they agree again.
+    """
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    box.old_files = {"creature.sql": "DROP TABLE IF EXISTS creature; -- old\n"}
+    box.ready = [False]
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    said = str(failed.value)
+    assert "could not be given a name to undo onto" in said
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature; -- new"], "no old tables"
+    assert box.pending() is None, "every table the new build needs is in"
+    assert box.head() == NEW
+    assert not [call for call in box.m.rec.calls if call.startswith("restore:")]
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the new build's map data"
+    state = native.read_state(box.server_dir, valid=())
+    assert state is not None and {rev.built[:7] for rev in state.source_revs} == {NEW[:7]}
+    assert said.endswith(native.SOURCES_LEFT_NOTE)
+    assert native.SOURCES_PUT_BACK_NOTE not in said and "agree again" not in said
+    assert failed.value.sources_kept is True
+
+
+def _docker_gone_after_the_compile(box: Box) -> None:
+    """Docker answers until the compile is done, then not: the recreate replaces nothing."""
+    box.seams["docker_ready"] = lambda: "build" not in box.m.rec.calls
+
+
+def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_tables_waiting(
+    box: Box,
+) -> None:
+    """T197: nothing was imported, and the new build stays, so its tables are what waits.
+
+    The recreate refused before `prepare()` ran, so `keep()` writes the record and
+    flags the map data itself: the new build must not start on the old tables.
+    """
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    assert "stop_servers" not in box.m.rec.calls, "the ground: the servers were never stopped"
+    assert box.streamed() == []
+    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    assert needs_reextract(box.server_dir, ENTRY) is not None
+    assert box.head() == NEW
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    assert box.world.running is True, "the build from before still runs in its containers"
+    assert str(failed.value).endswith(native.SOURCES_LEFT_NOTE)
+
+
+def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T197: `keep()`'s failure is added to the sentence, never in its place."""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    real_write = Path.write_text
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name.startswith(trinitycore.WORLD_REIMPORT_FILE):
+            raise PermissionError(13, "Permission denied")
+        return real_write(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    said = str(failed.value)
+    assert "could not be given a name to undo onto" in said
+    assert native.SOURCES_LEFT_NOTE in said
+    assert "Permission denied" in said
+    assert box.head() == NEW

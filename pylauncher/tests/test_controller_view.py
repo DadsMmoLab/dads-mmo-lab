@@ -63,7 +63,7 @@ from yulon.catalog.catalog import (
     load_catalog,
 )
 from yulon.catalog.families import decisions, sqlplan
-from yulon.catalog.installer import InstallerError, WorldStoppedAfterReadyError
+from yulon.catalog.installer import InstallerError, RollbackNotDone, WorldStoppedAfterReadyError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -12506,6 +12506,31 @@ def test_an_update_whose_build_was_kept_drops_the_server_cloned_count(
         raise WorldStoppedAfterReadyError(
             "The world server came up and then stopped.", sources_kept=True
         )
+
+    view.services.update_to_latest = replace(route, press=kept)
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update ended")
+
+    assert ("module", "mod-playerbots") not in view._behind
+    assert view._behind.get(("module", "mod-transmog")) == 3
+
+
+def test_an_update_whose_rollback_did_not_put_the_old_build_back_drops_the_count(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T197: a rollback that stopped early left the new build, and its sources with it.
+
+    Read off the route's typed outcome (`RollbackNotDone.sources_kept`), as T179's kept build.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, _ = _server_cloned_view(ps, tmp_path)
+    route = view.services.update_to_latest
+    assert route is not None
+
+    def kept(cancel: object = None) -> Iterator[str]:
+        yield "--- update-sources"
+        raise RollbackNotDone("The tags still name the new build.", sources_kept=True)
 
     view.services.update_to_latest = replace(route, press=kept)
     assert view.update_to_latest() is True
