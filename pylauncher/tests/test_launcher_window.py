@@ -123,6 +123,7 @@ def _launcher(
     job_runner: Any = run_inline,
     opened: list[Path] | None = None,
     addresses: tuple[str, ...] = (),
+    view_runner: Any = None,
 ) -> tuple[LauncherWindow, ControllerView, Path | None]:
     """A launcher over a Server tab whose ready-to-play client is real (or not made yet)."""
     original = _game_client(tmp_path / "clients" / "WoW")
@@ -137,6 +138,7 @@ def _launcher(
         entry=entry,
         asker=asker,
         options_asker=options_asker,
+        job_runner=view_runner,
     )
     reads = _Reads(view, answer)
     sink: list[Path] = opened if opened is not None else []
@@ -180,8 +182,9 @@ def _choose(combo: Any, data: object) -> None:
 
 
 def _type_address(window: LauncherWindow, text: str) -> None:
+    """Type `text` into the realm box and press Return: what commits a typed address."""
     window.realm_combo.setEditText(text)
-    window.realm_combo.lineEdit().editingFinished.emit()
+    window.realm_combo.lineEdit().returnPressed.emit()
 
 
 def _online(view: ControllerView) -> None:
@@ -1568,3 +1571,210 @@ def test_reads_asked_for_the_old_view_never_land_after_set_view(
 
     assert window._client is None and window._server is None
     assert not window._client_pending, "the dropped answer left the window waiting for ever"
+
+
+# -- Final fix round (whole-branch reviews) ------------------------------------------
+
+
+def test_a_failed_stale_account_save_is_tried_once_and_warned_once(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """A read-only record: the "Ask" save fails, and nothing tries it again in a loop.
+
+    The failure ends the save, which tells the window the view is idle, which reads
+    the client again, which finds ALICE still saved: that must not save again.
+    """
+    answer = ServerReading(accounts=("BOB",), online=UP, announced=None)
+    window, view, play = _launcher(ps, tmp_path, answer=answer, launcher={"account": "ALICE"})
+    assert play is not None
+    writes: list[int] = []
+    real = client_packs.write_record
+
+    def read_only(*_a: object, **_k: object) -> None:
+        writes.append(1)
+        if len(writes) > 20:
+            raise KeyboardInterrupt  # the loop: stop it here rather than hang the suite
+        raise client_packs.PackError("The record is read-only.")
+
+    monkeypatch.setattr(client_packs, "write_record", read_only)
+    with caplog.at_level("WARNING", logger="yulon.ui.launcher_window"):
+        _online(view)
+        view.play_state_changed.emit()  # any later word from the view
+        window._reload_client()  # and another reading of the same record
+
+    assert len(writes) == 1, f"{len(writes)} saves from one stale account"
+    warned = [r for r in caplog.records if r.name == "yulon.ui.launcher_window"]
+    assert len(warned) == 1, [r.getMessage() for r in warned]
+    assert _picks(play) == {"account": "ALICE"}
+
+    monkeypatch.setattr(client_packs, "write_record", real)
+    _save(play, {"account": "ALICE", "display": {"window": "windowed"}})  # the record changed
+    window._reload_client()
+
+    assert _picks(play) == {"account": None, "display": {"window": "windowed"}}
+
+
+def test_set_view_lets_a_failed_stale_account_save_be_tried_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer = ServerReading(accounts=("BOB",), online=UP, announced=None)
+    window, view, play = _launcher(ps, tmp_path, answer=answer, launcher={"account": "ALICE"})
+    assert play is not None
+    real = client_packs.write_record
+
+    def read_only(*_a: object, **_k: object) -> None:
+        raise client_packs.PackError("The record is read-only.")
+
+    monkeypatch.setattr(client_packs, "write_record", read_only)
+    _online(view)
+    monkeypatch.setattr(client_packs, "write_record", real)
+
+    window.set_view(view)
+
+    assert _picks(play) == {"account": None}
+
+
+def test_play_saves_a_typed_address_first_and_then_plays_in_one_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typed, not committed, PLAY pressed: the save runs, and Play starts when it is done."""
+    held = _HeldRunner()
+    window, view, play = _launcher(ps, tmp_path, view_runner=held)
+    assert play is not None
+    played: list[dict[str, Any]] = []
+    monkeypatch.setattr(view, "play", lambda: played.append(_picks(play)))
+    window.realm_combo.setEditText("10.0.0.7")
+
+    window.play_button.click()
+
+    assert played == [], "Play started before the address was saved"
+    assert not window.play_button.isEnabled()
+    held.run_all()
+    assert played == [{"realm_address": "10.0.0.7"}]
+    assert window.play_button.isEnabled()
+
+
+def test_play_is_greyed_with_why_while_a_launcher_save_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return committed the address; a PLAY pressed before the save lands is not refused."""
+    held = _HeldRunner()
+    window, view, play = _launcher(ps, tmp_path, view_runner=held)
+    assert play is not None
+    played: list[int] = []
+    monkeypatch.setattr(view, "play", lambda: played.append(1))
+
+    _type_address(window, "10.0.0.7")
+
+    assert not window.play_button.isEnabled()
+    assert "Saving" in window.play_reason_label.text()
+    window.play_button.click()
+    assert played == []
+    held.run_all()
+    assert window.play_button.isEnabled()
+    assert "Saving" not in window.play_reason_label.text()
+    assert _picks(play) == {"realm_address": "10.0.0.7"}
+    window.play_button.click()
+    assert played == [1]
+
+
+def test_play_with_a_typed_address_the_game_cannot_use_says_why_and_does_not_play(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, view, play = _launcher(ps, tmp_path)
+    played: list[int] = []
+    monkeypatch.setattr(view, "play", lambda: played.append(1))
+    window.realm_combo.setEditText("10.0.")
+
+    window.play_button.click()
+
+    assert played == [] and _picks(play) == {}
+    assert "not an address" in window.realm_note.text()
+
+
+def test_use_this_computer_writes_this_computers_address_where_config_wtf_is_the_only_one(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object], boxes: list[str]
+) -> None:
+    """Codex: no realmlist.wtf (removed) and no catalog realmList: removing the lines left
+    the typed address in place, so this computer's address is written instead."""
+    entry = _client_entry(tmp_path, with_packs=False, exe=False, remove_locale=True)
+    config_wtf = entry.client.config_wtf
+    assert config_wtf is not None
+    config_wtf = config_wtf.model_copy(update={"always": {}})
+    entry = entry.model_copy(
+        update={"client": entry.client.model_copy(update={"config_wtf": config_wtf})}
+    )
+    window, _view, play = _launcher(ps, tmp_path, entry=entry)
+    assert play is not None
+    _type_address(window, "10.0.0.5")
+    _play_once(window, ps)
+    config = play / "WTF" / "Config.wtf"
+    assert 'SET realmList "10.0.0.5"' in config.read_text(encoding="utf-8")
+
+    window.this_computer_button.click()
+    _play_once(window, ps)
+
+    text = config.read_text(encoding="utf-8")
+    assert 'SET realmList "127.0.0.1"' in text and 'SET patchList "127.0.0.1"' in text, text
+    assert "10.0.0.5" not in text, text
+    assert len(launched) == 2, boxes
+
+
+@pytest.mark.parametrize("spelling", [("interface", "addons"), ("INTERFACE", "AddOns")])
+def test_open_addons_folder_finds_it_whatever_its_case(
+    qapp: object, ps: _Ps, tmp_path: Path, spelling: tuple[str, str]
+) -> None:
+    opened: list[Path] = []
+    window, _view, play = _launcher(ps, tmp_path, play=True, opened=opened)
+    assert play is not None
+    import shutil
+
+    shutil.rmtree(play / "Interface", ignore_errors=True)
+    (play / spelling[0] / spelling[1] / "Questie").mkdir(parents=True)
+    window._reload_client()
+
+    window.open_addons_button.click()
+
+    assert opened == [play / spelling[0] / spelling[1]]
+
+
+@pytest.mark.parametrize("half", ["10.0.", ".example.com", ".", "-", ":", "..", "-.:"])
+def test_a_half_typed_address_is_neither_saved_nor_remembered(
+    qapp: object, ps: _Ps, tmp_path: Path, half: str
+) -> None:
+    window, _view, play = _launcher(ps, tmp_path)
+    remembered: list[list[str]] = []
+    window.addresses_changed.connect(remembered.append)
+
+    _type_address(window, half)
+
+    assert _picks(play) == {}, half
+    assert remembered == []
+    assert "not an address" in window.realm_note.text()
+
+
+def test_the_focus_leaving_the_realm_box_saves_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Half typed and the focus moves on: Return, a pick from the list, or PLAY commits it."""
+    window, _view, play = _launcher(ps, tmp_path)
+    window.realm_combo.setEditText("10.0")
+
+    window.realm_combo.lineEdit().editingFinished.emit()
+
+    assert _picks(play) == {}
+
+
+def test_as_the_game_remembers_it_is_offered_after_a_name_is_picked(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    window, view, play = _launcher(ps, tmp_path)
+    _online(view)
+    _choose(window.account_combo, account_data("BOB"))
+    assert _picks(play) == {"account": "BOB"}
+
+    _choose(window.account_combo, ACCOUNT_KEEP)
+
+    assert _picks(play) == {}
+    assert window.account_combo.currentData() == ACCOUNT_KEEP
+    assert window.account_combo.currentText() == "As the game remembers it"

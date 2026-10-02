@@ -194,6 +194,20 @@ def _scandir(folder: Path) -> ContextManager[Iterator[os.DirEntry[str]]]:
     return os.scandir(folder)
 
 
+def addons_folder(play_dir: Path) -> Path:
+    """The folder **Open AddOns folder** opens: `Interface/AddOns`, matched as `addon_folders` does.
+
+    Casefolded per part, so a client copied from Windows as `interface/addons` or
+    `INTERFACE/AddOns` opens there too (T187 final review). Without an `AddOns`, the
+    `Interface` folder; without that, the client itself.
+    """
+    interfaces = list(_children_named(play_dir, "interface"))
+    for interface in interfaces:
+        for addons in _children_named(interface, "addons"):
+            return addons
+    return interfaces[0] if interfaces else play_dir
+
+
 def _entries(folder: Path) -> list[os.DirEntry[str]]:
     """One folder's entries, or none when it cannot be listed."""
     try:

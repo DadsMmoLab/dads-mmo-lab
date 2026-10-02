@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from yulon import platform, ui_settings
 from yulon.ui_settings import (
     ADDRESS_HISTORY,
     LauncherPlace,
+    UiSettings,
     forget_launcher,
     launcher_place,
     load_ui_settings,
@@ -135,3 +137,24 @@ def test_a_load_sweeps_temporaries_a_day_old_and_keeps_younger_ones(tmp_path: Pa
     assert not old.exists()
     assert young.exists(), "a write still in flight lost its file"
     assert other.exists(), "another file's temporary was swept"
+
+
+def test_a_failed_save_whose_cleanup_also_fails_still_answers_false(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The temporary file could not be renamed nor removed: logged, False, nothing raised."""
+
+    def no_rename(self: Path, _target: object) -> Path:
+        raise OSError("rename refused")
+
+    def no_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError("unlink refused")
+
+    monkeypatch.setattr(Path, "replace", no_rename)
+    monkeypatch.setattr(Path, "unlink", no_unlink)
+
+    assert ui_settings.save_ui_settings(UiSettings(), tmp_path / "ui.json") is False
+
+
+def test_a_half_typed_address_is_never_remembered() -> None:
+    assert recent_addresses(["10.0.", ".x", ".", "-", ":", "10.0.0.7"]) == ["10.0.0.7"]

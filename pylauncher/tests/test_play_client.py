@@ -761,6 +761,7 @@ def refresh(play: Path, orig: Path, tmp_path: Path, **kw: object) -> tuple[Path,
         "server_dir": tmp_path / "s",
         "reflink": no_reflink,
         "exe_patch": None,
+        "catalog_always": {},
     }
     args.update(kw)
     return play_client.refresh(play, orig, **args)  # type: ignore[arg-type]

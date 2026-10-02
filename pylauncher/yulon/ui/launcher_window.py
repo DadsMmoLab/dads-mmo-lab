@@ -113,6 +113,7 @@ GAME_REMEMBERS = "As the game remembers it"
 SET_BY_SERVER = "set by this server"
 NO_EXTRAS = "This server offers no extras."
 PASSWORD_NOTE = "The password is never stored: you type it in the game."
+SAVING = "Saving your choice…"
 STOPPED_BANNER = "Play starts the server first (about 1 minute)"
 STARTING_BANNER = "The server is starting…"
 VIEW_GONE = (
@@ -296,11 +297,13 @@ class ViewReads:
                 )
             except Exception as exc:  # noqa: BLE001 - "could not compare" is an answer
                 logger.info(f"could not compare {play} with {source}: {exc}")
-        addons_dir = play
-        for candidate in (play / "Interface", play / "Interface" / "AddOns"):
-            if candidate.is_dir():
-                addons_dir = candidate
-        return ClientReading(record, source, stale, launcher_reads.addon_folders(play), addons_dir)
+        return ClientReading(
+            record,
+            source,
+            stale,
+            launcher_reads.addon_folders(play),
+            launcher_reads.addons_folder(play),
+        )
 
 
 def _open_in_file_manager(path: Path) -> bool:
@@ -421,6 +424,15 @@ class LauncherWindow(QWidget):
         # The last client read failed: the reading held is the one from before
         # it, too old to judge a saved account by (Task 5 fix).
         self._client_unread = False
+        # The stale-account "Ask" save on its way, and the record a failed one was
+        # made for: not tried again for that record, or a read-only record would
+        # be saved, refused, re-read and saved again for ever (final review).
+        self._auto_saving: client_packs.PackRecord | None = None
+        self._auto_failed: client_packs.PackRecord | None = None
+        # A launcher save is on its way (PLAY waits for it), and PLAY's own press
+        # waiting for the typed address it saved first.
+        self._saving = False
+        self._play_after_save = False
         # Hidden by a close (not a minimize): what it shows may be old by the
         # time it is opened again, so the next show reads it again.
         self._reread_on_show = False
@@ -473,6 +485,10 @@ class LauncherWindow(QWidget):
         self._client_pending = False
         self._client_unread = False
         self._reconcile_owed = False
+        self._auto_saving = None
+        self._auto_failed = None
+        self._saving = False
+        self._play_after_save = False
         self._was_busy = view.play_client_busy() is not None
         self._bind_entry(view.entry, view.services.controller.server_dir)
         self.realm_badge.set_status(view.realm_badge.status)
@@ -714,7 +730,9 @@ class LauncherWindow(QWidget):
         )
         line = self.realm_combo.lineEdit()
         if line is not None:
-            line.editingFinished.connect(self._address_entered)
+            # Return, not the focus leaving: a half-typed address moved away from
+            # is not one the player meant (final review). PLAY commits it too.
+            line.returnPressed.connect(self._address_entered)
         self.realm_combo.activated.connect(self._address_entered)
         grid.addWidget(self.realm_combo, 0, 0)
         self.this_computer_button = QPushButton("Use this computer", self.realm_box)
@@ -985,8 +1003,15 @@ class LauncherWindow(QWidget):
             # saved over with "Ask". The next good `_client_read` runs this.
             self._reconcile_owed = True
             return
+        if self._auto_saving is not None:
+            self._reconcile_owed = True  # judged again once that save has answered
+            return
         record, server = self._record(), self._server
         if record is None or server is None or server.accounts is None:
+            return
+        if record == self._auto_failed:
+            # Its "Ask" save failed: said once; tried again when the record changes.
+            self._reconcile_owed = False
             return
         saved = record.launcher.get("account")
         if not isinstance(saved, str) or "accountname" in self._fixed_keys():
@@ -1004,7 +1029,18 @@ class LauncherWindow(QWidget):
             return
         self._reconcile_owed = False
         self._stale_account = saved
-        self._save(launcher={"account": None})
+        self._auto_saving = record
+        if not self._save(launcher={"account": None}):
+            self._auto_saving = None
+            self._auto_save_failed(record)
+
+    def _auto_save_failed(self, record: client_packs.PackRecord) -> None:
+        if self._auto_failed != record:
+            logger.warning(
+                "the launcher could not save Ask in the game for an account the server no "
+                "longer has; it tries again when the client's record changes"
+            )
+        self._auto_failed = record
 
     # -- following the view ------------------------------------------------
 
@@ -1047,6 +1083,19 @@ class LauncherWindow(QWidget):
 
     @Slot(str)
     def _saved(self, problem: str) -> None:
+        """A launcher save has answered: "" saved, else why not."""
+        self._saving = False
+        attempt, self._auto_saving = self._auto_saving, None
+        if attempt is not None and problem:
+            self._auto_save_failed(attempt)
+        then_play, self._play_after_save = self._play_after_save, False
+        self._say(problem)
+        self._render_enabled()
+        if then_play and not problem and self._has_play():
+            if (view := self._pressing()) is not None:
+                view.play()  # the press that saved the typed address first
+
+    def _say(self, problem: str) -> None:
         self.settings_note.setText(problem)
         self.settings_note.setVisible(bool(problem))
 
@@ -1131,8 +1180,8 @@ class LauncherWindow(QWidget):
         idle = view is not None and view.play_client_busy() is None
         for box in (self.display_box, self.account_box, self.realm_box, self.extras_box):
             box.setEnabled(has_play and idle)
+        self.play_button.setEnabled(view is not None and has_play and not self._saving)
         for button in (
-            self.play_button,
             self.refresh_button,
             self.open_folder_button,
             self.delete_button,
@@ -1145,6 +1194,8 @@ class LauncherWindow(QWidget):
         self.server_tab_button.setEnabled(view is not None)
         if view is None:
             self.play_reason_label.setText(VIEW_GONE)
+        elif self._saving and has_play:
+            self.play_reason_label.setText(SAVING)
         elif not has_play:
             self.play_reason_label.setText(
                 f"Make a ready-to-play client first (“{MAKE_PLAY_CLIENT_LABEL}” above): "
@@ -1345,7 +1396,8 @@ class LauncherWindow(QWidget):
                 names.append(clean)
         if isinstance(saved, str) and saved not in names:
             names.append(saved)  # not read yet, or the read failed: kept, not dropped
-        items = [] if has_key else [(GAME_REMEMBERS, ACCOUNT_KEEP)]
+        # Always offered (lead ruling), as Window's "The game's own setting" is.
+        items = [(GAME_REMEMBERS, ACCOUNT_KEEP)]
         items += [(name, account_data(name)) for name in names]
         items.append((ASK_IN_THE_GAME, ACCOUNT_ASK))
         if not has_key:
@@ -1401,18 +1453,23 @@ class LauncherWindow(QWidget):
         drop: Collection[str] = (),
         packs: Mapping[str, bool] | None = None,
         exe_options: Mapping[str, bool] | None = None,
-    ) -> None:
+    ) -> bool:
+        """Start a save; False when it was refused (said) and nothing was started."""
         view = self._alive()
         if view is None:
-            return
-        self.settings_note.setText("")
-        self.settings_note.setVisible(False)
+            return False
+        self._say("")
+        # Before the call: an inline runner answers inside it, through `_saved`.
+        self._saving = True
         refusal = view.save_launcher_picks(
             launcher=launcher, drop=drop, packs=packs, exe_options=exe_options
         )
         if refusal is not None:
-            self._saved(refusal)
+            self._saving = False
+            self._say(refusal)
             self._render()  # back to what the record says
+            return False
+        return True
 
     @Slot(int)
     def _window_picked(self, index: int) -> None:
@@ -1457,46 +1514,58 @@ class LauncherWindow(QWidget):
 
     @Slot()
     def _address_entered(self) -> None:
-        """A typed (or picked) realm address: saved only when it is not this computer's."""
-        if not self.realm_box.isEnabled():
-            # Greyed while a save or a job holds the client: the focus leaving the
-            # box as it greys says "editing finished" too, and is not a new entry.
+        """Return in the realm box, or an address picked from its list."""
+        if not self.realm_box.isEnabled() or self._saving:
+            # Greyed while a save or a job holds the client, or a save of this
+            # very address already on its way: not a new entry.
             return
+        self._commit_address()
+
+    def _commit_address(self) -> str:
+        """Save what the realm box holds if it is new: "none", "saving" or "refused" (said).
+
+        Only when it is not this computer's; an address the game cannot use is
+        refused with why, and never saved nor remembered.
+        """
         typed = self.realm_combo.currentText().strip()
         saved = self._saved_address()
         self.realm_note.setText("")
         self.realm_note.setVisible(False)
         if typed == (saved or PLAY_CLIENT_ADDRESS):
             self._render_mismatch(typed)
-            return
+            return "none"
         if not typed or typed == PLAY_CLIENT_ADDRESS:
-            self._use_this_computer()
-            return
+            return self._this_computer()
         if "realm_address" not in client_packs.clean_launcher({"realm_address": typed}):
             self.realm_note.setText(
                 f"“{typed}” is not an address the game can use: letters, digits, dots, dashes "
-                "and colons only. Nothing was saved."
+                "and colons, with a letter or digit and no dot at either end. Nothing was "
+                "saved."
             )
             self.realm_note.setVisible(True)
             self._render_realm(force=True)
-            return
+            return "refused"
         history = ui_settings.recent_addresses([typed, *self._typed])
         if history != self._typed:
             self._typed = history
             self.addresses_changed.emit(list(history))
-        self._save(launcher={"realm_address": typed})
+        return "saving" if self._save(launcher={"realm_address": typed}) else "refused"
 
     @Slot()
     def _use_this_computer(self) -> None:
+        self._this_computer()
+
+    def _this_computer(self) -> str:
         self.realm_note.setText("")
         self.realm_note.setVisible(False)
         if self._saved_address() is None:
             self._render_realm(force=True)
-            return
-        # Saved as None, not dropped (lead ruling): the next Play also takes the typed
-        # address's realmList/patchList back out of Config.wtf where realmlist.wtf, or the
-        # catalog's own realmList, carries this computer's address.
-        self._save(launcher={"realm_address": None})
+            return "none"
+        # Saved as None, not dropped (lead ruling): the next Play writes this computer's
+        # address where Config.wtf is the only place for it, and elsewhere takes the typed
+        # address's realmList/patchList back out (realmlist.wtf or the catalog's own
+        # realmList carries this computer's address there).
+        return "saving" if self._save(launcher={"realm_address": None}) else "refused"
 
     def _pack_toggled(self, pack_id: str, on: bool) -> None:
         self._save(packs={pack_id: on})
@@ -1510,7 +1579,21 @@ class LauncherWindow(QWidget):
 
     @Slot()
     def _play(self) -> None:
-        if self._has_play() and (view := self._pressing()) is not None:
+        """PLAY; an address typed and not yet saved is saved first, then Play starts.
+
+        One press (final review): without this the click's focus change saved the
+        address and the Play behind it was refused as busy.
+        """
+        if not self._has_play() or self._saving or self._alive() is None:
+            return
+        # Before the commit: an inline runner answers inside it, through `_saved`.
+        self._play_after_save = True
+        if self._commit_address() != "none":
+            if not self._saving:  # refused, or already saved and played
+                self._play_after_save = False
+            return
+        self._play_after_save = False
+        if (view := self._pressing()) is not None:
             view.play()
 
     @Slot()
@@ -1537,7 +1620,7 @@ class LauncherWindow(QWidget):
         if path is None:
             return
         if not self._open_folder(path):
-            self._saved(f"Yu'lon could not open {path}. Open it from your file manager.")
+            self._say(f"Yu'lon could not open {path}. Open it from your file manager.")
 
     @Slot()
     def _open_play_folder(self) -> None:

@@ -1420,7 +1420,12 @@ def test_stale_and_refresh_leave_a_recorded_pack_file_alone(rig: _Rig) -> None:
     rel = Path("Data/patch-X.MPQ")
     assert play_client.stale(rig.play, rig.original) == (rel,), "the fixture must read as stale"
     assert play_client.refresh(
-        rig.play, rig.original, game=GAME, server_dir=rig.server, exe_patch=None
+        rig.play,
+        rig.original,
+        game=GAME,
+        server_dir=rig.server,
+        exe_patch=None,
+        catalog_always={},
     ) == (rel,), "and be refreshed"
     rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y + b"-longer"}, name="again.zip"))
     _record_installed(rig, WORLD, entry)
@@ -1431,7 +1436,12 @@ def test_stale_and_refresh_leave_a_recorded_pack_file_alone(rig: _Rig) -> None:
     assert play_client.stale(rig.play, rig.original) == ()
     assert (
         play_client.refresh(
-            rig.play, rig.original, game=GAME, server_dir=rig.server, exe_patch=None
+            rig.play,
+            rig.original,
+            game=GAME,
+            server_dir=rig.server,
+            exe_patch=None,
+            catalog_always={},
         )
         == ()
     )
@@ -2120,16 +2130,53 @@ def test_a_password_handed_to_the_launcher_keys_never_becomes_a_config_line() ->
 
 
 def test_borderless_follows_the_window_pick_only_where_the_patch_has_it() -> None:
+    def options(launcher: dict[str, Any], chosen: dict[str, bool], patch: list[str]) -> Any:
+        return client_packs.launcher_exe_options(launcher, chosen, patch, catalog_always={})
+
     mode = {"display": {"window": "borderless"}}
-    assert client_packs.launcher_exe_options(mode, {}, ["borderless"]) == {"borderless": True}
+    assert options(mode, {}, ["borderless"]) == {"borderless": True}
     other = {"display": {"window": "windowed"}}
-    assert client_packs.launcher_exe_options(other, {"borderless": True}, ["borderless"]) == {
-        "borderless": False
-    }
-    assert client_packs.launcher_exe_options(mode, {}, []) == {}
-    assert client_packs.launcher_exe_options({}, {"borderless": True}, ["borderless"]) == {
-        "borderless": True
-    }
+    assert options(other, {"borderless": True}, ["borderless"]) == {"borderless": False}
+    assert options(mode, {}, []) == {}
+    assert options({}, {"borderless": True}, ["borderless"]) == {"borderless": True}
+
+
+@pytest.mark.parametrize("key", ["gxWindow", "GXMAXIMIZE"])
+def test_a_catalog_that_fixes_the_window_keys_leaves_the_borderless_option_alone(key: str) -> None:
+    """The server sets the window itself: a launcher window pick says nothing about borderless."""
+    picks = {"display": {"window": "windowed"}}
+    chosen = {"borderless": True}
+    got = client_packs.launcher_exe_options(
+        picks, chosen, ["borderless"], catalog_always={key: "1"}
+    )
+    assert got == {"borderless": True}
+    free = client_packs.launcher_exe_options(picks, chosen, ["borderless"], catalog_always={})
+    assert free == {"borderless": False}
+
+
+@pytest.mark.parametrize(
+    "typed", ["10.0.", ".example.com", "example.com.", ".", "-", ":", "..", "-.:", "-:"]
+)
+def test_a_realm_address_needs_a_letter_or_digit_and_no_dot_at_either_end(typed: str) -> None:
+    assert "realm_address" not in client_packs.clean_launcher({"realm_address": typed})
+
+
+@pytest.mark.parametrize("typed", ["10.0.0.7", "logon.example.com", "host:3724", "my-realm", "a"])
+def test_a_whole_realm_address_is_kept(typed: str) -> None:
+    assert client_packs.clean_launcher({"realm_address": typed}) == {"realm_address": typed}
+
+
+def test_this_computer_said_writes_the_default_address_where_config_wtf_is_the_only_channel() -> (
+    None
+):
+    """Codex: no realmlist.wtf and no catalog realmList; removing the lines left the typed one."""
+    said = {"realm_address": None}
+    keys = client_packs.launcher_config_keys(said, catalog_always={}, default_address="127.0.0.1")
+    assert keys == {"realmList": "127.0.0.1", "patchList": "127.0.0.1"}
+    assert client_packs.launcher_config_keys(said, catalog_always={}, default_address=None) == {}
+    assert (
+        client_packs.launcher_config_keys({}, catalog_always={}, default_address="127.0.0.1") == {}
+    )
 
 
 def test_a_typed_realm_address_sets_realmlist_and_patchlist_over_the_catalogs() -> None:

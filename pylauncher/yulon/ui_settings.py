@@ -149,7 +149,10 @@ def save_ui_settings(settings: UiSettings, path: Path | None = None) -> bool:
     except OSError as exc:
         logger.info(f"window settings not saved to {target}: {exc}")
         if tmp is not None:
-            tmp.unlink(missing_ok=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError as gone:  # the answer is still False, never a raise
+                logger.info(f"could not remove the temporary {tmp}: {gone}")
         return False
     return True
 

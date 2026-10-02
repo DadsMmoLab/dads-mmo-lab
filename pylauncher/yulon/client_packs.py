@@ -755,7 +755,10 @@ class PackRecord:
 
 WINDOW_MODES = ("fullscreen", "windowed", "maximized", "borderless")
 _RESOLUTION = re.compile(r"[1-9][0-9]{2,4}x[1-9][0-9]{2,4}")
-_ADDRESS = re.compile(r"[A-Za-z0-9._:\-]{1,253}")
+# Letters, digits, dots, dashes and colons, with at least one letter or digit and
+# no dot at either end: "10.0." or "." is an address half typed, not one the game
+# can use (T187 final review).
+_ADDRESS = re.compile(r"(?!\.)(?=.*[A-Za-z0-9])[A-Za-z0-9._:\-]{1,253}(?<!\.)")
 ACCOUNT_MAX = 32
 
 
@@ -809,7 +812,10 @@ def clean_launcher(raw: object) -> dict[str, Any]:
 
 
 def launcher_config_keys(
-    launcher: Mapping[str, Any], *, catalog_always: Mapping[str, str]
+    launcher: Mapping[str, Any],
+    *,
+    catalog_always: Mapping[str, str],
+    default_address: str | None = None,
 ) -> dict[str, str]:
     """The Config.wtf keys the launcher picks set; a key the catalog's `always` sets is dropped.
 
@@ -819,6 +825,12 @@ def launcher_config_keys(
     The one exception (lead ruling, T187): a typed realm address sets `realmList`
     and `patchList` (Centurion's own launcher writes both from one address) even
     where the catalog's `always` sets them, so the caller lets these keys win.
+
+    `default_address` is for a client whose Config.wtf is the only place the game
+    finds its address (no realmlist.wtf, no catalog `realmList`): "Use this
+    computer" (`realm_address` saved as None) then writes it there, because
+    taking the typed lines out would leave the game with no address, and
+    leaving them would send it to the old one (T187 final review).
     """
     picks = clean_launcher(launcher)
     keys: dict[str, str] = {}
@@ -839,6 +851,8 @@ def launcher_config_keys(
     address = picks.get("realm_address")
     if address:
         keys.update(realmList=address, patchList=address)
+    elif "realm_address" in picks and default_address:
+        keys.update(realmList=default_address, patchList=default_address)
     return keys
 
 
@@ -871,15 +885,25 @@ def launcher_config_removals(
 
 
 def launcher_exe_options(
-    launcher: Mapping[str, Any], chosen: Mapping[str, bool], patch_options: Collection[str]
+    launcher: Mapping[str, Any],
+    chosen: Mapping[str, bool],
+    patch_options: Collection[str],
+    *,
+    catalog_always: Mapping[str, str],
 ) -> dict[str, bool]:
     """`chosen` exe options with `borderless` following the launcher's window pick.
 
     Only where the catalog's exe patch has a `borderless` option and the launcher has
     picked a window mode: borderless is on for "borderless" and off for any other mode.
+    Not where the catalog's `always` sets `gxWindow` or `gxMaximize`: the server
+    decides the window then, `launcher_config_keys` drops the pick, and the pick
+    says nothing about borderless either (T187 final review).
     """
     window = clean_launcher(launcher).get("display", {}).get("window")
     out = dict(chosen)
+    fixed = {key.casefold() for key in catalog_always}
+    if fixed & {"gxwindow", "gxmaximize"}:
+        return out
     if window is not None and "borderless" in patch_options:
         out["borderless"] = window == "borderless"
     return out

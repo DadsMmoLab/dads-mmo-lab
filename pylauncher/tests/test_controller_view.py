@@ -22646,6 +22646,52 @@ def test_a_borderless_pick_turns_the_exe_option_on_and_another_turns_it_off(
     assert seen[-1] == {"borderless": False}
 
 
+def test_a_window_the_catalog_fixes_leaves_the_borderless_option_to_client_options(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    site: _Site,
+    steps: list[str],
+    asks: _Asks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catalog sets gxWindow: a saved "windowed" pick does not turn borderless off."""
+    entry, original, play = _made_client(tmp_path)
+    cfg = entry.client.config_wtf
+    assert cfg is not None
+    cfg = cfg.model_copy(update={"always": {**cfg.always, "gxWindow": "1"}})
+    entry = entry.model_copy(update={"client": entry.client.model_copy(update={"config_wtf": cfg})})
+    seen: list[dict[str, bool]] = []
+    apply = client_exe.apply
+
+    def spy(
+        play_dir: Path, source: Path, patch: Any, options: dict[str, bool], *a: Any, **k: Any
+    ) -> Any:
+        seen.append(dict(options))
+        return apply(play_dir, source, patch, options, *a, **k)
+
+    monkeypatch.setattr(client_exe, "apply", spy)
+    record = client_packs.read_record(play)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            record.packs,
+            record.exe,
+            {**record.choices, "exe_options": {"borderless": True}},
+            record.config_seeded,
+            {"display": {"window": "windowed"}},
+        ),
+        game=WOTLK.id,
+        server_dir=_server_of(play),
+    )
+    ps.names = WORLD_UP
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+
+    view.play()
+
+    assert seen[-1] == {"borderless": True}
+
+
 def test_nothing_the_launcher_writes_holds_a_password(
     qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
 ) -> None:

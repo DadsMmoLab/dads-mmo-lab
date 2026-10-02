@@ -736,6 +736,11 @@ def _launcher_writes(record: client_packs.PackRecord) -> bool:
     )
 
 
+def _catalog_always(cfg: ConfigWtf | None) -> dict[str, str]:
+    """The Config.wtf keys the catalog sets for every player; none without a `config_wtf`."""
+    return dict(cfg.always) if cfg is not None else {}
+
+
 def _address_written_elsewhere(cfg: ConfigWtf | None) -> bool:
     """Whether this computer's address reaches the game without a typed one in Config.wtf.
 
@@ -9158,7 +9163,10 @@ class ControllerView(QWidget):
             say("Checking Wow.exe…")
             # A window pick decides `borderless`, and is saved as that exe option (T187).
             picked_exe = client_packs.launcher_exe_options(
-                record.launcher, record.choices["exe_options"], client.exe_patch.options
+                record.launcher,
+                record.choices["exe_options"],
+                client.exe_patch.options,
+                catalog_always=_catalog_always(client.config_wtf),
             )
             choices = {**record.choices, "exe_options": picked_exe}
             options = client_exe.options_for(client.exe_patch, picked_exe)
@@ -9178,12 +9186,18 @@ class ControllerView(QWidget):
                 exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
-        catalog_always = cfg.always if cfg is not None else {}
-        picked = client_packs.launcher_config_keys(record.launcher, catalog_always=catalog_always)
+        catalog_always = _catalog_always(cfg)
+        written_elsewhere = _address_written_elsewhere(cfg)
+        picked = client_packs.launcher_config_keys(
+            record.launcher,
+            catalog_always=catalog_always,
+            # Config.wtf the only channel: "Use this computer" writes this computer there.
+            default_address=None if written_elsewhere else PLAY_CLIENT_ADDRESS,
+        )
         removed = client_packs.launcher_config_removals(
             record.launcher,
             catalog_always=catalog_always,
-            default_address_written=_address_written_elsewhere(cfg),
+            default_address_written=written_elsewhere,
         )
         if cfg is None and (picked or removed):
             # An entry without `config_wtf` still gets the launcher's picks (T187); its
@@ -9527,6 +9541,7 @@ class ControllerView(QWidget):
             return refusal
         game, server_dir = self.entry.id, self.services.controller.server_dir
         patch = self.entry.client.exe_patch
+        always = _catalog_always(self.entry.client.config_wtf)
         changes = dict(launcher or {})
         gone = frozenset(drop)
 
@@ -9537,7 +9552,9 @@ class ControllerView(QWidget):
             chosen_packs = {**current.choices["packs"], **(packs or {})}
             chosen_exe = {**current.choices["exe_options"], **(exe_options or {})}
             if patch is not None:
-                chosen_exe = client_packs.launcher_exe_options(picks, chosen_exe, patch.options)
+                chosen_exe = client_packs.launcher_exe_options(
+                    picks, chosen_exe, patch.options, catalog_always=always
+                )
             client_packs.write_record(
                 play,
                 client_packs.PackRecord(
@@ -9605,6 +9622,7 @@ class ControllerView(QWidget):
                 server_dir=server_dir,
                 keep=module_kept_files(server_dir, play, client_dir),
                 exe_patch=self.entry.client.exe_patch,
+                catalog_always=_catalog_always(self.entry.client.config_wtf),
             )
             return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
 
