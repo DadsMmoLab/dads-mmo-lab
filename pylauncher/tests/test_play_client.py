@@ -16,6 +16,7 @@ import shutil
 import types
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -755,7 +756,12 @@ def exdev(src: Path, dst: Path) -> None:
 
 
 def refresh(play: Path, orig: Path, tmp_path: Path, **kw: object) -> tuple[Path, ...]:
-    args: dict[str, object] = {"game": "g", "server_dir": tmp_path / "s", "reflink": no_reflink}
+    args: dict[str, object] = {
+        "game": "g",
+        "server_dir": tmp_path / "s",
+        "reflink": no_reflink,
+        "exe_patch": None,
+    }
     args.update(kw)
     return play_client.refresh(play, orig, **args)  # type: ignore[arg-type]
 
@@ -1631,3 +1637,160 @@ def test_nothing_is_left_out_of_a_client_just_made(tmp_path: Path) -> None:
     build(orig, play, tmp_path)
 
     assert play_client.left_out_archives(play, orig) == ()
+
+
+# --- a patched Wow.exe (T181 c) ---------------------------------------------------------------
+
+
+def _exe_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, bytes, Any]:
+    """A ready-to-play client whose Wow.exe Yu'lon patched, and the patch that did it."""
+    import hashlib
+    import random
+
+    from yulon import client_exe, client_packs, platform
+    from yulon.catalog.catalog import ExePatch
+
+    monkeypatch.setattr(platform, "config_dir", lambda: tmp_path / "config")
+    stock = random.Random(7).randbytes(300_000)
+    patch = ExePatch.model_validate(
+        {
+            "expect_sha256": hashlib.sha256(stock).hexdigest(),
+            "expect_size": len(stock),
+            "clean_sources": [{"url": "https://clean.example.org/c.zip", "member": "Wow.exe"}],
+            "writes": [{"offset": 100, "bytes": "313233"}],
+            "options": {
+                "borderless": {
+                    "label": "Borderless",
+                    "default": True,
+                    "on": [{"offset": 200, "bytes": "eb"}],
+                    "off": [],
+                }
+            },
+            "build": 12342,
+        }
+    )
+    orig = fake_client(tmp_path)
+    (orig / "Wow.exe").write_bytes(stock)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    made = client_exe.apply(play, orig, patch, {"borderless": True})
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord({}, made, {"packs": {}, "exe_options": {"borderless": True}}),
+        game="g",
+        server_dir=tmp_path / "s",
+    )
+    return play, orig, stock, patch
+
+
+def test_a_patched_exe_is_not_stale_just_because_it_differs_from_the_originals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    play, orig, stock, _patch = _exe_world(tmp_path, monkeypatch)
+    assert (play / "Wow.exe").read_bytes() != (orig / "Wow.exe").read_bytes()
+    assert play_client.stale(play, orig) == ()
+
+
+def test_refresh_never_copies_the_originals_exe_over_a_patched_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    play, orig, stock, patch = _exe_world(tmp_path, monkeypatch)
+    patched = (play / "Wow.exe").read_bytes()
+    # Something unpatched lands in the ready-to-play client: stale, and re-made from stock bytes.
+    (play / "Wow.exe").write_bytes(stock)
+    assert play_client.stale(play, orig) == (Path("Wow.exe"),)
+    assert refresh(play, orig, tmp_path, exe_patch=patch) == (Path("Wow.exe"),)
+    assert (play / "Wow.exe").read_bytes() == patched
+    assert play_client.stale(play, orig) == ()
+
+
+def test_refresh_after_the_originals_exe_changed_keeps_the_exe_patched_from_stock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    play, orig, stock, patch = _exe_world(tmp_path, monkeypatch)
+    patched = (play / "Wow.exe").read_bytes()
+    (orig / "Wow.exe").write_bytes(b"MZ the player's own modified exe" * 100)  # non-stock
+    assert play_client.stale(play, orig) == ()
+    assert refresh(play, orig, tmp_path, exe_patch=patch) == ()
+    assert (play / "Wow.exe").read_bytes() == patched
+    # And when the ready-to-play one is damaged too, the stock bytes come from the cache's
+    # nowhere: neither exe is stock, so refresh refuses and leaves it as it was.
+    (play / "Wow.exe").write_bytes(b"damaged")
+    with pytest.raises(play_client.PlayClientError, match="stock Wow.exe"):
+        refresh(play, orig, tmp_path, exe_patch=patch, opener=_no_network)
+    assert (play / "Wow.exe").read_bytes() == b"damaged"
+    assert (orig / "Wow.exe").read_bytes().startswith(b"MZ the player")
+
+
+def test_refresh_without_the_patch_puts_the_originals_exe_back_and_forgets_the_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog dropped the exe patch: the patched exe goes, and is not stale forever."""
+    from yulon import client_packs
+
+    play, orig, stock, _patch = _exe_world(tmp_path, monkeypatch)
+    (play / "Wow.exe").write_bytes(b"damaged")
+    assert refresh(play, orig, tmp_path) == (Path("Wow.exe"),)
+    assert (play / "Wow.exe").read_bytes() == (orig / "Wow.exe").read_bytes()
+    assert not os.path.samefile(play / "Wow.exe", orig / "Wow.exe")
+    assert client_packs.read_record(play).exe is None
+    assert play_client.stale(play, orig) == ()
+
+
+def test_refresh_keeps_the_patch_and_its_record_when_the_originals_exe_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import client_packs
+
+    play, orig, stock, _patch = _exe_world(tmp_path, monkeypatch)
+    patched = (play / "Wow.exe").read_bytes()
+    original_exe = (orig / "Wow.exe").read_bytes()
+    (orig / "Wow.exe").unlink()  # the drive is unplugged, the folder is still there
+    assert refresh(play, orig, tmp_path) == ()
+    assert (play / "Wow.exe").read_bytes() == patched
+    assert client_packs.read_record(play).exe is not None
+    (orig / "Wow.exe").write_bytes(original_exe)
+    assert refresh(play, orig, tmp_path) == (Path("Wow.exe"),)
+    assert client_packs.read_record(play).exe is None
+
+
+def test_refresh_treats_an_unreadable_original_exe_like_a_missing_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import client_packs
+
+    play, orig, stock, _patch = _exe_world(tmp_path, monkeypatch)
+    patched = (play / "Wow.exe").read_bytes()
+
+    def denied(_path: Path) -> object:
+        raise PermissionError(13, "device not ready")
+
+    monkeypatch.setattr(play_client, "_original_file", denied)
+    assert refresh(play, orig, tmp_path) == ()
+    assert (play / "Wow.exe").read_bytes() == patched
+    assert client_packs.read_record(play).exe is not None
+
+
+def test_refresh_remakes_the_exe_with_the_options_the_player_chose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import client_packs
+
+    play, orig, stock, patch = _exe_world(tmp_path, monkeypatch)
+    record = client_packs.read_record(play)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            record.packs, record.exe, {"packs": {}, "exe_options": {"borderless": False}}
+        ),
+        game="g",
+        server_dir=tmp_path / "s",
+    )
+    (play / "Wow.exe").write_bytes(stock)
+    refresh(play, orig, tmp_path, exe_patch=patch)
+    assert (play / "Wow.exe").read_bytes()[200] == stock[200]  # borderless off: stock byte
+    assert client_packs.read_record(play).exe["options"] == {"borderless": False}  # type: ignore[index]
+
+
+def _no_network(*args: Any, **kwargs: Any) -> Any:
+    raise ConnectionResetError("offline")
