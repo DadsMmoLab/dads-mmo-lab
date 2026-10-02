@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from yulon import play_client
+from yulon import client_packs, play_client
 
 WHEN = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 
@@ -1840,3 +1840,57 @@ def test_refresh_remakes_the_exe_with_the_launchers_window_pick(
 
 def _no_network(*args: Any, **kwargs: Any) -> Any:
     raise ConnectionResetError("offline")
+
+
+# -- T196: a pack's swap names map to the player's file --------------------------------------
+
+
+def _windows_like_unlink(blocked: list[str]) -> Any:
+    def unlink(path: object) -> None:
+        # Windows refuses to delete a file whose read-only attribute is set.
+        if not os.lstat(path).st_mode & 0o200:  # type: ignore[arg-type]
+            blocked.append(Path(path).name)  # type: ignore[arg-type]
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        os.unlink(path)  # type: ignore[arg-type]
+
+    return unlink
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        client_packs._ASIDE,
+        client_packs._ASIDE + ".1",
+        client_packs._ASIDE + ".12",
+        client_packs._STAGING,
+        client_packs._STAGING + ".3",
+        client_packs._ASIDE.upper(),
+    ],
+)
+def test_a_pack_swap_name_sharing_a_read_only_archive_gives_the_player_back_its_flag(
+    tmp_path: Path, suffix: str
+) -> None:
+    """A pack's swap left the player's read-only archive under `<name><suffix>` (T196).
+
+    Deleting it needs the flag cleared on the inode the player's `<name>` shares;
+    the name it is mapped to for putting the flag back is `<name>`, not `<name><suffix>`.
+    """
+    orig = fake_client(tmp_path)
+    archive = orig / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    shared = play / "Data" / "common.MPQ"
+    side = shared.with_name(shared.name + suffix)
+    os.rename(shared, side)
+    shared.write_bytes(b"the pack's own common.MPQ")
+    assert os.path.samefile(side, archive), "the fixture must share the player's inode"
+    blocked: list[str] = []
+
+    play_client.remove_folder(play, original=orig, unlink=_windows_like_unlink(blocked))
+
+    assert not play.exists()
+    assert set(blocked) == {side.name}, "the read-only rule was not what the delete met"
+    assert archive.stat().st_mode & 0o777 == 0o444, "the player's own file left writable"
+    assert archive.read_bytes() == b"mpq" * 1000

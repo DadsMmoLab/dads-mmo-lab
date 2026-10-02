@@ -37,6 +37,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -73,6 +74,9 @@ stale cache from another server confuses the client. 3.3.5a keeps it in `Cache/`
 (`Cache/WDB`); Vanilla and Tortoise keep it at the top level as `WDB/`."""
 LINKED_SUFFIXES = frozenset({".mpq", ".dll"})
 PARTIAL_SUFFIX = ".yulon-partial"
+_PACK_SWAP_NAME = re.compile(r"(.+)\.yulon-pack-(?:tmp|old)(?:\.\d+)?", re.IGNORECASE)
+"""A name `client_packs`' swap gives a file beside its target `<name>` (its `_STAGING` and
+`_ASIDE`, numbered when the plain one is taken), matched whole; group 1 is `<name>`."""
 
 _FICLONE = 0x40049409  # linux/fs.h: _IOW(0x94, 9, int)
 
@@ -441,8 +445,27 @@ def _empty(here: Path, folder: Path, original: Path | None, unlink: Callable[[Pa
             _empty(child, folder, original, unlink)
             _remove_dir(child)
         else:
-            survivor = original / child.relative_to(folder) if original is not None else None
-            _remove_file(child, survivor, unlink)
+            _remove_file(child, _survivor(child, folder, original), unlink)
+
+
+def _survivor(path: Path, folder: Path, original: Path | None) -> Path | None:
+    """The name in `original` that `path`, a file in `folder`, may share its inode with.
+
+    The same relative path, except for a name a pack's swap gave the file
+    (`<name>.yulon-pack-old[.N]`, `<name>.yulon-pack-tmp[.N]`): that file was moved
+    there from `<name>`, so it shares the player's `<name>` (T196). The install
+    leaves such a file in place when it is read-only and shared with the player's
+    file (`client_config._remove_own`), so it is still here when the folder goes.
+    Only the same inode is ever given its flag back (`_remove_file`), so a name
+    mapped to a file it does not share changes nothing.
+    """
+    if original is None:
+        return None
+    rel = path.relative_to(folder)
+    swapped = _PACK_SWAP_NAME.fullmatch(rel.name)
+    if swapped is not None:
+        rel = rel.with_name(swapped.group(1))
+    return original / rel
 
 
 def _remove_link(path: Path, unlink: Callable[[Path], None]) -> None:

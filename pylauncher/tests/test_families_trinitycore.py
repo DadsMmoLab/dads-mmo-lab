@@ -1624,6 +1624,58 @@ def test_a_left_out_read_only_archive_keeps_its_flag_after_a_failed_extraction(
     assert snapshot(machine.client) == before
 
 
+STOCK_COMMON = b"MPQ\x1a centurion's own common.MPQ"
+OVER_STOCK = {
+    # A required pack laying a file under a name the copy shares with the player's client.
+    "id": "over-stock",
+    "label": "Centurion common",
+    "source": {"kind": "checkout", "path": f"{PATCHES}/common.zip"},
+    "md5": hashlib.md5(_zip("common.MPQ", STOCK_COMMON), usedforsecurity=False).hexdigest(),
+    "install": [{"member": "common.MPQ", "to": "Data/common.MPQ"}],
+}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+def test_a_pack_over_a_read_only_stock_archive_leaves_the_players_flag_after_extraction(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T196: the pack's swap moves the player's read-only `common.MPQ` aside in the copy.
+
+    The install cannot delete that aside (Windows: read-only, and its flag is the
+    player's too), so the copy's removal does, and puts the flag back on the player's
+    own `Data/common.MPQ`, the name it was moved from.
+    """
+    import pathlib
+
+    archive = machine.client / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    lay_for_client_data(machine)
+    (machine.server_dir / PATCHES / "common.zip").write_bytes(_zip("common.MPQ", STOCK_COMMON))
+    before = snapshot(machine.client)
+    real_unlink = pathlib.Path.unlink
+    asides: list[Path] = []
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if os.path.isfile(self) and not os.lstat(self).st_mode & stat.S_IWRITE:
+            asides.append(self)
+            raise PermissionError(errno.EACCES, "Access is denied", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", unlink)
+    entry = centurion_like(packs=[*REQUIRED_PACKS, OVER_STOCK, *OPTIONAL_PACKS], rev=REV)
+
+    said = run_stage(machine, "client-data", entry=entry)
+
+    for program, files in machine.tools.seen.items():
+        assert files["Data/common.MPQ"] == STOCK_COMMON, program
+    assert [p.name for p in asides] == ["common.MPQ" + client_packs._ASIDE], "never left aside"
+    assert "Removed the temporary copy of your client." in said
+    assert not os.path.lexists(copy_dir(machine))
+    assert mode(archive) == 0o444, "the player's own file left writable"
+    assert snapshot(machine.client) == before
+
+
 def crashed_after_moving_aside(machine: Machine) -> Path:
     """The copy a press that died after `_drop_unlisted_archives()` leaves, and its record."""
     target = leftover_copy(machine)
