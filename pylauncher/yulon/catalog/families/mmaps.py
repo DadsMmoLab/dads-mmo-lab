@@ -486,6 +486,13 @@ def start_mmaps(
         try:
             cid = run.run_detached(spec, job.container, timeout=CHANGE_TIMEOUT)
         except docker.DockerCommandError as exc:
+            # A `run -d` that timed out may still have made, and started, the
+            # container: removed here, so a `failed` record never sits beside a
+            # live generator (fix round 2).
+            try:
+                run.remove(job.container, timeout=CHANGE_TIMEOUT)
+            except docker.DockerCommandError as again:
+                logger.warning(f"could not remove {job.container} after its start failed: {again}")
             _write_record(
                 server_dir,
                 Record(
@@ -567,10 +574,22 @@ def stop_for_route(
         record = read_record(server_dir)
         if record is None:
             return None
-        if not record.unreadable and record.state not in ("queued", "running"):
+        if not record.unreadable and record.state == "done":
             return None
         job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
         run = runner or DockerRunner()
+        if not record.unreadable and record.state == "failed":
+            # Its container should be gone already; removed again by the derived
+            # name in case a start that timed out made it after all. Fail closed.
+            try:
+                run.remove(job.container, timeout=CHANGE_TIMEOUT)
+            except docker.DockerCommandError as exc:
+                raise MmapsError(
+                    f"A container left by a pathfinding run that did not start ({job.container}) "
+                    f"could not be removed ({exc}), so {route} was not started: it must not run "
+                    "while the server is rebuilt. Nothing was changed."
+                ) from exc
+            return None
         # Reconciled first: a run that FINISHED since the last status is a complete
         # set, switched on here, and never thrown away by the stop below. An
         # unreadable record has nothing to reconcile.
@@ -701,7 +720,7 @@ def _finished(
         return _fail(
             job, record, f"the generator stopped with exit {facts.exit_code}. {words}", run, now
         )
-    have = extract.counts({MMAPS_DIR: plan.min_files}, job.data_dir)[MMAPS_DIR]
+    have = _set_size(job)
     if have < plan.min_files:
         return _fail(
             job,
@@ -729,9 +748,18 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
     is no set, so the switch goes back to 0 with it and the job is not started.
     """
     plan = job.block.mmaps
-    if extract.counts({MMAPS_DIR: plan.min_files}, job.data_dir)[MMAPS_DIR] < plan.min_files:
-        _clear_output(job)
-        _forget_record(job.server_dir)
+    if _set_size(job) < plan.min_files:
+        # A poll never raises for this: a folder it cannot clear, or a switch it
+        # cannot turn off, is a failed state with its reason (fix round 2).
+        try:
+            _clear_output(job)
+            _forget_record(job.server_dir)
+        except MmapsError as exc:
+            return MmapsStatus(
+                "failed",
+                error=f"the finished pathfinding data is no longer all there, and {exc}",
+                pathfinding_on=_pathfinding_on(job),
+            )
         logger.warning(f"{job.data_dir / MMAPS_DIR} no longer holds a whole set; not started")
         return MmapsStatus("not-started", pathfinding_on=_pathfinding_on(job))
     if not record.pathfinding_on_at:
@@ -850,16 +878,45 @@ def _clear_output(job: Job) -> None:
                 f"pathfinding could not be switched off in the world server's conf ({exc}), so the "
                 "movement maps it would read were left as they are."
             ) from exc
-    out = _checked_data_dir(job) / MMAPS_DIR
+    data_dir = _checked_data_dir(job)
+    out = data_dir / MMAPS_DIR
     try:
         if out.exists():
             rmtree.remove_tree(out)
-        out.mkdir(parents=True, exist_ok=True)
+        # Never `data/` itself: a server whose map data is gone gets no empty
+        # folder in its place, only a start (which refuses without maps) needs it.
+        if data_dir.is_dir():
+            out.mkdir(exist_ok=True)
     except OSError as exc:
         raise MmapsError(
             f"{out} could not be emptied ({exc}); the generator skips every tile it finds, so "
             "it would leave a set that looks finished."
         ) from exc
+
+
+_COUNTS: dict[Path, tuple[int, int]] = {}
+"""`data/mmaps` -> (its modification time in ns, the files counted then).
+
+A finished set is thousands of tiles, and each poll of a done job asks whether
+they are still there; walking them every few seconds is real I/O on Windows. The
+folder is flat, so adding or removing a tile moves its own mtime, and the count
+is taken again only then."""
+
+
+def _set_size(job: Job) -> int:
+    """How many files `data/mmaps` holds, from `_COUNTS` while its mtime has not moved."""
+    out = job.data_dir / MMAPS_DIR
+    try:
+        stamp = out.stat().st_mtime_ns
+    except OSError:
+        _COUNTS.pop(out, None)
+        return 0
+    cached = _COUNTS.get(out)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    count = extract.counts({MMAPS_DIR: 0}, job.data_dir)[MMAPS_DIR]
+    _COUNTS[out] = (stamp, count)
+    return count
 
 
 def _pathfinding_on(job: Job) -> bool:

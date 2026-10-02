@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_trinitycore import CORE_DIR, FakeMmapsDocker
+from tests.support_trinitycore import CORE_DIR, FakeJob, FakeMmapsDocker
 from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytest resolves them
     ENTRY,
     MAP_NAMES,
@@ -706,7 +706,7 @@ def test_the_generators_threads_come_from_the_daemons_cores(
 
 def test_the_threads_option_refuses_nonsense() -> None:
     raw = ENTRY.model_dump(mode="json")
-    for bad in (0, -2, "all", "half "):
+    for bad in (0, -2, "all", "half ", True, "4", 2.0):
         raw["install"]["native"]["trinitycore"]["mmaps"]["threads"] = bad
         with pytest.raises(ValueError):
             type(ENTRY).model_validate(raw)
@@ -804,3 +804,119 @@ def test_restart_needed_allows_a_minute_of_clock_skew(
     fake.finish(0, tiles=MIN_FILES)
     fake.world_started_at = world_started
     assert status(server, fake, clock).restart_needed is due
+
+
+# -- fix round 2 ----------------------------------------------------------------------------
+
+
+def test_a_run_that_timed_out_is_removed_in_case_it_started(server: Path) -> None:
+    """`docker run -d` that does not answer in time may still have made the container."""
+    fake = FakeMmapsDocker()
+
+    def slow_run(spec: docker.ContainerRun, name: str, *, timeout: float) -> str:
+        fake.calls.append(f"run:{name}")
+        fake.jobs[name] = FakeJob(spec, "late")
+        raise docker.DockerCommandError("timed out after 120 s")
+
+    fake.run_detached = slow_run  # type: ignore[method-assign]
+    with pytest.raises(mmaps.MmapsError, match="timed out"):
+        start(server, fake)
+    assert fake.calls[-1] == f"remove:{NAME}" and NAME not in fake.jobs
+    assert record(server)["state"] == "failed"
+
+
+def test_a_route_removes_a_failed_jobs_container_if_it_is_still_there(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    raw = record(server)
+    raw["state"] = "failed"
+    (server / mmaps.RECORD_FILE).write_text(json.dumps(raw), "utf-8")
+    assert NAME in fake.jobs, "a live container the record no longer vouches for"
+    mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+    assert NAME not in fake.jobs
+
+
+def test_a_failed_jobs_container_that_cannot_be_removed_refuses_the_route(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    (server / mmaps.RECORD_FILE).write_text(
+        json.dumps({"state": "failed", "container": NAME}), "utf-8"
+    )
+    fake.refuse_remove = "daemon busy"
+    with pytest.raises(mmaps.MmapsError, match="the rebuild was not started"):
+        mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+
+
+def test_a_poll_over_an_emptied_set_it_cannot_clear_is_a_failed_state_not_a_raise(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.finish(0, tiles=MIN_FILES)
+    status(server, fake)
+    for tile in (server / "data" / "mmaps").iterdir():
+        tile.unlink()
+
+    def refuse(path: Path, keys: object) -> bool:
+        raise InstallerError(f"{path} is read-only")
+
+    monkeypatch.setattr(mmaps.conf, "set_keys", refuse)
+    now = status(server, fake)
+    assert now.state == "failed" and "read-only" in now.error
+
+
+def test_clearing_never_makes_a_data_folder_that_is_gone(server: Path) -> None:
+    import shutil
+
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.finish(0, tiles=MIN_FILES)
+    status(server, fake)
+    shutil.rmtree(server / "data")
+    assert status(server, fake).state == "not-started"
+    assert not (server / "data").exists()
+
+
+def test_a_finished_set_is_counted_once_until_its_folder_changes(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thousands of tiles on Windows: a poll must not walk them every time."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.finish(0, tiles=MIN_FILES)
+    status(server, fake)
+    walks: list[Path] = []
+    real = extract.counts
+
+    def counting(produces: dict[str, int], data_dir: Path) -> dict[str, int]:
+        walks.append(data_dir)
+        return real(produces, data_dir)
+
+    monkeypatch.setattr(mmaps.extract, "counts", counting)
+    status(server, fake)
+    status(server, fake)
+    assert walks == []
+    gone = next((server / "data" / "mmaps").iterdir())
+    gone.unlink()
+    import os
+
+    stamp = (server / "data" / "mmaps").stat().st_mtime_ns + 1_000_000_000
+    os.utime(server / "data" / "mmaps", ns=(stamp, stamp))
+    assert status(server, fake).state == "not-started"
+    assert len(walks) == 1
+
+
+def test_uninstall_removes_the_derived_job_and_never_a_container_a_record_names(
+    real_seam: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = real_seam
+    install(box)
+    name = job_name(box)
+    raw = record(box.server_dir)
+    raw["container"] = "centurion-worldserver"
+    (box.server_dir / mmaps.RECORD_FILE).write_text(json.dumps(raw), "utf-8")
+    monkeypatch.setattr(purge, "catalog_entry", lambda game: ENTRY if game == ENTRY.id else None)
+    rec = PurgeRecorder(box.server_dir, remove_folder=purge.remove_tree)
+    box.mmaps.calls.clear()
+    rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    removed = [call for call in box.mmaps.calls if call.startswith("remove:")]
+    assert removed == [f"remove:{name}"]

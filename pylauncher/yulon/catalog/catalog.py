@@ -23,6 +23,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -917,7 +918,7 @@ class TrinityCoreMmaps(MmapPlan):
             "It takes hours (README.md:193-194, facts §3) and the server starts without it."
         ),
     )
-    threads: Literal["half"] | Annotated[int, Field(ge=1)] = Field(
+    threads: Literal["half"] | Annotated[StrictInt, Field(ge=1)] = Field(
         default="half",
         description=(
             "What `{{THREADS}}` in `argv` becomes (`mmaps_generator --threads N`). `half`: half "
