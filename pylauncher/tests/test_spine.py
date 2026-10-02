@@ -2758,11 +2758,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "T179 Task 3 (fix round 1). Walks `Data/` of the TEMPORARY extraction client "
         "`play_client.create()` has just made beside the player's client (its marker names "
         "this game and server) for every `.MPQ` the block's `client_archives` does not keep, "
-        "and unlinks those NAMES from the copy, so the extractors never read another "
-        "server's patch or an HD pack. The player's own client is never listed or written: a "
-        "name in the copy shared with one of its files is removed as a name "
-        "(`play_client._remove_file()`, which puts back a read-only flag it had to clear), "
-        "and the copy is removed through `play_client.remove_folder()` either way"
+        "and RENAMES each into `.yulon-left-out/` inside the same copy (fix round 2), so the "
+        "extractors, which read `Data/` only, never see another server's patch or an HD pack. "
+        "A rename changes no flag on the inode the copy shares with the player's file; the "
+        "player's own client is never listed or written, and the copy is removed through "
+        "`play_client.remove_folder()` either way"
     ),
     ("catalog/families/extract.py", "overlay_files"): (
         "T179 Task 3. Lists the server's own checkout folder `dbc_overlay_from` "

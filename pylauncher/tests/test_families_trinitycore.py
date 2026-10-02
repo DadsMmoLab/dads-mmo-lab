@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import threading
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -338,7 +338,9 @@ def player_client(tmp_path: Path) -> Path:
     (client / "Data" / "enUS").mkdir(parents=True)
     for name in ("common", "common-2", "expansion", "lichking", "patch", "patch-2", "patch-3"):
         (client / "Data" / f"{name}.MPQ").write_bytes(f"MPQ {name}".encode())
-    for name in ("locale-enUS", "patch-enUS"):
+    # `Patch-enUS` in another case than the catalog's `patch-{locale}.MPQ`: a stock name
+    # spelled as some client zips spell it, which must be KEPT (fix round 2).
+    for name in ("locale-enUS", "Patch-enUS"):
         (client / "Data" / "enUS" / f"{name}.MPQ").write_bytes(f"MPQ {name}".encode())
     (client / "Data" / "patch-F.MPQ").write_bytes(b"MPQ an HD pack the player switched on")
     (client / "Data" / "patch-Y.MPQ").write_bytes(b"MPQ the stock Alt-World terrain")
@@ -575,7 +577,7 @@ STOCK = {
     *(f"Data/{name}.MPQ" for name in ("common", "common-2", "expansion", "lichking")),
     *(f"Data/{name}.MPQ" for name in ("patch", "patch-2", "patch-3")),
     "Data/enUS/locale-enUS.MPQ",
-    "Data/enUS/patch-enUS.MPQ",
+    "Data/enUS/Patch-enUS.MPQ",
 }
 
 
@@ -586,7 +588,9 @@ def test_the_extraction_client_keeps_only_the_stock_archives_and_the_required_pa
     lay_for_client_data(machine)
     said = run_stage(machine, "client-data")
     for program, files in machine.tools.seen.items():
-        archives = {rel for rel in files if rel.casefold().endswith(".mpq")}
+        archives = {
+            rel for rel in files if rel.startswith("Data/") and rel.casefold().endswith(".mpq")
+        }
         assert archives == STOCK | {"Data/patch-X.MPQ", "Data/enUS/patch-enUS-A.MPQ"}, program
     assert (
         "Left out of the copy, because this server's map data is made from the stock archives "
@@ -723,7 +727,7 @@ def test_a_folder_in_the_copys_place_that_is_not_this_installs_is_refused(
     stranger = copy_dir(machine)
     stranger.mkdir(parents=True)
     (stranger / "notes.txt").write_text("mine")
-    with pytest.raises(InstallerError, match="it was not made by this install, so it was left"):
+    with pytest.raises(InstallerError, match="Yu'lon did not make it, so it was left as it was"):
         run_stage(machine, "client-data")
     assert (stranger / "notes.txt").read_text() == "mine"
 
@@ -1136,8 +1140,12 @@ def test_uninstall_leaves_a_folder_at_the_recorded_path_that_is_not_this_install
     report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
     assert (stranger / "notes.txt").read_text() == "mine"
     (warning,) = report.warnings
-    assert warning.startswith(f"{stranger} is in the way of this install's temporary copy")
-    assert warning.endswith("made for its map data; delete that folder yourself.")
+    assert warning == (
+        f"{stranger} is where this server would keep a temporary copy of your client, but "
+        "Yu'lon did not make the folder that is there, so it was left alone. Do not delete it "
+        "unless you know what it is."
+    )
+    assert "delete that folder yourself" not in warning
 
 
 def test_uninstall_asks_for_the_copy_before_it_removes_the_server_folder(
@@ -1181,3 +1189,159 @@ def test_uninstall_removes_an_unfinished_copy_a_crash_inside_create_left(
     assert (
         sorted(path.name for path in machine.client.parent.iterdir() if "Yu'lon" in path.name) == []
     )
+
+
+# -- fix round 2 ---------------------------------------------------------------------
+
+
+def failing_removal(target: Path) -> Callable[..., None]:
+    """`play_client.remove_folder` that refuses `target` (a file held open) and removes others."""
+    real = play_client.remove_folder
+
+    def remove_folder(folder: Path, **kwargs: Any) -> None:
+        if folder == target:
+            raise PermissionError(errno.EACCES, "the file is open in another program")
+        real(folder, **kwargs)
+
+    return remove_folder
+
+
+def test_uninstall_offers_our_own_copy_for_deleting_only_when_it_could_not_remove_it(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = leftover_copy(machine)
+    monkeypatch.setattr(play_client, "remove_folder", failing_removal(target))
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
+    assert warning.startswith(
+        f"The temporary copy of your game client this server made for its map data, {target}, "
+        "could not be removed ("
+    )
+    assert warning.endswith("; delete that folder yourself.")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the hard link and the mode spy are POSIX here")
+def test_an_unlisted_read_only_archive_is_moved_aside_and_no_flag_is_touched(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lead's ruling: name-only on every platform -- a rename, never a delete that may
+    have to clear a read-only flag the copy's hard link shares with the player's file."""
+    archive = machine.client / "Data" / "patch-4.MPQ"
+    os.chmod(archive, 0o444)
+    before = snapshot(machine.client)
+    chmodded: list[Path] = []
+    real_chmod = os.chmod
+
+    def chmod(path: Any, mode: int, *args: Any, **kwargs: Any) -> None:
+        chmodded.append(Path(path))
+        real_chmod(path, mode, *args, **kwargs)
+
+    aside: list[bool] = []
+    tools = machine.tools
+
+    def run(spec: docker.ContainerRun, **kwargs: Any) -> docker.AttachedRun:
+        moved = copy_dir(machine) / trinitycore.LEFT_OUT_DIR / "Data" / "patch-4.MPQ"
+        aside.append(moved.is_file() and os.path.samefile(moved, archive))
+        return tools(spec, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+    lay_for_client_data(machine)
+    run_stage(machine, "client-data", run_container=run)
+    assert aside and all(aside), "moved aside within the copy, the same file, not deleted"
+    assert machine.tools.seen, "no extractor ran"
+    for program, files in machine.tools.seen.items():
+        data = [rel for rel in files if rel.endswith("patch-4.MPQ") and rel.startswith("Data")]
+        assert data == [], program
+    assert not [path for path in chmodded if path.name == "patch-4.MPQ"], "no flag on any name"
+    assert not [path for path in chmodded if path.is_relative_to(machine.client)]
+    assert snapshot(machine.client) == before
+    assert not os.path.lexists(copy_dir(machine))
+
+
+def test_a_record_pointing_at_this_servers_ready_to_play_client_cannot_remove_it(
+    machine: Machine,
+) -> None:
+    """Its marker is identical (this game, this server), its place is not the copy's."""
+    lay_for_client_data(machine)
+    playable = machine.client.parent / f"{machine.client.name} (Yu'lon – Centurion)"
+    play_client.create(
+        machine.client,
+        playable,
+        game=ENTRY.id,
+        server_dir=machine.server_dir,
+        allow_full_copy=False,
+    )
+    trinitycore._write_record(machine.server_dir, playable, machine.client)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    (warning,) = rec.uninstaller(game=ENTRY.id).run(keep_characters=False).warnings
+    assert play_client.read_marker(playable) is not None, "the player's ready-to-play client"
+    assert (playable / "Data" / "common.MPQ").is_file()
+    assert warning.startswith(f"{playable} is where this server would keep a temporary copy")
+
+
+@pytest.mark.parametrize("named", ["/", "."])
+def test_a_record_naming_no_folder_is_a_warning_and_the_uninstall_goes_on(
+    machine: Machine, named: str
+) -> None:
+    lay_for_client_data(machine)
+    trinitycore._write_record(machine.server_dir, Path(named), machine.client)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+    report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+    (warning,) = report.warnings
+    assert warning == (
+        f"This server's note of its temporary client copy names {Path(named)}, which is not a "
+        "folder Yu'lon makes, so nothing was removed there."
+    )
+    assert not machine.server_dir.exists(), "the uninstall went on"
+
+
+def link_failing_with(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """Every `create()` link refused with `code`, through the real `create()`."""
+    real_create = play_client.create
+
+    def refusing(src: Path, dst: Path) -> None:
+        raise OSError(code, os.strerror(code), str(dst))
+
+    def create(*args: Any, **kwargs: Any) -> play_client.Marker:
+        return real_create(*args, link=refusing, reflink=lambda src, dst: False, **kwargs)
+
+    monkeypatch.setattr(play_client, "create", create)
+
+
+def test_a_full_drive_is_told_to_free_the_space_the_copy_needs(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    link_failing_with(monkeypatch, errno.ENOSPC)
+    lay_for_client_data(machine)
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data")
+    message = str(caught.value)
+    assert "the drive ran out of space while it was being made" in message
+    assert re.search(r"Free about \d+\.\d GB on that drive, then press Install again\.", message)
+    assert "NTFS" not in message and "Program Files" not in message
+
+
+def test_a_client_folder_the_copy_refuses_says_its_own_reason(machine: Machine) -> None:
+    """`play_client.plan()`'s refusal has no OS cause: a `Data` that is a link elsewhere."""
+    lay_for_client_data(machine)
+    real_data = machine.client.parent / "elsewhere-Data"
+    (machine.client / "Data").rename(real_data)
+    (machine.client / "Data").symlink_to(real_data, target_is_directory=True)
+    with pytest.raises(InstallerError) as caught:
+        run_stage(machine, "client-data")
+    message = str(caught.value)
+    assert "that copy could not be made: The Data folder of" in message
+    assert "is a link to another folder" in message
+    assert "NTFS" not in message and "Free " not in message
+
+
+def test_a_copy_that_cannot_be_removed_after_a_success_says_uninstall_removes_it(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(play_client, "remove_folder", failing_removal(copy_dir(machine)))
+    lay_for_client_data(machine)
+    said = run_stage(machine, "client-data")
+    (warning,) = [line for line in said if line.startswith("warning:")]
+    assert warning.startswith(f"warning: the temporary copy of your client {copy_dir(machine)}")
+    assert warning.endswith("Uninstalling this server removes it.")
+    assert "next press" not in warning

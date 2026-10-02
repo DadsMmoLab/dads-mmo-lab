@@ -404,7 +404,8 @@ class Uninstaller:
         """
         from yulon.catalog.families.trinitycore import remove_leftover_extraction_client
 
-        return remove_leftover_extraction_client(self.server_dir, self.game)
+        left = remove_leftover_extraction_client(self.server_dir, self.game)
+        return "" if left is None else left.for_uninstall()
 
     def _pending_record(self) -> Path:
         """Where that record is, keyed as the channel keys it, for a sentence that names it."""
@@ -599,10 +600,8 @@ class Uninstaller:
         # BEFORE the folder: the record of where a leftover copy is lives in it.
         leftover = self._remove_extraction_client()
         if leftover:
-            warnings.append(
-                f"{leftover} It is a temporary copy of your game client this server made for "
-                "its map data; delete that folder yourself."
-            )
+            # Its own words: only a copy this install made is offered for deleting.
+            warnings.append(leftover)
 
         self._remove_folder(self.server_dir)
 
