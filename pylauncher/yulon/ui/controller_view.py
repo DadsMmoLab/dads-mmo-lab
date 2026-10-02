@@ -29,7 +29,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, cast
@@ -111,9 +111,14 @@ from yulon.apply import (
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
 from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
-from yulon.catalog.families import azerothcore, clientdir
+from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller_wow_centurion import accounts as centurion_accounts
+from yulon.controller_wow_centurion import characters as centurion_characters
+from yulon.controller_wow_centurion import console as centurion_console
+from yulon.controller_wow_centurion import controller as centurion_controller
+from yulon.controller_wow_centurion import maintenance as centurion_maintenance
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -497,22 +502,23 @@ makes a seventh button added to one and not the other raise on the first
 selection rather than silently mislabel.
 """
 
-_NO_MY_PARTY = (
-    "Building a bot party from the launcher works on WoW WotLK only (owner decision, "
-    "2026-09-06). The route is a pair of AzerothCore modules — the mod-ale Lua bridge, "
-    "and mod-playerbots' own addclass — so {game} would need a route of its own before "
-    "there could be a control here. One that sent these commands at it would be a "
-    "button that cannot work."
-)
-"""The whole My Party surface on the three games that have no route to it.
+_NO_MY_PARTY = decisions.PARTY_REASON
+"""The whole My Party surface on the games that have no route to it.
 
-A sentence rather than a disabled panel, which is `_build_characters_tab`'s rule
-for the same situation: a control that cannot work is a promise this tab cannot
-keep. The scope is the owner's (`pyplan/phase8-parity-decisions.md:41`, "My Party
-WotLK-only; Browse Bots on all four") and the reason is the engine's, which is
-why no later box can change it by measuring something —
-`party.InstallParty.for_entry_is_possible` is the same rule spelled in the module
-this text is about."""
+The family-decision registry's own sentence (T179): the view says exactly what
+`catalog/families/decisions.py` records as the reason My Party is not available,
+so the two cannot drift. A sentence rather than a disabled panel, which is
+`_build_characters_tab`'s rule for the same situation: a control that cannot
+work is a promise this tab cannot keep. The scope is the owner's
+(`pyplan/phase8-parity-decisions.md:41`) and the reason is the engine's --
+`party.InstallParty.for_entry_is_possible` is the same rule spelled in the
+module this text is about."""
+
+NO_ADDON_MODULES = (
+    "{game} has no add-on modules: its bots and its own features are built into the "
+    "server itself, so there is nothing to add or remove here."
+)
+"""The Modules tab of a game whose server takes no add-ons (T179: Centurion)."""
 
 _RENAME_OFFLINE_LABEL = "has to be logged in to be renamed"
 """What the button says when the tree's entry refuses an offline rename.
@@ -527,6 +533,23 @@ server: it is the field's own definition read back ("what to say instead of
 offering the at-login rename to a character who is NOT logged in"), and it is
 the same shape the revive refusal beside it takes.
 """
+
+
+def _withheld_sentence(withheld: Mapping[str, str]) -> str:
+    """One line naming the Characters verbs this tree does not offer, and why (T179).
+
+    Grouped by reason, in the tab's own order, with the tab's own labels: the verbs
+    a person would have looked for, not their ids.
+    """
+    labels = dict(zip(play_module.VERBS, _CHARACTER_ACTIONS, strict=True))
+    reasons: dict[str, list[str]] = {}
+    for verb in play_module.VERBS:
+        if verb in withheld:
+            reasons.setdefault(withheld[verb], []).append(labels[verb])
+    return " ".join(
+        f"Not offered on this server yet: {', '.join(names)} -- {reason}."
+        for reason, names in reasons.items()
+    )
 
 
 def _highest_level(entry: CatalogEntry) -> int:
@@ -1423,6 +1446,40 @@ and the sink is not a nicety.
 """
 
 
+@dataclass(frozen=True)
+class Pathfinding:
+    """T179: the background movement-map job's reading and its two presses, for one install.
+
+    `status` asks Docker (`mmaps.mmaps_status`), so the Server tab asks it off the
+    GUI thread; `start`/`stop` answer with the sentence they want shown and raise
+    `mmaps.MmapsError` with the refusal. One object, so the reading and the presses
+    cannot be wired to two different servers.
+    """
+
+    status: Callable[[], mmaps.MmapsStatus]
+    start: Callable[[], str]
+    stop: Callable[[], str]
+
+
+def _pathfinding(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> Pathfinding | None:
+    """The job's seam where the entry makes its movement maps in the background.
+
+    A catalog fact (`mmaps.background_block`), so it is wired in `_assemble` for
+    every game the way the time zone is. Not for a server inside a WSL distro: the
+    job runs on THIS host's Docker (`mmaps.DockerRunner`), which would be asked about
+    a container it has never heard of.
+    """
+    if wsl_distro is not None or mmaps.background_block(entry) is None:
+        return None
+    return Pathfinding(
+        status=lambda: mmaps.mmaps_status(server_dir, entry),
+        start=lambda: mmaps.start_mmaps(server_dir, entry),
+        stop=lambda: mmaps.stop_mmaps(server_dir, entry),
+    )
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -1848,6 +1905,26 @@ class ControllerServices:
     another server also has a receipt for is never offered. Bound by `main.py`
     from the live `AppState`; `None` (every factory) offers this server's own.
     A WSL-distro install is left out: reading its folder boots its distro (T133).
+    """
+
+    pathfinding: Pathfinding | None = None
+    """T179: the Server tab's movement-map line and its Start/Stop, where the entry has the job.
+
+    `None` hides the line: every game whose movement maps come with the install.
+    """
+
+    characters_withheld: Mapping[str, str] = field(default_factory=dict)
+    """Characters verbs (`play.VERBS`) this tree does not offer, each with why (T179).
+
+    The tab draws none of them and says the reasons instead; `play.InstallPlay`
+    refuses a press of one as well. Empty everywhere but a tree whose verbs have
+    not all been watched to work (Centurion, until T179 Task 9).
+    """
+
+    no_modules_note: str = ""
+    """What the Modules tab says in place of an empty list, for a game with no add-ons.
+
+    Empty keeps the panel's own sentence (`modules_panel.NO_MODULES_NOTE`).
     """
 
     @classmethod
@@ -2372,6 +2449,9 @@ def _assemble(
         # T171. HERE for T99's reason: the file and the services are catalog
         # facts, and it is files only, so a server inside a WSL distro is served.
         time_zone=server_time_zone.time_zone_route(entry, server_dir),
+        # T179. HERE for T171's reason: whether a server makes its movement maps
+        # in the background is a catalog fact (`mmaps.background_block`).
+        pathfinding=_pathfinding(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
@@ -3127,6 +3207,142 @@ def _for_vanilla(
     )
 
 
+def _for_centurion(
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """Centurion (TrinityCore, T179), through `controller_wow_centurion`.
+
+    Every seam is the entry's: the package takes the entry rather than reading
+    the shipped catalog, because `wow-centurion` lands there only in T179 Task 7.
+
+    The measured surfaces follow the entry's own blocks, as on every other tree
+    (`test_controller_packages_agree`): the dashboard, the log snapshot and Browse
+    bots ride on `observability`; Accounts on `accounts.level`; Characters on
+    `play`. What is not offered is said where it would be: My Party (the
+    registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
+    verb not yet watched to work on a live Centurion server
+    (`centurion_characters.withheld`).
+
+    No `import_probe`: the import is the install engine's marker-gated SQL plan,
+    and the Repair button's only action, `docker.repair_import()`, refuses an
+    entry with no import service. No `client_dir` use beyond the Steam entry: a
+    Centurion "module" does not exist.
+    """
+    password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    spec = entry.container_spec()
+    measured = entry.observability is not None
+    recorder = (
+        logsnap.Recorder(
+            spec,
+            server_dir,
+            game=entry.id,
+            logs_dir=platform.config_dir() / "logs",
+            wsl_distro=wsl_distro,
+        )
+        if measured
+        else None
+    )
+    watcher = (
+        dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+        if measured
+        else None
+    )
+    # SOAP on `urn:TC` at 127.0.0.1:7878, switched on in `etc/worldserver.conf`
+    # (`operations.enable_conf`): TrinityCore reads no environment.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: centurion_accounts.create_account(
+            entry, sql, name, pw, gm_level=level
+        ),
+        reset=lambda name, pw: centurion_accounts.reset_own_password(entry, sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
+    accounts_admin = (
+        useraccounts.InstallAccounts(
+            entry,
+            server_dir,
+            sql=sql,
+            channel_for_saved=channel.live_channel,
+            app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+        )
+        if entry.accounts.level is not None
+        else None
+    )
+    withheld = centurion_characters.withheld(entry)
+    characters_admin = (
+        play_module.InstallPlay(
+            entry,
+            server_dir,
+            sql=sql,
+            channel_for_saved=channel.live_channel,
+            withheld=withheld,
+        )
+        if entry.play is not None
+        else None
+    )
+    services = _assemble(
+        entry,
+        server_dir,
+        client_dir=client_dir,
+        wsl_distro=wsl_distro,
+        dashboard=watcher.tick if watcher is not None else None,
+        log_snapshot=recorder,
+        channel_setup=channel,
+        accounts=accounts_admin,
+        play=characters_admin,
+        bots=_BotBrowser(entry, server_dir, sql) if measured else None,
+        # The Uninstall of the gated families, over this engine's two extras:
+        # the movement-map job is removed before the containers and the
+        # temporary extraction client through its link-safe remover (T179
+        # Tasks 3 and 4, `purge.Uninstaller`'s own seams).
+        uninstall=purge.Uninstaller(
+            game=entry.id,
+            server_dir=server_dir,
+            spec=spec,
+            image_refs=composegen.built_image_refs(entry, server_dir),
+            logs_dir=platform.config_dir() / "logs",
+            wsl_distro=wsl_distro,
+            forget=forget_record(entry.id, server_dir),
+        ),
+        controller=centurion_controller.CenturionController(
+            entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
+        sql=sql,
+        send_console=lambda cmd: centurion_console.send_command(entry, cmd, wsl_distro=wsl_distro),
+        create_account=lambda name, pw, gm: centurion_accounts.create_account(
+            entry, sql, name, pw, gm_level=gm
+        ),
+        store=_no_manifest_store(entry),
+        applier=None,
+        backup=lambda: centurion_maintenance.backup(
+            entry, server_dir, mysql, wsl_distro=wsl_distro
+        ),
+        plan_restore=lambda path: centurion_maintenance.plan_restore(
+            entry, path, server_dir, wsl_distro=wsl_distro
+        ),
+        restore=lambda plan: centurion_maintenance.restore(
+            entry, plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
+        ),
+    )
+    return replace(
+        services,
+        characters_withheld=withheld,
+        no_modules_note=NO_ADDON_MODULES.format(game=entry.name),
+    )
+
+
 ADDONS_PARENT = "Interface"
 """The folder a client addon is written under, and the one a client must already have.
 
@@ -3469,6 +3685,9 @@ _FACTORIES: dict[str, _Factory] = {
     "wow-tbc": _for_tbc,
     "wow-vanilla": _for_vanilla,
     "wow-tortoise": _for_tortoise,
+    # T179: the `trinitycore` family's first game. Its catalog entry is T179
+    # Task 7's; until it ships, nothing in the catalog reaches this row.
+    "wow-centurion": _for_centurion,
 }
 """Catalog id → the wiring for that game. `for_entry()` is the only reader.
 
@@ -3759,6 +3978,11 @@ SERVER_BUILD_TIP = (
     "commit this app was tested against. Every entry asks first."
 )
 """The menu button's own tooltip; each entry keeps the one its button had (T89)."""
+
+PATHFINDING_START = "Make the pathfinding data"
+PATHFINDING_STOP = "Stop making the pathfinding data"
+PATHFINDING_ASKING = "Pathfinding data: asking how far it has got…"
+PATHFINDING_UNREAD = "Could not read how far the pathfinding data has got: {exc}"
 
 REMOVE_IDLE = "Stop and remove containers…"
 REMOVE_ARMED = "Press again to remove"
@@ -6113,8 +6337,10 @@ class ControllerView(QWidget):
         # T95: through `_tick`, so a tick never marks the poll in flight stale.
         self._timer.timeout.connect(self._tick)
         self._timer.timeout.connect(self.refresh_verdict)
+        self._timer.timeout.connect(self.refresh_pathfinding)
         if status_poll_ms > 0:
             self._timer.start(status_poll_ms)
+            self.refresh_pathfinding()
             # And once now. `QTimer.start()` fires nothing until the interval
             # has passed, so a tab opened over a running server spent its first
             # five seconds saying "status: unknown" with Start enabled
@@ -6203,6 +6429,19 @@ class ControllerView(QWidget):
         self.upstream_label = QLabel("", tab)
         self.upstream_label.setWordWrap(True)
         self.upstream_label.setVisible(False)
+        # T179: how far the background movement-map job has got, read off the
+        # GUI thread on the poll, with Start where a run could begin and Stop
+        # where one is running. Hidden for a server without the job.
+        self._pathfinding_status: mmaps.MmapsStatus | None = None
+        self._pathfinding_pending = False
+        self._pathfinding_pressing = False
+        self.pathfinding_label = QLabel("", tab)
+        self.pathfinding_label.setWordWrap(True)
+        self.pathfinding_start_button = QPushButton(PATHFINDING_START, tab)
+        self.pathfinding_start_button.clicked.connect(self.start_pathfinding)
+        self.pathfinding_stop_button = QPushButton(PATHFINDING_STOP, tab)
+        self.pathfinding_stop_button.clicked.connect(self.stop_pathfinding)
+        self._show_pathfinding()
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
         # `client` step or the Steam entry can use, and hiding the row there
@@ -6444,6 +6683,12 @@ class ControllerView(QWidget):
         box.addWidget(self.status_label)
         box.addWidget(self.distro_label)
         box.addWidget(self.upstream_label)
+        box.addWidget(self.pathfinding_label)
+        pathfinding_row = QHBoxLayout()
+        pathfinding_row.addWidget(self.pathfinding_start_button)
+        pathfinding_row.addWidget(self.pathfinding_stop_button)
+        pathfinding_row.addStretch(1)
+        box.addLayout(pathfinding_row)
         box.addWidget(self.client_dir_label)
         if self.set_client_dir_button is not None:
             box.addWidget(self.set_client_dir_button)
@@ -6723,6 +6968,109 @@ class ControllerView(QWidget):
         """No verdict line: the distro is not known to run, so no world to describe (T133)."""
         self.verdict_label.setText("")
         self.verdict_label.setVisible(False)
+
+    # ------------------------------------------- the movement-map job (T179)
+
+    @Slot()
+    def refresh_pathfinding(self) -> None:
+        """Ask the job how far it has got, off the GUI thread (it asks Docker).
+
+        Its own in-flight guard, for `refresh_verdict()`'s reason: a reading slower
+        than the poll must not queue up behind itself.
+        """
+        seam = self.services.pathfinding
+        if seam is None or self._pathfinding_pending:
+            return
+        self._pathfinding_pending = True
+        self._run(seam.status, self._pathfinding_read, self._pathfinding_read_failed)
+
+    @Slot(object)
+    def _pathfinding_read(self, status: object) -> None:
+        self._pathfinding_pending = False
+        if isinstance(status, mmaps.MmapsStatus):
+            self._pathfinding_status = status
+        self._show_pathfinding()
+
+    @Slot(object)
+    def _pathfinding_read_failed(self, exc: object) -> None:
+        """A reading that broke says so on its own line; the presses wait for a good one."""
+        self._pathfinding_pending = False
+        logger.warning(f"could not read the pathfinding data's progress: {exc}")
+        self._pathfinding_status = None
+        self.pathfinding_label.setText(PATHFINDING_UNREAD.format(exc=exc))
+        self.pathfinding_label.setVisible(True)
+        self.pathfinding_start_button.setVisible(False)
+        self.pathfinding_stop_button.setVisible(False)
+
+    def _show_pathfinding(self) -> None:
+        """Draw the line and its two presses from the last reading.
+
+        Start is offered where a run could begin and is held while a press of this
+        tab runs (`_busy`): a Rebuild, an Update, a Return to the tested build or an
+        Uninstall each stop the job themselves (`before_rebuild`, Uninstall's own
+        seam), and a job started beside one would run against the server the press
+        is replacing or removing.
+        """
+        if not hasattr(self, "pathfinding_label"):
+            return  # `_set_busy()` before the Server tab exists
+        seam, status = self.services.pathfinding, self._pathfinding_status
+        if seam is None:
+            for widget in (
+                self.pathfinding_label,
+                self.pathfinding_start_button,
+                self.pathfinding_stop_button,
+            ):
+                widget.setVisible(False)
+            return
+        self.pathfinding_label.setVisible(True)
+        if status is None:
+            self.pathfinding_label.setText(PATHFINDING_ASKING)
+        else:
+            self.pathfinding_label.setText(status.line())
+        can_start = status is not None and status.can_start
+        can_stop = status is not None and status.can_stop
+        self.pathfinding_start_button.setVisible(can_start)
+        self.pathfinding_stop_button.setVisible(can_stop)
+        self.pathfinding_start_button.setEnabled(
+            can_start and not self._busy and not self._pathfinding_pressing
+        )
+        self.pathfinding_stop_button.setEnabled(can_stop and not self._pathfinding_pressing)
+
+    @Slot()
+    def start_pathfinding(self) -> None:
+        """Start the job: offered after a failure, or where it never started."""
+        seam = self.services.pathfinding
+        if seam is None or self._busy or self._pathfinding_pressing:
+            return
+        self._press_pathfinding(seam.start)
+
+    @Slot()
+    def stop_pathfinding(self) -> None:
+        """Stop a running job: its container and its partial output go, nothing is switched on."""
+        seam = self.services.pathfinding
+        if seam is None or self._pathfinding_pressing:
+            return
+        self._press_pathfinding(seam.stop)
+
+    def _press_pathfinding(self, press: Callable[[], str]) -> None:
+        self._pathfinding_pressing = True
+        self._show_pathfinding()
+        self._run(press, self._pathfinding_pressed, self._pathfinding_press_failed)
+
+    @Slot(object)
+    def _pathfinding_pressed(self, said: object) -> None:
+        self._pathfinding_pressing = False
+        self.problem_label.setText(str(said))
+        self._pathfinding_pending = False
+        self.refresh_pathfinding()
+
+    @Slot(object)
+    def _pathfinding_press_failed(self, exc: object) -> None:
+        self._pathfinding_pressing = False
+        self.problem_label.setText(str(exc))
+        self.action_failed.emit(str(exc))
+        self._pathfinding_pending = False
+        self.refresh_pathfinding()
 
     @Slot(object)
     def _verdict_failed(self, exc: object) -> None:
@@ -7226,6 +7574,8 @@ class ControllerView(QWidget):
         not have its greyed button handed back by a job ending.
         """
         self._busy = busy
+        # T179: the movement-map job's Start is held while any press runs.
+        self._show_pathfinding()
         if not busy:
             # T158: whatever job just ended, a load wait's words and its button
             # are over with it. `_tuning_job_done()` and the Bots tab's handlers
@@ -10199,9 +10549,34 @@ class ControllerView(QWidget):
         self.set_level_absent = QLabel("", actions)
         self.set_level_absent.setWordWrap(True)
         self.set_level_absent.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow("Teleport to", self.teleport_where)
-        form.addRow(self.teleport_button)
-        if self._set_level_command() is not None:
+        # T179: a verb this tree withholds is neither drawn nor named on a button;
+        # one line below the form names them and says why (the entry's own reason,
+        # `services.characters_withheld`).
+        withheld = self.services.characters_withheld
+        self.characters_withheld_label = QLabel(_withheld_sentence(withheld), actions)
+        self.characters_withheld_label.setWordWrap(True)
+        self.characters_withheld_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.characters_withheld_label.setVisible(bool(withheld))
+        for verb, widgets in (
+            ("teleport", (self.teleport_where, self.teleport_button)),
+            ("rename", (self.rename_button,)),
+            ("revive", (self.revive_button,)),
+            ("mail_gold", (self.gold_amount, self.mail_gold_button)),
+            ("send_gear", (self.send_gear_button,)),
+        ):
+            if verb in withheld:
+                for widget in widgets:
+                    widget.setVisible(False)
+        if "teleport" not in withheld:
+            form.addRow("Teleport to", self.teleport_where)
+            form.addRow(self.teleport_button)
+        if "set_level" in withheld:
+            self.new_level.setVisible(False)
+            self.set_level_button.setVisible(False)
+            self.set_level_absent.setVisible(False)
+        elif self._set_level_command() is not None:
             form.addRow("Level", self.new_level)
             form.addRow(self.set_level_button)
             self.set_level_absent.setVisible(False)
@@ -10216,11 +10591,17 @@ class ControllerView(QWidget):
             self.set_level_absent.setVisible(bool(reason))
             if reason:
                 form.addRow(self.set_level_absent)
-        form.addRow(self.rename_button)
-        form.addRow(self.revive_button)
-        form.addRow("Gold", self.gold_amount)
-        form.addRow(self.mail_gold_button)
-        form.addRow(self.send_gear_button)
+        if "rename" not in withheld:
+            form.addRow(self.rename_button)
+        if "revive" not in withheld:
+            form.addRow(self.revive_button)
+        if "mail_gold" not in withheld:
+            form.addRow("Gold", self.gold_amount)
+            form.addRow(self.mail_gold_button)
+        if "send_gear" not in withheld:
+            form.addRow(self.send_gear_button)
+        if withheld:
+            form.addRow(self.characters_withheld_label)
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
@@ -10289,10 +10670,13 @@ class ControllerView(QWidget):
             self.send_gear_button,
         )
         drawn = self._set_level_command() is not None
+        withheld = self.services.characters_withheld
         return tuple(
             (button, label)
-            for button, label in zip(every, _CHARACTER_ACTIONS, strict=True)
-            if drawn or button is not self.set_level_button
+            for button, label, verb in zip(
+                every, _CHARACTER_ACTIONS, play_module.VERBS, strict=True
+            )
+            if (drawn or button is not self.set_level_button) and verb not in withheld
         )
 
     def character_buttons(self) -> tuple[QPushButton, ...]:
@@ -10367,6 +10751,8 @@ class ControllerView(QWidget):
         # (yulon-win11, 2026-09-23), so every arrow key through the list, and
         # every refresh that kept a row selected, froze the window for about
         # half a second. Until the answer lands the button promises nothing.
+        if "send_gear" in self.services.characters_withheld:
+            return  # T179: not drawn, so nothing to read for it
         self.send_gear_button.setText(f"Reading what {name} is wearing…")
         self.send_gear_button.setEnabled(False)
         self._ask_for_gear(self._gear_generation, name)
@@ -11552,7 +11938,7 @@ class ControllerView(QWidget):
         seam = self.services.my_party
         if seam is None:
             self.party_panel: PartyPanel | None = None
-            self.my_party_absent.setText(_NO_MY_PARTY.format(game=self.entry.name))
+            self.my_party_absent.setText(_NO_MY_PARTY)
             inside.addWidget(self.my_party_absent)
             return group
         self.my_party_absent.setVisible(False)
@@ -12884,6 +13270,10 @@ class ControllerView(QWidget):
         if self.services.store is None:
             self._manifests.clear()
             self.modules_panel.set_rows(())
+            if self.services.no_modules_note:
+                # T179: a game whose server takes no add-ons says so, not "no
+                # manifests yet", which reads as something still to come.
+                self.modules_panel.empty_label.setText(self.services.no_modules_note)
             self._refresh_rebuild_banner()
             return
         if self._waits_for_the_distro("modules", self.reload_modules):
@@ -15623,7 +16013,7 @@ class ControllerView(QWidget):
         rule for an ambiguity `_key_for()` already settles once, in the one
         place that has to guess.
         """
-        if (family, module_id) == botpop.CARD and file == botpop.CONF_FILE:
+        if (family, module_id) == botpop.CARD and file == botpop.card_file(self.entry):
             return botpop.conf_keys(self.entry)
         manifest = self._manifests.get((family, module_id))
         if manifest is None:

@@ -21,6 +21,12 @@ file's default is what the install's compose stage renders (owner decision 4,
 the channel's own keys while its press is live. The time zone is kept (owner,
 2026-09-28, T171): the render lays the file's own `TZ` lines over the new one.
 
+Centurion (TrinityCore, T179) is the first case again: its install copies
+`worldserver.conf`, `authserver.conf` and `playerbots.conf` out of its image's
+`.dist` and patches its conf table into them (`Updates.EnableDatabases = 0`,
+the database strings, SOAP, the bot population), so its default is made the
+same way, from the same image.
+
 **Only the server's own files.** A game's set is exactly its install conf
 table, or for WotLK `AZEROTHCORE_CORE_FILES` plus the override. A module's own
 conf file is never touched (the owner's decision); `reset()` refuses a file
@@ -47,7 +53,7 @@ from typing import Literal
 
 from yulon import dbsecret, docker, platform, resources, server_build_presses, tuning
 from yulon.catalog import bot_dashboard, composegen
-from yulon.catalog.catalog import CatalogEntry, ConfPatch
+from yulon.catalog.catalog import CatalogEntry, ConfPatch, ConfPatchTable
 from yulon.catalog.families import azerothcore, conf
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
@@ -76,18 +82,31 @@ override is not a file that editor shows. `core_files()` adds it.
 def core_files(entry: CatalogEntry) -> tuple[str, ...]:
     """This game's own settings files, relative to the server folder, in table order.
 
-    A CMaNGOS game's are exactly its install conf table, under `etc/`; WotLK's
-    are its three confs and the compose override. Any other family has none,
-    and the tab draws no button.
+    A CMaNGOS or TrinityCore game's are exactly its install conf table, under
+    `etc/`; WotLK's are its three confs and the compose override. Any other
+    family has none, and the tab draws no button.
     """
     native_block = entry.install.native
     if native_block is None:
         return ()
     if native_block.family == "azerothcore":
         return (*AZEROTHCORE_CORE_FILES, composegen.OVERRIDE_FILE)
-    if native_block.family == "cmangos" and native_block.cmangos is not None:
-        return tuple(f"{ETC_DIR}/{name}" for name in native_block.cmangos.conf.files)
+    table = _conf_table(entry)
+    if table is not None:
+        return tuple(f"{ETC_DIR}/{name}" for name in table.files)
     return ()
+
+
+def _conf_table(entry: CatalogEntry) -> ConfPatchTable | None:
+    """The conf table a CMaNGOS or TrinityCore install writes into `etc/`, or `None`."""
+    native_block = entry.install.native
+    if native_block is None:
+        return None
+    if native_block.family == "cmangos" and native_block.cmangos is not None:
+        return native_block.cmangos.conf
+    if native_block.family == "trinitycore" and native_block.trinitycore is not None:
+        return native_block.trinitycore.conf
+    return None
 
 
 def label(file: str) -> str:
@@ -294,7 +313,7 @@ def default_texts(
             except (composegen.ComposeGenError, OSError) as exc:
                 reasons[composegen.OVERRIDE_FILE] = OVERRIDE_UNRENDERABLE.format(exc=exc)
         return texts, reasons
-    if family == "cmangos":
+    if family in ("cmangos", "trinitycore"):
         return _from_image(entry, server_dir, files, wsl_distro=wsl_distro, seams=seams)
     return {}, dict.fromkeys(files, NO_DEFAULT.format(game=entry.name))
 
@@ -418,7 +437,10 @@ def _from_image(
     wsl_distro: str | None,
     seams: Seams,
 ) -> Built:
-    """CMaNGOS/Tortoise: the image's template, patched by the install's table and tokens.
+    """CMaNGOS/Tortoise/TrinityCore: the image's template, patched by the install's table.
+
+    `TrinityCoreInstaller` is a `CmangosInstaller` (T179 Task 3): its conf stage is
+    the same two calls over its own table, which `conf_table()` answers.
 
     One `docker cp` of the whole source dir into `RESET_STAGING`, as
     `conf.materialise()` does into `etc/` -- but never into `etc/`, because
@@ -719,10 +741,10 @@ def install_keys(entry: CatalogEntry, file: str) -> frozenset[str]:
     is dropped too -- dropping more is the safe side. WotLK's confs have no
     table, so none.
     """
-    native_block = entry.install.native
-    if native_block is None or native_block.cmangos is None:
+    table = _conf_table(entry)
+    if table is None:
         return frozenset()
-    patch = native_block.cmangos.conf.files.get(file.removeprefix(f"{ETC_DIR}/"))
+    patch = table.files.get(file.removeprefix(f"{ETC_DIR}/"))
     if patch is None or not file.startswith(f"{ETC_DIR}/"):
         return frozenset()
     return frozenset(key.casefold() for key in patch.keys)
@@ -756,10 +778,7 @@ def install_writes(entry: CatalogEntry, file: str) -> bool:
         return True
     if file in azerothcore.confs_from_dist(entry):
         return True
-    native_block = entry.install.native
-    return (
-        native_block is not None and native_block.family == "cmangos" and file in core_files(entry)
-    )
+    return _conf_table(entry) is not None and file in core_files(entry)
 
 
 def _install_mode(entry: CatalogEntry, server_dir: Path, file: str) -> int:

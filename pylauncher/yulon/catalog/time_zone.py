@@ -42,6 +42,10 @@ what a rewrite keeps is what the containers were going to read.
   governs after a zone's last listed change, so a zone with changes scheduled
   ahead could not be written that way.)
 
+* Centurion (TrinityCore, T179, an image Yu'lon builds too): its runtime stage
+  is `ubuntu:24.04` with no `tzdata` either (`wow-centurion/native/Dockerfile.tmpl`,
+  read, not yet measured in a built image), so it is given the same folder.
+
 **The names come from the `tzdata` package the app ships**, not from the
 computer: Windows has no zone database for Python to read, and one list on
 every host is one list to test. "This computer's zone" is Qt's answer
@@ -205,7 +209,7 @@ def _family(entry: CatalogEntry) -> str | None:
 
 def services(entry: CatalogEntry) -> tuple[str, ...]:
     """The login server's and the world's services, named as their containers."""
-    if _family(entry) not in ("azerothcore", "cmangos"):
+    if _family(entry) not in ("azerothcore", "cmangos", "trinitycore"):
         return ()
     spec = entry.container_spec()
     return (spec.auth, spec.world)
@@ -219,8 +223,12 @@ def line_for(entry: CatalogEntry, zone: str) -> Line | None:
 
 
 def needs_files(entry: CatalogEntry) -> bool:
-    """Whether this game's image has no zone files, so the server folder must bring them."""
-    return _family(entry) == "cmangos"
+    """Whether this game's image has no zone files, so the server folder must bring them.
+
+    The images Yu'lon builds: CMaNGOS's, and TrinityCore's (T179), whose runtime
+    stage is `ubuntu:24.04` with no `tzdata` (`wow-centurion/native/Dockerfile.tmpl`).
+    """
+    return _family(entry) in ("cmangos", "trinitycore")
 
 
 def bind_line(label: str) -> str:

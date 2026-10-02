@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, cast
 
 from yulon import client_packs, docker, platform, play_client
+from yulon.catalog import bot_count
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
@@ -501,12 +502,24 @@ class TrinityCoreInstaller(CmangosInstaller):
         folder as `worldserver.conf`, the only place the world server reads it
         (worldserver/Main.cpp:242-250, facts §4).
 
-        Without the two CMaNGOS carry-overs: the random-bot count read back from a
-        previous press (`bot_count`) is Task 5's for this family, and the bot
-        dashboard is the Tortoise module's (`families/decisions.py`).
+        The player's random-bot count is carried over, as on CMaNGOS (T117, T179
+        Task 5): read back from `playerbots.conf` BEFORE `materialise()`, and only
+        once this stage has finished before -- until then a pair in the file is
+        the `.dist`'s. The bot dashboard is the Tortoise module's, not carried here.
         """
         tc = self._tc()
         etc_dir = ctx.server_dir / ETC_DIR
+        table = (
+            bot_count.conf_table(
+                tc.conf,
+                etc_dir,
+                name=tc.conf.playerbots_conf,
+                low=bot_count.TC_MIN_KEY,
+                high=bot_count.TC_MAX_KEY,
+            )
+            if ctx.state.has("conf")
+            else tc.conf
+        )
         image_ref = self._image_ref(ctx, tc.extract.image)
         try:
             copied = conf.materialise(
@@ -525,7 +538,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         for path in copied:
             yield f"Copied {path.name} out of the server image."
         try:
-            changed = conf.apply_table(tc.conf, etc_dir, self._secret_tokens(ctx))
+            changed = conf.apply_table(table, etc_dir, self._secret_tokens(ctx))
         except InstallerError:
             raise
         except (RuntimeError, OSError) as exc:
@@ -934,14 +947,22 @@ def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None
     return left.for_uninstall()
 
 
+def recorded_leftover_count(*, config_dir: Path | None = None) -> int | None:
+    """How many temporary client copies are still noted for removal; `None` if unreadable."""
+    try:
+        return len(_read_leftovers(_leftovers_path(config_dir)))
+    except LeftoversUnreadable:
+        return None
+
+
 def remove_recorded_leftovers(*, config_dir: Path | None = None) -> list[str]:
     """Retry every copy Uninstall could not remove; drop the ones now gone; the warnings left.
 
-    Meant for the app's start (T179 Task 5 wires it from the main window; this task
-    may not edit it). The same `_remove_target()` every other route uses, so the same
-    checks hold: a folder that is not ours at its place is never touched, and stays
-    listed with a warning rather than being forgotten. A list that cannot be read is
-    left exactly as it is, with one warning; it is never rewritten from nothing.
+    Called once at the app's start (`main.sweep_leftover_client_copies`). The same
+    `_remove_target()` every other route uses, so the same checks hold: a folder
+    that is not ours at its place is never touched, and stays listed with a warning
+    rather than being forgotten. A list that cannot be read is left exactly as it
+    is, with one warning; it is never rewritten from nothing.
     """
     path = _leftovers_path(config_dir)
     try:

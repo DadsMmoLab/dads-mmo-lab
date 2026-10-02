@@ -411,9 +411,10 @@ def repair_compose_for_app(
 ) -> ComposeRepairRoute | None:
     """T106's "Repair server files…" for this install, or None when it has none.
 
-    Offered to the CMaNGOS family (TBC, Vanilla, Tortoise) and, since T170, to
-    AzerothCore (WotLK), read off `install.native.family`. The CMaNGOS installs
-    keep the `docker-compose.yml` they were installed with: `rebuild_stages()`
+    Offered to the CMaNGOS family (TBC, Vanilla, Tortoise), since T170 to
+    AzerothCore (WotLK), and since T179 to TrinityCore (Centurion), read off
+    `install.native.family`. The CMaNGOS and TrinityCore installs keep the
+    `docker-compose.yml` they were installed with: `rebuild_stages()`
     leaves generate-compose out on purpose, and Update-to-latest rewrites a
     compose file only for a source whose `dest` is the server dir
     (`app_written_paths()`), which is WotLK's alone. So WotLK's own file is
@@ -434,7 +435,7 @@ def repair_compose_for_app(
     if wsl_distro is not None:
         return None
     block = entry.install.native
-    if block is None or block.family not in ("cmangos", "azerothcore"):
+    if block is None or block.family not in ("cmangos", "azerothcore", "trinitycore"):
         return None
     options = InstallOptions(server_dir=server_dir)
     return ComposeRepairRoute(

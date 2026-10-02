@@ -112,12 +112,24 @@ _NOT_THE_TC_ENGINE = (
     "never reached: this is inside the TrinityCore engine, which only its own entries run"
 )
 _CMANGOS_CONTROLLER = "never reached: only this CMaNGOS game's own controller package reads it"
+_CENTURION_CONTROLLER = (
+    "never reached: the Centurion controller package refuses an entry of another family"
+)
 _NO_SQL_PLAN = "AzerothCore's own database updater applies its updates; its block has no SQL plan"
 _NO_CONF_TABLE = "AzerothCore's confs are made by its image from their .dist; it has no conf table"
 _COUNT_IN_CONF = "this family's random-bot count is in a conf file, not the override's environment"
 _WOTLK_DEFAULTS = "WotLK's Reset to default does not read its image: its defaults are not there"
 _COSMETIC = "cosmetic: a game without its own entry here gets the generic fallback"
-_PARTY_REASON = "My Party needs AzerothCore's Lua bridge; it is WotLK-only."
+PARTY_REASON = (
+    "Building a bot party from the launcher works on the WotLK server only (owner decision, "
+    "2026-09-06). Its route is AzerothCore's Lua bridge and its bot module's own "
+    "addclass command, so this server would need a route of its own before there could be a "
+    "control here. One that sent those commands at it would be a button that cannot work."
+)
+"""The sentence the My Party group says on every game that has no route (T179 Task 5).
+
+The Bots tab draws exactly this (`controller_view._NO_MY_PARTY`), so the note and the
+UI cannot drift; `tests/test_centurion_view.py` asserts they are equal."""
 _MMAPS_IN_THE_INSTALL = (
     "no background job: this family's movement maps are made before the server starts "
     "(CMaNGOS's `mmaps` stage) or come in the client-data download (AzerothCore)"
@@ -243,9 +255,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": not_applicable(_WOTLK_DEFAULTS),
             "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Reset to default from the image's .dist)"),
+            "trinitycore": supported("its Reset to default reads the image too (T179 Task 5)"),
         },
-        hits=("'cmangos'",),
+        hits=("'cmangos'", "'trinitycore'"),
     ),
     Site(
         "yulon.catalog.native",
@@ -380,9 +392,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Tuning: time zone)"),
+            "trinitycore": supported("the login and the world server, as on CMaNGOS (T179 Task 5)"),
         },
-        hits=("'azerothcore'", "'cmangos'"),
+        hits=("'azerothcore'", "'cmangos'", "'trinitycore'"),
     ),
     Site(
         "yulon.catalog.time_zone",
@@ -391,9 +403,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported("its image has zone files"),
             "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Tuning: time zone)"),
+            "trinitycore": supported("its ubuntu:24.04 runtime has no tzdata (T179 Task 5)"),
         },
-        hits=("'cmangos'",),
+        hits=("'cmangos'", "'trinitycore'"),
     ),
     Site(
         "yulon.catalog.bot_count",
@@ -423,20 +435,28 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "the file the Bots tab writes the random-bot count into",
         {
             "azerothcore": supported(),
-            "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Bots: count in playerbots.conf)"),
+            "cmangos": supported("through `_count_conf`"),
+            "trinitycore": supported("through `_count_conf` (T179 Task 5)"),
         },
-        hits=("'azerothcore'", "'cmangos'", ".cmangos", ".cmangos"),
+        hits=("'azerothcore'",),
     ),
     Site(
         "yulon.bot_population",
-        "_table",
-        "the conf table holding the bot-count keys",
+        "_count_conf",
+        "the conf, table and key names holding the bot count: aiplayerbot.conf's "
+        "Min/MaxRandomBots, or playerbots.conf's RandomPopulation.TargetMin/Max",
         _cmangos_only(
             "AzerothCore's count is in the override's environment",
-            pending("Task 5 (Bots: count in playerbots.conf)"),
+            supported("playerbots.conf beside the world server's conf (T179 Task 5)"),
         ),
-        hits=(".cmangos", ".cmangos"),
+        hits=(
+            "'cmangos'",
+            "'trinitycore'",
+            ".cmangos",
+            ".cmangos",
+            ".trinitycore",
+            ".trinitycore",
+        ),
     ),
     Site(
         "yulon.channel_setup",
@@ -458,9 +478,9 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Server tab: Repair server files)"),
+            "trinitycore": supported("its compose file is kept as installed, as CMaNGOS's is"),
         },
-        hits=("'azerothcore'", "'cmangos'"),
+        hits=("'azerothcore'", "'cmangos'", "'trinitycore'"),
     ),
     Site(
         "yulon.install_wiring",
@@ -483,7 +503,10 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": not_applicable("CMaNGOS writes every conf from its own conf table"),
-            "trinitycore": pending("Task 5 (Server tab: Repair server files)"),
+            "trinitycore": not_applicable(
+                "TrinityCore writes every conf, playerbots.conf included, from its own conf "
+                "table; a missing one is made again by Reset to default"
+            ),
         },
         scanned=False,
     ),
@@ -500,10 +523,26 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "the files Reset to default offers",
         {
             "azerothcore": supported(),
-            "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Tuning: Reset to default)"),
+            "cmangos": supported("its conf table, through `_conf_table`"),
+            "trinitycore": supported("its conf table, through `_conf_table` (T179 Task 5)"),
         },
-        hits=("'azerothcore'", "'cmangos'", ".cmangos", ".cmangos"),
+        hits=("'azerothcore'",),
+    ),
+    Site(
+        "yulon.reset_defaults",
+        "_conf_table",
+        "the conf table an install writes into etc/: the files Reset to default offers, the "
+        "keys that win over a carry-over (`install_keys`), and which missing files a reset "
+        "makes again (`install_writes`)",
+        _cmangos_only(_NO_CONF_TABLE, supported("T179 Task 5")),
+        hits=(
+            "'cmangos'",
+            "'trinitycore'",
+            ".cmangos",
+            ".cmangos",
+            ".trinitycore",
+            ".trinitycore",
+        ),
     ),
     Site(
         "yulon.reset_defaults",
@@ -512,34 +551,22 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Tuning: Reset to default)"),
+            "trinitycore": supported("the image's .dist through `_from_image` (T179 Task 5)"),
         },
-        hits=("'azerothcore'", "'cmangos'"),
+        hits=("'azerothcore'", "'cmangos'", "'trinitycore'"),
     ),
     Site(
         "yulon.reset_defaults",
         "_from_image",
         "defaults read from the server image",
-        _cmangos_only(_WOTLK_DEFAULTS, pending("Task 5 (Reset to default from the image's .dist)")),
+        _cmangos_only(
+            _WOTLK_DEFAULTS,
+            supported(
+                "TrinityCoreInstaller is a CmangosInstaller; `conf_table()` answers its own "
+                "table (T179 Task 5)"
+            ),
+        ),
         hits=("isinstance CmangosInstaller",),
-    ),
-    Site(
-        "yulon.reset_defaults",
-        "install_keys",
-        "the keys the install table writes, which win over a carry-over",
-        _cmangos_only(_NO_CONF_TABLE, pending("Task 5 (Tuning: Reset to default)")),
-        hits=(".cmangos", ".cmangos"),
-    ),
-    Site(
-        "yulon.reset_defaults",
-        "install_writes",
-        "whether a fresh install writes a file, so a missing one is made again",
-        {
-            "azerothcore": supported(),
-            "cmangos": supported(),
-            "trinitycore": pending("Task 5 (Tuning: Reset to default)"),
-        },
-        hits=("'cmangos'",),
     ),
     Site(
         "yulon.party",
@@ -547,8 +574,8 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         "whether My Party is offered (keyed on the entry id)",
         {
             "azerothcore": supported(),
-            "cmangos": not_available(_PARTY_REASON),
-            "trinitycore": not_available(_PARTY_REASON),
+            "cmangos": not_available(PARTY_REASON),
+            "trinitycore": not_available(PARTY_REASON),
         },
         scanned=False,
     ),
@@ -560,7 +587,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
+            "trinitycore": supported("salt/verifier, as its own LOGIN_UPD_LOGON writes them"),
         },
         hits=("'azerothcore'", "'azerothcore'", "'trinitycore'"),
     ),
@@ -571,7 +598,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported("the default is its scheme"),
             "cmangos": supported("its callers pass the entry's scheme"),
-            "trinitycore": pending("Task 5 (the Centurion controller passes its scheme)"),
+            "trinitycore": supported("`controller_wow_centurion.accounts` passes its scheme"),
         },
         hits=("'azerothcore'",),
     ),
@@ -582,7 +609,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
+            "trinitycore": supported("its own LOGIN_INS_ACCOUNT: salt, verifier, reg_mail, email"),
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
@@ -593,7 +620,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
+            "trinitycore": supported("account_access(AccountID, SecurityLevel, RealmID) -1"),
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
@@ -604,7 +631,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("mangos_srp6 / mangos_sha"),
-            "trinitycore": pending("Task 5 (scheme trinitycore; refuses by name until then)"),
+            "trinitycore": supported("account_access(AccountID, SecurityLevel, RealmID) -1"),
         },
         hits=("'azerothcore'", "'trinitycore'"),
     ),
@@ -644,6 +671,17 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         _cmangos_only(_CMANGOS_CONTROLLER),
         hits=(".cmangos",),
     ),
+    Site(
+        "yulon.controller_wow_centurion.docker_ctl",
+        "native_block",
+        "the Centurion controller package reads its TrinityCore block",
+        {
+            "azerothcore": not_applicable(_CENTURION_CONTROLLER),
+            "cmangos": not_applicable(_CENTURION_CONTROLLER),
+            "trinitycore": supported(),
+        },
+        hits=(".trinitycore", ".trinitycore"),
+    ),
     # -- the UI's per-game tables (keyed on the entry id) ---------------------------------
     Site(
         "yulon.ui.controller_view",
@@ -652,7 +690,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": pending("Task 5 (_for_centurion)"),
+            "trinitycore": supported("`_for_centurion` (T179 Task 5)"),
         },
         scanned=False,
     ),
@@ -663,7 +701,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": not_applicable(_COSMETIC),
+            "trinitycore": supported("`wow-centurion` (T179 Task 5)"),
         },
         scanned=False,
     ),
@@ -674,7 +712,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": not_applicable(_COSMETIC),
+            "trinitycore": supported("`wow-centurion` (T179 Task 5)"),
         },
         scanned=False,
     ),
@@ -696,7 +734,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported("each CMaNGOS controller overrides it from native.ready"),
-            "trinitycore": pending("Task 5 (the Centurion controller reads native.ready)"),
+            "trinitycore": supported("`CenturionController` overrides it from native.ready"),
         },
         scanned=False,
     ),

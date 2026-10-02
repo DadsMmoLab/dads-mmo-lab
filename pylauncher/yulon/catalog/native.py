@@ -249,8 +249,8 @@ def no_rollback_confirmation(entry: CatalogEntry) -> str:
     confirmation that promised a rollback, and this is what lets it go ahead
     without contradicting the dialog the player said yes to.
 
-    Reset to default is named only where it reads the image (the CMaNGOS
-    family, `reset_defaults._from_image()`): WotLK's defaults are not in its
+    Reset to default is named only where it reads the image (the CMaNGOS and
+    TrinityCore families, `reset_defaults._from_image()`): WotLK's defaults are not in its
     image, so there it never says the image is gone. What each failure leaves
     is said separately, because a compile that fails, or a replace Docker
     refuses, leaves the server as it is, and only a new build that has replaced
@@ -259,7 +259,7 @@ def no_rollback_confirmation(entry: CatalogEntry) -> str:
     block = entry.install.native
     says = (
         " (Reset to default says so when it finds the image gone)"
-        if block is not None and block.family == "cmangos"
+        if block is not None and block.family in ("cmangos", "trinitycore")
         else ""
     )
     return (

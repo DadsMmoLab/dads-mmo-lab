@@ -170,6 +170,10 @@ class Controller:
         # starts, since `start()` is the one door every Start, Restart and
         # recreate goes through.
         self.zone_problem: str | None = None
+        # The catalog entry this install is, where the subclass knows it (T179).
+        # `None` reads it off the shipped catalog by container names
+        # (`_entry_for`), which every game but one in the making can answer.
+        self.entry: CatalogEntry | None = None
 
     # -- queries ---------------------------------------------------------
 
@@ -311,7 +315,7 @@ class Controller:
         nothing is done there, and a game this catalogue does not know is left
         alone.
         """
-        entry = _entry_for(self.spec)
+        entry = self.entry or _entry_for(self.spec)
         if entry is None or not time_zone.needs_files(entry):
             return None
         try:

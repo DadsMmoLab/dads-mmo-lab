@@ -1180,3 +1180,13 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
             f"{game_id} declares {declared!r} but fell back to {argv[0]!r} with no probe; "
             f"on a MariaDB image that binary does not exist"
         )
+    # T179: Centurion's package takes its entry, which is not shipped until Task 7;
+    # its builder must pass the client that entry declares just the same.
+    from tests.support_trinitycore import centurion_like
+    from yulon.controller_wow_centurion import maintenance as centurion
+
+    entry = centurion_like()
+    assert entry.install.native is not None
+    _client_cache.clear()
+    argv = centurion.mysql_for(entry, "pw")._dump_argv("some_db")
+    assert entry.install.native.db.client == "mysql" and argv[0] == "mysqldump", argv

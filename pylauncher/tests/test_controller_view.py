@@ -62,7 +62,7 @@ from yulon.catalog.catalog import (
     Operations,
     load_catalog,
 )
-from yulon.catalog.families import sqlplan
+from yulon.catalog.families import decisions, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -1710,8 +1710,10 @@ def test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route(
     no test of the view would notice, because the view was handed a fake.
     """
     assert ControllerServices.for_entry(WOTLK, tmp_path).module_sql is not None
-    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
-        entry = load_catalog().get(game)
+    for entry in _every_game():
+        game = entry.id
+        if game == "wow-wotlk":
+            continue
         assert entry.container_spec().import_service == "", f"{game} now names an importer"
         assert ControllerServices.for_entry(entry, tmp_path).module_sql is None, game
 
@@ -3651,8 +3653,10 @@ def test_a_core_that_cannot_be_given_an_account_by_sql_says_so_instead_of_failin
 
     # The measured cores are untouched: AzerothCore, tortoise, and now the two
     # CMaNGOS games whose scheme was solved from rows their own servers wrote.
-    for game_id in ("wow-wotlk", "wow-tortoise", "wow-tbc", "wow-vanilla"):
-        other = ControllerView(catalog.get(game_id), _services(ps, tmp_path, []), status_poll_ms=0)
+    for game_id in ("wow-wotlk", "wow-tortoise", "wow-tbc", "wow-vanilla", "wow-centurion"):
+        other = ControllerView(
+            _factory_entry(game_id), _services(ps, tmp_path, []), status_poll_ms=0
+        )
         assert other.create_account_button.isEnabled() is True, game_id
         assert other.account_report.text() == "", game_id
 
@@ -3938,7 +3942,18 @@ their images — which is why the dispatch is keyed on the id.
 
 
 def _every_game() -> list[CatalogEntry]:
-    return list(load_catalog().games)
+    """Every game this build has a factory for: the shipped catalog's, then the fixtures.
+
+    T179: `wow-centurion` has its factory (Task 5) before its catalog entry (Task 7),
+    so the every-game tests drive it over its fixture (`_factory_entry`).
+    """
+    shipped = list(load_catalog().games)
+    ids = {entry.id for entry in shipped}
+    return shipped + [
+        _factory_entry(game)
+        for game in sorted(controller_view_module._FACTORIES)
+        if game not in ids
+    ]
 
 
 def test_every_game_in_the_catalog_can_be_opened(tmp_path: Path) -> None:
@@ -4000,6 +4015,8 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
         "wow-tbc": "Avg Diff: 15ms",
         "wow-vanilla": "Avg Diff: 15ms",
         "wow-tortoise": "World initialized in 12 seconds",
+        # T179: the fixture's marker (World.cpp's own line); Task 7 sets the entry's.
+        "wow-centurion": "World initialized in 0 minutes 41 seconds",
     }
     seen: dict[str, docker.ReadySpec] = {}
 
@@ -5528,7 +5545,8 @@ def test_a_game_with_no_party_route_says_why_rather_than_showing_a_dead_panel(
     )
 
     assert view.party_panel is None
-    assert "WoW WotLK only" in view.my_party_absent.text()
+    assert "WotLK server only" in view.my_party_absent.text()
+    assert view.my_party_absent.text() == decisions.PARTY_REASON
 
 
 def test_a_finished_party_press_re_reads_the_bot_list(
@@ -5650,9 +5668,9 @@ def test_a_console_channel_says_so_instead_of_offering_a_button(
 def test_the_soap_trees_keep_their_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The control, without which the test above would pass on a build with no buttons."""
     services = _with_channel(ps, tmp_path, _StubSetup())
-    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"):
         soap = ControllerView(
-            load_catalog().get(game), services, status_poll_ms=0, job_runner=run_inline
+            _factory_entry(game), services, status_poll_ms=0, job_runner=run_inline
         )
         assert soap.enable_channel_button.isVisibleTo(soap) is True, game
     view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
@@ -5818,6 +5836,8 @@ BOT_SQL_BY_GAME = {
     "wow-tbc": ("realmd", "characters", "tbc-db"),
     "wow-vanilla": ("realmd", "characters", "vanilla-db"),
     "wow-tortoise": ("tw_logon", "tw_char", "tortoise-db"),
+    # T179: the fixture's names (`support_trinitycore`); Task 7 ships the entry.
+    "wow-centurion": ("centurion_auth", "centurion_characters", "centurion-db"),
 }
 """Written out per game rather than read back out of the entry.
 
@@ -7910,8 +7930,8 @@ def test_the_updates_button_is_offered_only_where_the_plan_declares_a_rerunnable
     press that applies nothing and reports success), the reader hard-coded to
     an id, and the route removed with the phase.
     """
-    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
-        entry = load_catalog().get(game)
+    for entry in _every_game():
+        game = entry.id
         assert ControllerServices.for_entry(entry, tmp_path / game).updates is None, game
     flagged = _entry_declaring_a_rerunnable_phase()
     assert ControllerServices.for_entry(flagged, tmp_path / "flagged").updates is not None
@@ -8270,8 +8290,8 @@ def test_the_adopt_button_is_offered_only_where_the_plan_declares_a_rerunnable_p
 
     Catches the route wired for every entry, and the reader hard-coded to an id.
     """
-    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
-        entry = load_catalog().get(game)
+    for entry in _every_game():
+        game = entry.id
         assert ControllerServices.for_entry(entry, tmp_path / game).adopt is None, game
     flagged = _entry_declaring_a_rerunnable_phase()
     assert ControllerServices.for_entry(flagged, tmp_path / "flagged").adopt is not None
@@ -12781,6 +12801,23 @@ def test_a_tab_with_no_database_seam_backs_up_exactly_as_it_did_before(
     pump_until(lambda: made.backups == 1, "the backup ran without a database seam")
 
 
+def _factory_entry(game: str) -> CatalogEntry:
+    """The entry a factory in `_FACTORIES` serves: the shipped catalog's, else its fixture.
+
+    T179: `wow-centurion` has a factory (Task 5) before it has a shipped catalog
+    entry (Task 7), so its tests build the Centurion-shaped fixture instead. Any
+    other id missing from the catalog is a factory nothing can reach: an error.
+    """
+    catalog = load_catalog()
+    if game in {entry.id for entry in catalog.games}:
+        return catalog.get(game)
+    if game == "wow-centurion":
+        from tests.support_trinitycore import centurion_like
+
+        return centurion_like()
+    raise KeyError(f"{game} has a factory and neither a catalog entry nor a fixture")
+
+
 def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(
     qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -12808,9 +12845,8 @@ def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(
         "stop_containers",
         lambda names, wsl_distro=None: stopped.append((list(names), wsl_distro)),
     )
-    catalog = load_catalog()
     for game in controller_view_module._FACTORIES:
-        entry = catalog.get(game)
+        entry = _factory_entry(game)
         services = ControllerServices.for_entry(entry, tmp_path, None, "dml-arch")
         alone = services.database_alone
         assert alone is not None, f"{game} has no database seam"
@@ -19579,7 +19615,7 @@ def test_a_ready_to_play_client_takes_the_module_writes_and_the_row_keeps_the_or
     reads `services.client_dir`, which must stay the player's own folder.
     """
     monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
-    entry = load_catalog().get(game)
+    entry = _factory_entry(game)
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     original = _a_client(tmp_path / "WoW")
@@ -19608,7 +19644,7 @@ def test_without_a_ready_to_play_client_the_wiring_is_what_it_was(
     without the keyword: that would compare the new code with itself.
     """
     monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
-    entry = load_catalog().get(game)
+    entry = _factory_entry(game)
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     original = _a_client(tmp_path / "WoW")

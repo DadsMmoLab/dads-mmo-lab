@@ -16,7 +16,6 @@ implementation still matches on a pure-ASCII password.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from typing import get_args
 
 import pytest
@@ -1043,53 +1042,184 @@ def test_the_known_list_every_refusal_prints_comes_from_Scheme_itself() -> None:
     assert accounts.KNOWN_SCHEMES == ", ".join(known)
 
 
-# -- trinitycore: a scheme declared ahead of its statements (T179) -------------
+# -- trinitycore: TrinityCore's own account rows (T179 Task 5) -------------------
 
 
-@pytest.mark.parametrize(
-    ("call", "said"),
-    [
-        (
-            lambda sql: accounts.create_account(sql, "bob", "hunter2", scheme="trinitycore"),
-            "This app does not yet write an account row on a TrinityCore server, so nothing "
-            "was written. Use the worldserver console: account create <name> <password>.",
-        ),
-        (
-            lambda sql: accounts.reset_own_password(
-                sql, "YULON_243C46E3", "n3w-p@ssw0rd1234", scheme="trinitycore"
-            ),
-            "This app does not yet change an account's password on a TrinityCore server, so "
-            "nothing was written. Use the worldserver console: account set password <name> "
-            "<password> <password>.",
-        ),
-        (
-            lambda sql: accounts._grant_gm(sql, 106, 3, "trinitycore"),
-            "This app does not yet grant a GM level on a TrinityCore server, so nothing was "
-            "written. Use the worldserver console: account set gmlevel <name> <level> -1.",
-        ),
-        (
-            lambda sql: accounts._gm_level(sql, 106, "trinitycore"),
-            "This app does not yet read a GM level on a TrinityCore server, so nothing was "
-            "read. Look the account up at the worldserver console instead.",
-        ),
-    ],
-    ids=["create", "re-password", "grant", "read-level"],
-)
-def test_trinitycore_is_refused_by_name_at_every_dispatch_until_its_statements_exist(
-    call: Callable[[_Recorder], object], said: str
-) -> None:
-    """`Scheme` grew `trinitycore` because the catalog's `Accounts.scheme` did (T179 Task 1).
+class _TrinitySql:
+    """A `SqlSeam` over TrinityCore's two tables, as Centurion's dump creates them.
 
-    Its columns are confirmed on a live server before they are written down
-    (Task 5), so until then each dispatch says so -- not "not a scheme this app
-    knows", which would list it among the known ones in the same sentence -- and
-    asks the database nothing.
+    `account` keyed by the folded name; `account_access` keyed by
+    `(AccountID, RealmID)`, its primary key at CENTURION faac5fc9
+    (`centurion/sql/auth/auth_schema.sql:49-55`), so a second row for the same
+    pair is a duplicate exactly as MySQL would say. It answers the scheme's GM
+    read by computing the same lower bound the statement asks for, from the rows.
     """
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.queries: list[str] = []
+        self.table: dict[str, int] = {}
+        self.access: dict[tuple[int, int], int] = {}
+        self.next_id = 80
+
+    def run_statement(self, db: Db, statement: str) -> None:
+        assert db == "auth", db
+        self.statements.append(statement)
+        if statement.startswith("INSERT INTO account ("):
+            self.table[_folded_name_in(statement)] = self.next_id
+            self.next_id += 1
+        elif statement.startswith("UPDATE account_access SET SecurityLevel"):
+            level = int(statement.split("SecurityLevel = ")[1].split()[0])
+            who = int(statement.split("AccountID = ")[1].split()[0])
+            for key, held in list(self.access.items()):
+                if key[0] == who and held < level:
+                    self.access[key] = level
+        elif statement.startswith("INSERT INTO account_access"):
+            values = statement.split("VALUES (")[1].split(")")[0]
+            who, level, realm = (int(part) for part in values.split(","))
+            if (who, realm) in self.access:
+                if "ON DUPLICATE KEY UPDATE" not in statement:
+                    raise ApplyError("SQL failed (inline → auth): Duplicate entry")
+                self.access[(who, realm)] = max(self.access[(who, realm)], level)
+            else:
+                self.access[(who, realm)] = level
+
+    def query(self, db: Db, statement: str) -> str:
+        assert db == "auth", db
+        self.queries.append(statement)
+        if statement.startswith("SELECT id FROM account"):
+            found = self.table.get(_folded_name_in(statement))
+            return "" if found is None else f"{found}\n"
+        if statement.startswith("SELECT IF(SUM(RealmID = -1) > 0, MIN(SecurityLevel), 0)"):
+            who = int(statement.split("AccountID = ")[1].split()[0])
+            rows = {realm: level for (acct, realm), level in self.access.items() if acct == who}
+            return f"{min(rows.values()) if -1 in rows else 0}\n"
+        raise AssertionError(f"unexpected query: {statement}")
+
+
+def _hex_values(statement: str) -> list[bytes]:
+    """Every `X'…'` literal in a statement, in order, as bytes (the name's comes first)."""
+    return [bytes.fromhex(part.split("'")[0]) for part in statement.split("X'")[1:]]
+
+
+def test_a_trinitycore_account_is_the_row_trinitycores_own_command_writes() -> None:
+    """`LOGIN_INS_ACCOUNT` at CENTURION faac5fc9 (`LoginDatabase.cpp:63`), column for column.
+
+    `INSERT INTO account(username, salt, verifier, reg_mail, email, joindate)`:
+    the same binary little-endian SRP6 pair AzerothCore keeps (TrinityCore is
+    AzerothCore's parent; `SRP6::MakeRegistrationData`, facts §5), and no
+    `expansion` -- the column's own default is 2 on Centurion's schema, as its
+    own `account create` leaves it.
+    """
+    sql = _TrinitySql()
+    result = accounts.create_account(sql, "Newbie", PASSWORD, scheme="trinitycore")
+
+    assert result.created is True and result.account_id == 80 and result.gm_level == 0
+    (insert,) = [s for s in sql.statements if s.startswith("INSERT INTO account (")]
+    assert insert.startswith(
+        "INSERT INTO account (username, salt, verifier, reg_mail, email, joindate) VALUES ("
+    ), insert
+    assert insert.endswith(", '', '', NOW())"), insert
+    assert "expansion" not in insert
+    name, salt, verifier = _hex_values(insert)
+    assert name == b"NEWBIE"
+    assert verifier == accounts.verifier_for("Newbie", PASSWORD, salt)
+    assert PASSWORD not in " ".join(sql.statements)
+    # TrinityCore's own `LOGIN_INS_REALM_CHARACTERS_INIT` follows, as on AzerothCore.
+    assert any(s.startswith("INSERT INTO realmcharacters") for s in sql.statements)
+    # No GM level asked for: no access row at all, as `account create` writes none.
+    assert sql.access == {}
+
+
+def test_a_trinitycore_gm_level_is_an_account_access_row_for_every_realm() -> None:
+    """`account_access(AccountID, SecurityLevel, RealmID)` with RealmID -1 (facts §5).
+
+    What `account set gmlevel <name> 3 -1` leaves (`AccountMgr::UpdateAccountAccess`),
+    and what SOAP's `GetSecurity(account, realm)` reads with `RealmID = ? OR -1`.
+    """
+    sql = _TrinitySql()
+    result = accounts.create_account(sql, "Admin", PASSWORD, gm_level=3, scheme="trinitycore")
+
+    assert result.gm_level == 3
+    assert sql.access == {(result.account_id, -1): 3}
+    grant = [s for s in sql.statements if "account_access" in s]
+    assert grant, sql.statements
+    for statement in grant:
+        assert "gmlevel" not in statement and " id " not in f" {statement} ", statement
+
+
+def test_a_trinitycore_grant_never_lowers_a_realm_the_account_already_rules() -> None:
+    """`gm_level` is a floor on EVERY realm, which a single -1 row cannot say alone.
+
+    TrinityCore reads the realm's own row before the -1 row (`ORDER BY RealmID
+    DESC`, `LoginDatabase.cpp:83`). A realm row at 1 would outrank a new -1 row
+    at 3, so the grant raises the rows below the level too; and a realm row at 3
+    is left at 3 when 2 is asked for. Both statements only ever raise, so a press
+    that dies between them is finished by the next.
+    """
+    sql = _TrinitySql()
+    sql.table["ADMIN"] = 90
+    sql.access = {(90, 1): 1, (90, 2): 3}
+
+    level = accounts._ensure_gm(sql, 90, 2, "trinitycore")
+
+    assert level == 2
+    assert sql.access == {(90, 1): 2, (90, 2): 3, (90, -1): 2}
+    # The fake applies a raise without reading its WHERE, so the statements are
+    # pinned as well: only this account's rows, only the ones below the level.
+    assert sql.statements == [
+        "UPDATE account_access SET SecurityLevel = 2 WHERE AccountID = 90 AND SecurityLevel < 2",
+        "INSERT INTO account_access (AccountID, SecurityLevel, RealmID) VALUES (90, 2, -1)"
+        " ON DUPLICATE KEY UPDATE SecurityLevel = GREATEST(SecurityLevel, 2)",
+    ]
+
+
+def test_a_trinitycore_level_is_read_as_what_every_realm_holds_at_least() -> None:
+    """No -1 row: some realm sees 0. With one: the lowest row any realm can see."""
+    sql = _TrinitySql()
+    assert accounts._gm_level(sql, 90, "trinitycore") == 0
+    sql.access = {(90, 1): 3}
+    assert accounts._gm_level(sql, 90, "trinitycore") == 0
+    sql.access = {(90, 1): 3, (90, -1): 2}
+    assert accounts._gm_level(sql, 90, "trinitycore") == 2
+    (read,) = set(sql.queries)
+    assert read == (
+        "SELECT IF(SUM(RealmID = -1) > 0, MIN(SecurityLevel), 0) FROM account_access"
+        " WHERE AccountID = 90"
+    )
+
+
+def test_a_trinitycore_account_that_already_holds_the_level_is_left_alone() -> None:
+    sql = _TrinitySql()
+    sql.table["ADMIN"] = 90
+    sql.access = {(90, -1): 3}
+    result = accounts.create_account(sql, "admin", PASSWORD, gm_level=3, scheme="trinitycore")
+    assert result.created is False and result.gm_level == 3
+    assert not any("account_access" in s for s in sql.statements)
+
+
+def test_the_trinitycore_column_names_are_named_once_for_task_9_to_confirm() -> None:
+    """Read from CENTURION faac5fc9's dump; confirmed on a live server in T179 Task 9."""
+    assert accounts.TRINITYCORE_ACCESS == (
+        "account_access",
+        "AccountID",
+        "SecurityLevel",
+        "RealmID",
+    )
+
+
+def test_the_apps_own_trinitycore_account_is_re_passworded_in_salt_and_verifier() -> None:
+    """`LOGIN_UPD_LOGON` (`UPDATE account SET salt = ?, verifier = ? WHERE id = ?`), by name."""
     sql = _Recorder()
-    with pytest.raises(accounts.AccountError) as caught:
-        call(sql)
-    assert str(caught.value) == said
-    assert sql.statements == [], "it touched the database before refusing"
+    accounts.reset_own_password(sql, "YULON_243C46E3", "n3w-p@ssw0rd1234", scheme="trinitycore")
+    ((db, statement),) = sql.statements
+    assert db == "auth"
+    assert statement.startswith("UPDATE account SET salt = X'"), statement
+    name = _hex_values(statement)[-1]
+    assert name == b"YULON_243C46E3"
+    salt, verifier = _hex_values(statement)[:2]
+    assert verifier == accounts.verifier_for("YULON_243C46E3", "n3w-p@ssw0rd1234", salt)
+    assert "n3w-p@ssw0rd1234" not in statement
 
 
 def test_an_entry_that_declares_no_scheme_is_refused_rather_than_defaulted() -> None:

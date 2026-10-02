@@ -367,6 +367,44 @@ def announce_previous_update(
     return True
 
 
+LEFTOVER_COPIES_NOTICE = (
+    "Yu'lon could not remove {count} yet. It tries again the next time it starts; the log "
+    "says where."
+)
+LEFTOVER_LIST_UNREAD = (
+    "Yu'lon could not read its list of temporary game-client copies to remove. It tries again "
+    "the next time it starts; the log says why."
+)
+
+
+def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> str | None:
+    """T179: remove the temporary client copies an Uninstall could not; the notice, or None.
+
+    A Centurion install extracts its map data from a temporary copy of the player's
+    client made of HARD LINKS beside the original. An Uninstall that could not remove
+    one notes it in Yu'lon's own folder (`trinitycore.LEFTOVERS_FILE`), and this is the
+    retry it promised: once, at start, through the same link-safe remover. Every
+    warning goes to the log; one line is said when anything is still there. Runs off
+    the GUI thread (`build_window()`): removing a client-sized folder of links takes
+    a while on a slow disk.
+    """
+    from yulon.catalog.families import trinitycore
+
+    for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir):
+        logger.warning(warning)
+    left = trinitycore.recorded_leftover_count(config_dir=config_dir)
+    if left is None:
+        return LEFTOVER_LIST_UNREAD
+    if left == 0:
+        return None
+    copies = (
+        "a temporary copy of a game client"
+        if left == 1
+        else f"{left} temporary copies of a game client"
+    )
+    return LEFTOVER_COPIES_NOTICE.format(count=copies)
+
+
 HELPER_STAMP_SECONDS = 30.0
 """How long the app waits for the helper to say it is running, before refusing to close.
 
@@ -541,6 +579,9 @@ def build_window() -> object:
         yulon_log_panels: list[LogPanel]
         # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
         yulon_logs_view: LogsView
+        # T179: the runner of the start-up sweep of temporary client copies, held
+        # so the job is not collected while it runs.
+        yulon_sweep_jobs: Any
 
         # The input sources, so `_stop_background_threads()` can shut them down.
         # Typed as `Any`-free references to their concrete classes, imported in
@@ -2031,6 +2072,22 @@ def build_window() -> object:
         window.yulon_controllers = controller_views
         assert isinstance(window, QWidget)
         return window
+
+    # T179: the temporary client copies an Uninstall could not remove, retried once
+    # now and off the GUI thread; what is left is logged and said in the bar. Not
+    # under the smoke test above, which must change nothing on the machine.
+
+    sweep_jobs = threaded_job_runner(window)
+    window.yulon_sweep_jobs = sweep_jobs
+
+    def _swept(notice: object) -> None:
+        if notice:
+            update_bar.show_message(str(notice))
+
+    def _sweep_failed(exc: object) -> None:
+        logger.warning(f"could not retry removing the temporary client copies: {exc}")
+
+    sweep_jobs(lambda: sweep_leftover_client_copies(), _swept, _sweep_failed)
 
     update_thread = QThread(window)
     update_worker = _UpdateWorker()

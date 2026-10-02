@@ -41,6 +41,13 @@ MIN_ENV = composegen.env_name_for(MIN_KEY)
 MAX_ENV = composegen.env_name_for(MAX_KEY)
 CONF_NAME = "aiplayerbot.conf"
 
+TC_MIN_KEY = "Playerbot.RandomPopulation.TargetMin"
+TC_MAX_KEY = "Playerbot.RandomPopulation.TargetMax"
+"""Centurion's population range, in `playerbots.conf` beside `worldserver.conf` (T179).
+
+`playerbots.conf.dist:296-310` at CENTURION faac5fc9; the bot module reads both
+as whole numbers and rotates its target between them."""
+
 LARGEST = 2**31 - 1
 """The largest whole number the cores read these keys as (`GetIntDefault`, `GetOption<int32>`)."""
 
@@ -99,13 +106,13 @@ def in_override(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
     return {} if text is None else in_override_text(text, entry)
 
 
-def in_conf(path: Path) -> dict[str, str]:
-    """`{MIN_KEY: …, MAX_KEY: …}` from an `aiplayerbot.conf`, or `{}`."""
+def in_conf(path: Path, low: str = MIN_KEY, high: str = MAX_KEY) -> dict[str, str]:
+    """`{low: …, high: …}` from a bot conf (`aiplayerbot.conf` by default), or `{}`."""
     text = _text(path)
     if text is None:
         return {}
-    kept = pair(tuning.conf_value(text, MIN_KEY), tuning.conf_value(text, MAX_KEY))
-    return {} if kept is None else {MIN_KEY: kept[0], MAX_KEY: kept[1]}
+    kept = pair(tuning.conf_value(text, low), tuning.conf_value(text, high))
+    return {} if kept is None else {low: kept[0], high: kept[1]}
 
 
 def world_env(
@@ -123,17 +130,26 @@ def world_env(
     return {**(composegen.world_env(entry) if env is None else env), **kept}
 
 
-def conf_table(table: ConfPatchTable, etc_dir: Path) -> ConfPatchTable:
-    """The install table with its two bot keys set to the pair `aiplayerbot.conf` holds now.
+def conf_table(
+    table: ConfPatchTable,
+    etc_dir: Path,
+    *,
+    name: str = CONF_NAME,
+    low: str = MIN_KEY,
+    high: str = MAX_KEY,
+) -> ConfPatchTable:
+    """The install table with its two bot keys set to the pair the bot conf holds now.
 
-    The table unchanged when it does not write both keys, or the file has no
-    pair to carry.
+    CMaNGOS's `aiplayerbot.conf` and its `Min`/`MaxRandomBots` by default;
+    TrinityCore's conf stage names its `playerbots.conf` and `TC_MIN_KEY`/
+    `TC_MAX_KEY` (T179). The table unchanged when it does not write both keys,
+    or the file has no pair to carry.
     """
-    patch = table.files.get(CONF_NAME)
-    if patch is None or MIN_KEY not in patch.keys or MAX_KEY not in patch.keys:
+    patch = table.files.get(name)
+    if patch is None or low not in patch.keys or high not in patch.keys:
         return table
-    kept = in_conf(etc_dir / CONF_NAME)
+    kept = in_conf(etc_dir / name, low, high)
     if not kept:
         return table
-    files = {**table.files, CONF_NAME: patch.model_copy(update={"keys": {**patch.keys, **kept}})}
+    files = {**table.files, name: patch.model_copy(update={"keys": {**patch.keys, **kept}})}
     return table.model_copy(update={"files": files})

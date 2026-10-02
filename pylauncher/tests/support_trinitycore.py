@@ -186,7 +186,18 @@ TRINITYCORE: dict[str, Any] = {
                     "LoginDatabaseInfo": DB_STRING.format(db="{{AUTH_DB}}"),
                 }
             },
-            "playerbots.conf": {"keys": {"Playerbot.Enable": "1"}},
+            # The live realm's population settings (centurion/conf/playerbots.conf:27,
+            # 77-104); the `.dist` ships every one of them off or empty. The count is
+            # what the Bots tab's box reads and writes (`bot_population`).
+            "playerbots.conf": {
+                "keys": {
+                    "Playerbot.Enable": "1",
+                    "Playerbot.RandomPopulation.Enable": "1",
+                    "Playerbot.RandomPopulation.TargetMin": "150",
+                    "Playerbot.RandomPopulation.TargetMax": "150",
+                    "Playerbot.RandomPopulation.BotAccountIds": "76,77,78",
+                }
+            },
         },
         "playerbots_conf": "playerbots.conf",
     },
@@ -233,9 +244,45 @@ def centurion_like(
                 "address_column": "address",
                 "local_address_column": "localAddress",
             },
-            "accounts": {"scheme": "trinitycore"},
-            "console": {"prompt": "TC>", "prompt_precedes_answer": False},
-            "observability": None,
+            # TrinityCore's GM level: `account_access(AccountID, SecurityLevel, RealmID)`
+            # (auth_schema.sql:49-55), levels 0-3 (`SEC_ADMINISTRATOR`, Common.h:38-44).
+            "accounts": {
+                "scheme": "trinitycore",
+                "level": {
+                    "table": "account_access",
+                    "account_column": "AccountID",
+                    "level_column": "SecurityLevel",
+                    "max_level": 3,
+                },
+            },
+            # `CLI_PREFIX` "TC> " (CliRunnable.cpp:42), read with readline and printed
+            # again when a command finishes (:92-96, :157): AzerothCore's console code,
+            # so the prompt comes in front of the answer as it does there.
+            "console": {"prompt": "TC>", "prompt_precedes_answer": True},
+            # The Characters tab's verbs, read in the source (each `Console::Yes`):
+            # `tele name` (cs_tele.cpp:56), `character level`/`character rename`
+            # (cs_character.cpp:72-73); the inventory row carries the item INSTANCE
+            # guid and `item_instance.itemEntry` the template, as on AzerothCore;
+            # `MAX_MAIL_ITEMS` is 12 (Mail.h:33).
+            # Offered only once T179 Task 9 has watched them work
+            # (`controller_wow_centurion.characters`).
+            "play": {
+                "equipped": {
+                    "template_column": "itemEntry",
+                    "instance_table": "item_instance",
+                    "inventory_column": "item",
+                },
+                "teleport_command": "tele name",
+                "mail_item_cap": 12,
+                "rename_command": "character rename",
+                "set_level_command": "character level",
+            },
+            # Centurion's bots are four fixed accounts, PLAYERBOTONE..FOUR (ids 76-79,
+            # centurion/sql/auth/auth_bots.sql:3-12), with no prefix setting anywhere:
+            # the name prefix is the whole marker (T179 Task 5).
+            "observability": {"bots": {"account_prefix": "PLAYERBOT"}},
+            # Centurion takes no add-on modules: its Modules tab says so (T179 Task 5).
+            "has_manifests": False,
             "client": {"version": "3.3.5a", "build": 12342, "packs": packs or []},
         }
     )

@@ -1580,8 +1580,7 @@ class Accounts(_Strict):
             "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
             "text in v/s with the level in account.gmlevel; `trinitycore` is TrinityCore's "
             "salt/verifier with the level in account_access(AccountID, SecurityLevel, RealmID) "
-            "(facts §5), declared ahead of its statements (T179 Task 5), so until then every "
-            "account write on it refuses by name. None means this app does not "
+            "with RealmID -1 (T179). None means this app does not "
             "write accounts for this core and "
             "the Accounts tab points at `console_command` instead. Never defaulted onto a "
             "core that has not been measured — a wrong scheme inserts a row that looks "
@@ -2243,11 +2242,27 @@ class BotMarker(_Strict):
             "(`botid.rs:33-38`)."
         ),
     )
-    prefix_conf_file: str = Field(
-        min_length=1, description="Where the live prefix lives, relative to the server dir."
+    prefix_conf_file: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Where the live prefix lives, relative to the server dir; null for a tree whose "
+            "bot accounts are fixed rows with no prefix setting at all (T179: Centurion's "
+            "PLAYERBOTONE..FOUR, `auth_bots.sql`), where `account_prefix` is the whole marker."
+        ),
     )
-    prefix_conf_key: str = Field(min_length=1)
+    prefix_conf_key: str | None = Field(default=None, min_length=1)
     registry: BotRegistry | None = None
+
+    @model_validator(mode="after")
+    def _a_conf_file_names_its_key(self) -> BotMarker:
+        """Both or neither: a file with no key, or a key in no file, reads nothing."""
+        if (self.prefix_conf_file is None) != (self.prefix_conf_key is None):
+            raise ValueError(
+                "prefix_conf_file and prefix_conf_key go together: "
+                f"file={self.prefix_conf_file!r}, key={self.prefix_conf_key!r}"
+            )
+        return self
 
 
 class CharacterTable(_Strict):

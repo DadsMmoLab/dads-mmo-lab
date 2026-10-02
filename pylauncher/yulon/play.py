@@ -22,7 +22,7 @@ naming what it would look like:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +33,14 @@ from yulon.dbreads import SqlReader
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
+
+
+VERBS: tuple[str, ...] = ("teleport", "set_level", "rename", "revive", "mail_gold", "send_gear")
+"""The Characters tab's writes, by name, in the order the tab draws them.
+
+A tree may withhold some of them (`InstallPlay(withheld=...)`, T179): the tab
+leaves those out and this module refuses them, each with the tree's sentence.
+"""
 
 
 class Ambiguous(LookupError):
@@ -351,11 +359,27 @@ class InstallPlay:
         *,
         sql: SqlReader,
         channel_for_saved: Callable[[], object | None],
+        withheld: Mapping[str, str] | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
         self._sql = sql
         self._channel_for_saved = channel_for_saved
+        unknown = set(withheld or {}) - set(VERBS)
+        if unknown:
+            raise ValueError(f"no such Characters verb to withhold: {sorted(unknown)}")
+        self.withheld: Mapping[str, str] = dict(withheld or {})
+        """Verb -> why this tree does not offer it (T179). The tab draws none of them;
+        every press of one is refused here too, before anything is read or sent."""
+
+    def _refused(self, verb: str) -> Outcome | None:
+        """The refusal for a verb this tree withholds, or None for one it offers."""
+        reason = self.withheld.get(verb)
+        return (
+            None
+            if reason is None
+            else Outcome(False, problem=f"{verb} is not offered on this server: {reason}.")
+        )
 
     @staticmethod
     def for_entry_is_possible(entry: CatalogEntry) -> bool:
@@ -409,6 +433,8 @@ class InstallPlay:
     # -- writes --------------------------------------------------------------
 
     def teleport(self, character: str, location: str) -> Outcome:
+        if refused := self._refused("teleport"):
+            return refused
         verb = self.entry.play.teleport_command if self.entry.play is not None else ""
         return self._one(character, lambda name: commands.teleport_to(name, location, verb=verb))
 
@@ -423,6 +449,8 @@ class InstallPlay:
         today, and on a fork that later grows one it would be a real command
         nobody has run.
         """
+        if refused := self._refused("set_level"):
+            return refused
         block = self.entry.play
         if block is None or block.set_level_command is None:
             return Outcome(False, problem=_no_set_level(self.entry))
@@ -445,6 +473,8 @@ class InstallPlay:
         login". The view greys the button, but it greys it from a character
         list read minutes ago; this reads the row the press is about.
         """
+        if refused := self._refused("rename"):
+            return refused
         block = self.entry.play
         verb = block.rename_command if block is not None else ""
         return self._one(
@@ -454,10 +484,14 @@ class InstallPlay:
         )
 
     def revive(self, character: str) -> Outcome:
+        if refused := self._refused("revive"):
+            return refused
         return self._one(character, commands.revive)
 
     def mail_gold(self, character: str, *, gold: int, subject: str, body: str) -> Outcome:
         """Gold in, copper out, multiplied once and in one place."""
+        if refused := self._refused("mail_gold"):
+            return refused
         return self._one(
             character,
             lambda name: commands.mail_money(
@@ -468,6 +502,8 @@ class InstallPlay:
     def mail_items(
         self, character: str, *, items: tuple[tuple[int, int], ...], subject: str, body: str
     ) -> Outcome:
+        if refused := self._refused("send_gear"):
+            return refused
         return self._one(
             character,
             lambda name: commands.mail_items(
@@ -491,6 +527,8 @@ class InstallPlay:
         states, which is a feature rather than a sentence, and it is not this
         box's.
         """
+        if refused := self._refused("send_gear"):
+            return refused
         wearer = self._stored_name(character)
         if wearer is None:
             return Outcome(False, problem=_no_such(character))

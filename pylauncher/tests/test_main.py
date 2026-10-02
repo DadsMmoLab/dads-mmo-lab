@@ -552,7 +552,32 @@ def _app_window(qapp: object) -> Iterator[Any]:
 
     monkeypatch.setattr(ControllerView, "__init__", _no_polling)
 
+    # T179: the start-up sweep of temporary client copies an Uninstall left. It
+    # would read the REAL config dir here (see above), so it is recorded instead,
+    # with the thread it ran on, and answers a notice the test can look for.
+    import threading
+
+    swept: list[str] = []
+
+    def _sweep(*, config_dir: Path | None = None) -> str:
+        swept.append(threading.current_thread().name)
+        return LEFTOVER_NOTICE_SEEN
+
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", _sweep)
+    from yulon.ui.widgets.update_bar import UpdateBar
+
+    bar_said: list[str] = []
+    real_show = UpdateBar.show_message
+
+    def _show(self: Any, text: str, *, keep_details: bool = False) -> None:
+        bar_said.append(text)
+        real_show(self, text, keep_details=keep_details)
+
+    monkeypatch.setattr(UpdateBar, "show_message", _show)
+
     window = main.build_window()
+    window.swept = swept
+    window.bar_said = bar_said
     window.saved_states = saved
     window.update_state_dir = scratch
     yield window
@@ -564,6 +589,11 @@ def _app_window(qapp: object) -> Iterator[Any]:
     QApplication.processEvents()
     monkeypatch.undo()
     shutil.rmtree(scratch, ignore_errors=True)
+
+
+LEFTOVER_NOTICE_SEEN = "a leftover copy is still there (test)"
+_REAL_SWEEP = main.sweep_leftover_client_copies
+"""The real sweep: `_app_window` replaces the module's for the whole module."""
 
 
 @pytest.fixture
@@ -4446,3 +4476,61 @@ def test_the_launchers_server_tab_button_brings_its_tab_forward(
     launcher.server_tab_button.click()
 
     assert tabs.currentWidget() is view
+
+
+# ------------------------------------------- temporary client copies (T179 Task 5)
+
+
+def test_the_window_sweeps_leftover_client_copies_once_off_the_gui_thread(window: Any) -> None:
+    """`trinitycore.remove_recorded_leftovers()` at start, never on the GUI thread.
+
+    It removes folders of hard links to the player's own client, which can take a
+    while on a slow disk; a notice is said when anything is left.
+    """
+    import threading
+
+    from PySide6.QtWidgets import QApplication
+
+    for _ in range(200):
+        if window.swept:
+            break
+        QApplication.processEvents()
+        threading.Event().wait(0.01)
+    assert len(window.swept) == 1
+    assert window.swept[0] != threading.main_thread().name
+    for _ in range(200):
+        if LEFTOVER_NOTICE_SEEN in window.bar_said:
+            break
+        QApplication.processEvents()
+        threading.Event().wait(0.01)
+    assert window.bar_said.count(LEFTOVER_NOTICE_SEEN) == 1
+
+
+def test_the_sweep_says_nothing_when_nothing_is_left(tmp_path: Path) -> None:
+    assert _REAL_SWEEP(config_dir=tmp_path) is None
+
+
+def test_a_copy_that_stays_is_logged_and_said_in_one_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A folder at the noted place that is not ours is kept, warned about and noticed."""
+    import json
+
+    from yulon.catalog.families import trinitycore
+
+    foreign = tmp_path / "WoW (Yu'lon map data, temporary)"
+    foreign.mkdir()
+    (foreign / "keep.txt").write_text("not Yu'lon's", encoding="utf-8")
+    (tmp_path / trinitycore.LEFTOVERS_FILE).write_text(
+        json.dumps(
+            [{"target": str(foreign), "game": "wow-centurion", "server_dir": str(tmp_path / "s")}]
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level("WARNING", logger="main"):
+        notice = _REAL_SWEEP(config_dir=tmp_path)
+
+    assert notice is not None and "\n" not in notice
+    assert "temporary" in notice and "next time" in notice
+    assert (foreign / "keep.txt").is_file(), "a folder that is not ours was touched"
+    assert any(str(foreign) in record.getMessage() for record in caplog.records)
