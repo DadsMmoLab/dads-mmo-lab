@@ -15,6 +15,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import io
+import json
 import os
 import shutil
 import types
@@ -1419,7 +1420,12 @@ def test_stale_and_refresh_leave_a_recorded_pack_file_alone(rig: _Rig) -> None:
     rel = Path("Data/patch-X.MPQ")
     assert play_client.stale(rig.play, rig.original) == (rel,), "the fixture must read as stale"
     assert play_client.refresh(
-        rig.play, rig.original, game=GAME, server_dir=rig.server, exe_patch=None
+        rig.play,
+        rig.original,
+        game=GAME,
+        server_dir=rig.server,
+        exe_patch=None,
+        catalog_always={},
     ) == (rel,), "and be refreshed"
     rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y + b"-longer"}, name="again.zip"))
     _record_installed(rig, WORLD, entry)
@@ -1430,7 +1436,12 @@ def test_stale_and_refresh_leave_a_recorded_pack_file_alone(rig: _Rig) -> None:
     assert play_client.stale(rig.play, rig.original) == ()
     assert (
         play_client.refresh(
-            rig.play, rig.original, game=GAME, server_dir=rig.server, exe_patch=None
+            rig.play,
+            rig.original,
+            game=GAME,
+            server_dir=rig.server,
+            exe_patch=None,
+            catalog_always={},
         )
         == ()
     )
@@ -2023,3 +2034,191 @@ def test_a_missing_checkout_pack_refusal_ends_by_naming_the_press_to_repeat(
     assert play_text.endswith("then press Play again.")
     assert make_text.endswith(f"then press “{cv.MAKE_PLAY_CLIENT_LABEL}” again.")
     assert "press Play" not in make_text
+
+
+# -- the launcher's picks (T187) ----------------------------------------------------------------
+
+_NO_CHOICES: dict[str, Any] = {"packs": {}, "exe_options": {}}
+
+
+def test_launcher_picks_round_trip_and_an_old_record_reads_empty(rig: _Rig) -> None:
+    assert client_packs.read_record(rig.play).launcher == {}
+    picks = {
+        "display": {"window": "windowed", "resolution": "1920x1080"},
+        "account": "PLAYER_1",
+        "realm_address": "192.168.1.5",
+    }
+    record = client_packs.PackRecord({}, None, _NO_CHOICES, launcher=picks)
+
+    client_packs.write_record(rig.play, record, game=GAME, server_dir=rig.server)
+
+    assert client_packs.read_record(rig.play).launcher == picks
+    (rig.play / client_packs.RECORD).write_bytes(b'{"version": 1, "packs": {}}')
+    assert client_packs.read_record(rig.play).launcher == {}
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        {"display": {"window": "floating"}},
+        {"display": {"resolution": "big"}},
+        {"display": "windowed"},
+        {"account": 'A"B'},
+        {"account": "A\nSET realmList x"},
+        {"account": "X" * 33},
+        {"account": 5},
+        {"realm_address": "host name"},
+        {"realm_address": 'a"b'},
+        {"realm_address": ""},
+        {"unknown": "x"},
+    ],
+)
+def test_junk_launcher_values_are_dropped_on_read(rig: _Rig, junk: dict[str, Any]) -> None:
+    (rig.play / client_packs.RECORD).write_text(
+        json.dumps({"packs": {}, "launcher": junk}), encoding="utf-8"
+    )
+    assert client_packs.read_record(rig.play).launcher == {}
+
+
+def test_a_launcher_that_is_not_a_mapping_reads_empty(rig: _Rig) -> None:
+    (rig.play / client_packs.RECORD).write_text(
+        json.dumps({"packs": {}, "launcher": ["x"]}), encoding="utf-8"
+    )
+    assert client_packs.read_record(rig.play).launcher == {}
+
+
+@pytest.mark.parametrize(
+    ("window", "keys"),
+    [
+        ("fullscreen", {"gxWindow": "0"}),
+        ("windowed", {"gxWindow": "1", "gxMaximize": "0"}),
+        ("maximized", {"gxWindow": "1", "gxMaximize": "1"}),
+        ("borderless", {"gxWindow": "1", "gxMaximize": "1"}),
+    ],
+)
+def test_each_window_mode_maps_to_its_config_keys(window: str, keys: dict[str, str]) -> None:
+    got = client_packs.launcher_config_keys({"display": {"window": window}}, catalog_always={})
+    assert got == keys
+
+
+def test_resolution_and_account_map_to_their_keys() -> None:
+    got = client_packs.launcher_config_keys(
+        {"display": {"resolution": "1280x720"}, "account": "bob"}, catalog_always={}
+    )
+    assert got == {"gxResolution": "1280x720", "accountName": "BOB"}
+    assert client_packs.launcher_config_keys({}, catalog_always={}) == {}
+
+
+def test_a_key_the_catalog_always_sets_is_dropped_whatever_its_spelling() -> None:
+    picks = {"display": {"window": "windowed", "resolution": "1280x720"}, "account": "BOB"}
+    got = client_packs.launcher_config_keys(picks, catalog_always={"GXWINDOW": "0"})
+    assert got == {"gxMaximize": "0", "gxResolution": "1280x720", "accountName": "BOB"}
+
+
+def test_a_password_handed_to_the_launcher_keys_never_becomes_a_config_line() -> None:
+    """Whatever reaches these functions raw, no password comes out of them (T187).
+
+    `read_record` already drops a `password` key; this holds the functions that
+    turn picks into Config.wtf lines to the same rule on their own.
+    """
+    raw = {"account": "BOB", "password": "s3cret", "accountPassword": "s3cret"}
+    keys = client_packs.launcher_config_keys(raw, catalog_always={})
+    assert keys == {"accountName": "BOB"}
+    assert "password" not in client_packs.clean_launcher(raw)
+    removals = client_packs.launcher_config_removals(raw, catalog_always={})
+    assert not [key for key in removals if "password" in key.lower()]
+
+
+def test_borderless_follows_the_window_pick_only_where_the_patch_has_it() -> None:
+    def options(launcher: dict[str, Any], chosen: dict[str, bool], patch: list[str]) -> Any:
+        return client_packs.launcher_exe_options(launcher, chosen, patch, catalog_always={})
+
+    mode = {"display": {"window": "borderless"}}
+    assert options(mode, {}, ["borderless"]) == {"borderless": True}
+    other = {"display": {"window": "windowed"}}
+    assert options(other, {"borderless": True}, ["borderless"]) == {"borderless": False}
+    assert options(mode, {}, []) == {}
+    assert options({}, {"borderless": True}, ["borderless"]) == {"borderless": True}
+
+
+@pytest.mark.parametrize("key", ["gxWindow", "GXMAXIMIZE"])
+def test_a_catalog_that_fixes_the_window_keys_leaves_the_borderless_option_alone(key: str) -> None:
+    """The server sets the window itself: a launcher window pick says nothing about borderless."""
+    picks = {"display": {"window": "windowed"}}
+    chosen = {"borderless": True}
+    got = client_packs.launcher_exe_options(
+        picks, chosen, ["borderless"], catalog_always={key: "1"}
+    )
+    assert got == {"borderless": True}
+    free = client_packs.launcher_exe_options(picks, chosen, ["borderless"], catalog_always={})
+    assert free == {"borderless": False}
+
+
+@pytest.mark.parametrize(
+    "typed", ["10.0.", ".example.com", "example.com.", ".", "-", ":", "..", "-.:", "-:"]
+)
+def test_a_realm_address_needs_a_letter_or_digit_and_no_dot_at_either_end(typed: str) -> None:
+    assert "realm_address" not in client_packs.clean_launcher({"realm_address": typed})
+
+
+@pytest.mark.parametrize("typed", ["10.0.0.7", "logon.example.com", "host:3724", "my-realm", "a"])
+def test_a_whole_realm_address_is_kept(typed: str) -> None:
+    assert client_packs.clean_launcher({"realm_address": typed}) == {"realm_address": typed}
+
+
+def test_this_computer_said_writes_the_default_address_where_config_wtf_is_the_only_channel() -> (
+    None
+):
+    """Codex: no realmlist.wtf and no catalog realmList; removing the lines left the typed one."""
+    said = {"realm_address": None}
+    keys = client_packs.launcher_config_keys(said, catalog_always={}, default_address="127.0.0.1")
+    assert keys == {"realmList": "127.0.0.1", "patchList": "127.0.0.1"}
+    assert client_packs.launcher_config_keys(said, catalog_always={}, default_address=None) == {}
+    assert (
+        client_packs.launcher_config_keys({}, catalog_always={}, default_address="127.0.0.1") == {}
+    )
+
+
+def test_a_typed_realm_address_sets_realmlist_and_patchlist_over_the_catalogs() -> None:
+    """Lead ruling: the typed address wins over the catalog's for these two keys only."""
+    picks = {"realm_address": "10.0.0.7", "display": {"window": "windowed"}}
+    always = {"REALMLIST": "127.0.0.1", "patchlist": "127.0.0.1", "gxWindow": "0"}
+    got = client_packs.launcher_config_keys(picks, catalog_always=always)
+    assert got == {"realmList": "10.0.0.7", "patchList": "10.0.0.7", "gxMaximize": "0"}
+    assert "realmList" not in client_packs.launcher_config_keys({}, catalog_always={})
+
+
+def test_ask_in_the_game_removes_accountname_and_only_when_said_so() -> None:
+    assert client_packs.launcher_config_removals({"account": None}, catalog_always={}) == (
+        "accountName",
+    )
+    assert client_packs.launcher_config_removals({}, catalog_always={}) == ()
+    assert client_packs.launcher_config_removals({"account": "BOB"}, catalog_always={}) == ()
+    fixed = {"ACCOUNTNAME": "SERVER"}
+    assert client_packs.launcher_config_removals({"account": None}, catalog_always=fixed) == ()
+
+
+def test_this_computer_said_takes_the_realm_keys_out_only_where_realmlist_wtf_carries_it() -> None:
+    """Lead ruling (T187 fix 1): "Use this computer" is saved as `realm_address: None`.
+
+    Where this computer's address reaches the game another way (realmlist.wtf on an
+    entry without `config_wtf`, or the catalog's own `realmList`), the
+    `realmList`/`patchList` a typed address put into Config.wtf earlier come out;
+    where nothing else carries it (flag off) nothing is taken out, and a key the
+    catalog's `always` sets is never taken out either way.
+    """
+    said = client_packs.clean_launcher({"realm_address": None})
+    assert said == {"realm_address": None}
+    assert client_packs.launcher_config_keys(said, catalog_always={}) == {}
+    removals = client_packs.launcher_config_removals
+    assert removals(said, catalog_always={}, default_address_written=True) == (
+        "realmList",
+        "patchList",
+    )
+    assert removals(said, catalog_always={}, default_address_written=False) == ()
+    assert removals({}, catalog_always={}, default_address_written=True) == ()
+    both = {"realm_address": None, "account": None}
+    assert removals(both, catalog_always={"realmlist": "x"}, default_address_written=True) == (
+        "accountName",
+        "patchList",
+    )

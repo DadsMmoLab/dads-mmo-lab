@@ -2005,16 +2005,35 @@ def _leave(bar: Any) -> None:
     QApplication.sendEvent(bar, QEvent(QEvent.Type.Leave))
 
 
-def _x_of(window: Any, view: Any) -> Any:
+def _strip_of(window: Any, view: Any) -> Any:
+    """The tab's button strip: ▶ and × side by side (T187), where T95's × alone sat."""
     from PySide6.QtWidgets import QTabBar
 
     tabs = window.property("tabs")
     return tabs.tabBar().tabButton(tabs.indexOf(view), QTabBar.ButtonPosition.RightSide)
 
 
+def _x_of(window: Any, view: Any) -> Any:
+    from PySide6.QtWidgets import QToolButton
+
+    from yulon.ui.theme import FORGET_TAB_BUTTON
+
+    strip = _strip_of(window, view)
+    return None if strip is None else strip.findChild(QToolButton, FORGET_TAB_BUTTON)
+
+
+def _play_of(window: Any, view: Any) -> Any:
+    from PySide6.QtWidgets import QToolButton
+
+    from yulon.ui.theme import LAUNCH_TAB_BUTTON
+
+    strip = _strip_of(window, view)
+    return None if strip is None else strip.findChild(QToolButton, LAUNCH_TAB_BUTTON)
+
+
 def test_only_server_tabs_carry_an_x(window: Any, tmp_path: Any) -> None:
     """Decided by page type, not index: Catalog is 0 and T93 puts Logs at 1."""
-    from PySide6.QtWidgets import QTabBar
+    from PySide6.QtWidgets import QTabBar, QToolButton
 
     from yulon.ui.controller_view import ControllerView
     from yulon.ui.theme import FORGET_TAB_BUTTON
@@ -2028,7 +2047,8 @@ def test_only_server_tabs_carry_an_x(window: Any, tmp_path: Any) -> None:
         left = bar.tabButton(index, QTabBar.ButtonPosition.LeftSide)
         assert left is None
         if isinstance(page, ControllerView):
-            assert right is not None and right.objectName() == FORGET_TAB_BUTTON
+            assert right is not None
+            assert right.findChild(QToolButton, FORGET_TAB_BUTTON) is not None
         else:
             assert right is None, f"{tabs.tabText(index)!r} has an ×"
 
@@ -4133,3 +4153,296 @@ def test_the_removal_list_reads_the_other_installs_but_not_this_one_or_a_wsl_one
     assert other in others
     assert mine not in others, "this server's own receipts would hide every file"
     assert wsl_one not in others, "reading it would boot its distro"
+
+
+# ------------------------------------------------ T187: the client launcher window
+
+
+@pytest.fixture
+def launchers(window: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    """The launcher's reads inline, and every launcher a test opened closed after it."""
+    from yulon.ui import launcher_window
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(launcher_window, "threaded_job_runner", lambda _parent: run_inline)
+    yield window.yulon_launchers
+    for launcher in list(window.yulon_launchers.values()):
+        launcher.close()
+        launcher.deleteLater()
+    window.yulon_launchers.clear()
+    process_events()
+
+
+def _server(window: Any, tmp_path: Path, name: str, *, play: bool = False) -> Any:
+    """A WotLK tab over its own folder, with a client folder, and a ready-to-play one if asked.
+
+    The ready-to-play folder is recorded the way Make… records one: the view's
+    signal, which `main.py` answers by rebuilding the tab over it.
+    """
+    server_dir = tmp_path / name
+    client = tmp_path / f"{name}-client"
+    client.mkdir(parents=True)
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, client)
+    view = _tab_for(window, server_dir)
+    if play:
+        play_dir = tmp_path / f"{name}-play"
+        play_dir.mkdir()
+        view.play_client_dir_changed.emit("wow-wotlk", server_dir, play_dir)
+        view = _tab_for(window, server_dir)
+        assert view.services.play_client_dir == play_dir
+    return view
+
+
+def _key(view: Any) -> tuple[str, Path]:
+    return (view.entry.id, view.services.controller.server_dir)
+
+
+def test_each_server_tab_has_a_play_beside_its_x_shown_with_it(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    """Spec 1: ▶ beside the T95 ×, on the hovered or current tab only, never a pad stop."""
+    from PySide6.QtCore import Qt
+
+    first = _server(window, tmp_path, "t187-first")
+    second = _server(window, tmp_path, "t187-second")
+    tabs = window.property("tabs")
+    play_first, play_second = _play_of(window, first), _play_of(window, second)
+    assert play_first is not None and play_first.parent() is _x_of(window, first).parent()
+    assert play_first.text() == "▶"
+    assert "launcher" in play_first.toolTip().casefold()
+    assert tabs.currentWidget() is second
+    assert play_first.isHidden() and not play_second.isHidden()
+    _hover(tabs.tabBar(), tabs.indexOf(first))
+    assert not play_first.isHidden()
+    _leave(tabs.tabBar())
+    assert play_first.isHidden()
+
+    play_second.ensurePolished()
+    assert play_second.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert play_second.maximumWidth() <= 18 and play_second.maximumHeight() <= 18
+    strip = _strip_of(window, second)
+    assert strip.geometry().width() <= tabs.tabBar().width(), "the strip is wider than the rail"
+
+
+def test_the_sidebar_play_opens_the_servers_launcher_and_again_raises_the_same_one(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    from yulon.ui.launcher_window import LauncherWindow
+
+    view = _server(window, tmp_path, "t187-open", play=True)
+    _play_of(window, view).click()
+
+    launcher = launchers[_key(view)]
+    assert isinstance(launcher, LauncherWindow)
+    assert launcher.isVisible() and launcher.view is view
+    assert launcher.isWindow() and launcher.parent() is None, "not a window of its own"
+
+    _play_of(window, view).click()
+    assert launchers[_key(view)] is launcher and len(launchers) == 1
+
+    launcher.close()
+    _play_of(window, view).click()
+    assert launchers[_key(view)] is launcher and launcher.isVisible(), "closed for good"
+
+
+def test_one_launcher_per_server(window: Any, tmp_path: Path, launchers: Any) -> None:
+    one = _server(window, tmp_path, "t187-one", play=True)
+    two = _server(window, tmp_path, "t187-two", play=True)
+    first = window.yulon_open_launcher(*_key(one))
+    second = window.yulon_open_launcher(*_key(two))
+    assert first is not second
+    assert first.view is one and second.view is two
+
+
+def test_the_server_tabs_play_opens_the_launcher_and_its_make_stays_a_make(
+    window: Any, tmp_path: Path, launchers: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec 1 + 3: the tab keeps Play / Make / ▾; its Play opens the launcher, PLAY is in it."""
+    from yulon.ui.controller_view import MAKE_PLAY_CLIENT_LABEL
+
+    without = _server(window, tmp_path, "t187-make")
+    made: list[int] = []
+    monkeypatch.setattr(without, "make_play_client", lambda: made.append(1))
+    assert without.play_button.text() == MAKE_PLAY_CLIENT_LABEL
+    without.play_button.click()
+    assert made == [1] and _key(without) not in launchers
+
+    view = _server(window, tmp_path, "t187-tab-play", play=True)
+    played: list[int] = []
+    monkeypatch.setattr(view, "play", lambda: played.append(1))
+    assert view.play_button.text() == "Play"
+    view.play_button.click()
+
+    assert played == [], "the tab played directly instead of opening the launcher"
+    assert launchers[_key(view)].isVisible()
+    assert not view.play_menu_button.isHidden(), "the ▾ menu went"
+    from yulon.ui.theme import PLAY_MENU_BUTTON
+
+    assert view.play_menu_button.objectName() == PLAY_MENU_BUTTON, "two arrows on the ▾"
+
+
+def test_a_rebuilt_tab_is_followed_by_its_open_launcher(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    """After Make… or Delete `main.py` rebuilds the tab: the launcher drives the new one."""
+    view = _server(window, tmp_path, "t187-rebuilt")
+    launcher = window.yulon_open_launcher(*_key(view))
+    assert launcher.view is view and not launcher.play_button.isEnabled()
+
+    play_dir = tmp_path / "t187-rebuilt-play"
+    play_dir.mkdir()
+    view.play_client_dir_changed.emit("wow-wotlk", _key(view)[1], play_dir)
+    process_events()
+
+    rebuilt = _tab_for(window, _key(view)[1])
+    assert rebuilt is not view
+    assert launcher.view is rebuilt, "the launcher still drives the destroyed tab"
+    assert launchers[_key(view)] is launcher
+    assert rebuilt.open_launcher is not None
+
+
+def test_removing_the_server_closes_its_launcher_and_forgets_its_place(
+    window: Any, tmp_path: Path, launchers: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review Focus 4: the × closes the launcher before the tab goes; nothing calls a dead view."""
+    import shiboken6
+
+    from yulon import ui_settings
+
+    _answer(monkeypatch, True)
+    view, _stops = _removable_tab(window, monkeypatch, tmp_path / "t187-remove", "wow-wotlk")
+    key = _key(view)
+    launcher = window.yulon_open_launcher(*key)
+    ui_settings.remember_launcher(*key, addresses=["10.0.0.5"])
+
+    _x_of(window, view).click()
+    _collect_deleted()
+
+    assert key not in launchers
+    assert not shiboken6.isValid(launcher), "the closed launcher was never deleted"
+    assert ui_settings.launcher_place(*key) == ui_settings.LauncherPlace()
+
+
+def test_an_uninstall_closes_the_servers_launcher(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    view = _server(window, tmp_path, "t187-uninstall", play=True)
+    key = _key(view)
+    launcher = window.yulon_open_launcher(*key)
+    closed: list[int] = []
+    launcher.closed.connect(lambda: closed.append(1))
+
+    view.uninstalled.emit(*key)
+
+    assert closed == [1] and key not in launchers
+
+
+def test_the_main_window_closing_closes_every_launcher(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    """App exit: a launcher left open would keep the app running with no main window."""
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QApplication
+
+    one = window.yulon_open_launcher(*_key(_server(window, tmp_path, "t187-exit-1")))
+    two = window.yulon_open_launcher(*_key(_server(window, tmp_path, "t187-exit-2")))
+    event = QCloseEvent()
+
+    QApplication.sendEvent(window, event)
+
+    assert event.isAccepted()
+    assert one.isHidden() and two.isHidden()
+    assert launchers == {}
+
+
+def test_a_refused_close_leaves_the_launchers_open(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QApplication
+
+    class _Refuse(QObject):
+        def eventFilter(self, _watched: QObject, event: QEvent) -> bool:  # noqa: N802
+            if event.type() == QEvent.Type.Close:
+                event.ignore()
+                return True
+            return False
+
+    launcher = window.yulon_open_launcher(*_key(_server(window, tmp_path, "t187-refused")))
+    guard = _Refuse()
+    window.installEventFilter(guard)
+    try:
+        QApplication.sendEvent(window, QCloseEvent())
+    finally:
+        window.removeEventFilter(guard)
+
+    assert launcher.isVisible()
+
+
+def test_the_launchers_size_and_place_are_remembered_per_server(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    import shiboken6
+    from PySide6.QtGui import QGuiApplication
+
+    from yulon import ui_settings
+    from yulon.ui.launcher_window import fitted_size
+
+    view = _server(window, tmp_path, "t187-geometry")
+    key = _key(view)
+    launcher = window.yulon_open_launcher(*key)
+    screen = QGuiApplication.primaryScreen().availableGeometry().size()
+    assert launcher.size() == fitted_size(screen), "not the default size the first time"
+
+    launcher.resize(1010, 702)
+    process_events()
+    launcher.close()
+    assert ui_settings.launcher_place(*key).geometry, "nothing remembered at close"
+
+    # As if Yu'lon were started again: no window for the server any more.
+    launchers.pop(key).deleteLater()
+    _collect_deleted()
+    assert not shiboken6.isValid(launcher)
+    again = window.yulon_open_launcher(*key)
+
+    assert again is not launcher
+    # The height as saved; the width is kept on the 800-wide offscreen screen, so
+    # it comes back as the 960 minimum (see test_launcher_window's round trip).
+    assert again.height() == 702 and again.width() == 960
+    other = window.yulon_open_launcher(*_key(_server(window, tmp_path, "t187-geometry-2")))
+    assert other.size() == fitted_size(screen), "another server's size was used"
+
+
+def test_typed_addresses_are_remembered_per_server_and_offered_next_time(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    from yulon import ui_settings
+
+    view = _server(window, tmp_path, "t187-addresses")
+    key = _key(view)
+    launcher = window.yulon_open_launcher(*key)
+
+    launcher.addresses_changed.emit(["10.0.0.5", "lan.host"])
+
+    assert ui_settings.launcher_place(*key).addresses == ["10.0.0.5", "lan.host"]
+    launcher.close()
+    launchers.pop(key).deleteLater()
+    _collect_deleted()
+    again = window.yulon_open_launcher(*key)
+    offered = [again.realm_combo.itemText(i) for i in range(again.realm_combo.count())]
+    assert "10.0.0.5" in offered and "lan.host" in offered
+
+
+def test_the_launchers_server_tab_button_brings_its_tab_forward(
+    window: Any, tmp_path: Path, launchers: Any
+) -> None:
+    view = _server(window, tmp_path, "t187-server-tab")
+    other = _server(window, tmp_path, "t187-server-tab-other")
+    launcher = window.yulon_open_launcher(*_key(view))
+    tabs = window.property("tabs")
+    assert tabs.currentWidget() is other
+
+    launcher.server_tab_button.click()
+
+    assert tabs.currentWidget() is view
