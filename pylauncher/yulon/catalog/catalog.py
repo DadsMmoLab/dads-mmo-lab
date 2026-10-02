@@ -288,6 +288,14 @@ class ClientSpec(_Strict):
             "Warn when the client's volume has less free space than this (extraction scratch)."
         ),
     )
+    locales: tuple[Annotated[str, Field(pattern=r"^[A-Za-z]{4}$")], ...] = Field(
+        default=(),
+        description=(
+            "The locale folders (`enUS`) this server's client patches are made for; a client "
+            "holding none of them is refused. Empty: any locale. Centurion's patches are "
+            "`patch-enUS-*` only (T179 Task 7)."
+        ),
+    )
 
     @field_validator("mpq_depth")
     @classmethod
@@ -295,6 +303,15 @@ class ClientSpec(_Strict):
         if isinstance(value, int) and value < 1:
             raise ValueError("mpq_depth must be >= 1 or 'recursive'")
         return value
+
+    @model_validator(mode="after")
+    def _named_locales_are_required(self) -> ClientSpec:
+        if self.locales and not self.locale_mpq_required:
+            raise ValueError(
+                "a client spec naming locales needs locale_mpq_required: the locale is then a "
+                "folder the client must have, and its rule reports one that cannot be read"
+            )
+        return self
 
 
 class DockerfileSpec(_Strict):
@@ -2017,6 +2034,13 @@ class ClientPack(_Strict):
     (`patches.md5`) and a joined set of parts is exactly where a missing piece
     goes unnoticed; a URL pack may have none, since the server's site may
     publish none, and then size, zip CRC and the recorded version stand in.
+
+    A checkout pack's checksum is pinned here (`sha256`/`md5`) or read from a
+    file of the checkout itself (`md5_file`, T179 Task 7, the lead's ruling):
+    a pinned one would refuse every pack the server's makers update, and
+    "Update to latest" is meant to bring their new patches along. Reading it
+    from their repo moves the trust from Yu'lon's pin to that repo -- the same
+    trust as the server code built from it.
     """
 
     id: Slug
@@ -2025,6 +2049,16 @@ class ClientPack(_Strict):
     source: PackSource
     sha256: Sha256 | None = None
     md5: Md5 | None = None
+    md5_file: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Checkout packs only: a file of `md5sum` lines, relative to the server dir like "
+            "`source.path` (`src/centurion/centurion/patches/patches.md5`), whose line for this "
+            "zip -- named relative to the file's own folder -- is the md5 the zip must have, "
+            "read at the commit the checkout is on."
+        ),
+    )
     install: tuple[InstallRule, ...] = Field(min_length=1)
     remove_when_off: tuple[str, ...] = Field(
         default=(),
@@ -2047,12 +2081,35 @@ class ClientPack(_Strict):
             _inside(item, "remove_when_off", names_a_file=True)
         return value
 
+    @field_validator("md5_file")
+    @classmethod
+    def _md5_file_stays_inside_the_server_dir(cls, value: str | None) -> str | None:
+        return value if value is None else _inside(value, "md5_file", names_a_file=True)
+
     @model_validator(mode="after")
     def _checksum_and_choice_are_coherent(self) -> ClientPack:
-        if self.sha256 is not None and self.md5 is not None:
-            raise ValueError(f"pack {self.id!r}: at most one of sha256 and md5")
-        if self.source.kind == "checkout" and self.sha256 is None and self.md5 is None:
-            raise ValueError(f"pack {self.id!r}: a checkout pack needs a checksum")
+        given = [self.sha256, self.md5, self.md5_file]
+        if sum(item is not None for item in given) > 1:
+            raise ValueError(
+                f"pack {self.id!r}: a pack takes exactly one of sha256, md5 and md5_file"
+            )
+        if self.md5_file is not None:
+            if self.source.kind != "checkout" or self.source.path is None:
+                raise ValueError(
+                    f"pack {self.id!r}: only a checkout pack takes md5_file, which is read from "
+                    "the server's checkout"
+                )
+            folder = PurePosixPath(self.md5_file).parent
+            if not PurePosixPath(self.source.path).is_relative_to(folder):
+                raise ValueError(
+                    f"pack {self.id!r}: its zip {self.source.path!r} must be inside the folder of "
+                    f"its md5_file {self.md5_file!r}, whose lines name files relative to it"
+                )
+        if self.source.kind == "checkout" and all(item is None for item in given):
+            raise ValueError(
+                f"pack {self.id!r}: a checkout pack needs a checksum: exactly one of sha256, "
+                "md5 and md5_file"
+            )
         if (
             self.source.kind == "url"
             and self.sha256 is None

@@ -25,13 +25,15 @@ including the ones a review of the first version found it missing.
 from __future__ import annotations
 
 import ast
+import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import get_args
 
 import pytest
 
-from yulon.catalog.catalog import NativeInstall, load_catalog
+from yulon.catalog.catalog import CATALOG_FILE, NativeInstall, load_catalog, parse_catalog
 from yulon.catalog.families import FAMILIES, decisions
 from yulon.catalog.families.decisions import FAMILY_DECISIONS, Site
 
@@ -276,10 +278,35 @@ def _shipped_families() -> set[str]:
     }
 
 
-def test_pending_is_allowed_today_because_no_shipped_entry_is_trinitycore() -> None:
-    """`pending` is T179's runway: trinitycore only, and only while nothing ships on it."""
-    assert "trinitycore" not in _shipped_families()
+def test_the_runway_is_closed_the_catalog_ships_trinitycore_and_nothing_is_pending() -> None:
+    """`pending` was T179's runway: trinitycore only, and only while nothing shipped on it.
+
+    `wow-centurion` (Task 7) ships the family, so every site has decided it, and
+    the registry's own rule finds nothing -- read through `_shipped_families()`,
+    the same reading `test_pending_cannot_ship_a_catalog_that_installs_the_family`
+    makes.
+    """
+    assert "trinitycore" in _shipped_families()
     assert decisions.pending_problems(FAMILY_DECISIONS, _shipped_families()) == []
+    assert [
+        f"{site.module}:{site.scope}"
+        for site in FAMILY_DECISIONS
+        if any(decision.kind == "pending" for decision in site.decisions.values())
+    ] == []
+
+
+def test_shipped_families_reads_a_trinitycore_entry_from_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard's view of "what ships" follows the catalog it is given, both ways."""
+    shipped = load_catalog()
+    raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    raw["games"] = [game for game in raw["games"] if game["id"] != "wow-centurion"]
+    without = parse_catalog(raw)
+    monkeypatch.setattr(sys.modules[__name__], "load_catalog", lambda: without)
+    assert "trinitycore" not in _shipped_families()
+    monkeypatch.setattr(sys.modules[__name__], "load_catalog", lambda: shipped)
+    assert "trinitycore" in _shipped_families()
 
 
 def test_pending_cannot_ship_a_catalog_that_installs_the_family() -> None:
@@ -307,7 +334,7 @@ def test_pending_cannot_ship_a_catalog_that_installs_the_family() -> None:
         "yulon.example:somewhere is still pending for trinitycore (Task 5 (somewhere)), "
         "and the shipped catalog installs trinitycore"
     ]
-    assert decisions.pending_problems((site,), _shipped_families()) == []
+    assert decisions.pending_problems((site,), _shipped_families() - {"trinitycore"}) == []
 
 
 def test_pending_is_trinitycores_alone() -> None:

@@ -7,6 +7,7 @@ daemon or a database. The two tests that pin argv/env drive the real
 
 from __future__ import annotations
 
+import functools
 import io
 import subprocess
 from datetime import datetime
@@ -1158,13 +1159,17 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
     monkeypatch.setattr("yulon.platform.docker_program", lambda: None)
     _client_cache.clear()
 
+    from yulon.controller_wow_centurion import maintenance as centurion
+
+    catalog = load_catalog()
     factories = {
         "wow-wotlk": maintenance.mysql_for,
         "wow-tbc": tbc.mysql_for,
         "wow-vanilla": vanilla.mysql_for,
         "wow-tortoise": tortoise.mysql_for,
+        # Centurion's package takes its entry (T179 Task 5).
+        "wow-centurion": functools.partial(centurion.mysql_for, catalog.get("wow-centurion")),
     }
-    catalog = load_catalog()
     assert set(factories) == {
         game.id for game in catalog.games
     }, "a game was added to the catalog without a backup client binding"
@@ -1180,13 +1185,3 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
             f"{game_id} declares {declared!r} but fell back to {argv[0]!r} with no probe; "
             f"on a MariaDB image that binary does not exist"
         )
-    # T179: Centurion's package takes its entry, which is not shipped until Task 7;
-    # its builder must pass the client that entry declares just the same.
-    from tests.support_trinitycore import centurion_like
-    from yulon.controller_wow_centurion import maintenance as centurion
-
-    entry = centurion_like()
-    assert entry.install.native is not None
-    _client_cache.clear()
-    argv = centurion.mysql_for(entry, "pw")._dump_argv("some_db")
-    assert entry.install.native.db.client == "mysql" and argv[0] == "mysqldump", argv

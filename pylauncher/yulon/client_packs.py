@@ -240,21 +240,41 @@ _FROM_SOURCES = (
 )
 
 
-def _prove(pack: ClientPack, path: Path, advice: str = _RETRY) -> str:
+Expected = tuple[str, str]
+"""`("sha256" | "md5", hex)`: what a file must hash to, from the catalog or the checkout."""
+
+
+def _pinned(pack: ClientPack) -> Expected | None:
+    """The checksum the catalog itself carries for `pack`, if any."""
+    if pack.sha256 is not None:
+        return ("sha256", pack.sha256)
+    if pack.md5 is not None:
+        return ("md5", pack.md5)
+    return None
+
+
+def _prove(
+    pack: ClientPack, path: Path, advice: str = _RETRY, *, expected: Expected | None = None
+) -> str:
     """The file's SHA-256, once it matches the pack's checksum (or, with none, its zip CRCs).
+
+    `expected` is the checksum to hold the file to; by default the one the
+    catalog pins (a checkout pack whose md5 is read from the checkout passes it
+    in, `_expected_from_checkout`).
 
     Raises `PackError` and leaves the file where it is: the caller decides
     whether it may be deleted (a cache file may; a file of the server's own
     checkout may not).
     """
     sha256, md5 = _digests(path)
-    expected = pack.sha256 or pack.md5
-    if expected is not None:
-        actual = sha256 if pack.sha256 is not None else md5
-        if actual != expected:
+    want = expected if expected is not None else _pinned(pack)
+    if want is not None:
+        kind, expected_hex = want
+        actual = sha256 if kind == "sha256" else md5
+        if actual != expected_hex.lower():
             raise PackError(
                 f"{pack.label} does not match its published checksum ({actual[:12]}… instead "
-                f"of {expected[:12]}…), so Yu'lon did not use it. {advice}"
+                f"of {expected_hex[:12]}…), so Yu'lon did not use it. {advice}"
             )
         return sha256
     try:
@@ -353,6 +373,87 @@ def _checkout_version(pack: ClientPack, path: Path) -> str | None:
     return _checked_version(pack, raw, str(beside))
 
 
+MD5_FILE_MAX_BYTES = 1 << 20
+"""How much of a checksum file is read. Centurion's `patches.md5` is 399 bytes."""
+
+_MD5_LINE = re.compile(r"^([0-9A-Fa-f]{32}) [ *](.+)$")
+"""One `md5sum` line: the digest, a space, then ` ` (text mode) or `*` (binary), then the name."""
+
+
+def _expected_from_checkout(pack: ClientPack, server_dir: Path) -> Expected:
+    """The md5 `pack.md5_file` gives for the pack's zip, at the commit the checkout is on.
+
+    The file is `md5sum` output (Centurion's `centurion/patches/patches.md5`,
+    checked by its own `join.sh` with `md5sum -c`), so its names are relative to
+    its own folder: the pack's zip is looked up by its path relative to that
+    folder, exactly, `./` and Windows separators aside. Refused -- naming the
+    file, and pointing at the Server build menu -- when the file is missing, has
+    no line for the zip, or has two lines for it that disagree: with no
+    checksum to hold the zip to, a join missing a piece would go unnoticed.
+    """
+    assert pack.md5_file is not None and pack.source.path is not None
+    file = server_dir / pack.md5_file
+    try:
+        with file.open("rb") as handle:
+            raw = handle.read(MD5_FILE_MAX_BYTES + 1)
+    except FileNotFoundError:
+        raise PackError(
+            f"{pack.label}: this server's checkout has no {pack.md5_file} at the commit it is "
+            "on, and that file holds the checksum Yu'lon checks the pack against, so it was not "
+            f"used. {_FROM_SOURCES}"
+        ) from None
+    if len(raw) > MD5_FILE_MAX_BYTES:
+        raise PackError(
+            f"{pack.label}: {pack.md5_file} in this server's checkout is larger than a checksum "
+            f"list can be, so Yu'lon did not read it. {_FROM_SOURCES}"
+        )
+    name = PurePosixPath(pack.source.path).relative_to(PurePosixPath(pack.md5_file).parent)
+    found: set[str] = set()
+    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
+        match = _MD5_LINE.match(line.strip())
+        if match is None:
+            continue
+        listed = match.group(2).replace("\\", "/")
+        if listed.startswith("./"):
+            listed = listed[2:]
+        if listed == name.as_posix():
+            found.add(match.group(1).lower())
+    if not found:
+        raise PackError(
+            f"{pack.label}: {pack.md5_file} in this server's checkout has no line for "
+            f"{name.as_posix()}, so Yu'lon has no checksum to check the pack against and did "
+            f"not use it. {_FROM_SOURCES}"
+        )
+    if len(found) > 1:
+        raise PackError(
+            f"{pack.label}: {pack.md5_file} in this server's checkout names {name.as_posix()} "
+            f"more than once, with different checksums, so Yu'lon did not use it. {_FROM_SOURCES}"
+        )
+    return ("md5", found.pop())
+
+
+def _expected_checkout(pack: ClientPack, server_dir: Path) -> Expected:
+    """A checkout pack's checksum: pinned in the catalog, or read from its `md5_file`."""
+    if pack.md5_file is not None:
+        return _expected_from_checkout(pack, server_dir)
+    pinned = _pinned(pack)
+    assert pinned is not None  # catalog validation: a checkout pack always carries a checksum
+    return pinned
+
+
+def checkout_checksum(pack: ClientPack, server_dir: Path) -> str:
+    """The hex checksum a checkout pack's zip must have in `server_dir`'s checkout, as it is now.
+
+    For whatever needs to notice a changed pack without fetching it (the map
+    data's evidence names the required packs by checksum): with `md5_file`
+    the catalog alone no longer says, the checkout does. Raises `PackError`.
+    """
+    try:
+        return _expected_checkout(pack, server_dir)[1]
+    except OSError as exc:
+        raise _os_refusal(pack, exc) from exc
+
+
 def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
     """A checkout pack's zip, proved against its checksum.
 
@@ -367,10 +468,11 @@ def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
     if source.kind != "checkout" or source.path is None:
         raise PackError(f"{pack.label} does not come from the server's checkout.")
     path = server_dir / source.path
+    expected = _expected_checkout(pack, server_dir)
     version = _checkout_version(pack, path)
     if path.is_file():
         try:
-            return Fetched(path, version, _prove(pack, path, _FROM_SOURCES))
+            return Fetched(path, version, _prove(pack, path, _FROM_SOURCES, expected=expected))
         except PackError as exc:
             raise PackError(f"{exc} The file is {path}.") from exc
     parts = _whole_parts(pack, path)
@@ -380,13 +482,11 @@ def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
             "pieces) at the commit it is on, so Yu'lon cannot make its client. Update the "
             "server, or return it to the tested pin, and try again."
         )
-    digest = pack.sha256 or pack.md5
-    assert digest is not None  # catalog validation: a checkout pack always carries a checksum
-    folder = cache_dir() / "checkout" / digest
+    folder = cache_dir() / "checkout" / expected[1]
     dest = folder / path.name
     if dest.is_file():
         try:
-            return Fetched(dest, version, _prove(pack, dest))
+            return Fetched(dest, version, _prove(pack, dest, expected=expected))
         except PackError:
             logger.info(f"client-packs: cached {dest} no longer proves; joining it again")
             dest.unlink(missing_ok=True)
@@ -398,7 +498,7 @@ def _fetch_checkout(pack: ClientPack, server_dir: Path) -> Fetched:
             for part in parts:
                 with part.open("rb") as piece:
                     shutil.copyfileobj(piece, out, CHUNK_BYTES)
-        sha256 = _prove(pack, joining, _FROM_SOURCES)
+        sha256 = _prove(pack, joining, _FROM_SOURCES, expected=expected)
         os.replace(joining, dest)
     except BaseException:
         joining.unlink(missing_ok=True)

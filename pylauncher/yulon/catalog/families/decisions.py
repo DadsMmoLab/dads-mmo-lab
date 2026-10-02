@@ -113,7 +113,7 @@ _NOT_THE_TC_ENGINE = (
 )
 _CMANGOS_CONTROLLER = "never reached: only this CMaNGOS game's own controller package reads it"
 _CENTURION_CONTROLLER = (
-    "never reached: the Centurion controller package refuses an entry of another family"
+    "never reached: the TrinityCore game's controller package refuses an entry of another family"
 )
 _NO_SQL_PLAN = "AzerothCore's own database updater applies its updates; its block has no SQL plan"
 _NO_REEXTRACT_PRESS = (
@@ -717,7 +717,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
     Site(
         "yulon.controller_wow_centurion.docker_ctl",
         "native_block",
-        "the Centurion controller package reads its TrinityCore block",
+        "the TrinityCore game's controller package reads its TrinityCore block",
         {
             "azerothcore": not_applicable(_CENTURION_CONTROLLER),
             "cmangos": not_applicable(_CENTURION_CONTROLLER),
@@ -744,7 +744,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": supported("`wow-centurion` (T179 Task 5)"),
+            "trinitycore": supported("the TrinityCore entry's own (T179 Task 5)"),
         },
         scanned=False,
     ),
@@ -755,7 +755,7 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
         {
             "azerothcore": supported(),
             "cmangos": supported(),
-            "trinitycore": supported("`wow-centurion` (T179 Task 5)"),
+            "trinitycore": supported("the TrinityCore entry's own (T179 Task 5)"),
         },
         scanned=False,
     ),

@@ -692,6 +692,93 @@ def test_the_evidence_names_the_players_client_and_a_changed_pack_extracts_again
     assert seen["Data/enUS/patch-enUS-A.MPQ"] == b"MPQ\x1a centurion locale, a later version"
 
 
+# The shipped entry's checksum source (T179 Task 7, the lead's ruling): each required pack's
+# md5 is read from the checkout's own `patches.md5`, so a pack the server's makers update
+# with its line is taken without a catalog change.
+MD5_FILE = f"{PATCHES}/patches.md5"
+MD5_PACKS: list[dict[str, Any]] = [
+    {key: value for key, value in pack.items() if key != "md5"} | {"md5_file": MD5_FILE}
+    for pack in REQUIRED_PACKS
+]
+
+
+def _lay_md5_file(m: Machine) -> None:
+    lines = [
+        f"{hashlib.md5(m.server_dir.joinpath(rel).read_bytes(), usedforsecurity=False).hexdigest()}"
+        f"  {Path(rel).name}\n"
+        for rel in sorted(ZIPS)
+    ]
+    (m.server_dir / MD5_FILE).write_text("".join(lines), encoding="utf-8")
+
+
+def _update_locale_pack(m: Machine) -> None:
+    """The server's makers ship a new patch-enUS-A.zip and its line in patches.md5."""
+    newer = _zip("patch-enUS-A.MPQ", b"MPQ\x1a centurion locale, 1.00155")
+    (m.server_dir / PATCHES / "patch-enUS-A.zip").write_bytes(newer)
+    _lay_md5_file(m)
+
+
+def test_a_pack_updated_with_its_md5_line_is_extracted_by_the_re_extraction(
+    machine: Machine,
+) -> None:
+    """Update to latest flags the map data; the re-extraction removes the evidence and runs
+    `client-data` again (`TrinityCoreInstaller.reextract`), which takes the new zip on the
+    checkout's word -- with a pinned md5 it would be refused as a changed file."""
+    entry = centurion_like(packs=[*MD5_PACKS, *OPTIONAL_PACKS], rev=REV)
+    lay_for_client_data(machine)
+    _lay_md5_file(machine)
+    run_stage(machine, "client-data", entry=entry)
+    _update_locale_pack(machine)
+    (machine.server_dir / "data" / extract.EVIDENCE_FILE).unlink()  # as reextract() does
+    machine.tools.seen.clear()
+
+    run_stage(machine, "client-data", entry=entry)
+
+    seen = machine.tools.seen["mapextractor"]
+    assert seen["Data/enUS/patch-enUS-A.MPQ"] == b"MPQ\x1a centurion locale, 1.00155"
+
+
+def test_a_pack_that_does_not_match_the_checkouts_md5_file_stops_the_extraction(
+    machine: Machine,
+) -> None:
+    entry = centurion_like(packs=[*MD5_PACKS, *OPTIONAL_PACKS], rev=REV)
+    lay_for_client_data(machine)
+    _lay_md5_file(machine)
+    (machine.server_dir / PATCHES / "patch-enUS-A.zip").write_bytes(
+        _zip("patch-enUS-A.MPQ", b"MPQ\x1a changed without its line")
+    )
+
+    with pytest.raises(InstallerError, match="does not match its published checksum"):
+        run_stage(machine, "client-data", entry=entry)
+    assert not os.path.lexists(copy_dir(machine))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T179 Task 7 -> lead at the join: trinitycore._packs_salt() reads pack.sha256 or "
+        "pack.md5, which an md5_file pack has neither of, so its salt does not change with the "
+        "pack; it should read client_packs.checkout_checksum(pack, ctx.server_dir). "
+        "trinitycore.py is the other implementer's file in this round."
+    ),
+)
+def test_a_pack_updated_with_its_md5_line_is_noticed_by_the_evidence_without_a_press(
+    machine: Machine,
+) -> None:
+    """As `test_the_evidence_names_the_players_client_and_a_changed_pack_extracts_again`, for
+    the md5 the checkout gives: the evidence's salt must change with the pack."""
+    entry = centurion_like(packs=[*MD5_PACKS, *OPTIONAL_PACKS], rev=REV)
+    lay_for_client_data(machine)
+    _lay_md5_file(machine)
+    run_stage(machine, "client-data", entry=entry)
+    _update_locale_pack(machine)
+    machine.tools.seen.clear()
+
+    said = run_stage(machine, "client-data", entry=entry)
+
+    assert "the extracted data is for another client or plan; extracting everything again" in said
+
+
 def test_a_leftover_copy_from_an_interrupted_press_is_removed_first(machine: Machine) -> None:
     lay_for_client_data(machine)
     leftover = copy_dir(machine)

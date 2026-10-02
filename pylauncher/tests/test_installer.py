@@ -658,7 +658,13 @@ def test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks
         entry.id: tuple(source.dest for source in entry.emulator.sources)
         for entry in load_catalog().games
     }
-    assert set(landings) == {"wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"}, landings
+    assert set(landings) == {
+        "wow-wotlk",
+        "wow-tbc",
+        "wow-vanilla",
+        "wow-tortoise",
+        "wow-centurion",
+    }, landings
     into_server_dir = {
         game_id
         for game_id, dests in landings.items()

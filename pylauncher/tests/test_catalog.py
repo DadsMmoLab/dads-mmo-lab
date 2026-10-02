@@ -26,11 +26,15 @@ from yulon.catalog.catalog import (
 )
 from yulon.controller_wow_wotlk import docker_ctl
 
-V1_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
+V1_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
+"""README §1's four v1 servers, and Centurion after them (T179 Task 7)."""
 
 
 def test_bundled_catalog_describes_exactly_the_four_v1_servers() -> None:
-    """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only."""
+    """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only.
+
+    Plus Centurion (T179), the first server that is not one of the four.
+    """
     catalog = load_catalog()
     assert tuple(g.id for g in catalog.games) == V1_GAMES
     for game in catalog.games:
@@ -316,6 +320,8 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
         "wow-tbc": True,
         "wow-vanilla": True,
         "wow-tortoise": True,
+        # T179 decision 2: code = pull + rebuild, world = changed tables re-imported.
+        "wow-centurion": True,
     }, offered
 
 

@@ -1374,6 +1374,848 @@
         ]
       },
       "has_manifests": true
+    },
+    {
+      "id": "wow-centurion",
+      "name": "Centurion",
+      "status": "beta",
+      "description": "Centurion is level-60 player-versus-player WoW on the 3.3.5a client, with hardcore world characters, tournament battlegrounds and arenas, and 150 bots that quest, roam and fill the battlegrounds. Yu'lon builds the server from Centurion's own source and makes your English 3.3.5a client ready to play it, with Centurion's patches and addons.",
+      "emulator": {
+        "name": "Centurion (TrinityCore 3.3.5 fork with its own playerbots)",
+        "sources": [
+          {
+            "repo": "thomasjteachey/TrinityCore112",
+            "branch": "CENTURION",
+            "dest": "src/centurion",
+            "rev": "faac5fc9b0fe0934c26f08231793ca607d38327d"
+          }
+        ]
+      },
+      "install": {
+        "platforms": [
+          "linux",
+          "windows"
+        ],
+        "default_server_dir": "wow-centurion-server",
+        "requires_client_dir": true,
+        "password": {
+          "mode": "generated",
+          "file": ".db_password",
+          "prefix": "tc-"
+        },
+        "native": {
+          "family": "trinitycore",
+          "update_to_latest": true,
+          "templates": "shared/trinitycore",
+          "dockerfile_dir": "wow-centurion/native",
+          "image_prefix": "yulon.local/trinitycore-centurion-",
+          "images": [
+            "server"
+          ],
+          "min_server_dir_gb": 12,
+          "warn_server_dir_gb": 20,
+          "db": {
+            "image": "mysql:8.4",
+            "client": "mysql",
+            "user": "root"
+          },
+          "ready": {
+            "world": "(worldserver-daemon) ready...",
+            "auth": null,
+            "fatal": "Unable to load critical files - server shutting down !!!",
+            "regex": false,
+            "timeout_s": 1800,
+            "restart_loop": 4
+          },
+          "trinitycore": {
+            "checkout": "src/centurion",
+            "client": {
+              "required_file": "Data/lichking.MPQ",
+              "min_mpq": 6,
+              "mpq_depth": "recursive",
+              "locale_mpq_required": true,
+              "locales": [
+                "enUS"
+              ]
+            },
+            "sparse_exclude": [
+              "playerbot reference",
+              "centurion/launcher"
+            ],
+            "dockerfile": {
+              "make_jobs": 2,
+              "cmake_options": [
+                "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                "-DPLAYERBOT=ON",
+                "-DTOOLS=ON",
+                "-DSCRIPTS=static",
+                "-DWITH_WARNINGS=OFF"
+              ]
+            },
+            "extract": {
+              "image": "server",
+              "tools": [
+                {
+                  "name": "maps and cameras",
+                  "argv": [
+                    "/opt/trinitycore/bin/mapextractor",
+                    "-i",
+                    "/client",
+                    "-o",
+                    "/out",
+                    "-e",
+                    "5"
+                  ],
+                  "produces": {
+                    "maps": 100,
+                    "Cameras": 1
+                  }
+                },
+                {
+                  "name": "vmap extract",
+                  "argv": [
+                    "/opt/trinitycore/bin/vmap4extractor",
+                    "-d",
+                    "/client/Data/"
+                  ],
+                  "produces": {
+                    "Buildings": 100
+                  }
+                },
+                {
+                  "name": "vmap assemble",
+                  "argv": [
+                    "/opt/trinitycore/bin/vmap4assembler",
+                    "Buildings",
+                    "vmaps"
+                  ],
+                  "produces": {
+                    "vmaps": 100
+                  }
+                }
+              ],
+              "dbc_overlay_from": "centurion/dbc",
+              "client_archives": [
+                "common.MPQ",
+                "common-2.MPQ",
+                "expansion.MPQ",
+                "lichking.MPQ",
+                "patch.MPQ",
+                "patch-2.MPQ",
+                "patch-3.MPQ",
+                "{locale}/locale-{locale}.MPQ",
+                "{locale}/speech-{locale}.MPQ",
+                "{locale}/expansion-locale-{locale}.MPQ",
+                "{locale}/lichking-locale-{locale}.MPQ",
+                "{locale}/expansion-speech-{locale}.MPQ",
+                "{locale}/lichking-speech-{locale}.MPQ",
+                "{locale}/patch-{locale}.MPQ",
+                "{locale}/patch-{locale}-2.MPQ",
+                "{locale}/patch-{locale}-3.MPQ"
+              ]
+            },
+            "mmaps": {
+              "argv": [
+                "/opt/trinitycore/bin/mmaps_generator",
+                "--threads",
+                "{{THREADS}}"
+              ],
+              "min_files": 500,
+              "background": true
+            },
+            "conf": {
+              "source_dir": "/opt/trinitycore/etc",
+              "files": {
+                "worldserver.conf": {
+                  "keys": {
+                    "Updates.EnableDatabases": "0",
+                    "DataDir": "\"/opt/trinitycore/data\"",
+                    "LogsDir": "\"../logs\"",
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
+                    "WorldDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{WORLD_DB}}\"",
+                    "CharacterDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
+                    "WorldServerPort": "{{WORLD_PORT}}",
+                    "RealmID": "1",
+                    "Console.Enable": "1",
+                    "SOAP.Enabled": "1",
+                    "SOAP.IP": "\"0.0.0.0\"",
+                    "SOAP.Port": "7878",
+                    "mmap.enablePathFinding": "0",
+                    "MaxPlayerLevel": "60",
+                    "GameType": "1",
+                    "Centurion.Hardcore.Enable": "1",
+                    "Centurion.Tournament.Enable": "1",
+                    "Centurion.Bounty.Enable": "1",
+                    "Centurion.Bots.SkipClientPackets": "1",
+                    "Centurion.Bots.GridActivationRange": "90"
+                  }
+                },
+                "authserver.conf": {
+                  "keys": {
+                    "LogsDir": "\"../logs\"",
+                    "LoginDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\""
+                  }
+                },
+                "playerbots.conf": {
+                  "keys": {
+                    "Playerbot.Enable": "1",
+                    "Playerbot.PvpCore.Enable": "1",
+                    "Playerbot.PvpTactics.Enable": "1",
+                    "Playerbot.PvpLifecycle.PersistentBots.Enable": "0",
+                    "Playerbot.PvpLifecycle.Enable": "1",
+                    "Playerbot.PvpClassSpells.Enable": "1",
+                    "Playerbot.RandomPopulation.Enable": "1",
+                    "Playerbot.RandomPopulation.TargetMin": "150",
+                    "Playerbot.RandomPopulation.TargetMax": "150",
+                    "Playerbot.RandomPopulation.BotAccountIds": "76,77,78",
+                    "Playerbot.PvpLifecycle.QueueOnly.ScarletChapelAccounts": "76",
+                    "Playerbot.PvpLifecycle.QueueOnly.BlackrockThroneAccounts": "77",
+                    "Playerbot.PvpLifecycle.QueueOnly.BattleForGilneasAccounts": "0",
+                    "Playerbot.PvpLifecycle.QueueOnly.TwinPeaksAccounts": "0",
+                    "Playerbot.PvpLifecycle.QueueOnly.ArathiBasinAccounts": "0",
+                    "Playerbot.PvpLifecycle.QueueOnly.WarsongGulchAccounts": "0",
+                    "Playerbot.PvpLifecycle.QueueOnly.ArenaAccounts": "0",
+                    "Playerbot.RandomPopulation.MinLevel": "1",
+                    "Playerbot.RandomPopulation.MaxLevel": "60",
+                    "Playerbot.Pve.Enable": "1",
+                    "Playerbot.PveGrind.Enable": "1",
+                    "Playerbot.Pve.DevilsaurHunt.Enable": "1",
+                    "Playerbot.Pve.DevilsaurHunt.Entries": "\"6498,6499,6500\"",
+                    "Playerbot.Pve.DevilsaurHunt.BuffSpell": "90720",
+                    "Playerbot.Pve.DevilsaurHunt.DamageTakenPct": "20",
+                    "Playerbot.Pve.DevilsaurHunt.SeekYards": "400",
+                    "Playerbot.Pve.DevilsaurHunt.MaxLevelsAbove": "0",
+                    "Playerbot.Pve.DevilsaurHunt.RouteChancePct": "100",
+                    "Playerbot.Pve.CombatDiagnostics": "0",
+                    "Playerbot.Pve.Rest.UseConsumables": "1",
+                    "Playerbot.Pve.Professions.Enable": "1",
+                    "Playerbot.Pve.AuctionBuy.Enable": "1",
+                    "Playerbot.Pve.PvpOnlyAccountIds": "\"79\"",
+                    "Playerbot.PvpLifecycle.QueueOnly.ObsidianColosseumAccounts": "\"\"",
+                    "Playerbot.PvpLifecycle.QueueOnly.TanarisAccounts": "\"\"",
+                    "Playerbot.Pve.RebirthAtMaxLevel.Percent": "50",
+                    "Playerbot.Pve.DeclineGroupInvites": "1",
+                    "Playerbot.Pve.ZoneGuardians.PerZone": "1",
+                    "Playerbot.Pve.Drifters.Count": "30",
+                    "Playerbot.Pve.AuctionSell.Enable": "1",
+                    "Centurion.Hardcore.FfaPvp.WarModeAuraSpell": "90700",
+                    "Playerbot.PvpLifecycle.ObsidianColosseum.Clone.Enable": "1",
+                    "Playerbot.WhoListVisibility": "2",
+                    "Playerbot.Pve.Aggression.MinMinutes": "2",
+                    "Playerbot.Pve.Aggression.MaxMinutes": "45",
+                    "Playerbot.Pve.Rebirth.VeteranFleetSize": "256",
+                    "Playerbot.Pve.Aggression.TimidMinutes": "10",
+                    "Playerbot.WhoListTag": "\"\"",
+                    "Playerbot.Pve.Drifters.TeleportGold": "0",
+                    "Playerbot.Pve.Drifters.TeleportGold.Max": "0",
+                    "Playerbot.Pve.Auction.LevelsBehindPenalty": "0.35",
+                    "Playerbot.Pve.AggroBudget.Enable": "1",
+                    "Playerbot.Pve.AggroBudget.Solo": "1",
+                    "Playerbot.Pve.Drifters.PerExtraPersonInZone": "2",
+                    "Playerbot.Pve.IdleProd.AfterMinutes": "15",
+                    "Playerbot.Pve.IdleProd.DropYards": "210.0",
+                    "Playerbot.Pve.IdleProd.RetrySeconds": "120",
+                    "Playerbot.Pve.GatherDiagnostics": "0",
+                    "Playerbot.BgFill.Enable": "1",
+                    "Playerbot.BgFill.QueueWaitSeconds": "0",
+                    "Playerbot.BgFill.Tier.Easy.Characters": "\"100955-100963\"",
+                    "Playerbot.BgFill.Tier.Medium.Characters": "\"101158-101162,101164-101167\"",
+                    "Playerbot.BgFill.Tier.Hard.Characters": "\"101193-101194,101196-101202\"",
+                    "Playerbot.BgFill.Tier.Easy.BattlegroundTypes": "\"100\"",
+                    "Playerbot.BgFill.Tier.Medium.BattlegroundTypes": "\"101\"",
+                    "Playerbot.BgFill.Tier.Hard.BattlegroundTypes": "\"102\"",
+                    "Playerbot.RandomPopulation.DynamicWorldLoad.Enable": "1",
+                    "Playerbot.Pve.TransientBountyHunters.Enable": "1"
+                  }
+                }
+              },
+              "playerbots_conf": "playerbots.conf"
+            },
+            "sql": {
+              "create": [],
+              "phases": [
+                {
+                  "name": "databases",
+                  "statements": [
+                    "CREATE DATABASE IF NOT EXISTS `{{AUTH_DB}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                    "CREATE DATABASE IF NOT EXISTS `{{CHAR_DB}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+                    "CREATE DATABASE IF NOT EXISTS `{{WORLD_DB}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                  ]
+                },
+                {
+                  "name": "auth",
+                  "into": "centurion_auth",
+                  "files": [
+                    "src/centurion/centurion/sql/auth/auth_schema.sql",
+                    "src/centurion/centurion/sql/auth/auth_data.sql",
+                    "src/centurion/centurion/sql/auth/auth_bots.sql"
+                  ]
+                },
+                {
+                  "name": "characters",
+                  "into": "centurion_characters",
+                  "files": [
+                    "src/centurion/centurion/sql/characters/characters_schema.sql",
+                    "src/centurion/centurion/sql/characters/characters_seed.sql",
+                    "src/centurion/centurion/sql/characters/characters_bots.sql"
+                  ]
+                },
+                {
+                  "name": "world routines",
+                  "into": "centurion_world",
+                  "files": [
+                    "src/centurion/centurion/sql/world/_routines.sql"
+                  ]
+                },
+                {
+                  "name": "world tables",
+                  "into": "centurion_world",
+                  "files": [
+                    "src/centurion/centurion/sql/world/[!_]*.sql"
+                  ],
+                  "sort": "name"
+                }
+              ],
+              "verify": [
+                {
+                  "db": "centurion_world",
+                  "query": "SELECT COUNT(*) FROM version",
+                  "min": 1
+                },
+                {
+                  "db": "centurion_auth",
+                  "query": "SELECT COUNT(*) FROM realmlist WHERE id = 1",
+                  "min": 1
+                }
+              ],
+              "player_data": [
+                {
+                  "db": "centurion_auth",
+                  "table": "account",
+                  "exclude_usernames": [
+                    "PLAYERBOTONE",
+                    "PLAYERBOTTWO",
+                    "PLAYERBOTTHREE",
+                    "PLAYERBOTFOUR"
+                  ]
+                }
+              ],
+              "marker_db": "centurion_world",
+              "renames": [
+                [
+                  "legionnaireauth",
+                  "centurion_auth"
+                ],
+                [
+                  "centurionworld",
+                  "centurion_world"
+                ]
+              ],
+              "rename_files": [
+                "src/centurion/centurion/sql/auth/auth_schema.sql",
+                "src/centurion/centurion/sql/characters/characters_schema.sql",
+                "src/centurion/centurion/sql/world/_routines.sql"
+              ]
+            },
+            "required_maps": [
+              0,
+              1,
+              530
+            ],
+            "updates": {
+              "reimport_phases": [
+                "world routines",
+                "world tables"
+              ],
+              "layout_files": [
+                "src/centurion/centurion/sql/characters/characters_schema.sql",
+                "src/centurion/centurion/sql/auth/auth_schema.sql"
+              ],
+              "skip_lines": {
+                "src/centurion/centurion/sql/auth/auth_data.sql": [
+                  "INSERT INTO `realmlist` "
+                ]
+              }
+            }
+          }
+        }
+      },
+      "containers": {
+        "db": "centurion-db",
+        "auth": "centurion-authserver",
+        "world": "centurion-worldserver"
+      },
+      "ports": {
+        "auth": 3724,
+        "world": 8085,
+        "db": 3306
+      },
+      "databases": {
+        "auth": "centurion_auth",
+        "characters": "centurion_characters",
+        "world": "centurion_world"
+      },
+      "realmlist": {
+        "table": "realmlist",
+        "address_column": "address",
+        "local_address_column": "localAddress"
+      },
+      "client": {
+        "version": "3.3.5a",
+        "build": 12342,
+        "notes": [
+          "Your own English (enUS) 3.3.5a client, build 12340: Yu'lon makes a ready-to-play copy of it with Centurion's patches and a Wow.exe that reports build 12342, and leaves your client as it was."
+        ],
+        "packs": [
+          {
+            "id": "art-base",
+            "label": "Centurion's world art",
+            "description": "Centurion's textures, models and custom maps (patch-X).",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/patch-Y.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "patch-Y.MPQ",
+                "to": "Data/patch-X.MPQ"
+              }
+            ],
+            "size_hint": 1232561101
+          },
+          {
+            "id": "art-update",
+            "label": "Centurion's newest art",
+            "description": "The art changed since the last full art update (patch-Z).",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/patch-Z.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "patch-Z.MPQ",
+                "to": "Data/patch-Z.MPQ"
+              }
+            ],
+            "size_hint": 889
+          },
+          {
+            "id": "dungeon-maps",
+            "label": "Dungeon maps",
+            "description": "The in-instance floor maps (patch-M).",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/patch-dungeon-maps.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "patch-M.MPQ",
+                "to": "Data/patch-M.MPQ"
+              }
+            ],
+            "size_hint": 48792731
+          },
+          {
+            "id": "locale-6",
+            "label": "Centurion's game data (6)",
+            "description": "Centurion's English game data (patch-enUS-6).",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/patch-enUS-6.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "patch-enUS-6.MPQ",
+                "to": "Data/enUS/patch-enUS-6.MPQ"
+              }
+            ],
+            "size_hint": 122785262
+          },
+          {
+            "id": "locale-7",
+            "label": "Centurion's game data (7)",
+            "description": "Centurion's English game data (patch-enUS-7).",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/patch-enUS-7.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "patch-enUS-7.MPQ",
+                "to": "Data/enUS/patch-enUS-7.MPQ"
+              }
+            ],
+            "size_hint": 4974354
+          },
+          {
+            "id": "locale-a",
+            "label": "Centurion's game data (A)",
+            "description": "Centurion's English game data and interface (patch-enUS-A).",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/patch-enUS-A.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "patch-enUS-A.MPQ",
+                "to": "Data/enUS/patch-enUS-A.MPQ"
+              }
+            ],
+            "size_hint": 60709870
+          },
+          {
+            "id": "addons",
+            "label": "Centurion's addons",
+            "description": "The interface addons Centurion is played with.",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/addons.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "*",
+                "to_dir": "Interface/AddOns"
+              }
+            ],
+            "size_hint": 214001
+          },
+          {
+            "id": "client-tweaks",
+            "label": "Client tweaks",
+            "description": "Centurion's client fixes (dinput8.dll): stealth moves at vanilla speed, and spell animations no longer cut off melee swings.",
+            "source": {
+              "kind": "checkout",
+              "path": "src/centurion/centurion/patches/client-tweaks.zip"
+            },
+            "md5_file": "src/centurion/centurion/patches/patches.md5",
+            "install": [
+              {
+                "member": "dinput8.dll",
+                "to": "dinput8.dll"
+              }
+            ],
+            "size_hint": 100566
+          },
+          {
+            "id": "hd-creatures",
+            "label": "HD Creatures",
+            "description": "Higher resolution retail creature models.",
+            "source": {
+              "kind": "url",
+              "url": "https://centurionpvp.com/downloads/patches/hd-creatures.zip",
+              "version_url": "https://centurionpvp.com/downloads/patches/hd-creatures.version"
+            },
+            "install": [
+              {
+                "member": "patch-F.MPQ",
+                "to": "Data/patch-F.MPQ"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 1454949079
+          },
+          {
+            "id": "hd-textures",
+            "label": "HD Textures",
+            "description": "Higher resolution retail textures.",
+            "source": {
+              "kind": "url",
+              "url": "https://centurionpvp.com/downloads/patches/hd-textures.zip",
+              "version_url": "https://centurionpvp.com/downloads/patches/hd-textures.version"
+            },
+            "install": [
+              {
+                "member": "patch-T.MPQ",
+                "to": "Data/patch-T.MPQ"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 418008264
+          },
+          {
+            "id": "hd-spells",
+            "label": "HD Spells",
+            "description": "Higher resolution retail spell visuals.",
+            "source": {
+              "kind": "url",
+              "url": "https://centurionpvp.com/downloads/patches/hd-spells.zip",
+              "version_url": "https://centurionpvp.com/downloads/patches/hd-spells.version"
+            },
+            "install": [
+              {
+                "member": "patch-G.MPQ",
+                "to": "Data/patch-G.MPQ"
+              },
+              {
+                "member": "patch-H.MPQ",
+                "to": "Data/patch-H.MPQ"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 83185849
+          },
+          {
+            "id": "hd-bgs",
+            "label": "HD Battlegrounds",
+            "description": "Higher detail retail battleground maps.",
+            "source": {
+              "kind": "url",
+              "url": "https://centurionpvp.com/downloads/patches/hd-bgs.zip",
+              "version_url": "https://centurionpvp.com/downloads/patches/hd-bgs.version"
+            },
+            "install": [
+              {
+                "member": "patch-U.MPQ",
+                "to": "Data/patch-U.MPQ"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 232975066
+          },
+          {
+            "id": "hd-misc",
+            "label": "HD Interface",
+            "description": "A Shadowlands style user interface.",
+            "source": {
+              "kind": "url",
+              "url": "https://centurionpvp.com/downloads/patches/hd-misc.zip",
+              "version_url": "https://centurionpvp.com/downloads/patches/hd-misc.version"
+            },
+            "install": [
+              {
+                "member": "patch-L.MPQ",
+                "to": "Data/patch-L.MPQ"
+              }
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 121927714
+          },
+          {
+            "id": "world-terrain",
+            "label": "Alt World",
+            "description": "Reznik's world textures, models, skyboxes and lighting.",
+            "source": {
+              "kind": "url",
+              "url": "https://centurionpvp.com/downloads/patches/world-terrain.zip",
+              "version_url": "https://centurionpvp.com/downloads/patches/world-terrain.version"
+            },
+            "install": [
+              {
+                "member": "patch-Y.MPQ",
+                "to": "Data/patch-Y.MPQ"
+              }
+            ],
+            "remove_when_off": [
+              "Data/patch-Y.MPQ"
+            ],
+            "optional": true,
+            "default": false,
+            "size_hint": 146670268
+          }
+        ],
+        "exe_patch": {
+          "expect_sha256": "aa63a5750d60ef16746c686b3d5e26876d98953eab08b1c026cd0faf78e88cb8",
+          "expect_size": 7704216,
+          "clean_sources": [
+            {
+              "url": "https://wow.baerthe.com/WoW-Client-3.3.5a.zip",
+              "member": "WoW-3.3.5a/Wow.exe"
+            }
+          ],
+          "fallback_page": "https://chromiecraft.com/en/downloads/",
+          "writes": [
+            {
+              "offset": 6240768,
+              "bytes": "313233343200"
+            },
+            {
+              "offset": 5020144,
+              "bytes": "3630"
+            },
+            {
+              "offset": 2048447,
+              "bytes": "eb"
+            },
+            {
+              "offset": 4282917,
+              "bytes": "eb"
+            },
+            {
+              "offset": 4282943,
+              "bytes": "03"
+            },
+            {
+              "offset": 4283029,
+              "bytes": "03"
+            },
+            {
+              "offset": 4283206,
+              "bytes": "eb"
+            },
+            {
+              "offset": 4283231,
+              "bytes": "b803000000ebed"
+            },
+            {
+              "offset": 3021927,
+              "fill": 144,
+              "count": 11
+            },
+            {
+              "offset": 3397577,
+              "bytes": "eb"
+            },
+            {
+              "offset": 218559,
+              "bytes": "eb"
+            },
+            {
+              "offset": 3399894,
+              "fill": 144,
+              "count": 22
+            },
+            {
+              "offset": 4626988,
+              "bytes": "e971f00b00f813d4008b1dfc"
+            },
+            {
+              "offset": 5409442,
+              "bytes": "8d4df05157ff15dcf59d008b45f08b15f813d400e97a0ff4ff"
+            },
+            {
+              "offset": 4624817,
+              "bytes": "89e58b05fc13d4008b0df813d400ebc27d0383c10183c03283c1323b0decbcca007e0383e9013b05f0bcca007e0383e80183e93283e832890df813d4008905fc13d40089ec5de9b4f7ffffec5dc3c3"
+            },
+            {
+              "offset": 4624771,
+              "bytes": "83f8327d0383c00183f932eb31"
+            },
+            {
+              "offset": 1956957,
+              "bytes": "eb"
+            },
+            {
+              "offset": 1497241,
+              "bytes": "0501000000"
+            },
+            {
+              "offset": 2994753,
+              "bytes": "32"
+            },
+            {
+              "offset": 6093760,
+              "bytes": "c705748ed300ffffffffc3"
+            },
+            {
+              "offset": 1100353,
+              "bytes": "eb"
+            },
+            {
+              "offset": 409679,
+              "bytes": "14"
+            }
+          ],
+          "options": {
+            "borderless": {
+              "label": "Borderless full screen (turn it off if other screens go dark under Wine or Proton)",
+              "default": true,
+              "on": [
+                {
+                  "offset": 3732,
+                  "bytes": "eb"
+                }
+              ],
+              "off": [
+                {
+                  "offset": 3732,
+                  "bytes": "74"
+                }
+              ]
+            }
+          },
+          "pe_large_address_aware": true,
+          "build": 12342
+        },
+        "config_wtf": {
+          "always": {
+            "realmList": "127.0.0.1",
+            "patchList": "127.0.0.1",
+            "realmName": "Centurion",
+            "hwDetect": "0"
+          },
+          "seed": {
+            "gxWindow": "1",
+            "gxMaximize": "1",
+            "checkAddonVersion": "0"
+          },
+          "remove_locale_realmlists": true
+        }
+      },
+      "play": {
+        "equipped": {
+          "template_column": "itemEntry",
+          "instance_table": "item_instance",
+          "inventory_column": "item"
+        },
+        "teleport_command": "tele name",
+        "mail_item_cap": 12,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
+      },
+      "accounts": {
+        "scheme": "trinitycore",
+        "level": {
+          "table": "account_access",
+          "account_column": "AccountID",
+          "level_column": "SecurityLevel",
+          "max_level": 3
+        }
+      },
+      "console": {
+        "prompt": "TC>",
+        "prompt_precedes_answer": true
+      },
+      "operations": {
+        "channel": "soap",
+        "namespace": "urn:TC",
+        "port": 7878,
+        "gm_level": 3,
+        "enable_conf": {
+          "file": "etc/worldserver.conf",
+          "keys": {
+            "SOAP.Enabled": "1",
+            "SOAP.IP": "0.0.0.0",
+            "SOAP.Port": "7878"
+          }
+        },
+        "publish": true,
+        "must_not_listen": [
+          3443
+        ]
+      },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "PLAYERBOT"
+        }
+      },
+      "has_manifests": false
     }
   ]
 }

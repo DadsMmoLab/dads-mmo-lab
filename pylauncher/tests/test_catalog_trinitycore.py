@@ -178,21 +178,23 @@ def test_trinitycore_is_a_family_and_an_account_scheme_the_models_name() -> None
     assert Accounts(scheme="trinitycore").scheme == "trinitycore"
 
 
-def test_the_shipped_catalog_loads_unchanged_and_no_entry_is_trinitycore_yet() -> None:
-    """Task 1 is the model only: the real `wow-centurion` entry is Task 7's."""
+def test_the_shipped_catalog_has_one_trinitycore_entry_and_it_is_centurion() -> None:
+    """Task 1 was the model only; the real `wow-centurion` entry landed in Task 7."""
     catalog = load_catalog()
     assert [entry.id for entry in catalog.games] == [
         "wow-wotlk",
         "wow-tbc",
         "wow-vanilla",
         "wow-tortoise",
+        "wow-centurion",
     ]
     for entry in catalog.games:
         native = entry.install.native
         assert native is not None
-        assert native.family != "trinitycore", entry.id
-        assert native.trinitycore is None, entry.id
-        assert entry.accounts.scheme != "trinitycore", entry.id
+        is_tc = entry.id == "wow-centurion"
+        assert (native.family == "trinitycore") is is_tc, entry.id
+        assert (native.trinitycore is not None) is is_tc, entry.id
+        assert (entry.accounts.scheme == "trinitycore") is is_tc, entry.id
 
 
 def test_an_entry_of_the_family_dispatches_to_the_trinitycore_engine() -> None:

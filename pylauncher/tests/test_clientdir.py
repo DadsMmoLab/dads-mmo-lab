@@ -545,3 +545,79 @@ def test_the_warn_table_is_the_four_rules_in_reading_order(tmp_path: Path) -> No
         "the client's origin",
         "free space next to the client",
     ]
+
+
+# --- the locale a server's packs are made for (T179 Task 7) ---------------------------------
+
+CENTURION = ClientSpec(
+    required_file=None,
+    min_mpq=5,
+    mpq_depth="recursive",
+    locale_mpq_required=True,
+    locales=("enUS",),
+)
+
+
+def test_a_client_of_another_locale_is_refused_when_the_spec_names_its_locales(
+    tmp_path: Path,
+) -> None:
+    """Centurion's patches are enUS only (`patch-enUS-6/7/A`): a deDE client would extract
+    stock maps and play without its locale patch, so it is refused, saying which it is."""
+    folder = client(tmp_path, locale="deDE")
+    checks = clientdir.validate(folder, CENTURION, free_bytes=lambda _p: PLENTY)
+    refused = [check for check in checks if check.verdict == "refuse"]
+    assert [check.name for check in refused] == [clientdir.LOCALE_CHECK]
+    assert "deDE" in refused[0].detail and "enUS" in refused[0].detail
+    assert "enUS" in refused[0].remedy
+    assert checks[-1] is refused[0], "a refusal ends the table"
+
+
+def test_a_client_holding_a_named_locale_passes_the_locale_rule(tmp_path: Path) -> None:
+    folder = client(tmp_path, locale="enUS")
+    (folder / "Data" / "deDE").mkdir()
+    (folder / "Data" / "deDE" / "locale-deDE.MPQ").write_bytes(b"MPQ")
+    checks = clientdir.validate(folder, CENTURION, free_bytes=lambda _p: PLENTY)
+    assert not [check for check in checks if check.verdict == "refuse"]
+
+
+def test_the_locale_name_is_matched_as_windows_spells_it_any_case(tmp_path: Path) -> None:
+    folder = client(tmp_path, locale="ENUS")
+    checks = clientdir.validate(folder, CENTURION, free_bytes=lambda _p: PLENTY)
+    assert not [check for check in checks if check.verdict == "refuse"]
+
+
+def test_a_client_with_no_locale_folder_is_refused_when_a_locale_is_named(tmp_path: Path) -> None:
+    folder = client(tmp_path, locale=None)
+    checks = clientdir.validate(folder, CENTURION, free_bytes=lambda _p: PLENTY)
+    refused = [check for check in checks if check.verdict == "refuse"]
+    assert [check.name for check in refused] == [clientdir.LOCALE_CHECK]
+    assert "no locale folder" in refused[0].detail
+
+
+def test_no_locales_named_leaves_every_locale_to_the_old_rules(tmp_path: Path) -> None:
+    folder = client(tmp_path, locale="deDE")
+    checks = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)
+    assert not [check for check in checks if check.verdict == "refuse"]
+
+
+def test_an_unreadable_data_folder_is_unchecked_not_a_refusal_for_the_locale_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = client(tmp_path)
+
+    def refuse(_data: Path) -> tuple[Path, ...]:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(clientdir, "locale_dirs", refuse)
+    checks = clientdir.validate(folder, CENTURION, free_bytes=lambda _p: PLENTY)
+    assert verdicts(checks)[clientdir.LOCALE_CHECK] == "unchecked"
+    assert not [check for check in checks if check.verdict == "refuse"]
+
+
+def test_a_spec_naming_locales_must_also_require_the_locale_folder() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="needs locale_mpq_required"):
+        ClientSpec(required_file=None, locales=("enUS",))
+    with pytest.raises(ValidationError, match="String should match pattern"):
+        ClientSpec(required_file=None, locale_mpq_required=True, locales=("en/US",))

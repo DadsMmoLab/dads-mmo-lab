@@ -4015,8 +4015,12 @@ def test_each_game_waits_for_the_ready_line_its_own_server_prints(
         "wow-tbc": "Avg Diff: 15ms",
         "wow-vanilla": "Avg Diff: 15ms",
         "wow-tortoise": "World initialized in 12 seconds",
-        # T179: the fixture's marker (World.cpp's own line); Task 7 sets the entry's.
-        "wow-centurion": "World initialized in 0 minutes 41 seconds",
+        # T179 Task 7: worldserver/Main.cpp:446, after the network and SOAP are up, as the
+        # build spike's worldserver names itself (`--version`, 2026-10-02).
+        "wow-centurion": (
+            "TrinityCore rev. unknown 1970-01-01 00:00:00 +0000 (Archived branch) "
+            "(Unix, RelWithDebInfo, Static) (worldserver-daemon) ready..."
+        ),
     }
     seen: dict[str, docker.ReadySpec] = {}
 

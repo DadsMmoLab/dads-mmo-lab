@@ -182,6 +182,7 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-vanilla": (vanilla_accounts, vanilla_maintenance),
         "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
+        "wow-centurion": (centurion_accounts, centurion_maintenance),
     }
     catalog = load_catalog()
     assert set(packages) == {
@@ -198,14 +199,17 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                 builder = getattr(mod, name, None)
                 if builder is None or not inspect.isfunction(builder):
                     continue
-                first = next(iter(inspect.signature(builder).parameters))
+                params = list(inspect.signature(builder).parameters)
+                # Centurion's package takes its entry first (T179 Task 5).
+                lead = (catalog.get(game),) if params[0] == "entry" else ()
+                first = params[len(lead)]
                 if first == "server_dir":
                     install = tmp_path / (game + "-" + name)
                     install.mkdir(exist_ok=True)
                     (install / ".db_password").write_text("hunter2", encoding="utf-8")
-                    seam = builder(install)
+                    seam = builder(*lead, install)
                 else:
-                    seam = builder("pw")
+                    seam = builder(*lead, "pw")
                 assert seam.client == expected, (
                     game
                     + " "
@@ -216,8 +220,8 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                     + repr(expected)
                 )
                 checked += 1
-    assert checked == 11, (
-        str(checked) + " builders were exercised, not 11. An exact count, not a floor: the "
+    assert checked == 14, (
+        str(checked) + " builders were exercised, not 14. An exact count, not a floor: the "
         "floor this replaced had slack of one, so a deleted builder still passed it."
     )
 
@@ -340,8 +344,8 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     catalog = load_catalog()
     shipped = {g.id for g in catalog.games}
     assert shipped <= set(_FACTORIES), "a shipped game has no factory"
-    # T179: a factory whose game is not shipped yet (`wow-centurion`, until Task 7)
-    # is driven over its fixture entry, so its surface is held to the same rule now.
+    # T179: a factory whose game is not shipped yet is driven over its fixture entry,
+    # so its surface is held to the same rule (`wow-centurion` was, until Task 7).
     entries = [catalog.get(game) for game in sorted(shipped)] + [
         _fixture_entry(game) for game in sorted(set(_FACTORIES) - shipped)
     ]
@@ -676,10 +680,12 @@ def _fixture_entry(game: str) -> CatalogEntry:
 def test_the_centurion_seam_builders_bind_the_entrys_declared_client(tmp_path: Path) -> None:
     """The CMaNGOS builders' test above, for the package that takes its entry (T179).
 
-    Its builders take the entry first, because the entry is not in the shipped
-    catalog yet; the client must still be the one the entry declares, never a default.
+    Its builders take the entry first; the client must be the one the entry declares,
+    never a default. The shipped entry since T179 Task 7.
     """
-    entry = _fixture_entry("wow-centurion")
+    from yulon.catalog.catalog import load_catalog
+
+    entry = load_catalog().get("wow-centurion")
     native_block = entry.install.native
     assert native_block is not None
     (tmp_path / ".db_password").write_text("hunter2", encoding="utf-8")

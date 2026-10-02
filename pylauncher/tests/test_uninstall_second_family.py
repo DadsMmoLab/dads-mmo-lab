@@ -256,11 +256,16 @@ def test_the_database_image_is_no_familys_to_remove_and_this_ones_is_shared(
         if game.install.native is not None and game.install.native.db.image == vanilla_db
     }
     assert siblings > {VANILLA}, f"{vanilla_db} is shared with {siblings - {VANILLA}}"
-    assert wotlk_db not in {
-        game.install.native.db.image
+    # Since T179 Task 7 WotLK's `mysql:8.4` is shared too, with Centurion (the MySQL
+    # proof's verdict, 2026-10-02): the gated family's image is no longer its own, so
+    # removing the refs and never the database image now protects a WotLK neighbour as well.
+    assert {
+        game.id
         for game in load_catalog().games
-        if game.install.native is not None and game.id != WOTLK
-    }, "the gated family's database image is its own, which is why 8.9a cannot see this"
+        if game.install.native is not None
+        and game.id != WOTLK
+        and game.install.native.db.image == wotlk_db
+    } == {"wow-centurion"}
 
 
 def test_only_the_cmangos_tree_makes_the_record_name_a_folder_outside_the_install(

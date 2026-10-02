@@ -325,6 +325,94 @@ PROVENANCE: dict[str, Provenance] = {
         "gates/8.3d-tortoise-m910q-2026-09-07/README.md",
         note="asked: `... SHAPROBE 4` accepted, `5` answered `Incorrect values.`",
     ),
+    # -- wow-centurion (TrinityCore 3.3.5 fork) — read at CENTURION @ faac5fc9, T179 Task 7 --
+    # Nothing here is measured yet: the live proof is T179 Task 9, which confirms the
+    # Characters verbs (`controller_wow_centurion.characters.CONFIRMED_LIVE`) and the
+    # account columns before they are moved to `measured-on`.
+    "wow-centurion:play.equipped.template_column": Provenance(
+        "read-from-source",
+        "centurion/sql/characters/characters_schema.sql:1365",
+        note=(
+            "`item_instance.itemEntry`, the item's template, as on AzerothCore; CENTURION @ "
+            "faac5fc9"
+        ),
+    ),
+    "wow-centurion:play.equipped.instance_table": Provenance(
+        "read-from-source",
+        "centurion/sql/characters/characters_schema.sql:1363",
+        note=(
+            "the inventory row carries the INSTANCE guid, so the template is joined from here; @ "
+            "faac5fc9"
+        ),
+    ),
+    "wow-centurion:play.equipped.inventory_column": Provenance(
+        "read-from-source",
+        "centurion/sql/characters/characters_schema.sql:558",
+        note="`character_inventory.item`, 'Item Global Unique Identifier'; @ faac5fc9",
+    ),
+    "wow-centurion:play.teleport_command": Provenance(
+        "read-from-source",
+        "src/server/scripts/Commands/cs_tele.cpp:56",
+        note=(
+            "`tele name`, `Console::Yes`; @ faac5fc9; confirmed on a live Centurion in T179 Task "
+            "9 before the verb is offered"
+        ),
+    ),
+    "wow-centurion:play.mail_item_cap": Provenance(
+        "read-from-source",
+        "src/server/game/Mails/Mail.h:33",
+        note=(
+            "`MAX_MAIL_ITEMS 12`, a source constant and so a prediction until a thirteenth is "
+            "refused; @ faac5fc9"
+        ),
+    ),
+    "wow-centurion:play.rename_command": Provenance(
+        "read-from-source",
+        "src/server/scripts/Commands/cs_character.cpp:73",
+        note=(
+            "`character rename`, `Console::Yes`; @ faac5fc9; confirmed on a live Centurion in "
+            "T179 Task 9 before the verb is offered"
+        ),
+    ),
+    "wow-centurion:play.set_level_command": Provenance(
+        "read-from-source",
+        "src/server/scripts/Commands/cs_character.cpp:72",
+        note=(
+            "`character level`, `Console::Yes`; @ faac5fc9; confirmed on a live Centurion in T179"
+            " Task 9 before the verb is offered"
+        ),
+    ),
+    "wow-centurion:accounts.level.table": Provenance(
+        "read-from-source",
+        "centurion/sql/auth/auth_schema.sql:49",
+        note=(
+            "`account_access(AccountID, SecurityLevel, RealmID)`; @ faac5fc9; the columns are "
+            "confirmed live in T179 Task 9 (`TRINITYCORE_ACCESS`)"
+        ),
+    ),
+    "wow-centurion:accounts.level.account_column": Provenance(
+        "read-from-source",
+        "centurion/sql/auth/auth_schema.sql:50",
+        note="@ faac5fc9",
+    ),
+    "wow-centurion:accounts.level.level_column": Provenance(
+        "read-from-source",
+        "centurion/sql/auth/auth_schema.sql:51",
+        note="@ faac5fc9",
+    ),
+    "wow-centurion:accounts.level.max_level": Provenance(
+        "read-from-source",
+        "src/common/Common.h:43",
+        note="`SEC_ADMINISTRATOR = 3`, the level SOAP requires (TCSoap.cpp); @ faac5fc9",
+    ),
+    "wow-centurion:accounts.scheme": Provenance(
+        "read-from-source",
+        "src/server/game/Accounts/AccountMgr.cpp:63",
+        note=(
+            "`SRP6::MakeRegistrationData`, stock TrinityCore SRP6 into `account.salt`/`verifier` "
+            "(auth_schema.sql:18-19); @ faac5fc9"
+        ),
+    ),
 }
 
 

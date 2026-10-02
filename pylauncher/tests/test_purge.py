@@ -509,12 +509,11 @@ def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_im
     image, so the safety is structural rather than a race the daemon usually
     wins.
     """
-    from tests.support_trinitycore import centurion_like
     from yulon.ui.controller_view import ControllerServices
 
     offered: dict[str, tuple[str, ...]] = {}
-    # T179: Centurion's tab has the gated families' Uninstall; its fixture until Task 7.
-    for entry in [*load_catalog().games, centurion_like()]:
+    # T179: Centurion's tab has the gated families' Uninstall (its shipped entry since Task 7).
+    for entry in load_catalog().games:
         server_dir = tmp_path / entry.id
         server_dir.mkdir()
         # `wow-vanilla`'s password plan is `generated`, and its Uninstaller

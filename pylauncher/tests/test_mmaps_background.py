@@ -616,7 +616,9 @@ def test_only_a_background_trinitycore_block_has_a_job(tmp_path: Path) -> None:
     from yulon.catalog.catalog import load_catalog
 
     for entry in load_catalog().games:
-        assert mmaps.background_block(entry) is None, entry.id
+        # Centurion, the one shipped TrinityCore entry (T179 Task 7), and no other.
+        has_job = mmaps.background_block(entry) is not None
+        assert has_job is (entry.id == "wow-centurion"), entry.id
     assert mmaps.background_block(ENTRY) is not None
     wotlk = load_catalog().get("wow-wotlk")
     with pytest.raises(mmaps.MmapsError, match="during the install"):

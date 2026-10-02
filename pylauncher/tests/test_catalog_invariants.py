@@ -1120,8 +1120,8 @@ def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -
     # would go red on a number instead of on the sentence naming what to do
     # about it. It still earns its place. A field added AND marked in the same
     # commit is a deliberate act and reads the count as its receipt.
-    assert len(values) == 39, (
-        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 39; "
+    assert len(values) == 51, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 51; "
         f"if that is intended, move the number: {sorted(values)}"
     )
 
@@ -1186,7 +1186,27 @@ def test_a_read_from_source_provenance_cites_a_line_and_not_a_sentence() -> None
     """
     kinds = {key: mark.kind for key, mark in catalog_provenance.PROVENANCE.items()}
     predictions = [key for key, kind in kinds.items() if kind == "read-from-source"]
-    assert predictions == ["wow-tortoise:play.rename_offline_refusal"], predictions
+    assert predictions == [
+        "wow-tortoise:play.rename_offline_refusal",
+        # Centurion's twelve: read at CENTURION @ faac5fc9, live in T179 Task 9.
+        *(
+            f"wow-centurion:{path}"
+            for path in (
+                "play.equipped.template_column",
+                "play.equipped.instance_table",
+                "play.equipped.inventory_column",
+                "play.teleport_command",
+                "play.mail_item_cap",
+                "play.rename_command",
+                "play.set_level_command",
+                "accounts.level.table",
+                "accounts.level.account_column",
+                "accounts.level.level_column",
+                "accounts.level.max_level",
+                "accounts.scheme",
+            )
+        ),
+    ], predictions
     for key in predictions:
         cite = catalog_provenance.PROVENANCE[key].cite
         assert catalog_provenance.SOURCE_CITE.match(cite), f"{key}: {cite!r} is not a path:line"
