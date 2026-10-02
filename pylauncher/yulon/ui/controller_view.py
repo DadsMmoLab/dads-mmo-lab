@@ -721,11 +721,30 @@ def _realm_address(record: client_packs.PackRecord) -> str:
 
 
 def _launcher_writes(record: client_packs.PackRecord) -> bool:
-    """Whether the launcher's picks (T187) put a key into, or take one out of, Config.wtf."""
+    """Whether the launcher's picks (T187) put a key into, or take one out of, Config.wtf.
+
+    Asked only of an entry without `config_wtf`, whose realmlist.wtf carries
+    this computer's address (`_address_written_elsewhere`).
+    """
     return bool(
         client_packs.launcher_config_keys(record.launcher, catalog_always={})
-        or client_packs.launcher_config_removals(record.launcher, catalog_always={})
+        or client_packs.launcher_config_removals(
+            record.launcher, catalog_always={}, default_address_written=True
+        )
     )
+
+
+def _address_written_elsewhere(cfg: ConfigWtf | None) -> bool:
+    """Whether this computer's address reaches the game without a typed one in Config.wtf.
+
+    Through realmlist.wtf (no `config_wtf`, or one that keeps the locale
+    realmlists, which Play writes) or through the catalog's own `realmList`.
+    Then "Use this computer" may take a typed address's lines back out of
+    Config.wtf (T187 fix 1); otherwise they are the only address there is.
+    """
+    if cfg is None or not cfg.remove_locale_realmlists:
+        return True
+    return "realmlist" in {key.casefold() for key in cfg.always}
 
 
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
@@ -861,7 +880,7 @@ class ClientOptionsBox(QWidget):
         self.required_label = QLabel("", self)
         self.required_label.setWordWrap(True)
         self.required_label.setText(
-            f"Required download: {_size_text(required)}." if required else "Nothing to download."
+            f"Required download: {size_text(required)}." if required else "Nothing to download."
         )
         self.required_label.setVisible(bool(client.packs))
         box.addWidget(self.required_label)
@@ -899,7 +918,7 @@ class ClientOptionsBox(QWidget):
         if pack.description:
             text += f" — {pack.description}"
         if pack.size_hint:
-            text += f" ({_size_text(pack.size_hint)})"
+            text += f" ({size_text(pack.size_hint)})"
         if gone:
             text += " — unavailable: the server's site no longer has it"
         return text
@@ -910,7 +929,7 @@ class ClientOptionsBox(QWidget):
             for pack_id, size in self._sizes.items()
             if self.pack_boxes[pack_id].isChecked() and self.pack_boxes[pack_id].isEnabled()
         )
-        self.extra_label.setText(f"The ticked packs add {_size_text(extra)}." if extra else "")
+        self.extra_label.setText(f"The ticked packs add {size_text(extra)}." if extra else "")
         self.extra_label.setVisible(bool(extra))
 
     def choices(self) -> dict[str, Any]:
@@ -998,7 +1017,7 @@ def _play_size_text(plan: play_client.BuildPlan, free: int | None) -> str:
     if plan.same_volume:
         return (
             f"{_gb_text(plan.shared_bytes)} of game files are shared with your client and "
-            f"take no extra space; its own files take {_size_text(plan.own_bytes)}{space}."
+            f"take no extra space; its own files take {size_text(plan.own_bytes)}{space}."
         )
     return (
         "This folder is on another drive than your client, so its game files cannot be "
@@ -5725,7 +5744,7 @@ everything under it.
 """
 
 
-def _size_text(size: int) -> str:
+def size_text(size: int) -> str:
     """Bytes as the dialog says them: decimal units, one decimal place.
 
     Decimal rather than binary because that is what a user's file manager and
@@ -7923,7 +7942,7 @@ class ControllerView(QWidget):
             return
         keep = self.keep_characters_check.isChecked()
         lines = [
-            f"This removes {plan.server_dir} ({_size_text(plan.folder_bytes)}) and this "
+            f"This removes {plan.server_dir} ({size_text(plan.folder_bytes)}) and this "
             f"server's Docker project {plan.project}:",
             f"  containers: {', '.join(plan.containers) or 'none left'}",
             f"  images: {len(plan.images)} built for this install",
@@ -9111,7 +9130,9 @@ class ControllerView(QWidget):
         catalog_always = cfg.always if cfg is not None else {}
         picked = client_packs.launcher_config_keys(record.launcher, catalog_always=catalog_always)
         removed = client_packs.launcher_config_removals(
-            record.launcher, catalog_always=catalog_always
+            record.launcher,
+            catalog_always=catalog_always,
+            default_address_written=_address_written_elsewhere(cfg),
         )
         if cfg is None and (picked or removed):
             # An entry without `config_wtf` still gets the launcher's picks (T187); its
@@ -9167,8 +9188,8 @@ class ControllerView(QWidget):
             if percent == last[0] or (percent < 100 and last[0] >= 0 and now - last[1] < 0.2):
                 return
             last[0], last[1] = percent, now
-            of = f" of {_size_text(total)}" if total else ""
-            say(f"Downloading {pack.label}… {percent}% ({_size_text(done)}{of})")
+            of = f" of {size_text(total)}" if total else ""
+            say(f"Downloading {pack.label}… {percent}% ({size_text(done)}{of})")
 
         return report
 

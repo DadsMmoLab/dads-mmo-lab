@@ -802,6 +802,9 @@ def clean_launcher(raw: object) -> dict[str, Any]:
     address = raw.get("realm_address")
     if isinstance(address, str) and _ADDRESS.fullmatch(address):
         out["realm_address"] = address
+    elif "realm_address" in raw and address is None:
+        # "Use this computer" said so (T187 fix 1): Play takes a typed address back out.
+        out["realm_address"] = None
     return out
 
 
@@ -840,19 +843,31 @@ def launcher_config_keys(
 
 
 def launcher_config_removals(
-    launcher: Mapping[str, Any], *, catalog_always: Mapping[str, str]
+    launcher: Mapping[str, Any],
+    *,
+    catalog_always: Mapping[str, str],
+    default_address_written: bool = False,
 ) -> tuple[str, ...]:
-    """The Config.wtf keys the launcher's picks take out: `accountName` for "Ask in the game".
+    """The Config.wtf keys the launcher's picks take out.
 
-    Only an `account` saved as None says so; no `account` at all leaves the file as
-    it is. A key the catalog's `always` sets is the catalog's, and is never taken out.
+    * `accountName` for "Ask in the game": only an `account` saved as None says
+      so; no `account` at all leaves the file as it is.
+    * `realmList` and `patchList` for "Use this computer" (`realm_address` saved
+      as None, T187 fix 1), when `default_address_written`: this computer's
+      address reaches the game another way -- the realmlist.wtf Play writes, or
+      the catalog's own `realmList` -- so the lines a typed address put in
+      earlier would only send the game to the old address.
+
+    A key the catalog's `always` sets is the catalog's, and is never taken out.
     """
     picks = clean_launcher(launcher)
-    if "account" not in picks or picks["account"] is not None:
-        return ()
-    if "accountname" in {key.casefold() for key in catalog_always}:
-        return ()
-    return ("accountName",)
+    fixed = {key.casefold() for key in catalog_always}
+    out: list[str] = []
+    if "account" in picks and picks["account"] is None and "accountname" not in fixed:
+        out.append("accountName")
+    if default_address_written and "realm_address" in picks and picks["realm_address"] is None:
+        out += [key for key in ("realmList", "patchList") if key.casefold() not in fixed]
+    return tuple(out)
 
 
 def launcher_exe_options(

@@ -2135,3 +2135,29 @@ def test_ask_in_the_game_removes_accountname_and_only_when_said_so() -> None:
     assert client_packs.launcher_config_removals({"account": "BOB"}, catalog_always={}) == ()
     fixed = {"ACCOUNTNAME": "SERVER"}
     assert client_packs.launcher_config_removals({"account": None}, catalog_always=fixed) == ()
+
+
+def test_this_computer_said_takes_the_realm_keys_out_only_where_realmlist_wtf_carries_it() -> None:
+    """Lead ruling (T187 fix 1): "Use this computer" is saved as `realm_address: None`.
+
+    Where this computer's address reaches the game another way (realmlist.wtf on an
+    entry without `config_wtf`, or the catalog's own `realmList`), the
+    `realmList`/`patchList` a typed address put into Config.wtf earlier come out;
+    where nothing else carries it (flag off) nothing is taken out, and a key the
+    catalog's `always` sets is never taken out either way.
+    """
+    said = client_packs.clean_launcher({"realm_address": None})
+    assert said == {"realm_address": None}
+    assert client_packs.launcher_config_keys(said, catalog_always={}) == {}
+    removals = client_packs.launcher_config_removals
+    assert removals(said, catalog_always={}, default_address_written=True) == (
+        "realmList",
+        "patchList",
+    )
+    assert removals(said, catalog_always={}, default_address_written=False) == ()
+    assert removals({}, catalog_always={}, default_address_written=True) == ()
+    both = {"realm_address": None, "account": None}
+    assert removals(both, catalog_always={"realmlist": "x"}, default_address_written=True) == (
+        "accountName",
+        "patchList",
+    )

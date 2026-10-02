@@ -63,8 +63,8 @@ from yulon.ui.controller_view import (
     MAKE_PLAY_CLIENT_LABEL,
     PLAY_CLIENT_ADDRESS,
     ControllerView,
-    _size_text,
     module_kept_files,
+    size_text,
 )
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
@@ -83,6 +83,8 @@ changed" and "The password is never stored" stay on the dropdowns' tooltips
 there, and are on screen from the Steam Deck's 800 up."""
 ASK_IN_THE_GAME = "Ask in the game"
 GAMES_OWN = "The game's own setting"
+GAME_REMEMBERS = "As the game remembers it"
+"""Log in as with nothing picked: Config.wtf's `accountName` is left as the game last wrote it."""
 SET_BY_SERVER = "set by this server"
 NO_EXTRAS = "This server offers no extras."
 PASSWORD_NOTE = "The password is never stored: you type it in the game."
@@ -92,6 +94,9 @@ VIEW_GONE = (
     "This server's tab was closed, so nothing can be started from here. Open the launcher "
     "again from the server."
 )
+
+ADDON_ROWS = 3
+"""How many rows of "Addons in this client" always show; the list grows into spare height."""
 
 ACCOUNT_KEEP = "keep:"
 """The account item that leaves Config.wtf's `accountName` as the game has it (no pick saved)."""
@@ -356,6 +361,7 @@ class LauncherWindow(QWidget):
         self._server: ServerReading | None = None
         self._typed: list[str] = []
         self._stale_account: str | None = None
+        self._reconcile_owed = False
         self._was_busy = False
         self._client_asked = 0
         self._server_asked = 0
@@ -457,7 +463,8 @@ class LauncherWindow(QWidget):
         self.banner.setObjectName("launcher-banner")
         self.banner.setStyleSheet(
             "QFrame#launcher-banner { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
-            f"stop:0 {theme.COLOR_BG_PARCHMENT_LIGHT}, stop:1 {theme.COLOR_BG_DARK}); "
+            f"stop:0 {theme.COLOR_BG_PANEL}, stop:0.55 {theme.COLOR_EMBER}, "
+            f"stop:1 {theme.COLOR_BG_DARK}); "
             f"border-bottom: 1px solid {theme.COLOR_GOLD_BRASS}; }}"
             " QFrame#launcher-banner QLabel { background: transparent; border: none; }"
         )
@@ -686,9 +693,7 @@ class LauncherWindow(QWidget):
         addons = QVBoxLayout(self.addons_box)
         self.addons_list = QListWidget(self.addons_box)
         self.addons_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        self.addons_list.setMinimumHeight(48)
-        self.addons_list.setMaximumHeight(150)
-        addons.addWidget(self.addons_list)
+        addons.addWidget(self.addons_list, 1)
         self.addons_empty = _muted("No addons in this client yet.", self.addons_box)
         addons.addWidget(self.addons_empty)
         row = QHBoxLayout()
@@ -697,11 +702,14 @@ class LauncherWindow(QWidget):
         row.addWidget(self.open_addons_button)
         row.addStretch(1)
         addons.addLayout(row)
-        column.addWidget(self.addons_box)
+        # The list takes whatever height the column has spare (`_render_addons`
+        # moves the stretch to the end of the column while there is no list).
+        column.addWidget(self.addons_box, 1)
 
         self.settings_note = _warning(inner)
         column.addWidget(self.settings_note)
-        column.addStretch(1)
+        column.addStretch(0)
+        self._right_column = column
         self.right_scroll = self._scroll(inner, "launcher-right")
         return self.right_scroll
 
@@ -758,7 +766,7 @@ class LauncherWindow(QWidget):
             row.addWidget(check)
             row.addStretch(1)
             size = _muted(
-                _size_text(pack.size_hint) if pack.size_hint else "", self.extras_box, wrap=False
+                size_text(pack.size_hint) if pack.size_hint else "", self.extras_box, wrap=False
             )
             row.addWidget(size)
             self._extras_rows.addLayout(row)
@@ -837,6 +845,13 @@ class LauncherWindow(QWidget):
         known = {client_packs.clean_account(name) for name in server.accounts}
         if saved in known:
             return
+        view = self._alive()
+        if view is None or view.play_client_busy() is not None:
+            # A Play or a job holds the record: the save would only be refused,
+            # and its refusal shown. `_follow_play` asks again once it is idle.
+            self._reconcile_owed = True
+            return
+        self._reconcile_owed = False
         self._stale_account = saved
         self._save(launcher={"account": None})
 
@@ -869,6 +884,8 @@ class LauncherWindow(QWidget):
             # the client holds may have changed under the window.
             self._reload_client()
         self._was_busy = busy
+        if not busy and self._reconcile_owed:
+            self._reconcile_account()
         self._render_enabled()
 
     @Slot(str)
@@ -896,6 +913,7 @@ class LauncherWindow(QWidget):
         self.extras_box.setVisible(roomy or bool(self.pack_boxes))
         # The progress line takes the explanation's place while it says something.
         self.play_reason_label.setVisible(roomy or not self.progress_label.text())
+        self._size_addons()
 
     def _fixed_keys(self) -> set[str]:
         return {key.casefold() for key in self._always}
@@ -994,15 +1012,25 @@ class LauncherWindow(QWidget):
         address = record.launcher.get("realm_address") if record is not None else None
         return address if isinstance(address, str) else None
 
-    def _render_realm(self) -> None:
+    def _render_realm(self, *, force: bool = False) -> None:
+        """The realm box from the record -- but never under the player's typing.
+
+        A read landing or the realm coming up re-renders the window; with the
+        box focused that would replace what is being typed (M2). `force` is
+        for the box's own answers: an address refused, this computer kept.
+        """
         saved = self._saved_address()
         current = saved or PLAY_CLIENT_ADDRESS
+        combo = self.realm_combo
+        line = combo.lineEdit()
+        if not force and (combo.hasFocus() or (line is not None and line.hasFocus())):
+            self._render_mismatch(current)
+            return
         offered = [PLAY_CLIENT_ADDRESS]
         announced = self._server.announced if self._server is not None else None
         for address in (saved, announced, *self._typed):
             if address and address not in offered:
                 offered.append(address)
-        combo = self.realm_combo
         combo.blockSignals(True)
         combo.clear()
         combo.addItems(offered)
@@ -1047,22 +1075,28 @@ class LauncherWindow(QWidget):
         shown = record.launcher.get("display") if record is not None else None
         return dict(shown) if isinstance(shown, dict) else {}
 
+    def _window_now(self) -> str:
+        """The window mode in force: the pick, else Borderless where Client options ticked it."""
+        window = self._display().get("window", "")
+        record = self._record()
+        if (
+            not window
+            and self._borderless
+            and record is not None
+            and record.choices["exe_options"].get("borderless") is True
+        ):
+            return "borderless"  # Client options' box decides while nothing is picked
+        return str(window)
+
     def _render_display(self) -> None:
         fixed_window = _fixed_window(self._always)
         display = self._display()
         if fixed_window is not None:
             self._fixed(self.window_combo, fixed_window)
         else:
-            window = display.get("window", "")
-            record = self._record()
-            if (
-                not window
-                and self._borderless
-                and record is not None
-                and record.choices["exe_options"].get("borderless") is True
-            ):
-                window = "borderless"  # Client options' box decides while nothing is picked
-            items = [] if window else [(GAMES_OWN, "")]
+            window = self._window_now()
+            # Always offered (lead ruling): a saved mode can be cleared again.
+            items = [(GAMES_OWN, "")]
             for mode in client_packs.WINDOW_MODES:
                 if mode != "borderless" or self._borderless:
                     items.append((WINDOW_LABELS[mode], mode))
@@ -1117,7 +1151,7 @@ class LauncherWindow(QWidget):
                 names.append(clean)
         if isinstance(saved, str) and saved not in names:
             names.append(saved)  # not read yet, or the read failed: kept, not dropped
-        items = [] if has_key else [(GAMES_OWN, ACCOUNT_KEEP)]
+        items = [] if has_key else [(GAME_REMEMBERS, ACCOUNT_KEEP)]
         items += [(name, account_data(name)) for name in names]
         items.append((ASK_IN_THE_GAME, ACCOUNT_ASK))
         if not has_key:
@@ -1150,6 +1184,19 @@ class LauncherWindow(QWidget):
         self.addons_list.addItems(list(names))
         self.addons_list.setVisible(bool(names))
         self.addons_empty.setVisible(not names)
+        column = self._right_column
+        column.setStretch(column.indexOf(self.addons_box), 1 if names else 0)
+        column.setStretch(column.count() - 1, 0 if names else 1)
+        self._size_addons()
+
+    def _size_addons(self) -> None:
+        """At least three rows of the list showing; one where the window is compact."""
+        rows = 1 if self._compact else ADDON_ROWS
+        row = self.addons_list.sizeHintForRow(0)
+        if row <= 0:
+            row = self.addons_list.fontMetrics().height() + 8
+        frame = 2 * self.addons_list.frameWidth()
+        self.addons_list.setMinimumHeight(rows * row + frame)
 
     # -- the player's presses ----------------------------------------------
 
@@ -1179,7 +1226,7 @@ class LauncherWindow(QWidget):
         if not isinstance(mode, str):
             return
         display = self._display()
-        old = display.get("window")
+        old = self._window_now()
         if mode:
             display["window"] = mode
         else:
@@ -1237,7 +1284,7 @@ class LauncherWindow(QWidget):
                 "and colons only. Nothing was saved."
             )
             self.realm_note.setVisible(True)
-            self._render_realm()
+            self._render_realm(force=True)
             return
         if typed not in self._typed:
             self._typed.append(typed)
@@ -1248,9 +1295,12 @@ class LauncherWindow(QWidget):
         self.realm_note.setText("")
         self.realm_note.setVisible(False)
         if self._saved_address() is None:
-            self._render_realm()
+            self._render_realm(force=True)
             return
-        self._save(drop=("realm_address",))
+        # Saved as None, not dropped (lead ruling): the next Play also takes the typed
+        # address's realmList/patchList back out of Config.wtf where realmlist.wtf, or the
+        # catalog's own realmList, carries this computer's address.
+        self._save(launcher={"realm_address": None})
 
     def _pack_toggled(self, pack_id: str, on: bool) -> None:
         self._save(packs={pack_id: on})

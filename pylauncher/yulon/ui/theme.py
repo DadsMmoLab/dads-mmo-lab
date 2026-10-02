@@ -54,6 +54,11 @@ COLOR_GOLD_BRIGHT = "#FFB000"  # primary accent: focus rings, active tab, primar
 COLOR_GOLD_LIGHT = "#FFD980"  # lightened accent for hover text
 COLOR_GOLD_BORDER = "#C98A0A"  # accent hairline (focus / primary border)
 COLOR_GOLD_BRASS = "#8A6510"  # dim accent (pressed border, section headers)
+COLOR_EMBER = "#6B3410"
+"""Banked-fire brown: the warm middle of the client launcher's banner gradient (T187).
+
+The approved mockup's banner glows like a hearth; no other colour here is that dark
+and that warm, and a gradient between two of the charcoal sheets reads as grey."""
 COLOR_BRASS_DARK = "#3A3222"  # default hairline border — warm bronze, not neutral gray
 COLOR_BRASS_DEEP = "#262218"  # recessed / divider line
 

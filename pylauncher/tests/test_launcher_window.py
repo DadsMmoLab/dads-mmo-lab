@@ -37,6 +37,8 @@ from yulon.ui import launcher_window
 from yulon.ui.controller_view import ControllerView
 from yulon.ui.launcher_window import (
     ACCOUNT_ASK,
+    ACCOUNT_KEEP,
+    GAMES_OWN,
     LauncherWindow,
     Online,
     ServerReading,
@@ -431,6 +433,8 @@ def test_play_is_the_views_own_play_and_starts_the_game(
     assert len(launched) == 1, boxes
     assert window.progress_label.text() == view.play_label.text()
     assert "World of Warcraft is starting" in window.progress_label.text()
+    assert play is not None
+    assert not (play / "WTF" / "Config.wtf").exists(), "no picks, so nothing to write"
 
 
 def test_the_launchers_picks_reach_config_wtf_on_a_shipped_game_with_no_client_data(
@@ -631,7 +635,7 @@ def test_a_typed_realm_address_is_saved_and_use_this_computer_takes_it_out(
     assert _picks(play) == {"realm_address": "192.168.1.20"}
 
     window.this_computer_button.click()
-    assert _picks(play) == {}
+    assert _picks(play) == {"realm_address": None}, "said, so Play takes the old lines out"
     assert window.realm_combo.currentText() == "127.0.0.1"
     offered = [window.realm_combo.itemText(i) for i in range(window.realm_combo.count())]
     assert "192.168.1.20" in offered, "an address typed earlier is offered again"
@@ -646,7 +650,11 @@ def test_the_default_address_is_never_saved_as_a_typed_one(
 
     _type_address(window, "127.0.0.1")
 
-    assert _picks(play) == {}, "typing this computer's address is Use this computer"
+    assert _picks(play) == {"realm_address": None}, "typing 127.0.0.1 is Use this computer"
+
+    fresh, _view2, fresh_play = _launcher(ps, tmp_path / "fresh")
+    _type_address(fresh, "127.0.0.1")
+    assert _picks(fresh_play) == {}, "nothing typed over, nothing to take out"
 
 
 def test_the_focus_leaving_a_greyed_realm_box_is_not_a_new_address(
@@ -889,3 +897,159 @@ def test_set_view_points_the_window_at_the_rebuilt_tab(
     assert window.play_button.isEnabled() and not window.client_box.isHidden()
     assert window.client_path_label.toolTip() == str(play)
     assert launcher_window.LauncherWindow is LauncherWindow
+
+
+# -- fix round 1 --------------------------------------------------------------------
+
+
+def test_a_stale_account_waits_for_the_view_to_be_idle_before_it_is_saved(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I1: no save, and no refusal note, while a Play holds the record; saved once it ends."""
+    answer = ServerReading(accounts=("BOB",), online=UP, announced=None)
+    window, view, play = _launcher(ps, tmp_path, answer=answer, launcher={"account": "ALICE"})
+    view._play_pending = True
+
+    _online(view)
+
+    assert window.settings_note.isHidden(), window.settings_note.text()
+    assert _picks(play) == {"account": "ALICE"}
+
+    view._play_end()
+
+    assert _picks(play) == {"account": None}
+    assert "ALICE" in window.account_note.text()
+
+
+def test_the_no_pick_choices_are_named_for_what_they_leave_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Lead ruling: Log in as says "As the game remembers it"; Window can always go back."""
+    window, view, play = _launcher(ps, tmp_path, launcher={"display": {"window": "windowed"}})
+    _online(view)
+
+    keep = window.account_combo.findData(ACCOUNT_KEEP)
+    assert window.account_combo.itemText(keep) == "As the game remembers it"
+    assert window.window_combo.findData("") >= 0, "a saved mode could not be cleared"
+    assert window.window_combo.itemText(window.window_combo.findData("")) == GAMES_OWN
+
+    _choose(window.window_combo, "")
+    assert _picks(play) == {}
+
+
+def test_clearing_a_borderless_pick_also_clears_the_borderless_exe_option(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    window, _view, play = _launcher(ps, tmp_path, entry=_client_entry(tmp_path))
+    assert play is not None
+    _choose(window.window_combo, "borderless")
+    assert client_packs.read_record(play).choices["exe_options"]["borderless"] is True
+
+    _choose(window.window_combo, "")
+
+    assert "display" not in _picks(play)
+    assert client_packs.read_record(play).choices["exe_options"]["borderless"] is False
+    assert window.window_combo.currentData() == "", "it snapped back to Borderless"
+
+
+def test_clearing_borderless_ticked_in_client_options_clears_the_exe_option_too(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No window pick, Borderless ticked in Client options: the window shows it, and clears it."""
+    on = {"packs": {}, "exe_options": {"borderless": True}}
+    window, view, play = _launcher(
+        ps, tmp_path, entry=_client_entry(tmp_path), options_asker=_OptionsAsker(on)
+    )
+    assert play is not None
+    view.client_options()
+    assert window.window_combo.currentData() == "borderless"
+
+    _choose(window.window_combo, "")
+
+    assert client_packs.read_record(play).choices["exe_options"]["borderless"] is False
+    assert window.window_combo.currentData() == ""
+
+
+def _play_once(window: LauncherWindow, ps: _Ps) -> None:
+    ps.names = WORLD_UP
+    window.play_button.click()
+
+
+def test_use_this_computer_takes_the_typed_address_back_out_of_config_wtf(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object], boxes: list[str]
+) -> None:
+    """Lead ruling (M5), an entry without `config_wtf`: realmlist.wtf carries this computer."""
+    window, _view, play = _launcher(ps, tmp_path)
+    assert play is not None
+    _type_address(window, "10.0.0.5")
+    _play_once(window, ps)
+    config = play / "WTF" / "Config.wtf"
+    assert 'SET realmList "10.0.0.5"' in config.read_text(encoding="utf-8")
+
+    window.this_computer_button.click()
+    _play_once(window, ps)
+
+    text = config.read_text(encoding="utf-8")
+    assert "realmlist" not in text.casefold() and "patchlist" not in text.casefold(), text
+    realmlist = (play / "Data" / "enUS" / "realmlist.wtf").read_text(encoding="utf-8")
+    assert realmlist.startswith("set realmlist 127.0.0.1\n")
+    assert len(launched) == 2, boxes
+
+
+def test_use_this_computer_keeps_the_catalogs_own_realmlist_in_config_wtf(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object], boxes: list[str]
+) -> None:
+    """An entry WITH `config_wtf`: its `always` realmList is written again, never taken out."""
+    entry = _client_entry(tmp_path, with_packs=False, exe=False)
+    window, _view, play = _launcher(ps, tmp_path, entry=entry)
+    assert play is not None
+    _type_address(window, "10.0.0.5")
+    _play_once(window, ps)
+    config = play / "WTF" / "Config.wtf"
+    assert 'SET realmList "10.0.0.5"' in config.read_text(encoding="utf-8")
+
+    window.this_computer_button.click()
+    _play_once(window, ps)
+
+    text = config.read_text(encoding="utf-8")
+    assert 'SET realmList "127.0.0.1"' in text and "10.0.0.5" not in text, text
+    assert len(launched) == 2, boxes
+
+
+def test_typing_in_the_realm_box_survives_a_re_render(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    """M2: the realm coming up (a new read, a re-render) does not reset what is being typed."""
+    answer = ServerReading(accounts=(), online=UP, announced="192.168.1.20")
+    window, view, _ = _launcher(ps, tmp_path, answer=answer)
+    closing.append(window)
+    _shown(window, (1280, 800))
+    window.realm_combo.setFocus()
+    process_events()
+    window.realm_combo.setEditText("192.168.1.2")
+
+    _online(view)
+
+    assert window.realm_combo.currentText() == "192.168.1.2"
+    assert not window.realm_mismatch_label.isHidden(), "the hint still follows the read"
+
+
+def test_the_addons_list_takes_the_right_columns_spare_height(
+    qapp: object, ps: _Ps, tmp_path: Path, closing: list[LauncherWindow]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    for n in range(12):
+        (play / "Interface" / "AddOns" / f"Addon{n:02d}").mkdir(parents=True)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    window = LauncherWindow(view, reads=_Reads(view, SERVER), job_runner=run_inline)
+    closing.append(window)
+
+    heights = {}
+    for size in ((1280, 800), (1920, 1080)):
+        _shown(window, size)
+        heights[size] = window.addons_list.height()
+    row = window.addons_list.sizeHintForRow(0)
+    assert heights[(1280, 800)] >= 3 * row, heights
+    assert heights[(1920, 1080)] > heights[(1280, 800)] + 200, heights
+    assert window.right_scroll.verticalScrollBar().maximum() == 0
