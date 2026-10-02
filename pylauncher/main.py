@@ -363,7 +363,7 @@ def announce_previous_update(
     # (`v0.8.73-Public`) and the window title carries `__version__`
     # (`0.8.73-Public`), and the first live gate put the two side by side on
     # one screen (round 3, F9).
-    bar.show_message(f"Updated to Yu'lon {without_v(outcome.version or running)}.")
+    bar.show_message(f"Updated to Yu'lon {without_v(outcome.version or running)}.", fade=True)
     return True
 
 
@@ -377,7 +377,25 @@ LEFTOVER_LIST_UNREAD = (
 )
 
 
-def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> str | None:
+@dataclasses.dataclass(frozen=True)
+class LeftoverNotice:
+    """What the start-up sweep wants said, and the folders it names (none when unreadable)."""
+
+    text: str
+    folders: tuple[str, ...] = ()
+
+
+def leftover_notice_shown(notice: LeftoverNotice, *, config_dir: Path | None = None) -> None:
+    """The notice is on the bar: its folders are said, and not said again at the next start."""
+    from yulon import ui_settings
+
+    if notice.folders and not ui_settings.remember_leftover_notices(
+        notice.folders, ui_settings.ui_settings_path(config_dir)
+    ):
+        logger.info("could not note that the leftover-copy notice was shown; it is said again")
+
+
+def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> LeftoverNotice | None:
     """T179: remove the temporary client copies an Uninstall could not; the notice, or None.
 
     A Centurion install extracts its map data from a temporary copy of the player's
@@ -385,7 +403,7 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> str | Non
     one notes it in Yu'lon's own folder (`trinitycore.LEFTOVERS_FILE`), and this is the
     retry it promised: once, at start, through the same link-safe remover. Every
     warning goes to the log at every start; one line is said for a folder still there
-    the first time it is found left (`ui_settings.first_leftover_notices`). Runs off
+    until a notice naming it was shown (`ui_settings.unnoticed_leftovers`). Runs off
     the GUI thread (`build_window()`): removing a client-sized folder of links takes
     a while on a slow disk.
     """
@@ -397,10 +415,11 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> str | Non
 
     targets = trinitycore.recorded_leftover_targets(config_dir=config_dir)
     if targets is None:
-        return LEFTOVER_LIST_UNREAD
-    # Once per folder (T179 Task 5 fix round 1): a copy left at every start is in the
-    # log every time, and said in the bar only the first time.
-    fresh = ui_settings.first_leftover_notices(targets, ui_settings.ui_settings_path(config_dir))
+        return LeftoverNotice(LEFTOVER_LIST_UNREAD)
+    # Once per folder (T179 Task 5 fix rounds 1-2): a copy left at every start is in
+    # the log every time, and said in the bar until a notice naming it was SHOWN
+    # (`leftover_notice_shown`, called by the bar) -- not merely offered.
+    fresh = ui_settings.unnoticed_leftovers(targets, ui_settings.ui_settings_path(config_dir))
     left = len(fresh)
     if left == 0:
         return None
@@ -409,7 +428,7 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> str | Non
         if left == 1
         else f"{left} temporary copies of a game client"
     )
-    return LEFTOVER_COPIES_NOTICE.format(count=copies)
+    return LeftoverNotice(LEFTOVER_COPIES_NOTICE.format(count=copies), tuple(fresh))
 
 
 HELPER_STAMP_SECONDS = 30.0
@@ -1602,7 +1621,9 @@ def build_window() -> object:
             elif result.error:
                 update_bar.show_message(f"Could not check for updates: {result.error}")
             else:
-                update_bar.show_message(f"You have the newest version ({result.current}).")
+                update_bar.show_message(
+                    f"You have the newest version ({result.current}).", fade=True
+                )
 
         @Slot(object)
         def manual_failed(self, problem: object) -> None:
@@ -2089,8 +2110,8 @@ def build_window() -> object:
 
     def _swept(notice: object) -> None:
         # Below an update offer and the "Updated to" announcement: it waits for them.
-        if notice:
-            update_bar.offer_notice(str(notice))
+        if isinstance(notice, LeftoverNotice):
+            update_bar.offer_notice(notice.text, on_shown=lambda: leftover_notice_shown(notice))
 
     def _sweep_failed(exc: object) -> None:
         logger.warning(f"could not retry removing the temporary client copies: {exc}")

@@ -212,19 +212,29 @@ def forget_launcher(game: str, server_dir: Path, path: Path | None = None) -> bo
         return save_ui_settings(settings, path)
 
 
-def first_leftover_notices(targets: Iterable[str], path: Path | None = None) -> list[str]:
-    """The folders in `targets` not said before; all of `targets` remembered from now on.
+def unnoticed_leftovers(targets: Iterable[str], path: Path | None = None) -> list[str]:
+    """The folders in `targets` not yet shown in a notice; the record pruned to `targets`.
 
-    What is remembered is exactly the folders still left, so one that is removed and
-    later left again is said again. If `ui.json` cannot be written, every folder is
-    new -- a notice said twice is better than one never said.
+    Reads, and writes only to FORGET a folder that is no longer left, so one that is
+    removed and later left again is said again. Nothing is marked as said here: that
+    is `remember_leftover_notices()`, called when a notice is really on screen.
     """
     left = list(dict.fromkeys(targets))
     with _LOCK:
         settings = load_ui_settings(path)
-        fresh = [target for target in left if target not in settings.noticed_leftovers]
-        if settings.noticed_leftovers != left:
-            settings.noticed_leftovers = left
-            if not save_ui_settings(settings, path):
-                return left
-    return fresh
+        kept = [target for target in settings.noticed_leftovers if target in left]
+        if kept != settings.noticed_leftovers:
+            settings.noticed_leftovers = kept
+            save_ui_settings(settings, path)
+    return [target for target in left if target not in kept]
+
+
+def remember_leftover_notices(targets: Iterable[str], path: Path | None = None) -> bool:
+    """Mark these folders as said: a notice naming them was shown. False = not written."""
+    with _LOCK:
+        settings = load_ui_settings(path)
+        added = [target for target in targets if target not in settings.noticed_leftovers]
+        if not added:
+            return True
+        settings.noticed_leftovers = [*settings.noticed_leftovers, *added]
+        return save_ui_settings(settings, path)

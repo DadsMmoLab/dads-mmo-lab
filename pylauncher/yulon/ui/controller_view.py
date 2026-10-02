@@ -15258,7 +15258,7 @@ class ControllerView(QWidget):
         self._tuning_rows = rows
         self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
         # WHICH files are read-only is this module's list and not the panel's:
-        # `TUNING_CORE_FILES` is a decision about who owns core configuration,
+        # `reset_defaults.read_only_confs()` is a decision about who owns core configuration,
         # and a second copy of it inside a widget is a second place for it to
         # drift (T44 item 13).
         self.tuning_panel.set_files(self._tuning_files(), read_only=self._tuning_core_files())

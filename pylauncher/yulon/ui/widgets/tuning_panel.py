@@ -865,7 +865,7 @@ class TuningPanel(QWidget):
         """Draw one button per file, keeping the file already open if it is still listed.
 
         `read_only` is handed IN rather than decided here: which files this
-        app will not write is `controller_view.TUNING_CORE_FILES`, a decision
+        app will not write is `reset_defaults.read_only_confs()`, a decision
         about who owns core configuration, and this widget must not carry a
         second copy of that list.
         """

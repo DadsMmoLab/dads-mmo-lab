@@ -13,8 +13,9 @@ link it used to carry is now a button that opens the what's-new dialog.
 from __future__ import annotations
 
 import html
+from collections.abc import Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics, QResizeEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
@@ -39,8 +40,17 @@ def as_plain_tooltip(text: str) -> str:
     return f"<span style='white-space:pre-wrap'>{html.escape(text)}</span>"
 
 
+FADE_MS = 15_000
+"""How long a message said with `fade=True` stays before the bar clears itself (T179).
+
+For the announcements nothing else ever clears in a session -- "Updated to Yu'lon X",
+"You have the newest version" -- so a notice waiting behind one gets its turn."""
+
+
 class UpdateBar(QWidget):
-    """One line and one button. `show_update` / `show_message` / `clear` are the whole API."""
+    """One line and one button: `show_update`, `show_message` (optionally fading),
+    `offer_notice` (a lower-ranked notice that waits for the bar to be idle) and
+    `clear` are the whole API."""
 
     details_requested = Signal()
 
@@ -50,8 +60,11 @@ class UpdateBar(QWidget):
         self._text = ""
         # T179: a notice (`offer_notice`) waiting for the bar to be idle, and whether
         # the one on show now is one -- an offer or a message arriving over it wins.
-        self._waiting: str | None = None
+        self._waiting: tuple[str, Callable[[], None] | None] | None = None
         self._notice_on_show = False
+        # Every `_say` starts a new message; a fade timer clears only its own.
+        self._said = 0
+        self._fading: int | None = None
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 2, 14, 2)
         self.label = QLabel(self)
@@ -88,7 +101,7 @@ class UpdateBar(QWidget):
         self.details_button.setVisible(True)
         self.setVisible(True)
 
-    def show_message(self, text: str, *, keep_details: bool = False) -> None:
+    def show_message(self, text: str, *, keep_details: bool = False, fade: bool = False) -> None:
         """Say one thing. `keep_details` leaves "See what's new" where it is.
 
         The default hides it, because most messages ("You have the newest
@@ -102,47 +115,65 @@ class UpdateBar(QWidget):
         if not keep_details:
             self.details_button.setVisible(False)
         self.setVisible(True)
+        if fade:
+            said = self._fading = self._said
+            QTimer.singleShot(FADE_MS, self, lambda: self._fade(said))
 
-    def offer_notice(self, text: str) -> None:
+    def fading(self) -> bool:
+        """Whether what the bar says now will clear itself (`show_message(fade=True)`)."""
+        return self._fading is not None and self._fading == self._said
+
+    def _fade(self, said: int) -> None:
+        if said == self._said and not self.isHidden():
+            self.clear()
+
+    def offer_notice(self, text: str, on_shown: Callable[[], None] | None = None) -> None:
         """Say `text` when nothing else is being said (T179 Task 5, fix round 1).
 
         A notice ranks below an update offer and an announcement ("Updated to
         Yu'lon X"): over either it waits and is said when the bar clears, and an
         offer or a message arriving over it puts it back to wait. One waits at a
-        time; a newer one replaces it.
+        time; a newer one replaces it. `on_shown` is called once, the first time the
+        notice is actually on the bar -- never while it only waits.
         """
         if self.isHidden():
-            self._show_notice(text)
+            self._show_notice(text, on_shown)
         else:
-            self._waiting = text
+            self._waiting = (text, on_shown)
 
     def clear(self) -> None:
         """Nothing to say; the row gives its height back to the tabs -- or a waiting notice."""
         self._notice_on_show = False
         waiting, self._waiting = self._waiting, None
         if waiting is not None:
-            self._show_notice(waiting)
+            self._show_notice(*waiting)
             return
         self.setVisible(False)
 
-    def _show_notice(self, text: str) -> None:
+    def _show_notice(self, text: str, on_shown: Callable[[], None] | None) -> None:
         self._say(text)
         self.details_button.setVisible(False)
         self.setVisible(True)
         self._notice_on_show = True
+        if on_shown is not None:
+            on_shown()
 
     def _step_aside(self) -> None:
-        """A notice on show waits again under what is about to be said instead."""
+        """A notice on show waits again under what is about to be said instead.
+
+        Its `on_shown` was spent when it first showed, so it comes back without one.
+        """
         if self._notice_on_show:
             self._notice_on_show = False
             if self._waiting is None:
-                self._waiting = self._text
+                self._waiting = (self._text, None)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._elide()
 
     def _say(self, text: str) -> None:
+        self._said += 1
         self._text = text
         self.label.setToolTip(as_plain_tooltip(text))
         self._elide()
