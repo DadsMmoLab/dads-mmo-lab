@@ -3830,6 +3830,11 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
         "bind, resolves `docker_program()` directly for the same reason."
     ),
+    "run_detached": (
+        "`run_container`'s reason, for the background job T179 starts the same way: its "
+        "mounts are paths on this machine, and a server Yu'lon installed is on the local "
+        "daemon (an install never goes into a WSL distro)"
+    ),
     "_pumped": (
         "it is handed a COMPLETE argv and a complete child environment and starts them: the "
         "daemon was chosen by `exec_stdin()` and `compose_run_stdin()`, which both take a "

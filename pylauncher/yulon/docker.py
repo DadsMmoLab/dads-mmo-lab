@@ -4975,7 +4975,31 @@ class ContainerRun:
                 relative bind source with a daemon-side error that names
                 neither the field nor the caller; refusing here does both.
         """
-        argv = ["run", "--rm", *self.user_args, *self.security_args]
+        return ["run", "--rm", *self._options_and_command()]
+
+    def to_detached_argv(self, name: str) -> list[str]:
+        """`to_argv()` for a job that outlives this process: `-d --name <name>`, and NO `--rm`.
+
+        The one run this describes that is not a tool run to completion while
+        someone watches: T179's movement-map generation runs for hours in the
+        background after the server is up. `--rm` is left off on purpose, and it
+        is the whole reason this is a second method rather than a flag: a
+        container that removes itself on exit takes its exit code and its log with
+        it, and those are how the app -- possibly restarted since -- tells a
+        FINISHED generation from one that died. The caller removes the container
+        once it has read them (`families/mmaps.py`).
+
+        Raises:
+            ValueError: an empty name, or a mount's host path is not absolute
+                (see `to_argv()`).
+        """
+        if not name:
+            raise ValueError("a detached container needs a name to be found again")
+        return ["run", "-d", "--name", name, *self._options_and_command()]
+
+    def _options_and_command(self) -> list[str]:
+        """Every option, then the image and the tool's argv: what both argv forms share."""
+        argv = [*self.user_args, *self.security_args]
         for limit in self.ulimits:
             argv += ["--ulimit", limit]
         for mount in self.mounts:
@@ -5046,6 +5070,72 @@ def run_container(
     argv = spec.to_argv()
     logger.info(f"run_container(): `docker {' '.join(argv)}`")
     return run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
+
+
+def run_detached(spec: ContainerRun, name: str) -> str:
+    """Start `spec` in the background as the container `name`; its id (T179's mmaps job).
+
+    `ContainerRun.to_detached_argv()`: `-d --name`, and no `--rm`, so its exit code
+    and its log are still there to read after it ends, whoever reads them.
+
+    Local daemon only, for `run_container()`'s reason: the mounts are paths on this
+    machine (`_DAEMON_AGNOSTIC` in the completeness test says so).
+
+    Raises:
+        DockerCliMissingError: there is no docker CLI.
+        DockerCommandError: docker refused (an image it does not have, a name in use).
+    """
+    argv = spec.to_detached_argv(name)
+    logger.info(f"run_detached(): `docker {' '.join(argv)}`")
+    return _run(argv).stdout.strip()
+
+
+@dataclass(frozen=True)
+class ContainerExit:
+    """A background container's state, and how it ended once it has (T179's mmaps job).
+
+    `status` is `""` when Docker could not be asked or did not answer, and
+    `missing` is True only when it ANSWERED that there is no such container --
+    the two are kept apart for `ContainerState.missing`'s reason: a job whose
+    container is gone has failed, and one Docker could not be asked about has not.
+    """
+
+    status: str = ""
+    exit_code: int | None = None
+    finished_at: str = ""
+    container_id: str = ""
+    missing: bool = False
+
+
+def container_exit(container: str, *, wsl_distro: str | None = None) -> ContainerExit:
+    """`ContainerExit` in one `docker inspect`; never raises."""
+    fmt = "{{.Id}}\t{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.FinishedAt}}"
+    proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
+        missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
+        return ContainerExit(missing=missing)
+    fields = [part.strip() for part in proc.stdout.strip().split("\t")]
+    cid, status, code, finished = (fields + ["", "", "", ""])[:4]
+    exit_code = int(code) if code.lstrip("-").isdigit() else None
+    return ContainerExit(status, exit_code, finished, cid)
+
+
+def remove_container(container: str, *, wsl_distro: str | None = None) -> None:
+    """`docker rm -f <container>`; a container that is already gone is not a failure.
+
+    Raises:
+        DockerCliMissingError: there is no docker CLI.
+        DockerCommandError: docker refused for any other reason.
+    """
+    proc = _docker(["rm", "-f", container], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        return
+    if _cli_missing(proc):
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    if _NO_SUCH_CONTAINER.search(proc.stderr):
+        return
+    raise DockerCommandError(f"docker rm -f {container} exited {proc.returncode}: {proc.stderr}")
 
 
 _MISSING_IN_IMAGE = re.compile(r"No such container:path|Could not find the file", re.IGNORECASE)

@@ -46,6 +46,7 @@ from tests.support_trinitycore import (
     CORE_DIR,
     SQL_DIR,
     WORLD,
+    FakeMmapsDocker,
     centurion_like,
 )
 from tests.test_purge import Recorder as PurgeRecorder
@@ -392,6 +393,8 @@ class Machine:
     tools: Extractors
     server_dir: Path
     client: Path
+    mmaps: FakeMmapsDocker = field(default_factory=FakeMmapsDocker)
+    """The background movement-map job's Docker (Task 4): an install ends by starting it."""
 
 
 @pytest.fixture
@@ -424,6 +427,7 @@ def engine(m: Machine, *, entry: CatalogEntry = ENTRY, **overrides: object) -> T
     return TrinityCoreInstaller(
         entry,
         installers_root=resources.installers_dir(),
+        mmaps_runner=m.mmaps,
         seams=m.rec.seams(
             **{
                 "platform_id": lambda: "linux",

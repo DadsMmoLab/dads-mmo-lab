@@ -3977,6 +3977,29 @@ class StagedInstaller:
                 f"{type(self).__name__} may not name a stage {reserved[0]!r}: the spine owns it"
             )
 
+    # -- the family's hooks around a press (T179) --------------------------
+
+    def after_ready(self, server_dir: Path) -> Iterator[str]:
+        """What a family starts once its server is up, after an install or a rebuild.
+
+        Nothing on the spine. The TrinityCore family starts its movement maps
+        here, in the background (T179 spec §1 step 10). Called after the last
+        stage and before the press's closing line; what it yields is a sentence,
+        and a family must not raise from it -- the server is up, and a press that
+        made it so has not failed.
+        """
+        return iter(())
+
+    def before_rebuild(self, server_dir: Path, route: str) -> Iterator[str]:
+        """What a family must stop before `route` (a rebuild, an update, a return) changes it.
+
+        Nothing on the spine. The TrinityCore family stops a running movement-map
+        job here, whose output must not be written while the server is rebuilt
+        (T179 spec §3). Called after the press's refusals and before its first
+        change; a stop that fails raises `InstallerError`, and the press stops there.
+        """
+        return iter(())
+
     # -- the contract ----------------------------------------------------
 
     def server_dir(self, options: InstallOptions) -> Path:
@@ -4069,6 +4092,9 @@ class StagedInstaller:
         # make a working server time out. Before the closing line, because that
         # line is asserted to be LAST.
         yield from self._advertise_realm(replace(ctx, state=state))
+        # After the realm row, for `_advertise_realm()`'s reason: a background job
+        # is a sentence, never a failed install (T179's movement maps).
+        yield from self.after_ready(server_dir)
         # The bash path logs `install of <id> finished` (installer.py); this path
         # logged nothing at the end, so the only sign a run had ended was the
         # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
@@ -5368,6 +5394,11 @@ class StagedInstaller:
                 f"back. That is a bug in this build, not something you did. Nothing was "
                 f"started."
             )
+        # After every refusal above and before the first thing this press changes
+        # (the rollback tags): a family's background job over the server's files
+        # must not run while it is rebuilt (T179's movement maps). A stop that
+        # fails raises, and nothing was started.
+        yield from self.before_rebuild(server_dir, "the rebuild")
         refs = self.built_image_refs(ctx)
         kept = yield from self._keep_rollback(ctx, refs, missing_ok=missing_images_ok)
         try:
@@ -5457,6 +5488,7 @@ class StagedInstaller:
         yield from self._release(kept)
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
+        yield from self.after_ready(server_dir)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
@@ -5790,6 +5822,12 @@ class StagedInstaller:
         for said in targets.values():
             yield said.line
         self._check_cancel(cancel)
+        # After every refusal, before the first fetch: `rebuild()`'s reason, one
+        # press earlier, because the sources move before the compile does.
+        yield from self.before_rebuild(
+            server_dir,
+            "the return to the tested commit" if to_pin else "the update to the newest code",
+        )
         try:
             moved: list[tuple[EmulatorSource, Path, str]] = []
             try:

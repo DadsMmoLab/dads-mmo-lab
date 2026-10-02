@@ -304,6 +304,7 @@ class Uninstaller:
         remove_folder: Callable[[Path], None] | None = None,
         forget_pending: Callable[[], None] | None = None,
         remove_extraction_client: Callable[[], str] | None = None,
+        stop_background_jobs: Callable[[], None] | None = None,
     ) -> None:
         self.game = game
         self.server_dir = server_dir
@@ -335,6 +336,11 @@ class Uninstaller:
             remove_extraction_client
             if remove_extraction_client is not None
             else self._real_remove_extraction_client
+        )
+        self._stop_background_jobs = (
+            stop_background_jobs
+            if stop_background_jobs is not None
+            else self._real_stop_background_jobs
         )
         # How the containers' removal is heard and steered while it waits for a
         # world that is still loading (T158, `docker.StopControl`). Set by the
@@ -413,6 +419,25 @@ class Uninstaller:
         try:
             return remove_for_uninstall(self.server_dir, self.game)
         except LeftoverNotNoted as exc:
+            raise PurgeError(str(exc)) from exc
+
+    def _real_stop_background_jobs(self) -> None:
+        """A TrinityCore server's movement-map job, removed before its containers (T179 Task 4).
+
+        Started with `docker run -d`, not by compose, so `_remove_containers()`
+        never reaches it: left running it would hold the server image the loop
+        below removes and write into the folder being deleted. Found through its
+        record in the server folder, so a server with none asks Docker nothing.
+        Imported here rather than at module scope for `_default_claim`'s reason.
+
+        Raises:
+            PurgeError: the job could not be removed; nothing else was.
+        """
+        from yulon.catalog.families.mmaps import MmapsError, remove_for_uninstall
+
+        try:
+            remove_for_uninstall(self.server_dir)
+        except MmapsError as exc:
             raise PurgeError(str(exc)) from exc
 
     def _pending_record(self) -> Path:
@@ -567,6 +592,9 @@ class Uninstaller:
         if snapshot.problem:
             logger.warning(f"uninstall: no log snapshot ({snapshot.problem}); going ahead anyway")
 
+        # BEFORE the containers: a background job (T179's movement maps) holds the
+        # server image and writes into the folder, and compose does not own it.
+        self._stop_background_jobs()
         removed_containers = self._remove_containers()
 
         kept: list[str] = []

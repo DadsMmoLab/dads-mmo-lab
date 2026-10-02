@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from yulon import docker
 from yulon.catalog.catalog import CATALOG_FILE, CatalogEntry, parse_catalog
 
 CHECKOUT = "src/centurion"
@@ -255,3 +258,106 @@ def centurion_like(
         "trinitycore": copy.deepcopy(TRINITYCORE),
     }
     return parse_catalog({"schema_version": 1, "games": [entry]}).get("wow-centurion")
+
+
+# -- the movement-map job's Docker (T179 Task 4) ------------------------------------------
+
+
+@dataclass
+class FakeJob:
+    """One background container: what it was started with, where it is, what it printed."""
+
+    spec: docker.ContainerRun
+    container_id: str
+    status: str = "running"
+    exit_code: int | None = None
+    logs: list[str] = field(default_factory=list)
+
+
+class FakeMmapsDocker:
+    """`mmaps.Runner` over a dict of containers, so no test reaches a real daemon.
+
+    Containers are kept by NAME, as Docker keeps them: a second `run_detached()`
+    under a name in use is refused with Docker's own conflict, which is how a
+    second job at once would show. `answers=False` is a daemon that does not
+    answer an inspect (`ContainerExit()` with nothing in it); `refuse_remove` makes
+    every `docker rm -f` fail. The world server's start time is `world_started_at`.
+    """
+
+    def __init__(self) -> None:
+        self.jobs: dict[str, FakeJob] = {}
+        self.calls: list[str] = []
+        self.started: list[docker.ContainerRun] = []
+        self.world_started_at = "2026-10-02T10:00:00.123456789Z"
+        self.answers = True
+        self.refuse_run = ""
+        self.refuse_remove = ""
+        self.mmaps_at_run: list[list[str]] = []
+
+    # -- `mmaps.Runner` -------------------------------------------------------------
+
+    def run_detached(self, spec: docker.ContainerRun, name: str) -> str:
+        self.calls.append(f"run:{name}")
+        if self.refuse_run:
+            raise docker.DockerCommandError(self.refuse_run)
+        if name in self.jobs:
+            raise docker.DockerCommandError(
+                f'Conflict. The container name "/{name}" is already in use'
+            )
+        out = self.output_dir(spec)
+        assert out.is_dir(), "the generator's writable folder must exist before the bind"
+        self.mmaps_at_run.append(sorted(path.name for path in out.iterdir()))
+        self.started.append(spec)
+        container_id = f"{len(self.started):064x}"
+        self.jobs[name] = FakeJob(spec, container_id)
+        return container_id
+
+    def inspect(self, name: str) -> docker.ContainerExit:
+        self.calls.append(f"inspect:{name}")
+        if not self.answers:
+            return docker.ContainerExit()
+        job = self.jobs.get(name)
+        if job is None:
+            return docker.ContainerExit(missing=True)
+        return docker.ContainerExit(job.status, job.exit_code, "", job.container_id)
+
+    def log_tail(self, name: str, lines: int) -> str | None:
+        job = self.jobs.get(name)
+        return None if job is None else "\n".join(job.logs[-lines:])
+
+    def remove(self, name: str) -> None:
+        self.calls.append(f"remove:{name}")
+        if self.refuse_remove:
+            raise docker.DockerCommandError(self.refuse_remove)
+        self.jobs.pop(name, None)
+
+    def started_at(self, container: str) -> str:
+        return self.world_started_at
+
+    # -- driving it -----------------------------------------------------------------
+
+    @staticmethod
+    def output_dir(spec: docker.ContainerRun) -> Path:
+        (writable,) = [mount.host for mount in spec.mounts if not mount.read_only]
+        return writable
+
+    def only(self) -> tuple[str, FakeJob]:
+        (item,) = self.jobs.items()
+        return item
+
+    def say(self, *lines: str) -> None:
+        self.only()[1].logs.extend(lines)
+
+    def write_tiles(self, count: int) -> None:
+        out = self.output_dir(self.only()[1].spec)
+        for index in range(count):
+            (out / f"000{index:04}.mmtile").write_bytes(b"MMAP")
+
+    def finish(self, code: int = 0, *, tiles: int = 0) -> None:
+        self.write_tiles(tiles)
+        job = self.only()[1]
+        job.status, job.exit_code = "exited", code
+        job.logs.append("Finished. MMAPS were built in 3h 12m 5s" if code == 0 else "Segfault")
+
+    def vanish(self) -> None:
+        self.jobs.pop(self.only()[0])

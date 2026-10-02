@@ -118,6 +118,10 @@ _COUNT_IN_CONF = "this family's random-bot count is in a conf file, not the over
 _WOTLK_DEFAULTS = "WotLK's Reset to default does not read its image: its defaults are not there"
 _COSMETIC = "cosmetic: a game without its own entry here gets the generic fallback"
 _PARTY_REASON = "My Party needs AzerothCore's Lua bridge; it is WotLK-only."
+_MMAPS_IN_THE_INSTALL = (
+    "no background job: this family's movement maps are made before the server starts "
+    "(CMaNGOS's `mmaps` stage) or come in the client-data download (AzerothCore)"
+)
 _DASHBOARD_REASON = (
     "The bot dashboard belongs to the Tortoise bot module, which this server does not run."
 )
@@ -708,6 +712,51 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "trinitycore": supported(
                 "TrinityCoreInstaller inherits CmangosInstaller's, over its own SQL plan"
             ),
+        },
+        scanned=False,
+    ),
+    # -- movement maps in the background (T179 Task 4) ------------------------------------
+    Site(
+        "yulon.catalog.families.mmaps",
+        "background_block",
+        "which entries make their movement maps as a job after the server is up",
+        {
+            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "trinitycore": supported("`TrinityCoreMmaps.background` (Task 4)"),
+        },
+        hits=(".trinitycore",),
+    ),
+    Site(
+        "yulon.catalog.native",
+        "StagedInstaller.after_ready",
+        "what a family starts once its server is up, after an install or a rebuild",
+        {
+            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "trinitycore": supported("TrinityCoreInstaller starts its movement-map job"),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.catalog.native",
+        "StagedInstaller.before_rebuild",
+        "what a family stops before a rebuild, an update or a return to the tested commit",
+        {
+            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "trinitycore": supported("TrinityCoreInstaller stops a running movement-map job"),
+        },
+        scanned=False,
+    ),
+    Site(
+        "yulon.purge",
+        "Uninstaller._real_stop_background_jobs",
+        "Uninstall removes a background job before the containers (found by its record)",
+        {
+            "azerothcore": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "cmangos": not_applicable(_MMAPS_IN_THE_INSTALL),
+            "trinitycore": supported("the movement-map job's container, by `.yulon-mmaps.json`"),
         },
         scanned=False,
     ),

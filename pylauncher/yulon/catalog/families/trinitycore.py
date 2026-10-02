@@ -22,7 +22,10 @@ is overridden here, by name:
   the start check, all new;
 * `_conf()` -- the conf table alone, without the CMaNGOS bot-count carry-over and
   the Tortoise bot dashboard (`families/decisions.py` records both sites);
-* `_expand()` -- every run of the SQL plan, with the database-name renames.
+* `_expand()` -- every run of the SQL plan, with the database-name renames;
+* `after_ready()` / `before_rebuild()` -- the spine's hooks: the movement maps start
+  as a background job once the server is up, and stop before any rebuild route
+  (`families/mmaps.py`, Task 4).
 
 The inherited update and corrections routes see a plan with no re-runnable and no
 correctable phases, because `native.update_phases()` and `correction_phases()` read
@@ -42,13 +45,20 @@ from pathlib import Path
 from typing import ClassVar, Literal, cast
 
 from yulon import client_packs, docker, platform, play_client
-from yulon.catalog.catalog import ClientPack, CmangosData, SqlPlan, TrinityCoreData
-from yulon.catalog.families import conf, extract, sqlplan
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    ClientPack,
+    CmangosData,
+    SqlPlan,
+    TrinityCoreData,
+)
+from yulon.catalog.families import conf, extract, mmaps, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
+    Seams,
     Stage,
     StageContext,
 )
@@ -94,6 +104,31 @@ class TrinityCoreInstaller(CmangosInstaller):
         "up",
         "ready",
     )
+
+    def __init__(
+        self,
+        entry: CatalogEntry,
+        *,
+        installers_root: Path | None = None,
+        import_probe: docker.ImportProbe | None = None,
+        reset_unfinished: docker.ResetUnfinished | None = None,
+        seams: Seams | None = None,
+        mmaps_runner: mmaps.Runner | None = None,
+    ) -> None:
+        """The spine's constructor, plus the Docker seam of the movement-map job (Task 4).
+
+        Its own seam and not a `Seams` field: only this family has the job, and
+        `Seams.in_wsl()` binds every docker seam to a distro -- a server this
+        family installs never lives in one (an install is local).
+        """
+        super().__init__(
+            entry,
+            installers_root=installers_root,
+            import_probe=import_probe,
+            reset_unfinished=reset_unfinished,
+            seams=seams,
+        )
+        self._mmaps_runner = mmaps_runner if mmaps_runner is not None else mmaps.DockerRunner()
 
     def stages(self) -> tuple[Stage, ...]:
         """The family's stage tuple, in `STAGE_NAMES` order (T179 spec §1, steps 1-9)."""
@@ -505,6 +540,66 @@ class TrinityCoreInstaller(CmangosInstaller):
         yield (
             f"{tc.conf.playerbots_conf} is beside {tc.conf.world_conf} in {etc_dir}, the one "
             "place the world server reads it."
+        )
+
+    # -- movement maps, in the background (Task 4) ----------------------------
+
+    def after_ready(self, server_dir: Path) -> Iterator[str]:
+        """Start the movement maps once the server is up; a warning, never a failure.
+
+        Owner decision 4: the install finishes and the player plays first. A job
+        already running or a set already made is left alone (`mmaps.start_mmaps()`
+        reconciles first), so a resumed install or a rebuild never starts a second.
+        """
+        if mmaps.background_block(self.entry) is None:
+            return
+        try:
+            yield self.start_mmaps(server_dir)
+        except (InstallerError, OSError, docker.DockerCommandError) as exc:
+            yield (
+                f"warning: the pathfinding data could not be started in the background ({exc}). "
+                "The server runs without it; it can be started again from the Server tab."
+            )
+
+    def before_rebuild(self, server_dir: Path, route: str) -> Iterator[str]:
+        """Stop a running movement-map job before `route`; pathfinding stays off (spec §3)."""
+        said = mmaps.stop_for_route(
+            server_dir,
+            self.entry,
+            route,
+            runner=self._mmaps_runner,
+            install_id=self._install_id(server_dir),
+        )
+        if said is not None:
+            yield said
+
+    def mmaps_status(self, server_dir: Path) -> mmaps.MmapsStatus:
+        """The job's state for the Server tab (T179 Task 5): `mmaps.mmaps_status()`."""
+        return mmaps.mmaps_status(
+            server_dir,
+            self.entry,
+            runner=self._mmaps_runner,
+            install_id=self._install_id(server_dir),
+        )
+
+    def start_mmaps(self, server_dir: Path) -> str:
+        """Start the job with this engine's image, user and install id: `mmaps.start_mmaps()`."""
+        return mmaps.start_mmaps(
+            server_dir,
+            self.entry,
+            runner=self._mmaps_runner,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
+            user_args=self._user_args(),
+        )
+
+    def stop_mmaps(self, server_dir: Path) -> str:
+        """Stop the job and remove its partial output: `mmaps.stop_mmaps()`."""
+        return mmaps.stop_mmaps(
+            server_dir,
+            self.entry,
+            runner=self._mmaps_runner,
+            install_id=self._install_id(server_dir),
         )
 
     # -- import ----------------------------------------------------------------

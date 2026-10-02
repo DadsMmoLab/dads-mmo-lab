@@ -740,6 +740,15 @@ _fill = fill
 """The pre-7.1 private name, kept so nothing that imported it moves twice."""
 
 
+def container_prefix(entry: CatalogEntry) -> str:
+    """`_container_prefix()` for a caller outside this module (T179: the mmaps job's name).
+
+    One derivation, so a container this app names beside the compose services
+    carries the same prefix the services do, with the same refusals.
+    """
+    return _container_prefix(entry)
+
+
 def _container_prefix(entry: CatalogEntry) -> str:
     """The part the three container names share: `ac-` for WotLK, `tbc-` for TBC.
 
