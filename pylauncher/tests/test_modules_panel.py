@@ -1923,9 +1923,13 @@ def test_every_row_starts_its_badge_at_the_same_x_and_nothing_scrolls_sideways(
     a long name pushed its badge right of every other row's and, at 960, made a
     row wider than the list: a sideways scroll bar and a Remove cut in half.
 
-    Mutation: the left column's horizontal policy back to `Preferred` and the
-    long row's badge moves, the bar gets a range, and the action leaves the
-    viewport at 960.
+    Two defences hold the column, and either alone is enough: the left column's
+    `Ignored` policy (the layout then reads neither its hint nor its minimum),
+    and the name being an `_ElidedLabel` (its minimum is eight characters, and
+    the 2:3 stretch wins over a hint). Measured for T193's mutation check: each
+    alone changes no geometry. Mutation: BOTH -- the left column `Preferred`
+    and the name a plain `QLabel` -- and the long row's badge moves at 960 and
+    1280.
     """
     host, panel = _themed_panel(width, _t193_rows())
     rows = [r for r in panel.rows() if r.isVisible()]
