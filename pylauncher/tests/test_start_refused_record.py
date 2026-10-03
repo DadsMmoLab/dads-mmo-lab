@@ -248,7 +248,9 @@ def test_a_restart_refused_after_the_key_was_written_takes_the_key_back(tmp_path
 
     world = _Refused(tmp_path)
     with pytest.raises(poolreset.PoolResetError) as refused:
-        world.run()
+        # Bounded (fix round 5): a flow that wrongly went on to watch the log gives up
+        # at once instead of polling for the watch's real ten minutes.
+        world.run(timeout_s=0)
     assert world.key() == "off", "taken back: the running world never re-reads it"
     assert str(refused.value).startswith(
         f"The restart was refused, so the server was not stopped: {REFUSED} "

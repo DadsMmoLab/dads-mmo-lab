@@ -1620,9 +1620,12 @@ def test_an_unrelated_update_folds_the_kept_builds_tables_in_and_clears_only_onc
 
 ARENA = f"{WORLD_SQL}/arena_season.sql"
 NEEDED_AND_MISSING = (
-    f"{ARENA} is not in Centurion's sources, and the build this server was left on needs that "
-    "table: the world update stays waiting, so the server is still refused a start. Nothing "
-    "was imported."
+    f"{ARENA} is not among the world table files Centurion's import reads from its sources, "
+    "and the build this server was left on needs that table, so the world update was not "
+    "finished and the server is still refused a start. Nothing was imported. Put it back in "
+    "the sources and press “Finish the world update” again, or press “Update the server to "
+    "latest…” or “Return to the tested pin…” under “Server build ▾” on the Modules tab, "
+    "which builds a new version in place of the one this server was left on."
 )
 
 
@@ -1639,7 +1642,7 @@ def _kept_with_a_table_missing(box: Box) -> None:
 
 
 def test_finish_will_not_leave_out_a_table_the_kept_build_needs(box: Box) -> None:
-    """Fix round 4: a missing file the kept build needs is never "left": the record stays."""
+    """Fix rounds 4-5: a missing file the kept build needs is never "left": the record stays."""
     _kept_with_a_table_missing(box)
     with pytest.raises(InstallerError) as refused:
         box.finish()
@@ -1650,14 +1653,59 @@ def test_finish_will_not_leave_out_a_table_the_kept_build_needs(box: Box) -> Non
         CenturionController(ENTRY, box.server_dir).refuse_start()
 
 
-def test_the_next_update_will_not_fold_out_a_table_the_kept_build_needs(box: Box) -> None:
-    _kept_with_a_table_missing(box)
-    box.m.rec.upstream[box.checkout] = "c" * 40
-    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
-    builds = box.m.rec.calls.count("build")
-    with pytest.raises(InstallerError) as refused:
+def test_finish_will_not_leave_out_a_needed_file_the_import_plan_does_not_read(box: Box) -> None:
+    """Fix round 5: on disk is not enough; the plan `_expand` returns must read it too."""
+    on_the_built_commit(box)
+    outside = f"{SQL_DIR}/characters/not_a_world_table.sql"
+    (box.server_dir / outside).parent.mkdir(parents=True, exist_ok=True)
+    (box.server_dir / outside).write_text("SELECT 1;\n", encoding="utf-8")
+    (box.server_dir / trinitycore.WORLD_REIMPORT_FILE).write_text(
+        json.dumps({"version": 1, "reimport": [outside], "parts": [], "required": [outside]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(InstallerError, match="not_a_world_table.sql is not among"):
+        box.finish()
+    assert box.streamed() == []
+    assert box.pending() is not None, "the record stays"
+
+
+def _kept_with_a_new_table(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build B added `arena_season.sql` (on disk) and was kept without its tables imported."""
+    box.changes(("A", f"{REPO_SQL}/world/arena_season.sql"))
+    box.moves_to({"arena_season.sql": "DROP TABLE IF EXISTS arena_season;\n"})
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
         box.press()
-    assert NEEDED_AND_MISSING in str(refused.value)
-    assert box.m.rec.calls.count("build") == builds, "refused before the compile"
-    assert box.head() == NEW, "the move put back"
+    box.seams.clear()
     assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+
+    def gone(dest: Path) -> None:
+        (dest / REPO_SQL / "world" / "arena_season.sql").unlink(missing_ok=True)
+
+    box.m.rec.on_clone = gone  # the next move's commit has no such file
+
+
+def test_an_update_whose_commit_deleted_the_kept_builds_table_lands_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 5: no dead end -- the new build replaces the kept one, so its file is excused."""
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new="c" * 40)
+    said = box.press()
+    assert said[-1] == "Centurion is running on the newest upstream code."
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_return_to_a_pin_without_the_kept_builds_table_lands_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_new_table(box, monkeypatch)
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new=REV)
+    said = box.press(to_pin=True)
+    assert said[-1] == "Centurion is running on the commit this app was tested against."
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()

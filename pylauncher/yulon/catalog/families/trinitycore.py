@@ -82,6 +82,7 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
+    past_the_tested_pin,
     read_state,
 )
 from yulon.log import get_logger
@@ -1001,13 +1002,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         left = list(changes.left)
         notes = list(changes.notes)
         gone = {cast(re.Match[str], _PART.match(rel))["stem"] for rel in changes.left_parts}
-        needed = [
-            rel
-            for rel in pending.required
-            if rel not in reimport and not (server_dir / rel).is_file()
-        ]
-        if needed:
-            raise InstallerError(_needed_and_missing(self.entry, needed))
+        # A file the kept build needed (`required`) that this move's checkout no longer
+        # has is left like any other (fix round 5): the new build replaces the kept one,
+        # so nothing it needed is owed any more. Only "Finish the world update", which
+        # starts the kept build itself, refuses to leave one out.
         for rel in pending.reimport:
             if rel in reimport or rel in left:
                 continue
@@ -1104,7 +1102,11 @@ class TrinityCoreInstaller(CmangosInstaller):
         """
         if not isinstance(changes, SnapshotChanges):
             return None
-        if not changes.imports() and not changes.map_data:
+        # A record left by an earlier press keeps the work too (T197 fix round 5): this
+        # move may have excused every file it named, and then `forward()` clears it --
+        # otherwise the rebuild's own start check would refuse the press that repairs it.
+        waiting = _read_pending(server_dir) is not None
+        if not changes.imports() and not changes.map_data and not waiting:
             return None
         runs: list[sqlplan.PhaseRun] = []
         # What `WORLD_REIMPORT_FILE` held before `prepare()` wrote it (`None`: absent),
@@ -1133,6 +1135,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             if changes.map_data:
                 yield self._flag_map_data(server_dir, changes.map_data)
             if not runs:
+                if waiting and not changes.imports():
+                    # Every file the record named was left by this move: nothing is owed.
+                    yield from self._forget_pending(server_dir)
                 return
             names = [run.rel for run in runs]
             yield (
@@ -1296,9 +1301,6 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "changed."
             )
         self._refuse_unless_the_checkout_is_built(server_dir, state)
-        missing = [rel for rel in pending.required if not (server_dir / rel).is_file()]
-        if missing:
-            raise InstallerError(_needed_and_missing(self.entry, missing))
         changes = SnapshotChanges(
             reimport=pending.reimport, parts=pending.parts, everything=pending.unreadable
         )
@@ -1306,6 +1308,13 @@ class TrinityCoreInstaller(CmangosInstaller):
         runs = self._reimport_runs(ctx, changes, missing_ok=True)
         names = [run.rel for run in runs]
         found = set(names)
+        # T197 (fix rounds 4-5): a file the kept build needs is never left out, whether
+        # it is gone from the sources or only from the import plan that reads them.
+        missing = [rel for rel in pending.required if rel not in found]
+        if missing:
+            raise InstallerError(
+                _needed_and_missing(self.entry, missing, past_the_pin=past_the_tested_pin(state))
+            )
         for rel in pending.reimport:
             if rel not in found:
                 yield (
@@ -1999,14 +2008,25 @@ def _read_pending(server_dir: Path) -> _Pending | None:
     return _Pending(reimport=tuple(reimport), parts=tuple(parts), required=tuple(required))
 
 
-def _needed_and_missing(entry: CatalogEntry, missing: Sequence[str]) -> str:
-    """Why a world update the kept build needs cannot go on: its files are not on disk (T197)."""
+def _needed_and_missing(entry: CatalogEntry, missing: Sequence[str], *, past_the_pin: bool) -> str:
+    """Why "Finish the world update" stops: a file the kept build needs is not imported (T197).
+
+    Names the two ways out: the file put back, or a new build in place of the kept one
+    -- "Return to the tested pin…" only where the tab offers it (`past_the_pin`).
+    """
     one = len(missing) == 1
+    presses = f"\u201c{server_build_presses.UPDATE_TO_LATEST}\u201d" + (
+        f" or \u201c{server_build_presses.RETURN_TO_PIN}\u201d" if past_the_pin else ""
+    )
     return (
-        f"{_listed(missing)} {'is' if one else 'are'} not in {entry.name}'s sources, and the "
-        f"build this server was left on needs {'that table' if one else 'those tables'}: the "
-        "world update stays waiting, so the server is still refused a start. Nothing was "
-        "imported."
+        f"{_listed(missing)} {'is' if one else 'are'} not among the world table files "
+        f"{entry.name}'s import reads from its sources, and the build this server was left on "
+        f"needs {'that table' if one else 'those tables'}, so the world update was not "
+        "finished and the server is still refused a start. Nothing was imported. Put "
+        f"{'it' if one else 'them'} back in the sources and press "
+        f"\u201c{FINISH_WORLD_BUTTON}\u201d again, or press {presses} under "
+        f"\u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab, which builds a "
+        "new version in place of the one this server was left on."
     )
 
 
