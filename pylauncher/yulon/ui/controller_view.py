@@ -78,6 +78,7 @@ from yulon import (
     commands,
     dbreads,
     docker,
+    docker_advice,
     install_wiring,
     logsnap,
     networking,
@@ -167,6 +168,7 @@ from yulon.ui.theme import (
     SERVER_BUILD_BUTTON,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
+from yulon.ui.widgets.docker_banner import DockerBanner
 from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import CollapseHandle, LogPanel
@@ -4217,6 +4219,19 @@ STOPPING_DOCKER_REINSTALL = (
 DOCKER_REINSTALL_PROMPT_TITLE = "Reinstalling Docker"
 """The question dialogs' title for the repair, in place of "The installer needs an answer"."""
 
+START_FAILED_NO_DOCKER = "The server could not start because Docker isn't answering."
+"""A Start's own line when Docker did not answer it; the banner above says what to do (T194)."""
+
+STATUS_SEE_THE_BANNER = "Status unknown (see above)"
+"""The status line while the Docker banner above it says why (T194 C7)."""
+
+DOCKER_DESKTOP_OPENING = (
+    "Docker Desktop is starting. It can take a minute; this box goes away once Docker answers."
+)
+DOCKER_DESKTOP_OPEN_FAILED = (
+    "Yu'lon could not open Docker Desktop. Open it yourself and wait until it says Engine running."
+)
+
 DASHBOARD_SWITCH_OFF = "Bot dashboard: Off"
 DASHBOARD_SWITCH_ON = "Bot dashboard: On"
 DASHBOARD_ABOUT = (
@@ -6767,6 +6782,8 @@ class ControllerView(QWidget):
         self.repair_channel_button.setVisible(False)
         self.repair_channel_button.clicked.connect(self.repair_channel)
         self.status_label = QLabel("status: unknown", tab)
+        # T185: a Deck's sentence ran off the right edge of a 960 window.
+        self.status_label.setWordWrap(True)
         # T133: said while this server's WSL distro is stopped and every tab's
         # readings wait for it (`_waits_for_the_distro()`).
         self.distro_label = QLabel("", tab)
@@ -6891,6 +6908,16 @@ class ControllerView(QWidget):
         self._docker_prompter: InputPrompter | None = None
         # The running repair's cancel; None when this tab is not running one.
         self._docker_repair_cancel: threading.Event | None = None
+        # T194 C7: one box for "Yu'lon can't ask Docker", with what to do on this
+        # machine and the press that does it. The reinstall lives in it; its
+        # visibility is still `_offer_docker_repair()`'s.
+        self.docker_banner = DockerBanner(tab)
+        self.docker_banner.add_press(self.reinstall_docker_button)
+        self.docker_banner.open_button.clicked.connect(self.open_docker_desktop)
+        self.docker_banner.retry_button.clicked.connect(self._try_docker_again)
+        # What Docker last said on a failed poll, logged once per change; None
+        # once a poll answers.
+        self._docker_said: str | None = None
         # T158. Shown only while a stop waits for a world that cannot hear it
         # yet, and the one way to end that wait early: there is no time limit,
         # because a limit would force-stop a slow but healthy first boot.
@@ -7008,6 +7035,7 @@ class ControllerView(QWidget):
         realm, realm_column = section("Realm", tab)
         for label in (
             self.verdict_label,
+            self.docker_banner,
             self.status_label,
             self.distro_label,
             self.upstream_label,
@@ -7024,14 +7052,7 @@ class ControllerView(QWidget):
         )
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
-        realm_column.addWidget(
-            _bar(
-                realm,
-                self.stop_anyway_button,
-                self.stop_other_button,
-                self.reinstall_docker_button,
-            )
-        )
+        realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
         box.addWidget(realm)
 
         play, play_column = section("Play", tab)
@@ -7411,10 +7432,11 @@ class ControllerView(QWidget):
             # readings at once; the line comes back with the first poll after.
             self._clear_the_verdict()
             return
-        if result is None or self._distro != "running":
+        if result is None or self._distro != "running" or not self.docker_banner.isHidden():
             # None is `_world_reading()` finding the distro stopped on the
             # worker; a verdict landing after a poll said stopped is as old.
-            # Neither may leave an earlier verdict standing (T133).
+            # Neither may leave an earlier verdict standing (T133), and none
+            # stands under the Docker banner (T194).
             self._clear_the_verdict()
             return
         if not isinstance(result, dashboard_module.Verdict):
@@ -7668,6 +7690,10 @@ class ControllerView(QWidget):
         explanation of the stop that just refused.
         """
         self._verdict_pending = False
+        if not self.docker_banner.isHidden():
+            # T194 C7: the banner already says Docker isn't answering.
+            self._clear_the_verdict()
+            return
         self.verdict_label.setText(f"could not read this server's dashboard: {exc}")
         self.verdict_label.setVisible(True)
 
@@ -7870,8 +7896,11 @@ class ControllerView(QWidget):
             # asked before the removal says nothing about after it.
             self._nothing_to_remove = False
         self._update_forget_visibility()
-        # T160: Docker answered, so there is nothing to reinstall.
+        # T160: Docker answered, so there is nothing to reinstall -- and T194:
+        # nothing for the banner to say.
         self.reinstall_docker_button.setVisible(False)
+        self._docker_said = None
+        self.docker_banner.withdraw()
         self._update_client_dir_row()
         # T133: every answer, stale or not -- what WSL said about the distro is
         # not a fact an action of ours can make wrong the way "world down" is.
@@ -8154,13 +8183,25 @@ class ControllerView(QWidget):
         # app's job runner hands it to a worker thread, so its answer arrives
         # after this method has returned.
         self._ask_again_if_superseded(self._status_superseded)
-        self.status_label.setText(f"status: Docker not reachable ({exc})")
+        said = str(exc)
+        if said != self._docker_said:
+            # What Docker said goes to the log, once per change; the screen
+            # gets the banner's words (T194 C7).
+            self._docker_said = said
+            logger.warning(f"{self.entry.name}: Docker did not answer the status poll: {said}")
         # "unknown", not "stopped": Docker not answering says nothing about the
         # server (T188 final fix round). A hold is left alone by a failure older
         # than its job's own follow-up read; that read failing ends it here.
+        # The banner goes up with the badge, so it and the launcher's banner
+        # always agree.
         if self._badge_held is None or ends_the_hold:
             self._badge_held = None
             self.realm_badge.set_status("unknown")
+            self.docker_banner.show_advice(
+                docker_advice.advice_for(exc, distro=self.services.controller.wsl_distro)
+            )
+            self.status_label.setText(STATUS_SEE_THE_BANNER)
+            self._clear_the_verdict()
         self._offer_docker_repair()
         # T54. The reveal used to run only on the success path, and the control
         # it reveals exists for an install that is GONE -- which is the case
@@ -8644,10 +8685,18 @@ class ControllerView(QWidget):
         if isinstance(exc, docker.DockerCliMissingError) and self._offer_docker_repair():
             # T160. The missing-CLI sentence says to install Docker Desktop or
             # Docker Engine, which on a Deck after a SteamOS update is the wrong
-            # errand: the button below does it, the way the fix script did.
-            # (Not named by its constant here: `test_platform` counts the
-            # modules that name it as the modules that RAISE it.)
-            msg = platform.STEAMOS_DOCKER_GONE_HELP
+            # errand: the banner's button does it, the way the fix script did.
+            # The banner's own words, so the two agree (T194). (Not named by
+            # its constant here: `test_platform` counts the modules that name
+            # it as the modules that RAISE it.)
+            msg = docker_advice.advice_for(
+                exc, distro=self.services.controller.wsl_distro, deck_docker_removed=True
+            ).body
+        elif docker_advice.unreachable(exc):
+            # T194 C7: what Docker said goes to the log; what to do is the
+            # banner's, which the follow-up poll below puts up.
+            logger.warning(f"{self.entry.name}: Start could not reach Docker: {exc}")
+            msg = START_FAILED_NO_DOCKER
         rolled = self._roll_the_channel_back_if_it_took_the_port(msg)
         self.problem_label.setText(rolled or msg)
         self.action_failed.emit(rolled or msg)
@@ -8742,6 +8791,40 @@ class ControllerView(QWidget):
                 not self._busy and not platform.steamos_docker_repair_running()
             )
         return offered
+
+    @Slot()
+    def _try_docker_again(self) -> None:
+        """The banner's Try again: ask Docker now rather than at the next poll."""
+        self.refresh_status()
+
+    @Slot()
+    def open_docker_desktop(self) -> None:
+        """The banner's Open Docker Desktop, off the GUI thread (T194).
+
+        Finding it on Windows is a PowerShell probe; starting it returns at
+        once. The poll notices the engine coming up and takes the banner down.
+        """
+        self.docker_banner.open_button.setEnabled(False)
+        self.docker_banner.say("Opening Docker Desktop\u2026")
+        self._run(
+            lambda: platform.open_docker_desktop(),
+            self._docker_desktop_opened,
+            self._docker_desktop_open_failed,
+        )
+
+    @Slot(object)
+    def _docker_desktop_opened(self, result: object) -> None:
+        self.docker_banner.open_button.setEnabled(True)
+        if self.docker_banner.isHidden():
+            return  # Docker answered while it was asked
+        self.docker_banner.say(result if isinstance(result, str) else DOCKER_DESKTOP_OPENING)
+
+    @Slot(object)
+    def _docker_desktop_open_failed(self, exc: object) -> None:
+        logger.warning(f"could not open Docker Desktop: {exc}")
+        self.docker_banner.open_button.setEnabled(True)
+        if not self.docker_banner.isHidden():
+            self.docker_banner.say(DOCKER_DESKTOP_OPEN_FAILED)
 
     @Slot()
     def reinstall_docker(self) -> None:

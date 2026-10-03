@@ -4069,6 +4069,47 @@ def _start_docker_desktop_command(exe: Path) -> list[str]:
     return ["powershell.exe", "-NoProfile", "-Command", f"Start-Process {_ps_quote(exe)}"]
 
 
+_MANUAL_START_DOCKER_DESKTOP_MAC = (
+    "Yu'lon could not open Docker Desktop on this Mac. Open it from Applications and wait "
+    "until it says 'Engine running' — then try again. If it is not in Applications it is not "
+    "installed: get it from https://www.docker.com/products/docker-desktop/"
+)
+
+
+def open_docker_desktop(run: RunCmd | None = None) -> str | None:
+    """Start Docker Desktop for the Server tab's banner (T194); None once it is starting.
+
+    Otherwise the sentence that tells the player to start it themselves: it
+    is not installed, or Windows or macOS would not start it. Never raises,
+    and runs off the GUI thread: on Windows, finding the app is a PowerShell
+    probe (`find_docker_desktop()`). It does not wait for the engine; the
+    tab's own poll notices when it answers.
+    """
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
+    if detect() == "macos":
+        try:
+            proc = do(["open", "-a", "Docker"])
+        except OSError as exc:
+            logger.warning(f"could not open Docker Desktop: {exc}")
+            return _MANUAL_START_DOCKER_DESKTOP_MAC
+        if proc.returncode != 0:
+            logger.warning(f"open -a Docker exited {proc.returncode}: {proc.stderr.strip()}")
+            return _MANUAL_START_DOCKER_DESKTOP_MAC
+        return None
+    exe = find_docker_desktop(do)
+    if exe is None:
+        return _MANUAL_START_DOCKER_DESKTOP
+    try:
+        proc = do(_start_docker_desktop_command(exe))
+    except OSError as exc:
+        logger.warning(f"could not start {exe}: {exc}")
+        return _MANUAL_START_DOCKER_DESKTOP
+    if proc.returncode != 0:
+        logger.warning(f"starting {exe} exited {proc.returncode}: {proc.stderr.strip()}")
+        return _MANUAL_START_DOCKER_DESKTOP
+    return None
+
+
 def ensure_wsl2(*, run: RunCmd | None = None, dry_run: bool = False) -> ProvisionReport:
     """Ensure WSL2 exists on Windows (`wsl --status`; else `wsl --install --no-distribution`).
 

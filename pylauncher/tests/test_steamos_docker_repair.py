@@ -517,6 +517,38 @@ def test_the_offer_is_for_a_steamos_deck_whose_docker_command_is_gone(
     assert platform.steamos_docker_removed(which) is offered
 
 
+def test_the_banner_on_a_deck_that_lost_docker_names_the_press_it_carries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T185: the Server tab's banner offers the reinstall, and its sentence says which press."""
+    from yulon import docker, docker_advice
+
+    monkeypatch.setattr(platform, "_which", lambda _name, path=None: None)
+
+    advice = docker_advice.advice_for(docker.DockerCliMissingError("no docker"), distro=None)
+
+    assert advice.action == "reinstall-deck"
+    assert platform.STEAMOS_DOCKER_REPAIR_LABEL in advice.body
+    assert "Docker Desktop" not in advice.body
+
+
+def test_a_deck_whose_docker_is_there_but_stopped_is_not_offered_the_reinstall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped service leaves `docker` on PATH: restart advice, never a keyring reset."""
+    from yulon import docker, docker_advice
+
+    monkeypatch.setattr(platform, "_which", lambda name, path=None: "/usr/bin/" + name)
+
+    advice = docker_advice.advice_for(
+        docker.DockerCommandError("docker ps exited 1: Cannot connect to the Docker daemon"),
+        distro=None,
+    )
+
+    assert advice.action is None
+    assert "Restart the Deck" in advice.body
+
+
 # --------------------------------------------------------- setting the password
 
 needs_tty = pytest.mark.skipif(
