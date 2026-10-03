@@ -9763,12 +9763,13 @@ def test_a_steam_deck_that_lost_docker_is_offered_the_reinstall_on_the_server_ta
     assert view.reinstall_docker_button.isHidden(), "the offer outlived Docker coming back"
 
 
+@pytest.mark.parametrize("host", ["linux", "windows"])
 def test_off_steamos_a_missing_docker_is_not_offered_the_steamos_repair(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
 ) -> None:
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     _steam_deck_without_docker(monkeypatch, steamos=False)
-    monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
+    monkeypatch.setattr(yulon_platform, "detect", lambda: host)
     view.services.controller.status = _docker_gone  # type: ignore[method-assign]
     view.services.controller.start = _docker_gone  # type: ignore[method-assign]
 
@@ -9776,9 +9777,19 @@ def test_off_steamos_a_missing_docker_is_not_offered_the_steamos_repair(
     view.start_server()
 
     assert view.reinstall_docker_button.isHidden()
-    # T194 (lead ruling R2): this machine's half of the sentence, never Docker Desktop on Linux.
-    assert view.problem_label.text() == yulon_platform.DOCKER_MISSING_ON_LINUX
-    assert "Docker Desktop" not in view.problem_label.text()
+    # T194 (lead rulings R2, fix round 2): this machine's half of the sentence is the
+    # banner's, said once; the Start's line points at it.
+    halves = {
+        "linux": yulon_platform.DOCKER_MISSING_ON_LINUX,
+        "windows": yulon_platform.DOCKER_MISSING_ON_DESKTOP,
+    }
+    said = view.problem_label.text()
+    body = view.docker_banner.body_label.text()
+    assert view.docker_banner.isVisibleTo(view)
+    assert body == halves[host]
+    assert said == controller_view_module.START_FAILED_DOCKER_MISSING
+    assert body not in said and said != body
+    assert "Docker Desktop" not in said
 
 
 def test_a_start_with_no_docker_on_a_deck_names_the_update_not_docker_desktop(
@@ -10293,6 +10304,58 @@ def test_a_verdict_that_fails_first_on_docker_says_nothing_even_under_the_hold(
     assert view.verdict_label.isHidden()
     said = " ".join(text for _name, _where, text in visible_texts(view))
     assert "pipe" not in said and "exited" not in said, said
+
+
+def test_a_missing_docker_cli_in_a_verdict_that_lands_first_is_the_banners_to_say(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 2, O2: a missing CLI is not "unreachable", and the dashboard printed it whole."""
+    from tests.support_player_text import visible_texts
+
+    def no_cli() -> dashboard.Verdict:
+        raise docker.DockerCliMissingError(yulon_platform.DOCKER_CLI_MISSING_HELP)
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = no_cli
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view._hold_badge("starting")
+
+    view.refresh_verdict()
+
+    assert view.verdict_label.isHidden()
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    assert "could not be found" not in said, said
+
+
+def test_a_dashboard_failure_is_logged_again_after_the_dashboard_recovered(
+    qapp: object, ps: _Ps, tmp_path: Path, caplog: Any
+) -> None:
+    """Fix round 2, O3: fail, fail, answer, fail is two log lines, not one."""
+    answers: list[object] = []
+
+    def dashboard_read() -> dashboard.Verdict:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return cast(dashboard.Verdict, answer)
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = dashboard_read
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    broken = "docker exec ac-database mysql exited 1: ERROR 1146 (42S02): Table missing"
+    answers += [
+        docker.DockerCommandError(broken),
+        docker.DockerCommandError(broken),
+        dashboard.Verdict("up", players=1, bots=2),
+        docker.DockerCommandError(broken),
+    ]
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(4):
+            view.refresh_verdict()
+
+    logged = [r.getMessage() for r in caplog.records if "ERROR 1146" in r.getMessage()]
+    assert len(logged) == 2, logged
 
 
 def test_a_new_failure_drops_the_last_presss_answer_and_a_repeat_keeps_it(
@@ -25500,3 +25563,72 @@ def test_a_followed_log_that_ends_says_the_world_is_not_running(
     assert not said.startswith("finished"), said
     assert "not running" in said, said
     assert "world log line" in view.console_log.text()
+
+
+def _deferred_view(
+    ps: _Ps, tmp_path: Path
+) -> tuple[ControllerView, list[tuple[Callable[[], object], Any, Any]]]:
+    """A Server tab whose jobs wait in a list until the test runs them."""
+    jobs: list[tuple[Callable[[], object], Any, Any]] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        job_runner=lambda work, ok, err: jobs.append((work, ok, err)),
+    )
+    return view, jobs
+
+
+def _run_the_start(view: ControllerView, jobs: list[Any]) -> None:
+    """Run only the Start's own job; the follow-up status read stays queued."""
+    start = [job for job in jobs if job[2] == view._start_failed]
+    assert len(start) == 1, jobs
+    jobs.remove(start[0])
+    run_inline(*start[0])
+    assert any(job[1] == view._status_ready for job in jobs), "no follow-up read was asked"
+
+
+@pytest.mark.parametrize("machine", ["deck", "linux", "windows-down"])
+def test_a_start_that_points_at_the_box_puts_the_box_up_itself(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine: str
+) -> None:
+    """Fix round 2, O1: "in the box above" with no box until the next poll answered."""
+    view, jobs = _deferred_view(ps, tmp_path)
+    if machine == "deck":
+        _steam_deck_without_docker(monkeypatch)
+        view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+        view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+        pointer = controller_view_module.START_FAILED_DOCKER_GONE
+    elif machine == "linux":
+        _steam_deck_without_docker(monkeypatch, steamos=False)
+        monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
+        view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+        view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+        pointer = controller_view_module.START_FAILED_DOCKER_MISSING
+    else:
+        _windows_with_docker_desktop_down(monkeypatch)
+        pointer = controller_view_module.START_FAILED_NO_DOCKER
+    jobs.clear()
+
+    view.start_server()
+    _run_the_start(view, jobs)
+
+    assert view.problem_label.text() == pointer
+    assert view.docker_banner.isVisibleTo(view), "the line points at a box that is not there"
+    assert view.docker_banner.body_label.text() not in view.problem_label.text()
+    assert view.realm_badge.status == "unknown"
+    assert view.status_label.text() == controller_view_module.STATUS_SEE_THE_BANNER
+    if machine == "deck":
+        assert view.reinstall_docker_button.isVisibleTo(view)
+        assert view.reinstall_docker_button.isEnabled()
+    else:
+        assert not view.reinstall_docker_button.isVisibleTo(view)
+
+    # The follow-up read failing the same way changes nothing on screen.
+    shown = view.docker_banner.body_label.text()
+    for work, ok, err in list(jobs):
+        if ok == view._status_ready:
+            jobs.remove((work, ok, err))
+            run_inline(work, ok, err)
+    assert view.docker_banner.isVisibleTo(view)
+    assert view.docker_banner.body_label.text() == shown

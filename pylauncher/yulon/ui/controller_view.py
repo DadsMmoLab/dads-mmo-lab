@@ -4246,13 +4246,18 @@ DOCKER_REINSTALL_PROMPT_TITLE = "Reinstalling Docker"
 """The question dialogs' title for the repair, in place of "The installer needs an answer"."""
 
 START_FAILED_NO_DOCKER = "The server could not start because Docker isn't answering."
+"""A Start's own line when Docker did not answer it; the banner above says what to do (T194)."""
 
 START_FAILED_DOCKER_GONE = (
     "The server could not start: a SteamOS update removed Docker from this Steam Deck. Press "
     f'"{platform.STEAMOS_DOCKER_REPAIR_LABEL}" in the box above.'
 )
 """A Deck's failed Start, pointing at the banner that carries the reinstall (T194, T160)."""
-"""A Start's own line when Docker did not answer it; the banner above says what to do (T194)."""
+
+START_FAILED_DOCKER_MISSING = (
+    "The server could not start: Docker isn't installed. See the box above."
+)
+"""A failed Start off a Deck with no docker CLI; the banner says how to install it (T194)."""
 
 STATUS_SEE_THE_BANNER = "Status unknown (see above)"
 """The status line while the Docker banner above it says why (T194 C7)."""
@@ -7469,6 +7474,10 @@ class ControllerView(QWidget):
             self._verdict_failed(result.exc)
             return
         self._verdict_pending = False
+        if isinstance(result, dashboard_module.Verdict):
+            # The dashboard answered, whether or not it is shown: its next
+            # failure is a change, and logged (fix round 2, O3).
+            self._verdict_said = None
         if self._badge_held is not None:
             # T188 C4: "up — 3 players" under a badge saying STOPPING is two
             # readings at once; the line comes back with the first poll after.
@@ -7732,7 +7741,11 @@ class ControllerView(QWidget):
         explanation of the stop that just refused.
         """
         self._verdict_pending = False
-        if not self.docker_banner.isHidden() or docker_advice.unreachable(exc):
+        if (
+            not self.docker_banner.isHidden()
+            or isinstance(exc, docker.DockerCliMissingError)
+            or docker_advice.unreachable(exc)
+        ):
             # T194 C7: Docker not answering is the banner's to say -- and the
             # status poll's to log -- even when this lands first, or under a
             # hold that keeps the banner down.
@@ -8246,16 +8259,7 @@ class ControllerView(QWidget):
         # The banner goes up with the badge, so it and the launcher's banner
         # always agree.
         if self._badge_held is None or ends_the_hold:
-            self._badge_held = None
-            self.realm_badge.set_status("unknown")
-            self.docker_banner.show_advice(
-                docker_advice.advice_for(exc, distro=self.services.controller.wsl_distro)
-            )
-            self.status_label.setText(STATUS_SEE_THE_BANNER)
-            self._clear_the_verdict()
-            # The reinstall lives in the banner, so it is offered with it and
-            # never switched on inside a banner the hold keeps down.
-            self._offer_docker_repair()
+            self._put_the_docker_banner_up(exc)
         # T54. The reveal used to run only on the success path, and the control
         # it reveals exists for an install that is GONE -- which is the case
         # most likely to have taken Docker with it. A user deleted their server
@@ -8263,6 +8267,23 @@ class ControllerView(QWidget):
         # "Forget this install…", and could not be shown it. The predicate needs
         # nothing from Docker: it asks `wsl_distro` and `folder_is_gone()`.
         self._update_forget_visibility()
+
+    def _put_the_docker_banner_up(self, exc: object) -> None:
+        """Badge STATUS UNKNOWN, the banner's advice for `exc`, and its press (T194 C7).
+
+        Ends a T188 hold: only an answer that comes after the holding job is
+        over reaches here -- that job's follow-up read, or the job's own failure.
+        """
+        self._badge_held = None
+        self.realm_badge.set_status("unknown")
+        self.docker_banner.show_advice(
+            docker_advice.advice_for(exc, distro=self.services.controller.wsl_distro)
+        )
+        self.status_label.setText(STATUS_SEE_THE_BANNER)
+        self._clear_the_verdict()
+        # The reinstall lives in the banner, so it is offered with it and
+        # never switched on inside a banner the hold keeps down.
+        self._offer_docker_repair()
 
     def _hold_badge(self, status: str) -> None:
         """Hold the realm badge at `status` while our own Start/Stop/Restart runs (T188).
@@ -8744,12 +8765,18 @@ class ControllerView(QWidget):
             # `test_platform` counts the modules that name it as the modules
             # that RAISE it.)
             advice = docker_advice.advice_for(exc, distro=self.services.controller.wsl_distro)
-            msg = START_FAILED_DOCKER_GONE if advice.action == "reinstall-deck" else advice.body
+            deck = advice.action == "reinstall-deck"
+            msg = START_FAILED_DOCKER_GONE if deck else START_FAILED_DOCKER_MISSING
+            # The line points at the box, so the box goes up now rather than
+            # when the follow-up read below answers (fix round 2, O1). The
+            # Start's own failure is an answer from after its job ended.
+            self._put_the_docker_banner_up(exc)
         elif docker_advice.unreachable(exc):
             # T194 C7: what Docker said goes to the log; what to do is the
-            # banner's, which the follow-up poll below puts up.
+            # banner's, put up here for the reason above.
             logger.warning(f"{self.entry.name}: Start could not reach Docker: {exc}")
             msg = START_FAILED_NO_DOCKER
+            self._put_the_docker_banner_up(exc)
         rolled = self._roll_the_channel_back_if_it_took_the_port(msg)
         self.problem_label.setText(rolled or msg)
         self.action_failed.emit(rolled or msg)
