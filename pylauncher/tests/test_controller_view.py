@@ -23265,3 +23265,188 @@ def test_an_account_never_picked_leaves_a_typed_in_account_name_alone(
     after = (play / "WTF" / "Config.wtf").read_bytes()
     assert b'SET accountName "TYPEDINGAME"' in after
     assert after.startswith(before), "only keys added after the player's lines"
+
+
+# -- T188 C4/C5: the badge holds still while our own Start/Stop/Restart runs --
+
+ALL_UP = "ac-database\nac-authserver\nac-worldserver\n"
+
+
+def _held_view(ps: _Ps, tmp_path: Path) -> tuple[ControllerView, _Deferred]:
+    """A tab over a running server whose jobs wait, with a verdict line showing."""
+    jobs = _Deferred()
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("up", players=3, bots=497)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=jobs)
+    jobs.queue.clear()  # whatever opening the tab asked; this test asks its own
+    ps.names = ALL_UP
+    _poll(view, jobs)
+    view.refresh_verdict()
+    _finish(jobs, view._verdict_ready)
+    assert view.realm_badge.status == "running"
+    assert view.verdict_label.isHidden() is False
+    return view, jobs
+
+
+def _finish(jobs: _Deferred, on_done: Any) -> None:
+    """Run the one queued job that answers to `on_done`, as the worker would."""
+    [index] = [i for i, (_w, done, _e) in enumerate(jobs.queue) if done == on_done]
+    jobs.run(index)
+
+
+def _fail(jobs: _Deferred, on_done: Any, exc: Exception) -> None:
+    """Deliver the queued job's failure, as the worker would on a raise."""
+    [index] = [i for i, (_w, done, _e) in enumerate(jobs.queue) if done == on_done]
+    _work, _done, on_error = jobs.queue.pop(index)
+    on_error(exc)
+
+
+def _poll(view: ControllerView, jobs: _Deferred) -> None:
+    """One five-second status poll, answered."""
+    view._tick()
+    _finish(jobs, view._status_ready)
+
+
+def test_a_poll_while_a_stop_runs_leaves_the_badge_saying_stopping(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Audit C4/C5: Stop set "starting", and a poll mid-stop flipped it to OFFLINE and back."""
+    view, jobs = _held_view(ps, tmp_path)
+
+    view.stop_button.click()
+    assert view.realm_badge.status == "stopping"
+    assert view.verdict_label.isHidden() is True, "an 'up' verdict under a stop"
+
+    ps.names = "ac-database\n"
+    _poll(view, jobs)
+    assert view.realm_badge.status == "stopping"
+
+    view.refresh_verdict()
+    _finish(jobs, view._verdict_ready)
+    assert view.verdict_label.isHidden() is True, "a verdict landing mid-stop showed again"
+
+    _finish(jobs, view._stop_done)
+    _finish(jobs, view._status_ready)
+    assert view.realm_badge.status == "stopped"
+
+
+def test_a_poll_while_a_start_runs_leaves_the_badge_saying_starting(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, jobs = _held_view(ps, tmp_path)
+    ps.names = ""
+    _poll(view, jobs)
+    assert view.realm_badge.status == "stopped"
+
+    view.start_button.click()
+    _poll(view, jobs)
+
+    assert view.realm_badge.status == "starting"
+    assert view.verdict_label.isHidden() is True
+
+
+def _press(view: ControllerView, press: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Make the press a player makes; answer the slot its job reports success to.
+
+    "remove" is the window's call when a running server is removed (T95), and
+    "restart" is the Tuning tab's "Restart server…" after its question.
+    """
+    if press == "start":
+        view.start_button.click()
+        return view._server_action_done
+    if press == "stop":
+        view.stop_button.click()
+        return view._stop_done
+    if press == "stop-other":
+        view.stop_other_button.click()
+        return view._server_action_done
+    if press == "remove":
+        view.stop_for_removal()
+        return view._stopped_for_removal
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    view.restart_server()
+    return view._tuning_job_done
+
+
+_HELD = {
+    "start": "starting",
+    "stop": "stopping",
+    "stop-other": "starting",
+    "remove": "stopping",
+    "restart": "restarting",
+}
+_FROM = {"start": "stopped", "stop-other": "stopped"}
+"""What the server reads before the press: Start is only live on a stopped one."""
+
+
+def _pressable(view: ControllerView, jobs: _Deferred, ps: _Ps, press: str) -> str:
+    """Put the server where the press is offered; return what the badge reads there."""
+    if _FROM.get(press) == "stopped":
+        ps.names = ""
+        _poll(view, jobs)
+    if press == "stop-other":
+        view.stop_other_button.setVisible(True)
+        view.stop_other_button.setEnabled(True)
+    return view.realm_badge.status
+
+
+@pytest.mark.parametrize("press", list(_HELD))
+def test_every_hold_shows_its_word_and_lets_go_when_the_job_fails(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: str
+) -> None:
+    """Review focus 1: a hold that never releases is a badge stuck on a word."""
+    view, jobs = _held_view(ps, tmp_path)
+    reading = _pressable(view, jobs, ps, press)
+
+    done = _press(view, press, monkeypatch)
+    assert view.realm_badge.status == _HELD[press]
+
+    _fail(jobs, done, RuntimeError("no"))
+    if any(d == view._status_ready for _w, d, _e in jobs.queue):
+        _finish(jobs, view._status_ready)
+
+    assert view.realm_badge.status == reading, "the hold outlived the failed job"
+    assert view._badge_held is None
+
+
+@pytest.mark.parametrize("press", list(_HELD))
+def test_every_hold_lets_go_when_the_job_is_done(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: str
+) -> None:
+    view, jobs = _held_view(ps, tmp_path)
+    reading = _pressable(view, jobs, ps, press)
+    done = _press(view, press, monkeypatch)
+    assert view.realm_badge.status == _HELD[press]
+
+    [index] = [i for i, (_w, d, _e) in enumerate(jobs.queue) if d == done]
+    _work, on_done, _on_error = jobs.queue.pop(index)
+    on_done(("restart", True) if press == "restart" else True)
+
+    assert view._badge_held is None
+    assert view.realm_badge.status == reading, "released to the last reading"
+
+
+def test_docker_going_unreachable_lets_go_of_the_hold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+
+    view._tick()
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+
+    assert view.realm_badge.status == "stopped"
+    assert view._badge_held is None
+
+
+def test_a_partly_up_server_with_nothing_of_ours_running_says_partly_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """It used to read "starting" for a database left up on its own."""
+    view, jobs = _held_view(ps, tmp_path)
+
+    ps.names = "ac-database\n"
+    _poll(view, jobs)
+
+    assert view.realm_badge.status == "partial"
+    assert view.start_button.isEnabled() and view.stop_button.isEnabled()

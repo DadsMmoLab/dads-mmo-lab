@@ -116,6 +116,7 @@ PASSWORD_NOTE = "The password is never stored: you type it in the game."
 SAVING = "Saving your choice…"
 STOPPED_BANNER = "Play starts the server first (about 1 minute)"
 STARTING_BANNER = "The server is starting…"
+STOPPING_BANNER = "The server is stopping…"
 VIEW_GONE = (
     "This server's tab was closed, so nothing can be started from here. Open the launcher "
     "again from the server."
@@ -1224,6 +1225,10 @@ class LauncherWindow(QWidget):
                 text = f"{bots} and {players} online"
                 if online.uptime is not None:
                     text += f" · {dashboard.uptime_text(online.uptime)}"
+        elif status == "stopping":
+            # T188 C5: the tab's Stop holds the badge here; "Play starts the
+            # server first" under a stop in progress was a promise to undo it.
+            text = STOPPING_BANNER
         elif status in ("starting", "importing", "working", "building", "restarting"):
             text = STARTING_BANNER
         else:

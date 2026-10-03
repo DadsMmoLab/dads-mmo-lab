@@ -886,6 +886,7 @@ def build_window() -> object:
         if index != -1:
             tabs.removeTab(index)
             forget_buttons.tabs_changed()
+        follow_the_tab_on_screen()
         # The tab tree changed; the navigator's cached focus chain is stale.
         navigator.invalidate()
         # `removeTab()` only unparents the page, it does not delete it. Without
@@ -1198,6 +1199,23 @@ def build_window() -> object:
     tabs.tabBar().installEventFilter(forget_buttons)
     tabs.currentChanged.connect(forget_buttons.current_changed)
 
+    def follow_the_tab_on_screen(_index: int = -1) -> None:
+        """The header's realm badge is the Server tab badge of the tab on screen (T188 C6).
+
+        Hidden on the Catalog and Logs. Asked again after a tab is added or
+        dropped as well as on `currentChanged`: a rebuilt tab (Make…, Delete,
+        a new client folder) replaces the page under the header, and the
+        index alone need not change.
+        """
+        header = window.property("header")
+        if header is None:
+            return
+        current = tabs.currentWidget()
+        badge = getattr(current, "realm_badge", None) if current in controller_views else None
+        header.follow(badge)
+
+    tabs.currentChanged.connect(follow_the_tab_on_screen)
+
     def _tab_buttons(key: tuple[str, Path], name: str) -> QWidget:
         """A server tab's ▶ and × side by side (T187), on the side T95's × alone had.
 
@@ -1412,6 +1430,7 @@ def build_window() -> object:
         # first one's title wrong.
         retitle_controller_tabs(tabs, controllers.values())
         tabs.setCurrentWidget(view)
+        follow_the_tab_on_screen()
         # T187: a tab rebuilt over a new ready-to-play client (Make…, Delete), a
         # new client folder or distro: its open launcher drives the new view.
         launcher = launchers.get(key)
@@ -1429,6 +1448,8 @@ def build_window() -> object:
             )
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
+    # With no server tab (or the Catalog left current), nothing has asked yet.
+    follow_the_tab_on_screen()
 
     def on_installed(game: str, server_dir: object, client_dir: object) -> None:
         sd = Path(str(server_dir))

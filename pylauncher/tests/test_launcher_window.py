@@ -362,6 +362,20 @@ def test_the_realm_pill_follows_the_server_tabs_badge(
     assert window.online_label.text() == "412 bots and 2 players online · up 3h 12m"
 
 
+def test_a_stopping_realm_does_not_say_play_starts_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 C5: the tab's Stop now holds the badge at "stopping"; the banner says so."""
+    window, view, _ = _launcher(ps, tmp_path)
+    _online(view)
+
+    view.realm_badge.set_status("stopping")
+
+    assert window.realm_badge.status == "stopping"
+    assert window.online_label.text() == launcher_window.STOPPING_BANNER
+    assert window.online_label.text() != launcher_window.STOPPED_BANNER
+
+
 def test_a_count_that_could_not_be_read_is_left_out_not_shown_as_zero(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

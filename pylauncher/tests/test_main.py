@@ -4160,6 +4160,88 @@ def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
     assert gone.services.applier is not None and gone.services.applier.client_dir == client
 
 
+# -- T188 C6: the header's realm badge is the current server tab's ------------
+
+
+def test_the_header_badge_follows_the_server_tab_on_screen(window: Any, tmp_path: Any) -> None:
+    """Audit C6: the header said REALM OFFLINE for a realm the tab said was online."""
+    header = window.property("header")
+    tabs = window.property("tabs")
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", tmp_path / "c6-first", None)
+    first = _tab_for(window, tmp_path / "c6-first")
+    catalog.installed.emit("wow-wotlk", tmp_path / "c6-second", None)
+    second = _tab_for(window, tmp_path / "c6-second")
+    first.realm_badge.set_status("running")
+    second.realm_badge.set_status("stopped")
+
+    tabs.setCurrentWidget(first)
+    assert header._badge.status == "running"
+    assert header._badge.isHidden() is False
+
+    tabs.setCurrentWidget(second)
+    assert header._badge.status == "stopped"
+    first.realm_badge.set_status("starting")
+    assert header._badge.status == "stopped", "it followed a tab that is not on screen"
+    second.realm_badge.set_status("stopping")
+    assert header._badge.status == "stopping"
+
+
+def test_the_header_badge_is_hidden_on_the_catalog(window: Any, tmp_path: Any) -> None:
+    header = window.property("header")
+    tabs = window.property("tabs")
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "c6-catalog", None)
+    assert header._badge.isHidden() is False
+
+    tabs.setCurrentIndex(0)  # the Catalog
+
+    assert tabs.tabText(0) == "Catalog"
+    assert header._badge.isHidden() is True
+
+
+def test_the_header_badge_follows_a_tab_rebuilt_under_it(window: Any, tmp_path: Any) -> None:
+    """Review focus 2: Make…/Delete rebuild the tab; the old badge is gone with it."""
+    header = window.property("header")
+    server_dir = tmp_path / "c6-rebuilt"
+    client = tmp_path / "TurtleWoW"
+    play = tmp_path / "TurtleWoW (Yu'lon)"
+    for folder in (client, play):
+        (folder / "Interface").mkdir(parents=True)
+    _catalog_view(window).installed.emit("wow-tortoise", server_dir, client)
+    view = _tab_for(window, server_dir)
+    view.services.set_play_client_dir(play)
+    view.play_client_dir_changed.emit("wow-tortoise", server_dir, play)
+    process_events()  # the old view's deferred delete
+
+    made = _tab_for(window, server_dir)
+    assert made is not view
+    made.realm_badge.set_status("stopping")
+
+    assert header._badge.status == "stopping"
+
+
+def test_closing_the_tab_on_screen_leaves_the_header_on_what_is_left(
+    window: Any, tmp_path: Any
+) -> None:
+    """Review focus 2: an uninstall drops the tab the header was following."""
+    header = window.property("header")
+    tabs = window.property("tabs")
+    server_dir = tmp_path / "c6-closed"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    view.realm_badge.set_status("running")
+
+    view.uninstalled.emit("wow-wotlk", server_dir)
+    process_events()  # the dropped view's deferred delete
+
+    current = tabs.currentWidget()
+    if current in window.yulon_controllers:
+        assert header._badge.status == current.realm_badge.status
+        assert header._badge.isHidden() is False
+    else:
+        assert header._badge.isHidden() is True
+
+
 def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

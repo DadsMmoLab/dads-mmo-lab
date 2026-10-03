@@ -189,15 +189,16 @@ logger = get_logger(__name__)
 def _realm_badge_status(status: InstallStatus) -> str:
     """The `DadcraftRealmBadge` state for an `InstallStatus` (Server tab).
 
-    Maps the three-container reading onto the badge's four visual states: all
-    up reads "online", some up reads "starting" (a realm still coming up), and
-    none up reads "offline". The start/stop transitions set "starting"/"stopping"
-    directly, since a poll has not yet seen the change.
+    All up reads "running", some up reads "partial" (PARTLY UP), none up reads
+    "stopped". Some up used to read "starting", which was false for a database
+    left up on its own (T188 C4). While a Start, Stop or Restart of ours runs
+    the badge holds "starting", "stopping" or "restarting" instead
+    (`ControllerView._hold_badge`), and a poll does not move it.
     """
     if status.all_running:
         return "running"
     if status.any_running:
-        return "starting"
+        return "partial"
     return "stopped"
 
 
@@ -6301,6 +6302,11 @@ class ControllerView(QWidget):
         # freeze for the length of a `docker compose up`).
         self._jobs: JobRunner = job_runner or threaded_job_runner(self)
         self._busy = False
+        # T188 C4/C5: the word the realm badge holds while a Start, Stop or
+        # Restart of ours runs, and what the polls last read under it. A poll
+        # mid-stop used to flip the badge between OFFLINE and "starting".
+        self._badge_held: str | None = None
+        self._badge_reading = "stopped"
         self._status_pending = False
         self._verdict_pending = False
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
@@ -7150,6 +7156,11 @@ class ControllerView(QWidget):
     @Slot(object)
     def _verdict_ready(self, result: object) -> None:
         self._verdict_pending = False
+        if self._badge_held is not None:
+            # T188 C4: "up — 3 players" under a badge saying STOPPING is two
+            # readings at once; the line comes back with the first poll after.
+            self._clear_the_verdict()
+            return
         if result is None or self._distro != "running":
             # None is `_world_reading()` finding the distro stopped on the
             # worker; a verdict landing after a poll said stopped is as old.
@@ -7588,7 +7599,9 @@ class ControllerView(QWidget):
             self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
-        self.realm_badge.set_status(_realm_badge_status(status))
+        self._badge_reading = _realm_badge_status(status)
+        if self._badge_held is None:
+            self.realm_badge.set_status(self._badge_reading)
         if not stale and status.any_running:
             # T95: something brought the server back without Start, so "nothing
             # to remove" is no longer true, and a lit "Remove from Yu'lon…" beside
@@ -7877,6 +7890,10 @@ class ControllerView(QWidget):
         # after this method has returned.
         self._ask_again_if_superseded(self._status_superseded)
         self.status_label.setText(f"status: Docker not reachable ({exc})")
+        # Docker gone ends any hold: nothing is starting or stopping that this
+        # app can see (T188).
+        self._badge_held = None
+        self._badge_reading = "stopped"
         self.realm_badge.set_status("stopped")
         self._offer_docker_repair()
         # T54. The reveal used to run only on the success path, and the control
@@ -7886,6 +7903,23 @@ class ControllerView(QWidget):
         # "Forget this install…", and could not be shown it. The predicate needs
         # nothing from Docker: it asks `wsl_distro` and `folder_is_gone()`.
         self._update_forget_visibility()
+
+    def _hold_badge(self, status: str) -> None:
+        """Hold the realm badge at `status` while our own Start/Stop/Restart runs (T188).
+
+        Released in `_set_busy(False)`, which every one of those jobs reaches
+        on success and on failure alike, and by Docker becoming unreachable.
+        """
+        self._badge_held = status
+        self.realm_badge.set_status(status)
+        self._clear_the_verdict()
+
+    def _release_badge(self) -> None:
+        """Let go of a hold, back to what the polls last read; the next poll moves it on."""
+        if self._badge_held is None:
+            return
+        self._badge_held = None
+        self.realm_badge.set_status(self._badge_reading)
 
     def _set_busy(self, busy: bool) -> None:
         """Lock the Server buttons while an action of ours is running.
@@ -7918,6 +7952,8 @@ class ControllerView(QWidget):
         # T179 Task 6: so are Re-extract map data and Finish the world update.
         self._show_world_upkeep()
         if not busy:
+            # T188: whatever job just ended, a badge it held is let go of.
+            self._release_badge()
             # T158: whatever job just ended, a load wait's words and its button
             # are over with it. `_tuning_job_done()` and the Bots tab's handlers
             # never write this label, so they cannot be trusted to replace them;
@@ -8110,7 +8146,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
-        self.realm_badge.set_status("starting")
+        self._hold_badge("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
     @Slot()
@@ -8120,7 +8156,7 @@ class ControllerView(QWidget):
         self._stop_forced = ""
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
-        self.realm_badge.set_status("starting")
+        self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
 
     @Slot(object)
@@ -8524,7 +8560,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping the other server…")
-        self.realm_badge.set_status("starting")
+        self._hold_badge("starting")
         self._run(
             self.services.controller.stop_conflicting_and_start,
             self._server_action_done,
@@ -8559,7 +8595,7 @@ class ControllerView(QWidget):
         self._set_busy(True)
         self.status_label.setText(STOPPING_FOR_REMOVAL)
         self.problem_label.setText(STOPPING_FOR_REMOVAL_WAIT)
-        self.realm_badge.set_status("starting")
+        self._hold_badge("stopping")
         self._run(
             self.services.controller.stop,
             self._stopped_for_removal,
@@ -16205,6 +16241,7 @@ class ControllerView(QWidget):
         ):
             return
         self._set_busy(True)
+        self._hold_badge("restarting")
         self.tuning_report.setPlainText("restarting the server…")
         self._run(
             lambda: ("restart", self._do_restart()), self._tuning_job_done, self._tuning_job_failed
@@ -16288,6 +16325,9 @@ class ControllerView(QWidget):
         self._refresh_tuning_owed()
         self.tuning_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
+        # A restart that failed may have stopped the server before it broke, so
+        # the badge it let go of is read again rather than trusted (T188).
+        self.refresh_status()
 
     # -- T94: Reset to default
 
