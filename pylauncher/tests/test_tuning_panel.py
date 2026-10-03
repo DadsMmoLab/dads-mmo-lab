@@ -853,6 +853,11 @@ def test_in_a_440px_card_the_value_box_keeps_room_for_its_value(qapp: object) ->
             )
         )[0]
     )
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    # Styled as the app styles a 960px window, whatever an earlier test left on
+    # the application: a widget's own sheet is the one that applies.
+    apply_dadcraft_theme(card, width=960)
     card.show()
     try:
         process_events()
@@ -867,8 +872,6 @@ def test_in_a_440px_card_the_value_box_keeps_room_for_its_value(qapp: object) ->
 
         # Again after the app restyles it for a wide window, as `_at` does: the
         # font grows, and a floor counted in the old font's characters is short.
-        from yulon.ui.theme import apply_dadcraft_theme
-
         before = field.fontMetrics().averageCharWidth()
         apply_dadcraft_theme(card, width=1920)
         process_events()
