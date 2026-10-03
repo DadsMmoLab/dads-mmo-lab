@@ -2010,8 +2010,9 @@ EARLY_CASES = [
     pytest.param(entry, how, id=f"{entry.id}-{how}")
     for entry in SPINE_GAMES
     for how in EARLY_RETURNS
-    if how != "mixed" or entry.id == ENTRY.id
+    if how != "mixed"
 ]
+"""The early returns that leave ONE build on the tags: the new one. Mixed is its own case."""
 
 EARLY_SENTENCES = {
     "stop-refused": "servers could not be stopped",
@@ -2059,6 +2060,7 @@ def test_a_rollback_that_stops_early_leaves_the_sources_with_the_new_build(
     assert said.endswith(native.SOURCES_LEFT_NOTE)
     assert native.SOURCES_PUT_BACK_NOTE not in said and "agree again" not in said
     assert raised.value.sources_kept is True, "the outcome the tab reads, typed"
+    assert raised.value.touched is True and raised.value.mixed is False
 
 
 @pytest.mark.parametrize("entry", SPINE_GAMES, ids=lambda entry: entry.id)
@@ -2112,13 +2114,89 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
     made = engine(rec, **_name_refused(rec))
     with pytest.raises(RollbackNotDone) as raised:
         list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
-    said = str(raised.value)
     assert "recreate" not in rec.calls, "the ground: no container was replaced"
-    assert EARLY_SENTENCES["name-refused"] in said, said
+    assert str(raised.value) == (
+        f"{GIVEN_UP} Putting the build from before this rebuild back was not attempted, "
+        f"because the new build could not be given a name to undo onto ({REFUSED}); the tags "
+        "still name the new build, all of them. The old images are on the daemon under their "
+        "-rollback tags. The source folders were left on the new commits, because the image "
+        "tags name the new build made from them. None of your server's containers was "
+        "replaced, so it is still running the build from before this update if it is up, and "
+        "its next Start runs the new build."
+    )
     assert set(_heads(rec, server_dir).values()) == {NEW}
     assert _recorded_builds(server_dir) == {NEW[:7]}
-    assert said.endswith(native.SOURCES_LEFT_NOTE)
-    assert "agree again" not in said
+    assert raised.value.touched is False and raised.value.sources_kept is True
+
+
+GIVEN_UP = (
+    "The rebuild was cancelled while the world was still loading, so its containers were not "
+    "replaced -- the server you have is still the one that was running before this rebuild. "
+    "Nothing was touched."
+)
+"""`stage_recreate()`'s sentence for a recreate given up before its signal: nothing replaced."""
+
+BEFORE = native.SourceRev(repo="earlier/press", built="1234567 · 2026-09-01", pin="", ahead=None)
+"""A row an earlier press recorded: a mixed rollback must leave the record exactly as it was."""
+
+
+def _recorded_before(server_dir: Path) -> tuple[native.SourceRev, ...]:
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    native.write_state(server_dir, replace(state, source_revs=(BEFORE,)))
+    return (BEFORE,)
+
+
+def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_records_nothing(
+    tmp_path: Path,
+) -> None:
+    """T197 fix round 1: mixed tags are no one build, so no new build is recorded or kept.
+
+    Yu'lon has no record that refuses a Start until a Rebuild, so the record is left as
+    it was and the sources go back to the commits it names; the sentence says the tags
+    are mixed and that the server needs a Rebuild before it can start.
+    """
+    rec, server_dir = _ready(tmp_path)
+    before = _recorded_before(server_dir)
+    _recreate_given_up(rec)
+    made = engine(rec, **_mixed(rec))
+    refs = made.image_refs_at(server_dir)
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert str(raised.value) == (
+        f"{GIVEN_UP} Putting the build from before this rebuild back failed part-way "
+        f"({REFUSED}) and undoing it failed too, so the tags are MIXED: {refs[0]} name the old "
+        "build and the rest name the new one. Do not start this server until they agree; the "
+        "old images are under their -rollback tags. The source folders were put back on the "
+        "commits they were on, which are the ones Yu'lon has recorded for this server. Its "
+        "image tags are mixed, so it must be rebuilt before it can start: press “Rebuild the "
+        "server…” under “Server build ▾” on the Modules tab, which compiles every image from "
+        "those commits."
+    )
+    state = native.read_state(server_dir, valid=())
+    assert state is not None and state.source_revs == before, "the record is as it was"
+    assert set(_heads(rec, server_dir).values()) == {OLD}
+    assert raised.value.mixed is True and raised.value.sources_kept is False
+
+
+def test_a_rollback_that_leaves_the_tags_mixed_after_the_containers_moved_records_nothing(
+    tmp_path: Path,
+) -> None:
+    """The same with the new build's containers replaced: still no one build to keep."""
+    rec, server_dir = _ready(tmp_path)
+    before = _recorded_before(server_dir)
+    rec.ready = False
+    made = engine(rec, **_mixed(rec))
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "recreate" in rec.calls, "the ground: the new build's containers were replaced"
+    assert said.endswith(native.SOURCES_MIXED_NOTE)
+    assert native.SOURCES_LEFT_NOTE not in said and "agree again" not in said
+    state = native.read_state(server_dir, valid=())
+    assert state is not None and state.source_revs == before
+    assert set(_heads(rec, server_dir).values()) == {OLD}
+    assert raised.value.mixed is True and raised.value.touched is True
 
 
 def test_a_rollback_that_put_the_tags_back_before_any_container_moved_puts_the_sources_back(

@@ -147,10 +147,23 @@ class RollbackNotDone(InstallerError):
     then leaves the moved sources with the new build instead of putting the old
     commits back under it, and `sources_kept` says so, as on
     `WorldStoppedAfterReadyError`.
+
+    `touched` False: no container was replaced, so the server still runs the old
+    build until its next start. `mixed` True: the tags name neither build, so there
+    is no new build for the sources to stay with, and the route puts them back
+    (fix round 1).
     """
 
-    def __init__(self, *args: object, sources_kept: bool = False) -> None:
+    def __init__(
+        self,
+        *args: object,
+        touched: bool = True,
+        mixed: bool = False,
+        sources_kept: bool = False,
+    ) -> None:
         super().__init__(*args)
+        self.touched = touched
+        self.mixed = mixed
         self.sources_kept = sources_kept
 
 

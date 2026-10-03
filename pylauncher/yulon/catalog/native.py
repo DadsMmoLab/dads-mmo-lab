@@ -1826,10 +1826,35 @@ SOURCES_LEFT_NOTE = (
 )
 """Appended when the rebuild's rollback stopped early (`RollbackNotDone`, T197).
 
-The tags still name the new build (or are mixed, which the sentence in front says), so
-a start runs it: the old commits put back under it would disagree with every start,
-under `SOURCES_PUT_BACK_NOTE`'s "agree again".
+The tags still name the new build, so a start runs it: the old commits put back under
+it would disagree with every start, under `SOURCES_PUT_BACK_NOTE`'s "agree again".
 """
+
+SOURCES_LEFT_UNTOUCHED_NOTE = (
+    "The source folders were left on the new commits, because the image tags name the new "
+    "build made from them. None of your server's containers was replaced, so it is still "
+    "running the build from before this update if it is up, and its next Start runs the new "
+    "build."
+)
+"""`SOURCES_LEFT_NOTE` when no container was replaced (`RollbackNotDone.touched`, fix round 1).
+
+The tags and the sources name the new build, the containers still hold the old one: both
+said, because "what is on disk is what the new build was made from" alone reads as if the
+new build were what runs now."""
+
+SOURCES_MIXED_NOTE = (
+    "The source folders were put back on the commits they were on, which are the ones Yu'lon "
+    "has recorded for this server. Its image tags are mixed, so it must be rebuilt before it "
+    "can start: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}, which compiles "
+    "every image from those commits."
+)
+"""Appended when the rollback left the tags MIXED (`RollbackNotDone.mixed`, fix round 1).
+
+No single build is on the tags, so there is no new build for the sources to stay with and
+nothing new to record: the record is left as it was and the sources go back to the commits
+it names. Yu'lon keeps no record that refuses a Start until a Rebuild, so the sentence is
+what says it, beside the rollback's own "Do not start this server until they agree"."""
 
 
 class ServersLeftStopped(InstallerError):
@@ -1848,8 +1873,18 @@ class _LeftStopped(str):
 class _NotPutBack(str):
     """`_restore_rollback()`'s sentence when it stopped before the old build was back (T197).
 
-    `rebuild()` raises it as `RollbackNotDone`, so the update route keeps the new sources.
+    `rebuild()` raises it as `RollbackNotDone`, with whether any container was replaced
+    (`touched`) and whether the tags were left mixed (`mixed`), which the update route reads.
     """
+
+    touched: bool
+    mixed: bool
+
+    def __new__(cls, text: str, *, touched: bool, mixed: bool = False) -> _NotPutBack:
+        made = super().__new__(cls, text)
+        made.touched = touched
+        made.mixed = mixed
+        return made
 
 
 ROLLBACK_LEFT_STOPPED_DATABASE = (
@@ -5735,7 +5770,9 @@ class StagedInstaller:
             if isinstance(message, _NotPutBack):
                 # T197: the tags still name the new build (or are mixed), so the
                 # update route must not put the old sources back under it.
-                raise RollbackNotDone(str(message)) from exc
+                raise RollbackNotDone(
+                    str(message), touched=message.touched, mixed=message.mixed
+                ) from exc
             raise InstallerError(message) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
@@ -6081,6 +6118,9 @@ class StagedInstaller:
         old build was back on its tags (`RollbackNotDone`, T197): either way the
         new build is what the tags name, so its sources stay with it and are
         recorded, for the same invariant (`SOURCES_KEPT_NOTE`, T179; `SOURCES_LEFT_NOTE`).
+        A rollback that left the tags MIXED has no new build to keep them with: they
+        go back, nothing is recorded, and the sentence says a Rebuild is owed
+        (`SOURCES_MIXED_NOTE`, fix round 1).
         That is the one invariant a user cannot check for themselves and the one
         that quietly breaks everything afterwards: a Modules tab reading a source
         tree that is a hundred commits ahead of the binary answering on the port
@@ -6227,12 +6267,22 @@ class StagedInstaller:
                     f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
                 ) from exc
             except RollbackNotDone as exc:
+                if exc.mixed:
+                    # Fix round 1: the tags name neither build, so there is no new
+                    # build to keep the sources with or to record. They go back to
+                    # the commits the record still names, and the sentence says the
+                    # server needs a Rebuild before it can start.
+                    if work is not None:
+                        work.settle()
+                    yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                    raise RollbackNotDone(
+                        f"{exc} {SOURCES_MIXED_NOTE}", touched=exc.touched, mixed=True
+                    ) from exc
                 # T197: the rollback stopped before the old build was back on its
-                # tags, which still name the NEW build (or are mixed, which its
-                # sentence says), and a start runs them. Its sources stay with it and
-                # are recorded, as for the kept build above; putting the old commits
-                # back would leave them under a build they did not make, with a
-                # sentence saying the two agree again.
+                # tags, which still name the NEW build, and a start runs them. Its
+                # sources stay with it and are recorded, as for the kept build above;
+                # putting the old commits back would leave them under a build they
+                # did not make, with a sentence saying the two agree again.
                 also = ""
                 if work is not None:
                     try:
@@ -6249,8 +6299,9 @@ class StagedInstaller:
                     yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
                 except InstallerError as after:
                     also = f"{also} {after}"
+                left = SOURCES_LEFT_NOTE if exc.touched else SOURCES_LEFT_UNTOUCHED_NOTE
                 raise RollbackNotDone(
-                    f"{exc} {SOURCES_LEFT_NOTE}{also}", sources_kept=True
+                    f"{exc} {left}{also}", touched=exc.touched, sources_kept=True
                 ) from exc
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
@@ -6892,7 +6943,8 @@ class StagedInstaller:
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build's servers could not be stopped ({exc}); "
                     f"the tags still name the new build, all of them. The old images are on "
-                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    touched=touched,
                 )
         else:
             yield "Putting the build from before this rebuild back."
@@ -6909,7 +6961,8 @@ class StagedInstaller:
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
                     f"onto ({problem}); the tags still name the new build, all of them. The "
-                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    touched=touched,
                 )
             named.append(name)
         moved: list[str] = []
@@ -6925,13 +6978,16 @@ class StagedInstaller:
                         f"part-way ({problem}) and undoing it failed too, so the tags are "
                         f"MIXED: {', '.join(mixed)} name the old build and the rest name the "
                         f"new one. Do not start this server until they agree; the old images "
-                        f"are under their {ROLLBACK_TAG_SUFFIX} tags."
+                        f"are under their {ROLLBACK_TAG_SUFFIX} tags.",
+                        touched=touched,
+                        mixed=True,
                     )
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back failed "
                     f"({problem}), and the {len(undone)} tag(s) already moved were moved back, "
                     f"so the tags still name the new build, all of them. The old images are "
-                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    touched=touched,
                 )
             moved.append(ref)
         yield from self._release(named)

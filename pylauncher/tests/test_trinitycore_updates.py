@@ -1452,7 +1452,8 @@ def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_table
     assert box.head() == NEW
     assert box.engine().start_refusal(box.server_dir) == UNFINISHED
     assert box.world.running is True, "the build from before still runs in its containers"
-    assert str(failed.value).endswith(native.SOURCES_LEFT_NOTE)
+    assert str(failed.value).endswith(native.SOURCES_LEFT_UNTOUCHED_NOTE)
+    assert failed.value.touched is False
 
 
 def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay(
@@ -1474,6 +1475,6 @@ def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay
         box.press()
     said = str(failed.value)
     assert "could not be given a name to undo onto" in said
-    assert native.SOURCES_LEFT_NOTE in said
+    assert native.SOURCES_LEFT_UNTOUCHED_NOTE in said
     assert "Permission denied" in said
     assert box.head() == NEW
