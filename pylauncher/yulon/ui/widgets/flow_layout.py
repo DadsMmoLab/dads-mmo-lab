@@ -96,7 +96,7 @@ class FlowLayout(QLayout):
     def sizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
         """One line of everything, which is what the bar wants when it can have it."""
         margins = self.contentsMargins()
-        widths = [item.sizeHint().width() for item in self._items]
+        widths = [item.sizeHint().width() for item in self._shown()]
         spacing = self.spacing() * max(0, len(widths) - 1)
         return QSize(
             sum(widths) + spacing + margins.left() + margins.right(),
@@ -126,7 +126,7 @@ class FlowLayout(QLayout):
         somebody else; it spends it and says nothing.
         """
         margins = self.contentsMargins()
-        width = max((item.minimumSize().width() for item in self._items), default=0)
+        width = max((item.minimumSize().width() for item in self._shown()), default=0)
         one_line = self._line_height() + margins.top() + margins.bottom()
         laid_out = self.geometry().width()
         tall = one_line if laid_out <= 0 else max(one_line, self.heightForWidth(laid_out))
@@ -138,8 +138,12 @@ class FlowLayout(QLayout):
         """Mark this position as where a single line's leftover width goes."""
         self._gap_at = len(self._items)
 
+    def _shown(self) -> list[QLayoutItem]:
+        """The items that are drawn: a hidden widget takes no place and no gap (T189)."""
+        return [item for item in self._items if not item.isEmpty()]
+
     def _line_height(self) -> int:
-        return max((item.sizeHint().height() for item in self._items), default=0)
+        return max((item.sizeHint().height() for item in self._shown()), default=0)
 
     def _lines(self, width: int) -> list[list[int]]:
         """The item indexes, split into the lines `width` pixels make of them."""
@@ -147,6 +151,8 @@ class FlowLayout(QLayout):
         line: list[int] = []
         used = 0
         for index, item in enumerate(self._items):
+            if item.isEmpty():
+                continue
             need = item.sizeHint().width()
             step = need if not line else need + self.spacing()
             if line and used + step > width:

@@ -14,12 +14,16 @@ from PySide6.QtWidgets import (
     QApplication,
     QBoxLayout,
     QFrame,
+    QGroupBox,
     QListWidget,
     QScrollArea,
     QStyle,
     QStyleOptionViewItem,
+    QVBoxLayout,
     QWidget,
 )
+
+from yulon.ui.theme import COLOR_DANGER
 
 PAGE_NAME = "sub-tab-page"
 """The object name the page's own style sheet selects it by (an ID selector only)."""
@@ -286,6 +290,29 @@ def stack_when_narrow(columns: QBoxLayout, owner: QWidget) -> QObject:
     stacker = _Stacker(columns, owner)
     stacker.settle()
     return stacker
+
+
+DANGER_ZONE_NAME = "danger-zone"
+"""The object name of the Server tab's Danger zone; its red border selects it by this alone."""
+
+
+def section(title: str, parent: QWidget, *, danger: bool = False) -> tuple[QGroupBox, QVBoxLayout]:
+    """A titled box of a tab and the column inside it (T189).
+
+    Named `server-section-<title>`, or `danger-zone` for the one whose every
+    press removes something: that one is bordered in the theme's danger red, by
+    a sheet that selects that box by name and nothing else, so the `danger` and
+    `primary` buttons inside it keep the window's own style (T188 C1: a sheet
+    with no selector restyles everything under it).
+    """
+    box = QGroupBox(title, parent)
+    if danger:
+        box.setObjectName(DANGER_ZONE_NAME)
+        box.setStyleSheet(f"QGroupBox#{DANGER_ZONE_NAME} {{ border: 1px solid {COLOR_DANGER}; }}")
+    else:
+        box.setObjectName("server-section-" + "-".join(title.lower().split()))
+    column = QVBoxLayout(box)
+    return box, column
 
 
 def page_of(widget: QWidget) -> ScrollPage | None:

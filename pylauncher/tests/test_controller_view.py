@@ -16513,6 +16513,341 @@ def _server_with_the_plan_up(
     return view, window, view._tabs.currentWidget()
 
 
+SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Danger zone"]
+"""T189's Server tab, top to bottom, for a game with every part wired."""
+
+
+def _server_view(entry: CatalogEntry, tmp_path: Path, **wired: Any) -> ControllerView:
+    """`entry`'s Server tab over the factory's wiring, with the client-folder write seam.
+
+    `wired` replaces services fields after the factory, one fact per fixture.
+    """
+    services = ControllerServices.for_entry(
+        entry, tmp_path / entry.id, client_dir=_game_client(tmp_path / "clients" / "WoW")
+    )
+    services.set_client_dir = _FakeClientDir()
+    services.set_play_client_dir = _FakeClientDir()
+    for name, value in wired.items():
+        setattr(services, name, value)
+    return ControllerView(entry, services, status_poll_ms=0)
+
+
+def _sections(view: ControllerView) -> list[Any]:
+    """The group boxes the Server tab's own column holds, shown, top to bottom."""
+    from PySide6.QtWidgets import QGroupBox
+
+    box = view._server_body.layout()
+    found = []
+    for index in range(box.count()):
+        widget = box.itemAt(index).widget()
+        if isinstance(widget, QGroupBox) and not widget.isHidden():
+            found.append(widget)
+    return found
+
+
+def _section_of(view: ControllerView, widget: Any) -> str | None:
+    """The title of the Server section `widget` is in, or None."""
+    return next((s.title() for s in _sections(view) if s.isAncestorOf(widget)), None)
+
+
+def _named(widget: Any) -> str:
+    text = getattr(widget, "text", None)
+    return text() if callable(text) else type(widget).__name__
+
+
+def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T189: Realm, Play, Client, Command channel, Danger zone -- and what is in each."""
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    assert view.play_button is not None and view.steam_button is not None
+    assert view.services.channel_setup is not None, "the fixture has no channel to section"
+
+    assert [s.title() for s in _sections(view)] == SERVER_SECTIONS
+    expected = {
+        "Realm": [
+            view.start_button,
+            view.stop_button,
+            view.refresh_button,
+            view.stop_anyway_button,
+            view.stop_other_button,
+            view.reinstall_docker_button,
+            view.problem_label,
+            view.status_label,
+        ],
+        "Play": [
+            view.play_button,
+            view.play_menu_button,
+            view.play_cancel_button,
+            view.steam_button,
+            view.play_label,
+            view.steam_label,
+        ],
+        "Client": [
+            view.client_dir_label,
+            view.set_client_dir_button,
+            view.forget_client_dir_button,
+        ],
+        "Command channel": [
+            view.channel_label,
+            view.test_console_button,
+            view.enable_channel_button,
+            view.repair_channel_button,
+        ],
+        "Danger zone": [
+            view.remove_button,
+            view.repair_button,
+            view.forget_install_button,
+            view.uninstall_button,
+            view.repair_label,
+            view.uninstall_label,
+            view.keep_characters_check,
+            view.delete_play_client_check,
+            view.uninstall_confirm_button,
+        ],
+    }
+    misplaced = [
+        f"{_named(w)!r} in {_section_of(view, w)}"
+        for title, widgets in expected.items()
+        for w in widgets
+        if _section_of(view, w) != title
+    ]
+    assert misplaced == [], misplaced
+
+
+@pytest.mark.parametrize("entry", [TBC, TORTOISE], ids=["tbc", "tortoise"])
+def test_a_game_without_a_command_channel_has_no_command_channel_section(
+    qapp: object, ps: _Ps, tmp_path: Path, entry: CatalogEntry
+) -> None:
+    view = _server_view(entry, tmp_path, channel_setup=None, console_probe=None)
+    if controller_view_module._is_console_channel(entry):
+        pytest.skip(f"{entry.name}'s channel is its console, which the section explains")
+    titles = [s.title() for s in _sections(view)]
+    assert "Command channel" not in titles, titles
+    assert titles[0] == "Realm" and titles[-1] == "Danger zone"
+
+
+def test_play_is_the_one_gold_button_and_start_is_gold_only_without_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T189 A21: one primary on the tab. With Play wired it is Play; without, Start."""
+    view = _server_view(WOTLK, tmp_path)
+    assert view.play_button is not None
+    assert view.play_button.property("primary") is True
+    assert not view.start_button.property("primary")
+    assert "launcher" in view.play_button.toolTip() or view.services.play_client_dir is None
+
+    without = _server_view(WOTLK, tmp_path / "other", set_play_client_dir=None)
+    assert without.play_button is None
+    assert without.start_button.property("primary") is True
+
+
+def test_play_without_a_client_folder_says_where_to_set_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The button is hidden (T181); the Play section says why and where, not nothing."""
+    services = ControllerServices.for_entry(WOTLK, tmp_path / "w", client_dir=None)
+    services.set_client_dir = _FakeClientDir()
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.play_button is not None and view.play_button.isHidden()
+    assert not view.play_label.isHidden()
+    assert view.play_label.text() == controller_view_module.PLAY_NEEDS_A_CLIENT_FOLDER
+    assert "Client" in view.play_label.text()
+
+
+def test_the_play_button_says_it_opens_the_launcher(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """T187 made the tab's Play open the launcher; its tooltip still said it starts WoW."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    services = replace(
+        _services(ps, tmp_path, []), client_dir=original, play_client_dir=_built(original, tmp_path)
+    )
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.play_button is not None
+    tip = view.play_button.toolTip()
+    assert "launcher" in tip and "Start World of Warcraft" not in tip, tip
+
+
+def _pixel_near(widget: Any, x: int, y: int) -> Any:
+    from PySide6.QtGui import QColor
+
+    return QColor(widget.grab().toImage().pixelColor(x, y))
+
+
+def _close(a: Any, b: Any, slack: int = 24) -> bool:
+    return all(abs(p - q) <= slack for p, q in zip(a.getRgb()[:3], b.getRgb()[:3], strict=True))
+
+
+def test_the_danger_zone_is_bordered_red_and_its_buttons_keep_the_windows_style(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The border is the theme's danger red; the sheet that draws it restyles nothing inside."""
+    from PySide6.QtGui import QColor
+
+    from yulon.ui.theme import COLOR_DANGER
+
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[1])
+    zone = next(s for s in _sections(view) if s.title() == "Danger zone")
+    realm = next(s for s in _sections(view) if s.title() == "Realm")
+    middle = zone.height() // 2
+    assert _close(
+        _pixel_near(zone, 0, middle), QColor(COLOR_DANGER)
+    ), f"the Danger zone's left edge is {_pixel_near(zone, 0, middle).name()}"
+    assert not _close(
+        _pixel_near(realm, 0, realm.height() // 2), QColor(COLOR_DANGER)
+    ), "the Realm section is red too: the sheet is not scoped to the Danger zone"
+    view.stop_button.setEnabled(True)
+    view.remove_button.setEnabled(True)
+    process_events()
+    # Its edge and its fill, for a danger button and a plain one, each against
+    # its twin outside the zone: a sheet that reached the buttons shows first
+    # in their borders.
+    for inside_button, outside_button in (
+        (view.remove_button, view.stop_button),
+        (view.forget_install_button, view.refresh_button),
+    ):
+        for x in (0, 4):
+            inside = _pixel_near(inside_button, x, inside_button.height() // 2)
+            outside = _pixel_near(outside_button, x, outside_button.height() // 2)
+            assert _close(inside, outside, slack=4), (
+                f"{inside_button.text()!r} in the zone is {inside.name()} at x={x}; "
+                f"{outside_button.text()!r} outside is {outside.name()}"
+            )
+
+
+def test_a_game_with_no_uninstall_says_so_in_the_danger_zone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A27: Tortoise has no Uninstall; the zone says what it has instead."""
+    view = _server_view(TORTOISE, tmp_path, uninstall=None)
+    assert view.uninstall_button is None
+    label = view.uninstall_absent_label
+    assert not label.isHidden()
+    assert _section_of(view, label) == "Danger zone"
+    assert "Remove from Yu'lon" in label.text() and TORTOISE.name in label.text()
+    assert str(view.services.controller.server_dir) in label.text()
+
+    wotlk = _server_view(WOTLK, tmp_path / "w", uninstall=_PlanOnlyUninstall(tmp_path))
+    assert wotlk.uninstall_absent_label.isHidden()
+
+
+def _server_states(view: ControllerView) -> Iterator[str]:
+    """Put the Server tab through the states that grow it; yield each one's name."""
+    yield "idle"
+    assert view.uninstall_button is not None
+    view.uninstall_button.click()
+    process_events()
+    yield "plan up"
+    view.remove_button.click()
+    process_events()
+    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+    yield "remove armed"
+    view._disarm_actions()
+    view.problem_label.setText(" ".join(["The server refused to stop because of a reason."] * 12))
+    process_events()
+    yield "long problem"
+    view.stop_anyway_button.setVisible(True)
+    view.stop_other_button.setVisible(True)
+    process_events()
+    yield "stop now anyway shown"
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_the_server_tab_is_whole_in_every_state_at_every_size(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Nothing cut, overlapped or sideways: idle, plan up, armed, a long refusal, the stop offers.
+
+    The plan-up state at 960x640 is T188's after-render: "Refresh", "Stop and
+    remove containers…", "Remove from Yu'lon…" and "Add to Steam…" cut short in
+    one row of ten.
+    """
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    page = view._tabs.currentWidget()
+    faults = {}
+    for shown in _server_states(view):
+        process_events()
+        if found := _page_faults(page):
+            faults[shown] = found
+    assert faults == {}, f"the Server tab at {size}: {faults}"
+
+
+def test_the_server_tabs_buttons_keep_their_own_width_at_1080p(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I6/I7: "Forget client folder" was a 1,780 px bar at 1920; every press is its own width.
+
+    Except the uninstall confirm, which is the one press drawn the width of its
+    section on purpose.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[2])
+    view.uninstall_button.click()
+    process_events()
+    wide = [
+        f"{b.text()!r}: {b.width()} for a hint of {b.sizeHint().width()}"
+        for b in tab.findChildren(QPushButton)
+        if b.isVisible()
+        and b is not view.uninstall_confirm_button
+        and b.width() > b.sizeHint().width() + 1
+    ]
+    assert wide == [], wide
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_the_pad_reaches_every_server_control_and_walks_down_the_sections_in_order(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """From the sub-tab bar: every shown control is reachable, and Down goes section by section.
+
+    Down from the bar, pressed again and again, never goes back to an earlier
+    section, and it reaches the Danger zone with the plan up.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, _iter_focusable, install_gamepad_navigation
+
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    view.uninstall_button.click()
+    process_events()
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        bar = view._tabs.tabBar()
+        reached = set(_pad_routes(nav, bar))
+        missed = [_pad_describe(w, window) for w in _iter_focusable(tab) if w not in reached]
+        assert missed == [], f"the pad cannot reach {missed} at {size}"
+
+        order = [s.title() for s in _sections(view)]
+        bar.setFocus()
+        process_events()
+        seen: list[str] = []
+        for _press in range(60):
+            nav.navigate(Direction.DOWN)
+            process_events()
+            title = _section_of(view, QApplication.focusWidget())
+            if title is not None and (not seen or seen[-1] != title):
+                seen.append(title)
+            if title == "Danger zone":
+                break
+        assert seen and seen[-1] == "Danger zone", f"Down went through {seen} at {size}"
+        indexes = [order.index(t) for t in seen]
+        assert indexes == sorted(indexes), f"Down went back up: {seen} at {size}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
 def _whole_in_the_page(widget: Any, page: Any) -> bool:
     """Whether every pixel of `widget` is inside `page`'s viewport now."""
     top = widget.mapTo(page.viewport(), widget.rect().topLeft()).y()
@@ -16610,7 +16945,7 @@ def test_a_widget_drawn_over_one_in_another_layout_of_the_same_parent_is_a_fault
 def test_the_pad_walks_the_plan_page_from_the_sub_tab_bar_to_its_last_button(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Down from the sub-tab bar enters the page at its first control; Down again reaches the end.
+    """Down from the sub-tab bar enters the page at its top row; Down again reaches the end.
 
     The page scrolls under the focus (`_scroll_into_view`) until the uninstall
     button is whole on screen, and the page itself is never a stop.
@@ -16628,8 +16963,11 @@ def test_the_pad_walks_the_plan_page_from_the_sub_tab_bar_to_its_last_button(
         nav.navigate(Direction.DOWN)
         process_events()
         landed = QApplication.focusWidget()
+        # The page's top row, which since T189 is the Realm section's presses:
+        # nothing on the page that the pad can stop on starts above it.
+        top = min(_edges_in(w, window)[1] for w in _in_page(page.widget()))
         assert (
-            landed is view.set_client_dir_button
+            _section_of(view, landed) == "Realm" and _edges_in(landed, window)[1] == top
         ), f"Down from the sub-tab bar went to {_pad_describe(landed, window)}"
         stops = [landed]
         for _press in range(40):
@@ -16893,6 +17231,68 @@ def test_every_sub_tab_name_is_whole_and_the_open_one_is_on_screen(
         assert (
             last.right() < bar.width() - 100
         ), f"the tabs are spread across the bar: the last ends at {last.right()} of {bar.width()}"
+
+
+def _overflowing_tab_bar(tmp_path: Path) -> tuple[ControllerView, Any]:
+    """Tortoise's nine sub-tabs at 960x640, which need more than the bar: (view, window)."""
+    services = ControllerServices.for_entry(TORTOISE, tmp_path / TORTOISE.id)
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[0])
+    return view, window
+
+
+def test_a_tab_bar_too_narrow_for_its_names_scrolls_them_whole(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 960x640 Tortoise's names need more than the bar: it scrolls, and none is cut.
+
+    The sweep above runs WotLK, whose eight tabs fit at 960, so there the bar
+    never scrolls and "whole, clear of the arrows" holds whatever the bar does.
+    """
+    from PySide6.QtWidgets import QToolButton
+
+    view, _window = _overflowing_tab_bar(tmp_path)
+    bar = view._tabs.tabBar()
+    arrows = [a for a in bar.findChildren(QToolButton) if a.isVisible()]
+    assert arrows, "the bar does not scroll at 960x640: this fixture proves nothing"
+    cut = [why for why in (_tab_name_cut(bar, i) for i in range(bar.count())) if why]
+    assert cut == [], f"sub-tab names cut on a scrolling bar: {cut}"
+    for index in (bar.count() - 1, 0):
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        rect = bar.tabRect(index)
+        assert bar.rect().contains(rect), f"{bar.tabText(index)!r} is not whole in the bar"
+        assert _scroll_arrows_over(bar, rect) == [], f"{bar.tabText(index)!r} is under an arrow"
+
+
+def test_down_from_a_scrolling_tab_bar_goes_into_the_page_not_to_an_arrow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The bar's arrows are a mouse's; the pad's Down from the bar enters the page."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QToolButton
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    view, window = _overflowing_tab_bar(tmp_path)
+    bar = view._tabs.tabBar()
+    arrows = [a for a in bar.findChildren(QToolButton) if a.isVisible()]
+    assert arrows, "the bar does not scroll at 960x640: this fixture proves nothing"
+    assert all(a.focusPolicy() == Qt.FocusPolicy.NoFocus for a in arrows)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        bar.setFocus()
+        process_events()
+        nav.navigate(Direction.DOWN)
+        process_events()
+        landed = QApplication.focusWidget()
+        assert view._tabs.currentWidget().isAncestorOf(
+            landed
+        ), f"Down from the bar went to {_pad_describe(landed, window)}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
 
 
 def test_a_server_without_a_bots_tab_draws_no_bot_count_box_over_its_tabs(

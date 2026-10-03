@@ -183,6 +183,7 @@ from yulon.ui.widgets.page import (
     RowsScroll,
     ScrollPage,
     page_room,
+    section,
     stack_when_narrow,
 )
 from yulon.ui.widgets.party_panel import PartyPanel
@@ -6191,6 +6192,25 @@ Measured on the T86 gate: a SOAP request 8 s after `World server is up` hit the
 SUB_TABS_NAME = "server-sub-tabs"
 """The object name of a server's sub-tab widget, which its own style sheet selects by (T191)."""
 
+UNINSTALL_ABSENT = (
+    "Uninstall is not offered for {name} yet: Stop and remove containers… frees its "
+    "containers, Remove from Yu'lon… takes it off the list, and the folder {server_dir} "
+    "stays for you to delete."
+)
+"""The Danger zone's sentence for a game with no uninstall seam (T189 A27)."""
+
+PLAY_NEEDS_A_CLIENT_FOLDER = "Play needs your own client folder first — set it under Client below."
+"""The Play section's line while there is nothing to make a ready-to-play client from (T189)."""
+
+
+def _bar(parent: QWidget, *buttons: QWidget) -> QWidget:
+    """A row of presses at their own width that wraps when the window is narrow (T189)."""
+    bar = flow_bar(parent)
+    for button in buttons:
+        bar.flow().addWidget(button)
+    return bar
+
+
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
 """Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
 
@@ -6904,36 +6924,134 @@ class ControllerView(QWidget):
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
-        row = QHBoxLayout()
-        for b in (self.start_button, self.stop_button):
-            row.addWidget(b)
-        # T181: beside Start and Stop, the third thing this row does with the server.
-        if self.play_button is not None and self.play_menu_button is not None:
-            row.addWidget(self.play_button)
-            row.addWidget(self.play_menu_button)
-            row.addWidget(self.play_cancel_button)
-        for b in (self.refresh_button, self.remove_button, self.repair_button):
-            row.addWidget(b)
-        if self.steam_button is not None:
-            row.addWidget(self.steam_button)
-        # The actions keep their natural size instead of stretching to fill the
-        # row: a Start button drawn 226px wide beside a 95px word looks like a
-        # broken border, not a button. The spare width goes to a trailing gap.
-        row.addStretch(1)
-        # T95 decision 4: low-key and at the far end of the row, but always there.
-        row.addWidget(self.forget_install_button)
-        # The header line: the install's name and path, with the realm's live
-        # status as a glowing gem badge on the right. `DadcraftRealmBadge` is
-        # the one decoration that had a natural home in the view but was only
-        # ever exercised by tests.
+        # Start is the tab's gold press only where there is no Play: Play is the
+        # one thing a player comes to this tab to do (T189 A21).
+        self.start_button.setProperty("primary", self.play_button is None)
+        # T189: what this tab does, as five boxes in the order a player needs
+        # them. The name row and the two banners stay above them.
+        self._server_body = tab
         name_row = QHBoxLayout()
         name_row.addWidget(
             QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}")
         )
         name_row.addStretch(1)
+        # The realm's live status as a glowing gem badge on the right.
         self.realm_badge = DadcraftRealmBadge("stopped", tab)
         name_row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         box.addLayout(name_row)
+        self._build_server_banners(tab)
+        box.addWidget(self.compose_banner)
+        box.addWidget(self.corrections_banner)
+
+        realm, realm_column = section("Realm", tab)
+        for label in (
+            self.verdict_label,
+            self.status_label,
+            self.distro_label,
+            self.upstream_label,
+            self.pathfinding_label,
+        ):
+            realm_column.addWidget(label)
+        realm_column.addWidget(
+            _bar(realm, self.pathfinding_start_button, self.pathfinding_stop_button)
+        )
+        realm_column.addWidget(self.world_upkeep_label)
+        realm_column.addWidget(_bar(realm, self.reextract_button, self.finish_world_button))
+        realm_column.addWidget(
+            _bar(realm, self.start_button, self.stop_button, self.refresh_button)
+        )
+        # The refusal, then the offers it makes: read in that order.
+        realm_column.addWidget(self.problem_label)
+        realm_column.addWidget(
+            _bar(
+                realm,
+                self.stop_anyway_button,
+                self.stop_other_button,
+                self.reinstall_docker_button,
+            )
+        )
+        box.addWidget(realm)
+
+        play, play_column = section("Play", tab)
+        play_presses = [
+            b
+            for b in (
+                self.play_button,
+                self.play_menu_button,
+                self.play_cancel_button,
+                self.steam_button,
+            )
+            if b is not None
+        ]
+        play_column.addWidget(_bar(play, *play_presses))
+        play_column.addWidget(self.play_label)
+        play_column.addWidget(self.steam_label)
+        self._add_section(box, play, self.play_button is not None or self.steam_button is not None)
+
+        client, client_column = section("Client", tab)
+        client_column.addWidget(self.client_dir_label)
+        client_presses = [
+            b for b in (self.set_client_dir_button, self.forget_client_dir_button) if b is not None
+        ]
+        client_column.addWidget(_bar(client, *client_presses))
+        self._add_section(box, client, self.set_client_dir_button is not None)
+
+        # Decided at build, like `channel_label`'s own visibility above: a
+        # channel to set up, a console channel to explain, or a console to test.
+        channel, channel_column = section("Command channel", tab)
+        channel_column.addWidget(self.channel_label)
+        channel_column.addWidget(_bar(channel, self.test_console_button))
+        channel_column.addWidget(self.console_probe_label)
+        channel_column.addWidget(
+            _bar(channel, self.enable_channel_button, self.repair_channel_button)
+        )
+        self._add_section(
+            box,
+            channel,
+            self.services.channel_setup is not None
+            or _is_console_channel(self.entry)
+            or self.services.console_probe is not None,
+        )
+
+        # Every press that removes something, in one red-bordered box (T189
+        # A22/C27): none of them sits beside Refresh any more. Under the
+        # presses, T188's order: what the plan removes, then the two choices
+        # that change it, then the press that acts on them.
+        danger, danger_column = section("Danger zone", tab, danger=True)
+        danger_presses = [
+            b
+            for b in (
+                self.remove_button,
+                self.repair_button,
+                self.forget_install_button,
+                self.uninstall_button,
+            )
+            if b is not None
+        ]
+        danger_column.addWidget(_bar(danger, *danger_presses))
+        danger_column.addWidget(self.repair_label)
+        # A27: a game with no Uninstall says what it has instead of saying nothing.
+        self.uninstall_absent_label = QLabel(
+            UNINSTALL_ABSENT.format(
+                name=self.entry.name, server_dir=self.services.controller.server_dir
+            ),
+            danger,
+        )
+        self.uninstall_absent_label.setWordWrap(True)
+        self.uninstall_absent_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        self.uninstall_absent_label.setVisible(self.services.uninstall is None)
+        danger_column.addWidget(self.uninstall_absent_label)
+        if self.uninstall_button is not None:
+            danger_column.addWidget(self.uninstall_label)
+            danger_column.addWidget(self.keep_characters_check)
+            danger_column.addWidget(self.delete_play_client_check)
+            danger_column.addWidget(self.uninstall_confirm_button)
+        box.addWidget(danger)
+        box.addStretch(1)
+        self._add_panel_tab(tab, "server", "Server")
+
+    def _build_server_banners(self, tab: QWidget) -> None:
+        """The Server tab's two amber banners, hidden until a check raises one."""
         # T106's banner, hidden until the check says this install's
         # docker-compose.yml is not what this version writes -- and, after a
         # repair, until the recreate that applies it has run. Amber and above the
@@ -6956,7 +7074,6 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.compose_banner.setVisible(False)
-        box.addWidget(self.compose_banner)
         # T129's banner, T106's shape: hidden until the check says this version
         # corrected an install-plan step these databases were imported with.
         self.corrections_banner = QWidget(tab)
@@ -6975,51 +7092,18 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.corrections_banner.setVisible(False)
-        box.addWidget(self.corrections_banner)
-        box.addWidget(self.verdict_label)
-        box.addWidget(self.status_label)
-        box.addWidget(self.distro_label)
-        box.addWidget(self.upstream_label)
-        box.addWidget(self.pathfinding_label)
-        pathfinding_row = QHBoxLayout()
-        pathfinding_row.addWidget(self.pathfinding_start_button)
-        pathfinding_row.addWidget(self.pathfinding_stop_button)
-        pathfinding_row.addStretch(1)
-        box.addLayout(pathfinding_row)
-        box.addWidget(self.world_upkeep_label)
-        upkeep_row = QHBoxLayout()
-        upkeep_row.addWidget(self.reextract_button)
-        upkeep_row.addWidget(self.finish_world_button)
-        upkeep_row.addStretch(1)
-        box.addLayout(upkeep_row)
-        box.addWidget(self.client_dir_label)
-        if self.set_client_dir_button is not None:
-            box.addWidget(self.set_client_dir_button)
-        if self.forget_client_dir_button is not None:
-            box.addWidget(self.forget_client_dir_button)
-        box.addWidget(self.channel_label)
-        box.addWidget(self.test_console_button)
-        box.addWidget(self.console_probe_label)
-        box.addWidget(self.enable_channel_button)
-        box.addWidget(self.repair_channel_button)
-        box.addLayout(row)
-        box.addWidget(self.play_label)
-        box.addWidget(self.steam_label)
-        box.addWidget(self.problem_label)
-        box.addWidget(self.stop_anyway_button)
-        box.addWidget(self.stop_other_button)
-        box.addWidget(self.reinstall_docker_button)
-        box.addWidget(self.repair_label)
-        if self.uninstall_button is not None:
-            box.addWidget(self.uninstall_button)
-            # T188 A14: the choices come after the plan they change and just
-            # above the press that acts on them, read in that order.
-            box.addWidget(self.uninstall_label)
-            box.addWidget(self.keep_characters_check)
-            box.addWidget(self.delete_play_client_check)
-            box.addWidget(self.uninstall_confirm_button)
-        box.addStretch(1)
-        self._add_panel_tab(tab, "server", "Server")
+
+    def _add_section(self, box: QVBoxLayout, group: QGroupBox, wired: bool) -> None:
+        """Put a Server section in the column if this game has it; otherwise keep it hidden.
+
+        Hidden and unplaced rather than never built, so every control the rest
+        of this view reaches for exists -- and, inside a hidden box, cannot be
+        drawn at the tab's corner by a later `setVisible(True)`.
+        """
+        if wired:
+            box.addWidget(group)
+        else:
+            group.setVisible(False)
 
     def busy_reason(self) -> str | None:
         """Why this tab must not be torn down yet, or None.
@@ -9201,11 +9285,15 @@ class ControllerView(QWidget):
             return
         has_play = self.services.play_client_dir is not None
         self.play_button = QPushButton(PLAY_LABEL if has_play else MAKE_PLAY_CLIENT_LABEL, tab)
+        # The tab's one gold press (T189 A21).
+        self.play_button.setProperty("primary", True)
         if has_play:
             self.play_button.setIcon(dadcraft_icon("play", COLOR_GOLD_LIGHT, 14))
+            # T187 made this press open the launcher; the tooltip still said it
+            # started the game (T189).
             self.play_button.setToolTip(
-                "Start World of Warcraft from this server's ready-to-play client, pointed "
-                "at this server. Starts the server first if it is stopped (asks)."
+                "Open this server's launcher, where you choose the realm address, the "
+                "account and the display, and press PLAY to start World of Warcraft."
             )
         else:
             self.play_button.setToolTip(
@@ -9221,6 +9309,10 @@ class ControllerView(QWidget):
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
         self.play_label.setVisible(True)
+        if not has_play and self.services.client_dir is None:
+            # The button is hidden until there is a folder to make one from
+            # (T181); the section says so, and where (T189).
+            self.play_label.setText(PLAY_NEEDS_A_CLIENT_FOLDER)
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)

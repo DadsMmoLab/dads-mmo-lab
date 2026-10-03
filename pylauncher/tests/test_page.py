@@ -281,3 +281,31 @@ def test_a_restyle_at_run_time_gives_a_list_held_at_its_floor_the_new_floor(
         f"the list is drawn {rows.height()}px after the restyle; its floor is now "
         f"{rows.minimumSizeHint().height()}"
     )
+
+
+def test_a_hidden_press_in_a_flow_bar_leaves_no_gap(qapp: object) -> None:
+    """Tortoise's Play bar drew "Add to Steam…" one gap in, after three hidden presses (T189).
+
+    The one rule broken is the hidden middle button: the third must start where
+    the second would have, and the bar must be no wider than the two it shows.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.widgets.flow_layout import flow_bar
+
+    bar = flow_bar()
+    first, hidden, third = (QPushButton(text, bar) for text in ("One", "Two", "Three"))
+    for button in (first, hidden, third):
+        bar.flow().addWidget(button)
+    hidden.setVisible(False)
+    bar.resize(600, 80)
+    bar.show()
+    process_events()
+
+    spacing = bar.flow().spacing()
+    assert (
+        third.x() == first.x() + first.width() + spacing
+    ), f"the third press starts at {third.x()}, after a hidden one's gap"
+    assert bar.flow().sizeHint().width() == first.sizeHint().width() + spacing + (
+        third.sizeHint().width()
+    )
