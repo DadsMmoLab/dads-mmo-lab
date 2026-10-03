@@ -919,7 +919,7 @@ class CatalogView(QWidget):
         # password it last carried. `ask()` clears the answer on the way out;
         # this stops the objects accumulating (review, 2026-08-22).
         if self._prompter is None:
-            self._prompter = InputPrompter(self)
+            self._prompter = InputPrompter(self, purpose="set up Docker for the install")
         prompter = self._prompter
         prompter.bind_cancel(cancel)
         started = self._log.run(

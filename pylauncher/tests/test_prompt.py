@@ -26,6 +26,7 @@ import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -353,11 +354,14 @@ def test_prompter_carries_the_answer_from_the_gui_thread_to_the_worker(
 
     seen: list[tuple[str, bool]] = []
 
-    def fake_dialog(_parent, _title, label, echo, _text):  # type: ignore[no-untyped-def]
-        seen.append((label, echo == prompt_module.QLineEdit.EchoMode.Password))
-        return "hunter2", True
+    def fake_exec(dialog):  # type: ignore[no-untyped-def]
+        seen.append(
+            (dialog.labelText(), dialog.textEchoMode() == prompt_module.QLineEdit.EchoMode.Password)
+        )
+        dialog.setTextValue("hunter2")
+        return prompt_module.QDialog.DialogCode.Accepted
 
-    monkeypatch.setattr(prompt_module.QInputDialog, "getText", staticmethod(fake_dialog))
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", fake_exec)
 
     prompter = InputPrompter()
     answer: list[str | None] = []
@@ -368,7 +372,9 @@ def test_prompter_carries_the_answer_from_the_gui_thread_to_the_worker(
     worker.join(timeout=HANG_BOUND)
 
     assert answer == ["hunter2"]
-    assert seen == [("[sudo] password for pk:", True)], "a password must be masked"
+    ((label, masked),) = seen
+    assert masked, "a password must be masked"
+    assert label.endswith("[sudo] password for pk:"), label
 
 
 def test_prompter_stops_waiting_when_the_job_is_cancelled(
@@ -379,8 +385,8 @@ def test_prompter_stops_waiting_when_the_job_is_cancelled(
 
     monkeypatch.setattr(
         prompt_module.QInputDialog,
-        "getText",
-        staticmethod(lambda *a, **k: ("", False)),
+        "exec",
+        lambda dialog: prompt_module.QDialog.DialogCode.Rejected,
     )
     cancel = threading.Event()
     prompter = InputPrompter()
@@ -431,9 +437,11 @@ def test_the_prompter_does_not_keep_the_answer_after_handing_it_over(
     """
     from yulon.ui.widgets import prompt as prompt_module
 
-    monkeypatch.setattr(
-        prompt_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("hunter2", True))
-    )
+    def answers(dialog):  # type: ignore[no-untyped-def]
+        dialog.setTextValue("hunter2")
+        return prompt_module.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", answers)
     prompter = InputPrompter()
     answer: list[str | None] = []
 
@@ -459,8 +467,11 @@ def test_no_dialog_opens_for_a_job_that_was_already_cancelled(
     opened: list[str] = []
     monkeypatch.setattr(
         prompt_module.QInputDialog,
-        "getText",
-        staticmethod(lambda *a, **k: (opened.append(a[2] if len(a) > 2 else ""), ("", False))[1]),
+        "exec",
+        lambda dialog: (
+            opened.append(dialog.labelText()),
+            prompt_module.QDialog.DialogCode.Rejected,
+        )[1],
     )
     cancel = threading.Event()
     cancel.set()  # already cancelled before anything is asked
@@ -1092,11 +1103,85 @@ def test_a_prompter_can_name_its_own_dialog_title(
 
     titles: list[str] = []
 
-    def get_text(_parent: object, title: str, *_a: object, **_k: object) -> tuple[str, bool]:
-        titles.append(title)
-        return "y", True
+    def answers(dialog: Any) -> object:
+        titles.append(dialog.windowTitle())
+        dialog.setTextValue("y")
+        return prompt_module.QDialog.DialogCode.Accepted
 
-    monkeypatch.setattr(prompt_module.QInputDialog, "getText", staticmethod(get_text))
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", answers)
     prompt_module.InputPrompter(None, title="Reinstalling Docker")._show("Go on? (y/n): ", False)
     prompt_module.InputPrompter(None)._show("Go on? (y/n): ", False)
     assert titles == ["Reinstalling Docker", prompt_module.INSTALLER_TITLE]
+
+
+# -- T194 C29: a sudo prompt says whose password and why ----------------------
+
+
+def test_a_sudo_prompt_says_whose_password_it_is_and_what_it_is_for(qapp: object) -> None:
+    """`[sudo] password for pk:` under "The installer needs an answer" was all a player got."""
+    from yulon.ui.widgets import prompt as prompt_module
+
+    dialog = InputPrompter(purpose="reinstall Docker")._dialog_for(
+        "[sudo] password for user:", True
+    )
+
+    label = dialog.labelText()
+    assert label.startswith("Yu'lon needs this computer's password"), label
+    assert "(the one you log in with) to reinstall Docker." in label, label
+    assert "never saved" in label, label
+    assert label.endswith("[sudo] password for user:"), label
+    assert dialog.textEchoMode() == prompt_module.QLineEdit.EchoMode.Password
+
+
+def test_a_prompt_that_is_not_sudo_is_shown_as_it_came(qapp: object) -> None:
+    """Only sudo's line is explained; a script's own question already says what it wants."""
+    dialog = InputPrompter(purpose="reinstall Docker")._dialog_for("Go on? (y/n): ", False)
+    assert dialog.labelText() == "Go on? (y/n):"
+
+
+def test_the_shown_dialog_is_the_one_dialog_for_builds(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_show` must put up `_dialog_for`'s dialog, not a second copy of the wording."""
+    from yulon.ui.widgets import prompt as prompt_module
+
+    shown: list[str] = []
+
+    def fake_exec(dialog: Any) -> object:
+        shown.append(dialog.labelText())
+        return prompt_module.QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", fake_exec)
+    prompter = InputPrompter(purpose="set up Docker for the install")
+    prompter._show("[sudo] password for pk:", True)
+
+    assert shown == [prompter._dialog_for("[sudo] password for pk:", True).labelText()]
+    assert "to set up Docker for the install." in shown[0]
+
+
+def test_the_catalog_asks_for_the_password_to_set_up_docker(qapp: object, tmp_path: Path) -> None:
+    """The install's prompter is built with its purpose, so its sudo line says why."""
+    from yulon.catalog.catalog import load_catalog
+    from yulon.ui.catalog_view import CatalogView
+
+    catalog = load_catalog()
+    panel = LogPanel()
+    view = CatalogView(
+        catalog,
+        lambda e: _NoopInstaller(e),
+        panel,
+        platform_id=lambda: "linux",
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+    )
+    try:
+        view.start_install(catalog.get("wow-wotlk"))
+        wait_for_panel(panel)
+        prompter = view._prompter
+        assert prompter is not None
+        label = prompter._dialog_for("[sudo] password for pk:", True).labelText()
+        assert "to set up Docker for the install." in label, label
+    finally:
+        panel.stop()
+        assert panel.wait(HANG_BOUND_MS), "the panel's job never joined after stop()"
+        process_events(50)

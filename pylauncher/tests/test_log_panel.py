@@ -128,7 +128,7 @@ def test_job_exception_becomes_a_failed_status_not_a_crash(qapp: object) -> None
     panel.run(source)
     wait_for_panel(panel)
     assert _unstamped(panel) == ["before"]
-    assert finished == [(False, "RuntimeError: boom")]
+    assert finished == [(False, "boom")]
 
 
 def test_stop_ends_an_endless_job(qapp: object) -> None:
@@ -1236,10 +1236,10 @@ def test_a_failed_run_turns_the_bar_red_and_keeps_the_label(qapp: object) -> Non
     panel.append("Step 3 of 9 (33%): clone-core")
     panel.append(lines.PROGRESS + "clone-core 42 Receiving objects")
     assert panel._bar.styleSheet() == ""
-    panel._on_finished(False, "InstallerError: the clone failed")
+    panel._on_finished(False, "the clone failed")
     red = tone_colour(PALETTE["failure"], _theme(panel))
     assert red is not None and red.name() in panel._bar.styleSheet()
-    assert panel.step_text() == "Step 3 of 9 · clone-core"
+    assert panel.step_text() == "Stopped at step 3 of 9 · clone-core"
 
 
 def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
@@ -1437,7 +1437,7 @@ def test_a_recorded_run_keeps_every_line_and_its_verdict_on_disk(qapp: object) -
     lines_on_disk = _recorded(path)
     assert lines_on_disk[0] == "--- Installing X"
     assert [STAMP.sub("", line, count=1) for line in lines_on_disk[1:3]] == ["cloning", "building"]
-    assert lines_on_disk[-1] == "--- FAILED: RuntimeError: boom"
+    assert lines_on_disk[-1] == "--- FAILED: boom"
 
 
 def test_a_stopped_recorded_run_keeps_its_cleanup_lines_and_says_cancelled(qapp: object) -> None:
@@ -1606,3 +1606,114 @@ def test_the_next_run_without_an_ending_says_finished_again(qapp: object) -> Non
     wait_for_panel(panel)
 
     assert panel.status_text() == "finished: done"
+
+
+# -- T194 C8: a failure in plain words, whole, under the strip -----------------
+
+
+def test_a_failure_says_its_reason_in_full_without_the_class_name(
+    qapp: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`KeyError: 'x'` was the header: a Python class name, elided to one line.
+
+    The class name goes to the app log, where a bug report wants it; the screen
+    gets the reason, whole and wrapped, in its own line under the strip. The
+    stage the run died in reads as where it stopped, and the progress reading
+    from before the failure is not left claiming work is going on.
+
+    Mutation: put `type(exc).__name__` back into the worker's message and the
+    header, the signal and the new line all carry "KeyError" again.
+    """
+    panel = LogPanel()
+    panel.resize(500, 300)
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+
+    def source() -> Iterator[str]:
+        yield "Step 3 of 9 (33%): Clone"
+        yield lines.PROGRESS + "Clone 42 Receiving objects:  42% (420/1000)"
+        raise KeyError("x")
+
+    assert panel.failure_label.isHidden(), "the failure line is up before anything failed"
+    with caplog.at_level(logging.WARNING):
+        panel.run(source)
+        wait_for_panel(panel)
+
+    assert finished == [(False, "'x'")]
+    assert "KeyError" not in panel.status_text(), panel.status_text()
+    assert panel.status_text() == "FAILED: 'x'"
+    assert panel.failure_label.isVisibleTo(panel)
+    assert panel.failure_label.wordWrap()
+    assert panel.failure_label.text() == "'x'"
+    assert panel.step_text() == "Stopped at step 3 of 9 · Clone"
+    assert panel.progress_text() == ""
+    assert any(
+        "KeyError" in record.getMessage() for record in caplog.records
+    ), "the class name was dropped from the log as well as the screen"
+
+
+def test_the_failure_line_carries_a_long_reason_whole_and_a_new_run_takes_it_down(
+    qapp: object,
+) -> None:
+    """The header elides; this line is where the whole refusal is read."""
+    reason = (
+        "/home/pk is your home folder itself. A server needs a folder of its own, so pick "
+        "or make an empty folder inside it, such as /home/pk/wow-server, and press Install "
+        "again. Nothing was written."
+    )
+
+    def refused() -> Iterator[str]:
+        yield "Step 1 of 9 (11%): preflight"
+        raise RuntimeError(reason)
+
+    panel = LogPanel()
+    panel.resize(400, 300)
+    panel.run(refused)
+    wait_for_panel(panel)
+    assert panel.failure_label.text() == reason
+    assert panel.failure_label.isVisibleTo(panel)
+
+    panel.run(lambda: iter(["fine"]))
+    wait_for_panel(panel)
+    assert panel.failure_label.text() == ""
+    assert panel.failure_label.isHidden(), "the last run's failure stayed up over this one"
+
+
+def test_a_failure_with_nothing_to_say_still_says_something(qapp: object) -> None:
+    """`str(exc)` is empty for a bare `raise SomeError()`; an empty FAILED: is no answer."""
+
+    def silent() -> Iterator[str]:
+        yield "a line"
+        raise RuntimeError()
+
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    panel.run(silent)
+    wait_for_panel(panel)
+
+    sentence = "It stopped on an error it did not describe; the Logs tab has the details."
+    assert finished == [(False, sentence)]
+    assert panel.failure_label.text() == sentence
+    assert "RuntimeError" not in panel.status_text()
+
+
+@pytest.mark.parametrize(("lasted", "shown"), [(0.2, ""), (90.0, "0:01:30")])
+def test_a_failure_in_under_a_second_shows_no_elapsed_time(
+    qapp: object, lasted: float, shown: str
+) -> None:
+    """A preflight refusal read `0:00:00` beside FAILED, as if the job had a duration.
+
+    Mutation: drop the under-a-second rule and the 0.2 s case reads `0:00:00`.
+    """
+    clock = _HandClock()
+    panel = LogPanel(seams=Seams(monotonic=clock))
+
+    def refused() -> Iterator[str]:
+        clock.wind(lasted)
+        raise RuntimeError("refused")
+        yield "never"  # pragma: no cover - makes this a generator
+
+    panel.run(refused)
+    wait_for_panel(panel)
+    assert panel.elapsed_text() == shown, panel.elapsed_text()

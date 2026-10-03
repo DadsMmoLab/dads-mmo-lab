@@ -78,6 +78,12 @@ class Seams:
 
 _MAX_BLOCKS = 5000
 
+UNDESCRIBED_FAILURE = "It stopped on an error it did not describe; the Logs tab has the details."
+"""What a failed run says when its error carried no words of its own (T194 C8)."""
+
+_SHORTEST_ELAPSED_S = 1.0
+"""A failed run shorter than this shows no elapsed time: `0:00:00` is not a duration."""
+
 _STICK_SLACK_PX = 4
 """How far off the bottom still counts as "at the bottom".
 
@@ -380,7 +386,10 @@ class _StreamWorker(QObject):
                 self.line.emit(text)
         except Exception as exc:  # boundary: anything the job raises becomes a UI message
             ok = False
-            message = f"{type(exc).__name__}: {exc}"
+            # The reason alone (T194 C8): the class name is for the log line
+            # below, not for the screen and not for `run_finished`'s readers.
+            message = str(exc) or UNDESCRIBED_FAILURE
+            raised = f"{type(exc).__name__}: {exc}"
             if self._stop:
                 # A SOURCE THAT RAISES AFTER A STOP IS THE STOP TAKING EFFECT.
                 # `request_stop()` ends the job's children, and a terminated
@@ -392,10 +401,10 @@ class _StreamWorker(QObject):
                 # `_on_finished` exists to fix. The text is kept in the log, at
                 # debug, so a genuine failure that happened to land in the same
                 # millisecond is not lost.
-                logger.debug(f"log panel job ended after a stop was asked for: {message}")
+                logger.debug(f"log panel job ended after a stop was asked for: {raised}")
                 ok, message = True, "stopped"
             else:
-                logger.warning(f"log panel job failed: {message}")
+                logger.warning(f"log panel job failed: {raised}")
         if self._stop:
             # Said HERE and not only in the loop above, so all three ways out
             # agree. The break reports a stop; a source that returned on its own
@@ -656,14 +665,28 @@ class LogPanel(QWidget):
         header.addWidget(self._progress_label, 2)
         header.addWidget(self._elapsed_label)
         header.addWidget(self._stop_button)
+        # T194 C8: the whole reason a run failed, wrapped, under the strip. The
+        # header above elides it to one line for T32/T83's reasons; this line
+        # is where it is read in full. Hidden until a run fails, and taken down
+        # by the next `run()`.
+        self.failure_label = QLabel("", self)
+        self.failure_label.setWordWrap(True)
+        self.failure_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.failure_label.setVisible(False)
         layout = QVBoxLayout(self)
         layout.addLayout(header)
+        layout.addWidget(self.failure_label)
         layout.addWidget(self._text, 1)
 
         self._cancel: threading.Event | None = None
         self._ended: str | None = None
         self._job_label = "log panel (no job yet)"
         self._started_at: float | None = None
+        # The last stage line that parsed, so a failure can say where it stopped.
+        self._step: lines.Step | None = None
         # One second, because the field it drives has a seconds place; a faster
         # tick repaints a label that cannot have changed.
         self._ticker = QTimer(self)
@@ -868,6 +891,7 @@ class LogPanel(QWidget):
         step = lines.parse_step(line)
         if step is None:
             return
+        self._step = step
         self._step_label.say(f"Step {step.number} of {step.total} · {step.name}")
 
     def _show_progress(self, parsed: lines.Parsed) -> None:
@@ -888,7 +912,10 @@ class LogPanel(QWidget):
 
     def _clear_strip(self) -> None:
         """Take the last run's strip down. Called by `run()`, for the elapsed field's reason."""
+        self._step = None
         self._step_label.say("")
+        self.failure_label.setText("")
+        self.failure_label.setVisible(False)
         self._progress_label.say("")
         self._bar.setStyleSheet("")
         self._bar.setRange(0, 100)
@@ -1080,12 +1107,27 @@ class LogPanel(QWidget):
         # the next `run()` resets it.
         self._ticker.stop()
         self._show_elapsed()
+        if not ok and self._lasted() < _SHORTEST_ELAPSED_S:
+            # A refusal before the job got going (a preflight) read `0:00:00`
+            # beside FAILED, which is not a duration of anything (T194 C8).
+            self._elapsed_label.setText("")
         # The strip is LEFT STANDING, and the bar goes red on a refusal. Which
         # of the nine stages an install died in is the first thing anybody asks
         # of a failed run, and it is already on screen — clearing it would
         # throw away the one field that answers before the log is scrolled.
+        #
+        # T194 C8: kept, but said as where the run STOPPED, and the progress
+        # reading beside it goes: "Receiving objects: 42%" after a failure
+        # claims work that is no longer happening. The whole reason goes on its
+        # own wrapped line under the strip.
         if not ok:
             self._bar.setStyleSheet(_bar_style(self._text.palette()))
+            if self._step is not None:
+                step = self._step
+                self._step_label.say(f"Stopped at step {step.number} of {step.total} · {step.name}")
+            self._progress_label.say("")
+            self.failure_label.setText(message)
+            self.failure_label.setVisible(True)
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
 
@@ -1105,6 +1147,12 @@ class LogPanel(QWidget):
         # The same clock the zero was taken from, necessarily: a difference
         # between two different clocks is not a duration of anything.
         self._elapsed_label.setText(_elapsed(self._seams.monotonic() - self._started_at))
+
+    def _lasted(self) -> float:
+        """How long the current or last run has been going, in seconds."""
+        if self._started_at is None:
+            return 0.0
+        return self._seams.monotonic() - self._started_at
 
     def elapsed_text(self) -> str:
         """What the header's elapsed field says (tests / accessibility)."""

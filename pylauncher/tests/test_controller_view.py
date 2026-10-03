@@ -349,7 +349,9 @@ def test_server_tab_status_start_and_port_conflict_message(
     view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
     ps.names = "ac-database\n"
     view.refresh_status()
-    assert "db up, auth down, world down" in view.status_label.text()
+    assert (
+        "Database running · Login server stopped · World server stopped" in view.status_label.text()
+    )
     assert view.start_button.isEnabled() and view.stop_button.isEnabled()
 
     # A foreign container on 3724 → README §12 message, compose up never runs.
@@ -2345,7 +2347,7 @@ def test_the_loopback_plan_shown_in_the_tab_says_what_it_costs(
     view.loopback_radio.setChecked(True)
     view.show_network_plan()
     text = view.network_text.toPlainText()
-    assert "Mode: loopback" in text, text
+    assert "Playing: Only this computer (127.0.0.1)" in text, text
     assert "Players set realmlist to: 127.0.0.1" in text, text
     assert "no other machine" in text, text
     assert view.apply_button.isEnabled() is True, "a loopback plan could not be applied"
@@ -2409,11 +2411,12 @@ def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_
     view.internet_radio.setChecked(True)
     view.show_network_plan()
     text = view.network_text.toPlainText()
-    assert "Mode: internet" in text, text
-    assert "firewall-cmd --permanent --zone=docker --add-port=3724/tcp" in text, text
-    assert "\n  firewall-cmd --zone=docker --add-port=3724/tcp\n" in text, text
-    assert "\n  firewall-cmd --zone=public --add-port=8085/tcp\n" in text, text
-    assert "firewall-cmd --reload" not in text, text
+    commands = view.network_details.text() + "\n"
+    assert "Playing: Internet play (friends elsewhere)" in text, text
+    assert "firewall-cmd --permanent --zone=docker --add-port=3724/tcp" in commands, commands
+    assert "\n  firewall-cmd --zone=docker --add-port=3724/tcp\n" in commands, commands
+    assert "\n  firewall-cmd --zone=public --add-port=8085/tcp\n" in commands, commands
+    assert "firewall-cmd --reload" not in commands + text, commands
     assert "REFUSED" not in text, text
     assert (
         "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public right now "
@@ -2452,15 +2455,16 @@ def test_the_loopback_plan_in_the_tab_offers_to_open_no_ports(
     view.loopback_radio.setChecked(True)
     view.show_network_plan()
     quiet = view.network_text.toPlainText()
-    assert "Mode: loopback" in quiet, quiet
-    assert "Firewall commands:" not in quiet, quiet
-    assert "ufw allow" not in quiet, quiet
+    assert "Playing: Only this computer (127.0.0.1)" in quiet, quiet
+    assert "open the game ports" not in quiet, quiet
+    assert "ufw allow" not in quiet + view.network_details.text(), view.network_details.text()
 
     view.lan_radio.setChecked(True)
     view.show_network_plan()
     loud = view.network_text.toPlainText()
-    assert "Mode: lan" in loud, loud
-    assert "ufw allow 3724/tcp" in loud, loud
+    assert "Playing: LAN (same Wi-Fi)" in loud, loud
+    assert "Apply will open the game ports in ufw" in loud, loud
+    assert "ufw allow 3724/tcp" in view.network_details.text(), view.network_details.text()
     view.close()
 
 
@@ -3029,13 +3033,13 @@ def test_the_status_line_holds_still_while_an_action_of_ours_is_running(
     ps.names = "\n".join([WOTLK.container_spec().db, WOTLK.container_spec().world])
 
     view._set_busy(True)
-    view.status_label.setText("status: stopping…")
+    view.status_label.setText("Stopping…")
     view.refresh_status()
-    assert view.status_label.text() == "status: stopping…", "the poll overwrote a live action"
+    assert view.status_label.text() == "Stopping…", "the poll overwrote a live action"
 
     view._set_busy(False)
     view.refresh_status()
-    assert "db up" in view.status_label.text(), "the label never came back"
+    assert "Database running" in view.status_label.text(), "the label never came back"
 
 
 def test_every_action_button_is_locked_while_an_action_runs(
@@ -4251,7 +4255,7 @@ def test_the_tab_reads_its_status_at_once_instead_of_a_poll_interval_later(
     )
 
     assert "unknown" not in view.status_label.text()
-    assert "world up" in view.status_label.text()
+    assert "World server running" in view.status_label.text()
 
 
 def test_polling_that_is_switched_off_stays_off_including_the_first_read(
@@ -4262,7 +4266,7 @@ def test_polling_that_is_switched_off_stays_off_including_the_first_read(
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
-    assert view.status_label.text() == "status: unknown"
+    assert view.status_label.text() == "Status unknown"
 
 
 def test_the_verdict_line_says_the_population_above_the_three_words(
@@ -4320,7 +4324,7 @@ def test_a_verdict_that_raises_leaves_the_tab_working(
     assert "could not" in view.verdict_label.text()
     ps.names = "ac-database\n"
     view.refresh_status()
-    assert "db up" in view.status_label.text()
+    assert "Database running" in view.status_label.text()
 
 
 def test_a_stop_names_the_file_the_servers_log_was_saved_to(
@@ -6663,7 +6667,7 @@ def test_a_stop_before_a_removal_leaves_no_stopping_words_behind_when_it_succeed
 
     ((status, problem),) = at_the_emit
     assert status != controller_view_module.STOPPING_FOR_REMOVAL
-    assert "world down" in status, "the status was not asked again"
+    assert "World server stopped" in status, "the status was not asked again"
     assert problem != controller_view_module.STOPPING_FOR_REMOVAL_WAIT
 
 
@@ -6709,7 +6713,7 @@ def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
 
     status = view.status_label.text()
     assert status == controller_view_module.STOPPING_FOR_REMOVAL
-    assert "stopping the server first" in status
+    assert "Stopping the server first" in status
     said = view.problem_label.text()
     assert "still loading" in said and "few minutes" in said
     assert not view.refresh_button.isEnabled(), "the stop is running"
@@ -7284,9 +7288,7 @@ def test_a_rebuild_refused_on_its_worker_thread_reaches_the_view_with_its_messag
     pump_until(lambda: bool(heard), "the refusal to reach the view")
 
     assert len(ran_on) == 1 and ran_on[0] is not threading.main_thread(), "ran on the GUI thread"
-    assert heard == [
-        ("InstallerError: that compose file was not written by Yu'lon", threading.main_thread())
-    ]
+    assert heard == [("that compose file was not written by Yu'lon", threading.main_thread())]
     view.refresh_status()
     assert view.rebuild_action.isEnabled() is True
 
@@ -9400,8 +9402,10 @@ def test_the_add_to_steam_button_says_what_it_wrote(qapp: object, ps: _Ps, tmp_p
 
     said = view.steam_label.text()
     assert "Turtle WoW" in said and "Turtle WoW Server" in said
-    assert "shortcuts.vdf" in said and "yulon-bak-20260910-200500" in said
-    assert "GE-Proton11-6-x86_64" in said
+    # T194 C34: the files and the tool are in the Details fold under the sentence.
+    details = view.steam_details.text()
+    assert "shortcuts.vdf" in details and "yulon-bak-20260910-200500" in details
+    assert "GE-Proton11-6-x86_64" in details
     assert view.steam_button.isEnabled()
 
 
@@ -10243,7 +10247,7 @@ def test_the_next_good_poll_takes_the_banner_down(
     view.refresh_status()
 
     assert view.docker_banner.isHidden()
-    assert "db up" in view.status_label.text()
+    assert "Database running" in view.status_label.text()
     assert view.realm_badge.status != "unknown"
 
     down.down = True
@@ -25632,3 +25636,256 @@ def test_a_start_that_points_at_the_box_puts_the_box_up_itself(
             run_inline(work, ok, err)
     assert view.docker_banner.isVisibleTo(view)
     assert view.docker_banner.body_label.text() == shown
+
+
+# -- T194: results and failures in plain words (C34, A24/I5, C12/C14) ---------
+
+
+def test_add_to_steam_says_the_result_in_words_and_folds_the_files_away(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C34: the paths, backups and compatibility tool came first, "Restart Steam" last."""
+    services = _services(ps, tmp_path, [])
+    services.steam = _FakeSteam(_report(tmp_path))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.steam_button is not None
+    assert view.steam_details.isHidden(), "Details are up before anything was written"
+
+    view.steam_button.click()
+
+    said = view.steam_label.text()
+    assert said.startswith("Added to your Steam library"), said
+    assert "Restart Steam" in said
+    assert "/" not in said, said
+    details = view.steam_details
+    assert details.isVisibleTo(view)
+    assert details.collapsed, "the files are open before anyone asked for them"
+    assert not details.text_box.isVisibleTo(view)
+    assert "shortcuts.vdf.yulon-bak-20260910-200500" in details.text()
+    assert "GE-Proton11-6-x86_64" in details.text()
+    assert str(tmp_path / "userdata/18347166/config/grid") in details.text()
+
+    details.handle.toggle()
+    assert details.text_box.isVisibleTo(view)
+    assert details.text_box.isReadOnly()
+    assert "shortcuts.vdf" in details.text_box.toPlainText()
+
+
+def test_a_refused_add_to_steam_takes_the_last_presss_details_down(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fold under a refusal would hold files this press never wrote."""
+    services = _services(ps, tmp_path, [])
+    fake = _FakeSteam(_report(tmp_path))
+    services.steam = fake
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.steam_button is not None
+    view.steam_button.click()
+    assert view.steam_details.isVisibleTo(view)
+
+    fake.outcome = steam.SteamRefusal(steam.RUNNING)
+    view.steam_button.click()
+
+    assert "Steam is running" in view.steam_label.text()
+    assert view.steam_details.isHidden()
+
+
+def _netsh_plan(mode: str) -> NetworkPlan:
+    """A Windows plan with every kind of command: firewall rules, a portproxy and the SQL."""
+    return NetworkPlan(
+        mode=cast(Any, mode),
+        game_id="wow-wotlk",
+        lan_ip="192.168.1.25",
+        public_ip=None,
+        ports=(3724, 8085),
+        firewall="netsh",
+        firewall_commands=(
+            (
+                "netsh",
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Yulon 3724",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                "localport=3724",
+            ),
+        ),
+        portproxy_commands=(
+            (
+                "netsh",
+                "interface",
+                "portproxy",
+                "add",
+                "v4tov4",
+                "listenport=3724",
+                "connectaddress=172.20.0.2",
+            ),
+        ),
+        realmlist_sql="UPDATE realmlist SET address='192.168.1.25' WHERE id=1;",
+        client_realmlist="192.168.1.25",
+    )
+
+
+def test_the_network_plan_reads_as_words_and_the_commands_are_in_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A24/I5: argv lists and the realmlist UPDATE were the plan a player read."""
+    from tests.support_player_text import visible_texts
+
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    page = view.network_text.parentWidget()
+    view.show_network_plan()
+
+    shown = view.network_text.toPlainText()
+    for word in ("netsh", "UPDATE", "advfirewall", "portproxy", "localport=", "('"):
+        assert word not in shown, f"{word!r} is in the plan a player reads:\n{shown}"
+    assert "192.168.1.25" in shown, shown
+    assert "3724" in shown and "8085" in shown, shown
+    assert "Windows Firewall" in shown, shown
+    for _name, _where, text in visible_texts(page):
+        assert "netsh" not in text and "UPDATE" not in text, text
+
+    details = view.network_details
+    assert details.isVisibleTo(page) and details.collapsed
+    held = details.text()
+    assert (
+        "netsh advfirewall firewall add rule name=Yulon 3724 dir=in action=allow protocol=TCP "
+        "localport=3724"
+    ) in held, held
+    assert "netsh interface portproxy add v4tov4 listenport=3724 connectaddress=172.20.0.2" in held
+    assert "UPDATE realmlist SET address='192.168.1.25' WHERE id=1;" in held
+    assert view.apply_button.isEnabled()
+
+
+def test_a_plan_with_nothing_to_run_has_no_details_fold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No commands and no SQL: a fold with nothing in it is a press that shows nothing."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: replace(
+        _netsh_plan(mode),
+        firewall="none",
+        firewall_commands=(),
+        portproxy_commands=(),
+        realmlist_sql=None,
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    assert view.network_details.isHidden()
+
+
+def test_a_plan_or_apply_that_fails_says_so_in_a_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C12/C14: "could not plan:" and "APPLY FAILED:" read as shouted log lines."""
+    services = _services(ps, tmp_path, [])
+
+    def refuses(mode: str) -> NetworkPlan:
+        raise RuntimeError("the LAN address could not be read")
+
+    services.network_plan = refuses
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    assert view.network_text.toPlainText() == (
+        "Could not work out the plan: the LAN address could not be read"
+    )
+    assert view.network_details.isHidden()
+
+    services.network_plan = _netsh_plan
+
+    def apply_refuses(plan: NetworkPlan) -> NetworkReport:
+        raise RuntimeError("netsh needs an administrator")
+
+    services.network_apply = apply_refuses
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert shown.endswith("\nApply did not finish: netsh needs an administrator"), shown
+    assert "APPLY FAILED" not in shown
+
+
+def test_the_status_line_names_the_three_servers_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C12: "status: db up, auth up, world down" was three abbreviations and a colon."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.status_label.text() == "Status unknown"
+    spec = WOTLK.container_spec()
+    ps.names = "\n".join([spec.db, spec.auth])
+
+    view.refresh_status()
+
+    assert view.status_label.text() == (
+        "Database running · Login server running · World server stopped"
+    )
+
+
+def test_a_good_poll_takes_the_starts_pointer_at_the_box_down_with_the_box(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 2's carried finding: "See the box above" stayed up after the box went."""
+    view, jobs = _deferred_view(ps, tmp_path)
+    real_status = view.services.controller.status
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    jobs.clear()
+    view.start_server()
+    _run_the_start(view, jobs)
+    assert view.problem_label.text() == controller_view_module.START_FAILED_DOCKER_GONE
+
+    # The Start's own follow-up read fails the same way: the box stays, and so
+    # does the line pointing at it.
+    for work, ok, err in list(jobs):
+        jobs.remove((work, ok, err))
+        run_inline(work, ok, err)
+    assert view.docker_banner.isVisibleTo(view)
+    assert view.problem_label.text() == controller_view_module.START_FAILED_DOCKER_GONE
+
+    # Docker is back: the next poll is a good one.
+    view.services.controller.status = real_status  # type: ignore[method-assign]
+    ps.names = WOTLK.container_spec().db
+    view.refresh_status()
+    while jobs:
+        run_inline(*jobs.pop(0))
+
+    assert view.docker_banner.isHidden()
+    assert view.problem_label.text() == ""
+    assert view.problem_label.isHidden()
+
+
+def test_a_good_poll_leaves_any_other_problem_line_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Only the three pointers at the box go with it; a refusal of another kind stays."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.problem_label.setText("Port 3724 is in use by another program.")
+    ps.names = WOTLK.container_spec().db
+    view.refresh_status()
+    assert view.problem_label.text() == "Port 3724 is in use by another program."
+
+
+def test_the_docker_reinstall_asks_for_the_password_by_saying_what_it_is_for(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C29: the Deck repair's sudo prompt says why, then the raw line."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        yulon_platform,
+        "repair_docker_after_steamos_update",
+        lambda **kw: yulon_platform.ProvisionReport("linux"),
+    )
+    view.reinstall_docker()
+    prompter = view._docker_prompter
+    assert prompter is not None
+    label = prompter._dialog_for("[sudo] password for deck:", True).labelText()
+    assert label.startswith("Yu'lon needs this computer's password"), label
+    assert "to reinstall Docker." in label, label
+    assert label.endswith("[sudo] password for deck:"), label

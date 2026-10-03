@@ -120,7 +120,8 @@ class _ReadFailed(Exception):
     """
 
     def __init__(self, generation: int, cause: Exception) -> None:
-        super().__init__(f"{type(cause).__name__}: {cause}")
+        # The cause's own words; its class goes to the log in `_read_failed`.
+        super().__init__(str(cause))
         self.generation = generation
         self.cause = cause
 
@@ -162,8 +163,8 @@ def _read_logs(
             for item in support_sources.viewables(sources)
         )
     except Exception as exc:  # boundary: the tab says so rather than losing the read
-        logger.warning(f"the Logs tab could not list its files: {type(exc).__name__}")
-        return _Read(generation, (), None, f"The logs could not be listed ({type(exc).__name__}).")
+        logger.warning(f"the Logs tab could not list its files: {type(exc).__name__}: {exc}")
+        return _Read(generation, (), None, LOGS_NOT_LISTED)
     shown = next((item.path for item in items if str(item.path) == wanted), None)
     if shown is None and items:
         shown = items[0].path
@@ -194,6 +195,13 @@ def _size_text(size: int) -> str:
     return f"{max(1, round(size / 1000))} KB"
 
 
+LOGS_NOT_LISTED = "The logs could not be listed. Yu'lon's own log has the details."
+"""The viewer's text when the list of logs could not be made (T194 C8: no class name)."""
+
+LOGS_NOT_READ = "The logs could not be read. Yu'lon's own log has the details."
+"""The viewer's text when a read failed past `_read_logs` (T194 C8: no class name)."""
+
+
 def _why_not_saved(name: str, error: object) -> str:
     """One line for the status bar: which file, what the OS said, and what to try."""
     if isinstance(error, OSError):
@@ -206,10 +214,7 @@ def _why_not_saved(name: str, error: object) -> str:
         else:
             hint = "Try again, or pick another folder."
         return f"Could not save {name}: {said}. {hint}"
-    return (
-        f"Could not save {name}: something went wrong ({type(error).__name__}). "
-        "Yu'lon's own log has the details."
-    )
+    return f"Could not save {name}: something went wrong. Yu'lon's own log has the details."
 
 
 class LogsView(QWidget):
@@ -354,10 +359,10 @@ class LogsView(QWidget):
             if error.generation != self._generation:
                 return
             error = error.cause
-        logger.debug(f"a Logs tab read failed: {type(error).__name__}")
+        logger.warning(f"a Logs tab read failed: {type(error).__name__}: {error}")
         if self._reading:
             self._reading = False
-            self.viewer.setPlainText(f"The logs could not be read ({type(error).__name__}).")
+            self.viewer.setPlainText(LOGS_NOT_READ)
 
     def shown_text(self) -> str:
         """What the viewer shows -- already redacted."""
@@ -453,6 +458,9 @@ class LogsView(QWidget):
     def _save_failed(self, error: object) -> None:
         name = self._saving_to.name if self._saving_to is not None else "the support file"
         self._set_saving(None)
+        if not isinstance(error, OSError):
+            # The line on screen names no class (T194 C8); this is the log it points at.
+            logger.warning(f"support file not saved: {type(error).__name__}: {error}")
         self.status.setText(_why_not_saved(name, error))
 
     def _set_saving(self, dest: Path | None) -> None:

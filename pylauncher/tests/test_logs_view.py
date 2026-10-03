@@ -329,7 +329,60 @@ def test_the_newest_read_that_fails_says_so(qapp: object, monkeypatch: pytest.Mo
     view = _view(jobs=_holding(held))
     view.refresh()
     _settle(held[0])
-    assert view.shown_text() == "The logs could not be read (RuntimeError)."
+    assert view.shown_text() == "The logs could not be read. Yu'lon's own log has the details."
+
+
+def test_a_failed_read_says_so_in_words_and_logs_the_class_name(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T194 C8: "(RuntimeError)" was the whole explanation; the app log is where it belongs."""
+
+    def read_logs(*args: Any) -> object:
+        raise RuntimeError("broke")
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    held: Held = []
+    view = _view(jobs=_holding(held))
+    view.refresh()
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        _settle(held[0])
+    assert view.shown_text() == "The logs could not be read. Yu'lon's own log has the details."
+    assert any(
+        "RuntimeError" in r.getMessage() and "broke" in r.getMessage() for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_a_listing_that_fails_says_so_without_a_class_name(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same rule for the listing: "(KeyError)" on screen, the reason nowhere."""
+
+    def sources_for_app(*args: Any, **kwargs: Any) -> object:
+        raise KeyError("x")
+
+    monkeypatch.setattr(support_sources, "sources_for_app", sources_for_app)
+    view = _view()
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        view.refresh()
+    assert view.shown_text() == "The logs could not be listed. Yu'lon's own log has the details."
+    assert any("KeyError" in r.getMessage() for r in caplog.records)
+
+
+def test_a_save_that_fails_for_no_os_reason_names_no_class(
+    qapp: object, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Not an `OSError`: the line said "something went wrong (ValueError)"."""
+    view = _view(
+        pick_save_path=lambda parent, suggested: tmp_path / "support.zip",
+        jobs=lambda work, done, failed: failed(ValueError("bad zip member")),
+    )
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        view.save_for_support()
+    text = view.status.text()
+    assert text == (
+        "Could not save support.zip: something went wrong. Yu'lon's own log has the details."
+    ), text
+    assert any("ValueError" in r.getMessage() for r in caplog.records)
 
 
 def test_a_secret_stored_after_the_first_read_is_masked_after_a_picker_change(

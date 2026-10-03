@@ -33,7 +33,7 @@ from tests.conftest import (
 from yulon import platform, runner, wsl
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.installer import InstallEngine, InstallOptions
+from yulon.catalog.installer import InstallEngine, InstallerError, InstallOptions
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.git import CloneSpec, RunnerGit
 from yulon.support import runlog
@@ -677,6 +677,62 @@ def test_a_script_that_exits_0_without_installing_is_not_remembered(
     assert not (tmp_path / ".env").exists(), "a folder with no install was pinned"
     assert ran == [], f"the pin shelled out to {ran}"
     assert warned and "docker-compose.yml" in warned[0]
+
+
+class _RefusingInstaller(_FakeInstaller):
+    """Streams its lines, then refuses the way the engine does: an `InstallerError`."""
+
+    def run(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+        ask: object = None,
+    ) -> Iterator[str]:
+        yield from self.lines
+        raise InstallerError("The source clone failed: the network went away. Press Install again.")
+
+
+def test_the_install_failed_box_says_the_reason_without_a_class_name(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T194 C8: the box read "InstallerError: The source clone failed: ...".
+
+    The class name is a fact for the app log, not for the player reading why
+    their install stopped. The reason itself is carried whole.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(),  # type: ignore[arg-type]
+    )
+    warned: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append((a[1], a[2])))  # type: ignore[attr-defined]
+    # No docker-group restart to offer, so the plain warning is what shows
+    # (the premise the clean-exit-without-a-compose-file test states).
+    monkeypatch.setattr(platform, "_process_group_names", lambda gids: {"docker"})
+
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _RefusingInstaller(e, ["Step 3 of 9 (33%): clone-core"]),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    finished: list[tuple[str, bool, str]] = []
+    view.install_finished.connect(lambda g, ok, m: finished.append((g, ok, m)))
+
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    wait_for_panel(panel)
+
+    reason = "The source clone failed: the network went away. Press Install again."
+    assert warned == [("Install failed", reason)]
+    assert finished == [("wow-wotlk", False, reason)]
+    assert "Error" not in panel.status_text(), panel.status_text()
 
 
 def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(

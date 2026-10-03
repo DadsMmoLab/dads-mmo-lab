@@ -896,13 +896,23 @@ class AddReport:
 
 
 def confirmation(report: AddReport) -> str:
-    """The sentence the button shows: every file it touched, by name.
+    """The sentence the button shows: what is in the library now, and the one thing to do.
 
-    Long on purpose. This writes inside the user's own Steam profile, and the
-    only honest confirmation is one they can check by hand afterwards.
+    Plain words first (T194 C34): which two entries, and "Restart Steam". Every
+    file the press touched is still said, by name, in `confirmation_details()`
+    -- folded under the sentence, because this writes inside the user's own
+    Steam profile and the honest confirmation is one they can check by hand.
     """
-    verb = "Replaced" if report.replaced else "Added"
     client, server = report.entries
+    where = "Updated in your Steam library" if report.replaced else "Added to your Steam library"
+    return (
+        f"{where}: “{client}” (the game) and “{server}” (this launcher). Restart Steam to see them."
+    )
+
+
+def confirmation_details(report: AddReport) -> str:
+    """Every file the press wrote or backed up, by name, for the Details fold."""
+    client, _server = report.entries
     backup = (
         f" It was backed up first as {report.backup.name}."
         if report.backup is not None
@@ -911,14 +921,13 @@ def confirmation(report: AddReport) -> str:
     compat_backup = (
         f", backed up as {report.compat_backup.name}" if report.compat_backup is not None else ""
     )
-    return (
-        f"{verb} two entries in the Steam library: “{client}” (the game client, "
-        f"through the compatibility tool {report.compat_tool}) and “{server}” "
-        f"(this launcher). Written to {report.path}.{backup} "
-        f"{len(report.artwork)} artwork files were written under "
-        f"{report.path.parent / 'grid'}. The compatibility tool was set in "
-        f"{report.compat_path}{compat_backup}. "
-        "Restart Steam to see them."
+    return "\n".join(
+        (
+            f"Entries written to {report.path}. {backup}",
+            f"{len(report.artwork)} artwork files written under {report.path.parent / 'grid'}.",
+            f"“{client}” runs through the compatibility tool {report.compat_tool}, set in "
+            f"{report.compat_path}{compat_backup}.",
+        )
     )
 
 

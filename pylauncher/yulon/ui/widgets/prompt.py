@@ -22,7 +22,7 @@ import re
 import threading
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtWidgets import QInputDialog, QLineEdit, QWidget
+from PySide6.QtWidgets import QDialog, QInputDialog, QLineEdit, QWidget
 
 from yulon.log import get_logger
 
@@ -71,6 +71,26 @@ def tidy(prompt: str) -> str:
     return prompt.strip()
 
 
+def explain(prompt: str, purpose: str | None) -> str:
+    """The question as a player reads it: sudo's line said in words first (T194 C29).
+
+    `[sudo] password for pk:` under "The installer needs an answer" does not
+    say whose password, or why. A prompt that starts with `[sudo]` -- in any
+    language, since sudo keeps its tag -- gets a sentence saying it is this
+    computer's login password, what it is for, and that it is not kept; sudo's
+    own line follows, so nothing it asked is hidden. Any other prompt is the
+    script's own question and is shown as `tidy()` leaves it.
+    """
+    line = tidy(prompt)
+    if not line.startswith("[sudo]"):
+        return line
+    why = f" to {purpose}" if purpose else ""
+    return (
+        f"Yu'lon needs this computer's password (the one you log in with){why}. "
+        f"It goes to sudo and is never saved.\n\n{line}"
+    )
+
+
 class InputPrompter(QObject):
     """Bridges a blocked subprocess to a dialog, across the thread boundary.
 
@@ -82,9 +102,17 @@ class InputPrompter(QObject):
     #: (prompt text, whether the answer must be masked). Emitted from the worker.
     requested = Signal(str, bool)
 
-    def __init__(self, parent: QWidget | None = None, *, title: str = INSTALLER_TITLE) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        title: str = INSTALLER_TITLE,
+        purpose: str | None = None,
+    ) -> None:
+        """`purpose` finishes "Yu'lon needs this computer's password ... to <purpose>" (T194)."""
         super().__init__(parent)
         self._title = title
+        self._purpose = purpose
         self._answer: str | None = None
         self._answered = threading.Event()
         self._cancel: threading.Event | None = None
@@ -137,13 +165,24 @@ class InputPrompter(QObject):
         if self._cancel is not None and self._cancel.is_set():
             self._answered.set()
             return
-        parent = self.parent()
-        text, ok = QInputDialog.getText(
-            parent if isinstance(parent, QWidget) else None,
-            self._title,
-            prompt,
-            QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal,
-            "",
-        )
+        dialog = self._dialog_for(prompt, secret)
+        try:
+            ok = dialog.exec() == QDialog.DialogCode.Accepted
+            text = dialog.textValue()
+        finally:
+            # The typed text is not left on a dialog waiting for deletion.
+            dialog.setTextValue("")
+            dialog.deleteLater()
         self._answer = text if ok else None
         self._answered.set()
+
+    def _dialog_for(self, prompt: str, secret: bool) -> QInputDialog:
+        """The dialog `_show` puts up for this prompt, built but not yet shown."""
+        parent = self.parent()
+        dialog = QInputDialog(parent if isinstance(parent, QWidget) else None)
+        dialog.setWindowTitle(self._title)
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        dialog.setLabelText(explain(prompt, self._purpose))
+        dialog.setTextEchoMode(QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal)
+        dialog.setTextValue("")
+        return dialog

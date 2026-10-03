@@ -168,6 +168,7 @@ from yulon.ui.theme import (
     SERVER_BUILD_BUTTON,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
+from yulon.ui.widgets.details import Details
 from yulon.ui.widgets.docker_banner import DockerBanner
 from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
@@ -4217,7 +4218,7 @@ STOP_ANYWAY_TIP = (
 )
 """T158: the only way to end a load wait early, shown only while one is running."""
 
-STOPPING_FOR_REMOVAL = "status: stopping the server first, then removing it from Yu'lon…"
+STOPPING_FOR_REMOVAL = "Stopping the server first, then removing it from Yu'lon…"
 STOPPING_FOR_REMOVAL_WAIT = (
     "Stopping the server before it is removed from Yu'lon. A server still loading its "
     "world can take a few minutes to stop; the buttons unlock when it has."
@@ -4261,6 +4262,28 @@ START_FAILED_DOCKER_MISSING = (
 
 STATUS_SEE_THE_BANNER = "Status unknown (see above)"
 """The status line while the Docker banner above it says why (T194 C7)."""
+
+_POINTERS_AT_THE_BANNER = frozenset(
+    {START_FAILED_NO_DOCKER, START_FAILED_DOCKER_GONE, START_FAILED_DOCKER_MISSING}
+)
+"""A failed Start's lines that send the player to the Docker banner (T194).
+
+When the banner goes, a problem line holding one of these points at nothing,
+so it goes too; any other problem line is a refusal of its own and stays.
+"""
+
+
+def _status_words(status: InstallStatus) -> str:
+    """The three servers' state as a player says it (T194 C12)."""
+
+    def said(up: bool) -> str:
+        return "running" if up else "stopped"
+
+    return (
+        f"Database {said(status.db)} · Login server {said(status.auth)} · "
+        f"World server {said(status.world)}"
+    )
+
 
 DOCKER_DESKTOP_OPENING = (
     "Docker Desktop is starting. It can take a minute; this box goes away once Docker answers."
@@ -6823,7 +6846,7 @@ class ControllerView(QWidget):
         self.repair_channel_button = QPushButton("Repair the command channel", tab)
         self.repair_channel_button.setVisible(False)
         self.repair_channel_button.clicked.connect(self.repair_channel)
-        self.status_label = QLabel("status: unknown", tab)
+        self.status_label = QLabel("Status unknown", tab)
         # T185: a Deck's sentence ran off the right edge of a 960 window.
         self.status_label.setWordWrap(True)
         # T133: said while this server's WSL distro is stopped and every tab's
@@ -7031,6 +7054,8 @@ class ControllerView(QWidget):
         self.steam_label.setWordWrap(True)
         self.steam_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.steam_label.setVisible(False)
+        # T194 C34: the files the press wrote, folded under the sentence.
+        self.steam_details = Details(tab)
         if self.services.steam is not None:
             self.steam_button = QPushButton("Add to Steam\u2026", tab)
             self.steam_button.clicked.connect(self.add_to_steam)
@@ -7111,6 +7136,7 @@ class ControllerView(QWidget):
         play_column.addWidget(_bar(play, *play_presses))
         play_column.addWidget(self.play_label)
         play_column.addWidget(self.steam_label)
+        play_column.addWidget(self.steam_details)
         self._add_section(box, play, self.play_button is not None or self.steam_button is not None)
 
         client, client_column = section("Client", tab)
@@ -7937,12 +7963,7 @@ class ControllerView(QWidget):
             # for the next minute and a half with both buttons dead and no
             # explanation. The buttons below are still updated — it is the
             # sentence that has to hold still, not the state (review, 2026-08-23).
-            parts = [
-                f"db {'up' if status.db else 'down'}",
-                f"auth {'up' if status.auth else 'down'}",
-                f"world {'up' if status.world else 'down'}",
-            ]
-            self.status_label.setText("status: " + ", ".join(parts))
+            self.status_label.setText(_status_words(status))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
         if self._badge_held is not None and ends_the_hold:
@@ -7965,6 +7986,9 @@ class ControllerView(QWidget):
         self.reinstall_docker_button.setVisible(False)
         self._docker_said = None
         self.docker_banner.withdraw()
+        if self.problem_label.text() in _POINTERS_AT_THE_BANNER:
+            # A failed Start's pointer at the box: the box is gone, so the line is too.
+            self.problem_label.setText("")
         self._update_client_dir_row()
         # T133: every answer, stale or not -- what WSL said about the distro is
         # not a fact an action of ours can make wrong the way "world down" is.
@@ -8531,7 +8555,7 @@ class ControllerView(QWidget):
         self._update_forget_visibility()
         self.problem_label.setText("")
         self._set_busy(True)
-        self.status_label.setText("status: starting…")
+        self.status_label.setText("Starting…")
         self._hold_badge("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
@@ -8541,7 +8565,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._stop_forced = ""
         self._set_busy(True)
-        self.status_label.setText("status: stopping…")
+        self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
 
@@ -8935,7 +8959,9 @@ class ControllerView(QWidget):
             "Reinstalling Docker. Answer the questions as they come; this can take a few minutes."
         )
         if self._docker_prompter is None:
-            self._docker_prompter = InputPrompter(self, title=DOCKER_REINSTALL_PROMPT_TITLE)
+            self._docker_prompter = InputPrompter(
+                self, title=DOCKER_REINSTALL_PROMPT_TITLE, purpose="reinstall Docker"
+            )
         self._docker_prompter.bind_cancel(cancel)
         ask = self._docker_prompter.ask
         self._run(
@@ -8993,7 +9019,7 @@ class ControllerView(QWidget):
         self._hide_stop_other()
         self.problem_label.setText("")
         self._set_busy(True)
-        self.status_label.setText("status: stopping the other server…")
+        self.status_label.setText("Stopping the other server…")
         self._hold_badge("starting")
         self._run(
             self.services.controller.stop_conflicting_and_start,
@@ -10898,6 +10924,7 @@ class ControllerView(QWidget):
         if shortcuts is None or self.steam_button is None:  # pragma: no cover - not built
             return
         self.steam_button.setEnabled(False)
+        self.steam_details.set_text("")
         self.steam_label.setText("Writing the two Steam entries\u2026")
         self._run(shortcuts.add, self._steam_done, self._steam_failed)
 
@@ -10906,9 +10933,12 @@ class ControllerView(QWidget):
         """Name everything the press changed, so it can be checked by hand."""
         if self.steam_button is not None:
             self.steam_button.setEnabled(True)
-        said = steam_module.confirmation(cast(steam_module.AddReport, result))
+        report = cast(steam_module.AddReport, result)
+        said = steam_module.confirmation(report)
+        details = steam_module.confirmation_details(report)
         self.steam_label.setText(said)
-        logger.info(f"steam: {self.entry.id}: {said}")
+        self.steam_details.set_text(details)
+        logger.info(f"steam: {self.entry.id}: {said} {details}")
 
     @Slot(object)
     def _steam_failed(self, exc: object) -> None:
@@ -10922,6 +10952,7 @@ class ControllerView(QWidget):
             self.steam_button.setEnabled(True)
         message = str(exc)
         self.steam_label.setText(message)
+        self.steam_details.set_text("")
         self.action_failed.emit(message)
 
     @Slot()
@@ -17451,6 +17482,9 @@ class ControllerView(QWidget):
         self.apply_button.clicked.connect(self.apply_network_plan)
         self.network_text = QPlainTextEdit(tab)
         self.network_text.setReadOnly(True)
+        # A24/I5 (T194): the commands and the SQL Apply runs, folded under the
+        # plan a player reads.
+        self.network_details = Details(tab)
         # A bar that wraps (T191): on one line the three radios and the two
         # presses need 850px, and the tab has 842 at 960x640 -- squeezed, they
         # were drawn under their own width; in a page, a sideways scroll.
@@ -17463,6 +17497,7 @@ class ControllerView(QWidget):
         row.flow().addWidget(self.apply_button)
         box.addWidget(row)
         box.addWidget(self.network_text, 1)
+        box.addWidget(self.network_details)
         self._add_panel_tab(tab, "networking", "Networking")
         self._plan: NetworkPlan | None = None
 
@@ -17483,7 +17518,8 @@ class ControllerView(QWidget):
     @Slot()
     def show_network_plan(self) -> None:
         mode = self.network_mode()
-        self.network_text.setPlainText("working out the plan… (this can take a few seconds)")
+        self.network_text.setPlainText("Working out the plan… (this can take a few seconds)")
+        self.network_details.set_text("")
         self._run(lambda: self.services.network_plan(mode), self._plan_ready, self._plan_failed)
 
     @Slot(object)
@@ -17492,11 +17528,13 @@ class ControllerView(QWidget):
             return
         self._plan = result
         self.network_text.setPlainText(_format_plan(result))
+        self.network_details.set_text(_plan_details(result))
         self.apply_button.setEnabled(result.ready)
 
     @Slot(object)
     def _plan_failed(self, exc: object) -> None:
-        self.network_text.setPlainText(f"could not plan: {exc}")
+        self.network_text.setPlainText(f"Could not work out the plan: {exc}")
+        self.network_details.set_text("")
         self.action_failed.emit(str(exc))
 
     @Slot()
@@ -17518,7 +17556,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _apply_failed(self, exc: object) -> None:
         self._network_applying = False
-        self.network_text.appendPlainText(f"\nAPPLY FAILED: {exc}")
+        self.network_text.appendPlainText(f"\nApply did not finish: {exc}")
         self.action_failed.emit(str(exc))
         self.apply_button.setEnabled(True)
 
@@ -17894,21 +17932,49 @@ def _format_report(report: ApplyReport) -> str:
     return "\n".join(lines)
 
 
+_MODE_WORDS: dict[str, str] = {
+    "lan": "LAN (same Wi-Fi)",
+    "internet": "Internet play (friends elsewhere)",
+    "loopback": LOOPBACK_CHOICE,
+}
+"""A plan's mode in the words its radio button uses."""
+
+_FIREWALL_WORDS: dict[str, str] = {
+    "ufw": "ufw",
+    "firewalld": "firewalld",
+    "netsh": "Windows Firewall",
+    "alf": "the macOS firewall",
+    "none": "none found",
+}
+"""A firewall backend as a player knows it: Windows calls netsh's firewall Windows Firewall."""
+
+
 def _format_plan(plan: NetworkPlan) -> str:
-    lines = [
-        f"Mode: {plan.mode}   LAN IP: {plan.lan_ip or '?'}   public IP: {plan.public_ip or '-'}",
-        f"Ports: {', '.join(map(str, plan.ports))}   firewall: {plan.firewall}",
-    ]
+    """The plan as a player reads it: what, where, and what Apply will do (T194 A24/I5).
+
+    The exact commands and the realmlist SQL are `_plan_details()`'s, shown
+    folded under this.
+    """
+    firewall = _FIREWALL_WORDS.get(plan.firewall, plan.firewall)
+    lines = [f"Playing: {_MODE_WORDS.get(plan.mode, plan.mode)}"]
+    if plan.mode != "loopback":
+        # The one mode that needs no address of the machine's own.
+        lines.append(
+            f"This computer on your network: {plan.lan_ip or 'not found'}"
+            + (f"   Your public address: {plan.public_ip}" if plan.public_ip else "")
+        )
+    lines.append(f"Game ports: {', '.join(map(str, plan.ports))}   Firewall: {firewall}")
     if plan.client_realmlist:
         lines.append(f"Players set realmlist to: {plan.client_realmlist}")
+    does: list[str] = []
     if plan.firewall_commands:
-        lines.append("Firewall commands:")
-        lines += ["  " + " ".join(c) for c in plan.firewall_commands]
+        does.append(f"open the game ports in {firewall}")
     if plan.portproxy_commands:
-        lines.append("Port proxy commands:")
-        lines += ["  " + " ".join(c) for c in plan.portproxy_commands]
+        does.append("pass the game ports on to the server inside WSL")
     if plan.realmlist_sql:
-        lines.append(f"Realmlist: {plan.realmlist_sql}")
+        does.append("set the address the realm list gives players")
+    if does:
+        lines.append("Apply will " + _joined(does) + ". The exact commands are under Details.")
     if plan.warnings:
         lines.append("Warnings:")
         lines += [f"  ⚠ {w}" for w in plan.warnings]
@@ -17917,6 +17983,28 @@ def _format_plan(plan: NetworkPlan) -> str:
         lines += [f"  {i}. {s}" for i, s in enumerate(plan.manual_steps, 1)]
     if not plan.ready:
         lines.append("Not ready to apply — see warnings.")
+    return "\n".join(lines)
+
+
+def _joined(parts: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    if len(parts) < 2:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _plan_details(plan: NetworkPlan) -> str:
+    """Every command Apply runs and the realmlist SQL, for the Details fold; "" when none."""
+    lines: list[str] = []
+    if plan.firewall_commands:
+        lines.append("Firewall commands:")
+        lines += ["  " + " ".join(c) for c in plan.firewall_commands]
+    if plan.portproxy_commands:
+        lines.append("Port proxy commands:")
+        lines += ["  " + " ".join(c) for c in plan.portproxy_commands]
+    if plan.realmlist_sql:
+        lines.append("Realmlist SQL:")
+        lines.append(f"  {plan.realmlist_sql}")
     return "\n".join(lines)
 
 
