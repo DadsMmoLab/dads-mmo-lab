@@ -314,3 +314,40 @@ def test_a_dragged_split_is_kept_while_wide_and_reset_after_a_narrow_window(
     _at(window, SMALL)
     _at(window, MEDIUM)
     assert area.width() == fresh, f"the drag outlived a narrow window: {area.width()} != {fresh}"
+
+
+def test_the_switch_paints_the_chosen_side_differently_from_the_other(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both buttons looked the same, so only the content said which side was showing.
+
+    Pressed with the keyboard (Space, as the pad's A presses) and sampled with
+    the focus elsewhere, so neither focus ring nor hover is what differs. The
+    second press swaps the paint, so a style that only ever marked one button
+    fails.
+    """
+    from PySide6.QtTest import QTest
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, SMALL)
+
+    def press(button: Any) -> None:
+        button.setFocus()
+        QTest.keyClick(button, Qt.Key.Key_Space)
+        button.clearFocus()
+        process_events()
+
+    def sample(button: Any) -> tuple[int, int, int]:
+        image = button.grab().toImage()
+        colour = image.pixelColor(4, image.height() // 2)
+        return colour.red(), colour.green(), colour.blue()
+
+    press(panel.edit_file_button)
+    assert panel.edit_file_button.isChecked() and not panel.settings_button.isChecked()
+    chosen, other = sample(panel.edit_file_button), sample(panel.settings_button)
+    assert chosen != other, f"the chosen side paints {chosen}, the other {other}"
+
+    press(panel.settings_button)
+    assert sample(panel.settings_button) == chosen, "the paint did not follow the press"
+    assert sample(panel.edit_file_button) == other

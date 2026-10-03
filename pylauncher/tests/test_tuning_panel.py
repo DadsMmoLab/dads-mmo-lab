@@ -784,3 +784,104 @@ def test_the_raw_editor_offers_a_revert_beside_save_file(qapp: object) -> None:
     panel.file_revert_button.click()
 
     assert pressed == [True]
+
+
+# -- T190 B3: the row shows its value, and a number box takes numbers --------
+
+
+def test_the_key_line_is_drawn_only_when_the_label_says_something_else() -> None:
+    assert tp.shows_key_line(_row(key="BeastMaster.Enable", label="Enable the NPC")) is True
+    assert tp.shows_key_line(_row(key="BeastMaster.Enable", label="BeastMaster.Enable")) is False
+
+
+def test_a_row_with_no_label_of_its_own_names_its_key_once(qapp: object) -> None:
+    """45 of 157 keys have no `label`, so the label IS the key -- and was printed twice."""
+    from PySide6.QtWidgets import QLabel
+
+    editor = tp.RowEditor(_row(key="Transmog.Enable", label="Transmog.Enable", current="1"))
+    named = [label for label in editor.findChildren(QLabel) if label.text() == "Transmog.Enable"]
+    assert named == [editor.label], [label.objectName() or label.text() for label in named]
+    assert editor.key_label is None
+    assert editor.label.toolTip() == "Transmog.Enable"
+
+
+def test_a_labelled_row_keeps_its_key_line_under_the_label(qapp: object) -> None:
+    editor = tp.RowEditor(_row(key="BeastMaster.Enable", label="Enable the Beastmaster NPC"))
+    assert editor.key_label is not None and editor.key_label.text() == "BeastMaster.Enable"
+    assert editor.label.toolTip() == "BeastMaster.Enable"
+
+
+def test_in_a_440px_card_the_value_box_keeps_room_for_its_value(qapp: object) -> None:
+    """B3: a long label beside the box took the whole row and left the value 28px.
+
+    Laid out at the narrowest the card's own layout will go, where every widget
+    sits at its minimum -- so it is the box's floor that is measured, not
+    whatever room a wide card happened to leave -- and that narrowest card
+    still fits the 440px column, so the floor was not bought by widening it.
+    """
+    from tests.conftest import process_events
+
+    card = tp.CardWidget(
+        tp.build_tuning_cards(
+            (
+                _row(
+                    # A short path, so the card's monospace file line is not
+                    # what sets its narrowest width: the value box's own floor
+                    # is what is measured, not the room a long path leaves.
+                    file="env/dist/etc/modules/b.conf",
+                    key="BeastMaster.Enable",
+                    label="Enable the Beastmaster NPC for every class of character on this realm",
+                    current="anything at all",
+                ),
+            )
+        )[0]
+    )
+    card.show()
+    try:
+        process_events()
+        narrowest = card.minimumSizeHint().width()
+        assert narrowest <= tp.CARDS_MIN_WIDTH, f"the card needs {narrowest}px"
+        card.resize(narrowest, 600)
+        process_events()
+        field = card.editors["BeastMaster.Enable"].control
+        assert isinstance(field, QLineEdit)
+        need = tp.VALUE_MIN_CHARS * field.fontMetrics().averageCharWidth()
+        assert field.width() >= need, f"the value has {field.width()}px, needs {need}"
+    finally:
+        card.close()
+
+
+def test_an_int_with_one_bound_takes_digits_and_a_sign_and_nothing_else(qapp: object) -> None:
+    """Typed, the way a player types: letters do not go in, `-5` does. No range is invented."""
+    from PySide6.QtTest import QTest
+
+    editor = tp.RowEditor(_row(type="int", min=0, current="10"))
+    field = editor.control
+    assert isinstance(field, QLineEdit)
+    field.clear()
+    QTest.keyClicks(field, "a5b")
+    assert field.text() == "5"
+    field.clear()
+    QTest.keyClicks(field, "-5")
+    assert field.text() == "-5", "a bound is tuning.check()'s to apply at Save, not the box's"
+    assert editor.changed
+
+
+def test_a_key_with_no_type_takes_anything_and_keeps_its_free_text_chip(qapp: object) -> None:
+    from PySide6.QtTest import QTest
+
+    editor = tp.RowEditor(_row(type=None, current=""))
+    field = editor.control
+    assert isinstance(field, QLineEdit)
+    assert field.validator() is None
+    QTest.keyClicks(field, "abc")
+    assert field.text() == "abc"
+    assert tp.CHIP_FREE_TEXT in editor.chips.text()
+
+
+def test_a_file_value_the_box_would_refuse_is_shown_as_written(qapp: object) -> None:
+    """Never clamped, never blanked: the file said `abc`, so the box says `abc`."""
+    editor = tp.RowEditor(_row(type="int", min=0, current="abc"))
+    assert isinstance(editor.control, QLineEdit)
+    assert editor.control.text() == "abc"
+    assert editor.value() == "abc" and not editor.changed

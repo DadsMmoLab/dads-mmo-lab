@@ -24,8 +24,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QResizeEvent
+from PySide6.QtCore import QRegularExpression, Qt, Signal
+from PySide6.QtGui import QFont, QRegularExpressionValidator, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -48,7 +48,9 @@ from yulon.manifest_store import FAMILY_FILES
 from yulon.tuning import ApplyRule, TuningRow
 from yulon.ui.theme import (
     COLOR_BG_PANEL,
+    COLOR_BG_PARCHMENT_LIGHT,
     COLOR_GOLD_BORDER,
+    COLOR_GOLD_BRIGHT,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_PRIMARY,
     COLOR_TEXT_WARNING,
@@ -231,6 +233,13 @@ def is_narrow(width: int, cards_min: int = CARDS_MIN_WIDTH) -> bool:
     """
     return width < max(NARROW_WIDTH, cards_min + EDITOR_MIN_WIDTH)
 
+
+VALUE_MIN_CHARS = 12
+"""The fewest characters a value box keeps beside its label (T190 B3).
+
+In a narrow card a long label took the whole row and squeezed the box until
+its value was gone; the label wraps instead, and the box keeps this much.
+"""
 
 BOOL_WORDS: dict[str, tuple[str, str]] = {
     "true": ("true", "false"),
@@ -432,6 +441,25 @@ def value_note(row: TuningRow) -> str | None:
     return None if row.current is not None else NOT_IN_THE_FILE
 
 
+def shows_key_line(row: TuningRow) -> bool:
+    """Whether the key gets a line of its own under the label (T190 B3).
+
+    Only when the label says something else. A key with no `label` in the
+    catalog -- 45 of 157 -- is labelled with the key itself (`tuning.rows_for`),
+    and a second line saying the same words is a line a value could have had.
+    """
+    return row.label != row.key
+
+
+INT_TEXT = r"-?\d*"
+"""What a box for an `int` with fewer than two bounds lets a player type (T190).
+
+Digits and a leading minus, and NO range: the range is the catalog's to state,
+and `tuning.check()` applies the one bound it has at Save. `*` and not `+`, so
+the box can be emptied on the way to a new number.
+"""
+
+
 def bool_words(row: TuningRow) -> tuple[str, str]:
     """The (on, off) spellings this row's own file uses."""
     seen = (row.current or row.default or "").strip().lower()
@@ -480,7 +508,10 @@ class RowEditor(QWidget):
         self.label = QLabel(row.label, self)
         self.label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
         self.label.setToolTip(row.key)
-        top.addWidget(self.label)
+        # Wraps, so a long label gives up width to the value rather than the
+        # value giving up all of its own (T190 B3).
+        self.label.setWordWrap(True)
+        top.addWidget(self.label, 1)
         # The chips, between the name and the control. Rebuilt on every edit
         # rather than toggled, because the `pending` one comes and goes with
         # the value and the other two never change -- one code path for both
@@ -488,7 +519,8 @@ class RowEditor(QWidget):
         self.chips = QLabel("", self)
         self.chips.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         top.addWidget(self.chips)
-        top.addStretch(1)
+        # No spacer here: the label's stretch takes the spare width, so it
+        # wraps only when the row really is too narrow for it on one line.
         bounds = bounds_note(row)
         self.bounds_label: QLabel | None = None
         if bounds is not None:
@@ -507,13 +539,16 @@ class RowEditor(QWidget):
             top.addWidget(self.value_label)
         box.addLayout(top)
 
-        # The key itself, always, under whatever the label says: `label` may be
-        # the catalog's own words, and the key is what the user will search the
-        # module's documentation for.
-        self.key_label = QLabel(row.key, self)
-        self.key_label.setFont(QFont("monospace"))
-        self.key_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
-        box.addWidget(self.key_label)
+        # The key itself under the label whenever the label is the catalog's own
+        # words: the key is what the user will search the module's documentation
+        # for. Not when the label already IS the key (`shows_key_line`); the
+        # label's tooltip names it either way.
+        self.key_label: QLabel | None = None
+        if shows_key_line(row):
+            self.key_label = QLabel(row.key, self)
+            self.key_label.setFont(QFont("monospace"))
+            self.key_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+            box.addWidget(self.key_label)
 
         self.explain_label: QLabel | None = None
         if row.explain:
@@ -568,11 +603,22 @@ class RowEditor(QWidget):
                 # control that silently reports a value nobody wrote.
                 spinner.setValue(self.row.min)
             spinner.valueChanged.connect(lambda _value: self._touched())
+            self._keep_room(spinner)
             return spinner
         field = QLineEdit(self)
+        # The file's value as written, BEFORE the validator: `setText` does not
+        # validate, so a value the box would refuse to have typed is still shown
+        # rather than blanked -- the T43 rule that nothing here invents a value.
         field.setText(self._start)
+        if self.row.type == "int":
+            field.setValidator(QRegularExpressionValidator(QRegularExpression(INT_TEXT), field))
         field.textChanged.connect(lambda _text: self._touched())
+        self._keep_room(field)
         return field
+
+    def _keep_room(self, control: QWidget) -> None:
+        """`VALUE_MIN_CHARS` of this control's own font, so a value is never squeezed out."""
+        control.setMinimumWidth(VALUE_MIN_CHARS * control.fontMetrics().averageCharWidth())
 
     def value(self) -> str:
         """What this row would be written as, in the file's own spelling."""
@@ -771,6 +817,13 @@ class TuningPanel(QWidget):
         side_box.addStretch(1)
         self.settings_button.setChecked(True)
         self._side_group.buttonClicked.connect(self._side_picked)
+        # The chosen side says so: the theme has no `:checked` rule for a
+        # button, so both read alike and only the content below told them apart.
+        # The theme's own hover sheet and accent, no colour of this panel's.
+        self.side_buttons.setStyleSheet(
+            f"QPushButton:checked {{ background-color: {COLOR_BG_PARCHMENT_LIGHT}; "
+            f"color: {COLOR_GOLD_BRIGHT}; border-bottom: 2px solid {COLOR_GOLD_BRIGHT}; }}"
+        )
         self.side_buttons.setVisible(False)
         outer.addWidget(self.side_buttons)
         # Always side by side (T190). A vertical split's sizes came back as
@@ -1118,6 +1171,7 @@ __all__ = [
     "CHANGED_FROM",
     "CardWidget",
     "EDITOR_MIN_WIDTH",
+    "VALUE_MIN_CHARS",
     "NOTHING",
     "NOTHING_TO_TUNE",
     "NOT_IN_THE_FILE",
@@ -1128,6 +1182,7 @@ __all__ = [
     "build_tuning_cards",
     "control_kind",
     "is_narrow",
+    "shows_key_line",
     "split_sizes",
     "starting_value",
     "value_note",
