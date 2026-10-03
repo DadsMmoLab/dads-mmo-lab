@@ -771,9 +771,14 @@ def test_a_docker_disk_moved_to_another_drive_is_the_drive_the_install_is_judged
     both needs, and 31 GB is refused — which is what the player saw again
     after moving the disk, before this.
 
-    Only the drive letter is faked: a POSIX test host has none, so
-    `_volume_of` answers the `C`/`E` folder under `tmp_path` that stands in for
-    the drive. Everything between the settings file and the verdict is real.
+    A move the settings name but that cannot be found (round 2) is neither:
+    Docker's disk is unchecked and nothing is refused on a guessed drive, with
+    C:'s stale copy of the disk sitting right there.
+
+    Only the drives are faked: a POSIX test host has none, so `_volume_of`
+    answers the `C`/`E` folder under `tmp_path` that stands in for the drive,
+    and `platform._windows_host_path` maps `E:\\X` to `<tmp>/E/X`. Everything
+    else between the settings file and the verdict is real.
     """
     drive_free = {"C": 31 * GIB, "E": 100 * GIB}
 
@@ -782,6 +787,11 @@ def test_a_docker_disk_moved_to_another_drive_is_the_drive_the_install_is_judged
 
     monkeypatch.setattr(preflight, "_volume_of", lambda path, _platform: drive(path))
     monkeypatch.setattr(platform_module, "detect", lambda: "windows")
+    monkeypatch.setattr(
+        platform_module,
+        "_windows_host_path",
+        lambda location: tmp_path.joinpath(location.drive[0], *location.parts[1:]),
+    )
     profile = tmp_path / "C" / "Users" / "pk" / "AppData"
     monkeypatch.setenv("APPDATA", str(profile / "Roaming"))
     monkeypatch.setenv("LOCALAPPDATA", str(profile / "Local"))
@@ -808,7 +818,7 @@ def test_a_docker_disk_moved_to_another_drive_is_the_drive_the_install_is_judged
         )
         return got, preflight.evaluate(ENTRY, server_dir, got)
 
-    store.write_text(json.dumps({"CustomWslDistroDir": str(moved)}), encoding="utf-8")
+    store.write_text(json.dumps({"CustomWslDistroDir": "E:\\DockerDesktopWSL"}), encoding="utf-8")
     got, report = judged()
     assert got.data_root == moved / "disk"
     assert (got.data_root_free, got.same_volume) == (100 * GIB, False)
@@ -822,6 +832,15 @@ def test_a_docker_disk_moved_to_another_drive_is_the_drive_the_install_is_judged
     refused = report.refusals()
     assert [check.name for check in refused] == [f"free space on {preflight.ONE_VOLUME_SPACE}"]
     assert "31 GB free" in refused[0].detail, refused[0].detail
+
+    stale = profile / "Local" / "Docker" / "wsl" / "disk" / "docker_data.vhdx"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"the copy the move left behind")
+    store.write_text(json.dumps({"CustomWslDistroDir": "E:\\gone"}), encoding="utf-8")
+    got, report = judged()
+    assert (got.data_root, got.data_root_free) == (None, None)
+    assert verdict(report, "free space on Docker's disk") == "unchecked"
+    assert report.refusals() == (), report.message()
 
 
 def test_gather_on_macos_assembles_platform_facts(tmp_path: Path) -> None:
