@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from yulon import resources
+
 if TYPE_CHECKING:
     from PySide6.QtGui import QPalette
     from PySide6.QtWidgets import QApplication, QWidget
@@ -188,6 +190,28 @@ def _touch(base: int, scale: float) -> str:
 def _px(base: int, scale: float) -> str:
     """A font size at `scale`, floored so text never becomes unreadable."""
     return f"{max(MIN_FONT_PX, round(base * scale))}px"
+
+
+def _image(name: str) -> str:
+    """`url("<path>")` for one of the theme's SVGs (T193), read at build time.
+
+    Quoted, because the path is the install's: `...\\Yu'lon\\...` carries an
+    apostrophe and often spaces, and an unquoted `url()` would end at either.
+    Forward slashes on every platform, which is what Qt's URL parser expects.
+    Looked up through the module on each call, so a sheet built for a moved
+    bundle (or a test's copy) names the files that are really there.
+    """
+    return f'url("{(resources.theme_images_dir() / name).as_posix()}")'
+
+
+def _indicator_px(scale: float) -> int:
+    """The checkbox / radio indicator's side (px) at `scale`, without its 1px border."""
+    return int(_touch(22, scale).removesuffix("px"))
+
+
+def _spin_button_px(scale: float) -> int:
+    """The side (px) of each of a spin box's square − and + buttons at `scale`."""
+    return int(_touch(28, scale).removesuffix("px"))
 
 
 def _build_qss(scale: float) -> str:
@@ -705,6 +729,77 @@ QComboBox::drop-down:hover {{
     border-left: 1px solid {COLOR_GOLD_BRASS};
 }}
 
+/* T193: the combo's arrow. `::drop-down` alone drew an empty well -- the
+   style sheet replaces the base style's arrow and draws only what it names. */
+QComboBox::down-arrow {{
+    image: {_image("arrow-down.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QComboBox::down-arrow:disabled {{
+    image: {_image("arrow-down-disabled.svg")};
+}}
+
+/* T193: a spin box's − and + are two touch-sized squares either side of the
+   number, not the 16-px stacked halves that drew a 1-px dash. The style sheet
+   takes each button's width out of the edit field itself, so the shared
+   padding above is kept as the gap between a button and the number. */
+QSpinBox, QDoubleSpinBox {{
+    min-width: {2 * _spin_button_px(scale) + 48}px;
+}}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: center right;
+    width: {_spin_button_px(scale)}px;
+    height: {_spin_button_px(scale)}px;
+    border: none;
+    border-left: 1px solid {COLOR_BRASS_DARK};
+    background-color: {COLOR_BG_PANEL};
+}}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: center left;
+    width: {_spin_button_px(scale)}px;
+    height: {_spin_button_px(scale)}px;
+    border: none;
+    border-right: 1px solid {COLOR_BRASS_DARK};
+    background-color: {COLOR_BG_PANEL};
+}}
+
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background-color: {COLOR_BG_PARCHMENT_LIGHT};
+    border-color: {COLOR_GOLD_BRASS};
+}}
+
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+    background-color: {COLOR_BG_INPUT};
+}}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: {_image("plus.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: {_image("minus.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {{
+    image: {_image("plus-disabled.svg")};
+}}
+
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{
+    image: {_image("minus-disabled.svg")};
+}}
+
 QComboBox QAbstractItemView {{
     background-color: {COLOR_BG_CONTAINER};
     border: 1px solid {COLOR_GOLD_BRASS};
@@ -900,15 +995,18 @@ QCheckBox, QRadioButton {{
 }}
 
 QCheckBox::indicator, QRadioButton::indicator {{
-    width: {_touch(22, scale)};
-    height: {_touch(22, scale)};
-    border: 1px solid #6A6A6A;
+    width: {_indicator_px(scale)}px;
+    height: {_indicator_px(scale)}px;
+    border: 1px solid {COLOR_TEXT_MUTED};
     background-color: {COLOR_BG_INPUT};
     border-radius: 3px;
 }}
 
+/* Round (T193): the radius is half the box the border is drawn on -- the
+   indicator plus its two 1px borders -- so the radio is a disc, never the
+   rounded square `11 * scale` made of it. */
 QRadioButton::indicator {{
-    border-radius: {max(6, round(11 * scale))}px;
+    border-radius: {(_indicator_px(scale) + 2) // 2}px;
 }}
 
 QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
@@ -924,9 +1022,33 @@ QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
     border-color: {COLOR_GOLD_LIGHT};
 }}
 
+/* T193: a ticked box shows a tick, not only an amber fill. */
+QCheckBox::indicator:checked {{
+    image: {_image("check.svg")};
+}}
+
+/* A checked radio is a gold dot in the dark well, so it never reads as a
+   ticked checkbox beside it. */
+QRadioButton::indicator:checked {{
+    background-color: {COLOR_BG_INPUT};
+    border-color: {COLOR_GOLD_BRIGHT};
+    image: {_image("radio-dot.svg")};
+}}
+
 QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
     border-color: {COLOR_BRASS_DEEP};
     background-color: #161616;
+}}
+
+/* After `:disabled`, which would otherwise wipe the checked look: a disabled
+   ticked box kept looking unticked -- the uninstall's "Keep my characters"
+   while a job runs (T193). A muted tick or dot on the disabled well. */
+QCheckBox::indicator:checked:disabled {{
+    image: {_image("check-disabled.svg")};
+}}
+
+QRadioButton::indicator:checked:disabled {{
+    image: {_image("radio-dot-disabled.svg")};
 }}
 
 QCheckBox:disabled, QRadioButton:disabled {{

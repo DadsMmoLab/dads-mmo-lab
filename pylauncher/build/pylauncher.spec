@@ -38,6 +38,14 @@ datas = [
     # bridge would deploy from a checkout and find nothing from a release build,
     # which is precisely the failure `party.deploy` refuses to report as success.
     (os.path.join(ROOT, "lua"), "lua"),
+    # T193: the SVGs the theme's style sheet names by path (the checkbox tick,
+    # the radio dot, the combo arrow, the spin box's minus and plus). A tree, so
+    # a glyph added there needs no edit here. Left out, a release build would
+    # draw empty ticked boxes and blank arrow wells again.
+    (
+        os.path.join(ROOT, "yulon", "ui", "theme_images"),
+        os.path.join("yulon", "ui", "theme_images"),
+    ),
     # Non-Python package data: the catalog lives next to its models.
     (os.path.join(ROOT, "yulon", "catalog", "catalog.json"), os.path.join("yulon", "catalog")),
 ]
