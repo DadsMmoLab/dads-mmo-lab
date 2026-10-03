@@ -61,7 +61,7 @@ def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
 
 
 def _tuning_window(
-    ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_tab: str = "Tuning"
 ) -> tuple[ControllerView, Any, Any]:
     """Two modules' cards, the core confs, and this computer's time zone, in the real window.
 
@@ -88,7 +88,7 @@ def _tuning_window(
     )
     object.__setattr__(services, "time_zone", server_time_zone.time_zone_route(WOTLK, tmp_path))
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    window, tab = _controller_in_the_real_window(view, "Tuning")
+    window, tab = _controller_in_the_real_window(view, first_tab)
     return view, window, tab
 
 
@@ -351,3 +351,133 @@ def test_the_switch_paints_the_chosen_side_differently_from_the_other(
     press(panel.settings_button)
     assert sample(panel.settings_button) == chosen, "the paint did not follow the press"
     assert sample(panel.edit_file_button) == other
+
+
+# -- Task 1, cold review round 1 ----------------------------------------------
+
+
+def test_left_and_right_walk_the_switch_with_the_keys_a_player_presses(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Right from Settings went UP to "Reload from disk": Edit file was no stop at all.
+
+    An exclusive `QButtonGroup` takes Tab focus off its unchecked buttons, and
+    the pad stops only on widgets with Tab focus. Left is pressed from a focus
+    put there by other means, so it is the row rule that answers and not the
+    pad's memory of the Right it would undo.
+    """
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from tests.test_controller_view import _pad_describe
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, SMALL)
+    _nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        panel.settings_button.setFocus()
+        process_events()
+        QTest.keyClick(panel.settings_button, Qt.Key.Key_Right)
+        process_events()
+        landed = QApplication.focusWidget()
+        assert landed is panel.edit_file_button, f"Right went to {_pad_describe(landed, window)}"
+
+        view.tuning_reload_button.setFocus()
+        panel.edit_file_button.setFocus()
+        process_events()
+        QTest.keyClick(panel.edit_file_button, Qt.Key.Key_Left)
+        process_events()
+        landed = QApplication.focusWidget()
+        assert landed is panel.settings_button, f"Left went to {_pad_describe(landed, window)}"
+        assert panel.settings_button.isChecked(), "control: moving the focus chose nothing"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def test_a_tab_first_shown_in_a_wide_window_starts_on_the_half_and_half_split(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first layout sets the split up even when it is not a switch from narrow.
+
+    The window is already 1280x800 when the Tuning tab is first opened, so the
+    panel's first resize is a wide one with no narrow layout before it.
+    """
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch, first_tab="Modules")
+    panel = view.tuning_panel
+    assert not panel.isVisible(), "control: the Tuning tab is shown before this test opens it"
+    _at(window, MEDIUM)
+    view._tabs.setCurrentIndex(view._tabs.indexOf(view.tuning_panel.parentWidget()))
+    process_events()
+    assert panel.isVisible()
+    half = (panel.width() - panel.split.handleWidth()) // 2
+    assert panel._area.width() >= half, f"the cards have {panel._area.width()}px, half is {half}"
+
+
+def test_a_header_wider_than_the_column_sets_the_columns_floor(qapp: object) -> None:
+    """The header is drawn whole: the column is never narrower than it, and the
+    panel takes turns sooner rather than cut it -- at a width where, without the
+    header, the halves would still sit side by side."""
+    from PySide6.QtWidgets import QLabel
+
+    plain = tp.TuningPanel()
+    headed = tp.TuningPanel()
+    header = QLabel("H" * 80)
+    headed.set_header(header)
+    assert header.sizeHint().width() > tp.CARDS_MIN_WIDTH, "control: the header is the wider one"
+    # Room for the header and the editor, but not for the column's own chrome
+    # round the header as well: only a floor that counts the header binds here.
+    width = max(tp.NARROW_WIDTH, header.sizeHint().width() + tp.EDITOR_MIN_WIDTH)
+    for panel in (plain, headed):
+        panel.show()
+        panel.resize(width, 600)
+    try:
+        process_events()
+        assert not plain.side_buttons.isVisible(), f"control: {width}px holds both halves"
+        assert headed.side_buttons.isVisible(), "the header was cut instead of taking turns"
+        headed.resize(width + 400, 600)
+        process_events()
+        assert not headed.side_buttons.isVisible()
+        assert (
+            header.width() >= header.sizeHint().width()
+        ), f"the header is {header.width()}px of the {header.sizeHint().width()} it needs"
+        area = headed._area
+        assert area.widget().width() <= area.viewport().width()
+    finally:
+        plain.close()
+        headed.close()
+
+
+def test_going_narrow_with_unsaved_typing_in_the_editor_shows_the_editor(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shrinking the window must not hide what the player is typing behind Settings.
+
+    The same drag with nothing typed stays on Settings, and after the file is
+    opened again the typing is gone, so the next narrow window follows the
+    switch, not the typing.
+    """
+    from PySide6.QtTest import QTest
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, MEDIUM)
+    _at(window, SMALL)
+    assert panel.settings_button.isChecked(), "control: nothing typed, the settings show"
+    _at(window, MEDIUM)
+
+    panel.editor.setFocus()
+    QTest.keyClicks(panel.editor, "BeastMaster.Enable = 0")
+    _at(window, SMALL)
+    assert panel.edit_file_button.isChecked(), "the typing went behind the Settings side"
+    assert panel.editor.isVisible() and not panel._area.isVisible()
+
+    QTest.keyClick(panel.settings_button, Qt.Key.Key_Space)
+    process_events()
+    _at(window, MEDIUM)
+    panel.file_buttons()[0].click()
+    process_events()
+    _at(window, SMALL)
+    assert panel.settings_button.isChecked(), "a file opened again still counted as typed in"

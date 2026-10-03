@@ -27,8 +27,6 @@ from typing import Literal
 from PySide6.QtCore import QRegularExpression, Qt, Signal
 from PySide6.QtGui import QFont, QRegularExpressionValidator, QResizeEvent
 from PySide6.QtWidgets import (
-    QAbstractButton,
-    QButtonGroup,
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
@@ -808,15 +806,16 @@ class TuningPanel(QWidget):
         side_box.setSpacing(4)
         self.settings_button = QPushButton(SIDE_SETTINGS, self.side_buttons)
         self.edit_file_button = QPushButton(SIDE_EDIT_FILE, self.side_buttons)
-        self._side_group = QButtonGroup(self)
-        self._side_group.setExclusive(True)
+        # Exclusive by hand and not through an exclusive `QButtonGroup`: Qt
+        # takes Tab focus off a group's unchecked buttons, and the pad stops
+        # only where Tab focus is -- Right from Settings went past "Edit file"
+        # up to the tab's bar, and the unchosen side could not be reached.
         for button in (self.settings_button, self.edit_file_button):
             button.setCheckable(True)
-            self._side_group.addButton(button)
+            button.clicked.connect(lambda _checked=False, chosen=button: self._side_picked(chosen))
             side_box.addWidget(button)
         side_box.addStretch(1)
         self.settings_button.setChecked(True)
-        self._side_group.buttonClicked.connect(self._side_picked)
         # The chosen side says so: the theme has no `:checked` rule for a
         # button, so both read alike and only the content below told them apart.
         # The theme's own hover sheet and accent, no colour of this panel's.
@@ -833,9 +832,10 @@ class TuningPanel(QWidget):
 
         self._area = QScrollArea(self.split)
         self._area.setWidgetResizable(True)
-        # Never sideways: the cards wrap to the column they are given, and the
-        # column has a floor (`CARDS_MIN_WIDTH`) that they fit in.
-        self._area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The column has a floor (`CARDS_MIN_WIDTH`, or the header's) that the
+        # cards fit in, so no sideways scroll bar appears; one is left possible
+        # rather than turned off, because off would cut a card that somehow did
+        # not fit instead of letting it be scrolled to (cold review round 1).
         self._area.setMinimumWidth(CARDS_MIN_WIDTH)
         self._content = QWidget(self._area)
         self._content_layout = QVBoxLayout(self._content)
@@ -882,6 +882,13 @@ class TuningPanel(QWidget):
             f"color: {COLOR_TEXT_PRIMARY};"
         )
         self.editor.textChanged.connect(self._relint)
+        self._editor_dirty = False
+        """Typing in the editor that no `set_file_text` has replaced since.
+
+        `set_file_text` puts its text in with the signals blocked, so only a
+        player's typing sets it. A window going narrow with this set shows the
+        editor, so the typing is not hidden behind the Settings side."""
+        self.editor.textChanged.connect(self._typed)
         right_box.addWidget(self.editor, 1)
         self.lint_label = QLabel("", right)
         self.lint_label.setWordWrap(True)
@@ -1075,6 +1082,7 @@ class TuningPanel(QWidget):
         blocked = self.editor.blockSignals(True)
         self.editor.setPlainText(text)
         self.editor.blockSignals(blocked)
+        self._editor_dirty = False
         self.editor.setReadOnly(read_only)
         self.file_note.setText(note or "")
         self.file_note.setVisible(bool(note))
@@ -1135,8 +1143,14 @@ class TuningPanel(QWidget):
         )
         return max(CARDS_MIN_WIDTH, self._header.sizeHint().width() + chrome)
 
-    def _side_picked(self, _button: QAbstractButton) -> None:
+    def _side_picked(self, chosen: QPushButton) -> None:
+        """One side checked, always: pressing the checked one again keeps it."""
+        self.settings_button.setChecked(chosen is self.settings_button)
+        self.edit_file_button.setChecked(chosen is self.edit_file_button)
         self._show_sides()
+
+    def _typed(self) -> None:
+        self._editor_dirty = True
 
     def _show_sides(self) -> None:
         """Both halves when wide; when narrow, the one the switch names."""
@@ -1158,6 +1172,9 @@ class TuningPanel(QWidget):
         narrow = is_narrow(self.width(), cards_min)
         if narrow != self._narrow:
             self._narrow = narrow
+            if narrow and self._editor_dirty:
+                self.settings_button.setChecked(False)
+                self.edit_file_button.setChecked(True)
             self._show_sides()
             if not narrow:
                 total = self.width() - self.split.handleWidth()
