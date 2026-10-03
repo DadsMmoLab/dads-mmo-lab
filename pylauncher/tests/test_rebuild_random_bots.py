@@ -1909,3 +1909,22 @@ def test_the_tortoise_factory_wires_the_real_start_stamp_and_run_log(
     assert seam.world_started() == "2026-09-26T10:00:05.1Z"
     assert seam.world_log() == docker.RunLog("", this_run_only=True)
     assert asked == [("started_at", world, None), ("current_run_log", world, None)]
+
+
+def test_a_rebuild_pressed_from_another_tab_opens_the_bots_page(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The offer after an update is answered on the Modules tab; the job's lines are on Bots.
+
+    Each sub-tab sits in a page since T191, so the switch is to the page the
+    log is on, not to the tab widget the sub-tab bar no longer holds.
+    """
+    _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    view = _view(tmp_path, _Seam())
+    titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
+    view._tabs.setCurrentIndex(titles.index("Modules"))
+
+    assert view.rebuild_random_bots() is True
+    _wait(view)
+    assert view._tabs.tabText(view._tabs.currentIndex()) == "Bots"
+    assert view._tabs.currentWidget().isAncestorOf(view.bot_rebuild_log)

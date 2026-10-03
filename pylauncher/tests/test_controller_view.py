@@ -16363,33 +16363,47 @@ T191_SIZES = [(960, 640), (1280, 800), (1920, 1080)]
 """The three windows T191's sub-tabs are proved at: the smallest, the Steam Deck's, 1080p."""
 
 
-def _page_faults(page: Any) -> list[str]:
-    """Everything wrong with how `page` (a sub-tab's `ScrollPage`) is drawn now (T191).
+def _laid_out_in(parent: Any) -> list[Any]:
+    """The visible widgets `parent`'s own layout places, through its nested layouts.
 
-    Asked of the widgets as they are on screen, and each kind of fault is a
-    different way a squeezed tab shows: an item drawn under the minimum its
-    layout gives it (Qt's proportional cut), two items of one layout drawn over
-    each other, a button whose label does not fit it, and a page that scrolls
-    sideways. Every layout under the body is walked, so a box nested three deep
-    is held to the same rule as the tab's own column.
+    Not into a child widget's layout: those are placed in that child's
+    coordinates, and are `parent`'s grandchildren.
     """
-    from PySide6.QtWidgets import QLayout, QPushButton
+    found: list[Any] = []
+    pending = [] if parent.layout() is None else [parent.layout()]
+    while pending:
+        layout = pending.pop()
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is None:
+                continue
+            if item.widget() is not None:
+                if item.widget().isVisible():
+                    found.append(item)
+            elif item.layout() is not None:
+                pending.append(item.layout())
+    return found
+
+
+def _squeezed_or_overlapping(page: Any) -> list[str]:
+    """Every widget on `page` drawn under the minimum its layout gives it, or over another.
+
+    Qt's proportional cut shows as both. Every widget under the body is held to
+    it, and the overlap is asked across EVERY widget one parent lays out,
+    through its nested layouts: a button in a row's layout drawn over a label
+    in the column around that row is two items of two layouts, and the same
+    picture on screen.
+    """
+    from PySide6.QtWidgets import QWidget
 
     body = page.widget()
     faults: list[str] = []
-    if page.horizontalScrollBar().maximum() > 0:
-        faults.append(f"scrolls sideways by {page.horizontalScrollBar().maximum()}px")
-    layouts: list[Any] = []
-    for layout in [body.layout(), *body.findChildren(QLayout)]:
-        if layout is not None and all(layout is not seen for seen in layouts):
-            layouts.append(layout)
-    for layout in layouts:
-        drawn: list[Any] = []
-        for index in range(layout.count()):
-            item = layout.itemAt(index)
-            widget = None if item is None else item.widget()
-            if widget is None or not widget.isVisible():
-                continue
+    for parent in [body, *body.findChildren(QWidget)]:
+        if not parent.isVisible():
+            continue
+        items = _laid_out_in(parent)
+        for item in items:
+            widget = item.widget()
             need = item.minimumSize()
             need_height = need.height()
             if item.hasHeightForWidth():
@@ -16399,7 +16413,7 @@ def _page_faults(page: Any) -> list[str]:
                     f"{type(widget).__name__} {widget.objectName()!r} drawn "
                     f"{widget.width()}x{widget.height()} under its {need.width()}x{need_height}"
                 )
-            drawn.append(widget)
+        drawn = [item.widget() for item in items]
         for first, widget in enumerate(drawn):
             for other in drawn[first + 1 :]:
                 if widget.geometry().intersects(other.geometry()):
@@ -16407,6 +16421,24 @@ def _page_faults(page: Any) -> list[str]:
                         f"{type(widget).__name__} {widget.objectName()!r} drawn over "
                         f"{type(other).__name__} {other.objectName()!r}"
                     )
+    return faults
+
+
+def _page_faults(page: Any) -> list[str]:
+    """Everything wrong with how `page` (a sub-tab's `ScrollPage`) is drawn now (T191).
+
+    Asked of the widgets as they are on screen, and each kind of fault is a
+    different way a squeezed tab shows: a widget cut or drawn over another
+    (`_squeezed_or_overlapping`), a button whose label does not fit it, and a
+    page that scrolls sideways.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    body = page.widget()
+    faults: list[str] = []
+    if page.horizontalScrollBar().maximum() > 0:
+        faults.append(f"scrolls sideways by {page.horizontalScrollBar().maximum()}px")
+    faults += _squeezed_or_overlapping(page)
     for button in body.findChildren(QPushButton):
         # A module row's chip draws as much of its label as its width holds
         # (`_ChipButton`, T83): elided on purpose, with the rest behind the "…".
@@ -16447,10 +16479,15 @@ def test_every_sub_tab_but_tuning_scrolls_instead_of_squeezing(
     assert faults == {}, f"sub-tabs drawn squeezed at {size}: {faults}"
 
 
-def test_the_server_tab_with_the_uninstall_plan_up_scrolls_to_its_last_button(
-    qapp: object, ps: _Ps, tmp_path: Path
-) -> None:
-    """C3: the plan's page needs more than 960x640 has, so it scrolls, whole, to its end."""
+def _server_with_the_plan_up(
+    tmp_path: Path, size: tuple[int, int] = T191_SIZES[0]
+) -> tuple[ControllerView, Any, Any]:
+    """WotLK's Server tab in the real window at `size`, with Uninstall… pressed.
+
+    The factory's wiring, as the app builds it (the client folder row, the
+    command channel), with only the plan's answer fixed. Returns the view, the
+    window and the tab's `ScrollPage`.
+    """
 
     class _WholePlan(_PlanOnlyUninstall):
         def plan(self) -> purge.PurgePlan:
@@ -16463,20 +16500,32 @@ def test_the_server_tab_with_the_uninstall_plan_up_scrolls_to_its_last_button(
                 character_volume="t-project_ac-database",
             )
 
-    # The factory's wiring, as the app builds it (the client folder row, the
-    # command channel), with only the plan's answer fixed.
     services = ControllerServices.for_entry(
         WOTLK, tmp_path, client_dir=_game_client(tmp_path / "clients" / "WoW")
     )
     services.set_client_dir = _FakeClientDir()
     services.uninstall = _WholePlan(tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    window, tab = _controller_in_the_real_window(view, "Server")
-    _at(window, T191_SIZES[0])
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
     assert view.uninstall_button is not None
     view.uninstall_button.click()
     process_events()
-    page = view._tabs.currentWidget()
+    return view, window, view._tabs.currentWidget()
+
+
+def _whole_in_the_page(widget: Any, page: Any) -> bool:
+    """Whether every pixel of `widget` is inside `page`'s viewport now."""
+    top = widget.mapTo(page.viewport(), widget.rect().topLeft()).y()
+    return 0 <= top and top + widget.height() <= page.viewport().height()
+
+
+def test_the_server_tab_with_the_uninstall_plan_up_scrolls_to_its_last_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C3: the plan's page needs more than 960x640 has, so it scrolls, whole, to its end."""
+    view, _window, page = _server_with_the_plan_up(tmp_path)
+    tab = page.widget()
     confirm = view.uninstall_confirm_button
     assert confirm.isVisible(), "the plan is not on screen, so there is nothing to scroll to"
     assert page.verticalScrollBar().maximum() > 0, "the plan fitted: this proves nothing"
@@ -16484,10 +16533,124 @@ def test_the_server_tab_with_the_uninstall_plan_up_scrolls_to_its_last_button(
     assert confirm.height() >= confirm.minimumSizeHint().height()
     page.ensureWidgetVisible(confirm)
     process_events()
-    top = confirm.mapTo(page.viewport(), confirm.rect().topLeft()).y()
-    assert (
-        0 <= top and top + confirm.height() <= page.viewport().height()
+    assert _whole_in_the_page(
+        confirm, page
     ), "scrolled to its end, the uninstall button is still not whole on screen"
+
+
+def _overflowing_page(which: str, ps: _Ps, tmp_path: Path) -> tuple[Any, Any]:
+    """A sub-tab at 960x640 whose content needs more height than the page has: (window, page).
+
+    The window comes back too: dropped, it takes the page with it.
+    """
+    from tests.test_characters_tab import _people, _Play
+
+    if which == "Server, uninstall plan up":
+        _view, window, page = _server_with_the_plan_up(tmp_path)
+        return window, page
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    title = which
+    if which == "Characters":
+        services.play = _Play(characters=_people())
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, title)
+    _at(window, T191_SIZES[0])
+    if which == "Characters":
+        view.refresh_characters()
+        process_events()
+    return window, view._tabs.currentWidget()
+
+
+@pytest.mark.parametrize("which", ["Server, uninstall plan up", "Characters", "Bots"])
+def test_a_page_too_tall_for_the_window_scrolls_and_cuts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, which: str
+) -> None:
+    """The pages that really overflow at 960x640: a scroll bar, and nothing squeezed or overlapped.
+
+    The sweep above runs at sizes where every page's minimum fits its
+    viewport, so it passes as well with the body held at the viewport's
+    height; these are the pages where the two differ. The horizontal half
+    (the Server row's cut labels) is Task 4's: this asks the vertical one.
+    """
+    _window, page = _overflowing_page(which, ps, tmp_path)
+    assert page.verticalScrollBar().maximum() > 0, f"{which} fits at 960x640: this proves nothing"
+    assert _squeezed_or_overlapping(page) == [], f"{which}: {_squeezed_or_overlapping(page)}"
+
+
+def test_a_widget_drawn_over_one_in_another_layout_of_the_same_parent_is_a_fault(
+    qapp: object,
+) -> None:
+    """A row's button over the label in the column around it: two layouts, one picture.
+
+    The one rule broken is the overlap -- both widgets keep their size.
+    """
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+
+    from yulon.ui.widgets.page import ScrollPage
+
+    body = QWidget()
+    column = QVBoxLayout(body)
+    label = QLabel("a sentence over the row", body)
+    column.addWidget(label)
+    row = QHBoxLayout()
+    button = QPushButton("Press", body)
+    row.addWidget(button)
+    column.addLayout(row)
+    page = ScrollPage(body)
+    page.resize(400, 300)
+    page.show()
+    process_events()
+    assert _squeezed_or_overlapping(page) == [], "the fixture is broken before it is broken"
+
+    button.move(label.pos())
+    assert button.geometry().intersects(label.geometry())
+    assert any("drawn over" in fault for fault in _squeezed_or_overlapping(page))
+
+
+@pytest.mark.slow
+def test_the_pad_walks_the_plan_page_from_the_sub_tab_bar_to_its_last_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Down from the sub-tab bar enters the page at its first control; Down again reaches the end.
+
+    The page scrolls under the focus (`_scroll_into_view`) until the uninstall
+    button is whole on screen, and the page itself is never a stop.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+    from yulon.ui.widgets.page import ScrollPage
+
+    view, window, page = _server_with_the_plan_up(tmp_path)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        view._tabs.tabBar().setFocus()
+        process_events()
+        nav.navigate(Direction.DOWN)
+        process_events()
+        landed = QApplication.focusWidget()
+        assert (
+            landed is view.set_client_dir_button
+        ), f"Down from the sub-tab bar went to {_pad_describe(landed, window)}"
+        stops = [landed]
+        for _press in range(40):
+            if landed is view.uninstall_confirm_button:
+                break
+            nav.navigate(Direction.DOWN)
+            process_events()
+            landed = QApplication.focusWidget()
+            assert not isinstance(landed, ScrollPage), "the page itself took the focus"
+            stops.append(landed)
+        assert (
+            landed is view.uninstall_confirm_button
+        ), "Down never reached the uninstall button: " + ", ".join(
+            _pad_describe(w, window) for w in stops
+        )
+        assert page.verticalScrollBar().value() > 0, "the page did not scroll under the focus"
+        assert _whole_in_the_page(landed, page), "the uninstall button is focused but cut off"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
 
 
 def test_a_job_pressed_on_the_server_tab_opens_the_page_its_log_is_on(
