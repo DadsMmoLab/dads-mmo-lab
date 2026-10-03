@@ -6204,12 +6204,57 @@ PLAY_NEEDS_A_CLIENT_FOLDER = "Play needs your own client folder first — set it
 """The Play section's line while there is nothing to make a ready-to-play client from (T189)."""
 
 
+class _ShownWhileAnyIs(QObject):
+    """Hides a row while every press in it is hidden, and shows it with the first (T189).
+
+    A row of hidden presses is drawn nothing tall, but its column still spends
+    a spacing on it: three of them were most of the gap under Realm's presses.
+    `ShowToParent`/`HideToParent` reach a press whether or not the row is
+    shown, which is what lets a hidden row come back.
+    """
+
+    def __init__(self, row: QWidget, presses: Sequence[QWidget]) -> None:
+        super().__init__(row)
+        self._row = row
+        self._presses = list(presses)
+        for press in self._presses:
+            press.installEventFilter(self)
+        self.follow()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() in (QEvent.Type.ShowToParent, QEvent.Type.HideToParent):
+            self.follow()
+        return False
+
+    def follow(self) -> None:
+        shown = any(not press.isHidden() for press in self._presses)
+        if self._row.isHidden() == shown:
+            self._row.setVisible(shown)
+
+
 def _bar(parent: QWidget, *buttons: QWidget) -> QWidget:
-    """A row of presses at their own width that wraps when the window is narrow (T189)."""
+    """A row of presses at their own width that wraps when the window is narrow (T189).
+
+    Hidden while all of its presses are (`_ShownWhileAnyIs`).
+    """
     bar = flow_bar(parent)
     for button in buttons:
         bar.flow().addWidget(button)
+    _ShownWhileAnyIs(bar, buttons)
     return bar
+
+
+class _SaidLine(QLabel):
+    """A label shown while it has something to say, hidden while its text is empty (T189).
+
+    An empty word-wrapped label is still a line tall in its column, plus a
+    spacing: Realm's problem line and Play's two lines left ~45 px of nothing
+    under their presses.
+    """
+
+    def setText(self, text: str) -> None:  # noqa: N802  (Qt's own name)
+        super().setText(text)
+        self.setVisible(bool(text))
 
 
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
@@ -6802,7 +6847,8 @@ class ControllerView(QWidget):
         # `_start_failed` wrote to it; a stop that refused wrote nowhere at all,
         # so a refusal was indistinguishable from the silent bug the refusal
         # exists to prevent (review, 2026-08-22).
-        self.problem_label = QLabel("", tab)
+        self.problem_label = _SaidLine("", tab)
+        self.problem_label.setVisible(False)
         self.problem_label.setWordWrap(True)
         self.problem_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse  # so the remedy can be copied
@@ -6911,14 +6957,13 @@ class ControllerView(QWidget):
         # where the seam is wired, which is Linux -- on Windows and macOS there
         # is no button rather than a dead one.
         self.steam_button: QPushButton | None = None
-        self.steam_label = QLabel("", tab)
+        self.steam_label = _SaidLine("", tab)
         self.steam_label.setWordWrap(True)
         self.steam_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.steam_label.setVisible(False)
         if self.services.steam is not None:
             self.steam_button = QPushButton("Add to Steam\u2026", tab)
             self.steam_button.clicked.connect(self.add_to_steam)
-            self.steam_label.setVisible(True)
         self._build_play_controls(tab)
         if self.services.uninstall is not None:
             self.uninstall_button = QPushButton("Uninstall\u2026", tab)
@@ -9294,7 +9339,7 @@ class ControllerView(QWidget):
             "Delete the ready-to-play client. Your own client keeps all its files. Asks first."
         )
         self.delete_play_client_action.triggered.connect(self._from_tab(self.delete_play_client))
-        self.play_label = QLabel("", tab)
+        self.play_label = _SaidLine("", tab)
         self.play_label.setWordWrap(True)
         self.play_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.play_label.setVisible(False)
@@ -9325,7 +9370,6 @@ class ControllerView(QWidget):
         self.play_menu_button.setToolTip("More for the ready-to-play client")
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
-        self.play_label.setVisible(True)
         if not has_play and self.services.client_dir is None:
             # The button is hidden until there is a folder to make one from
             # (T181); the section says so, and where (T189).
@@ -10722,8 +10766,8 @@ class ControllerView(QWidget):
 
         The action is safe for player data — the database is a named volume and
         `remove_staged()` never passes `-v` — but it is still a teardown, and it
-        sits next to Stop. Arming says what will happen, in the same label the
-        stop refusals use, before anything is touched.
+        sits in the Danger zone. Arming says what will happen, under the presses
+        (`danger_label`, T189), before anything is touched.
         """
         if not self._remove_armed:
             # Only one of the two destructive buttons is ever armed. Both write
@@ -10760,8 +10804,10 @@ class ControllerView(QWidget):
 
     @Slot()
     def _bring_the_danger_label_on_screen(self) -> None:
+        # Visible, not merely not hidden: a job that ends while the player is
+        # on another sub-tab must not scroll the page they left.
         label = self.danger_label
-        if label.isHidden():
+        if not label.isVisible():
             return
         parent = label.parentWidget()
         while parent is not None and not isinstance(parent, ScrollPage):
@@ -10770,21 +10816,29 @@ class ControllerView(QWidget):
             parent.ensureWidgetVisible(label, 0, 0)
 
     def _clear_danger_label(self) -> None:
-        """The line goes once neither destructive press is armed."""
-        if self._remove_armed or self._repair_armed:
-            return
         self.danger_label.setText("")
         self.danger_label.setVisible(False)
 
     def _disarm_remove(self) -> None:
+        """Unload the press; its warning goes with it, and only its own.
+
+        A press that was not armed leaves the line alone: it may be the other
+        press's warning, or how a remove or repair went -- which every import
+        probe's answer would otherwise wipe, through `_show_repair`.
+        """
+        was = self._remove_armed
         self._remove_armed = False
         self.remove_button.setText(REMOVE_IDLE)
-        self._clear_danger_label()
+        if was:
+            self._clear_danger_label()
 
     def _disarm_repair(self) -> None:
+        """`_disarm_remove`'s twin."""
+        was = self._repair_armed
         self._repair_armed = False
         self.repair_button.setText(REPAIR_IDLE)
-        self._clear_danger_label()
+        if was:
+            self._clear_danger_label()
 
     def _disarm_actions(self) -> None:
         """Any other server action means the user moved on from all of them.
@@ -10793,12 +10847,17 @@ class ControllerView(QWidget):
         what ran when it was shown, and a Start, Stop or Remove changes exactly
         that. The press re-plans anyway; a plan on screen that the server has
         since moved away from is still one the player would be agreeing to.
+
+        So the line under the Danger zone's presses goes too, armed or not --
+        except while the import it is reporting is still running.
         """
         self._disarm_remove()
         self._disarm_repair()
         self._hide_stop_other()
         self._restore_plan = None
         self.restore_button.setEnabled(False)
+        if not self._import_running:
+            self._clear_danger_label()
 
     @Slot(object)
     def _remove_done(self, result: object) -> None:
@@ -10866,7 +10925,10 @@ class ControllerView(QWidget):
         # directly under "Running the database import" for the whole 10-30
         # minutes, contradicting it (review, 2026-08-23).
         self.repair_label.setVisible(False)
-        self.problem_label.setText(IMPORT_RUNNING)
+        # Under the press, like the warning it replaces (T189): Realm's line
+        # can be a page away at 960, for a job that cannot be stopped.
+        self.problem_label.setText("")
+        self._say_under_the_presses(IMPORT_RUNNING)
         # The sink is the relay's emitter, not `_import_line`: this call runs on
         # a worker thread, and everything it invokes runs there too.
         self._run(
@@ -10897,13 +10959,15 @@ class ControllerView(QWidget):
         if len(text) > _IMPORT_LINE_CHARS:
             text = text[:_IMPORT_LINE_CHARS] + "…"
         self._import_tail.append(text)
-        self.problem_label.setText("\n".join([IMPORT_RUNNING, *self._import_tail]))
+        # Not `_say_under_the_presses`: a line a second must not pull the page
+        # back to the zone each time the player scrolls away from it.
+        self.danger_label.setText("\n".join([IMPORT_RUNNING, *self._import_tail]))
 
     @Slot(object)
     def _repair_done(self, _result: object) -> None:
         self._set_busy(False)
         self._import_running = False
-        self.problem_label.setText(
+        self._say_under_the_presses(
             "The database import finished. Press Start — the server has a database to talk to now."
         )
         # The remembered answer is now stale in the one direction that matters:
@@ -10918,7 +10982,7 @@ class ControllerView(QWidget):
     def _repair_failed(self, exc: object) -> None:
         self._set_busy(False)
         self._import_running = False
-        self.problem_label.setText(str(exc))
+        self._say_under_the_presses(str(exc))
         self.action_failed.emit(str(exc))
         self._import_asked = False
         self.refresh_status()

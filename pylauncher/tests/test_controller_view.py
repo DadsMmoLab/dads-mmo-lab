@@ -2595,6 +2595,8 @@ def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
     assert row is not None and row.isAncestorOf(view.forget_install_button)
     assert not view.danger_label.isHidden()
     assert "no containers" not in view.problem_label.text(), "said a page away as well"
+    view._show_repair()  # what every import probe's answer ends in
+    assert "no containers to remove" in view.danger_label.text(), "a probe answer wiped it"
 
 
 def test_a_removal_that_removed_something_does_not_highlight_it(
@@ -2872,7 +2874,7 @@ def test_the_import_shows_its_own_output_instead_of_one_frozen_sentence(
         assert output is not None, "the import was run with nowhere to say anything"
         for line in printed:
             output(line)
-            shown.append(view.problem_label.text())
+            shown.append(view.danger_label.text())
         return True
 
     view.services.controller.import_state = lambda: UNIMPORTED  # type: ignore[method-assign]
@@ -2952,7 +2954,10 @@ def test_a_finished_repair_stops_offering_itself(qapp: object, ps: _Ps, tmp_path
     )
     view.repair_import()
     view.repair_import()
-    assert "import finished" in view.problem_label.text()
+    # Said under the presses and still there: the offer withdrawn after the
+    # run (`_show_repair`) disarms a press that is no longer armed.
+    assert "import finished" in view.danger_label.text()
+    assert not view.danger_label.isHidden()
     assert view.repair_button.isHidden(), "still offering to import an install it just imported"
 
 
@@ -2973,7 +2978,8 @@ def test_a_refused_repair_is_readable_on_screen(qapp: object, ps: _Ps, tmp_path:
     view.action_failed.connect(failures.append)
     view.repair_import()
     view.repair_import()
-    assert "651 rows in acore_auth.account" in view.problem_label.text()
+    assert "651 rows in acore_auth.account" in view.danger_label.text()
+    assert not view.danger_label.isHidden()
     assert failures and "player data" in failures[0]
 
 
@@ -9486,7 +9492,7 @@ def test_neither_one_line_sink_can_show_a_control_character(
     view._import_line(log_lines.TOOL + ">> Applying update 2026_01_01_00.sql")
     view._module_sql_line(log_lines.TOOL + ">> Applying mod-playerbots.sql")
 
-    assert view.problem_label.text().splitlines()[-1] == ">> Applying update 2026_01_01_00.sql"
+    assert view.danger_label.text().splitlines()[-1] == ">> Applying update 2026_01_01_00.sql"
     assert view.module_report.toPlainText().splitlines()[-1] == ">> Applying mod-playerbots.sql"
 
 
@@ -16851,6 +16857,158 @@ def test_a_press_at_the_bottom_edge_brings_its_warning_on_screen(
     process_events()
     assert _whole_in_the_page(view.danger_label, page), "the warning opened under the edge"
     assert _whole_in_the_page(button, page), "the press it warns about scrolled away"
+
+
+@pytest.mark.parametrize("outcome", ["done", "refused"])
+def test_the_running_repair_says_how_it_goes_under_its_press_at_960(
+    qapp: object, ps: _Ps, tmp_path: Path, outcome: str
+) -> None:
+    """Ten to thirty minutes that cannot be stopped, told where the press was (T189).
+
+    Pressed as the pad presses it (`_scroll_into_view`, then a click), twice.
+    The running text, each line of progress and the end are under the Repair
+    press, on screen with it; Realm's `problem_label`, a page above at 960,
+    carries none of it.
+    """
+    from yulon.ui.gamepad import _scroll_into_view
+
+    view = _server_view(WOTLK, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, (960, 640))
+    page = view._tabs.currentWidget()
+    label = view.danger_label
+    refusal = docker.DockerCommandError("this install's databases hold player data (651 rows).")
+    seen: list[tuple[str, bool, bool, bool, str]] = []
+
+    def look() -> None:
+        process_events()
+        seen.append(
+            (
+                label.text(),
+                label.isVisible(),
+                _whole_in_the_page(label, page),
+                _whole_in_the_page(view.repair_button, page),
+                view.problem_label.text(),
+            )
+        )
+
+    def fake_repair(output: docker.OutputSink | None = None) -> bool:
+        # Jobs run inline here (`_inline_jobs`), so this is mid-import on screen.
+        assert output is not None
+        look()
+        output("applying acore_world")
+        look()
+        if outcome == "refused":
+            raise refusal
+        return True
+
+    view.services.controller.import_state = lambda: UNIMPORTED  # type: ignore[method-assign]
+    view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
+    _db_up(view, ps)
+    process_events()
+    assert view.repair_button.isVisible(), "the repair is not offered"
+    page.verticalScrollBar().setValue(0)
+    process_events()
+    assert not _whole_in_the_page(view.repair_button, page), "the press was on screen already"
+
+    for _press in range(2):
+        _scroll_into_view(view.repair_button)
+        process_events()
+        view.repair_button.click()
+        process_events()
+    assert len(seen) == 2, "the import did not run"
+    running, progress = seen
+    assert running[0] == controller_view_module.IMPORT_RUNNING, running[0]
+    assert "applying acore_world" in progress[0], progress[0]
+    assert controller_view_module.IMPORT_RUNNING in progress[0], progress[0]
+    for text, visible, whole, press_whole, realm in seen:
+        assert visible and whole, f"the running import is off screen: {text!r}"
+        assert press_whole, "the press scrolled away"
+        assert "import" not in realm, "said a page away as well"
+    assert _section_of(view, label) == "Danger zone"
+    end = "import finished" if outcome == "done" else "651 rows"
+    assert end in label.text(), label.text()
+    assert label.isVisible(), "the end was said and then wiped"
+    assert _whole_in_the_page(label, page), "the end is off screen"
+    assert end not in view.problem_label.text()
+
+
+def test_a_remove_that_ends_on_another_tab_leaves_the_server_page_where_it_was(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The line under the presses is brought on screen only while the page is on screen.
+
+    The player confirms, then goes to the Console tab while the containers go;
+    the page they left keeps its scroll for when they come back.
+    """
+    view, window, page = _server_with_the_plan_up(tmp_path)
+    titles = [view._tabs.tabText(i) for i in range(view._tabs.count())]
+
+    def remove_while_away() -> bool:
+        # Jobs run inline here (`_inline_jobs`): the player leaves mid-remove.
+        view._tabs.setCurrentIndex(titles.index("Console"))
+        process_events()
+        page.verticalScrollBar().setValue(0)
+        process_events()
+        return True
+
+    view.services.controller.remove = remove_while_away  # type: ignore[method-assign]
+    view.remove_button.click()
+    process_events()
+    view.remove_button.click()
+    process_events()
+    assert "Containers removed" in view.danger_label.text(), view.danger_label.text()
+    assert view._tabs.tabText(view._tabs.currentIndex()) == "Console"
+    assert page.verticalScrollBar().value() == 0, "the page the player left was scrolled"
+
+
+def _space_under_the_last_row(section: Any) -> int:
+    """Pixels from the bottom of `section`'s last drawn row to the bottom of the box.
+
+    A row is a visible widget with something in it: a label with text, or any
+    other widget taller than nothing.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    bottom = 0
+    for item in _laid_out_in(section):
+        widget = item.widget()
+        if isinstance(widget, QLabel) and not widget.text():
+            continue
+        if widget.height() > 0:
+            bottom = max(bottom, widget.geometry().bottom() + 1)
+    return int(section.height() - bottom)
+
+
+def test_realm_and_play_end_at_their_last_row_when_nothing_is_said(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The after-render left ~45 px under Realm's and Play's presses: empty lines and rows.
+
+    An empty label, or a row whose presses are all hidden, took its height and
+    a spacing. With nothing to say, each box ends at its frame and margin (and
+    one spacing of slack); a problem then shows, whole.
+    """
+    view = _server_view(WOTLK, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, (960, 640))
+    page = view._tabs.currentWidget()
+    sections = {s.title(): s for s in _sections(view)}
+    for title in ("Realm", "Play"):
+        section = sections[title]
+        layout = section.layout()
+        frame = section.height() - (section.contentsRect().bottom() + 1)
+        slack = frame + layout.contentsMargins().bottom() + layout.spacing()
+        under = _space_under_the_last_row(section)
+        assert under <= slack, f"{title}: {under}px under its last row, over {slack}"
+
+    view.problem_label.setText("The server refused to stop because of a reason.")
+    process_events()
+    assert view.problem_label.isVisible(), "a problem was said and not shown"
+    assert _page_faults(page) == []
+    view.problem_label.setText("")
+    process_events()
+    assert view.problem_label.isHidden()
 
 
 def _server_states(view: ControllerView) -> Iterator[str]:
