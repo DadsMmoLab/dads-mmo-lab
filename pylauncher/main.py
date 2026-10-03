@@ -574,8 +574,8 @@ def build_window() -> object:
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
-    from yulon.ui.sidebar import SidebarPins
-    from yulon.ui.tab_titles import retitle_controller_tabs
+    from yulon.ui.sidebar import SidebarPins, server_tab_icon
+    from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
     from yulon.ui.theme import (
         CHECK_UPDATES_BUTTON,
         FORGET_TAB_BUTTON,
@@ -807,6 +807,8 @@ def build_window() -> object:
     # distro comparison both reach into `services` and `console_log`.
     controllers: dict[tuple[str, Path], ControllerView] = {}
     controller_views: list[QWidget] = []
+    # T192: each tab's status-dot slot, so `drop_controller()` can unhook it.
+    status_dots: dict[tuple[str, Path], Callable[[str], None]] = {}
     # T187: one launcher window per server, keyed as its tab is. Made on the
     # first ▶ and kept (closing one hides it) until its server goes.
     launchers: dict[tuple[str, Path], LauncherWindow] = {}
@@ -892,6 +894,15 @@ def build_window() -> object:
         later call `shutdown()`/`wait()` on at exit.
         """
         view = controllers.pop(key)
+        # T192: the tab's status dot lets go of the badge first. The badge
+        # outlives this call until the deferred delete below, and a rebuilt
+        # tab's old badge must not keep a line to the rail.
+        dot = status_dots.pop(key, None)
+        if dot is not None:
+            try:
+                view.realm_badge.status_changed.disconnect(dot)
+            except (RuntimeError, TypeError):  # pragma: no cover - never connected
+                pass
         view.shutdown()
         # EVERY panel the view owns, not the console one by name. It grew a
         # second (the rebuild's) on 2026-09-08, and a panel this loop cannot see
@@ -1039,6 +1050,9 @@ def build_window() -> object:
             # which is a fact about the SET - so removing one can make another's
             # title longer than it needs to be.
             retitle_controller_tabs(tabs, controllers.values())
+            # And the header's name for the tab on screen with it: a tab removed
+            # off screen moves no selection, so nothing else asks (T192).
+            follow_the_tab_on_screen()
         catalog_view.forget_installed(game, state.installed_dirs())
 
     removal_pending: set[tuple[str, Path]] = set()
@@ -1234,8 +1248,22 @@ def build_window() -> object:
         if header is None:
             return
         current = tabs.currentWidget()
-        badge = getattr(current, "realm_badge", None) if current in controller_views else None
-        header.follow(badge)
+        views = list(controllers.values())
+        if current not in views:
+            header.follow(None)
+            return
+        # T192's game strip: the server's whole name beside its badge, worked
+        # out over the set of open tabs as the old tab titles were -- the rail
+        # shows only the short name. The tab's tooltip carries the full path.
+        titles = controller_tab_titles(
+            [(view.entry.name, view.services.controller.server_dir) for view in views]
+        )
+        position = views.index(current)
+        header.follow(
+            views[position].realm_badge,
+            title=titles[position],
+            tooltip=tabs.tabToolTip(tabs.currentIndex()),
+        )
 
     tabs.currentChanged.connect(follow_the_tab_on_screen)
 
@@ -1438,7 +1466,18 @@ def build_window() -> object:
         controller_views.append(view)
         panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
-        tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
+
+        # C28 (T192): the icon is a status dot that follows the Server tab's
+        # badge -- through its signal, so T188's held "stopping" shows too --
+        # read once now, because the badge already says something.
+        def show_status_dot(status: str, view: ControllerView = view) -> None:
+            index = tabs.indexOf(view)
+            if index != -1:
+                tabs.setTabIcon(index, server_tab_icon(status))
+
+        view.realm_badge.status_changed.connect(show_status_dot)
+        status_dots[key] = show_status_dot
+        show_status_dot(view.realm_badge.status)
         # T95: the ×, on a server page only. Catalog (and T93's Logs) never get
         # one, because only this function attaches it and only to a ControllerView.
         forget_buttons.attach(tabs.indexOf(view), _tab_buttons(key, entry.name))

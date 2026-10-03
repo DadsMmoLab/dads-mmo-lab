@@ -478,3 +478,61 @@ def test_get_app_icon_renders_a_valid_non_null_icon(qapp: QApplication) -> None:
         assert not pixmap.isNull()
         assert pixmap.width() == size
         assert pixmap.height() == size
+
+
+# -- T192: one reading of a realm status for the badge and the sidebar's dot -------
+
+
+@pytest.mark.parametrize(
+    ("status", "tone", "says"),
+    [
+        ("running", "up", "ONLINE"),
+        ("online", "up", "ONLINE"),
+        ("ready", "up", "ONLINE"),
+        ("starting", "between", "STARTING"),
+        ("importing", "between", "STARTING"),
+        ("building", "between", "STARTING"),
+        ("stopping", "between", "STOPPING"),
+        ("partial", "between", "PARTLY UP"),
+        ("restarting", "restarting", "RESTARTING"),
+        ("loop", "restarting", "RESTARTING"),
+        ("unknown", "unknown", "UNKNOWN"),
+        ("stopped", "down", "OFFLINE"),
+        ("exited", "down", "OFFLINE"),
+    ],
+)
+def test_realm_tone_is_what_the_badge_says(
+    qapp: QApplication, status: str, tone: str, says: str
+) -> None:
+    """The sidebar's dot reads `realm_tone()`; the badge must read it too, or they drift."""
+    from yulon.ui.widgets.dadcraft_decorations import realm_tone
+
+    badge = DadcraftRealmBadge("running" if status != "running" else "stopped")
+    badge.set_status(status)
+    assert realm_tone(status) == tone
+    assert realm_tone(status.upper()) == tone
+    assert says in badge._label.text(), badge._label.text()
+
+
+def test_the_header_names_the_server_it_follows(qapp: QApplication) -> None:
+    """T192: the header's game strip -- the server's whole name beside its badge.
+
+    Hidden with the badge, on the Catalog and Logs (`follow(None)`), and when a
+    caller hands a badge with no title.
+    """
+    header = DadcraftHeader("TEST REALM", "Subtitle")
+    header.resize(1200, 56)
+    header.show()
+    badge = DadcraftRealmBadge("running")
+
+    header.follow(badge, title="WoW WotLK — DadsMmoLab", tooltip="WoW WotLK — D:/DadsMmoLab")
+
+    assert header._realm_title.isHidden() is False
+    assert header._realm_title.text() == "WoW WotLK — DadsMmoLab"
+    assert header._realm_title.toolTip() == "WoW WotLK — D:/DadsMmoLab"
+
+    header.follow(None)
+    assert header._realm_title.isHidden() is True
+    header.follow(badge)
+    assert header._realm_title.isHidden() is True
+    header.close()

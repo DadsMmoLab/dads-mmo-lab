@@ -4984,3 +4984,220 @@ def test_the_next_tab_bumper_from_the_last_server_lands_on_the_catalog(
 
     assert tabs.currentIndex() == 0
     assert pins.buttons[0].isChecked()
+
+
+# -- T192: a status dot on each server tab; the server's name in the header -----------
+
+
+def _tab_dot(window: Any, view: Any) -> Any:
+    """The tab's icon as the rail draws it, at the rail's icon size."""
+    tabs = window.property("tabs")
+    size = tabs.iconSize()
+    return tabs.tabIcon(tabs.indexOf(view)).pixmap(size).toImage()
+
+
+def _dot_is(image: Any, hex_colour: str) -> bool:
+    """The dot's centre pixel is `hex_colour` (within 24 a channel), opaque."""
+    from PySide6.QtGui import QColor
+
+    from yulon.ui.sidebar import status_dot_geometry
+
+    centre, _radius, _halo = status_dot_geometry(image.width())
+    got, want = image.pixelColor(int(centre.x()), int(centre.y())), QColor(hex_colour)
+    return got.alpha() > 200 and all(
+        abs(a - b) <= 24 for a, b in zip(got.getRgb()[:3], want.getRgb()[:3], strict=True)
+    )
+
+
+def _drop(window: Any, game: str, server_dir: Path) -> None:
+    for view in list(window.yulon_controllers):
+        if view.services.controller.server_dir == server_dir:
+            view.uninstalled.emit(game, server_dir)
+    process_events(10)
+
+
+def test_a_server_tab_carries_a_dot_that_follows_its_realm_badge(
+    window: Any, tmp_path: Any
+) -> None:
+    """C28: every server tab had the same icon, so the rail said nothing about which were up.
+
+    Mutation: leave `status_changed` unconnected and the dot stays at the
+    status the tab was built with.
+    """
+    from yulon.ui.icons import get_tab_icon
+    from yulon.ui.theme import COLOR_GOLD_BRIGHT, COLOR_RARE, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-dot"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        view.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, view), COLOR_UNCOMMON)
+        view.realm_badge.set_status("restarting")
+        assert _dot_is(_tab_dot(window, view), COLOR_RARE)
+        view.realm_badge.set_status("partial")
+        assert _dot_is(_tab_dot(window, view), COLOR_GOLD_BRIGHT)
+
+        # T188: Docker did not answer. No dot -- a ring would claim it is offline.
+        view.realm_badge.set_status("unknown")
+        plain = get_tab_icon("server").pixmap(window.property("tabs").iconSize()).toImage()
+        dot = _tab_dot(window, view)
+        assert dot.convertToFormat(plain.format()) == plain, "an unknown realm shows a dot"
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_a_new_server_tab_starts_with_the_dot_of_its_badge(window: Any, tmp_path: Any) -> None:
+    """Read at `add_controller`, not only on the first change: the badge starts stopped."""
+    from yulon.ui.theme import COLOR_TEXT_MUTED, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-first-dot"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        assert view.realm_badge.status == "stopped"
+        image = _tab_dot(window, view)
+        assert not _dot_is(image, COLOR_UNCOMMON)
+        from PySide6.QtGui import QColor
+
+        from yulon.ui.sidebar import status_dot_geometry
+
+        centre, radius, _halo = status_dot_geometry(image.width())
+        muted = QColor(COLOR_TEXT_MUTED).getRgb()[:3]
+        ring = [
+            image.pixelColor(x, y)
+            for y in range(image.height())
+            for x in range(image.width())
+            if abs(((x + 0.5 - centre.x()) ** 2 + (y + 0.5 - centre.y()) ** 2) ** 0.5 - radius)
+            < 1.5
+        ]
+        assert any(
+            c.alpha() > 200
+            and all(abs(a - b) <= 24 for a, b in zip(c.getRgb()[:3], muted, strict=True))
+            for c in ring
+        ), "a new tab shows no stopped ring"
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_the_dot_shows_the_badge_held_while_our_stop_runs(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T188 holds the badge at "stopping" while our own Stop runs; the dot holds with it."""
+    from yulon.ui.theme import COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-held"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        view.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, view), COLOR_UNCOMMON)
+        monkeypatch.setattr(view, "_run", lambda *_args, **_kwargs: None)
+
+        view.stop_server()
+
+        assert view.realm_badge.status == "stopping"
+        assert _dot_is(_tab_dot(window, view), COLOR_GOLD_BRIGHT)
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_a_rebuilt_tab_gets_its_new_badge_s_dot_and_the_old_badge_lets_go(
+    window: Any, tmp_path: Any
+) -> None:
+    """A new client folder rebuilds the tab (`on_client_dir_changed`): a new view, a new badge.
+
+    The old badge must not keep a line to the tab: nothing is left listening
+    to it, and what it says no longer reaches the rail.
+
+    Mutation: leave the old badge connected and it still has a receiver.
+    """
+    from PySide6.QtCore import SIGNAL
+
+    from yulon.ui.theme import COLOR_RARE, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-rebuilt"
+    client = tmp_path / "t192-client"
+    (client / "Data").mkdir(parents=True)
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    old = _tab_for(window, server_dir)
+    try:
+        old.client_dir_changed.emit("wow-wotlk", server_dir, client)
+        made = _tab_for(window, server_dir)
+        assert made is not old
+
+        made.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, made), COLOR_UNCOMMON)
+        assert old.realm_badge.receivers(SIGNAL("status_changed(QString)")) == 0
+        old.realm_badge.set_status("restarting")  # still alive until its deferred delete
+        assert not _dot_is(_tab_dot(window, made), COLOR_RARE)
+        process_events()  # the old view's deferred delete
+        made.realm_badge.set_status("restarting")
+        assert _dot_is(_tab_dot(window, made), COLOR_RARE)
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_the_header_names_the_server_on_screen_and_nothing_on_the_catalog(
+    shown_window: Any, tmp_path: Any
+) -> None:
+    """The game strip: "WoW WotLK — <folder>" beside the badge, clear of both header controls.
+
+    Mutation: stop passing `title=` and the header names nothing.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    header = shown_window.property("header")
+    tabs = shown_window.property("tabs")
+    server_dir = tmp_path / "Hdr Realm"
+    _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(shown_window, server_dir)
+    try:
+        tabs.setCurrentWidget(view)
+        _at_width(shown_window, (960, 640))
+        title = header._realm_title
+        check = shown_window.findChild(QPushButton, "check-for-updates")
+        assert title.isVisible()
+        assert title.text().startswith("WoW WotLK"), title.text()
+        assert title.toolTip() == f"WoW WotLK — {server_dir}"
+        assert not title.geometry().intersects(check.geometry()), (
+            title.geometry(),
+            check.geometry(),
+        )
+        assert not title.geometry().intersects(header._badge.geometry())
+        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
+
+        tabs.setCurrentIndex(0)
+        process_events(10)
+        assert title.isHidden(), "the Catalog names a server"
+        tabs.setCurrentIndex(1)
+        process_events(10)
+        assert title.isHidden(), "Logs names a server"
+    finally:
+        _drop(shown_window, "wow-wotlk", server_dir)
+
+
+def test_the_header_title_shortens_when_the_tab_that_needed_the_longer_one_goes(
+    window: Any, tmp_path: Any
+) -> None:
+    """Two "Hdr Twin" folders need a parent folder each to tell apart; one alone does not.
+
+    Removing a tab that is not on screen moves no selection, so it is the
+    retitle after the removal that has to refresh the header.
+    """
+    header = window.property("header")
+    tabs = window.property("tabs")
+    first, second = tmp_path / "d1" / "Hdr Twin", tmp_path / "d2" / "Hdr Twin"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", first, None)
+    catalog.installed.emit("wow-wotlk", second, None)
+    try:
+        tabs.setCurrentWidget(_tab_for(window, first))
+        assert header._realm_title.text() == f"WoW WotLK — {Path('d1') / 'Hdr Twin'}"
+
+        _drop(window, "wow-wotlk", second)
+
+        assert header._realm_title.text() == "WoW WotLK — Hdr Twin"
+    finally:
+        _drop(window, "wow-wotlk", first)
+        _drop(window, "wow-wotlk", second)

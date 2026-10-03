@@ -136,3 +136,100 @@ def test_a_tab_widget_inside_the_rail_keeps_its_own_tab_width(rail) -> None:
     words = nested.fontMetrics().horizontalAdvance("Characters and their gear")
     assert nested.tabRect(0).width() > words, (nested.tabRect(0), words)
     assert nested.tabRect(0).width() > RAIL_MIN_WIDTH
+
+
+# -- T192: each server tab carries a status dot that follows its realm badge -------
+
+ICON = 18
+"""The rail's icon size (`main.py` `tabs.setIconSize`). The server glyph is drawn
+at 16px, and the icon gives out the size it has, so the dot's geometry is asked
+for at the image's own width."""
+
+
+def _icon_image(status: str):  # noqa: ANN202  (a QImage)
+    from yulon.ui.sidebar import server_tab_icon
+
+    return server_tab_icon(status).pixmap(ICON, ICON).toImage()
+
+
+def _close(colour: QColor, hex_colour: str, tolerance: int = 24) -> bool:
+    want = QColor(hex_colour)
+    return colour.alpha() > 200 and all(
+        abs(a - b) <= tolerance
+        for a, b in zip(
+            (colour.red(), colour.green(), colour.blue()),
+            (want.red(), want.green(), want.blue()),
+            strict=True,
+        )
+    )
+
+
+def _dot_pixels(image, hex_colour: str) -> int:  # noqa: ANN001  (a QImage)
+    from yulon.ui.sidebar import status_dot_geometry
+
+    centre, _radius, halo = status_dot_geometry(image.width())
+    return sum(
+        1
+        for y in range(image.height())
+        for x in range(image.width())
+        if (x + 0.5 - centre.x()) ** 2 + (y + 0.5 - centre.y()) ** 2 <= halo**2
+        and _close(image.pixelColor(x, y), hex_colour)
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "colour"),
+    [
+        ("running", theme.COLOR_UNCOMMON),
+        ("starting", theme.COLOR_GOLD_BRIGHT),
+        ("stopping", theme.COLOR_GOLD_BRIGHT),
+        ("partial", theme.COLOR_GOLD_BRIGHT),
+        ("restarting", theme.COLOR_RARE),
+    ],
+)
+def test_a_realm_that_is_up_or_on_its_way_shows_a_filled_dot_of_its_colour(
+    qapp: object, status: str, colour: str
+) -> None:
+    """The badge's own colour, filled, in a clear ring that keeps it off the server glyph.
+
+    The clear ring is what makes it a dot: the glyph is the same gold as
+    "in between", so a centre pixel alone could be the glyph.
+    """
+    from yulon.ui.sidebar import status_dot_geometry
+
+    image = _icon_image(status)
+    centre, radius, halo = status_dot_geometry(image.width())
+    middle = image.pixelColor(int(centre.x()), int(centre.y()))
+    assert _close(middle, colour), (status, middle.name(), middle.alpha())
+    assert _dot_pixels(image, colour) > 20, _dot_pixels(image, colour)
+    gap = image.pixelColor(int(centre.x()), int(centre.y() - (radius + halo) / 2))
+    assert gap.alpha() < 64, ("no clear ring around the dot", gap.name(), gap.alpha())
+
+
+def test_a_stopped_realm_shows_a_hollow_muted_ring(qapp: object) -> None:
+    from yulon.ui.sidebar import status_dot_geometry
+
+    image = _icon_image("stopped")
+    centre, _radius, _halo = status_dot_geometry(image.width())
+    middle = image.pixelColor(int(centre.x()), int(centre.y()))
+    assert middle.alpha() < 64, ("the ring is filled", middle.name(), middle.alpha())
+    assert _dot_pixels(image, theme.COLOR_TEXT_MUTED) >= 8, _dot_pixels(
+        image, theme.COLOR_TEXT_MUTED
+    )
+    assert _dot_pixels(image, theme.COLOR_UNCOMMON) == 0
+
+
+def test_an_unknown_realm_shows_no_dot_at_all(qapp: object) -> None:
+    """T188: Docker did not answer, so nothing is known -- not even "offline".
+
+    A ring would say stopped. The tab carries the plain server icon, pixel for pixel.
+
+    Mutation: draw "unknown" as the stopped ring and the icon differs.
+    """
+    from yulon.ui.icons import get_tab_icon
+
+    plain = get_tab_icon("server").pixmap(ICON, ICON).toImage()
+    unknown = _icon_image("unknown")
+    assert unknown.size() == plain.size()
+    assert unknown.convertToFormat(plain.format()) == plain, "an unknown realm draws a dot"
+    assert _icon_image("stopped").convertToFormat(plain.format()) != plain, "the probe is blind"

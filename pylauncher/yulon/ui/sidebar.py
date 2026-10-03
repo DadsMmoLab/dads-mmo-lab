@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, Slot
-from PySide6.QtGui import QIcon, QPaintEvent
+from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, Slot
+from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionTab,
@@ -36,7 +36,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon.ui.theme import SIDEBAR_PIN_BUTTON, SIDEBAR_PIN_GAP, SIDEBAR_RAIL_WIDTH
+from yulon.ui.theme import (
+    COLOR_GOLD_BRIGHT,
+    COLOR_RARE,
+    COLOR_TEXT_MUTED,
+    COLOR_UNCOMMON,
+    SIDEBAR_PIN_BUTTON,
+    SIDEBAR_PIN_GAP,
+    SIDEBAR_RAIL_WIDTH,
+)
+from yulon.ui.widgets.dadcraft_decorations import realm_tone
 
 RAIL_MIN_WIDTH = SIDEBAR_RAIL_WIDTH
 """The rail's thickness floor (px): a server tab's styled width, so the rail is
@@ -51,6 +60,60 @@ def short_game_name(name: str) -> str:
     tab's tooltip.
     """
     return name.removeprefix("WoW ")
+
+
+DOT_FILLS = {"up": COLOR_UNCOMMON, "between": COLOR_GOLD_BRIGHT, "restarting": COLOR_RARE}
+"""The status dot's fill per `realm_tone()`: the realm badge's own border colours."""
+
+
+def status_dot_geometry(size: int) -> tuple[QPointF, float, float]:
+    """The dot on a `size`-px tab icon: its centre, its radius, and the clear ring's radius.
+
+    Bottom-right, over the server glyph, and the clear ring around it is what
+    keeps it a dot: the glyph is the same gold as "in between".
+    """
+    radius = size * 0.22
+    centre = size - radius - 0.5
+    return QPointF(centre, centre), radius, radius + size * 0.1
+
+
+def server_tab_icon(status: str) -> QIcon:
+    """A server tab's icon: the server glyph with a dot that says how its realm is (T192).
+
+    Up is filled green, in between (starting, stopping, partly up) filled
+    amber, restarting filled blue -- the badge's colours, through the same
+    `realm_tone()` -- and stopped a hollow grey ring. Unknown draws no dot at
+    all: Docker did not answer, and a ring would claim the realm is offline
+    (T188).
+    """
+    from yulon.ui.icons import get_tab_icon
+
+    glyph = get_tab_icon("server")
+    tone = realm_tone(status)
+    if tone == "unknown":
+        return glyph
+    base = glyph.availableSizes()[0] if glyph.availableSizes() else QSize(16, 16)
+    pixmap = glyph.pixmap(base)
+    size = pixmap.width()
+    centre, radius, halo = status_dot_geometry(size)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    painter.setBrush(QBrush(Qt.GlobalColor.black))
+    painter.drawEllipse(centre, halo, halo)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    fill = DOT_FILLS.get(tone)
+    if fill is not None:
+        painter.setBrush(QColor(fill))
+        painter.drawEllipse(centre, radius, radius)
+    else:
+        ring = size * 0.1
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(COLOR_TEXT_MUTED), ring))
+        painter.drawEllipse(centre, radius - ring / 2, radius - ring / 2)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class SidebarRail(QTabBar):
