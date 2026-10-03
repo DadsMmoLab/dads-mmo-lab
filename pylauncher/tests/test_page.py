@@ -170,3 +170,73 @@ def test_a_page_prefers_the_size_its_body_prefers(qapp: object) -> None:
     page = ScrollPage(body)
 
     assert page.sizeHint() == QSize(1500, 1200)
+
+
+def _row_of_a_real_item(window: Any) -> int:
+    """How tall the theme draws one row of a list, asked of a list that has one."""
+    from PySide6.QtWidgets import QListWidget
+
+    probe = QListWidget(window)
+    probe.addItem("Guglu — level 78 — online — ADMIN")
+    probe.show()
+    process_events()
+    height = probe.sizeHintForRow(0)
+    probe.deleteLater()
+    return int(height)
+
+
+def test_an_empty_rows_list_asks_for_three_whole_rows_of_the_themes_height(qapp: object) -> None:
+    """Empty, it still claims three rows -- the height the theme gives a real row, three times.
+
+    Measured against a list WITH an item, so the floor is the theme's row and
+    not a number this test or the widget made up.
+    """
+    from PySide6.QtWidgets import QListWidget, QMainWindow
+
+    from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.widgets.page import RowsList
+
+    window = QMainWindow()
+    apply_dadcraft_theme(window, width=960)
+    rows = RowsList(rows=3, parent=window)
+    plain = QListWidget(window)
+    window.show()
+    process_events()
+    row = _row_of_a_real_item(window)
+
+    assert row > 0
+    assert (
+        rows.minimumSizeHint().height() == 3 * row + 2 * rows.frameWidth()
+    ), f"{rows.minimumSizeHint().height()}px for three rows of {row}"
+    assert plain.minimumSizeHint().height() < 3 * row, "a plain list already asks for this"
+
+
+def test_a_rows_list_follows_the_style_when_the_window_restyles(qapp: object) -> None:
+    """Restyled at another width, and restyled with taller rows: the floor follows each.
+
+    The theme's row is floored at its touch target, so 960 and 1920 draw the
+    same row today (measured); the second restyle is the one that moves it,
+    and a floor computed once at construction would stay where it was.
+    """
+    from PySide6.QtWidgets import QMainWindow
+
+    from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.widgets.page import RowsList
+
+    window = QMainWindow()
+    apply_dadcraft_theme(window, width=960)
+    rows = RowsList(rows=3, parent=window)
+    window.show()
+    process_events()
+    first = rows.minimumSizeHint().height()
+    apply_dadcraft_theme(window, width=1920)
+    process_events()
+    assert (
+        rows.minimumSizeHint().height() == 3 * _row_of_a_real_item(window) + 2 * rows.frameWidth()
+    )
+    window.setStyleSheet(window.styleSheet() + "\nQListWidget::item { min-height: 80px; }")
+    process_events()
+    taller = _row_of_a_real_item(window)
+
+    assert taller * 3 + 2 * rows.frameWidth() > first, "the restyle did not make a row taller"
+    assert rows.minimumSizeHint().height() == 3 * taller + 2 * rows.frameWidth()

@@ -16524,6 +16524,107 @@ def test_a_job_pressed_on_the_server_tab_opens_the_page_its_log_is_on(
     )
 
 
+def _whole_rows_in(listing: Any, page: Any) -> int:
+    """How many of `listing`'s rows are wholly inside both its own viewport and the page's."""
+    viewport = listing.viewport()
+    seen = page.viewport()
+    whole = 0
+    for row in range(listing.count()):
+        rect = listing.visualItemRect(listing.item(row))
+        top = viewport.mapTo(seen, rect.topLeft()).y()
+        if (
+            rect.top() >= 0
+            and rect.bottom() < viewport.height()
+            and top >= 0
+            and top + rect.height() <= seen.height()
+        ):
+            whole += 1
+    return whole
+
+
+def test_the_account_list_takes_the_height_the_accounts_tab_has(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A16/B13: at 1080p the list is half the page, not a strip over empty space.
+
+    And at 960x640, scrolled to, it still shows three whole rows: the height a
+    taller window gives it is not taken from a short one.
+    """
+    accounts = _StubAccounts(
+        useraccounts.Listing(
+            accounts=[
+                useraccounts.Account(id=row, username=f"PLAYER{row}", gm_level=0)
+                for row in range(5)
+            ]
+        )
+    )
+    services = replace(_services(ps, tmp_path, []), accounts=accounts)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Accounts")
+    _at(window, T191_SIZES[2])
+    view.refresh_accounts()
+    process_events()
+    page = view._tabs.currentWidget()
+    listing = view.account_list
+
+    assert listing.count() == 5
+    assert (
+        listing.height() >= page.viewport().height() // 2
+    ), f"the list is {listing.height()}px of a {page.viewport().height()}px page"
+    _at(window, T191_SIZES[0])
+    page.ensureWidgetVisible(listing)
+    process_events()
+    assert _whole_rows_in(listing, page) >= 3
+
+
+@pytest.mark.parametrize("entry", [WOTLK, TORTOISE], ids=["wotlk", "tortoise"])
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_the_bots_tab_scrolls_instead_of_squeezing(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int], entry: CatalogEntry
+) -> None:
+    """B1/A2: WotLK's My Party and Tortoise's bot count and dashboard, whole at every size.
+
+    The factory's wiring, as the app builds it: My Party for WotLK, the
+    random-bot count and the bot dashboard for Tortoise.
+    """
+    services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+    view = ControllerView(entry, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, size)
+    page = view._tabs.currentWidget()
+    if entry is WOTLK:
+        assert view.party_panel is not None and view.party_panel.isVisible()
+    else:
+        assert view.bot_count_group.isVisible(), "the fixture has no bot count to squeeze"
+    assert _page_faults(page) == [], f"the {entry.name} Bots tab at {size}: {_page_faults(page)}"
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_my_party_shows_its_first_three_rows_without_scrolling(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """B1: Character, Class and Level are on screen in My Party's own box, at every size.
+
+    The box scrolls (the panel is long), and before T191 it had no floor of
+    its own, so a short window left it a sliver with the Level row under it.
+    """
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, size)
+    panel = view.party_panel
+    assert panel is not None
+    viewport = panel.parentWidget()
+    box = viewport.parentWidget()
+    box.verticalScrollBar().setValue(0)
+    process_events()
+    third = panel.layout().itemAt(2).geometry()
+    assert third.height() > 0, "the third row is not laid out"
+    assert (
+        third.bottom() < viewport.height()
+    ), f"My Party's box is {viewport.height()}px; its third row ends at {third.bottom()}"
+
+
 def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

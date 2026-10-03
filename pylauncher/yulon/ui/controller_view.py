@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -60,7 +59,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
@@ -179,7 +177,13 @@ from yulon.ui.widgets.modules_panel import (
     build_module_rows,
     moved_by_server_update,
 )
-from yulon.ui.widgets.page import ScrollPage, page_room
+from yulon.ui.widgets.page import (
+    RowsList,
+    RowsScroll,
+    ScrollPage,
+    page_room,
+    stack_when_narrow,
+)
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
@@ -6186,6 +6190,25 @@ and a page around it would be a second answer to the same question.
 """
 
 
+class _FieldLabel(QLabel):
+    """A form label as tall as the field beside it, so its words sit at the field's middle.
+
+    `QFormLayout` draws a label no taller than 7/4 of its own height, from the
+    top of the row, and the theme's boxes are three lines tall: "Level" sat 12
+    px above the middle of its spin box, level with the button row above it
+    (T191). Asked of the field at every layout, so it follows a restyle.
+    """
+
+    def __init__(self, text: str, field: QWidget) -> None:
+        super().__init__(text, field.parentWidget())
+        self._field = field
+        self.setBuddy(field)
+
+    def sizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        hint = super().sizeHint()
+        return QSize(hint.width(), max(hint.height(), self._field.sizeHint().height()))
+
+
 class ControllerView(QWidget):
     """Per-install tabs; see module docstring."""
 
@@ -10886,9 +10909,9 @@ class ControllerView(QWidget):
         self.account_gm.setRange(0, _highest_level(self.entry))
         self.create_account_button = QPushButton("Create", accounts)
         self.create_account_button.clicked.connect(self.create_account)
-        form.addRow("Username", self.account_name)
-        form.addRow("Password", self.account_password)
-        form.addRow("GM level", self.account_gm)
+        form.addRow(_FieldLabel("Username", self.account_name), self.account_name)
+        form.addRow(_FieldLabel("Password", self.account_password), self.account_password)
+        form.addRow(_FieldLabel("GM level", self.account_gm), self.account_gm)
         form.addRow(self.create_account_button)
 
         # 8.3a. Hidden for a game whose account stores have not been measured:
@@ -10898,7 +10921,7 @@ class ControllerView(QWidget):
         wired = self.services.accounts is not None
         existing = QGroupBox("Accounts on this server", tab)
         existing_box = QVBoxLayout(existing)
-        self.account_list = QListWidget(existing)
+        self.account_list = RowsList(rows=3, parent=existing)
         self.account_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.account_list.customContextMenuRequested.connect(self._show_account_context_menu)
         self.account_list.currentRowChanged.connect(self._account_chosen)
@@ -10914,11 +10937,12 @@ class ControllerView(QWidget):
         self.selected_gm.setRange(0, _highest_level(self.entry))
         self.set_gm_button = QPushButton("Set GM level", existing)
         self.set_gm_button.clicked.connect(self.set_selected_gm_level)
-        change.addRow("New password", self.selected_password)
+        change.addRow(_FieldLabel("New password", self.selected_password), self.selected_password)
         change.addRow(self.set_password_button)
-        change.addRow("GM level", self.selected_gm)
+        change.addRow(_FieldLabel("GM level", self.selected_gm), self.selected_gm)
         change.addRow(self.set_gm_button)
-        existing_box.addWidget(self.account_list)
+        # The list is what grows (T191 A16): the window's spare height is its.
+        existing_box.addWidget(self.account_list, 1)
         existing_box.addWidget(self.refresh_accounts_button)
         existing_box.addLayout(change)
         existing.setVisible(wired)
@@ -10959,9 +10983,11 @@ class ControllerView(QWidget):
         columns.setSpacing(12)
         columns.addWidget(accounts, 1)
         columns.addWidget(existing, 1)
-        box.addLayout(columns)
+        # The columns take the tab's spare height (T191 A16), where a stretch
+        # under them used to: at 1080p it left the list 192 px over 700 of
+        # nothing.
+        box.addLayout(columns, 1)
         box.addWidget(self.account_report)
-        box.addStretch(1)
         self._add_panel_tab(tab, "accounts", "Accounts")
 
     def _build_characters_tab(self) -> None:
@@ -10978,13 +11004,13 @@ class ControllerView(QWidget):
 
         people = QGroupBox("Characters on this server", tab)
         people_box = QVBoxLayout(people)
-        self.character_list = QListWidget(people)
+        self.character_list = RowsList(rows=3, parent=people)
         self.character_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.character_list.customContextMenuRequested.connect(self._show_character_context_menu)
         self.character_list.currentRowChanged.connect(self._character_chosen)
         self.refresh_characters_button = QPushButton("Refresh the list", people)
         self.refresh_characters_button.clicked.connect(self.refresh_characters)
-        people_box.addWidget(self.character_list)
+        people_box.addWidget(self.character_list, 1)
         people_box.addWidget(self.refresh_characters_button)
 
         actions = QGroupBox("What to do", tab)
@@ -11042,14 +11068,14 @@ class ControllerView(QWidget):
                 for widget in widgets:
                     widget.setVisible(False)
         if "teleport" not in withheld:
-            form.addRow("Teleport to", self.teleport_where)
+            form.addRow(_FieldLabel("Teleport to", self.teleport_where), self.teleport_where)
             form.addRow(self.teleport_button)
         if "set_level" in withheld:
             self.new_level.setVisible(False)
             self.set_level_button.setVisible(False)
             self.set_level_absent.setVisible(False)
         elif self._set_level_command() is not None:
-            form.addRow("Level", self.new_level)
+            form.addRow(_FieldLabel("Level", self.new_level), self.new_level)
             form.addRow(self.set_level_button)
             self.set_level_absent.setVisible(False)
         else:
@@ -11068,7 +11094,7 @@ class ControllerView(QWidget):
         if "revive" not in withheld:
             form.addRow(self.revive_button)
         if "mail_gold" not in withheld:
-            form.addRow("Gold", self.gold_amount)
+            form.addRow(_FieldLabel("Gold", self.gold_amount), self.gold_amount)
             form.addRow(self.mail_gold_button)
         if "send_gear" not in withheld:
             form.addRow(self.send_gear_button)
@@ -11111,9 +11137,9 @@ class ControllerView(QWidget):
         columns.setSpacing(12)
         columns.addWidget(people, 3)
         columns.addWidget(actions, 2)
-        box.addLayout(columns)
+        # As the Accounts tab (T191 A13): the roster takes the spare height.
+        box.addLayout(columns, 1)
         box.addWidget(self.character_report)
-        box.addStretch(1)
         self._add_panel_tab(tab, "characters", "Characters")
 
     def _set_level_command(self) -> str | None:
@@ -11755,7 +11781,7 @@ class ControllerView(QWidget):
         browse_box = QVBoxLayout(browse)
         self.bot_summary = QLabel("", browse)
         self.bot_summary.setWordWrap(True)
-        self.bot_list = QListWidget(browse)
+        self.bot_list = RowsList(rows=3, parent=browse)
         self.bot_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.bot_list.customContextMenuRequested.connect(self._show_bot_context_menu)
         row = QHBoxLayout()
@@ -11796,6 +11822,7 @@ class ControllerView(QWidget):
         columns.addWidget(browse, 1)
         columns.addWidget(self._build_my_party_group(tab), 1)
         box.addLayout(columns, 1)
+        stack_when_narrow(columns, tab)
         if self.services.bot_dashboard is not None:
             box.addWidget(self._build_bot_dashboard_group(tab))
         self._bots_tab: QWidget | None = tab
@@ -12464,9 +12491,9 @@ class ControllerView(QWidget):
         # joined a party is a row the Browse list above has not got yet.
         self.party_panel.party_changed.connect(self.refresh_bots)
 
-        scroll = QScrollArea(group)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Its first three rows -- Character, Class and Spec, Level -- always
+        # show (T191 B1); the rest of the panel scrolls inside the box.
+        scroll = RowsScroll(rows=3, parent=group)
         scroll.setWidget(self.party_panel)
         inside.addWidget(scroll, 1)
         return group
@@ -12865,7 +12892,7 @@ class ControllerView(QWidget):
         top.addWidget(self.refresh_backups_button)
         top.addStretch(1)
 
-        self.backup_list = QListWidget(tab)
+        self.backup_list = RowsList(rows=3, parent=tab)
         self.backup_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.backup_list.customContextMenuRequested.connect(self._show_backup_context_menu)
         self.backup_list.currentItemChanged.connect(self._backup_selection_changed)

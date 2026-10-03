@@ -1244,3 +1244,41 @@ def test_an_action_landing_first_does_not_take_the_level_of_one_still_out(
     assert row.data(level_role) == 78, "Revive's answer stored a level it never sent"
     jobs.deliver(view._character_done, 0)  # Set level's answer
     assert row.data(level_role) == 80
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800)], ids=["960x640", "1280x800"])
+def test_the_characters_tab_is_whole_and_its_labels_sit_beside_their_boxes(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """T191 A13: nothing on the tab cut or overlapped, and "Level" reads level with its box.
+
+    Before the page, ten form rows at 960x640 were drawn over each other (the
+    spin boxes over the buttons under them). The label is held to the box's
+    middle, not its top edge: a label beside the top of a taller box reads as
+    belonging to the row above.
+    """
+    from tests.conftest import process_events
+    from tests.test_controller_view import (
+        _at,
+        _controller_in_the_real_window,
+        _page_faults,
+    )
+
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    window, _tab = _controller_in_the_real_window(view, "Characters")
+    _at(window, size)
+    view.refresh_characters()
+    process_events()
+    view.character_list.setCurrentRow(0)
+    process_events()
+    page = view._tabs.currentWidget()
+
+    assert view.new_level.isVisible(), "the fixture's tree has no Level row to check"
+    assert _page_faults(page) == [], f"the Characters tab at {size}: {_page_faults(page)}"
+    form = view.new_level.parentWidget().layout()
+    label = form.labelForField(view.new_level)
+    label_middle = label.mapTo(window, label.rect().center()).y()
+    box_middle = view.new_level.mapTo(window, view.new_level.rect().center()).y()
+    assert (
+        abs(label_middle - box_middle) <= 2
+    ), f"'Level' is centred at {label_middle}, its box at {box_middle}"
