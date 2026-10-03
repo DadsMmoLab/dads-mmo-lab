@@ -18290,6 +18290,26 @@ def test_past_its_pins_with_a_rebuild_owed_nothing_on_the_modules_tab_is_cut(
         )
 
 
+def _the_list_needs_the_cards_sentence(view: ControllerView) -> None:
+    """Put a job's row on the Modules tab: the state where 960x640 folds the card.
+
+    Past the pins and nothing else, the list now has its two rows at 960x640
+    with the card whole, so the card is right to keep its sentence there.
+    T191 took the job's row off the tab until a job has run (74px), which left
+    the list 140px on T189's branch: 5px under the 145 it folds for. Two
+    changes each close that gap alone: T193's rail rule stopped reaching the
+    server's sub-tab bar (60px tall at 960 -> 51, 9px more page; 149 after
+    the merge), and T194's shorter sentence wraps to two lines at 824px, not
+    three (card 136 -> 122; 163 with both). Measured themed at 960x640.
+
+    A job's row is the state T153 measured, and what
+    `test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate` already
+    runs for the same reason since T191: with it on the tab the list has 89px
+    with the card whole, so the card folds at 960x640 and is whole at 1280x800.
+    """
+    _ran_a_job(view)
+
+
 def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -18297,7 +18317,8 @@ def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
 
     * At the size the app opens at, the card is whole -- title, sentence and both
       buttons -- because the list has its rows there without it.
-    * At 960x640 it is one line, and that line still carries BOTH presses and
+    * At 960x640 with a job's row on the tab (`_the_list_needs_the_cards_sentence`)
+      it is one line, and that line still carries BOTH presses and
       they are the same presses: each opens the same dialog the card's own
       button opens. A fold that hid a press behind a handle would leave a small
       window that cannot install a module from a link at all (see
@@ -18315,6 +18336,7 @@ def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
         folder_asker=lambda parent, title: asked.append(title),
     )
     window, _tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
 
     _at(window, main.DEFAULT_WINDOW_SIZE)
     assert view.custom_module_card.isVisible(), "the card is not whole at the default window"
@@ -18536,6 +18558,7 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
         folder_asker=lambda parent, title: asked.append(title),
     )
     window, _tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     start = view.refresh_modules_button
@@ -19499,6 +19522,7 @@ def test_the_card_changes_form_at_most_once_per_step_of_a_drag(
 
     view = _past_its_pin(ps, tmp_path)
     window, _tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
     _at(window, (960, 640))
     seen = _shows_and_hides(view.custom_module_card)
     apply_dadcraft_theme(window, width=window.width())
@@ -19535,6 +19559,7 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
 
     view = _past_its_pin(ps, tmp_path)
     window, tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
     _at(window, main.MINIMUM_WINDOW_SIZE)
     assert view.custom_module_card.isHidden(), "the card is whole here, so nothing is derived"
     derived = view.modules_fit.card_minimum()
