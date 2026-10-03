@@ -14106,10 +14106,9 @@ def test_the_module_list_gets_the_height_on_a_maximised_1080p_window(
     assert (
         whole >= ROWS_VISIBLE_AT_1080P
     ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
-    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
-        f"the idle log is CLIPPED at {view.rebuild_log.height()}px, not merely small: "
-        f"it says it needs {view.rebuild_log.minimumSizeHint().height()}"
-    )
+    # Not drawn at all before a job since T191 (I8), rather than an idle strip
+    # whose height could quietly be made unusable.
+    assert view.rebuild_log.isHidden(), "an idle job row is drawn before any job ran"
     assert _lines_readable_without_scrolling(view.module_report, READABLE_REPORT_LINES), (
         f"the report cannot show {READABLE_REPORT_LINES} lines: "
         f"it is {view.module_report.height()}px"
@@ -14272,10 +14271,10 @@ def test_the_rebuild_log_takes_its_height_back_when_a_job_starts(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, (1920, 1080))
-    idle = view.rebuild_log.height()
-    assert (
-        idle == view.rebuild_log.minimumSizeHint().height()
-    ), f"an empty log is not at its smallest: {idle}px"
+    # Before a job it is not drawn at all (T191, I8); the smallest it is ever
+    # drawn is its strip.
+    assert view.rebuild_log.isHidden(), "an empty log is drawn before any job ran"
+    idle = view.rebuild_log.folded_minimum()
 
     assert view.rebuild_log.run(lambda: iter(["compiling"]), title="rebuild") is True
     pump_until(lambda: not view.rebuild_log.running, "the job finished")
@@ -16788,6 +16787,143 @@ def test_my_party_shows_its_first_three_rows_without_scrolling(
     ), f"My Party's box is {viewport.height()}px; its third row ends at {third.bottom()}"
 
 
+def _scroll_arrows_over(bar: Any, rect: Any) -> list[str]:
+    """The sub-tab bar's visible scroll arrows that cover any of `rect`."""
+    from PySide6.QtWidgets import QToolButton
+
+    return [
+        arrow.objectName() or "arrow"
+        for arrow in bar.findChildren(QToolButton)
+        if arrow.isVisible() and arrow.geometry().intersects(rect)
+    ]
+
+
+def _tab_name_cut(bar: Any, index: int) -> str | None:
+    """Why tab `index`'s name does not fit the room its tab gives it, or None.
+
+    Qt's own question, asked the way `QTabBar::initStyleOption()` asks it
+    before it elides: the text rect the STYLE gives the tab, against the bar's
+    font. A tab's width alone is not it -- the theme's padding is inside that
+    width, and a tab wider than its name can still draw "Charact…".
+    """
+    from PySide6.QtWidgets import QStyle, QStyleOptionTab
+
+    option = QStyleOptionTab()
+    option.initFrom(bar)
+    option.rect = bar.tabRect(index)
+    option.text = bar.tabText(index)
+    option.icon = bar.tabIcon(index)
+    option.iconSize = bar.iconSize()
+    option.shape = bar.shape()
+    option.documentMode = bar.documentMode()
+    room = bar.style().subElementRect(QStyle.SubElement.SE_TabBarTabText, option, bar)
+    need = bar.fontMetrics().horizontalAdvance(bar.tabText(index))
+    if need <= room.width():
+        return None
+    return f"{bar.tabText(index)!r}: {room.width()}px of room for {need}px"
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_sub_tab_name_is_whole_and_the_open_one_is_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """A19/B10/C11: "Charact…", "Mainte…", "Networ…" at 960x640, and stretched tabs at 1080p.
+
+    Each tab is as wide as its icon and its whole name in the bar's own font;
+    at 960 the bar scrolls (its arrows) instead of cutting, and a tab opened
+    from either end is whole on screen, clear of the arrows; at 1920 the tabs
+    keep their own width rather than being spread across the bar.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    bar = view._tabs.tabBar()
+    cut = [why for why in (_tab_name_cut(bar, i) for i in range(bar.count())) if why]
+    assert cut == [], f"sub-tab names cut at {size}: {cut}"
+    for index in (bar.count() - 1, 0, bar.count() // 2):
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        rect = bar.tabRect(index)
+        assert bar.rect().contains(
+            rect
+        ), f"{bar.tabText(index)!r} at {rect.getRect()} is not whole in a {bar.width()}px bar"
+        assert _scroll_arrows_over(bar, rect) == [], f"{bar.tabText(index)!r} is under an arrow"
+    if size == T191_SIZES[2]:
+        last = bar.tabRect(bar.count() - 1)
+        assert (
+            last.right() < bar.width() - 100
+        ), f"the tabs are spread across the bar: the last ends at {last.right()} of {bar.width()}"
+
+
+def test_a_server_without_a_bots_tab_draws_no_bot_count_box_over_its_tabs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The bot-count box exists without a Bots tab (T99); it must not be drawn at the corner."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[2])
+    titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
+    assert "Bots" not in titles, "the fixture has a Bots tab to hold the box"
+    assert not view.bot_count_group.isVisible()
+
+
+def test_the_modules_job_row_is_not_drawn_until_a_job_runs_and_then_stays(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I8: no "idle" strip with a dead Stop on a tab that has run nothing.
+
+    Before a job the row is not there and the list has its height. A job
+    started while another tab is open brings it, open; and it STAYS once it is
+    there: folded by hand after the job, it is the strip, not gone -- the
+    T80 promise that a job's last line is one press away holds from the first
+    job on.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, T191_SIZES[2])
+    log = view.rebuild_log
+    assert log.isHidden(), "an idle job row is drawn before any job ran"
+    without_the_row = view.modules_panel.height()
+
+    titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
+    view._tabs.setCurrentIndex(titles.index("Server"))
+    _ran_a_job(view)
+    assert not log.isHidden(), "the job ran and its log is still not drawn"
+    view._tabs.setCurrentIndex(titles.index("Modules"))
+    process_events()
+    assert not log.collapsed, "the job's log came back folded on a tab with the room for it"
+
+    QTest.mouseClick(log._collapse, Qt.MouseButton.LeftButton)
+    process_events()
+    assert log.collapsed and log.isVisible(), "folded by hand, the row went away"
+    assert (
+        view.modules_panel.height() < without_the_row
+    ), "the list is as tall with the strip as without it: the hidden row was not hidden"
+    _ran_a_job(view)
+    assert log.isVisible(), "a second job hid the row"
+
+
+def test_tortoises_bot_job_rows_are_not_drawn_until_their_jobs_run(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The random-bot rebuild's and the dashboard's rows on Tortoise's Bots tab (I8)."""
+    services = ControllerServices.for_entry(TORTOISE, tmp_path / TORTOISE.id)
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, T191_SIZES[2])
+    assert view.bot_rebuild_log is not None and view.dashboard_log is not None
+    assert view.bot_rebuild_log.isHidden() and view.dashboard_log.isHidden()
+
+    assert view.bot_rebuild_log.run(lambda: iter(["rebuilt"]), title="rebuild") is True
+    pump_until(lambda: not view.bot_rebuild_log.running, "the job finished")
+    process_events()
+    assert view.bot_rebuild_log.isVisible()
+    assert view.dashboard_log.isHidden(), "the other job's row came with it"
+
+
 def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -17498,6 +17634,9 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     view._refresh_source_version()
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, main.MINIMUM_WINDOW_SIZE)
+    # A job's row on the tab, as T153 measured it: with no job run the row is
+    # not drawn (T191) and the card has the room to be whole.
+    _ran_a_job(view)
     assert view.custom_module_line.isVisible(), "the one-line card is not what is on screen"
 
     link, folder = view.module_link_line_button, view.module_folder_line_button
@@ -18710,12 +18849,16 @@ def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     log = view.rebuild_log
-
-    assert log.collapsed, "the log did not start folded, so `open_minimum()` is not derived here"
+    # A job first: before one the row is not drawn (T191), and a hidden widget
+    # is not polished by the theme, so its numbers are nobody's. Then folded
+    # by hand, which is the state `open_minimum()` is derived in.
+    _ran_a_job(view)
+    _click(_the_handle_on(log))
+    assert log.collapsed and log.isVisible(), "the log is not on screen folded"
     derived_open = log.open_minimum()
 
-    _ran_a_job(view)
-    assert not log.collapsed, "the job did not open the log"
+    _click(_the_handle_on(log))
+    assert not log.collapsed, "the handle did not open the log"
     really_open = log.minimumSizeHint().height()
     derived_folded = log.folded_minimum()
 

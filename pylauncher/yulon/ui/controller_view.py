@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -5310,6 +5311,10 @@ class _IdleLogPanel(LogPanel):
         self._has_room = True
         self._adjusting = False
         self.set_collapsed(True)
+        # Not drawn until its first job (T191 I8): before one it is an "idle"
+        # strip with a Stop that stops nothing. From then on it stays, folded
+        # or open -- the last job's lines one press away (T80).
+        self.setVisible(False)
         self.collapse_toggled.connect(self._someone_used_the_handle)
         self.run_started.connect(self._give_it_the_room)
         self._watch_the_tab()
@@ -5444,6 +5449,7 @@ class _IdleLogPanel(LogPanel):
         saying a job is running and the Stop button that ends it.
         """
         self._wants_open = True
+        self.setVisible(True)
         self.wants_changed.emit(False)
         self._apply()
 
@@ -6182,6 +6188,9 @@ Measured on the T86 gate: a SOAP request 8 s after `World server is up` hit the
 20 s timeout while the world logged in its bots; 40 s after it answered at once.
 """
 
+SUB_TABS_NAME = "server-sub-tabs"
+"""The object name of a server's sub-tab widget, which its own style sheet selects by (T191)."""
+
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
 """Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
 
@@ -6367,9 +6376,29 @@ class ControllerView(QWidget):
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
         self._tabs.setUsesScrollButtons(True)
-        self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        # Whole names, and each tab its own width (T191 A19/B10/C11): elided,
+        # 960x640 read "Charact…", "Mainte…", "Networ…"; expanding, 1080p spread
+        # nine tabs across 1,800 px. Where they do not fit, the bar's arrows
+        # scroll them.
+        self._tabs.setElideMode(Qt.TextElideMode.ElideNone)
         self._tabs.setDocumentMode(True)
-        self._tabs.tabBar().setExpanding(True)
+        self._tabs.tabBar().setExpanding(False)
+        # And no width cap. The rail's rule (`QTabWidget#sidebar-tabs
+        # QTabBar::tab`, theme.py) is a descendant selector, so it reaches this
+        # bar too and caps every sub-tab at 64 px of content -- the cut names
+        # were that cap, and expanding tabs hid it wherever the bar had room to
+        # spread them. This widget's own sheet wins over the window's; it names
+        # this bar only (T188 C1: a sheet without a selector restyles everything
+        # under it).
+        self._tabs.setObjectName(SUB_TABS_NAME)
+        self._tabs.setStyleSheet(
+            f"QTabWidget#{SUB_TABS_NAME} > QTabBar::tab {{ max-width: 16777215px; }}"
+        )
+        # The bar's scroll arrows, now that a narrow window shows them: a mouse's,
+        # not a pad stop. Down from the bar went to the arrow at its right end
+        # instead of into the page, and LB/RB already walk the tabs.
+        for arrow in self._tabs.tabBar().findChildren(QToolButton):
+            arrow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tabs)
@@ -11771,6 +11800,10 @@ class ControllerView(QWidget):
             and self.services.my_party is None
             and self.services.bot_population is None
         ):
+            # Not shown with no tab to hold it: a child of this view with no
+            # layout cell draws at its top-left corner, over the sub-tab bar
+            # (seen once the tabs stopped spreading across the bar, T191).
+            self.bot_count_group.setVisible(False)
             return
         tab = QWidget(self)
         box = QVBoxLayout(tab)
