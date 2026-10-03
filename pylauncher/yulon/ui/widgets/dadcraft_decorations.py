@@ -397,6 +397,33 @@ class DadcraftHeader(QFrame):
             self._row.indexOf(self._realm_title), widget, 0, Qt.AlignmentFlag.AlignVCenter
         )
 
+    def event(self, event: QEvent) -> bool:
+        """Re-fit the server's name whenever the row is laid out again (T192)."""
+        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.Resize):
+            self._fit_title()
+        return super().event(event)
+
+    def _fit_title(self) -> None:
+        """Cap the server's name at the room the other header items leave it (T192).
+
+        Asked for its whole width, a long name made the row short of room, and
+        a box layout then takes the shortfall from EVERY item that can shrink,
+        in equal parts: "Check for updates" (whose minimum is the theme's
+        `min-width`) was cut to 94 of its 140px before the name gave up a pixel.
+        Capped here, the name is the only thing short of room; the cap moves
+        with every layout, so a wider window gives the whole name back.
+        """
+        row = self._row
+        margins = row.contentsMargins()
+        room = self.contentsRect().width() - margins.left() - margins.right()
+        for index in range(row.count()):
+            item = row.itemAt(index)
+            if item is None or item.widget() is self._realm_title or item.isEmpty():
+                continue
+            room -= item.sizeHint().width() + max(0, row.spacing())
+        floor = self._realm_title.minimumSizeHint().width()
+        self._realm_title.setMaximumWidth(max(floor, room))
+
     def _tick(self) -> None:
         """Advance the firepit animation clock and rise the ember particles."""
         self._time += 0.033

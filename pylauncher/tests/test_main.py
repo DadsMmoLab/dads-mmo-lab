@@ -5214,3 +5214,92 @@ def test_the_header_title_shortens_when_the_tab_that_needed_the_longer_one_goes(
     finally:
         _drop(window, "wow-wotlk", first)
         _drop(window, "wow-wotlk", second)
+
+
+def test_ctrl_tab_reaches_the_catalog_and_logs_from_the_rail_and_from_them(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    """The changelog's claim, in the real window (T192 final review).
+
+    From the rail, the Catalog or Logs, Ctrl+Tab and Ctrl+Shift+Tab walk the
+    same ring as the bumpers, pinned tabs included, and the pins follow. Inside
+    a server page its own sub-tabs take the keys first and the rail does not
+    move: cycling a server's sub-tabs is that page's natural Ctrl+Tab.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QTabWidget
+
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    last = tabs.count() - 1
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    back = ctrl | Qt.KeyboardModifier.ShiftModifier
+
+    def press(widget: Any, key: Qt.Key, modifiers: Qt.KeyboardModifier) -> int:
+        assert widget.isVisible(), widget
+        QTest.keyClick(widget, key, modifiers)
+        process_events(10)
+        return tabs.currentIndex()
+
+    tabs.setCurrentIndex(last)
+    process_events(10)
+    assert press(tabs.tabBar(), Qt.Key.Key_Tab, ctrl) == 0, "the rail skipped the Catalog"
+    assert pins.buttons[0].isChecked()
+    catalog = _catalog_view(shown_window)
+    assert press(catalog, Qt.Key.Key_Tab, ctrl) == 1, "the Catalog skipped Logs"
+    assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+    assert press(shown_window.yulon_logs_view, Qt.Key.Key_Backtab, back) == 0
+    assert pins.buttons[0].isChecked()
+    assert press(catalog, Qt.Key.Key_Backtab, back) == last, "Ctrl+Shift+Tab did not wrap"
+    assert not any(button.isChecked() for button in pins.buttons.values())
+
+    server = five_servers[-1]
+    tabs.setCurrentWidget(server)
+    process_events(10)
+    inner = server.findChild(QTabWidget)
+    assert inner is not None
+    before = inner.currentIndex()
+    assert press(inner.currentWidget(), Qt.Key.Key_Tab, ctrl) == tabs.indexOf(server)
+    assert (
+        inner.currentIndex() == (before + 1) % inner.count()
+    ), "the server's sub-tabs did not move"
+
+
+def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wider(
+    shown_window: Any, tmp_path: Any
+) -> None:
+    """The header's name gives way before the update check and the badge, and comes back.
+
+    Task 2's lesson: a label whose size hint is what it shows never asks for
+    its room back, so a name cut at 960 stayed cut at 1920.
+
+    Mutation: answer `_RealmTitle.sizeHint` from the text on screen and the
+    name is still shortened at 1920.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    header = shown_window.property("header")
+    tabs = shown_window.property("tabs")
+    server_dir = tmp_path / "A very long server folder name that cannot fit beside the badge"
+    _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(shown_window, server_dir)
+    try:
+        tabs.setCurrentWidget(view)
+        title = header._realm_title
+        check = shown_window.findChild(QPushButton, "check-for-updates")
+        _at_width(shown_window, (960, 640))
+        whole = title.full_text
+        assert whole == f"WoW WotLK — {server_dir.name}"
+        assert title.text() != whole and title.text().endswith("…"), title.text()
+        assert title.text().startswith("WoW"), title.text()
+        assert not title.geometry().intersects(check.geometry())
+        assert not title.geometry().intersects(header._badge.geometry())
+        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
+
+        _at_width(shown_window, (1920, 1080))
+        assert title.text() == whole, f"still cut at 1920: {title.text()!r}"
+        assert not title.geometry().intersects(check.geometry())
+        assert not title.geometry().intersects(header._badge.geometry())
+    finally:
+        _drop(shown_window, "wow-wotlk", server_dir)
