@@ -309,3 +309,33 @@ def test_a_hidden_press_in_a_flow_bar_leaves_no_gap(qapp: object) -> None:
     assert bar.flow().sizeHint().width() == first.sizeHint().width() + spacing + (
         third.sizeHint().width()
     )
+
+
+def test_a_hidden_press_at_the_gap_hands_the_gap_to_the_next_one_shown(qapp: object) -> None:
+    """`add_gap()` marks a position; the press there being hidden must not drop the gap.
+
+    The one rule broken is the hidden press AT the gap: the leftover goes in
+    front of the next press shown, so the last one still ends at the bar's edge.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.widgets.flow_layout import flow_bar
+
+    bar = flow_bar()
+    flow = bar.flow()
+    first = QPushButton("One", bar)
+    flow.addWidget(first)
+    flow.add_gap()
+    hidden, last = (QPushButton(text, bar) for text in ("Two", "Three"))
+    flow.addWidget(hidden)
+    flow.addWidget(last)
+    hidden.setVisible(False)
+    bar.resize(600, 80)
+    bar.show()
+    process_events()
+
+    assert last.y() == first.y(), "600px wrapped three short presses"
+    assert last.x() + last.width() == bar.width(), (
+        f"the last press ends at {last.x() + last.width()} of {bar.width()}: the gap went "
+        "with the hidden press"
+    )

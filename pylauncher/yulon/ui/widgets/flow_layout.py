@@ -176,17 +176,27 @@ class FlowLayout(QLayout):
         inner = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
         lines = self._lines(inner.width())
         height = self._line_height()
+        # The press at the gap may be hidden (T189); the gap then goes in front
+        # of the next one shown, not with it.
+        gap = next(
+            (
+                index
+                for index in range(self._gap_at or 0, len(self._items))
+                if not self._items[index].isEmpty()
+            ),
+            None,
+        )
         for number, line in enumerate(lines):
             # The leftover only exists on a bar that fits on ONE line; a wrapped
             # bar has spent all of it. See `add_gap()`.
             leftover = 0
-            if len(lines) == 1 and self._gap_at is not None:
+            if len(lines) == 1 and self._gap_at is not None and gap is not None:
                 used = sum(self._items[i].sizeHint().width() for i in line)
                 leftover = max(0, inner.width() - used - self.spacing() * max(0, len(line) - 1))
             x = inner.x()
             y = inner.y() + number * (height + self.spacing())
             for index in line:
-                if index == self._gap_at:
+                if index == gap:
                     x += leftover
                 item = self._items[index]
                 need = item.sizeHint().width()

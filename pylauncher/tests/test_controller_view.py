@@ -2525,7 +2525,7 @@ def test_the_armed_warning_says_the_characters_are_kept(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view)
     view.remove_containers()
-    said = view.problem_label.text()
+    said = view.danger_label.text()
     assert "NOT" in said and "characters" in said
     assert "volume" in said
     assert "Refresh" in said, "no way out was offered"
@@ -2563,7 +2563,7 @@ def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: P
     _watch_remove(view, result=False)
     view.remove_containers()
     view.remove_containers()
-    assert "no containers to remove" in view.problem_label.text()
+    assert "no containers to remove" in view.danger_label.text()
 
 
 def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
@@ -2583,9 +2583,18 @@ def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
     view.remove_containers()
     view.remove_containers()
 
-    assert "no containers to remove" in view.problem_label.text()
-    assert controller_view_module.REMOVE_FROM_YULON in view.problem_label.text()
+    said = view.danger_label.text()
+    assert "no containers to remove" in said
+    assert f'"{controller_view_module.REMOVE_FROM_YULON}" in the row above' in said, said
     assert _highlighted(view.forget_install_button)
+    # T189: "the row above" is true where it is said -- the label is the
+    # Danger zone's next item after the row that holds the button.
+    column = view.danger_label.parentWidget().layout()
+    at = column.indexOf(view.danger_label)
+    row = column.itemAt(at - 1).widget()
+    assert row is not None and row.isAncestorOf(view.forget_install_button)
+    assert not view.danger_label.isHidden()
+    assert "no containers" not in view.problem_label.text(), "said a page away as well"
 
 
 def test_a_removal_that_removed_something_does_not_highlight_it(
@@ -2686,7 +2695,7 @@ def test_a_removal_that_finds_containers_after_one_that_did_not_takes_it_back(
     view.remove_containers()
     view.remove_containers()
     assert not _highlighted(view.forget_install_button)
-    assert "Containers removed" in view.problem_label.text()
+    assert "Containers removed" in view.danger_label.text()
 
 
 UNIMPORTED = docker.ImportState(
@@ -2789,7 +2798,7 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
     view.repair_import()
     assert calls == [], "the first press imported something"
     assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
-    said = view.problem_label.text()
+    said = view.danger_label.text()
     assert "OVERWRITTEN" in said, said
     assert "restore a backup" in said, "no way out was offered"
     assert "Refresh" in said, "no way to cancel was offered"
@@ -2802,7 +2811,7 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
 def test_the_two_destructive_buttons_are_never_armed_together(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Both write their warning into the same label, so one has to disarm the other.
+    """Both write their warning into the same label (`danger_label`), so one disarms the other.
 
     Two loaded buttons under one paragraph is a second press that does whichever
     of them the user had forgotten about.
@@ -2813,9 +2822,14 @@ def test_the_two_destructive_buttons_are_never_armed_together(
     _db_up(view, ps)
 
     view.remove_containers()
+    # The repair offer withdrawn (`_show_repair`) disarms a repair that is not
+    # armed: the teardown's warning stays with the teardown's armed press.
+    view._disarm_repair()
+    assert "characters are NOT" in view.danger_label.text()
     view.repair_import()
     assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
     assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
+    assert "OVERWRITTEN" in view.danger_label.text(), "the warning is the teardown's"
 
     view.remove_containers()
     assert repairs == [], "arming the teardown left the import armed and it ran"
@@ -2920,7 +2934,7 @@ def test_neither_the_armed_copy_nor_the_running_one_offers_a_stop(
     view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
     _db_up(view, ps)
     view.repair_import()
-    armed = view.problem_label.text()
+    armed = view.danger_label.text()
     assert "cannot be stopped" in armed, armed
     view.repair_import()
     assert disabled == [True], "a button was live while the import it cannot stop was running"
@@ -3164,7 +3178,7 @@ def test_the_armed_paragraph_does_not_offer_a_cancel_it_cannot_honour(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     view.services.controller.repair_import = lambda sink=None: True  # type: ignore[method-assign]
     view.repair_import()
-    said = view.problem_label.text()
+    said = view.danger_label.text()
     assert "Press Refresh to cancel." not in said
     assert "while nothing has happened yet" in said, said
     assert "cannot be stopped" in said
@@ -16656,6 +16670,42 @@ def test_play_without_a_client_folder_says_where_to_set_one(
     assert "Client" in view.play_label.text()
 
 
+def _gold_on_screen(view: ControllerView) -> list[str]:
+    """The Server tab's `primary` presses that its page would draw: the gold ones."""
+    from PySide6.QtWidgets import QPushButton
+
+    body = view._server_body
+    return [
+        b.text()
+        for b in body.findChildren(QPushButton)
+        if b.property("primary") and b.isVisibleTo(body)
+    ]
+
+
+def test_start_is_gold_while_play_is_hidden_and_play_is_gold_once_shown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Exactly one gold press on screen: a fresh install has no client folder, so no Play.
+
+    Play's visibility is settled when the tab is built -- setting or forgetting
+    the folder rebuilds it (`client_dir_changed`) -- so both states are built.
+    """
+    (tmp_path / "w").mkdir()
+    services = ControllerServices.for_entry(WOTLK, tmp_path / "w", client_dir=None)
+    services.set_client_dir = _FakeClientDir()
+    services.set_play_client_dir = _FakeClientDir()
+    hidden = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert hidden.play_button is not None and hidden.play_button.isHidden()
+    assert hidden.start_button.property("primary") is True, "a fresh install has no gold press"
+    assert _gold_on_screen(hidden) == [hidden.start_button.text()]
+
+    (tmp_path / "s").mkdir()
+    shown = _server_view(WOTLK, tmp_path / "s")
+    assert shown.play_button is not None and not shown.play_button.isHidden()
+    assert not shown.start_button.property("primary")
+    assert _gold_on_screen(shown) == [shown.play_button.text()]
+
+
 def test_the_play_button_says_it_opens_the_launcher(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """T187 made the tab's Play open the launcher; its tooltip still said it starts WoW."""
     original = _game_client(tmp_path / "clients" / "WoW")
@@ -16734,6 +16784,75 @@ def test_a_game_with_no_uninstall_says_so_in_the_danger_zone(
     assert wotlk.uninstall_absent_label.isHidden()
 
 
+def test_the_armed_warning_shows_in_the_danger_zone_under_its_press(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 960 Realm's `problem_label` is a page away from the press that arms.
+
+    The page starts at its top, where `problem_label` is, and the press is then
+    brought on screen as the pad brings it (`_scroll_into_view`). The warning
+    has to be there, in the Danger zone, directly under the presses; and
+    Realm's label keeps what it said before.
+    """
+    from yulon.ui.gamepad import _scroll_into_view
+
+    view, _window, page = _server_with_the_plan_up(tmp_path)
+    page.verticalScrollBar().setValue(0)
+    view.problem_label.setText("A message from before the press.")
+    process_events()
+    assert not _whole_in_the_page(view.remove_button, page), "the press was on screen already"
+    label = view.danger_label
+    assert label.isHidden(), "a warning before anything was armed"
+
+    view.remove_button.click()
+    _scroll_into_view(view.remove_button)
+    process_events()
+    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+    assert _section_of(view, label) == "Danger zone"
+    assert not label.isHidden() and "characters are NOT" in label.text(), label.text()
+    assert _whole_in_the_page(view.remove_button, page)
+    assert _whole_in_the_page(label, page), "the warning is off screen under its press"
+    row = view.remove_button.parentWidget()
+    assert label.y() >= row.geometry().bottom(), "the warning is not under the presses"
+    assert view.problem_label.text() == "A message from before the press."
+
+    view.recheck()
+    process_events()
+    assert label.isHidden() and label.text() == "", "the warning outlived the cancel"
+
+    view.services.controller.remove = lambda: True  # type: ignore[method-assign]
+    view.remove_button.click()
+    assert not label.isHidden()
+    view.remove_button.click()
+    pump_until(lambda: "Containers removed" in label.text(), "the remove to finish")
+    assert "characters are NOT" not in label.text(), "the warning outlived the press it armed"
+    assert not label.isHidden(), "how the remove went is said where it was pressed"
+
+
+def test_a_press_at_the_bottom_edge_brings_its_warning_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A mouse press on a remove button the window's bottom edge cuts under.
+
+    Nothing moves the focus, so the pad's scroll does not run: the warning
+    would open under the edge unless the page is asked to show it.
+    """
+    view, _window, page = _server_with_the_plan_up(tmp_path)
+    body = page.widget()
+    button = view.remove_button
+    bottom = button.mapTo(body, button.rect().bottomLeft()).y()
+    page.verticalScrollBar().setValue(bottom + 1 - page.viewport().height())
+    process_events()
+    assert _whole_in_the_page(button, page), "the fixture put the press off screen"
+    below = button.mapTo(page.viewport(), button.rect().bottomLeft()).y()
+    assert page.viewport().height() - below < 8, "the press is not at the bottom edge"
+
+    button.click()
+    process_events()
+    assert _whole_in_the_page(view.danger_label, page), "the warning opened under the edge"
+    assert _whole_in_the_page(button, page), "the press it warns about scrolled away"
+
+
 def _server_states(view: ControllerView) -> Iterator[str]:
     """Put the Server tab through the states that grow it; yield each one's name."""
     yield "idle"
@@ -16765,6 +16884,8 @@ def test_the_server_tab_is_whole_in_every_state_at_every_size(
     remove containers…", "Remove from Yu'lon…" and "Add to Steam…" cut short in
     one row of ten.
     """
+    from yulon.ui.gamepad import _scroll_into_view
+
     view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
     window, _tab = _controller_in_the_real_window(view, "Server")
     _at(window, size)
@@ -16774,6 +16895,15 @@ def test_the_server_tab_is_whole_in_every_state_at_every_size(
         process_events()
         if found := _page_faults(page):
             faults[shown] = found
+        if shown == "remove armed":
+            # The warning is next to the press that armed it, on screen with it.
+            _scroll_into_view(view.remove_button)
+            process_events()
+            label = view.danger_label
+            assert _section_of(view, label) == "Danger zone", size
+            assert not label.isHidden() and "characters are NOT" in label.text(), size
+            assert _whole_in_the_page(view.remove_button, page), size
+            assert _whole_in_the_page(label, page), f"the armed warning is off screen at {size}"
     assert faults == {}, f"the Server tab at {size}: {faults}"
 
 
@@ -16963,12 +17093,18 @@ def test_the_pad_walks_the_plan_page_from_the_sub_tab_bar_to_its_last_button(
         nav.navigate(Direction.DOWN)
         process_events()
         landed = QApplication.focusWidget()
-        # The page's top row, which since T189 is the Realm section's presses:
-        # nothing on the page that the pad can stop on starts above it.
+        # The page's top row, which since T189 is the Realm section's presses
+        # (the pathfinding and world-upkeep rows above it are hidden on a
+        # server that owes neither): nothing on the page the pad can stop on
+        # starts above it. The sub-tab bar is one stop as wide as the page, and
+        # Down takes the best centred press of the row under it
+        # (`_pick`): of Start, Stop and Refresh, Refresh.
         top = min(_edges_in(w, window)[1] for w in _in_page(page.widget()))
-        assert (
-            _section_of(view, landed) == "Realm" and _edges_in(landed, window)[1] == top
-        ), f"Down from the sub-tab bar went to {_pad_describe(landed, window)}"
+        assert landed is view.refresh_button, (
+            f"Down from the sub-tab bar went to {_pad_describe(landed, window)}, "
+            "not Refresh, the best centred press of Realm's top row"
+        )
+        assert _section_of(view, landed) == "Realm" and _edges_in(landed, window)[1] == top
         stops = [landed]
         for _press in range(40):
             if landed is view.uninstall_confirm_button:
@@ -17022,6 +17158,9 @@ def test_a_job_pressed_on_the_server_tab_opens_the_page_its_log_is_on(
         f"the job ran on {view._tabs.tabText(view._tabs.currentIndex())!r}, "
         "not on the tab its log is on"
     )
+    page = view._tabs.currentWidget()
+    top = view.rebuild_log.mapTo(page.viewport(), view.rebuild_log.rect().topLeft()).y()
+    assert 0 <= top < page.viewport().height(), "the log's page opened with the log out of sight"
 
 
 def _whole_rows_in(listing: Any, page: Any) -> int:

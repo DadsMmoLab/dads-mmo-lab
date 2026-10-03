@@ -4167,7 +4167,8 @@ REMOVE_ARMED = "Press again to remove"
 """Two labels for one button, because a teardown should not be one click away.
 
 The wording changes rather than a dialog appearing: the explanation is a
-paragraph naming what is kept, `problem_label` already renders those, and a
+paragraph naming what is kept, `danger_label` renders it directly under the
+press (T189: in Realm's `problem_label` it was a page away at 960), and a
 modal would arrive from a worker thread.
 """
 
@@ -6850,6 +6851,16 @@ class ControllerView(QWidget):
         self.stop_anyway_button.setProperty("danger", True)
         self.stop_anyway_button.setToolTip(STOP_ANYWAY_TIP)
         self.stop_anyway_button.setVisible(False)
+        # T189: what an armed remove or repair will do, and how the remove
+        # went, directly under the Danger zone's presses where the player is
+        # looking. Both were written into `problem_label`, which at 960 can be
+        # scrolled a page above the press. Hidden while it has nothing to say;
+        # the next server action clears it (`_disarm_actions`).
+        self.danger_label = QLabel("", tab)
+        self.danger_label.setWordWrap(True)
+        self.danger_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.danger_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.danger_label.setVisible(False)
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -6924,9 +6935,14 @@ class ControllerView(QWidget):
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
-        # Start is the tab's gold press only where there is no Play: Play is the
-        # one thing a player comes to this tab to do (T189 A21).
-        self.start_button.setProperty("primary", self.play_button is None)
+        # Start is the tab's gold press only where no Play is shown: Play is the
+        # one thing a player comes to this tab to do (T189 A21), and a fresh
+        # install with no client folder has its Play hidden (T181). Settled at
+        # build: setting or forgetting the folder rebuilds the tab
+        # (`client_dir_changed`).
+        self.start_button.setProperty(
+            "primary", self.play_button is None or self.play_button.isHidden()
+        )
         # T189: what this tab does, as five boxes in the order a player needs
         # them. The name row and the two banners stay above them.
         self._server_body = tab
@@ -7029,6 +7045,7 @@ class ControllerView(QWidget):
             if b is not None
         ]
         danger_column.addWidget(_bar(danger, *danger_presses))
+        danger_column.addWidget(self.danger_label)
         danger_column.addWidget(self.repair_label)
         # A27: a game with no Uninstall says what it has instead of saying nothing.
         self.uninstall_absent_label = QLabel(
@@ -10716,7 +10733,7 @@ class ControllerView(QWidget):
             self._disarm_repair()
             self._remove_armed = True
             self.remove_button.setText(REMOVE_ARMED)
-            self.problem_label.setText(
+            self._say_under_the_presses(
                 "This stops the server and deletes its containers. Your characters are NOT "
                 "affected — the database lives in a Docker volume, which is kept. The next "
                 "Start recreates the containers, which takes longer than a normal start. "
@@ -10726,16 +10743,48 @@ class ControllerView(QWidget):
         self._disarm_remove()
         self._set_busy(True)
         self._stop_forced = ""
-        self.problem_label.setText("Removing containers…")
+        self.problem_label.setText("")
+        self._say_under_the_presses("Removing containers…")
         self._run(self.services.controller.remove, self._remove_done, self._remove_failed)
+
+    def _say_under_the_presses(self, text: str) -> None:
+        """Say it under the Danger zone's presses, and bring that on screen (T189).
+
+        The label appears under a press the player has just pressed, so on a
+        page shorter than the Danger zone it would open below the window's
+        edge; the page is asked to show it once the layout has made room.
+        """
+        self.danger_label.setText(text)
+        self.danger_label.setVisible(True)
+        QTimer.singleShot(0, self._bring_the_danger_label_on_screen)
+
+    @Slot()
+    def _bring_the_danger_label_on_screen(self) -> None:
+        label = self.danger_label
+        if label.isHidden():
+            return
+        parent = label.parentWidget()
+        while parent is not None and not isinstance(parent, ScrollPage):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.ensureWidgetVisible(label, 0, 0)
+
+    def _clear_danger_label(self) -> None:
+        """The line goes once neither destructive press is armed."""
+        if self._remove_armed or self._repair_armed:
+            return
+        self.danger_label.setText("")
+        self.danger_label.setVisible(False)
 
     def _disarm_remove(self) -> None:
         self._remove_armed = False
         self.remove_button.setText(REMOVE_IDLE)
+        self._clear_danger_label()
 
     def _disarm_repair(self) -> None:
         self._repair_armed = False
         self.repair_button.setText(REPAIR_IDLE)
+        self._clear_danger_label()
 
     def _disarm_actions(self) -> None:
         """Any other server action means the user moved on from all of them.
@@ -10758,7 +10807,9 @@ class ControllerView(QWidget):
         # looks for a way off the list. The button in the row is that way, and it
         # lights up.
         self._nothing_to_remove = not result
-        self.problem_label.setText(
+        # Under the presses, where the player pressed: "in the row above" is
+        # the Danger zone's row, which holds Remove from Yu'lon.
+        self._say_under_the_presses(
             self._after_the_stop(
                 "Containers removed; volumes kept. The next Start will recreate them."
                 if result
@@ -10774,7 +10825,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _remove_failed(self, exc: object) -> None:
         self._set_busy(False)
-        self.problem_label.setText(f"Could not remove the containers: {exc}")
+        self._say_under_the_presses(f"Could not remove the containers: {exc}")
         self.action_failed.emit(str(exc))
 
     @Slot()
@@ -10792,7 +10843,7 @@ class ControllerView(QWidget):
             self._disarm_remove()
             self._repair_armed = True
             self.repair_button.setText(REPAIR_ARMED)
-            self.problem_label.setText(
+            self._say_under_the_presses(
                 "This re-runs the database import that never finished. Everything in the auth, "
                 "characters and world databases is OVERWRITTEN. It is offered because those "
                 "databases hold no accounts and no characters — if that is wrong, press "
