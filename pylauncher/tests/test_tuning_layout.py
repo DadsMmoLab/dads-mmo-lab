@@ -472,6 +472,8 @@ def test_going_narrow_with_unsaved_typing_in_the_editor_shows_the_editor(
     QTest.keyClick(panel.settings_button, Qt.Key.Key_Space)
     process_events()
     _at(window, MEDIUM)
+    # The file button asks about the typing first; the player throws it away.
+    panel.choose = lambda _title, _question, _choices: tp.CHOICE_DISCARD
     panel.file_buttons()[0].click()
     process_events()
     _at(window, SMALL)
@@ -607,3 +609,121 @@ def test_the_restart_sentence_is_on_screen_once_and_never_missing(
     process_events()
     assert panel.file_note.isVisible() and restart in panel.file_note.text(), shown()
     assert len(shown()) == 1
+
+
+# -- the final round: no press loses or quietly overrides what was typed ------
+
+
+class _Answers:
+    """The panel's question, answered as the test says, each one kept."""
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.asked: list[tuple[str, ...]] = []
+
+    def __call__(self, title: str, question: str, choices: tuple[str, ...]) -> str:
+        self.asked.append(tuple(choices))
+        return self.answer
+
+
+BEAST_CONF = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+
+
+def _card_with(view: ControllerView, key: str) -> tp.CardWidget:
+    return next(c for c in view.tuning_panel.cards() if key in c.editors)
+
+
+def test_saving_one_card_keeps_what_was_typed_on_the_others_and_so_does_reload(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every card was drawn again after one card's Save, and the others' typing went with it."""
+    from PySide6.QtTest import QTest
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    _at(window, MEDIUM)
+    transmog_key = "Transmogrification.Enable"
+    switch = _card_with(view, transmog_key).editors[transmog_key].control
+    assert switch is not None and switch.isChecked(), "control: transmog starts on"
+    QTest.mouseClick(switch, Qt.MouseButton.LeftButton)
+    assert _card_with(view, transmog_key).edits() == {transmog_key: "0"}, "control: typed"
+
+    _uncheck_and_save(view, "BeastMaster.Enable")
+    assert "BeastMaster.Enable = 0" in (tmp_path / BEAST_CONF).read_text(encoding="utf-8")
+    beast = _card_with(view, "BeastMaster.Enable")
+    assert beast.edits() == {}, "the saved card still counts its saved value as typed"
+    saved_switch = beast.editors["BeastMaster.Enable"].control
+    assert saved_switch is not None and not saved_switch.isChecked()
+    transmog = _card_with(view, transmog_key)
+    assert transmog.edits() == {transmog_key: "0"}, "another card's save dropped this typing"
+    assert transmog.editors[transmog_key].changed
+    assert "Transmogrification.Enable = 1" in (tmp_path / TRANSMOG_CONF).read_text(
+        encoding="utf-8"
+    ), "control: the typing was never written"
+
+    QTest.mouseClick(view.tuning_reload_button, Qt.MouseButton.LeftButton)
+    process_events()
+    assert _card_with(view, transmog_key).edits() == {transmog_key: "0"}, "Reload dropped it"
+    assert view.tuning_revert_all_button.isEnabled(), "the kept typing no longer counts"
+
+
+def test_revert_file_puts_back_the_backup_its_label_names(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Save file, then a card's Save on the same file: the label named the first backup and
+    Revert file restored the second."""
+    from PySide6.QtTest import QTest
+
+    from yulon import tuning
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    conf = tmp_path / BEAST_CONF
+    _at(window, MEDIUM)
+    assert panel.current_file() == BEAST_CONF, "control: the beastmaster conf is open"
+    panel.editor.moveCursor(panel.editor.textCursor().MoveOperation.End)
+    QTest.keyClicks(panel.editor, "BeastMaster.HunterOnly = 1")
+    QTest.mouseClick(panel.file_save_button, Qt.MouseButton.LeftButton)
+    process_events()
+    label = panel.backup_label.text()
+    named = label.rsplit(": ", 1)[-1]
+    assert named.endswith(".bak"), label
+
+    _uncheck_and_save(view, "BeastMaster.Enable")
+    assert len(tuning.backups_of(conf)) == 2, "control: the card's save took a newer backup"
+    assert panel.backup_label.text() == label
+    wanted = (conf.parent / named).read_text(encoding="utf-8")
+    assert wanted != conf.read_text(encoding="utf-8"), "control: Revert has something to do"
+
+    QTest.mouseClick(panel.file_revert_button, Qt.MouseButton.LeftButton)
+    process_events()
+    assert conf.read_text(encoding="utf-8") == wanted, "Revert restored another backup"
+    assert named in view.tuning_report.toPlainText()
+
+
+def test_a_card_save_under_typing_in_the_editor_says_so_and_save_file_asks(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The editor kept its typing over a card's Save and said nothing; Save file then put
+    the card's value back without a word (cold review)."""
+    from PySide6.QtTest import QTest
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    conf = tmp_path / BEAST_CONF
+    _at(window, MEDIUM)
+    assert panel.current_file() == BEAST_CONF, "control: the beastmaster conf is open"
+    panel.editor.moveCursor(panel.editor.textCursor().MoveOperation.End)
+    QTest.keyClicks(panel.editor, "# mine")
+
+    _uncheck_and_save(view, "BeastMaster.Enable")
+    on_disk = conf.read_text(encoding="utf-8")
+    assert "BeastMaster.Enable = 0" in on_disk, "control: the card saved"
+    assert "# mine" in panel.editor.toPlainText(), "the typing was thrown away"
+    assert panel.file_note.isVisible() and tp.EDITOR_STALE in panel.file_note.text()
+
+    ask = _Answers(tp.CHOICE_CANCEL)
+    panel.choose = ask
+    QTest.mouseClick(panel.file_save_button, Qt.MouseButton.LeftButton)
+    process_events()
+    assert ask.asked == [(tp.CHOICE_OVERWRITE, tp.CHOICE_RELOAD, tp.CHOICE_CANCEL)]
+    assert conf.read_text(encoding="utf-8") == on_disk, "Cancel wrote the file"

@@ -21,11 +21,12 @@ colours come from the `COLOR_*` constants `theme.py` exports.
 from __future__ import annotations
 
 import html
-from collections.abc import Sequence
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from PySide6.QtCore import QEvent, QObject, QRegularExpression, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRegularExpression, Qt, Signal, SignalInstance
 from PySide6.QtGui import QFont, QRegularExpressionValidator, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -45,6 +47,7 @@ from PySide6.QtWidgets import (
 from yulon import tuning
 from yulon.manifest_store import FAMILY_FILES
 from yulon.tuning import ApplyRule, TuningRow
+from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import (
     COLOR_BG_PANEL,
     COLOR_BG_PARCHMENT_LIGHT,
@@ -228,6 +231,35 @@ own hover sheet and accent; no colour of this panel's.
 
 FILE_READ_ONLY = "read-only — the server's own file"
 """What the editor's title adds for a file this tab will not write (T190)."""
+
+CHOICE_SAVE = "Save"
+CHOICE_DISCARD = "Discard"
+CHOICE_CANCEL = "Cancel"
+CHOICE_OVERWRITE = "Overwrite"
+CHOICE_RELOAD = "Reload instead"
+"""The answers to the panel's two questions (T190): typing in the editor and another
+file picked; typing in the editor and Save file over a file changed on disk."""
+
+UNSAVED_TITLE = "Unsaved typing"
+UNSAVED_QUESTION = (
+    "{name} has typing you have not saved. Save it before opening {other}, or discard it?"
+)
+STALE_TITLE = "File changed on disk"
+STALE_QUESTION = (
+    "{name} changed on disk after the editor read it, and the editor does not show that "
+    "change. Overwrite it with your typing, or reload the file and lose your typing?"
+)
+
+EDITOR_STALE = (
+    "This file changed on disk after the editor read it, and the editor kept your typing, "
+    "so it does not show that change. Save file asks before writing over it."
+)
+"""What the editor's note says when a re-read found the file changed under typing (T190).
+
+A card's Save, Revert or Reset, or Reload from disk, read the open file again;
+the typing is kept rather than replaced, and without this the editor showed a
+file that was no longer the one on disk with nothing to say so.
+"""
 
 
 def split_sizes(total: int, cards_min: int = CARDS_MIN_WIDTH) -> tuple[int, int]:
@@ -648,10 +680,49 @@ class RowEditor(QWidget):
         # rather than blanked -- the T43 rule that nothing here invents a value.
         field.setText(self._start)
         if self.row.type == "int":
-            field.setValidator(QRegularExpressionValidator(QRegularExpression(INT_TEXT), field))
+            numbers = QRegularExpressionValidator(QRegularExpression(INT_TEXT), field)
+            self._guard_int(field, numbers)
+            field.textChanged.connect(lambda _text: self._guard_int(field, numbers))
         field.textChanged.connect(lambda _text: self._touched())
         self._keep_room(field)
         return field
+
+    @staticmethod
+    def _guard_int(field: QLineEdit, numbers: QRegularExpressionValidator) -> None:
+        """The number rule on the box only while its text keeps it (T190 final review).
+
+        A file can hold `1.5` under an `int` key. With the rule on, every edit of
+        it -- Backspace included -- made another text the rule refuses, so Qt
+        refused the edit and the value could not be changed at all. Off while the
+        text breaks it, on again the moment the text is a number.
+        """
+        fits = re.fullmatch(INT_TEXT, field.text()) is not None
+        # `None` is Qt's own "no validator"; the stubs type the argument as required.
+        field.setValidator(numbers if fits else None)  # type: ignore[arg-type]
+
+    def control_state(self) -> bool | int | str | None:
+        """What the control is set to, in its own terms: checked, a number, the text."""
+        if isinstance(self.control, QCheckBox):
+            return self.control.isChecked()
+        if isinstance(self.control, QSpinBox):
+            return self.control.value()
+        if isinstance(self.control, QLineEdit):
+            return self.control.text()
+        return None
+
+    def set_control_state(self, state: bool | int | str | None) -> None:
+        """Put the control back to `control_state()`'s answer, if it is still that kind of control.
+
+        Through the control's own setter, so its change signal marks the row as
+        moved exactly as a press would -- and a state that matches what the
+        file now says moves nothing, so it is not counted as typing.
+        """
+        if isinstance(self.control, QCheckBox) and isinstance(state, bool):
+            self.control.setChecked(state)
+        elif isinstance(self.control, QSpinBox) and type(state) is int:
+            self.control.setValue(state)
+        elif isinstance(self.control, QLineEdit) and isinstance(state, str):
+            self.control.setText(state)
 
     def _keep_room(self, control: QWidget) -> None:
         """`VALUE_MIN_CHARS` of this control's own font, so a value is never squeezed out.
@@ -861,6 +932,13 @@ class TuningPanel(QWidget):
         self._order: list[tuple[str, str]] = []
         self._actions_enabled = True
         self._header: QWidget | None = None
+        self._pressed_card: tuple[str, str] | None = None
+        """The card whose Save or Revert is being handled: its redraw shows the
+        file, not the typing that press just wrote or put back (T190)."""
+        self.choose: Callable[[str, str, tuple[str, ...]], str | None] = self._ask
+        """`(title, question, answers) -> the answer pressed`, `None` for none.
+
+        An attribute so a test answers it; the app asks in a message box."""
         self._narrow: bool | None = None
         """The shape last laid out: `None` until the first resize, so the first
         one -- wide or narrow -- is a change and sets the split up (T190)."""
@@ -941,6 +1019,18 @@ class TuningPanel(QWidget):
         self._backup_file: str | None = None
         """Which file the backup named on the tab is of, so reading that same
         file again keeps it (T190) and opening another drops it."""
+        self._backup_name: str | None = None
+        """The backup named on the tab; Revert file restores exactly it (`backup_name`)."""
+        self._text_file: str | None = None
+        """Which file the editor's text was read from, `None` before any."""
+        self._loaded_text = ""
+        """The text last put in the editor from disk: what any typing started from."""
+        self._stale = False
+        """Whether a re-read under typing found the file changed since `_loaded_text`."""
+        self._note = ""
+        """The note `set_file_text` was handed; `file_note` adds `EDITOR_STALE` to it."""
+        self._reverting = False
+        """Set while Revert file is handled: the file it puts back replaces the typing."""
         right_box.addWidget(self.files)
         # Which file this is, said rather than left to the checked button
         # (T190): its name, its path, and whether it is the server's own.
@@ -1007,20 +1097,39 @@ class TuningPanel(QWidget):
             "Put this file back from the backup Yu'lon took at the last save on this tab."
         )
         self.file_revert_button.setEnabled(False)
-        self.file_revert_button.clicked.connect(self.file_revert_pressed.emit)
+        self.file_revert_button.clicked.connect(self._revert_file_pressed)
         file_actions.addWidget(self.file_revert_button)
         self.file_save_button = QPushButton("Save file", right)
-        self.file_save_button.clicked.connect(
-            lambda: self.file_save_pressed.emit(self.editor.toPlainText())
-        )
+        self.file_save_button.clicked.connect(lambda: self._save_file_pressed())
         file_actions.addWidget(self.file_save_button)
         right_box.addLayout(file_actions)
         self.split.addWidget(right)
         outer.addWidget(self.split, 1)
+        # Whether the note over the cards is on screen changes as the column
+        # scrolls, resizes or lays out, and the editor's note follows it.
+        for watched in (self._content, self.rule_note, self._area.viewport()):
+            watched.installEventFilter(self)
+        self._area.verticalScrollBar().valueChanged.connect(self._draw_file_note)
 
     # ------------------------------------------------------------ the cards
 
-    def set_cards(self, cards: Sequence[TuningCard]) -> None:
+    def set_cards(self, cards: Sequence[TuningCard], *, keep_edits: bool = True) -> None:
+        """Draw one card per module, keeping what was typed on them unless `keep_edits` is off.
+
+        Kept by `(family, module, key)` (T190 final review): every save and
+        every Reload draws all the cards again, and one card's Save took every
+        other card's typing with it. The card whose own Save or Revert caused
+        this redraw shows the file, and "Revert all changes" passes
+        `keep_edits=False`, which is the one press meant to drop them.
+        """
+        typed: dict[tuple[str, str, str], bool | int | str | None] = {}
+        if keep_edits:
+            for (family, module_id), widget in self._cards.items():
+                if (family, module_id) == self._pressed_card:
+                    continue
+                for key, editor in widget.editors.items():
+                    if editor.changed:
+                        typed[(family, module_id, key)] = editor.control_state()
         for widget in self._cards.values():
             widget.setParent(None)
             widget.deleteLater()
@@ -1028,8 +1137,15 @@ class TuningPanel(QWidget):
         self._order.clear()
         for card in cards:
             widget = CardWidget(card, self._content)
-            widget.save_pressed.connect(self.save_pressed.emit)
-            widget.revert_pressed.connect(self.revert_pressed.emit)
+            for key, editor in widget.editors.items():
+                if (card.family, card.module_id, key) in typed:
+                    editor.set_control_state(typed[(card.family, card.module_id, key)])
+            widget.save_pressed.connect(
+                lambda family, module_id: self._card_pressed(self.save_pressed, family, module_id)
+            )
+            widget.revert_pressed.connect(
+                lambda family, module_id: self._card_pressed(self.revert_pressed, family, module_id)
+            )
             widget.edited.connect(self.edited.emit)
             widget.set_enabled_actions(self._actions_enabled)
             self._cards[(card.family, card.module_id)] = widget
@@ -1042,6 +1158,14 @@ class TuningPanel(QWidget):
         for widget in self._cards.values():
             widget.set_rule_lifted(widget.card.rules == lifted)
         self._draw_file_note()
+
+    def _card_pressed(self, signal: SignalInstance, family: str, module_id: str) -> None:
+        """Hand a card's Save or Revert up, naming the card for the redraw it causes."""
+        self._pressed_card = (family, module_id)
+        try:
+            signal.emit(family, module_id)
+        finally:
+            self._pressed_card = None
 
     def set_header(self, widget: QWidget) -> None:
         """Put `widget` above the cards, in the same scrolling column (T171).
@@ -1132,16 +1256,15 @@ class TuningPanel(QWidget):
             )
             button.setCheckable(True)
             button.setToolTip(file)
-            button.clicked.connect(lambda _checked=False, name=file: self._file_picked(name))
+            button.clicked.connect(lambda _checked=False, name=file: self._file_clicked(name))
             self._file_buttons.append(button)
             self.files.flow().addWidget(button)
-        if keep in files and self._editor_dirty:
-            # Typing nobody has saved is not thrown away by a reload.
-            self._mark_current(keep)
-        elif keep in files:
+        if keep in files:
             # Read again (T190 A28): the tab's Reload and every save hand the
             # same list back, and an editor kept as it was went stale under a
             # card's save -- a later Save file then wrote the old value back.
+            # Under typing too: `set_file_text` keeps the typing and says when
+            # the file changed (`EDITOR_STALE`).
             self._file_picked(keep)
         elif files:
             self._file_picked(files[0])
@@ -1165,6 +1288,7 @@ class TuningPanel(QWidget):
         and the next reload reads it in (T190).
         """
         self._backup_file = self._current_file if name else None
+        self._backup_name = name or None
         if name:
             self._editor_dirty = False
         self.backup_label.setText(f"Backup of this file as it was: {name}" if name else "")
@@ -1172,6 +1296,15 @@ class TuningPanel(QWidget):
         self.file_revert_button.setEnabled(
             self._actions_enabled and bool(name) and not self.editor.isReadOnly()
         )
+
+    def backup_name(self) -> str | None:
+        """The backup the tab names for the open file, `None` when it names none.
+
+        Revert file restores exactly this one (T190): a card's Save on the open
+        file takes a newer backup, and Revert restoring the newest put back a
+        file the label never named.
+        """
+        return self._backup_name
 
     def _mark_current(self, file: str) -> None:
         self._current_file = file
@@ -1212,12 +1345,17 @@ class TuningPanel(QWidget):
         that imported the compose generator to find out would be a second place
         for that question to be asked.
         """
-        blocked = self.editor.blockSignals(True)
-        self.editor.setPlainText(text)
-        self.editor.blockSignals(blocked)
-        self._editor_dirty = False
+        same = self._text_file == self._current_file
+        if same and self._editor_dirty and not read_only and not self._reverting:
+            # The same file read again under typing (a card's Save, Revert or
+            # Reset, or Reload): the typing stays, and the editor says when the
+            # file it started from is no longer what is on disk (T190).
+            self._stale = text != self._loaded_text
+        else:
+            self._put_text(text, keep_place=same)
+        self._text_file = self._current_file
         self.editor.setReadOnly(read_only)
-        self.file_note.setText(note or "")
+        self._note = note or ""
         self._draw_file_note()
         # Only where a key really IS shadowed, and only on a file this tab will
         # write: nothing can be typed into a read-only one, so no edit of it
@@ -1237,10 +1375,103 @@ class TuningPanel(QWidget):
         self._draw_file_title()
         self._relint()
 
+    def _put_text(self, text: str, *, keep_place: bool) -> None:
+        """Replace the editor's text with the file's, where the player was if it is the same file.
+
+        The scroll and the cursor are kept on a re-read of the same file
+        (T190): every save and Reload re-reads it, and it jumped to line one.
+        """
+        bar = self.editor.verticalScrollBar()
+        across = self.editor.horizontalScrollBar()
+        place = (bar.value(), across.value(), self.editor.textCursor().position())
+        blocked = self.editor.blockSignals(True)
+        self.editor.setPlainText(text)
+        self.editor.blockSignals(blocked)
+        self._editor_dirty = False
+        self._loaded_text = text
+        self._stale = False
+        if keep_place:
+            cursor = self.editor.textCursor()
+            cursor.setPosition(min(place[2], len(text)))
+            self.editor.setTextCursor(cursor)
+            bar.setValue(place[0])
+            across.setValue(place[1])
+
     def _file_picked(self, name: str) -> None:
         self._mark_current(name)
         if name:
             self.file_selected.emit(name)
+
+    def _file_clicked(self, name: str) -> None:
+        """A file button's press: ask first when the editor holds typing (T190 final review).
+
+        Save hands the typing up and opens `name` only once it was saved;
+        Discard opens it; Cancel, or no answer, leaves the editor as it was.
+        """
+        if self._editor_dirty:
+            answer = self.choose(
+                UNSAVED_TITLE,
+                UNSAVED_QUESTION.format(
+                    name=self._current_file.rsplit("/", 1)[-1], other=name.rsplit("/", 1)[-1]
+                ),
+                (CHOICE_SAVE, CHOICE_DISCARD, CHOICE_CANCEL),
+            )
+            if answer == CHOICE_DISCARD:
+                self._editor_dirty = False
+            elif answer != CHOICE_SAVE or not self._save_file_pressed():
+                # The click checked its button; the open file's is the checked one.
+                self._mark_current(self._current_file)
+                return
+        self._file_picked(name)
+
+    def _save_file_pressed(self) -> bool:
+        """Save file's press: hand the text up, asking first over a file changed on disk.
+
+        True when the view saved it, which it says by naming a backup
+        (`set_backup` counts the editor clean again).
+        """
+        if self._stale and self._editor_dirty:
+            answer = self.choose(
+                STALE_TITLE,
+                STALE_QUESTION.format(name=self._current_file.rsplit("/", 1)[-1]),
+                (CHOICE_OVERWRITE, CHOICE_RELOAD, CHOICE_CANCEL),
+            )
+            if answer == CHOICE_RELOAD:
+                self._editor_dirty = False
+                self._file_picked(self._current_file)
+                return False
+            if answer != CHOICE_OVERWRITE:
+                return False
+        self.file_save_pressed.emit(self.editor.toPlainText())
+        return not self._editor_dirty
+
+    def _revert_file_pressed(self) -> None:
+        """Revert file's press: the file it puts back replaces any typing, as asked."""
+        self._reverting = True
+        try:
+            self.file_revert_pressed.emit()
+        finally:
+            self._reverting = False
+
+    def _ask(self, title: str, question: str, choices: tuple[str, ...]) -> str | None:
+        """`choose` in the app: a message box with one button per answer; Cancel is Escape."""
+        # Fitted (T157): a plain box squeezes "Reload instead" below its label.
+        box = FittedMessageBox(QMessageBox.Icon.Question, title, question, parent=self)
+        buttons: dict[QPushButton, str] = {}
+        for answer in choices:
+            role = (
+                QMessageBox.ButtonRole.RejectRole
+                if answer == CHOICE_CANCEL
+                else QMessageBox.ButtonRole.AcceptRole
+            )
+            buttons[box.addButton(answer, role)] = answer
+        cancel = next((b for b, a in buttons.items() if a == CHOICE_CANCEL), None)
+        if cancel is not None:
+            box.setEscapeButton(cancel)
+            box.setDefaultButton(cancel)
+        box.exec()
+        pressed = box.clickedButton()
+        return buttons.get(pressed) if isinstance(pressed, QPushButton) else None
 
     def _relint(self) -> None:
         """The live guard, on an editable `.conf` only.
@@ -1290,9 +1521,25 @@ class TuningPanel(QWidget):
         cards' note is on screen, though: at 960x640 on the Edit file side the
         cards are hidden, and the file being edited still needs its sentence.
         """
-        said = self.file_note.text()
-        echoed = said == self.rule_note.text() and self.rule_note.isVisibleTo(self)
+        said = self._note
+        # On screen, not merely shown: scrolled out of the column's view it says
+        # nothing to anybody (T190 final review).
+        echoed = said == self.rule_note.text() and not self.rule_note.visibleRegion().isEmpty()
+        if self._stale:
+            said = EDITOR_STALE if echoed or not said else f"{said}\n{EDITOR_STALE}"
+            echoed = False
+        self.file_note.setText(said)
         self.file_note.setVisible(bool(said) and not echoed)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802  (Qt's own name)
+        if event.type() in (
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+        ):
+            self._draw_file_note()
+        return False
 
     def _side_picked(self, chosen: QPushButton) -> None:
         """One side checked, always: pressing the checked one again keeps it."""

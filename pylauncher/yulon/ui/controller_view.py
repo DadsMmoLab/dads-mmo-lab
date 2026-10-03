@@ -15730,7 +15730,7 @@ class ControllerView(QWidget):
         self.tuning_reload_button.clicked.connect(self.reload_tuning)
         self.tuning_reload_button.setToolTip(
             "Read this install's conf files again. Cheap: the files themselves, no network. "
-            "Anything you have typed here and not saved is dropped."
+            "Anything you have typed here and not saved is kept."
         )
         # The undo for the FORM, and the one control on this bar that cannot
         # destroy anything: the cards are rebuilt from the rows already read,
@@ -15914,7 +15914,7 @@ class ControllerView(QWidget):
         made, and that is not what a person pressing "revert my changes"
         asked for.
         """
-        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()), keep_edits=False)
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
@@ -16911,7 +16911,10 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         path = self.services.controller.server_dir / file
-        backups = tuning.backups_of(path)
+        # The backup the tab names, not merely the newest (T190): a card's Save
+        # may have taken a newer one since, and the label still names this one.
+        named = self.tuning_panel.backup_name()
+        backups = tuple(b for b in tuning.backups_of(path) if named is None or b.name == named)
         if not backups:
             self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
             return
