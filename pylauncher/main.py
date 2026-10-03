@@ -568,6 +568,7 @@ def build_window() -> object:
     from yulon.ui.logs_view import LogsView
     from yulon.ui.tab_titles import retitle_controller_tabs
     from yulon.ui.theme import (
+        CHECK_UPDATES_BUTTON,
         FORGET_TAB_BUTTON,
         LAUNCH_TAB_BUTTON,
         TAB_BUTTONS,
@@ -2101,8 +2102,9 @@ def build_window() -> object:
     announce_previous_update(update_bar)
 
     check_button = QPushButton("Check for updates", window)
-    check_button.setObjectName("check-for-updates")
-    check_button.setFlat(True)
+    check_button.setObjectName(CHECK_UPDATES_BUTTON)
+    # Not flat (T193 A20): it is the window's one control for the update check,
+    # and it is drawn as the theme's button, edge and fill, on the ember glow.
     check_button.clicked.connect(update_host.check_now)
     header = window.property("header")
     if header is not None:

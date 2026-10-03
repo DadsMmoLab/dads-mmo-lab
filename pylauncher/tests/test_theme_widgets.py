@@ -25,6 +25,7 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QPushButton,
     QRadioButton,
     QSpinBox,
     QStyle,
@@ -447,3 +448,54 @@ def test_the_images_load_from_a_folder_with_a_quote_and_spaces(
     assert complaints == [], complaints
     tick, _ = _tick_pixels(image, rect)
     assert tick > 20, f"the tick did not load from {odd}"
+
+
+# ------------------------------------------------------------ destructive
+
+
+def _luminance(colour: QColor) -> float:
+    def channel(value: int) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * channel(colour.red())
+        + 0.7152 * channel(colour.green())
+        + 0.0722 * channel(colour.blue())
+    )
+
+
+def _contrast(a: QColor, b: QColor) -> float:
+    light, dark = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def _mid_left(button: QPushButton) -> QColor:
+    image = button.grab().toImage()
+    return image.pixelColor(0, image.height() // 2)
+
+
+@pytest.mark.parametrize("width", WIDTHS)
+def test_an_enabled_destructive_button_has_a_red_edge_a_disabled_one_does_not(
+    themed, width: int
+) -> None:
+    """C22: the danger border was `#6A3034` on the pane -- 1.8:1, the look of `:disabled`.
+
+    At rest an enabled Stop / Uninstall / Remove now carries `COLOR_DANGER`,
+    over 3:1 against the pane (WCAG 1.4.11 for a control's edge), and a disabled
+    one keeps the muted `COLOR_BRASS_DEEP`, so the two can be told apart.
+
+    Mutation: put `#6A3034` back and the enabled edge is neither the token nor
+    3:1.
+    """
+    live, dead = QPushButton("Stop"), QPushButton("Stop")
+    for button in (live, dead):
+        button.setProperty("danger", True)
+    dead.setEnabled(False)
+    themed(width, live, dead)
+
+    edge = _mid_left(live)
+    assert edge.name() == QColor(theme.COLOR_DANGER).name(), edge.name()
+    ratio = _contrast(edge, QColor(theme.COLOR_BG_CONTAINER))
+    assert ratio >= 3.0, f"the red edge is {ratio:.2f}:1 against the pane"
+    assert _mid_left(dead).name() == QColor(theme.COLOR_BRASS_DEEP).name()

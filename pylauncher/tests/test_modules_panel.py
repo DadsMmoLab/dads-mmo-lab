@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
 
+import pytest
+
 from yulon.catalog import native
 from yulon.catalog.catalog import EmulatorSource, load_catalog
 from yulon.git import Behind
@@ -1849,3 +1851,193 @@ def test_no_family_card_title_turns_a_letter_into_a_shortcut(qapp: object) -> No
     assert {card.family for card in cards} == set(mp.FAMILY_FILES), "a family drew no card"
     for card in cards:
         assert QKeySequence.mnemonic(card.title()).isEmpty(), card.title()
+
+
+# -- T193: the row's columns line up, nothing scrolls sideways, Remove is red ---
+
+LONG_MODULE_NAME = "mod-playerbots-extended-companion-roster-with-a-very-long-name"
+
+PANEL_SIZE_AT = {960: (824, 186), 1280: (1144, 318), 1920: (1784, 598)}
+"""The Modules panel's size inside the real window at 960x640, 1280x800 and 1920x1080.
+
+Measured 2026-10-03 through the T193 render harness (`build_window()`, a WotLK
+tab, the Modules sub-tab): the inputs the panel is laid out at, not answers.
+"""
+
+
+def _t193_rows() -> list[mp.ModuleRow]:
+    """Short and long names, installed (Remove) and not (Install), links, versions, chips."""
+    owed = mp.Chip("owed", mp.CHIP_REBUILD_PENDING, "not compiled since this changed", "rebuild")
+    fact = mp.Chip("fact", mp.chip_required_by_label(["City Bots"]), "City Bots needs this")
+
+    def row(item_id: str, family: str, name: str, installed: bool) -> mp.ModuleRow:
+        return mp.ModuleRow(
+            item_id,
+            family,
+            name,
+            f"{name} does a thing.",
+            f"https://github.com/someone-with-a-long-handle/{name}",
+            installed,
+            True,
+            (),
+            (owed, fact) if installed else (),
+            True,
+            None,
+            badge=mp.BADGE_INSTALLED if installed else mp.BADGE_NOT_INSTALLED,
+            version="0123456 · 2026-08-30" if installed else None,
+        )
+
+    return [
+        row("ah", "module", "AH Bot", True),
+        row("long", "module", LONG_MODULE_NAME, True),
+        row("a1", "ale", "Solo", False),
+        row("a2", "ale", LONG_MODULE_NAME + "-ale", False),
+    ]
+
+
+def _themed_panel(width: int, rows: list[mp.ModuleRow]) -> tuple[object, mp.ModulesPanel]:
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from tests.conftest import process_events
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    host = QWidget()
+    apply_dadcraft_theme(host, width=width)
+    QVBoxLayout(host).setContentsMargins(0, 0, 0, 0)
+    panel = mp.ModulesPanel(host)
+    host.layout().addWidget(panel)
+    panel.set_rows(rows)
+    host.resize(*PANEL_SIZE_AT[width])
+    host.show()
+    process_events(50)
+    return host, panel
+
+
+@pytest.mark.parametrize("width", sorted(PANEL_SIZE_AT))
+def test_every_row_starts_its_badge_at_the_same_x_and_nothing_scrolls_sideways(
+    qapp: object, width: int
+) -> None:
+    """The ragged "Installed" column, and Remove pushed past the edge at 960 (T193).
+
+    The text column's minimum was its unelided name, GitHub link and version, so
+    a long name pushed its badge right of every other row's and, at 960, made a
+    row wider than the list: a sideways scroll bar and a Remove cut in half.
+
+    Mutation: the left column's horizontal policy back to `Preferred` and the
+    long row's badge moves, the bar gets a range, and the action leaves the
+    viewport at 960.
+    """
+    host, panel = _themed_panel(width, _t193_rows())
+    rows = [r for r in panel.rows() if r.isVisible()]
+    assert len(rows) == 4, [r.data.id for r in rows]
+
+    xs = {r.data.id: r.badge_label.mapTo(panel, r.badge_label.rect().topLeft()).x() for r in rows}
+    assert max(xs.values()) - min(xs.values()) <= 1, xs
+    area = panel._area
+    assert area.horizontalScrollBar().maximum() == 0
+    viewport = area.viewport()
+    for r in rows:
+        action = r.install_button or r.remove_button
+        assert action is not None
+        box = action.rect().translated(action.mapTo(viewport, action.rect().topLeft()))
+        assert (
+            viewport.rect().left() <= box.left() and box.right() <= viewport.rect().right()
+        ), f"{r.data.id}'s {action.text()} at {box} is outside the list {viewport.rect()}"
+    assert host.isVisible()
+
+
+def _fill(button: object) -> str:
+    """The colour at the button's centre-left interior: its fill, clear of the text."""
+    image = button.grab().toImage()  # type: ignore[attr-defined]
+    return image.pixelColor(6, image.height() // 2).name()
+
+
+@pytest.mark.parametrize("width", sorted(PANEL_SIZE_AT))
+def test_remove_on_a_module_row_looks_destructive_and_install_does_not(
+    qapp: object, width: int
+) -> None:
+    """A9: Remove wore Install's gold bevel; now it is a `danger` button like Stop.
+
+    Its fill is the one a `danger` button outside the panel has, its edge is
+    `COLOR_DANGER` (the panel's bevel would otherwise win over the theme's), and
+    Install keeps the panel's look.
+
+    Mutation: build Remove without `danger` and its fill is Install's.
+    """
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.theme import COLOR_DANGER, apply_dadcraft_theme
+
+    host, panel = _themed_panel(width, _t193_rows())
+    remove = panel.row("ah").remove_button
+    install = panel.row("a1").install_button
+    assert remove is not None and install is not None
+    reference = QPushButton("Stop")
+    reference.setProperty("danger", True)
+    apply_dadcraft_theme(reference, width=width)
+    reference.show()
+
+    assert _fill(remove) == _fill(reference), (_fill(remove), _fill(reference))
+    assert _fill(remove) != _fill(install)
+    image = remove.grab().toImage()
+    assert image.pixelColor(0, image.height() // 2).name() == QColor(COLOR_DANGER).name()
+    reference.close()
+    assert host.isVisible()
+
+
+def test_a_disabled_remove_keeps_the_muted_edge(qapp: object) -> None:
+    """The panel's red edge must not make a disabled Remove look pressable."""
+    from PySide6.QtGui import QColor
+
+    from yulon.ui.theme import COLOR_BRASS_DEEP
+
+    host, panel = _themed_panel(1280, _t193_rows())
+    panel.row("ah").set_enabled_actions(False)
+    remove = panel.row("ah").remove_button
+    assert remove is not None and not remove.isEnabled()
+    image = remove.grab().toImage()
+    assert image.pixelColor(0, image.height() // 2).name() == QColor(COLOR_BRASS_DEEP).name()
+    assert host.isVisible()
+
+
+def test_the_github_link_is_drawn_in_the_theme_gold_not_blue(qapp: object) -> None:
+    """Links: the palette's `Link` was `COLOR_RARE`, a blue no other text here uses.
+
+    Mutation: `Link` back to `COLOR_RARE` and the label has blue pixels and no gold.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_RARE, build_dadcraft_palette
+
+    # The APP's palette, the one `main()` installs: a styled label draws its
+    # link from it, not from a palette set on a parent (measured).
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    before = app.palette()
+    app.setPalette(build_dadcraft_palette())
+    try:
+        host, panel = _themed_panel(1280, _t193_rows())
+        link = panel.row("ah").link_label
+        assert link is not None
+        image = link.grab().toImage()
+    finally:
+        app.setPalette(before)
+
+    def near(colour: object, hex_value: str) -> bool:
+        from PySide6.QtGui import QColor
+
+        want = QColor(hex_value)
+        return all(
+            abs(a - b) <= 24
+            for a, b in zip(
+                (colour.red(), colour.green(), colour.blue()),  # type: ignore[attr-defined]
+                (want.red(), want.green(), want.blue()),
+                strict=True,
+            )
+        )
+
+    pixels = [image.pixelColor(x, y) for y in range(image.height()) for x in range(image.width())]
+    assert sum(1 for c in pixels if near(c, COLOR_RARE)) == 0
+    assert sum(1 for c in pixels if near(c, COLOR_GOLD_LIGHT)) > 10
+    assert host.isVisible()

@@ -4740,3 +4740,86 @@ def test_a_notice_is_remembered_only_once_it_was_shown(
     notice = _REAL_SWEEP(config_dir=tmp_path)
     assert notice is not None and notice.folders == (str(other),)
     assert "a temporary copy of a game client" in notice.text
+
+
+# -- T193 A20: "Check for updates" is a real button, whole at every width -----------
+
+
+@pytest.fixture
+def shown_window(window: Any) -> Iterator[Any]:
+    """The shared window shown on the Catalog, put back hidden at its size afterwards."""
+    tabs = window.property("tabs")
+    size, current = window.size(), tabs.currentIndex()
+    tabs.setCurrentIndex(0)
+    window.show()
+    process_events(50)
+    yield window
+    window.hide()
+    window.resize(size)
+    window._restyle_for_width()
+    tabs.setCurrentIndex(current)
+    process_events(20)
+
+
+def _at_width(window: Any, size: tuple[int, int]) -> None:
+    """Resize the window and restyle it the way its settle timer does."""
+    window.resize(*size)
+    process_events(20)
+    window._restyle_for_width()
+    process_events(50)
+
+
+def test_the_header_check_button_has_an_opaque_brass_edge(shown_window: Any) -> None:
+    """A20: the header's selector-less sheet stripped the button's border and fill.
+
+    `background: transparent; border: none;` with no selector reaches every
+    child (T188 C1's mechanism), and the button was also flat: it read as a
+    caption on the ember glow. Four pixels down the middle of its left edge are
+    the theme's hairline, which is opaque, so the glow animating behind it
+    cannot change them.
+
+    Mutation: give the header its selector-less sheet back and the edge is the
+    glow, not `COLOR_BRASS_DARK`.
+    """
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.theme import COLOR_BRASS_DARK
+
+    button = shown_window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    button.clearFocus()
+    image = button.grab().toImage()
+    middle = image.height() // 2
+    edge = [image.pixelColor(0, y).name() for y in range(middle - 2, middle + 2)]
+    assert edge == [QColor(COLOR_BRASS_DARK).name()] * 4, edge
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800), (1920, 1080)])
+def test_the_header_check_button_is_never_cut_off(shown_window: Any, size: tuple[int, int]) -> None:
+    """T188's renders showed "Check for updates" cut at 1280 on the Catalog.
+
+    Measured for T193: a harness artefact, not the app. The shot was taken 0.2 s
+    after the resize, and the 120 ms restyle had grown the font but the header's
+    relayout had not landed yet; at a 1 s settle the button is whole at every
+    size. Kept as the guard on that answer: reached from 960, the way a window
+    is dragged wider, the button is as wide as it asks to be, wider than its words.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.theme import TOUCH_TARGET_PX
+
+    button = shown_window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    _at_width(shown_window, (960, 640))
+    _at_width(shown_window, size)
+
+    words = button.fontMetrics().horizontalAdvance(button.text())
+    assert button.width() >= button.sizeHint().width(), (button.width(), button.sizeHint())
+    assert button.width() > words, (button.width(), words)
+    # And inside the header, top to bottom: at the theme's 8px padding it was
+    # 50px tall in a 44px row and stood out over the header's bottom edge.
+    header = shown_window.property("header")
+    inside = header.contentsRect().marginsRemoved(header.layout().contentsMargins())
+    assert inside.contains(button.geometry()), (button.geometry(), inside)
+    assert button.height() >= TOUCH_TARGET_PX

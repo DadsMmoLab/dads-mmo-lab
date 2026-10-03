@@ -152,6 +152,15 @@ it the size the launcher is built around, in the theme's colours.
 """
 
 
+CHECK_UPDATES_BUTTON = "check-for-updates"
+"""objectName of the header's "Check for updates" (T90; a real button since T193).
+
+The header is 56px tall with 6px margins, so a button with the theme's 8px
+vertical padding (50px) stood out over its bottom edge. Its rule keeps the
+touch floor and trims only the padding.
+"""
+
+
 # --- Handheld geometry floors -------------------------------------------------
 # The launcher ships on the Steam Deck (1280x800, 7"), driven by controller and
 # touch. Every interactive widget gets a floor of at least `TOUCH_TARGET_PX` in
@@ -518,11 +527,18 @@ QPushButton#{LAUNCHER_PLAY_BUTTON} {{
     border-radius: 4px;
 }}
 
-/* Destructive actions (Stop, Purge, Uninstall). */
+/* T193 A20: the header's update check, a real button that fits the header. */
+QPushButton#{CHECK_UPDATES_BUTTON} {{
+    padding: 4px 14px;
+}}
+
+/* Destructive actions (Stop, Purge, Uninstall). The edge is `COLOR_DANGER` at
+   rest (T193): the old `#6A3034` was 1.8:1 against the pane, under the 3:1 a
+   control's edge needs, and read exactly like the `:disabled` look below. */
 QPushButton[danger="true"], QPushButton#stop-server, QPushButton#purge-btn {{
     background-color: #2A1A1C;
     color: #E8A0A4;
-    border: 1px solid #6A3034;
+    border: 1px solid {COLOR_DANGER};
     border-radius: 3px;
 }}
 
@@ -1171,7 +1187,11 @@ def build_dadcraft_palette() -> QPalette:
     palette.setColor(QPalette.ColorRole.Button, QColor(COLOR_BG_PANEL))
     palette.setColor(QPalette.ColorRole.ButtonText, QColor(COLOR_TEXT_PRIMARY))
     palette.setColor(QPalette.ColorRole.BrightText, QColor(COLOR_GOLD_BRIGHT))
-    palette.setColor(QPalette.ColorRole.Link, QColor(COLOR_RARE))
+    # Gold, not the info blue (T193): a link is the theme's accent like every
+    # other thing that can be pressed, and visited is the same, since a GitHub
+    # page opened once is no less worth opening again.
+    palette.setColor(QPalette.ColorRole.Link, QColor(COLOR_GOLD_LIGHT))
+    palette.setColor(QPalette.ColorRole.LinkVisited, QColor(COLOR_GOLD_LIGHT))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(COLOR_GOLD_BRASS))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(COLOR_TEXT_PRIMARY))
     # Placeholder text (a QLineEdit hint) would otherwise fall back to a

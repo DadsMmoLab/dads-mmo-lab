@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStyle,
     QStyleOptionButton,
     QStylePainter,
@@ -1459,11 +1460,21 @@ class RowWidget(QFrame):
         box.setSpacing(10)
         outer.addLayout(box)
 
-        left = QVBoxLayout()
+        # The text column lives in a widget whose WIDTH the row decides (T193).
+        # As a bare layout its minimum was the unelided name, GitHub link and
+        # version, so a long name pushed this row's badge right of every other
+        # row's and, at 960, made the row wider than the list: a sideways
+        # scroll bar with Remove cut in half under it. `Ignored` hands the row
+        # the split -- one share here, two for the state column -- whatever the
+        # text, and the name elides into what it is given, whole in its tooltip.
+        left_column = QWidget(self)
+        left_column.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        left = QVBoxLayout(left_column)
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(ROW_LINE_SPACING)
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
-        self.name_label = QLabel(data.name, self)
+        self.name_label = _ElidedLabel(data.name, self)
         self.name_label.setStyleSheet(f"color: {COLOR_TEXT_GOLD}; font-weight: bold;")
         title_row.addWidget(self.name_label)
         if data.url is not None:
@@ -1481,7 +1492,17 @@ class RowWidget(QFrame):
         self.version_label = QLabel(data.version or "", self)
         self.version_label.setFont(QFont("monospace"))
         self.version_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
-        title_row.addWidget(self.version_label)
+        # The first thing on this line to give way when the column is narrow
+        # (T193). The text column is GIVEN its width now, and at 960 that does
+        # not hold a name, the link and `7c02b1d · 2026-09-01` side by side. As
+        # a plain label the version kept its whole width and the NAME was cut
+        # to "Trans…" (measured); `Ignored` asks for nothing, so the name and
+        # the link are laid out first and the version takes the rest -- the sha,
+        # the part somebody pastes, is the last of it to go. Stretch 1 is what
+        # hands it that rest, and why the line no longer ends in a spacer.
+        self.version_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.version_label.setToolTip(data.version or "")
+        title_row.addWidget(self.version_label, 1)
         # The conf files this manifest writes, FOLDED onto the name line (T75).
         # They were a line of their own -- one per file, stacked -- which is a
         # paragraph of paths on a row whose subject is a module. Joined, elided
@@ -1494,7 +1515,6 @@ class RowWidget(QFrame):
             title_row.addWidget(self.paths_label, 1)
         else:
             self.paths_label = None
-        title_row.addStretch(1)
         left.addLayout(title_row)
 
         # One line, elided, with the whole sentence in its tooltip. Wrapped, a
@@ -1510,9 +1530,14 @@ class RowWidget(QFrame):
             self.note_label = QLabel(data.note, self)
             self.note_label.setWordWrap(True)
             left.addWidget(self.note_label)
-        box.addLayout(left, 1)
+        box.addWidget(left_column, 1)
 
-        middle = QHBoxLayout()
+        # The state column, on the same terms and for the same reason: its
+        # left edge -- the badge -- is then the same x on every row (T193).
+        middle_column = QWidget(self)
+        middle_column.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        middle = QHBoxLayout(middle_column)
+        middle.setContentsMargins(0, 0, 0, 0)
         middle.setSpacing(CHIP_SPACING)
         self.badge_label = QLabel(data.badge, self)
         # Three tones, and the pairing is by what the badge ASKS OF THE READER
@@ -1567,7 +1592,7 @@ class RowWidget(QFrame):
         # HAS hover. Measured at 1280x800: an even split gave the strip 373px
         # against a lock chip of 341 plus the mark, so `battlepass` drew no chip
         # at all; two shares give it 533 and both of its chips are on screen.
-        box.addLayout(middle, 2)
+        box.addWidget(middle_column, 2)
 
         self.install_button: QPushButton | None = None
         self.remove_button: QPushButton | None = None
@@ -1592,6 +1617,10 @@ class RowWidget(QFrame):
             column.addWidget(self.install_button)
         elif data.catalogued:
             self.remove_button = QPushButton("Remove", self)
+            # Destructive, so it looks it (T193 A9): the theme's red edge and
+            # fill, not Install's gold bevel. `panel_qss()` keeps the edge red
+            # under the panel's bevel.
+            self.remove_button.setProperty("danger", True)
             self.remove_button.clicked.connect(lambda: self.pressed_remove.emit(self.data.id))
             if not data.removable:
                 self.remove_button.setToolTip(data.remove_reason or "")
@@ -1667,6 +1696,7 @@ class RowWidget(QFrame):
     def set_version(self, version: str | None) -> None:
         """Show what this clone is at, or nothing. Never a placeholder."""
         self.version_label.setText(version or "")
+        self.version_label.setToolTip(version or "")
 
     def set_selected(self, selected: bool) -> None:
         """Highlight, through the theme's own constants (T42 forbids touching `theme.py`)."""

@@ -196,7 +196,11 @@ class DadcraftHeader(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFixedHeight(56)
-        self.setStyleSheet("background: transparent; border: none;")
+        # Scoped to the frame itself (T193 A20). Selector-less, the same two
+        # declarations reached every child -- T188 C1's mechanism -- and took the
+        # border and fill off "Check for updates", which then read as a caption.
+        self.setObjectName("dadcraft-header")
+        self.setStyleSheet("QFrame#dadcraft-header { background: transparent; border: none; }")
         self._time = 0.0
 
         # Pool of floating firepit embers
