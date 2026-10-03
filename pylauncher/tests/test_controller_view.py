@@ -23397,7 +23397,7 @@ def test_a_poll_while_a_stop_runs_leaves_the_badge_saying_stopping(
     assert view.verdict_label.isHidden() is True, "a verdict landing mid-stop showed again"
 
     _finish(jobs, view._stop_done)
-    _finish(jobs, view._status_ready)
+    _drain_polls(view, jobs)
     assert view.realm_badge.status == "stopped"
 
 
@@ -23435,8 +23435,17 @@ def _press(view: ControllerView, press: str, monkeypatch: pytest.MonkeyPatch) ->
         view.stop_for_removal()
         return view._stopped_for_removal
     monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
-    view.restart_server()
+    if press == "recreate":
+        view.recreate_containers()
+    else:
+        view.restart_server()
     return view._tuning_job_done
+
+
+def _drain_polls(view: ControllerView, jobs: _Deferred) -> None:
+    """Answer every status read the tab has asked for, including the ones it asks again."""
+    while any(d == view._status_ready for _w, d, _e in jobs.queue):
+        _finish(jobs, view._status_ready)
 
 
 _HELD = {
@@ -23445,8 +23454,11 @@ _HELD = {
     "stop-other": "starting",
     "remove": "stopping",
     "restart": "restarting",
+    "recreate": "restarting",
 }
 _FROM = {"start": "stopped", "stop-other": "stopped"}
+_AFTER = {"start": ALL_UP, "stop-other": ALL_UP, "restart": ALL_UP, "recreate": ALL_UP}
+"""What `docker ps` reads once each job has done its work; a stop leaves nothing up."""
 """What the server reads before the press: Start is only live on a stopped one."""
 
 
@@ -23473,8 +23485,8 @@ def test_every_hold_shows_its_word_and_lets_go_when_the_job_fails(
     assert view.realm_badge.status == _HELD[press]
 
     _fail(jobs, done, RuntimeError("no"))
-    if any(d == view._status_ready for _w, d, _e in jobs.queue):
-        _finish(jobs, view._status_ready)
+    assert view.realm_badge.status == _HELD[press], "let go before the follow-up poll answered"
+    _drain_polls(view, jobs)
 
     assert view.realm_badge.status == reading, "the hold outlived the failed job"
     assert view._badge_held is None
@@ -23485,29 +23497,69 @@ def test_every_hold_lets_go_when_the_job_is_done(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: str
 ) -> None:
     view, jobs = _held_view(ps, tmp_path)
-    reading = _pressable(view, jobs, ps, press)
+    _pressable(view, jobs, ps, press)
     done = _press(view, press, monkeypatch)
     assert view.realm_badge.status == _HELD[press]
 
     [index] = [i for i, (_w, d, _e) in enumerate(jobs.queue) if d == done]
     _work, on_done, _on_error = jobs.queue.pop(index)
-    on_done(("restart", True) if press == "restart" else True)
+    ps.names = _AFTER.get(press, "")  # what the job's work left behind
+    on_done((press, True) if press in ("restart", "recreate") else True)
+
+    assert view.realm_badge.status == _HELD[press], "let go before the follow-up poll answered"
+    _drain_polls(view, jobs)
 
     assert view._badge_held is None
-    assert view.realm_badge.status == reading, "released to the last reading"
+    assert view.realm_badge.status == ("running" if press in _AFTER else "stopped")
 
 
-def test_docker_going_unreachable_lets_go_of_the_hold(
+def test_a_stop_goes_from_stopping_to_stopped_and_never_through_running(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
+    """Fix round 1 (I1): the hold fell back to the reading from before the press,
+    so REALM ONLINE flashed between STOPPING and OFFLINE, and the launcher
+    reloaded against a stopped server."""
+    view, jobs = _held_view(ps, tmp_path)
+    seen: list[str] = []
+    view.realm_badge.status_changed.connect(seen.append)
+
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)  # the real stop: compose stop empties `docker ps`
+    _drain_polls(view, jobs)
+
+    assert seen == ["stopping", "stopped"]
+
+
+def test_a_failed_poll_during_a_stop_leaves_the_hold_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 1 (I2): one failed `docker ps` mid-stop is not the stop finishing."""
     view, jobs = _held_view(ps, tmp_path)
     view.stop_button.click()
 
     view._tick()
     _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+    assert view.realm_badge.status == "stopping"
+
+    ps.names = "ac-database\nac-authserver\n"
+    _poll(view, jobs)
+    assert view.realm_badge.status == "stopping"
+
+    _finish(jobs, view._stop_done)
+    _drain_polls(view, jobs)
+    assert view.realm_badge.status == "stopped"
+
+
+def test_a_failed_poll_with_nothing_of_ours_running_says_stopped(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Unchanged since before T188: an idle poll that cannot reach Docker says stopped."""
+    view, jobs = _held_view(ps, tmp_path)
+
+    view._tick()
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
 
     assert view.realm_badge.status == "stopped"
-    assert view._badge_held is None
 
 
 def test_a_partly_up_server_with_nothing_of_ours_running_says_partly_up(

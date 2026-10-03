@@ -581,6 +581,9 @@ def _app_window(qapp: object) -> Iterator[Any]:
     monkeypatch.setattr(UpdateBar, "offer_notice", _offer)
 
     window = main.build_window()
+    # Read before any test adds a tab: the window as a player with no servers opens it.
+    header = window.property("header")
+    window.header_badge_hidden_at_start = header is not None and header._badge.isHidden()
     window.swept = swept
     window.bar_said = bar_said
     window.bar_callbacks = bar_callbacks
@@ -4187,6 +4190,11 @@ def test_the_header_badge_follows_the_server_tab_on_screen(window: Any, tmp_path
     assert header._badge.status == "stopping"
 
 
+def test_a_window_opened_with_no_servers_hides_the_header_badge(window: Any) -> None:
+    """T188 fix round 1 (M6): the Catalog was current before the header listened."""
+    assert window.header_badge_hidden_at_start is True
+
+
 def test_the_header_badge_is_hidden_on_the_catalog(window: Any, tmp_path: Any) -> None:
     header = window.property("header")
     tabs = window.property("tabs")
@@ -4226,20 +4234,27 @@ def test_closing_the_tab_on_screen_leaves_the_header_on_what_is_left(
     """Review focus 2: an uninstall drops the tab the header was following."""
     header = window.property("header")
     tabs = window.property("tabs")
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", tmp_path / "c6-kept", None)
+    kept = _tab_for(window, tmp_path / "c6-kept")
     server_dir = tmp_path / "c6-closed"
-    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
-    view = _tab_for(window, server_dir)
-    view.realm_badge.set_status("running")
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    closed = _tab_for(window, server_dir)
+    kept.realm_badge.set_status("restarting")
+    closed.realm_badge.set_status("running")
+    tabs.setCurrentWidget(closed)
+    assert tabs.indexOf(closed) == tabs.count() - 1, "the newest tab is the last one"
+    assert header._badge.status == "running"
 
-    view.uninstalled.emit("wow-wotlk", server_dir)
+    closed.uninstalled.emit("wow-wotlk", server_dir)
     process_events()  # the dropped view's deferred delete
 
-    current = tabs.currentWidget()
-    if current in window.yulon_controllers:
-        assert header._badge.status == current.realm_badge.status
-        assert header._badge.isHidden() is False
-    else:
-        assert header._badge.isHidden() is True
+    # Qt selects the tab left of a removed last one: the one added just before.
+    assert tabs.currentWidget() is kept
+    assert header._badge.status == "restarting"
+    assert header._badge.isHidden() is False
+    kept.realm_badge.set_status("running")
+    assert header._badge.status == "running", "the header stopped following"
 
 
 # -- T188 A7/B7/C10: "&" in a label is shown, never read as a shortcut ---------

@@ -376,6 +376,21 @@ def test_a_stopping_realm_does_not_say_play_starts_it(
     assert window.online_label.text() != launcher_window.STOPPED_BANNER
 
 
+def test_a_partly_up_server_is_not_called_stopped_under_play(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 fix round 1 (M3): the tab's badge says PARTLY UP; the line under PLAY agreed."""
+    window, view, _ = _launcher(ps, tmp_path)
+    ps.names = "ac-database\n"
+
+    view.refresh_status()
+
+    assert window.realm_badge.status == "partial"
+    said = window.play_reason_label.text()
+    assert "partly up" in said, said
+    assert "stopped" not in said, said
+
+
 def test_a_count_that_could_not_be_read_is_left_out_not_shown_as_zero(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

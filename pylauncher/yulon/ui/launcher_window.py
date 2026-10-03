@@ -1206,6 +1206,12 @@ class LauncherWindow(QWidget):
             self.play_reason_label.setText(
                 "Starts World of Warcraft from this server's ready-to-play client."
             )
+        elif self.realm_badge.status == "partial":
+            # T188: only part of it is up, which "The server is stopped" was not.
+            self.play_reason_label.setText(
+                "The server is partly up: PLAY starts the rest, waits for the realm, then "
+                "starts the game."
+            )
         else:
             self.play_reason_label.setText(
                 "The server is stopped: PLAY starts it, waits for the realm, then starts "
