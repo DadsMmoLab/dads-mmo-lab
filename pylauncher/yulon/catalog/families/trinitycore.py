@@ -1009,9 +1009,12 @@ class TrinityCoreInstaller(CmangosInstaller):
         for rel in pending.reimport:
             if rel in reimport or rel in left:
                 continue
-            if not (server_dir / rel).is_file():
+            if not (server_dir / rel).is_file() and rel not in pending.required:
                 left.append(rel)
                 continue
+            # A file the kept build needs is excused only when this move's commit
+            # deleted it (`changes.left`, above); gone from the disk alone, it is
+            # still imported, and the plan refuses it as missing (fix round 6).
             reimport.append(rel)
         for stem in pending.parts:
             if stem in parts or stem in gone:
@@ -1103,8 +1106,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         if not isinstance(changes, SnapshotChanges):
             return None
         # A record left by an earlier press keeps the work too (T197 fix round 5): this
-        # move may have excused every file it named, and then `forward()` clears it --
-        # otherwise the rebuild's own start check would refuse the press that repairs it.
+        # move may have excused every file it named, and then `done()` clears it once the
+        # new build is up -- otherwise the rebuild's own start check would refuse the
+        # press that repairs it.
         waiting = _read_pending(server_dir) is not None
         if not changes.imports() and not changes.map_data and not waiting:
             return None
@@ -1115,6 +1119,17 @@ class TrinityCoreInstaller(CmangosInstaller):
         before: list[bytes | None] = []
         started: list[bool] = []
         prepared: list[bool] = []
+        # The record as `forward()` found it, and whether every table it had went in
+        # (T197 fix round 6): nothing is removed until the new build is up (`done()`),
+        # and a rollback puts back what was owed before this press (`back()`).
+        snapshot: list[bytes | None] = []
+        imported: list[bool] = []
+
+        def original() -> bytes | None:
+            """The record as it was before this press touched it."""
+            if before:
+                return before[0]
+            return snapshot[0] if snapshot else None
 
         def prepare() -> Iterator[str]:
             if not changes.imports():
@@ -1132,12 +1147,11 @@ class TrinityCoreInstaller(CmangosInstaller):
 
         def forward(ctx: StageContext) -> Iterator[str]:
             started.append(True)
+            snapshot[:] = [_read_bytes(server_dir / WORLD_REIMPORT_FILE)]
             if changes.map_data:
                 yield self._flag_map_data(server_dir, changes.map_data)
             if not runs:
-                if waiting and not changes.imports():
-                    # Every file the record named was left by this move: nothing is owed.
-                    yield from self._forget_pending(server_dir)
+                imported.append(True)
                 return
             names = [run.rel for run in runs]
             yield (
@@ -1148,8 +1162,14 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield WORLD_TABLES_CANCEL_NOTE
             self._refuse_unless_the_world_is_down(names)
             yield from self._import_runs(ctx, runs, cancel_note=WORLD_TABLES_CANCEL_NOTE)
-            yield from self._forget_pending(server_dir)
+            imported.append(True)
             yield f"The {len(runs)} world tables are in; the new build starts on them."
+
+        def done() -> Iterator[str]:
+            # The new build is up (or kept after its banner): what the record owed is in,
+            # or was excused by this move, so it goes now and not before.
+            if imported:
+                yield from self._forget_pending(server_dir)
 
         def back(ctx: StageContext) -> Iterator[str]:
             # Like `forward()`: from here the record may name a table this press
@@ -1157,12 +1177,16 @@ class TrinityCoreInstaller(CmangosInstaller):
             started.append(True)
             if changes.map_data:
                 yield from self._put_flag_back(server_dir, changes.flagged_before)
+            # The record as it was before this press (fix round 6), names this move
+            # excused included: the old build is the one that will run, and it still
+            # needs them.
+            if snapshot or before:
+                _put_back(server_dir / WORLD_REIMPORT_FILE, original())
             if not changes.imports():
                 return
             present = self._reimport_runs(ctx, changes, missing_ok=True)
             names = [run.rel for run in present]
             if not present:
-                yield from self._forget_pending(server_dir)
                 return
             yield (
                 f"Importing the same {len(present)} world tables again from the sources the old "
@@ -1177,7 +1201,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"{_finish_advice(names, press)} The world tables could not all be put back "
                     f"for the build from before this update: {exc}{_backup_advice(press)}"
                 ) from exc
-            yield from self._forget_pending(server_dir)
+            yield from self._drop_from_pending(server_dir, names)
             yield f"The {len(present)} world tables are back as the old build had them."
 
         def settle() -> None:
@@ -1188,7 +1212,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         def keep() -> Iterator[str]:
             if started:
                 # `forward()` began: it flagged the map data first, and what it did
-                # not import is still in the record it leaves.
+                # not import is still in the record it leaves; all of it in, the
+                # kept build has its tables and the record goes.
+                yield from done()
                 return
             # The flag first (fix round 2): it never raises, and a record that
             # cannot be written below must not cost it.
@@ -1223,7 +1249,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 raise
 
         return ServersDownWork(
-            prepare=prepare, forward=forward, back=back, settle=settle, keep=keep
+            prepare=prepare, forward=forward, back=back, settle=settle, keep=keep, done=done
         )
 
     def after_update(
@@ -1568,6 +1594,30 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "are still to be imported if this stops part way, so the world server was not "
                 "stopped and nothing was imported again."
             ) from exc
+
+    def _drop_from_pending(self, server_dir: Path, names: Sequence[str]) -> Iterator[str]:
+        """Take the files just imported off `WORLD_REIMPORT_FILE`; the rest stays owed (T197).
+
+        The rollback's half: what it imported from the old checkout is in, and what the
+        record owed before the press and it did not import stays. Gone once empty.
+        """
+        pending = _read_pending(server_dir)
+        if pending is None or pending.unreadable:
+            # Nothing to take off, or a record that means every table: it stays.
+            return
+            yield ""  # pragma: no cover - makes this a generator
+        done = set(names)
+        stems = {m["stem"] for rel in names if (m := _PART.match(rel)) is not None}
+        reimport = [rel for rel in pending.reimport if rel not in done]
+        parts = [stem for stem in pending.parts if stem not in stems]
+        if not reimport and not parts:
+            yield from self._forget_pending(server_dir)
+            return
+        body: dict[str, object] = {"version": 1, "reimport": reimport, "parts": parts}
+        required = [rel for rel in pending.required if rel in reimport]
+        if required:
+            body["required"] = required
+        _put_back(server_dir / WORLD_REIMPORT_FILE, (json.dumps(body, indent=2) + "\n").encode())
 
     def _forget_pending(self, server_dir: Path) -> Iterator[str]:
         """Remove `WORLD_REIMPORT_FILE` once every file it names went in; a warning if it stays."""

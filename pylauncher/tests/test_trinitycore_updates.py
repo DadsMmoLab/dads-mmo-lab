@@ -1709,3 +1709,144 @@ def test_a_return_to_a_pin_without_the_kept_builds_table_lands_and_clears_it(
     assert said[-1] == "Centurion is running on the commit this app was tested against."
     assert box.pending() is None
     CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_failed_update_after_an_excused_move_puts_the_kept_builds_record_back(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: C excuses B's owed table, then fails its ready wait and B is put back.
+
+    The record is not removed until C is up, and the rollback puts it back as it was:
+    B still needs its table, so every start refuses and the sentence says why.
+    """
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new="c" * 40)
+    box.ready = [False, True]
+    with pytest.raises(InstallerError) as failed:
+        box.press()
+    said = str(failed.value)
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    assert box.head() == NEW, "the kept build's sources are back"
+    assert f"its servers were left STOPPED: {UNFINISHED}" in said
+    assert box.world.running is False
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_failed_update_after_a_partly_excused_move_keeps_what_the_old_build_still_owes(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B owes two tables; C deletes one, keeps the other. C fails; the rollback imports the
+    one C kept from B's checkout and the excused one stays owed."""
+    box.changes(
+        ("A", f"{REPO_SQL}/world/arena_season.sql"), ("M", f"{REPO_SQL}/world/creature.sql")
+    )
+    box.moves_to(
+        {
+            "arena_season.sql": "DROP TABLE IF EXISTS arena_season;\n",
+            "creature.sql": "DROP TABLE IF EXISTS creature; -- b\n",
+        }
+    )
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
+        box.press()
+    box.seams.clear()
+    owed = sorted([ARENA, f"{WORLD_SQL}/creature.sql"])
+    assert box.pending() == {"version": 1, "reimport": owed, "parts": [], "required": owed}
+
+    def gone(dest: Path) -> None:
+        (dest / REPO_SQL / "world" / "arena_season.sql").unlink(missing_ok=True)
+
+    box.m.rec.on_clone = gone
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new="c" * 40)
+    box.ready = [False, True]
+    with pytest.raises(InstallerError):
+        box.press()
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_needed_file_the_new_commit_still_has_is_not_excused_by_a_missing_disk_copy(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: excused only when the move's commit deleted it, never by the disk alone."""
+    _kept_with_a_new_table(box, monkeypatch)  # the next move's checkout lacks the file
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+    with pytest.raises(InstallerError) as refused:
+        box.press()
+    assert f"are not all in the server's sources ({ARENA})" in str(refused.value)
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    assert box.head() == NEW
+
+
+def test_a_rebuild_is_refused_while_a_kept_builds_tables_are_owed(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: a plain Rebuild ends in a start and imports no table: refused first."""
+    _kept_with_a_new_table(box, monkeypatch)
+    builds = box.m.rec.calls.count("build")
+    with pytest.raises(InstallerError) as refused:
+        list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    assert str(refused.value) == f"{UNFINISHED} Nothing was changed."
+    assert box.m.rec.calls.count("build") == builds
+
+
+def test_a_new_table_the_old_build_never_had_is_not_owed_after_the_rollback(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: the rollback puts back the record as it was BEFORE the press.
+
+    C adds a table B never had and fails; the rollback must not leave B owing it (it
+    would refuse every start for a file B's checkout does not have). What B owed went in
+    from B's own checkout during the rollback, so nothing is owed at all.
+    """
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.on_clone = None
+    team = f"{REPO_SQL}/world/arena_team.sql"
+    box.moves_to({"arena_team.sql": "DROP TABLE IF EXISTS arena_team;\n"})
+    real_restore = box.m.rec.restore_rev
+
+    def restore(dest: Path, rev: str) -> None:
+        real_restore(dest, rev)
+        (dest / team.removeprefix(f"{CHECKOUT}/")).unlink(missing_ok=True)
+        (box.server_dir / team).unlink(missing_ok=True)
+
+    monkeypatch.setattr(box.m.rec, "restore_rev", restore)
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("A", team), old=NEW, new="c" * 40)
+    box.ready = [False, True]
+    with pytest.raises(InstallerError) as failed:
+        box.press()
+    assert first_lines(box)[-1] == "DROP TABLE IF EXISTS arena_season;", "B's own, from B"
+    assert box.pending() is None, f"{team} is not owed by the build put back"
+    assert "put back and is running again" in str(failed.value)
+
+
+def test_the_record_stays_until_the_new_build_is_up_even_when_the_press_dies(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: `forward()` imported everything, then the press died before any ready
+    wait. Nothing confirmed the new build up, so what was owed is still recorded."""
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.on_clone = None
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+
+    def boom(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("a bug in the recreate")
+
+    box.world.recreate = boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="a bug in the recreate"):
+        box.press()
+    assert first_lines(box)[-2:] == [
+        "DROP TABLE IF EXISTS arena_season;",
+        "DROP TABLE IF EXISTS version;",
+    ], "the ground: forward() imported every table"
+    pending = box.pending()
+    assert pending is not None and ARENA in cast(list[str], pending["reimport"])

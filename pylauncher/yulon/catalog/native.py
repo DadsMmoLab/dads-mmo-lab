@@ -2743,6 +2743,12 @@ class ServersDownWork:
     record saying something is waiting would then be false. Must not raise.
     """
     keep: Callable[[], Iterator[str]] = lambda: iter(())
+    done: Callable[[], Iterator[str]] = lambda: iter(())
+    """Once the new build is up, or kept after its banner (T197 fix round 6).
+
+    Nothing the work recorded is removed before this: a build that fails its ready
+    wait is rolled back, and the old build still needs what the record owed then.
+    """
     """Instead of `settle()`, when the rollback stopped before the old build was back (T197).
 
     The new build stays on its tags, so what it needs and `forward()` did not get to
@@ -6359,12 +6365,16 @@ class StagedInstaller:
                 work = replace(work, back=back)
             try:
                 yield from self.rebuild(opts, cancel=cancel, servers_down=work)
+                if work is not None:
+                    yield from work.done()
             except WorldStoppedAfterReadyError as exc:
                 # T71: the rebuild KEPT the new build -- it came up, then stopped
                 # on its data -- so the sources it was made from stay with it, and
                 # are recorded as what the running build is (T179 fix round 2).
                 # Putting the old commits back here would be this route's own
                 # invariant broken by its own recovery.
+                if work is not None:
+                    yield from work.done()
                 self._record_source_revs(
                     server_dir,
                     state,
