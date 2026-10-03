@@ -2041,3 +2041,110 @@ def test_the_github_link_is_drawn_in_the_theme_gold_not_blue(qapp: object) -> No
     assert sum(1 for c in pixels if near(c, COLOR_RARE)) == 0
     assert sum(1 for c in pixels if near(c, COLOR_GOLD_LIGHT)) > 10
     assert host.isVisible()
+
+
+# -- T193 fix round: a name elided once grows back; the version never cuts a glyph ----
+
+REAL_NAMES = (
+    "All Races All Classes (ARAC)",
+    "TortoiseBots Manager (client addon)",
+    "AzerothCore Lua Engine (ALE)",
+)
+"""Names from the shipped catalogs, the ones the review measured cut at 1920."""
+
+
+def _named_rows() -> list[mp.ModuleRow]:
+    owed = mp.Chip("owed", mp.CHIP_REBUILD_PENDING, "not compiled since this changed", "rebuild")
+    return [
+        mp.ModuleRow(
+            f"real-{n}",
+            "module",
+            name,
+            f"{name} does a thing.",
+            f"https://github.com/azerothcore/{n}",
+            True,
+            True,
+            ("env/dist/etc/modules/a-long-conf-file-name.conf",) if n == 1 else (),
+            (owed,),
+            True,
+            None,
+            badge=mp.BADGE_INSTALLED,
+            version="7c02b1d · 2026-09-01",
+        )
+        for n, name in enumerate(REAL_NAMES)
+    ]
+
+
+def _restyle(host: object, panel: mp.ModulesPanel, width: int) -> None:
+    """The window's restyle at a new width, as `_Window._restyle_for_width` does it."""
+    from tests.conftest import process_events
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    host.resize(*PANEL_SIZE_AT[width])  # type: ignore[attr-defined]
+    apply_dadcraft_theme(host, width=width)  # type: ignore[arg-type]
+    process_events(50)
+
+
+@pytest.mark.parametrize("width", [1280, 1920])
+@pytest.mark.parametrize("start", ["there", "from 960"])
+def test_a_real_module_name_is_whole_when_the_row_has_room_for_it(
+    qapp: object, width: int, start: str
+) -> None:
+    """Review (Critical): an elided name never grew back.
+
+    `_ElidedLabel` answered its size hint from the text on screen, so once a
+    narrow window had shortened a name to "All Races All …" that was all it
+    ever asked for again, and the version beside it took the rest of the row:
+    356px of version at 1920 next to a cut name. The hint is the whole name, and
+    the version and conf paths only get what the name leaves.
+
+    Mutation: answer the hint from `text()` again and the "from 960" cases show
+    the name cut at 1920.
+    """
+    host, panel = _themed_panel(960 if start == "from 960" else width, _named_rows())
+    if start == "from 960":
+        _restyle(host, panel, width)
+    for row in panel.rows():
+        assert row.name_label.text() == row.data.name, (
+            f"{row.data.name!r} shows as {row.name_label.text()!r} at {width} ({start}), "
+            f"in {row.name_label.width()}px beside a {row.version_label.width()}px version"
+        )
+    assert host.isVisible()
+
+
+def test_a_name_is_elided_only_when_the_row_really_lacks_the_room(qapp: object) -> None:
+    """At 960 a long name may be cut, but only after the version and paths gave way."""
+    host, panel = _themed_panel(960, _named_rows())
+    for row in panel.rows():
+        if row.name_label.text() == row.data.name:
+            continue
+        others = [row.version_label] + ([row.paths_label] if row.paths_label else [])
+        assert all(
+            label.width() <= 1 for label in others
+        ), f"{row.data.name!r} is cut while " + ", ".join(
+            f"{label.text()!r} has {label.width()}px" for label in others
+        )
+    assert host.isVisible()
+
+
+@pytest.mark.parametrize("width", sorted(PANEL_SIZE_AT))
+def test_the_version_is_whole_or_ends_in_an_ellipsis_never_cut_mid_glyph(
+    qapp: object, width: int
+) -> None:
+    """Review (Important): at 960 the version was clipped mid-letter in 25-32px.
+
+    It elides like the name now, from the right, so what is left is the sha --
+    the part somebody pastes -- and the whole of it is in the tooltip.
+    """
+    host, panel = _themed_panel(width, _named_rows() + _t193_rows())
+    for row in panel.rows():
+        if not row.isVisible() or not row.data.version:
+            continue
+        label = row.version_label
+        shown = label.text()
+        assert (
+            label.fontMetrics().horizontalAdvance(shown) <= label.width()
+        ), f"{shown!r} needs {label.fontMetrics().horizontalAdvance(shown)}px in {label.width()}"
+        assert shown in ("", row.data.version) or shown.endswith("…"), shown
+        assert label.toolTip() == row.data.version
+    assert host.isVisible()

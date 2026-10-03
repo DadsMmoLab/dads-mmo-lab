@@ -16075,15 +16075,10 @@ def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
     Three assertions, and the last two are what keep the first honest. A lock
     drawn is not a lock READ: it may have been given a width its label does not
     fit, and the promise then is that the whole sentence is one hover away. And
-    the sweep must really reach the narrow case, where the lock is kept at
-    another chip's expense, so that case is asserted to have happened.
-
-    T193 changed which narrow case the shipped catalog reaches. The text column
-    no longer claims its unelided name as a minimum, so at 960 the status column
-    has 334px for `accountwide`'s 316px lock: the lock is drawn WHOLE and
-    displaces the mark (measured), and no width in the sweep elides it any more.
-    The elided half of the rule is asked directly, at 360px, by
-    `test_a_strip_dragged_narrow_and_back_stops_eliding` and the tests beside it.
+    the sweep must really reach the narrow case -- a fix that made the strip
+    wider instead would satisfy "the lock is drawn" at every width while leaving
+    the rule it was meant to add untested, so the elided case is asserted to
+    have happened at least once.
     """
     import main
 
@@ -16099,7 +16094,7 @@ def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
 
     gone: list[str] = []
     silent: list[str] = []
-    crowded_somewhere = False
+    elided_somewhere = False
     for width in range(main.MINIMUM_WINDOW_SIZE[0], 3001, 40):
         _at(window, (width, 800))
         for row in locked:
@@ -16108,10 +16103,9 @@ def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
             if lock.label not in strip.visible_chip_labels():
                 gone.append(f"{width}: {row.data.id} hid {lock.label!r}")
                 continue
-            if strip.hidden_chips():
-                crowded_somewhere = True
             if lock.label not in strip.elided_chip_labels():
                 continue
+            elided_somewhere = True
             button = next(
                 b for b, chip in zip(row.chip_buttons, row.data.chips, strict=True) if chip is lock
             )
@@ -16122,9 +16116,9 @@ def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
                 silent.append(f"{width}: {row.data.id}'s elided lock says nothing on hover")
     assert gone == [], f"the reason Install is locked left the screen at {gone[:3]}"
     assert silent == [], f"an elided lock with the sentence nowhere: {silent[:3]}"
-    assert crowded_somewhere, (
-        "no locked row was ever short of room for all its chips in the whole sweep, so the "
-        "rule this test is about was never exercised"
+    assert elided_somewhere, (
+        "no lock chip was ever drawn narrower than its label in the whole sweep, so the "
+        "elision this test is about was never exercised"
     )
 
 
