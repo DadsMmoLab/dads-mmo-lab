@@ -545,15 +545,20 @@ def test_a_card_hint_comes_from_the_backends_its_rows_really_use() -> None:
 
 
 def test_a_card_says_how_many_settings_it_carries(qapp: object) -> None:
-    """Item 12's count, beside the module's name.
+    """Item 12's count, beside the module's name -- which is now the card's title (T190 I9).
 
     Mutation: count the FILES instead and Beastmaster's five settings across
-    two files read as `Settings 2`.
+    two files read as `2 settings`.
     """
     card = tp.build_tuning_cards((_row(key="A"), _row(key="B"), _row(key="C")))[0]
     widget = tp.CardWidget(card)
 
-    assert widget.count_label.text() == "Settings 3"
+    assert widget.title_label.text() == "NPC Beastmaster"
+    assert widget.count_label.text() == "3 settings"
+    assert widget.title() == "", "the name is drawn once, as the heading, not in the frame too"
+    assert widget.accessibleName() == "NPC Beastmaster"
+    one = tp.CardWidget(tp.build_tuning_cards((_row(key="A"),))[0])
+    assert one.count_label.text() == "1 setting"
 
 
 def test_a_changed_row_names_its_key_and_the_value_it_had(qapp: object) -> None:
@@ -756,14 +761,26 @@ def test_the_backup_name_is_shown_after_a_save_and_cleared_on_the_next_file(
     backup sits under another file's text.
     """
     panel = tp.TuningPanel()
+    opened: list[str] = []
+    panel.file_selected.connect(opened.append)
+    panel.set_files(["a/mod.conf", "a/other.conf"])
     panel.set_file_text("A = 1\n", read_only=False, note=None)
     assert panel.backup_label.text() == ""
 
     panel.set_backup("mod.conf.2026-09-13T01-02-03.bak")
     assert "mod.conf.2026-09-13T01-02-03.bak" in panel.backup_label.text()
 
+    # T190: the same file read again -- what Reload and every save now do --
+    # keeps the backup it was saved with, and Revert stays armed.
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+    assert "mod.conf.2026-09-13T01-02-03.bak" in panel.backup_label.text()
+    assert panel.file_revert_button.isEnabled()
+
+    panel.file_buttons()[1].click()
+    assert opened[-1] == "a/other.conf"
     panel.set_file_text("B = 2\n", read_only=False, note=None)
     assert panel.backup_label.text() == ""
+    assert not panel.file_revert_button.isEnabled()
 
 
 def test_the_raw_editor_offers_a_revert_beside_save_file(qapp: object) -> None:
@@ -885,3 +902,127 @@ def test_a_file_value_the_box_would_refuse_is_shown_as_written(qapp: object) -> 
     assert isinstance(editor.control, QLineEdit)
     assert editor.control.text() == "abc"
     assert editor.value() == "abc" and not editor.changed
+
+
+# -- T190 A28/I9/B15: card titles, the restart note once, one Reload ----------
+
+
+def _restart_card(module_id: str) -> tuple[tuning.TuningRow, ...]:
+    return (_row(module_id=module_id, module_name=f"Module {module_id}", key=f"{module_id}.A"),)
+
+
+RECREATE_FILE = "conf/mod_outside_every_bind.conf"
+"""A conf no compose bind reaches, so a change to it owes a recreate, not a restart."""
+
+
+def test_a_card_heading_is_the_module_name_and_its_count() -> None:
+    three = tp.build_tuning_cards((_row(key="A"), _row(key="B"), _row(key="C")))[0]
+    one = tp.build_tuning_cards((_row(key="A"),))[0]
+    assert tp.card_heading(three) == ("NPC Beastmaster", "3 settings")
+    assert tp.card_heading(one) == ("NPC Beastmaster", "1 setting")
+
+
+def test_the_restart_rule_is_lifted_only_when_a_card_owes_exactly_a_restart() -> None:
+    restart = tp.build_tuning_cards(_restart_card("a"))
+    recreate = tp.build_tuning_cards((_row(file=RECREATE_FILE),))
+    assert tuning.file_rule(RECREATE_FILE) == "recreate", "control: the file owes a recreate"
+    assert tp.lifted_rule(restart + recreate) == ("restart",)
+    assert tp.lifted_rule(recreate) is None
+
+
+def test_the_restart_sentence_is_said_once_and_a_dearer_one_stays_on_its_card(
+    qapp: object,
+) -> None:
+    """B15: three conf cards said the same restart sentence three times, under three hints.
+
+    Set twice: the second set has no restart card, so a note that was only
+    ever put up, never taken down, fails.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    restart = tuning.apply_sentence("restart")
+    rows = _restart_card("a") + _restart_card("b") + _restart_card("c")
+    rows += (_row(module_id="d", module_name="Module d", key="d.A", file=RECREATE_FILE),)
+    panel = tp.TuningPanel()
+    panel.set_cards(tp.build_tuning_cards(rows))
+    panel.show()
+    try:
+        said = [w for w in panel.findChildren(QLabel) if w.isVisible() and restart in w.text()]
+        assert said == [panel.rule_note], [w.text()[:40] for w in said]
+        recreate = panel.card("d")
+        assert recreate.rule_label.isVisible()
+        assert tuning.apply_sentence("recreate") in recreate.rule_label.text()
+        for key in ("a", "b", "c"):
+            assert not panel.card(key).hint_label.isVisible(), f"card {key} still says its hint"
+            assert not panel.card(key).rule_label.isVisible()
+
+        panel.set_cards(tp.build_tuning_cards(rows[3:]))
+        assert not panel.rule_note.isVisible(), "the note outlived the last restart card"
+    finally:
+        panel.close()
+
+
+def test_the_panel_has_no_reload_of_its_own(qapp: object) -> None:
+    """A28: the tab's bar has the one Reload; the editor's second one is gone."""
+    from PySide6.QtWidgets import QPushButton
+
+    panel = tp.TuningPanel()
+    panel.resize(1200, 600)
+    panel.show()
+    try:
+        panel.set_files(["a/mod.conf"])
+        shown = [b.text() for b in panel.findChildren(QPushButton) if b.isVisible()]
+        assert "Reload from disk" not in shown, shown
+        assert "Save file" in shown and "Revert file" in shown, shown
+    finally:
+        panel.close()
+
+
+def test_the_same_files_again_reads_the_open_file_again_unless_it_has_typing_in_it(
+    qapp: object,
+) -> None:
+    """The tab's Reload, and every save, hand the same list back: the open file is read again.
+
+    Before, the editor kept its old text, so after a card's save a later Save
+    file wrote the old value back. Not when the player has typed into it,
+    though: their typing is not thrown away by somebody else's reload.
+    """
+    from PySide6.QtTest import QTest
+
+    panel = tp.TuningPanel()
+    opened: list[str] = []
+    panel.file_selected.connect(opened.append)
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    panel.file_buttons()[1].click()
+    panel.set_file_text("B = 1\n", read_only=False, note=None)
+    opened.clear()
+
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    assert opened == ["a/other.conf"]
+    panel.set_file_text("B = 1\n", read_only=False, note=None)
+
+    QTest.keyClicks(panel.editor, "# mine")
+    opened.clear()
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    assert opened == [], "a reload threw the typing away"
+    assert "# mine" in panel.editor.toPlainText()
+    assert panel.current_file() == "a/other.conf"
+
+
+def test_the_editor_names_the_file_it_shows_and_says_when_it_is_the_servers_own(
+    qapp: object,
+) -> None:
+    panel = tp.TuningPanel()
+    core = "env/dist/etc/worldserver.conf"
+    mine = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    panel.set_files([mine, core], read_only=[core])
+    panel.set_file_text("BeastMaster.Enable = 1\n", read_only=False, note=None)
+    title = panel.file_title.text()
+    assert "mod_npc_beastmaster.conf" in title and mine in title
+    assert tp.FILE_READ_ONLY not in title
+
+    panel.file_buttons()[1].click()
+    panel.set_file_text("# conf\n", read_only=True, note=None)
+    title = panel.file_title.text()
+    assert "worldserver.conf" in title and core in title
+    assert tp.FILE_READ_ONLY in title

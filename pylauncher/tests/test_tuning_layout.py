@@ -187,7 +187,8 @@ def test_a_narrow_window_gives_one_side_the_whole_height_and_a_press_swaps_them(
     assert (
         _file_side(panel).height() == panel.split.height()
     ), f"the file side has {_file_side(panel).height()}px of the split's {panel.split.height()}"
-    assert panel.editor.height() >= panel.editor.minimumSizeHint().height()
+    lines = panel.editor.viewport().height() // panel.editor.fontMetrics().lineSpacing()
+    assert lines >= 4, f"the editor shows {lines} lines"
 
     _at(window, MEDIUM)
     assert not panel.side_buttons.isVisible(), "the switch is still there with room for both"
@@ -250,13 +251,7 @@ def test_nothing_on_the_tuning_tab_is_cut_at_any_step_of_the_drag(
 
     def look(where: str) -> None:
         found.extend(f"{where}: {cut}" for cut in _drawn_under_their_minimum(tab))
-        # The file picker's own buttons are a row that cannot wrap yet (a
-        # `QHBoxLayout`, T83's class of defect); T190's later step puts them in
-        # a `FlowLayout` and takes them out of this exclusion.
-        picker = set(panel.file_buttons())
         for button in tab.findChildren(QPushButton):
-            if button in picker:
-                continue
             if button.isVisible() and (why := _clipped(button)) is not None:
                 found.append(f"{where}: {why}")
 
@@ -481,3 +476,98 @@ def test_going_narrow_with_unsaved_typing_in_the_editor_shows_the_editor(
     process_events()
     _at(window, SMALL)
     assert panel.settings_button.isChecked(), "a file opened again still counted as typed in"
+
+
+# -- Task 3: one Reload that re-reads, the file named, the chosen file shown ---
+
+
+def test_at_960_every_file_button_is_as_wide_as_its_label_needs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Five file buttons in one row that could not wrap: "od_npc_beastmaster.co"."""
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, SMALL)
+    panel.edit_file_button.click()
+    process_events()
+    buttons = panel.file_buttons()
+    assert len(buttons) == 5, "control: the five files of this install are listed"
+    short = [
+        f"{b.text()}: {b.width()} < {b.sizeHint().width()}"
+        for b in buttons
+        if b.width() < b.sizeHint().width()
+    ]
+    assert short == [], short
+    assert all(b.isVisible() for b in buttons)
+
+
+def _uncheck_and_save(view: ControllerView, key: str) -> None:
+    """Switch `key` off on its card and press the card's Save, with the mouse."""
+    from PySide6.QtTest import QTest
+
+    card = next(c for c in view.tuning_panel.cards() if key in c.editors)
+    switch = card.editors[key].control
+    assert switch is not None and switch.isChecked(), "control: the switch starts on"
+    QTest.mouseClick(switch, Qt.MouseButton.LeftButton)
+    assert card.save_button is not None
+    QTest.mouseClick(card.save_button, Qt.MouseButton.LeftButton)
+    process_events()
+
+
+def test_a_card_save_reaches_the_file_open_in_the_editor(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A28: after a card's save the editor still said `= 1`, and Save file then wrote it back.
+
+    Twice, the second time after a Save file of the editor's own: a saved
+    editor counts as clean again, so the next card save is read in too.
+    """
+    from PySide6.QtTest import QTest
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    conf = tmp_path / "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    _at(window, MEDIUM)
+    assert panel.current_file().endswith("mod_npc_beastmaster.conf")
+
+    _uncheck_and_save(view, "BeastMaster.Enable")
+    assert "BeastMaster.Enable = 0" in conf.read_text(encoding="utf-8"), "control: it saved"
+    assert "BeastMaster.Enable = 0" in panel.editor.toPlainText(), panel.editor.toPlainText()
+
+    panel.editor.moveCursor(panel.editor.textCursor().MoveOperation.End)
+    QTest.keyClick(panel.editor, Qt.Key.Key_Return)
+    QTest.keyClicks(panel.editor, "BeastMaster.HunterOnly = 1")
+    QTest.mouseClick(panel.file_save_button, Qt.MouseButton.LeftButton)
+    process_events()
+    assert "BeastMaster.HunterOnly = 1" in conf.read_text(encoding="utf-8"), "control: saved"
+    assert panel.file_revert_button.isEnabled(), "the save's backup was dropped by the re-read"
+
+    _uncheck_and_save(view, "BeastMaster.HunterOnly")
+    assert "BeastMaster.HunterOnly = 0" in panel.editor.toPlainText(), panel.editor.toPlainText()
+
+
+def test_the_open_files_button_paints_as_chosen(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which file the editor shows was a checked state the theme never drew."""
+    from PySide6.QtTest import QTest
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, LARGE)
+    first, second = panel.file_buttons()[:2]
+
+    def sample(button: Any) -> tuple[int, int, int]:
+        image = button.grab().toImage()
+        colour = image.pixelColor(4, image.height() // 2)
+        return colour.red(), colour.green(), colour.blue()
+
+    assert first.isChecked() and not second.isChecked()
+    chosen, other = sample(first), sample(second)
+    assert chosen != other, f"the open file paints {chosen}, the other {other}"
+    second.setFocus()
+    QTest.keyClick(second, Qt.Key.Key_Space)
+    second.clearFocus()
+    process_events()
+    assert second.isChecked() and not first.isChecked()
+    assert (sample(second), sample(first)) == (chosen, other), "the paint did not follow"

@@ -20,6 +20,7 @@ colours come from the `COLOR_*` constants `theme.py` exports.
 
 from __future__ import annotations
 
+import html
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -54,6 +55,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
 )
+from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.panel_style import panel_qss
 
 ControlKind = Literal["switch", "spinner", "box", "none"]
@@ -211,6 +213,21 @@ Two checkable buttons and not a `QTabWidget`: the gamepad's RB/LB go to the
 nearest tab widget (`gamepad._nearest_tab_widget`), and an inner one would take
 them from the app's own tabs whenever the focus was on this panel.
 """
+
+
+CHECKED_QSS = (
+    f"QPushButton:checked {{ background-color: {COLOR_BG_PARCHMENT_LIGHT}; "
+    f"color: {COLOR_GOLD_BRIGHT}; border-bottom: 2px solid {COLOR_GOLD_BRIGHT}; }}"
+)
+"""How a chosen button looks: the switch's open side, the open file's button (T190).
+
+The theme has no `:checked` rule for a push button, so a chosen one read the
+same as the rest and only what lay below said which was chosen. The theme's
+own hover sheet and accent; no colour of this panel's.
+"""
+
+FILE_READ_ONLY = "read-only — the server's own file"
+"""What the editor's title adds for a file this tab will not write (T190)."""
 
 
 def split_sizes(total: int, cards_min: int = CARDS_MIN_WIDTH) -> tuple[int, int]:
@@ -405,6 +422,28 @@ def bounds_note(row: TuningRow) -> str | None:
     if row.type != "int" or row.min is None or row.max is None:
         return None
     return f"{row.min}–{row.max}"
+
+
+def card_heading(card: TuningCard) -> tuple[str, str]:
+    """`(title, count)` for a card's first line (T190 I9): the module, then how many.
+
+    The module's name is the title. Before, the bold primary line said
+    "Settings 3" and the name sat in the frame, muted and small, so the eye
+    found three cards called "Settings".
+    """
+    count = len(card.rows)
+    return card.module_name, f"{count} setting" if count == 1 else f"{count} settings"
+
+
+def lifted_rule(cards: Sequence[TuningCard]) -> tuple[ApplyRule, ...] | None:
+    """The rule said once above the cards instead of on each of them, or `None` (T190 B15).
+
+    Only a bare restart, the cheap and common case: it is the same sentence on
+    every conf card. A card that owes anything dearer, or two jobs, keeps its own
+    sentence on the card, where it is read beside the Save it prices.
+    """
+    restart: tuple[ApplyRule, ...] = ("restart",)
+    return restart if any(card.rules == restart for card in cards) else None
 
 
 def card_hint(card: TuningCard) -> str:
@@ -684,25 +723,32 @@ class CardWidget(QGroupBox):
     """
 
     def __init__(self, card: TuningCard, parent: QWidget | None = None) -> None:
-        super().__init__(card.module_name, parent)
+        # No frame title (T190 I9): the module's name is the card's heading,
+        # drawn once, bold and primary, and still its accessible name.
+        super().__init__("", parent)
         self.card = card
         # What `panel_style.panel_qss()` selects to notch the title centre-top.
         self.setObjectName("tuningCard")
+        self.setAccessibleName(card.module_name)
         box = QVBoxLayout(self)
         box.setSpacing(4)
 
+        title, count = card_heading(card)
         heading = QHBoxLayout()
-        self.count_label = QLabel(f"Settings {len(card.rows)}", self)
-        self.count_label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
+        self.title_label = QLabel(title, self)
+        self.title_label.setWordWrap(True)
+        self.title_label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
+        heading.addWidget(self.title_label, 1)
+        self.count_label = QLabel(count, self)
+        self.count_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         heading.addWidget(self.count_label)
+        box.addLayout(heading)
         # What KIND of thing these settings are, derived from the rows' own
         # backends (`card_hint`) rather than from the module's family.
         self.hint_label = QLabel(card_hint(card), self)
         self.hint_label.setWordWrap(True)
         self.hint_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-style: italic;")
-        heading.addWidget(self.hint_label)
-        heading.addStretch(1)
-        box.addLayout(heading)
+        box.addWidget(self.hint_label)
 
         self.files_label = QLabel("\n".join(card.files), self)
         self.files_label.setFont(QFont("monospace"))
@@ -750,6 +796,11 @@ class CardWidget(QGroupBox):
             )
             actions.addWidget(self.save_button)
             box.addLayout(actions)
+
+    def set_rule_lifted(self, lifted: bool) -> None:
+        """Hide this card's own rule sentence and hint while the panel says them once (B15)."""
+        self.rule_label.setVisible(not lifted)
+        self.hint_label.setVisible(not lifted)
 
     def edits(self) -> dict[str, str]:
         """The keys the user moved, and nothing else.
@@ -819,10 +870,7 @@ class TuningPanel(QWidget):
         # The chosen side says so: the theme has no `:checked` rule for a
         # button, so both read alike and only the content below told them apart.
         # The theme's own hover sheet and accent, no colour of this panel's.
-        self.side_buttons.setStyleSheet(
-            f"QPushButton:checked {{ background-color: {COLOR_BG_PARCHMENT_LIGHT}; "
-            f"color: {COLOR_GOLD_BRIGHT}; border-bottom: 2px solid {COLOR_GOLD_BRIGHT}; }}"
-        )
+        self.side_buttons.setStyleSheet(CHECKED_QSS)
         self.side_buttons.setVisible(False)
         outer.addWidget(self.side_buttons)
         # Always side by side (T190). A vertical split's sizes came back as
@@ -840,6 +888,14 @@ class TuningPanel(QWidget):
         self._content = QWidget(self._area)
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setSpacing(8)
+        # The restart sentence, once, over every card that owes only a restart
+        # (T190 B15, `lifted_rule`). Under the header: `set_header` inserts
+        # above it.
+        self.rule_note = QLabel("", self._content)
+        self.rule_note.setWordWrap(True)
+        self.rule_note.setStyleSheet(f"color: {COLOR_UNCOMMON};")
+        self.rule_note.setVisible(False)
+        self._content_layout.addWidget(self.rule_note)
         self.empty_label = QLabel(NOTHING_TO_TUNE, self._content)
         self.empty_label.setWordWrap(True)
         self.empty_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
@@ -856,13 +912,23 @@ class TuningPanel(QWidget):
         # The picker as BUTTONS (T44 item 13). A combo box shows one file and
         # hides the rest behind a press; this install offers a handful, and
         # which ones they are is half the answer to "what can I tune here?".
-        self.files = QWidget(right)
-        self._files_layout = QHBoxLayout(self.files)
-        self._files_layout.setContentsMargins(0, 0, 0, 0)
-        self._files_layout.setSpacing(4)
+        # A `FlowBar` (T190), so the buttons wrap to a second line rather than
+        # each being cut to fit one -- T83's defect, on this row of five.
+        self.files = flow_bar(right)
+        self.files.setStyleSheet(CHECKED_QSS)
         self._file_buttons: list[QPushButton] = []
         self._current_file = ""
+        self._read_only_files: frozenset[str] = frozenset()
+        self._backup_file: str | None = None
+        """Which file the backup named on the tab is of, so reading that same
+        file again keeps it (T190) and opening another drops it."""
         right_box.addWidget(self.files)
+        # Which file this is, said rather than left to the checked button
+        # (T190): its name, its path, and whether it is the server's own.
+        self.file_title = QLabel("", right)
+        self.file_title.setWordWrap(True)
+        self.file_title.setTextFormat(Qt.TextFormat.RichText)
+        right_box.addWidget(self.file_title)
         self.file_note = QLabel("", right)
         self.file_note.setWordWrap(True)
         self.file_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
@@ -877,9 +943,14 @@ class TuningPanel(QWidget):
         right_box.addWidget(self.shadow_warning)
         self.editor = QPlainTextEdit(right)
         self.editor.setFont(QFont("monospace"))
+        # Four lines at least, in place of the theme's 90px floor for every
+        # multi-line box: at 960x640 the file side also holds two lines of file
+        # buttons, the file's name and its note, and the height the editor did
+        # not need was height the panel was drawn short of (T190).
+        lines = 4 * self.editor.fontMetrics().lineSpacing()
         self.editor.setStyleSheet(
             f"background-color: {COLOR_BG_PANEL}; border: 1px solid {COLOR_GOLD_BORDER}; "
-            f"color: {COLOR_TEXT_PRIMARY};"
+            f"color: {COLOR_TEXT_PRIMARY}; min-height: {lines}px;"
         )
         self.editor.textChanged.connect(self._relint)
         self._editor_dirty = False
@@ -893,23 +964,26 @@ class TuningPanel(QWidget):
         self.lint_label = QLabel("", right)
         self.lint_label.setWordWrap(True)
         self.lint_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
-        right_box.addWidget(self.lint_label)
         # The backup's name, said rather than implied (T44 item 15). It is the
         # only record of what the file said before, and the one thing a user
         # needs in order to look at it by hand.
         self.backup_label = QLabel("", right)
         self.backup_label.setWordWrap(True)
         self.backup_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        # Shown only while it names a backup: an empty line still cost the
+        # file side its height at 960x640 (T190).
+        self.backup_label.setVisible(False)
         right_box.addWidget(self.backup_label)
+        # No Reload here (T190 A28): the tab's bar has the one, and it re-reads
+        # this file too (`set_files`). `file_reload_pressed` stays for the view.
+        # The guard's verdict on the row of the two presses it is about, not
+        # on a line of its own above them (T190, the height at 960x640).
         file_actions = QHBoxLayout()
-        self.file_reload_button = QPushButton("Reload from disk", right)
-        self.file_reload_button.clicked.connect(self.file_reload_pressed.emit)
-        file_actions.addWidget(self.file_reload_button)
-        file_actions.addStretch(1)
+        file_actions.addWidget(self.lint_label, 1)
         # Dead until there is a backup to restore FROM. A Revert with nothing
         # behind it is a press that can only explain itself, and the card's own
         # Revert already answers that case with a sentence.
-        self.file_revert_button = QPushButton("Revert", right)
+        self.file_revert_button = QPushButton("Revert file", right)
         self.file_revert_button.setToolTip(
             "Put this file back from the backup Yu'lon took at the last save on this tab."
         )
@@ -943,6 +1017,11 @@ class TuningPanel(QWidget):
             self._order.append((card.family, card.module_id))
             self._content_layout.insertWidget(self._content_layout.count() - 1, widget)
         self.empty_label.setVisible(not self._cards)
+        lifted = lifted_rule(cards)
+        self.rule_note.setText(tuning.owed_sentence(lifted) if lifted else "")
+        self.rule_note.setVisible(lifted is not None)
+        for widget in self._cards.values():
+            widget.set_rule_lifted(widget.card.rules == lifted)
 
     def set_header(self, widget: QWidget) -> None:
         """Put `widget` above the cards, in the same scrolling column (T171).
@@ -997,7 +1076,6 @@ class TuningPanel(QWidget):
         for widget in self._cards.values():
             widget.set_enabled_actions(enabled)
         self.files.setEnabled(enabled)
-        self.file_reload_button.setEnabled(enabled)
         self.file_save_button.setEnabled(enabled and not self.editor.isReadOnly())
         self.file_revert_button.setEnabled(
             enabled and bool(self.backup_label.text()) and not self.editor.isReadOnly()
@@ -1014,6 +1092,7 @@ class TuningPanel(QWidget):
         second copy of that list.
         """
         keep = self._current_file
+        self._read_only_files = frozenset(read_only)
         for button in self._file_buttons:
             button.setParent(None)
             button.deleteLater()
@@ -1035,9 +1114,15 @@ class TuningPanel(QWidget):
             button.setToolTip(file)
             button.clicked.connect(lambda _checked=False, name=file: self._file_picked(name))
             self._file_buttons.append(button)
-            self._files_layout.insertWidget(self._files_layout.count(), button)
-        if keep in files:
+            self.files.flow().addWidget(button)
+        if keep in files and self._editor_dirty:
+            # Typing nobody has saved is not thrown away by a reload.
             self._mark_current(keep)
+        elif keep in files:
+            # Read again (T190 A28): the tab's Reload and every save hand the
+            # same list back, and an editor kept as it was went stale under a
+            # card's save -- a later Save file then wrote the old value back.
+            self._file_picked(keep)
         elif files:
             self._file_picked(files[0])
         else:
@@ -1053,8 +1138,17 @@ class TuningPanel(QWidget):
         return self._current_file
 
     def set_backup(self, name: str | None) -> None:
-        """Name the backup the last save took, and arm Revert (T44 item 15)."""
+        """Name the backup the last save took, and arm Revert (T44 item 15).
+
+        Only a save that wrote the open file names one, so a name here also
+        says the editor's text is on disk: the editor counts as clean again,
+        and the next reload reads it in (T190).
+        """
+        self._backup_file = self._current_file if name else None
+        if name:
+            self._editor_dirty = False
         self.backup_label.setText(f"Backup of this file as it was: {name}" if name else "")
+        self.backup_label.setVisible(bool(name))
         self.file_revert_button.setEnabled(
             self._actions_enabled and bool(name) and not self.editor.isReadOnly()
         )
@@ -1063,6 +1157,25 @@ class TuningPanel(QWidget):
         self._current_file = file
         for button in self._file_buttons:
             button.setChecked(button.toolTip() == file)
+        self._draw_file_title()
+
+    def _draw_file_title(self) -> None:
+        """The open file's name in bold, its path muted, and whether it is the server's own."""
+        file = self._current_file
+        if not file:
+            self.file_title.setText("")
+            return
+        name = html.escape(file.rsplit("/", 1)[-1], quote=False)
+        path = html.escape(file, quote=False)
+        said = (
+            f" · {html.escape(FILE_READ_ONLY, quote=False)}"
+            if file in self._read_only_files
+            else ""
+        )
+        self.file_title.setText(
+            f'<span style="color: {COLOR_TEXT_PRIMARY}; font-weight: bold;">{name}</span> '
+            f'<span style="color: {COLOR_TEXT_MUTED};">{path}{said}</span>'
+        )
 
     def set_file_text(
         self,
@@ -1093,8 +1206,15 @@ class TuningPanel(QWidget):
         self.shadow_warning.setVisible(bool(shadowed) and not read_only)
         self.file_save_button.setEnabled(self._actions_enabled and not read_only)
         # A backup of the file you were looking at a moment ago is not a
-        # backup of this one, so the name goes with the text it described.
-        self.set_backup(None)
+        # backup of this one, so the name goes with the text it described --
+        # but the same file read again keeps it (T190): every save re-reads.
+        if self._current_file != self._backup_file:
+            self.set_backup(None)
+        else:
+            self.file_revert_button.setEnabled(
+                self._actions_enabled and bool(self.backup_label.text()) and not read_only
+            )
+        self._draw_file_title()
         self._relint()
 
     def _file_picked(self, name: str) -> None:
@@ -1197,8 +1317,10 @@ __all__ = [
     "TuningPanel",
     "bool_words",
     "build_tuning_cards",
+    "card_heading",
     "control_kind",
     "is_narrow",
+    "lifted_rule",
     "shows_key_line",
     "split_sizes",
     "starting_value",
