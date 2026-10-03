@@ -864,6 +864,19 @@ def test_in_a_440px_card_the_value_box_keeps_room_for_its_value(qapp: object) ->
         assert isinstance(field, QLineEdit)
         need = tp.VALUE_MIN_CHARS * field.fontMetrics().averageCharWidth()
         assert field.width() >= need, f"the value has {field.width()}px, needs {need}"
+
+        # Again after the app restyles it for a wide window, as `_at` does: the
+        # font grows, and a floor counted in the old font's characters is short.
+        from yulon.ui.theme import apply_dadcraft_theme
+
+        before = field.fontMetrics().averageCharWidth()
+        apply_dadcraft_theme(card, width=1920)
+        process_events()
+        assert field.fontMetrics().averageCharWidth() > before, "control: the font grew"
+        card.resize(card.minimumSizeHint().width(), 600)
+        process_events()
+        need = tp.VALUE_MIN_CHARS * field.fontMetrics().averageCharWidth()
+        assert field.width() >= need, f"restyled, the value has {field.width()}px, needs {need}"
     finally:
         card.close()
 

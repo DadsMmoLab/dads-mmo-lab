@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from PySide6.QtCore import QRegularExpression, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRegularExpression, Qt, Signal
 from PySide6.QtGui import QFont, QRegularExpressionValidator, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -654,8 +654,27 @@ class RowEditor(QWidget):
         return field
 
     def _keep_room(self, control: QWidget) -> None:
-        """`VALUE_MIN_CHARS` of this control's own font, so a value is never squeezed out."""
+        """`VALUE_MIN_CHARS` of this control's own font, so a value is never squeezed out.
+
+        Counted again whenever that font changes (`eventFilter`): the app
+        restyles every font with the window's width, and a floor counted in the
+        font the box was built with fell 2px short once it grew.
+        """
         control.setMinimumWidth(VALUE_MIN_CHARS * control.fontMetrics().averageCharWidth())
+        if not getattr(self, "_watching_font", False):
+            self._watching_font = True
+            control.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802  (Qt's own name)
+        # By identity with the control, read with `getattr`: a font can change
+        # before `__init__` has stored the control it built.
+        if (
+            event.type() == QEvent.Type.FontChange
+            and isinstance(watched, QWidget)
+            and watched is getattr(self, "control", None)
+        ):
+            self._keep_room(watched)
+        return False
 
     def value(self) -> str:
         """What this row would be written as, in the file's own spelling."""
