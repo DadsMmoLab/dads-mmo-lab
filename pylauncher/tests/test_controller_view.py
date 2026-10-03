@@ -9755,6 +9755,8 @@ def test_a_steam_deck_that_lost_docker_is_offered_the_reinstall_on_the_server_ta
     view.services.controller.status = _docker_gone  # type: ignore[method-assign]
     view.refresh_status()
     assert not view.reinstall_docker_button.isHidden(), "the Deck was not offered the repair"
+    # T194: the press lives in the Docker banner, which must be up with it.
+    assert view.reinstall_docker_button.isVisibleTo(view), "offered inside a hidden banner"
 
     view.services.controller.status = real_status  # type: ignore[method-assign]
     view.refresh_status()
@@ -9766,6 +9768,7 @@ def test_off_steamos_a_missing_docker_is_not_offered_the_steamos_repair(
 ) -> None:
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     _steam_deck_without_docker(monkeypatch, steamos=False)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
     view.services.controller.status = _docker_gone  # type: ignore[method-assign]
     view.services.controller.start = _docker_gone  # type: ignore[method-assign]
 
@@ -9773,7 +9776,9 @@ def test_off_steamos_a_missing_docker_is_not_offered_the_steamos_repair(
     view.start_server()
 
     assert view.reinstall_docker_button.isHidden()
-    assert view.problem_label.text() == yulon_platform.DOCKER_CLI_MISSING_HELP
+    # T194 (lead ruling R2): this machine's half of the sentence, never Docker Desktop on Linux.
+    assert view.problem_label.text() == yulon_platform.DOCKER_MISSING_ON_LINUX
+    assert "Docker Desktop" not in view.problem_label.text()
 
 
 def test_a_start_with_no_docker_on_a_deck_names_the_update_not_docker_desktop(
@@ -9787,9 +9792,16 @@ def test_a_start_with_no_docker_on_a_deck_names_the_update_not_docker_desktop(
 
     view.start_server()
 
-    assert view.problem_label.text() == yulon_platform.STEAMOS_DOCKER_GONE_HELP
-    assert "Docker Desktop" not in view.problem_label.text()
+    # T194 (lead ruling R1): the Start names the cause and points at the press;
+    # the banner above it carries the press and the whole sentence, once.
+    said = view.problem_label.text()
+    assert said == controller_view_module.START_FAILED_DOCKER_GONE
+    assert "SteamOS update" in said and yulon_platform.STEAMOS_DOCKER_REPAIR_LABEL in said
+    assert yulon_platform.STEAMOS_DOCKER_GONE_HELP not in said
+    assert "Docker Desktop" not in said
     assert not view.reinstall_docker_button.isHidden()
+    assert view.reinstall_docker_button.isVisibleTo(view)
+    assert view.docker_banner.body_label.text() == yulon_platform.STEAMOS_DOCKER_GONE_HELP
 
 
 def test_pressing_the_reinstall_runs_the_repair_with_a_prompter_and_shows_its_report(
@@ -9961,7 +9973,11 @@ class _DockerDesktopDown(_Ps):
         self.found = ""
 
     def __call__(
-        self, cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+        self,
+        cmd: list[str],
+        cwd: Path | None = None,
+        timeout: float | None = None,
+        **_kw: object,
     ) -> subprocess.CompletedProcess[str]:
         if cmd[:1] == ["powershell.exe"]:
             self.calls.append(cmd)
@@ -10041,38 +10057,57 @@ def test_the_banner_sits_in_realm_above_the_status_line(
     assert "#docker-banner" in view.docker_banner.styleSheet()
 
 
+def _logged_raw(caplog: Any) -> list[str]:
+    """Every record, from every logger, that carries Docker's own words."""
+    return [r.getMessage() for r in caplog.records if "dockerDesktopLinuxEngine" in r.getMessage()]
+
+
 def test_the_raw_docker_error_goes_to_the_log_once_per_change(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
 ) -> None:
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    """On the real threaded runner, with the dashboard failing too: one line per change.
+
+    The runner's worker logs every job that raises, so a poll that raised its
+    Docker error put Docker's words in the log every five seconds, twice (status
+    and verdict), however carefully the view logged its own once.
+    """
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    services = _services(ps, tmp_path, [])
+    services.dashboard = _dashboard_down
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
     down = _windows_with_docker_desktop_down(monkeypatch)
 
+    def poll() -> None:
+        view.refresh_status()
+        view.refresh_verdict()
+        pump_until(
+            lambda: not view._status_pending and not view._verdict_pending, "the poll's answers"
+        )
+
     with caplog.at_level(logging.DEBUG):
-        view.refresh_status()
-        view.refresh_status()
-        view.refresh_status()
-    logged = [
-        r
-        for r in caplog.records
-        if r.name == controller_view_module.logger.name
-        and "dockerDesktopLinuxEngine" in r.getMessage()
-    ]
-    assert len(logged) == 1, [r.getMessage() for r in logged]
+        poll()
+        poll()
+        poll()
+    assert _shown(view, view.docker_banner)
+    assert len(_logged_raw(caplog)) == 1, _logged_raw(caplog)
 
     caplog.clear()
     down.down = False
     with caplog.at_level(logging.DEBUG):
         view.refresh_status()
+        pump_until(lambda: not view._status_pending, "the good poll")
+    assert view.docker_banner.isHidden()
     down.down = True
     with caplog.at_level(logging.DEBUG):
-        view.refresh_status()
-    logged = [
-        r
-        for r in caplog.records
-        if r.name == controller_view_module.logger.name
-        and "dockerDesktopLinuxEngine" in r.getMessage()
-    ]
-    assert len(logged) == 1, "Docker coming back and going again is a change"
+        poll()
+    assert len(_logged_raw(caplog)) == 1, "Docker coming back and going again is a change"
+    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 
 
 def test_try_again_asks_docker_again(
@@ -10219,6 +10254,69 @@ def test_a_failed_poll_during_our_own_start_leaves_the_held_badge_and_shows_no_b
     assert view.docker_banner.isHidden()
 
 
+def test_a_deck_poll_failing_under_the_hold_offers_no_press_in_a_hidden_banner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reinstall was switched on inside the banner the hold kept down (fix round 1, I2)."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view._hold_badge("starting")
+    view._set_busy(True)
+
+    view._status_failed(docker.DockerCliMissingError("no docker"))
+
+    assert view.docker_banner.isHidden()
+    assert view.reinstall_docker_button.isHidden(), "on, inside a banner nobody can see"
+
+    # The job's own follow-up read ends the hold: banner and press go up together.
+    view._set_busy(False)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    view.refresh_status()
+    assert _shown(view, view.docker_banner)
+    assert _shown(view, view.reinstall_docker_button)
+
+
+def test_a_verdict_that_fails_first_on_docker_says_nothing_even_under_the_hold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Verdict before status: the dashboard line printed Docker's pipe error (fix round 1, I3)."""
+    from tests.support_player_text import visible_texts
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = _dashboard_down
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view._hold_badge("starting")
+
+    view.refresh_verdict()
+
+    assert view.docker_banner.isHidden(), "the hold keeps the banner down"
+    assert view.verdict_label.isHidden()
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    assert "pipe" not in said and "exited" not in said, said
+
+
+def test_a_new_failure_drops_the_last_presss_answer_and_a_repeat_keeps_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M4: "Docker Desktop is starting" under a Deck's reinstall advice is an old answer."""
+    from yulon import docker_advice
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+    banner = view.docker_banner
+    banner.say(controller_view_module.DOCKER_DESKTOP_OPENING)
+
+    view.refresh_status()
+    assert (
+        banner.note_label.text() == controller_view_module.DOCKER_DESKTOP_OPENING
+    ), "the next poll of the same failure wiped the press's answer"
+
+    banner.show_advice(docker_advice.advise("permission", "windows"))
+    assert banner.note_label.text() == ""
+    assert banner.note_label.isHidden()
+
+
 def test_a_start_docker_could_not_hear_says_so_once_and_leaves_the_advice_to_the_banner(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10262,27 +10360,39 @@ def test_the_longest_advice_fits_960_without_scrolling_sideways(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """T185: the Deck's status line ran off the right edge at 960."""
-    from yulon import docker_advice
+    from yulon import docker_advice, wsl
 
     view = _server_view(WOTLK, tmp_path)
     window, _tab = _controller_in_the_real_window(view, "Server")
     _steam_deck_without_docker(monkeypatch)
     view.services.controller.status = _docker_gone  # type: ignore[method-assign]
     view.refresh_status()
-    longest = max(
-        (
-            docker_advice.advise(problem, host, distro="a-distro-with-a-long-name")
-            for host in ("windows", "macos", "linux", "deck")
-            for problem in ("missing", "not-running", "permission", "removed", "wsl")
-        ),
-        key=lambda advice: len(advice.body),
+    distro = "a-distro-with-a-long-name"
+    gone = wsl.missing_distro_problem(
+        distro, wsl._DISTRO_NOT_FOUND_RETURNCODE, wsl._DISTRO_NOT_FOUND_CODE
     )
+    assert gone is not None
+    pool = [
+        docker_advice.advise(problem, host, distro=distro)
+        for host in ("windows", "macos", "linux", "deck")
+        for problem in ("missing", "not-running", "permission", "removed", "wsl")
+    ]
+    pool.append(
+        docker_advice.advice_for(
+            docker.DockerCommandError(gone),
+            distro=distro,
+            host="windows",
+            deck_docker_removed=False,
+        )
+    )
+    longest = max(pool, key=lambda advice: len(advice.body))
     view.docker_banner.show_advice(replace(longest, action="open-desktop"))
-    view.docker_banner.note_label.setText(yulon_platform._MANUAL_START_DOCKER_DESKTOP)
+    view.docker_banner.say(yulon_platform._MANUAL_START_DOCKER_DESKTOP)
     _at(window, (960, 640))
     page = view._tabs.currentWidget()
 
     assert view.docker_banner.isVisible()
+    assert view.docker_banner.note_label.isVisible(), "the press's answer is not on screen"
     assert view.reinstall_docker_button.isVisible() and view.docker_banner.open_button.isVisible()
     assert page.horizontalScrollBar().maximum() == 0
     assert _page_faults(page) == []

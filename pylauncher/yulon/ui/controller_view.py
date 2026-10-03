@@ -195,6 +195,32 @@ from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 logger = get_logger(__name__)
 
 
+class _DockerSilent(NamedTuple):
+    """A poll's Docker failure, handed back as an answer instead of raised (T194 fix round 1)."""
+
+    exc: Exception
+
+
+def _quiet(work: Callable[[], object]) -> Callable[[], object]:
+    """`work`, with a Docker failure returned as `_DockerSilent` rather than raised.
+
+    The job runner logs every job that raises, so a status poll and a verdict
+    read that raised put Docker's own words in the log every five seconds,
+    twice. Returned, the slot logs them once per change. Anything that is not
+    Docker's still raises, and is logged by the runner as before.
+    """
+
+    def run() -> object:
+        try:
+            return work()
+        except Exception as exc:  # noqa: BLE001 - only Docker's own failures are kept
+            if isinstance(exc, docker.DockerCommandError) or docker_advice.unreachable(exc):
+                return _DockerSilent(exc)
+            raise
+
+    return run
+
+
 def _realm_badge_status(status: InstallStatus) -> str:
     """The `DadcraftRealmBadge` state for an `InstallStatus` (Server tab).
 
@@ -4220,6 +4246,12 @@ DOCKER_REINSTALL_PROMPT_TITLE = "Reinstalling Docker"
 """The question dialogs' title for the repair, in place of "The installer needs an answer"."""
 
 START_FAILED_NO_DOCKER = "The server could not start because Docker isn't answering."
+
+START_FAILED_DOCKER_GONE = (
+    "The server could not start: a SteamOS update removed Docker from this Steam Deck. Press "
+    f'"{platform.STEAMOS_DOCKER_REPAIR_LABEL}" in the box above.'
+)
+"""A Deck's failed Start, pointing at the banner that carries the reinstall (T194, T160)."""
 """A Start's own line when Docker did not answer it; the banner above says what to do (T194)."""
 
 STATUS_SEE_THE_BANNER = "Status unknown (see above)"
@@ -6454,6 +6486,8 @@ class ControllerView(QWidget):
         self._status_ask_out = 0
         self._status_pending = False
         self._verdict_pending = False
+        # What the dashboard last failed with, logged once per change (T194).
+        self._verdict_said: str | None = None
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
         self._upstream_pending = False
         self._module_pending: str | None = None
@@ -7406,7 +7440,7 @@ class ControllerView(QWidget):
         self._status_asked_busy = self._busy
         self._status_asks += 1
         self._status_ask_out = self._status_asks
-        self._run(self.services.controller.status, self._status_ready, self._status_failed)
+        self._run(_quiet(self.services.controller.status), self._status_ready, self._status_failed)
 
     @Slot()
     def refresh_verdict(self) -> None:
@@ -7424,11 +7458,16 @@ class ControllerView(QWidget):
             return
         self._verdict_pending = True
         self._run(
-            self._world_reading(self.services.dashboard), self._verdict_ready, self._verdict_failed
+            _quiet(self._world_reading(self.services.dashboard)),
+            self._verdict_ready,
+            self._verdict_failed,
         )
 
     @Slot(object)
     def _verdict_ready(self, result: object) -> None:
+        if isinstance(result, _DockerSilent):
+            self._verdict_failed(result.exc)
+            return
         self._verdict_pending = False
         if self._badge_held is not None:
             # T188 C4: "up — 3 players" under a badge saying STOPPING is two
@@ -7693,10 +7732,16 @@ class ControllerView(QWidget):
         explanation of the stop that just refused.
         """
         self._verdict_pending = False
-        if not self.docker_banner.isHidden():
-            # T194 C7: the banner already says Docker isn't answering.
+        if not self.docker_banner.isHidden() or docker_advice.unreachable(exc):
+            # T194 C7: Docker not answering is the banner's to say -- and the
+            # status poll's to log -- even when this lands first, or under a
+            # hold that keeps the banner down.
             self._clear_the_verdict()
             return
+        said = str(exc)
+        if said != self._verdict_said:
+            self._verdict_said = said
+            logger.warning(f"{self.entry.name}: could not read the dashboard: {said}")
         self.verdict_label.setText(f"could not read this server's dashboard: {exc}")
         self.verdict_label.setVisible(True)
 
@@ -7849,6 +7894,9 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _status_ready(self, result: object) -> None:
+        if isinstance(result, _DockerSilent):
+            self._status_failed(result.exc)
+            return
         self._status_pending = False
         superseded = self._status_superseded
         ends_the_hold = self._ends_the_hold()
@@ -8205,7 +8253,9 @@ class ControllerView(QWidget):
             )
             self.status_label.setText(STATUS_SEE_THE_BANNER)
             self._clear_the_verdict()
-        self._offer_docker_repair()
+            # The reinstall lives in the banner, so it is offered with it and
+            # never switched on inside a banner the hold keeps down.
+            self._offer_docker_repair()
         # T54. The reveal used to run only on the success path, and the control
         # it reveals exists for an install that is GONE -- which is the case
         # most likely to have taken Docker with it. A user deleted their server
@@ -8685,16 +8735,16 @@ class ControllerView(QWidget):
             return
         self._hide_stop_other()
         msg = str(exc)
-        if isinstance(exc, docker.DockerCliMissingError) and self._offer_docker_repair():
-            # T160. The missing-CLI sentence says to install Docker Desktop or
-            # Docker Engine, which on a Deck after a SteamOS update is the wrong
-            # errand: the banner's button does it, the way the fix script did.
-            # The banner's own words, so the two agree (T194). (Not named by
-            # its constant here: `test_platform` counts the modules that name
-            # it as the modules that RAISE it.)
-            msg = docker_advice.advice_for(
-                exc, distro=self.services.controller.wsl_distro, deck_docker_removed=True
-            ).body
+        if isinstance(exc, docker.DockerCliMissingError):
+            # T160, T194. The missing-CLI sentence names both Docker Desktop and
+            # Docker Engine; this machine is told its own half. On a Deck after a
+            # SteamOS update both are the wrong errand: the banner's button does
+            # it, the way the fix script did, and this line points at it rather
+            # than repeating the banner. (Not named by its constant here:
+            # `test_platform` counts the modules that name it as the modules
+            # that RAISE it.)
+            advice = docker_advice.advice_for(exc, distro=self.services.controller.wsl_distro)
+            msg = START_FAILED_DOCKER_GONE if advice.action == "reinstall-deck" else advice.body
         elif docker_advice.unreachable(exc):
             # T194 C7: what Docker said goes to the log; what to do is the
             # banner's, which the follow-up poll below puts up.

@@ -68,7 +68,13 @@ class DockerBanner(QFrame):
         flow.addWidget(self.retry_button)
 
     def show_advice(self, advice: Advice) -> None:
-        """Say `advice`, with Open Docker Desktop only where it is the press."""
+        """Say `advice`, with Open Docker Desktop only where it is the press.
+
+        A press's answer is about the advice it was pressed under: it stays
+        while the polls repeat the same failure and goes when the failure changes.
+        """
+        if advice.body != self.body_label.text():
+            self.say("")
         self.title_label.setText(advice.title)
         self.body_label.setText(advice.body)
         self.open_button.setVisible(advice.action == "open-desktop")

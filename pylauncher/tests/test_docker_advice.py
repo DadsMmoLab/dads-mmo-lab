@@ -73,9 +73,14 @@ def test_docker_desktop_down_says_open_it_and_wait_for_engine_running() -> None:
 
 
 def test_a_deck_or_linux_daemon_that_is_down_is_told_how_to_start_it() -> None:
-    for host in ("linux", "deck"):
-        body = docker_advice.advise("not-running", host).body
-        assert body.startswith("Docker is installed but not running. Restart the Deck"), body
+    linux = docker_advice.advise("not-running", "linux").body
+    deck = docker_advice.advise("not-running", "deck").body
+
+    assert linux.startswith("Docker is installed but not running. Restart the computer"), linux
+    assert deck.startswith("Docker is installed but not running. Restart the Deck"), deck
+    assert "Deck" not in linux, "a plain Linux machine was told about a Deck"
+    assert "computer" not in deck
+    for body in (linux, deck):
         assert "sudo systemctl start docker" in body
 
 
@@ -92,10 +97,33 @@ def test_a_missing_cli_is_told_only_its_own_platforms_half() -> None:
     assert "Docker Desktop" in windows and "Docker Engine" not in windows
 
 
+def test_the_two_halves_are_the_missing_cli_sentences_own_words() -> None:
+    """One home for the words: the halves are platform's, and the whole is built from them."""
+    assert docker_advice.advise("missing", "linux").body == yulon_platform.DOCKER_MISSING_ON_LINUX
+    assert docker_advice.advise("missing", "windows").body == (
+        yulon_platform.DOCKER_MISSING_ON_DESKTOP
+    )
+    assert docker_advice.advise("missing", "macos").body == (
+        yulon_platform.DOCKER_MISSING_ON_DESKTOP
+    )
+    whole = yulon_platform.DOCKER_CLI_MISSING_HELP
+    for half in (yulon_platform.DOCKER_MISSING_ON_LINUX, yulon_platform.DOCKER_MISSING_ON_DESKTOP):
+        advice = half.removeprefix("Docker could not be found on this machine. ")
+        assert advice != half and advice in whole, (advice, whole)
+
+
 def test_linux_permission_says_log_out_and_back_in() -> None:
     body = docker_advice.advise("permission", "linux").body
     assert "Log out and back in" in body
     assert "Try again" in body
+    assert "Deck" not in body
+
+
+def test_deck_permission_says_restart_the_deck() -> None:
+    body = docker_advice.advise("permission", "deck").body
+    assert "Restart the Deck" in body
+    assert "Try again" in body
+    assert "computer" not in body
 
 
 def test_a_wsl_install_names_its_distro_and_never_docker_desktop() -> None:
@@ -294,3 +322,39 @@ def test_a_mac_without_docker_desktop_is_told_where_to_get_it(
 
     assert said is not None and "Applications" in said
     assert text_faults(said) == []
+
+
+def test_linux_has_no_docker_desktop_to_open_and_asks_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
+    run = _Run()
+
+    said = yulon_platform.open_docker_desktop(run=run)
+
+    assert said is not None and "sudo systemctl start docker" in said
+    assert run.calls == [], "the Windows probe ran on Linux"
+
+
+def test_a_probe_that_hangs_is_given_up_on_and_the_press_comes_back(
+    monkeypatch: pytest.MonkeyPatch, no_known_installs: None
+) -> None:
+    """A wedged PowerShell must not hold Open Docker Desktop grey for ever."""
+    from yulon import runner
+
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "windows")
+    asked: list[float | None] = []
+
+    def hung(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        timeout = kw.get("timeout")
+        asked.append(timeout)  # type: ignore[arg-type]
+        assert timeout is not None, f"{argv[0]} was run with no deadline"
+        # What `runner.run()` hands back when the deadline passes.
+        return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout}s")
+
+    monkeypatch.setattr(runner, "run", hung)
+
+    said = yulon_platform.open_docker_desktop()
+
+    assert said == yulon_platform._MANUAL_START_DOCKER_DESKTOP
+    assert asked and all(t is not None and t <= 60 for t in asked), asked

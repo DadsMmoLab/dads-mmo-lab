@@ -988,11 +988,20 @@ def docker_programs() -> tuple[str, ...]:
     return ("docker", *_windows_docker_programs())
 
 
+_DOCKER_NOT_FOUND = "Docker could not be found on this machine."
+_DESKTOP_INSTALL_ADVICE = (
+    "Install Docker Desktop and try again — and if it is already installed, open Docker "
+    "Desktop once, wait for 'Engine running', and try again then."
+)
+_ENGINE_INSTALL_ADVICE = "Install Docker Engine and try again."
+DOCKER_MISSING_ON_DESKTOP = f"{_DOCKER_NOT_FOUND} {_DESKTOP_INSTALL_ADVICE}"
+"""No docker CLI, told to a Windows or macOS player (the Server tab's Docker banner, T194)."""
+DOCKER_MISSING_ON_LINUX = f"{_DOCKER_NOT_FOUND} {_ENGINE_INSTALL_ADVICE}"
+"""No docker CLI, told to a Linux player: no Docker Desktop in it (T194)."""
+
 DOCKER_CLI_MISSING_HELP = (
-    "Docker could not be found on this machine. Install Docker Desktop "
-    "(Windows/macOS) or Docker Engine (Linux) and try again — and if it is "
-    "already installed, open Docker Desktop once, wait for 'Engine running', "
-    "and try again then."
+    f"{_DOCKER_NOT_FOUND} On Windows or macOS: {_DESKTOP_INSTALL_ADVICE} "
+    f"On Linux: {_ENGINE_INSTALL_ADVICE}"
 )
 """What to tell the user when `docker_program()` comes back empty.
 
@@ -4076,6 +4085,15 @@ _MANUAL_START_DOCKER_DESKTOP_MAC = (
 )
 
 
+_OPEN_DOCKER_DESKTOP_SECONDS = 30.0
+"""Each child `open_docker_desktop()` runs is given up on after this: the press comes back."""
+
+_NO_DOCKER_DESKTOP_ON_LINUX = (
+    'There is no Docker Desktop to open on Linux: run "sudo systemctl start docker" in a '
+    "terminal, then press Try again."
+)
+
+
 def open_docker_desktop(run: RunCmd | None = None) -> str | None:
     """Start Docker Desktop for the Server tab's banner (T194); None once it is starting.
 
@@ -4083,10 +4101,14 @@ def open_docker_desktop(run: RunCmd | None = None) -> str | None:
     is not installed, or Windows or macOS would not start it. Never raises,
     and runs off the GUI thread: on Windows, finding the app is a PowerShell
     probe (`find_docker_desktop()`). It does not wait for the engine; the
-    tab's own poll notices when it answers.
+    tab's own poll notices when it answers. Every child it runs is bounded,
+    so a PowerShell that never answers cannot hold the press grey for good.
     """
-    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv))
-    if detect() == "macos":
+    here = detect()
+    if here == "linux":
+        return _NO_DOCKER_DESKTOP_ON_LINUX
+    do: RunCmd = run if run is not None else _DefaultRunner().bounded(_OPEN_DOCKER_DESKTOP_SECONDS)
+    if here == "macos":
         try:
             proc = do(["open", "-a", "Docker"])
         except OSError as exc:

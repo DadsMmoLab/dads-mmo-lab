@@ -29,20 +29,21 @@ _DESKTOP_NOT_RUNNING = (
     "Docker Desktop isn't running. Open it and wait until it says Engine running; "
     "Yu'lon checks again every few seconds."
 )
-_DESKTOP_MISSING = (
-    "Docker could not be found on this machine. Install Docker Desktop and try again — and "
-    "if it is already installed, open Docker Desktop once, wait for 'Engine running', and "
-    "try again then."
-)
-_ENGINE_MISSING = "Docker could not be found on this machine. Install Docker Engine and try again."
 _ENGINE_NOT_RUNNING = (
-    "Docker is installed but not running. Restart the Deck (or computer), or run "
+    "Docker is installed but not running. Restart the computer, or run "
     '"sudo systemctl start docker" in a terminal.'
+)
+_DECK_NOT_RUNNING = (
+    "Docker is installed but not running. Restart the Deck, or run "
+    '"sudo systemctl start docker" in a terminal in Desktop Mode.'
 )
 _ENGINE_PERMISSION = (
     "Docker is running, but your account isn't allowed to use it yet. Log out and back in "
-    "(or restart the Deck or computer) so your account joins the docker group, then press "
-    "Try again."
+    "(or restart the computer) so your account joins the docker group, then press Try again."
+)
+_DECK_PERMISSION = (
+    "Docker is running, but your account isn't allowed to use it yet. Restart the Deck so "
+    "your account joins the docker group, then press Try again."
 )
 _WINDOWS_PERMISSION = (
     "Docker Desktop didn't let Yu'lon in. Sign out of Windows and back in (your account "
@@ -130,16 +131,20 @@ def advise(problem: Problem, host: Host, *, distro: str | None = None) -> Advice
         if host == "deck":
             return Advice(UNKNOWN_TITLE, platform.STEAMOS_DOCKER_GONE_HELP, "reinstall-deck")
         if desktop:
-            return Advice(UNKNOWN_TITLE, _DESKTOP_MISSING, "open-desktop")
-        return Advice(UNKNOWN_TITLE, _ENGINE_MISSING, None)
+            return Advice(UNKNOWN_TITLE, platform.DOCKER_MISSING_ON_DESKTOP, "open-desktop")
+        return Advice(UNKNOWN_TITLE, platform.DOCKER_MISSING_ON_LINUX, None)
     if problem == "permission":
         if host == "windows":
             return Advice(UNKNOWN_TITLE, _WINDOWS_PERMISSION, None)
         if host == "macos":
             return Advice(UNKNOWN_TITLE, _MACOS_PERMISSION, None)
+        if host == "deck":
+            return Advice(UNKNOWN_TITLE, _DECK_PERMISSION, None)
         return Advice(UNKNOWN_TITLE, _ENGINE_PERMISSION, None)
     if desktop:
         return Advice(UNKNOWN_TITLE, _DESKTOP_NOT_RUNNING, "open-desktop")
+    if host == "deck":
+        return Advice(UNKNOWN_TITLE, _DECK_NOT_RUNNING, None)
     return Advice(UNKNOWN_TITLE, _ENGINE_NOT_RUNNING, None)
 
 
