@@ -1496,10 +1496,11 @@ class _UninstallOutcome:
 def _delete_with_the_server(play: Path, *, game: str, server_dir: Path) -> str:
     """Delete a removed server's ready-to-play client; the sentence that says how it went."""
     try:
-        play_client.delete(play, game=game, server_dir=server_dir, can_try_again=False)
+        lost = play_client.delete(play, game=game, server_dir=server_dir, can_try_again=False)
     except play_client.PlayClientError as exc:
         return str(exc)
-    return f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
+    done = f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
+    return f"{done} {lost}" if lost else done  # T198: a read-only flag it could not put back
 
 
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
@@ -10470,8 +10471,10 @@ class ControllerView(QWidget):
         )
 
     @Slot(object)
-    def _play_client_deleted(self, _result: object) -> None:
+    def _play_client_deleted(self, result: object) -> None:
         self._release_play_client()
+        if isinstance(result, str) and result:  # T198: a read-only flag it could not put back
+            self._play_refused(result)
         setter = self.services.set_play_client_dir
         if setter is None:  # pragma: no cover - the menu is not built without it
             return

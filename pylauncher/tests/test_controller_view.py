@@ -20861,6 +20861,98 @@ def test_uninstall_offers_nothing_for_a_folder_without_the_marker(
     assert (play / "Data").is_dir()
 
 
+# -- T198: a read-only flag Delete could not put back is told to the player ----------------
+
+
+def _flag_put_back_refused(monkeypatch: pytest.MonkeyPatch, archive: Path, times: int) -> None:
+    """Delete as Windows does (a read-only file refuses), and `os.chmod` on the player's
+    `archive` refused its first `times` calls: its flag cannot be put back."""
+    real_remove = play_client.remove_folder
+
+    def windows_unlink(path: Any) -> None:
+        if not os.lstat(path).st_mode & stat.S_IWRITE:
+            raise PermissionError(13, "Access is denied", str(path))
+        os.unlink(path)
+
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, unlink=windows_unlink, **kw),
+    )
+    real_chmod = os.chmod
+    calls: list[int] = []
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        if Path(path) == archive:
+            calls.append(mode)
+            if len(calls) <= times:
+                raise PermissionError(13, "Access is denied", str(path))
+        real_chmod(path, mode, **kw)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+
+
+def _read_only_client(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """The player's client with a read-only shared archive, and this server's copy of it."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    archive = original / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    return original, archive, _built(original, tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_delete_tells_the_player_which_file_lost_its_read_only_flag_and_only_then(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    qmb = controller_view_module.QMessageBox
+    monkeypatch.setattr(qmb, "question", lambda *a, **k: qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(qmb, "warning", lambda *a, **_k: warned.append(a[2]))
+    original, archive, play = _read_only_client(tmp_path)
+    _flag_put_back_refused(monkeypatch, archive, refused)
+    view, recorder = _play_view(ps, tmp_path, original=original, play=play)
+    seen: list[object] = []
+    view.play_client_dir_changed.connect(lambda *a: seen.append(a))
+
+    view.delete_play_client()
+
+    assert not play.exists()
+    assert recorder.written == [None] and len(seen) == 1, "deleted and forgotten either way"
+    assert archive.read_bytes() == b"MPQ the shared archive"
+    if refused:
+        (told,) = warned
+        assert str(archive) in told and "no longer read-only" in told
+    else:
+        assert warned == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_uninstall_tells_the_player_which_file_lost_its_read_only_flag_and_only_then(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    original, archive, play = _read_only_client(tmp_path)
+    _flag_put_back_refused(monkeypatch, archive, refused)
+    services = replace(
+        _services(ps, tmp_path, []),
+        client_dir=original,
+        play_client_dir=play,
+        uninstall=_PlanOnlyUninstall(tmp_path),
+    )
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.show_uninstall_plan()
+    view.run_uninstall()
+
+    said = view.uninstall_label.text()
+    assert not play.exists()
+    assert f"ready-to-play client at {play} was deleted" in said
+    assert archive.read_bytes() == b"MPQ the shared archive"
+    assert (str(archive) in said and "no longer read-only" in said) is bool(refused)
+
+
 # -- T181a Task 5, fix round 1 --------------------------------------------------
 
 

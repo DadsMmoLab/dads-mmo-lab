@@ -400,6 +400,7 @@ def remove_folder(
     *,
     original: Path | None = None,
     unlink: Callable[[Path], None] = os.unlink,
+    flags_lost: list[Path] | None = None,
 ) -> None:
     """Delete a ready-to-play client folder without changing the original through a link.
 
@@ -412,17 +413,28 @@ def remove_folder(
 
     Directories are this folder's own, never shared, so they are made writable
     freely. Raises OSError if something cannot be removed.
+
+    A file of the original whose recorded mode could not be put back (tried twice)
+    is appended to `flags_lost`, also when the removal stops later with OSError:
+    the shared name is gone by then, so the removal is not failed for it, and the
+    caller tells the player (`flags_lost_warning()`, T198).
     """
     if _stat_is_link(_lstat(folder)):  # a look that fails stops it: never fail open
         raise OSError(
             errno.EPERM,
             f"{folder} is a link, not a folder Yu'lon may delete through; nothing was changed",
         )
-    _empty(folder, folder, original, unlink)
+    _empty(folder, folder, original, unlink, flags_lost if flags_lost is not None else [])
     _remove_dir(folder, parent_is_ours=False)  # its parent is the player's, not ours
 
 
-def _empty(here: Path, folder: Path, original: Path | None, unlink: Callable[[Path], None]) -> None:
+def _empty(
+    here: Path,
+    folder: Path,
+    original: Path | None,
+    unlink: Callable[[Path], None],
+    flags_lost: list[Path],
+) -> None:
     """Remove everything inside `here`, bottom up, never entering a link.
 
     One `lstat` per entry decides both "is it a link" and "is it a folder": a
@@ -442,10 +454,12 @@ def _empty(here: Path, folder: Path, original: Path | None, unlink: Callable[[Pa
         if _stat_is_link(st):
             _remove_link(child, unlink)
         elif stat.S_ISDIR(st.st_mode):
-            _empty(child, folder, original, unlink)
+            _empty(child, folder, original, unlink, flags_lost)
             _remove_dir(child)
         else:
-            _remove_file(child, _survivor(child, folder, original), unlink)
+            lost = _remove_file(child, _survivor(child, folder, original), unlink)
+            if lost is not None:
+                flags_lost.append(lost)
 
 
 def _survivor(path: Path, folder: Path, original: Path | None) -> Path | None:
@@ -491,24 +505,25 @@ def _make_writable(path: Path) -> None:
         pass
 
 
-def _remove_file(path: Path, survivor: Path | None, unlink: Callable[[Path], None]) -> None:
+def _remove_file(path: Path, survivor: Path | None, unlink: Callable[[Path], None]) -> Path | None:
     """Delete one file, clearing its own read-only flag only if nothing else helps.
 
     First the directory (this folder's own: on POSIX its write bit is what
     refuses an unlink), and only then the file itself (Windows' read-only
     attribute), because on a hard link that flag is the original's too. The
     recorded mode is put back on `survivor`, the name in the player's client
-    this file may share its inode with, if it still does.
+    this file may share its inode with, if it still does; a refusal is tried
+    once more. Returns `survivor` when its mode could not be put back, else None.
     """
     st = path.lstat()
     try:
         unlink(path)
-        return
+        return None
     except PermissionError:
         _make_writable(path.parent)
     try:
         unlink(path)
-        return
+        return None
     except PermissionError:
         if stat.S_ISLNK(st.st_mode):
             raise
@@ -527,19 +542,55 @@ def _remove_file(path: Path, survivor: Path | None, unlink: Callable[[Path], Non
             )
         raise
     if st.st_nlink <= 1:
-        return
-    try:
-        if survivor is not None:
-            now = survivor.lstat()
-            if (now.st_dev, now.st_ino) == (st.st_dev, st.st_ino):
+        return None
+    if survivor is not None:
+        for attempt in (1, 2):
+            try:
+                now = survivor.lstat()
+                if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+                    break  # not that file (any more): the other name is not the player's here
                 os.chmod(survivor, stat.S_IMODE(st.st_mode))
-                return
-    except OSError:
-        pass
+                return None
+            except FileNotFoundError:
+                break
+            except OSError:
+                if attempt == 2:
+                    logger.warning(
+                        "ready-to-play client: the read-only flag of %s, cleared to delete %s, "
+                        "could not be put back",
+                        survivor,
+                        path,
+                        exc_info=True,
+                    )
+                    return survivor
     logger.warning(
         "ready-to-play client: %s was shared with another file whose read-only flag "
         "could not be put back",
         path,
+    )
+    return None
+
+
+def flags_lost_warning(paths: Collection[Path]) -> str:
+    """What to tell the player about `remove_folder()`'s `flags_lost`; "" when there are none.
+
+    Each is a file of the player's own client, unchanged but no longer read-only:
+    Windows deletes a read-only file only once its flag is cleared, the flag is the
+    one every hard link to it shares, and putting it back was refused (T198).
+    """
+    if not paths:
+        return ""
+    names = ", ".join(str(path) for path in sorted(paths))
+    if len(paths) == 1:
+        return (
+            f"Your own client's file {names} is no longer read-only: Yu'lon had to clear that "
+            "flag to delete the copy that shared it, and could not set it again. The file "
+            "itself did not change. Set it read-only again yourself if you want it protected."
+        )
+    return (
+        f"These files of your own client are no longer read-only: {names}. Yu'lon had to clear "
+        "that flag to delete the copies that shared them, and could not set it again. The files "
+        "themselves did not change. Set them read-only again yourself if you want them protected."
     )
 
 
@@ -1260,8 +1311,12 @@ def _on_windows() -> bool:
     return sys.platform == "win32"
 
 
-def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool = True) -> None:
+def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool = True) -> str:
     """Delete this server's ready-to-play client; the original keeps every shared file.
+
+    Returns `flags_lost_warning()` for the files of the original whose read-only
+    flag could not be put back, "" when there are none (T198); a delete that stops
+    part way says them in its `PlayClientError` too.
 
     Only a folder whose marker names this game and server. A folder that is
     already gone is not an error: what Delete promises is that it is not there.
@@ -1272,7 +1327,7 @@ def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool =
     """
     if not os.path.lexists(play_dir):
         logger.info("ready-to-play client %s is already gone", play_dir)
-        return
+        return ""
     try:
         is_link = _stat_is_link(_lstat(play_dir))
     except OSError as exc:
@@ -1297,8 +1352,9 @@ def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool =
             f"{play_dir} is the ready-to-play client of {whose}, so it was left as it "
             "was. Delete it from that server instead."
         )
+    lost: list[Path] = []
     try:
-        remove_folder(play_dir, original=marker.source_client_dir)
+        remove_folder(play_dir, original=marker.source_client_dir, flags_lost=lost)
     except OSError as exc:
         logger.warning("ready-to-play client: could not delete %s", play_dir, exc_info=True)
         if _on_windows():
@@ -1315,11 +1371,17 @@ def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool =
             rest = f"What is left still carries Yu'lon's marker: {holder}, then try again."
         else:
             rest = f"Delete what is left by hand at {play_dir} ({holder} first)."
+        if lost:
+            raise PlayClientError(
+                f"{play_dir} could not be deleted completely: {exc}. {rest} "
+                f"{flags_lost_warning(lost)}"
+            ) from exc
         raise PlayClientError(
             f"{play_dir} could not be deleted completely: {exc}. Your own client was "
             f"left as it was. {rest}"
         ) from exc
     logger.info("ready-to-play client for %s at %s deleted", game, play_dir)
+    return flags_lost_warning(lost)
 
 
 def taken_back(play_dir: Path) -> tuple[Path, ...]:

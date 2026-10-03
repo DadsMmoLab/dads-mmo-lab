@@ -1676,6 +1676,124 @@ def test_a_pack_over_a_read_only_stock_archive_leaves_the_players_flag_after_ext
     assert snapshot(machine.client) == before
 
 
+# -- T198: a read-only flag that could not be put back is told to the player ----------------
+
+
+def put_back_refused(monkeypatch: pytest.MonkeyPatch, target: Path, times: int) -> None:
+    """`os.chmod` on the player's `target` refused its first `times` calls (Windows: in use)."""
+    real = os.chmod
+    calls: list[int] = []
+
+    def chmod(path: Any, mode: int, **kwargs: Any) -> None:
+        if Path(path) == target:
+            calls.append(mode)
+            if len(calls) <= times:
+                raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real(path, mode, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+
+
+def read_only_common(machine: Machine) -> Path:
+    """The player's read-only `Data/common.MPQ`, a stock archive the copy shares."""
+    archive = machine.client / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    return archive
+
+
+LOST = "no longer read-only"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_an_extraction_says_which_file_lost_its_flag_and_only_then(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    archive = read_only_common(machine)
+    stock = archive.read_bytes()
+    lay_for_client_data(machine)
+    put_back_refused(monkeypatch, archive, refused)
+
+    said = run_stage(machine, "client-data")
+
+    assert "Removed the temporary copy of your client." in said
+    assert not os.path.lexists(copy_dir(machine))
+    assert archive.read_bytes() == stock
+    told = [line for line in said if LOST in line]
+    if refused:
+        assert len(told) == 1 and told[0].startswith("warning: ") and str(archive) in told[0]
+    else:
+        assert told == []
+        assert mode(archive) == 0o444
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+def test_a_failed_extraction_says_which_file_lost_its_flag(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = read_only_common(machine)
+    machine.tools.fail_tool = "vmap4extractor"
+    lay_for_client_data(machine)
+    put_back_refused(monkeypatch, archive, 2)
+
+    with pytest.raises(InstallerError, match="vmap extract failed") as info:
+        run_stage(machine, "client-data")
+
+    assert LOST in str(info.value) and str(archive) in str(info.value)
+    assert not os.path.lexists(copy_dir(machine))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+def test_uninstall_says_which_file_lost_its_flag(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = read_only_common(machine)
+    target = leftover_copy(machine)
+    put_back_refused(monkeypatch, archive, 2)
+    rec = PurgeRecorder(machine.server_dir, remove_folder=purge.remove_tree)
+
+    report = rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+
+    assert not os.path.lexists(target)
+    (told,) = [warning for warning in report.warnings if LOST in warning]
+    assert str(archive) in told
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_the_startup_sweep_says_which_file_lost_its_flag_and_only_then(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, config_dir: Path, refused: int
+) -> None:
+    archive = read_only_common(machine)
+    target = leftover_copy(machine)
+    noted_list(
+        config_dir,
+        [
+            {
+                "target": os.fspath(target),
+                "game": ENTRY.id,
+                "server_dir": os.fspath(machine.server_dir),
+            }
+        ],
+    )
+    put_back_refused(monkeypatch, archive, refused)
+
+    warnings = trinitycore.remove_recorded_leftovers()
+
+    assert not os.path.lexists(target)
+    assert not (config_dir / trinitycore.LEFTOVERS_FILE).exists(), "the entry was dropped"
+    if refused:
+        (told,) = warnings
+        assert LOST in told and str(archive) in told
+    else:
+        assert warnings == []
+        assert mode(archive) == 0o444
+
+
 def crashed_after_moving_aside(machine: Machine) -> Path:
     """The copy a press that died after `_drop_unlisted_archives()` leaves, and its record."""
     target = leftover_copy(machine)

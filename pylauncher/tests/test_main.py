@@ -4715,6 +4715,73 @@ def test_a_copy_that_stays_is_logged_and_said_in_one_line(
     assert any(str(foreign) in record.getMessage() for record in caplog.records)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_the_sweep_says_which_file_lost_its_read_only_flag_and_only_then(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    """T198: a noted copy is removed, and a flag of the player's it could not put back is said."""
+    import errno
+
+    from yulon import play_client
+    from yulon.catalog.families import trinitycore
+
+    original = tmp_path / "WoW"
+    (original / "Data").mkdir(parents=True)
+    archive = original / "Data" / "common.MPQ"
+    archive.write_bytes(b"MPQ the player's own")
+    os.chmod(archive, 0o444)
+    (original / "Wow.exe").write_bytes(b"MZ")
+    server_dir = tmp_path / "srv"
+    copy = trinitycore.extraction_client_dir(original, server_dir)
+    play_client.create(
+        original,
+        copy,
+        game="wow-centurion",
+        server_dir=server_dir,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    (tmp_path / trinitycore.LEFTOVERS_FILE).write_text(
+        json.dumps([{"target": str(copy), "game": "wow-centurion", "server_dir": str(server_dir)}]),
+        encoding="utf-8",
+    )
+    real_remove = play_client.remove_folder
+
+    def windows_unlink(path: Any) -> None:
+        if not os.lstat(path).st_mode & 0o200:
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        os.unlink(path)
+
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, unlink=windows_unlink, **kw),
+    )
+    real_chmod = os.chmod
+    calls: list[int] = []
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        if Path(path) == archive:
+            calls.append(mode)
+            if len(calls) <= refused:
+                raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real_chmod(path, mode, **kw)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+
+    notice = _REAL_SWEEP(config_dir=tmp_path)
+
+    assert not copy.exists()
+    assert archive.read_bytes() == b"MPQ the player's own"
+    if refused:
+        assert notice is not None and "\n" not in notice.text
+        assert str(archive) in notice.text and "no longer read-only" in notice.text
+        assert notice.folders == ()
+    else:
+        assert notice is None
+
+
 def test_a_notice_is_remembered_only_once_it_was_shown(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

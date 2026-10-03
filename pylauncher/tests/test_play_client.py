@@ -1894,3 +1894,123 @@ def test_a_pack_swap_name_sharing_a_read_only_archive_gives_the_player_back_its_
     assert set(blocked) == {side.name}, "the read-only rule was not what the delete met"
     assert archive.stat().st_mode & 0o777 == 0o444, "the player's own file left writable"
     assert archive.read_bytes() == b"mpq" * 1000
+
+
+# -- T198: a read-only flag that could not be put back is told, not only logged ---------------
+
+
+def _shared_read_only(tmp_path: Path) -> tuple[Path, Path]:
+    """A ready-to-play client whose `Data/common.MPQ` shares the player's read-only file."""
+    orig = fake_client(tmp_path)
+    archive = orig / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    build(orig, tmp_path / "t", tmp_path)
+    return archive, tmp_path / "t"
+
+
+def _put_back_refused(monkeypatch: pytest.MonkeyPatch, target: Path, times: int) -> list[int]:
+    """`os.chmod` on `target` refused its first `times` calls, then done; each call's mode."""
+    real = os.chmod
+    calls: list[int] = []
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        if Path(path) == target:
+            calls.append(mode)
+            if len(calls) <= times:
+                raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real(path, mode, **kw)
+
+    monkeypatch.setattr(play_client.os, "chmod", chmod)
+    return calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_a_flag_that_cannot_be_put_back_is_named_and_the_folder_still_goes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, play = _shared_read_only(tmp_path)
+    calls = _put_back_refused(monkeypatch, archive, times=2)
+    lost: list[Path] = []
+
+    play_client.remove_folder(
+        play, original=archive.parents[1], unlink=_windows_like_unlink([]), flags_lost=lost
+    )
+
+    assert not play.exists(), "the link was gone already: the removal is not failed for it"
+    assert lost == [archive]
+    assert calls == [0o444, 0o444], "tried once more, and no more"
+    assert archive.read_bytes() == b"mpq" * 1000
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_a_flag_refused_once_is_put_back_on_the_second_try_and_nothing_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, play = _shared_read_only(tmp_path)
+    calls = _put_back_refused(monkeypatch, archive, times=1)
+    lost: list[Path] = []
+
+    play_client.remove_folder(
+        play, original=archive.parents[1], unlink=_windows_like_unlink([]), flags_lost=lost
+    )
+
+    assert not play.exists()
+    assert lost == []
+    assert len(calls) == 2
+    assert archive.stat().st_mode & 0o777 == 0o444
+
+
+def _windows_like_delete(monkeypatch: pytest.MonkeyPatch, *, in_use: str | None = None) -> None:
+    """`delete()`'s removal deleting as Windows does; `in_use` a name that stays held open."""
+    blocked: list[str] = []
+    windows = _windows_like_unlink(blocked)
+
+    def unlink(path: object) -> None:
+        if Path(path).name == in_use:  # type: ignore[arg-type]
+            raise PermissionError(errno.EACCES, "in use", str(path))
+        windows(path)
+
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, **kw, unlink=unlink),
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_delete_says_which_of_the_players_files_lost_its_flag_and_only_then(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    archive, play = _shared_read_only(tmp_path)
+    _put_back_refused(monkeypatch, archive, times=refused)
+    _windows_like_delete(monkeypatch)
+
+    said = play_client.delete(play, game="g", server_dir=tmp_path / "s")
+
+    assert not play.exists()
+    assert archive.read_bytes() == b"mpq" * 1000
+    if refused:
+        assert str(archive) in said and "read-only" in said
+    else:
+        assert said == ""
+        assert archive.stat().st_mode & 0o777 == 0o444
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_a_delete_that_stops_part_way_names_the_lost_flag_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker goes last, so everything shared is already gone when it is refused."""
+    archive, play = _shared_read_only(tmp_path)
+    _put_back_refused(monkeypatch, archive, times=2)
+    _windows_like_delete(monkeypatch, in_use=play_client.MARKER)
+
+    with pytest.raises(play_client.PlayClientError) as info:
+        play_client.delete(play, game="g", server_dir=tmp_path / "s")
+
+    assert "could not be deleted completely" in str(info.value)
+    assert str(archive) in str(info.value)
+    assert not (play / "Data").exists(), "the shared file was removed before the refusal"
+    assert archive.read_bytes() == b"mpq" * 1000
