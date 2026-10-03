@@ -179,6 +179,7 @@ from yulon.ui.widgets.modules_panel import (
     build_module_rows,
     moved_by_server_update,
 )
+from yulon.ui.widgets.page import ScrollPage, page_room
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
@@ -5019,14 +5020,11 @@ class _TabFit(QObject):
             self._report: self._report.wants_open(),
         }
         for panel in self._give_order():
-            if (
-                self._owed(
-                    log_open=open_now[self._log],
-                    report_open=open_now[self._report],
-                    list_floor=list_floor,
-                )
-                <= self._tab.height()
-            ):
+            if self._owed(
+                log_open=open_now[self._log],
+                report_open=open_now[self._report],
+                list_floor=list_floor,
+            ) <= page_room(self._tab):
                 break
             open_now[panel] = False
         return open_now
@@ -5066,7 +5064,7 @@ class _TabFit(QObject):
             return
         self._settling = True
         try:
-            height = self._tab.height()
+            height = page_room(self._tab)
             open_now = self._fold_until_it_fits(self._floor)
             asked = self._asked_for
             # And the list's own rows are the last thing a PRESS can spend, which
@@ -5332,7 +5330,7 @@ class _IdleLogPanel(LogPanel):
         tab = self.parentWidget()
         if tab is None:
             return _NO_HEIGHT_CAP
-        return max(floor, tab.height() // LOG_SHARE_OF_THE_TAB)
+        return max(floor, page_room(tab) // LOG_SHARE_OF_THE_TAB)
 
     def open_minimum(self) -> int:
         """What this panel needs with its text pane showing, open or not (T83).
@@ -6180,6 +6178,13 @@ Measured on the T86 gate: a SOAP request 8 s after `World server is up` hit the
 20 s timeout while the world logged in its bots; 40 s after it answered at once.
 """
 
+_PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
+"""Sub-tabs `_add_panel_tab` leaves out of a `ScrollPage` (T191).
+
+Tuning is T190's: that ticket fits the tab itself, its cards and its conf list,
+and a page around it would be a second answer to the same question.
+"""
+
 
 class ControllerView(QWidget):
     """Per-install tabs; see module docstring."""
@@ -6572,9 +6577,30 @@ class ControllerView(QWidget):
     # ------------------------------------------------------------- sub-tabs
 
     def _add_panel_tab(self, tab: QWidget, icon_name: str, title: str) -> None:
-        """Add a sub-tab carrying both its icon and readable title label."""
-        index = self._tabs.addTab(tab, get_tab_icon(icon_name), title)
+        """Add a sub-tab carrying both its icon and readable title label.
+
+        In a `ScrollPage` (T191), so a tab that needs more height than the
+        window has scrolls instead of drawing everything on it shorter than it
+        needs -- except the pages in `_PAGES_THAT_FIT_THEMSELVES`.
+        """
+        page = tab if title in _PAGES_THAT_FIT_THEMSELVES else ScrollPage(tab)
+        index = self._tabs.addTab(page, get_tab_icon(icon_name), title)
         self._tabs.setTabToolTip(index, title)
+
+    def _show_page_of(self, widget: QWidget) -> None:
+        """Open the sub-tab `widget` is on, and scroll it into view there (T191).
+
+        Found by ancestry, because the sub-tab bar holds each tab's `ScrollPage`
+        and not the tab: `setCurrentWidget()` with the tab itself is a warning
+        and nothing on screen.
+        """
+        for index in range(self._tabs.count()):
+            page = self._tabs.widget(index)
+            if page is not None and (page is widget or page.isAncestorOf(widget)):
+                self._tabs.setCurrentIndex(index)
+                if isinstance(page, ScrollPage) and page is not widget:
+                    page.ensureWidgetVisible(widget)
+                return
 
     # ------------------------------------------------------------ server tab
 
@@ -7431,9 +7457,7 @@ class ControllerView(QWidget):
             record_as=self._run_record_kind(),
         )
         if started:
-            panel = self.rebuild_log.parentWidget()
-            if panel is not None:
-                self._tabs.setCurrentWidget(panel)
+            self._show_page_of(self.rebuild_log)
         return started
 
     @Slot(object)
@@ -11917,7 +11941,7 @@ class ControllerView(QWidget):
         if self._bots_tab is not None:
             # The offer after an update is answered on the Modules tab; the
             # job's lines are here.
-            self._tabs.setCurrentWidget(self._bots_tab)
+            self._show_page_of(self._bots_tab)
         if self.bot_rebuild_report is not None:
             self.bot_rebuild_report.setText("")
         return log.run(
@@ -15432,9 +15456,7 @@ class ControllerView(QWidget):
             record_as=self._run_record_kind(),
         )
         if started:
-            panel = self.rebuild_log.parentWidget()
-            if panel is not None:
-                self._tabs.setCurrentWidget(panel)
+            self._show_page_of(self.rebuild_log)
         return started
 
     def adopt_as_imported(self) -> bool:
@@ -16998,14 +17020,17 @@ class ControllerView(QWidget):
         self.apply_button.clicked.connect(self.apply_network_plan)
         self.network_text = QPlainTextEdit(tab)
         self.network_text.setReadOnly(True)
-        row = QHBoxLayout()
-        row.addWidget(self.lan_radio)
-        row.addWidget(self.internet_radio)
-        row.addWidget(self.loopback_radio)
-        row.addStretch(1)
-        row.addWidget(self.plan_button)
-        row.addWidget(self.apply_button)
-        box.addLayout(row)
+        # A bar that wraps (T191): on one line the three radios and the two
+        # presses need 850px, and the tab has 842 at 960x640 -- squeezed, they
+        # were drawn under their own width; in a page, a sideways scroll.
+        row = flow_bar(tab)
+        row.flow().addWidget(self.lan_radio)
+        row.flow().addWidget(self.internet_radio)
+        row.flow().addWidget(self.loopback_radio)
+        row.flow().add_gap()
+        row.flow().addWidget(self.plan_button)
+        row.flow().addWidget(self.apply_button)
+        box.addWidget(row)
         box.addWidget(self.network_text, 1)
         self._add_panel_tab(tab, "networking", "Networking")
         self._plan: NetworkPlan | None = None

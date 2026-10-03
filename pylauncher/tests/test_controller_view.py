@@ -13990,7 +13990,14 @@ def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tupl
     view._tabs.setCurrentIndex(index)
     window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
     window.show()
-    return window, view._tabs.widget(index)
+    return window, _body_of(view._tabs.widget(index))
+
+
+def _body_of(page: Any) -> Any:
+    """The sub-tab's own widget: the body of its `ScrollPage` (T191), or the page itself."""
+    from yulon.ui.widgets.page import ScrollPage
+
+    return page.widget() if isinstance(page, ScrollPage) else page
 
 
 def _at(window: Any, size: tuple[int, int]) -> None:
@@ -16350,6 +16357,171 @@ def _drawn_under_their_minimum(tab: Any) -> list[str]:
         for w in (box.itemAt(i).widget() for i in range(box.count()))
         if w is not None and w.isVisible() and w.height() < w.minimumSizeHint().height()
     ]
+
+
+T191_SIZES = [(960, 640), (1280, 800), (1920, 1080)]
+"""The three windows T191's sub-tabs are proved at: the smallest, the Steam Deck's, 1080p."""
+
+
+def _page_faults(page: Any) -> list[str]:
+    """Everything wrong with how `page` (a sub-tab's `ScrollPage`) is drawn now (T191).
+
+    Asked of the widgets as they are on screen, and each kind of fault is a
+    different way a squeezed tab shows: an item drawn under the minimum its
+    layout gives it (Qt's proportional cut), two items of one layout drawn over
+    each other, a button whose label does not fit it, and a page that scrolls
+    sideways. Every layout under the body is walked, so a box nested three deep
+    is held to the same rule as the tab's own column.
+    """
+    from PySide6.QtWidgets import QLayout, QPushButton
+
+    body = page.widget()
+    faults: list[str] = []
+    if page.horizontalScrollBar().maximum() > 0:
+        faults.append(f"scrolls sideways by {page.horizontalScrollBar().maximum()}px")
+    layouts: list[Any] = []
+    for layout in [body.layout(), *body.findChildren(QLayout)]:
+        if layout is not None and all(layout is not seen for seen in layouts):
+            layouts.append(layout)
+    for layout in layouts:
+        drawn: list[Any] = []
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = None if item is None else item.widget()
+            if widget is None or not widget.isVisible():
+                continue
+            need = item.minimumSize()
+            need_height = need.height()
+            if item.hasHeightForWidth():
+                need_height = max(need_height, item.minimumHeightForWidth(widget.width()))
+            if widget.width() < need.width() or widget.height() < need_height:
+                faults.append(
+                    f"{type(widget).__name__} {widget.objectName()!r} drawn "
+                    f"{widget.width()}x{widget.height()} under its {need.width()}x{need_height}"
+                )
+            drawn.append(widget)
+        for first, widget in enumerate(drawn):
+            for other in drawn[first + 1 :]:
+                if widget.geometry().intersects(other.geometry()):
+                    faults.append(
+                        f"{type(widget).__name__} {widget.objectName()!r} drawn over "
+                        f"{type(other).__name__} {other.objectName()!r}"
+                    )
+    for button in body.findChildren(QPushButton):
+        # A module row's chip draws as much of its label as its width holds
+        # (`_ChipButton`, T83): elided on purpose, with the rest behind the "…".
+        if hasattr(button, "drawn_text"):
+            continue
+        if button.isVisible() and (why := _clipped(button)):
+            faults.append(why)
+    return faults
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_sub_tab_but_tuning_scrolls_instead_of_squeezing(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Each sub-tab is in a page that scrolls, and none of it is cut, overlapped or sideways.
+
+    Tuning is the one left out, and on purpose: T190 is fitting that tab
+    itself, so its widget goes into the sub-tab bar bare.
+    """
+    from yulon.ui.widgets.page import ScrollPage
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    faults: dict[str, list[str]] = {}
+    titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
+    assert "Tuning" in titles and len(titles) > 5, f"not the tabs this test is about: {titles}"
+    for index, title in enumerate(titles):
+        page = view._tabs.widget(index)
+        if title == "Tuning":
+            assert not isinstance(page, ScrollPage), "Tuning is T190's to fit, not a page's"
+            continue
+        assert isinstance(page, ScrollPage), f"the {title} sub-tab is not in a page that scrolls"
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        if found := _page_faults(page):
+            faults[title] = found
+    assert faults == {}, f"sub-tabs drawn squeezed at {size}: {faults}"
+
+
+def test_the_server_tab_with_the_uninstall_plan_up_scrolls_to_its_last_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C3: the plan's page needs more than 960x640 has, so it scrolls, whole, to its end."""
+
+    class _WholePlan(_PlanOnlyUninstall):
+        def plan(self) -> purge.PurgePlan:
+            return purge.PurgePlan(
+                game="wow-wotlk",
+                server_dir=self.server_dir,
+                project="t-project",
+                containers=("ac-database", "ac-authserver", "ac-worldserver"),
+                volumes=("t-project_ac-database",),
+                character_volume="t-project_ac-database",
+            )
+
+    # The factory's wiring, as the app builds it (the client folder row, the
+    # command channel), with only the plan's answer fixed.
+    services = ControllerServices.for_entry(
+        WOTLK, tmp_path, client_dir=_game_client(tmp_path / "clients" / "WoW")
+    )
+    services.set_client_dir = _FakeClientDir()
+    services.uninstall = _WholePlan(tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[0])
+    assert view.uninstall_button is not None
+    view.uninstall_button.click()
+    process_events()
+    page = view._tabs.currentWidget()
+    confirm = view.uninstall_confirm_button
+    assert confirm.isVisible(), "the plan is not on screen, so there is nothing to scroll to"
+    assert page.verticalScrollBar().maximum() > 0, "the plan fitted: this proves nothing"
+    assert tab.height() >= tab.minimumSizeHint().height()
+    assert confirm.height() >= confirm.minimumSizeHint().height()
+    page.ensureWidgetVisible(confirm)
+    process_events()
+    top = confirm.mapTo(page.viewport(), confirm.rect().topLeft()).y()
+    assert (
+        0 <= top and top + confirm.height() <= page.viewport().height()
+    ), "scrolled to its end, the uninstall button is still not whole on screen"
+
+
+def test_a_job_pressed_on_the_server_tab_opens_the_page_its_log_is_on(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Finish the world update, pressed on the Server tab, shows the Modules tab's log."""
+    finished: list[object] = []
+
+    def finish(cancel: object = None) -> Iterator[str]:
+        finished.append(cancel)
+        yield "Importing 1 world tables again"
+
+    services = replace(
+        _services(ps, tmp_path, []),
+        world_upkeep=controller_view_module.WorldUpkeep(
+            read=lambda: (None, "the last update did not finish importing its world tables"),
+            reextract=None,
+            finish_world=finish,
+        ),
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, (960, 640))
+    view.refresh_world_upkeep()
+    pump_until(lambda: view.finish_world_button.isVisible(), "the press is offered")
+    view.finish_world_button.click()
+    wait_for_panel(view.rebuild_log)
+    process_events()
+
+    assert finished, "the press did not run"
+    assert view._tabs.currentWidget().isAncestorOf(view.rebuild_log), (
+        f"the job ran on {view._tabs.tabText(view._tabs.currentIndex())!r}, "
+        "not on the tab its log is on"
+    )
 
 
 def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
