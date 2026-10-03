@@ -1044,7 +1044,8 @@ QCheckBox::indicator:checked {{
 }}
 
 /* A checked radio is a gold dot in the dark well, so it never reads as a
-   ticked checkbox beside it. */
+   ticked checkbox beside it. Its gold rim alone still tells it from an
+   unchecked one (muted rim) if the dot's file cannot load. */
 QRadioButton::indicator:checked {{
     background-color: {COLOR_BG_INPUT};
     border-color: {COLOR_GOLD_BRIGHT};
@@ -1056,14 +1057,19 @@ QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
     background-color: #161616;
 }}
 
-/* After `:disabled`, which would otherwise wipe the checked look: a disabled
-   ticked box kept looking unticked -- the uninstall's "Keep my characters"
-   while a job runs (T193). A muted tick or dot on the disabled well. */
+/* A disabled ticked box kept looking unticked -- the uninstall's "Keep my
+   characters" while a job runs (T193): `:disabled` and `:checked` weigh the
+   same, so the later `:disabled` wiped the checked look. These two pseudo-
+   classes outweigh either alone, so they win wherever they sit in the sheet.
+   A muted tick or dot on the disabled well, and a muted rim against the
+   unticked box's deep one, so the two still differ if the image cannot load. */
 QCheckBox::indicator:checked:disabled {{
+    border-color: {COLOR_TEXT_MUTED};
     image: {_image("check-disabled.svg")};
 }}
 
 QRadioButton::indicator:checked:disabled {{
+    border-color: {COLOR_TEXT_MUTED};
     image: {_image("radio-dot-disabled.svg")};
 }}
 

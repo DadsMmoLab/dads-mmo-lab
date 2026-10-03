@@ -184,10 +184,12 @@ def test_a_disabled_ticked_checkbox_does_not_look_unticked(themed, width: int) -
     """C16/A14: `:disabled` came after `:checked`, so a disabled ticked box looked empty.
 
     That is the uninstall dialog's "Keep my characters" while a job runs -- the
-    one box whose state decides whether a database survives.
+    one box whose state decides whether a database survives. The fix is the
+    `:checked:disabled` rule, which wins on specificity (two pseudo-classes
+    against one), not on where it sits in the sheet.
 
-    Mutation: put the `:checked:disabled` rule above `:disabled` and the muted
-    tick disappears again.
+    Mutation: delete the `:checked:disabled` rule and the muted tick disappears
+    again.
     """
     ticked, unticked = QCheckBox("Keep"), QCheckBox("Keep")
     ticked.setChecked(True)
@@ -406,14 +408,62 @@ def test_every_image_the_sheet_names_ships_in_the_theme_images_dir() -> None:
     assert named == {(folder / name).as_posix() for name in THEME_IMAGES}, named
 
 
+def _spec_datas(spec: Path, root: Path) -> list[tuple[Path, Path]]:
+    """The `(source, destination)` pairs of the spec's own `datas = [...]` list.
+
+    Read from the syntax tree and evaluated for the one call the list uses,
+    `os.path.join`, with `ROOT` as the spec defines it (`pylauncher/`). A string
+    grep would pass on a comment, or on a tuple whose two halves disagree.
+    """
+    import ast
+
+    def value(node: ast.expr) -> str:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name) and node.id == "ROOT":
+            return str(root)
+        if (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func) == "os.path.join"
+            and not node.keywords
+        ):
+            return str(Path(*(value(arg) for arg in node.args)))
+        raise AssertionError(f"unexpected spec expression: {ast.unparse(node)}")
+
+    tree = ast.parse(spec.read_text())
+    lists = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [ast.unparse(t) for t in node.targets] == ["datas"]
+        and isinstance(node.value, ast.List)
+    ]
+    assert len(lists) == 1, "the spec no longer starts `datas` as one list literal"
+    pairs = []
+    for item in lists[0].elts:
+        assert isinstance(item, ast.Tuple) and len(item.elts) == 2, ast.unparse(item)
+        pairs.append((Path(value(item.elts[0])), Path(value(item.elts[1]))))
+    return pairs
+
+
 def test_the_pyinstaller_spec_carries_the_theme_images() -> None:
     """A tick that draws from a checkout and not from a release is no tick at all.
 
     The spec lists its data by hand (see `tests/test_party.py`), so the folder
-    has to be added by hand too.
+    has to be added by hand too -- from the folder `theme_images_dir()` reads in
+    a checkout, to the place it reads in a frozen build.
+
+    Mutation: delete the spec's `theme_images` tuple, or point either half of it
+    anywhere else, and no pair matches.
     """
-    spec = (Path(__file__).resolve().parents[1] / "build" / "pylauncher.spec").read_text()
-    assert '"theme_images"' in spec, "build/pylauncher.spec does not ship theme_images"
+    pylauncher = Path(__file__).resolve().parents[1]
+    pairs = _spec_datas(pylauncher / "build" / "pylauncher.spec", pylauncher)
+    assert resources.bundle_root() == pylauncher  # a checkout, not a frozen build
+    wanted = (
+        resources.theme_images_dir(),
+        resources.theme_images_dir().relative_to(resources.bundle_root()),
+    )
+    assert wanted in pairs, pairs
 
 
 def test_the_images_load_from_a_folder_with_a_quote_and_spaces(
@@ -499,3 +549,38 @@ def test_an_enabled_destructive_button_has_a_red_edge_a_disabled_one_does_not(
     ratio = _contrast(edge, QColor(theme.COLOR_BG_CONTAINER))
     assert ratio >= 3.0, f"the red edge is {ratio:.2f}:1 against the pane"
     assert _mid_left(dead).name() == QColor(theme.COLOR_BRASS_DEEP).name()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_a_checked_box_or_radio_still_differs_when_its_image_cannot_load(
+    themed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """The glyph is a file, and a file can be missing from a broken install (T193 review).
+
+    With every image URL pointing at a folder that holds none, a checked box and
+    a checked radio must still not look unchecked -- above all when disabled,
+    where `:disabled` gives both states the same deep rim and the same well. The
+    rim is what tells them apart: muted on a disabled checked one, gold on an
+    enabled checked radio.
+
+    Mutation: drop the `border-color` from either `:checked:disabled` rule and
+    the disabled pair draws the same rim.
+    """
+    empty = tmp_path / "no images here"
+    empty.mkdir()
+    monkeypatch.setattr(resources, "theme_images_dir", lambda: empty)
+    qss = theme._build_qss(1.0)
+    assert empty.as_posix() in qss
+
+    for kind in (QCheckBox, QRadioButton):
+        checked, unchecked = kind("On"), kind("Off")
+        checked.setChecked(True)
+        for button in (checked, unchecked):
+            button.setEnabled(enabled)
+        holder = themed(1280, checked, unchecked, qss=qss)
+
+        rims = []
+        for button in (checked, unchecked):
+            image, rect = _indicator(button, holder)
+            rims.append(image.pixelColor(rect.left(), rect.center().y()).name())
+        assert rims[0] != rims[1], (kind.__name__, enabled, rims)

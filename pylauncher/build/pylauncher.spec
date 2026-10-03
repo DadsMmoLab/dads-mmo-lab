@@ -7,6 +7,7 @@
 #   manifests/            -> <bundle>/manifests
 #   catalog/installers/** -> <bundle>/catalog/installers/**
 #   lua/**                -> <bundle>/lua/**
+#   yulon/ui/theme_images/** -> <bundle>/yulon/ui/theme_images/** (T193)
 # The app bundles a self-contained Python + PySide6 + pydantic; end users never
 # install Python (README §3b).
 
