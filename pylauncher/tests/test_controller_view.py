@@ -16761,6 +16761,46 @@ def test_the_bots_tab_scrolls_instead_of_squeezing(
     assert _page_faults(page) == [], f"the {entry.name} Bots tab at {size}: {_page_faults(page)}"
 
 
+@pytest.mark.slow
+def test_the_pad_reaches_every_button_on_the_stacked_bots_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 960x640 My Party is stacked under the bot list (T191); the pad still reaches all of it.
+
+    The real navigator, walked breadth-first from the sub-tab bar: every
+    visible, enabled button on the page is among the stops it reaches.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, T191_SIZES[0])
+    party = view.party_panel
+    assert party is not None
+    browse = view.bot_list.parentWidget()
+    assert (
+        party.mapTo(tab, party.rect().topLeft()).y() > browse.geometry().bottom()
+    ), "My Party is not stacked under the bot list at 960x640: this is not the stacked mode"
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        bar = view._tabs.tabBar()
+        reached = set(_pad_routes(nav, bar))
+        buttons = [
+            button
+            for button in tab.findChildren(QPushButton)
+            if button.isVisible() and button.isEnabled()
+        ]
+        assert buttons, "no button to reach"
+        missed = [button.text() for button in buttons if button not in reached]
+        assert missed == [], f"the pad cannot reach {missed} on the stacked Bots tab"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
 @pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
 def test_my_party_shows_its_first_three_rows_without_scrolling(
     qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]

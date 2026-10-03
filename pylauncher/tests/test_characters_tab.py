@@ -1282,3 +1282,21 @@ def test_the_characters_tab_is_whole_and_its_labels_sit_beside_their_boxes(
     assert (
         abs(label_middle - box_middle) <= 2
     ), f"'Level' is centred at {label_middle}, its box at {box_middle}"
+
+
+def test_the_character_roster_takes_the_height_a_1080p_window_has(tmp_path: Path) -> None:
+    """A13: the roster is the column that grows; at 1080p it is not a strip over empty space."""
+    from tests.conftest import process_events
+    from tests.test_controller_view import _at, _controller_in_the_real_window
+
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    window, _tab = _controller_in_the_real_window(view, "Characters")
+    _at(window, (1920, 1080))
+    view.refresh_characters()
+    process_events()
+    page = view._tabs.currentWidget()
+
+    assert view.character_list.count() == 2
+    assert (
+        view.character_list.height() >= page.viewport().height() // 2
+    ), f"the roster is {view.character_list.height()}px of a {page.viewport().height()}px page"

@@ -240,3 +240,44 @@ def test_a_rows_list_follows_the_style_when_the_window_restyles(qapp: object) ->
 
     assert taller * 3 + 2 * rows.frameWidth() > first, "the restyle did not make a row taller"
     assert rows.minimumSizeHint().height() == 3 * taller + 2 * rows.frameWidth()
+
+
+def test_a_restyle_at_run_time_gives_a_list_held_at_its_floor_the_new_floor(
+    qapp: object,
+) -> None:
+    """The LAYOUT follows the restyle, not only the hint: the list is drawn at its new floor.
+
+    The list sits at its floor (the page is shorter than the body, so nothing
+    has spare height to hand it); a restyle with taller rows must reach the
+    layout, or the list keeps the height of the old three rows.
+    """
+    from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QWidget
+
+    from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.widgets.page import RowsList, ScrollPage
+
+    window = QMainWindow()
+    apply_dadcraft_theme(window, width=960)
+    body = QWidget()
+    box = QVBoxLayout(body)
+    rows = RowsList(rows=3, parent=body)
+    box.addWidget(rows)
+    tall = QWidget(body)
+    tall.setMinimumHeight(2000)
+    box.addWidget(tall, 1)
+    page = ScrollPage(body)
+    window.setCentralWidget(page)
+    window.resize(400, 300)
+    window.show()
+    process_events()
+    before = rows.height()
+    assert before == rows.minimumSizeHint().height(), "the list is not at its floor"
+
+    window.setStyleSheet(window.styleSheet() + "\nQListWidget::item { min-height: 80px; }")
+    process_events()
+
+    assert rows.minimumSizeHint().height() > before, "the restyle did not make a row taller"
+    assert rows.height() == rows.minimumSizeHint().height(), (
+        f"the list is drawn {rows.height()}px after the restyle; its floor is now "
+        f"{rows.minimumSizeHint().height()}"
+    )

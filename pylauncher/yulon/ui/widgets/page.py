@@ -174,7 +174,10 @@ class RowsList(QListWidget):
 
     The row is asked of the STYLE (the item padding and the touch-target
     minimum the theme sets), so the floor follows the font the window's width
-    gives the theme, and holds before the list has a single item.
+    gives the theme, and holds before the list has a single item. Asked on
+    every layout and never stored: `QWidget` already asks its layout again on
+    a font or style change, so a restyle reaches the drawn height with nothing
+    here to do it.
     """
 
     def __init__(self, rows: int, parent: QWidget | None = None) -> None:
@@ -197,11 +200,6 @@ class RowsList(QListWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
         hint = super().minimumSizeHint()
         return QSize(hint.width(), self._rows * self.row_height() + 2 * self.frameWidth())
-
-    def changeEvent(self, event: QEvent) -> None:  # noqa: N802  (Qt's own name)
-        super().changeEvent(event)
-        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
-            self.updateGeometry()
 
 
 class RowsScroll(QScrollArea):
