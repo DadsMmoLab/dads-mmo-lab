@@ -2100,6 +2100,7 @@ def test_a_file_never_confirmed_as_the_shared_one_is_said_as_unchecked(
     said = play_client.flags_lost_warning(lost)
     if first_look == "fails":
         assert lost == [play_client.LostFlag(archive, "unchecked")]
+        assert f"may have cleared the read-only flag of your own client's file {archive}" in said
         assert "could not check" in said and "no longer read-only" not in said
     else:
         assert lost == [play_client.LostFlag(archive)]
@@ -2138,7 +2139,10 @@ def test_a_shared_file_that_stays_writable_after_a_failed_delete_is_named(
         play_client.remove_folder(play, original=archive.parents[1], unlink=unlink, flags_lost=lost)
 
     if survivor == "the same file":
-        assert lost == [play_client.LostFlag(archive)]
+        assert lost == [play_client.LostFlag(archive, "refused")]
+        said = play_client.flags_lost_warning(lost)
+        assert "trying to delete" in said and "still there" in said
+        assert "had to clear that flag to delete" not in said, "the copy was not deleted"
     else:
         assert lost == [play_client.LostFlag(mine, "shared")]
         assert str(mine) in play_client.flags_lost_warning(lost)
@@ -2298,3 +2302,71 @@ def test_refresh_names_the_file_a_crashed_temporary_shared_whose_flag_it_could_n
     assert (play / "Data" / "common.MPQ").read_bytes() == b"MPQ patched"
     assert src.read_bytes() == b"MPQ patched"
     assert lost == ([play_client.LostFlag(src)] if refused else [])
+
+
+# -- T198 fix round 2: a flag lost early in a Refresh reaches every way it can end ------------
+
+
+def _crashed_refresh_temporary(orig: Path, play: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The player's read-only `common.MPQ`, patched (so stale), a crash's temporary linked to it,
+    deleted as Windows does, and its flag refused every time it is put back."""
+    src = orig / "Data" / "common.MPQ"
+    replace_file(src, b"MPQ patched")
+    os.chmod(src, 0o444)
+    os.link(src, play / "Data" / ("common.MPQ" + play_client.REFRESH_SUFFIX))
+    real_unlink = os.unlink
+
+    def windows_unlink(path: Any, **kw: Any) -> None:
+        if not os.lstat(path).st_mode & 0o200:
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real_unlink(path, **kw)
+
+    monkeypatch.setattr(os, "unlink", windows_unlink)
+    _put_back_refused(monkeypatch, src, times=99)
+    return src
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_a_refresh_whose_exe_pass_fails_still_names_the_flag_an_earlier_pass_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    play, orig, _stock, patch = _exe_world(tmp_path, monkeypatch)
+    (orig / "Wow.exe").write_bytes(b"MZ the player's own modified exe" * 100)  # non-stock
+    (play / "Wow.exe").write_bytes(b"damaged")  # stale, and no stock bytes to make it from
+    src = _crashed_refresh_temporary(orig, play, monkeypatch)
+
+    with pytest.raises(play_client.PlayClientError, match="stock Wow.exe") as info:
+        refresh(play, orig, tmp_path, exe_patch=patch, opener=_no_network)
+
+    said = str(info.value)
+    assert str(src) in said and "no longer read-only" in said
+    assert "Your own client was left as it was" not in said, "the Refresh's own claim is gone"
+    # The exe step's own words may say it left your client alone, which is true of that step:
+    # the lost flag is said as what happened earlier in this Refresh.
+    assert said.index("Earlier in this Refresh") < said.index(str(src))
+    assert src.read_bytes() == b"MPQ patched"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_a_refresh_that_ends_in_an_unexpected_error_still_names_the_flag_it_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    src = _crashed_refresh_temporary(orig, play, monkeypatch)
+    replace_file(orig / "Data" / "enUS" / "locale-enUS.MPQ", b"loc patched")  # refreshed after
+    real_share = play_client._share
+
+    def share(source: Path, dst: Path, **kw: Any) -> None:
+        if source.name == "locale-enUS.MPQ":
+            raise ValueError("a bug")
+        real_share(source, dst, **kw)
+
+    monkeypatch.setattr(play_client, "_share", share)
+
+    with pytest.raises(ValueError, match="a bug") as info:
+        refresh(play, orig, tmp_path)
+
+    assert str(src) in str(info.value) and "no longer read-only" in str(info.value)
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"MPQ patched", "the earlier pass done"

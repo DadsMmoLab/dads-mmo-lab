@@ -84,15 +84,16 @@ class LostFlag:
     """A read-only flag of the player's own client that a removal cleared and did not put back.
 
     `kind` says what is known (T198): "lost", `path` is the player's file, seen to
-    share the cleared flag, and the flag could not be set again; "unchecked", `path`
-    is the player's file at the place the flag belongs to, but it could not be looked
-    at to confirm it is that file; "shared", `path` is the copy's own file, still
-    there and no longer read-only, sharing its flag with a file of the player's that
-    is not at the same place.
+    share the cleared flag, the copy's name was deleted, and the flag could not be
+    set again; "refused", the same, but the copy's name could not be deleted and is
+    still there; "unchecked", `path` is the player's file at the place the flag
+    belongs to, but it could not be looked at to confirm it shared the flag;
+    "shared", `path` is the copy's own file, still there and no longer read-only,
+    sharing its flag with a file of the player's that is not at the same place.
     """
 
     path: Path
-    kind: Literal["lost", "unchecked", "shared"] = "lost"
+    kind: Literal["lost", "refused", "unchecked", "shared"] = "lost"
 
 
 _FICLONE = 0x40049409  # linux/fs.h: _IOW(0x94, 9, int)
@@ -570,7 +571,7 @@ def _remove_file(
             )
             if st.st_nlink > 1:  # the flag is a file of the player's too
                 flags_lost.append(
-                    LostFlag(survivor)
+                    LostFlag(survivor, "refused")
                     if survivor is not None and _same_file(survivor, st)
                     else LostFlag(path, "shared")
                 )
@@ -630,14 +631,15 @@ def _flag_not_put_back(
 def flags_lost_warning(flags: Collection[LostFlag]) -> str:
     """What to tell the player about `remove_folder()`'s `flags_lost`; "" when there are none.
 
-    Each file is named once (a file both lost and unchecked is lost). Windows
-    deletes a read-only file only once its flag is cleared, and the flag is the one
-    every hard link to the file shares (T198).
+    Each file is named once, by what is surest about it (lost, then refused, then
+    unchecked). Windows deletes a read-only file only once its flag is cleared, and
+    the flag is the one every hard link to the file shares (T198).
     """
     lost = sorted({flag.path for flag in flags if flag.kind == "lost"})
-    unchecked = sorted({f.path for f in flags if f.kind == "unchecked"} - set(lost))
+    refused = sorted({f.path for f in flags if f.kind == "refused"} - set(lost))
+    unchecked = sorted({f.path for f in flags if f.kind == "unchecked"} - {*lost, *refused})
     shared = sorted({flag.path for flag in flags if flag.kind == "shared"})
-    if not (lost or unchecked or shared):
+    if not (lost or refused or unchecked or shared):
         return ""
     said: list[str] = []
     if len(lost) == 1:
@@ -651,16 +653,27 @@ def flags_lost_warning(flags: Collection[LostFlag]) -> str:
             "had to clear that flag to delete the copy that shared them, and could not set it "
             "again."
         )
+    if len(refused) == 1:
+        said.append(
+            f"Your own client's file {refused[0]} is no longer read-only: Yu'lon cleared that "
+            "flag trying to delete the copy that shares it, the copy is still there, and the "
+            "flag could not be set again."
+        )
+    elif refused:
+        said.append(
+            f"These files of your own client are no longer read-only: {_listed(refused)}. "
+            "Yu'lon cleared that flag trying to delete the copies that share them, the copies "
+            "are still there, and the flag could not be set again."
+        )
     if len(unchecked) == 1:
         said.append(
-            f"Yu'lon had to clear the read-only flag of your own client's file {unchecked[0]} "
-            "to delete the copy that shared it, and could not check whether it is set again."
+            f"Yu'lon may have cleared the read-only flag of your own client's file "
+            f"{unchecked[0]} while deleting a copy of your client, and could not check it."
         )
     elif unchecked:
         said.append(
-            "Yu'lon had to clear the read-only flag of these files of your own client to "
-            "delete the copy that shared them, and could not check whether it is set again: "
-            f"{_listed(unchecked)}."
+            "Yu'lon may have cleared the read-only flag of these files of your own client while "
+            f"deleting a copy of your client, and could not check them: {_listed(unchecked)}."
         )
     if len(shared) == 1:
         said.append(
@@ -673,7 +686,7 @@ def flags_lost_warning(flags: Collection[LostFlag]) -> str:
             f"{_listed(shared)}, which Yu'lon could not delete, and the flag could not be set "
             "again."
         )
-    if len(lost) + len(unchecked) + len(shared) == 1:
+    if len(lost) + len(refused) + len(unchecked) + len(shared) == 1:
         said.append(
             "The file itself did not change. Set it read-only again yourself if you want it "
             "protected."
@@ -1297,70 +1310,80 @@ def refresh(
     todo = [rel for rel in stale(play_dir, original) if not _players_own(rel) and not is_kept(rel)]
     exe = client_executable(original)
     rec_exe = _exe_record(play_dir)
-    for rel in todo:
-        archive = rel.suffix.lower() in LINKED_SUFFIXES
-        if not archive and rec_exe is not None:
-            # A patched exe is made again from stock bytes, never copied from the original.
-            if exe_patch is None:
+    try:
+        for rel in todo:
+            archive = rel.suffix.lower() in LINKED_SUFFIXES
+            if not archive and rec_exe is not None:
+                # A patched exe is made again from stock bytes, never copied from the original.
+                if exe_patch is None:
+                    continue
+                _reapply_exe(
+                    play_dir,
+                    original,
+                    exe_patch,
+                    opener,
+                    rec_exe,
+                    game=game,
+                    server_dir=server_dir,
+                    catalog_always=catalog_always,
+                    flags_lost=lost,
+                )
+                done.append(rel)
                 continue
-            _reapply_exe(
-                play_dir,
-                original,
-                exe_patch,
-                opener,
-                rec_exe,
-                game=game,
-                server_dir=server_dir,
-                catalog_always=catalog_always,
-            )
-            done.append(rel)
-            continue
-        src, dst = (original / rel if archive else exe), play_dir / rel
-        tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
-        try:
-            if _original_file(src) is None:
-                continue  # gone since stale() looked: keep what the client has
-            _drop_temp(tmp, src, lost)
-            if archive and not marker.full_copy:
-                try:
-                    _share(src, tmp, link=link, reflink=reflink)
-                except OSError as exc:
-                    if exc.errno != errno.EXDEV and not _cannot_link(exc):
-                        raise
-                    raise _Stop(
-                        f"{rel} could not be shared with your client {original} any more "
-                        f"({exc}), and refreshing it would need a full copy.",
-                        "Delete the ready-to-play client and make it again, agreeing to "
-                        "a full copy.",
-                    ) from exc
-            else:
-                shutil.copy2(src, tmp)
-            _replace(tmp, dst)
-        except Exception as exc:
+            src, dst = (original / rel if archive else exe), play_dir / rel
+            tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
             try:
+                if _original_file(src) is None:
+                    continue  # gone since stale() looked: keep what the client has
                 _drop_temp(tmp, src, lost)
-            except OSError:
-                logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
-            if isinstance(exc, _Stop):
-                stop = exc
-            elif isinstance(exc, OSError):
-                logger.error("ready-to-play client: refreshing %s failed", dst, exc_info=True)
-                stop = _Stop(f"Refreshing {dst} failed: {exc}.", "Fix the cause and try again.")
-            else:
-                raise
-            kept = (
-                "Nothing in the ready-to-play client was changed"
-                if not done
-                else f"{len(done)} file(s) were refreshed before it and the rest were left "
-                "as they were"
-            )
-            yours = (
-                f". {flags_lost_warning(lost)}" if lost else "; your own client was left as it was."
-            )
-            raise PlayClientError(
-                f"{stop.what} {kept}{yours} {stop.next_step}", flags_lost=lost
-            ) from exc
-        done.append(rel)
+                if archive and not marker.full_copy:
+                    try:
+                        _share(src, tmp, link=link, reflink=reflink)
+                    except OSError as exc:
+                        if exc.errno != errno.EXDEV and not _cannot_link(exc):
+                            raise
+                        raise _Stop(
+                            f"{rel} could not be shared with your client {original} any more "
+                            f"({exc}), and refreshing it would need a full copy.",
+                            "Delete the ready-to-play client and make it again, agreeing to "
+                            "a full copy.",
+                        ) from exc
+                else:
+                    shutil.copy2(src, tmp)
+                _replace(tmp, dst)
+            except Exception as exc:
+                try:
+                    _drop_temp(tmp, src, lost)
+                except OSError:
+                    logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
+                if isinstance(exc, _Stop):
+                    stop = exc
+                elif isinstance(exc, OSError):
+                    logger.error("ready-to-play client: refreshing %s failed", dst, exc_info=True)
+                    stop = _Stop(f"Refreshing {dst} failed: {exc}.", "Fix the cause and try again.")
+                else:
+                    raise
+                kept = (
+                    "Nothing in the ready-to-play client was changed"
+                    if not done
+                    else f"{len(done)} file(s) were refreshed before it and the rest were left "
+                    "as they were"
+                )
+                yours = (
+                    f". {flags_lost_warning(lost)}"
+                    if lost
+                    else "; your own client was left as it was."
+                )
+                raise PlayClientError(
+                    f"{stop.what} {kept}{yours} {stop.next_step}", flags_lost=lost
+                ) from exc
+            done.append(rel)
+    except Exception as exc:
+        # T198: a flag an earlier pass lost reaches every way this can end; a
+        # PlayClientError that carries it has said it already.
+        if lost and not (isinstance(exc, PlayClientError) and exc.flags_lost):
+            exc.args = (f"{exc} {flags_lost_warning(lost)}",)
+        raise
     if done:
         logger.info("ready-to-play client %s refreshed: %s", play_dir, ", ".join(map(str, done)))
     return tuple(done)
@@ -1425,8 +1448,13 @@ def _reapply_exe(
     game: str,
     server_dir: Path,
     catalog_always: Mapping[str, str],
+    flags_lost: Collection[LostFlag] = (),
 ) -> None:
-    """Make the patched Wow.exe again from stock bytes, with the options it was made with."""
+    """Make the patched Wow.exe again from stock bytes, with the options it was made with.
+
+    `flags_lost` are what this Refresh's earlier passes lost (T198): a failure here
+    names them rather than saying the player's client was left as it was.
+    """
     from yulon import client_exe, client_packs
 
     record = client_packs.read_record(play_dir)
@@ -1448,6 +1476,12 @@ def _reapply_exe(
             server_dir=server_dir,
         )
     except (client_exe.ExeError, client_packs.PackError) as exc:
+        if flags_lost:
+            raise PlayClientError(
+                f"Refreshing the patched Wow.exe in {play_dir} failed: {exc} Earlier in this "
+                f"Refresh, though: {flags_lost_warning(flags_lost)}",
+                flags_lost=flags_lost,
+            ) from exc
         raise PlayClientError(
             f"Refreshing the patched Wow.exe in {play_dir} failed: {exc} Your own client was "
             "left as it was."
