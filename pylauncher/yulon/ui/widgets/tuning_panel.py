@@ -1041,6 +1041,7 @@ class TuningPanel(QWidget):
         self.rule_note.setVisible(lifted is not None)
         for widget in self._cards.values():
             widget.set_rule_lifted(widget.card.rules == lifted)
+        self._draw_file_note()
 
     def set_header(self, widget: QWidget) -> None:
         """Put `widget` above the cards, in the same scrolling column (T171).
@@ -1217,7 +1218,7 @@ class TuningPanel(QWidget):
         self._editor_dirty = False
         self.editor.setReadOnly(read_only)
         self.file_note.setText(note or "")
-        self.file_note.setVisible(bool(note))
+        self._draw_file_note()
         # Only where a key really IS shadowed, and only on a file this tab will
         # write: nothing can be typed into a read-only one, so no edit of it
         # can silently fail to apply (item 16, round 2).
@@ -1282,6 +1283,17 @@ class TuningPanel(QWidget):
         )
         return max(CARDS_MIN_WIDTH, self._header.sizeHint().width() + chrome)
 
+    def _draw_file_note(self) -> None:
+        """The editor's note, unless the note over the cards says the same and shows.
+
+        Side by side both said the restart sentence (T190 B15). Only while the
+        cards' note is on screen, though: at 960x640 on the Edit file side the
+        cards are hidden, and the file being edited still needs its sentence.
+        """
+        said = self.file_note.text()
+        echoed = said == self.rule_note.text() and self.rule_note.isVisibleTo(self)
+        self.file_note.setVisible(bool(said) and not echoed)
+
     def _side_picked(self, chosen: QPushButton) -> None:
         """One side checked, always: pressing the checked one again keeps it."""
         self.settings_button.setChecked(chosen is self.settings_button)
@@ -1298,6 +1310,7 @@ class TuningPanel(QWidget):
         self.side_buttons.setVisible(narrow)
         self._area.setVisible(not narrow or not editing)
         self._file_side.setVisible(not narrow or editing)
+        self._draw_file_note()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
         """Side by side while there is room, one half at a time when there is not (T190).

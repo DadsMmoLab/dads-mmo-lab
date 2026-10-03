@@ -571,3 +571,39 @@ def test_the_open_files_button_paints_as_chosen(
     process_events()
     assert second.isChecked() and not first.isChecked()
     assert (sample(second), sample(first)) == (chosen, other), "the paint did not follow"
+
+
+def test_the_restart_sentence_is_on_screen_once_and_never_missing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Side by side, the note over the cards and the editor's note said the same sentence.
+
+    The editor's note gives way only while the note over the cards is on
+    screen: at 960x640 on the Edit file side the cards are hidden, and the
+    sentence must still be there for the file being edited.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    from yulon import tuning
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    restart = tuning.apply_sentence("restart")
+    assert panel.current_file().endswith("mod_npc_beastmaster.conf"), "control: a restart file"
+
+    def shown() -> list[str]:
+        return [
+            w.objectName() or w.text()[:20]
+            for w in panel.findChildren(QLabel)
+            if w.isVisible() and restart in w.text()
+        ]
+
+    for size in (MEDIUM, LARGE):
+        _at(window, size)
+        assert len(shown()) == 1, f"{size}: {shown()}"
+    _at(window, SMALL)
+    assert len(shown()) == 1, f"960 settings: {shown()}"
+    panel.edit_file_button.click()
+    process_events()
+    assert panel.file_note.isVisible() and restart in panel.file_note.text(), shown()
+    assert len(shown()) == 1
