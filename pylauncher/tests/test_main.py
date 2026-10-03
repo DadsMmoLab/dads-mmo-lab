@@ -2184,6 +2184,11 @@ def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
     # there is nothing of it in the bar to right-click (its menu offered one
     # disabled caption and nothing else).
     assert not bar.isTabVisible(0) and bar.tabRect(0).isEmpty()
+    # And should a point ever answer the Catalog's index, it has no menu.
+    from PySide6.QtCore import QPoint
+
+    monkeypatch.setattr(bar, "tabAt", lambda _pos: 0)
+    assert window.yulon_tab_menu(QPoint(1, 1)) is None, "the Catalog has a bar menu"
 
 
 def test_the_tab_menu_answered_yes_removes_the_server(
@@ -4308,17 +4313,25 @@ def test_a_server_folder_with_an_ampersand_keeps_it_on_its_tab(window: Any, tmp_
     from PySide6.QtGui import QKeySequence
 
     server_dir = tmp_path / "Raids & Dungeons"
+    # T192: the folder is on the tab only when another tab has the same game,
+    # so a second WotLK puts "Raids & Dungeons" on this one's second line.
+    other = tmp_path / "Other WotLK"
     _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
-    view = _tab_for(window, server_dir)
-    tabs = window.property("tabs")
-    index = tabs.indexOf(view)
+    _catalog_view(window).installed.emit("wow-wotlk", other, None)
+    try:
+        view = _tab_for(window, server_dir)
+        tabs = window.property("tabs")
+        index = tabs.indexOf(view)
 
-    title = tabs.tabText(index)
-    assert QKeySequence.mnemonic(title).isEmpty(), title
-    # T192: the folder is on the tab only when another tab has the same game
-    # (`test_tab_titles.py` asks that case); the tooltip always carries it.
-    assert "Raids & Dungeons" in tabs.tabToolTip(index), tabs.tabToolTip(index)
-    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
+        title = tabs.tabText(index)
+        assert "\n" in title, ("the folder is not on the tab", title)
+        assert QKeySequence.mnemonic(title).isEmpty(), title
+        assert "Raids & Dungeons" in title.replace("&&", "&"), title
+        assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
+    finally:
+        for folder in (server_dir, other):
+            _tab_for(window, folder).uninstalled.emit("wow-wotlk", folder)
+        process_events(10)
 
 
 def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(

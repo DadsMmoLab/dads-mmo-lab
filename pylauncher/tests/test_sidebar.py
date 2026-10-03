@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QLabel, QMainWindow, QTabWidget
 
@@ -136,6 +137,82 @@ def test_a_tab_widget_inside_the_rail_keeps_its_own_tab_width(rail) -> None:
     words = nested.fontMetrics().horizontalAdvance("Characters and their gear")
     assert nested.tabRect(0).width() > words, (nested.tabRect(0), words)
     assert nested.tabRect(0).width() > RAIL_MIN_WIDTH
+
+
+def _pinned_rail_with_servers(tabs: QTabWidget):  # noqa: ANN202  (a SidebarPins)
+    """Catalog and Logs pinned, two servers after them, the last server current."""
+    from PySide6.QtGui import QIcon
+
+    from yulon.ui.sidebar import SidebarPins
+
+    _pinned_pair(tabs)
+    for title in ("WotLK", "TBC"):
+        tabs.addTab(QLabel(title), title)
+    pins = SidebarPins(tabs, [(0, QIcon(), "Catalog"), (1, QIcon(), "Logs")])
+    tabs.setCurrentIndex(3)
+    return pins
+
+
+def test_ctrl_tab_walks_through_the_catalog_and_logs_like_the_bumpers(rail) -> None:
+    """Qt's own Ctrl+Tab skips hidden tabs, so it never reached the Catalog or Logs (T192 review).
+
+    LB/RB visit tabs 0..n in a ring (`gamepad.py` `_cycle`); Ctrl+Tab and
+    Ctrl+Shift+Tab now walk the same ring, and the pins follow.
+    """
+    from PySide6.QtTest import QTest
+
+    window, tabs = rail
+    pins = _pinned_rail_with_servers(tabs)
+    window.show()
+    process_events(20)
+
+    def press(key: Qt.Key, modifiers: Qt.KeyboardModifier) -> int:
+        QTest.keyClick(tabs.currentWidget(), key, modifiers)
+        process_events(5)
+        return tabs.currentIndex()
+
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    back = ctrl | Qt.KeyboardModifier.ShiftModifier
+    assert press(Qt.Key.Key_Tab, ctrl) == 0
+    assert pins.buttons[0].isChecked() and not pins.buttons[1].isChecked()
+    assert press(Qt.Key.Key_Tab, ctrl) == 1
+    assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+    assert press(Qt.Key.Key_Tab, ctrl) == 2
+    assert not any(button.isChecked() for button in pins.buttons.values())
+
+    assert press(Qt.Key.Key_Backtab, back) == 1
+    assert pins.buttons[1].isChecked()
+    assert press(Qt.Key.Key_Backtab, back) == 0
+    assert pins.buttons[0].isChecked()
+    assert press(Qt.Key.Key_Backtab, back) == 3, "Ctrl+Shift+Tab from the Catalog wraps"
+
+
+def test_a_restyle_that_grows_the_pins_pushes_the_rail_down_with_them(rail) -> None:
+    """The bar's offset is the pins' own height, re-read on a restyle, not a number in the theme.
+
+    The theme's pins are the same height at all three window sizes, so this
+    restyle makes them taller on purpose: the first server tab must still
+    start below the Logs pin.
+
+    Mutation: drop `SidebarPins.changeEvent` and the bar stays where the
+    smaller pins put it, under the taller ones.
+    """
+    window, tabs = rail
+    pins = _pinned_rail_with_servers(tabs)
+    window.show()
+    process_events(20)
+    before = pins.sizeHint().height()
+
+    window.setStyleSheet(
+        window.styleSheet()
+        + f"\nQToolButton#{theme.SIDEBAR_PIN_BUTTON} {{ padding: 30px 4px; font-size: 24px; }}"
+    )
+    process_events(30)
+
+    assert pins.sizeHint().height() > before + 40, (before, pins.sizeHint())
+    bar = tabs.tabBar()
+    assert pins.geometry().bottom() < bar.geometry().top(), (pins.geometry(), bar.geometry())
+    assert pins.height() >= pins.sizeHint().height(), (pins.size(), pins.sizeHint())
 
 
 # -- T192: each server tab carries a status dot that follows its realm badge -------

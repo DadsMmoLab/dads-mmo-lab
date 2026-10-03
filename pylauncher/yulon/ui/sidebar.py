@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, Slot
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QBrush, QColor, QIcon, QKeyEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionTab,
@@ -191,6 +191,7 @@ class SidebarPins(QWidget):
         layout.addStretch(1)
         tabs.currentChanged.connect(self._sync)
         self._bar.installEventFilter(self)
+        tabs.installEventFilter(self)  # Ctrl+Tab (`_ctrl_tab`)
         self._reserved = -1
         self._reserve()
         self._sync(tabs.currentIndex())
@@ -224,7 +225,38 @@ class SidebarPins(QWidget):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if watched is self._bar and event.type() in (QEvent.Type.Move, QEvent.Type.Resize):
             self._place()
+        if (
+            watched is self._tabs
+            and event.type() == QEvent.Type.KeyPress
+            and isinstance(event, QKeyEvent)
+        ):
+            return self._ctrl_tab(event)
         return False
+
+    def _ctrl_tab(self, event: QKeyEvent) -> bool:
+        """Ctrl+Tab and Ctrl+Shift+Tab walk every tab in a ring, the pinned two included.
+
+        Qt's own Ctrl+Tab skips hidden tabs, and Catalog and Logs are hidden
+        in the bar, so it never reached them while LB/RB do (`gamepad.py`'s
+        `_cycle`). Same ring, same order. A tab widget inside a page (a
+        server's own sub-tabs) takes the keys first, as it always did.
+        """
+        if not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            return False
+        if event.key() == Qt.Key.Key_Backtab or (
+            event.key() == Qt.Key.Key_Tab and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            step = -1
+        elif event.key() == Qt.Key.Key_Tab:
+            step = 1
+        else:
+            return False
+        count = self._tabs.count()
+        if count < 2:
+            return False
+        self._tabs.setCurrentIndex((self._tabs.currentIndex() + step) % count)
+        event.accept()
+        return True
 
     def _place(self) -> None:
         bar = self._bar.geometry()
