@@ -6321,6 +6321,15 @@ class ControllerView(QWidget):
         # Restart of ours runs. A poll mid-stop used to flip the badge between
         # OFFLINE and "starting".
         self._badge_held: str | None = None
+        # The first status read that may end that hold: the one the holding job
+        # asks for as it ends, or any asked after it. None while the job runs.
+        # A number and not `_busy` at answer time: a Rebuild pressed before the
+        # stop's own read answered made it "stale", and STOPPING stayed on the
+        # badge for the whole rebuild (T188 final review).
+        self._hold_ends_at: int | None = None
+        # How many status reads were asked, and which one is out.
+        self._status_asks = 0
+        self._status_ask_out = 0
         self._status_pending = False
         self._verdict_pending = False
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
@@ -7146,6 +7155,8 @@ class ControllerView(QWidget):
         self._status_pending = True
         self._status_superseded = False
         self._status_asked_busy = self._busy
+        self._status_asks += 1
+        self._status_ask_out = self._status_asks
         self._run(self.services.controller.status, self._status_ready, self._status_failed)
 
     @Slot()
@@ -7588,6 +7599,7 @@ class ControllerView(QWidget):
     def _status_ready(self, result: object) -> None:
         self._status_pending = False
         superseded = self._status_superseded
+        ends_the_hold = self._ends_the_hold()
         status = result
         if not isinstance(status, InstallStatus):
             # Same hole, one branch narrower: a result that is not a status
@@ -7620,7 +7632,7 @@ class ControllerView(QWidget):
             self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
-        if self._badge_held is not None and not stale:
+        if self._badge_held is not None and ends_the_hold:
             # Asked after our job ended, so this is the job's own follow-up
             # reading: the hold ends HERE and not when the job does. Falling back
             # to the reading from before the press flashed REALM ONLINE between
@@ -7911,10 +7923,10 @@ class ControllerView(QWidget):
     def _status_failed(self, exc: object) -> None:
         self._status_pending = False
         self._last_status = None
-        # Read before the ask below, which resets them: a poll that was asked
-        # while a job of ours ran, or that some later ask was dropped behind, is
-        # older than that job's own follow-up read (T188).
-        stale = self._status_superseded or self._status_asked_busy or self._busy
+        # Read before the ask below, which moves `_status_ask_out` on: a poll
+        # asked before the holding job ended is older than that job's own
+        # follow-up read (T188).
+        ends_the_hold = self._ends_the_hold()
         # T95: the refresh dropped while this poll was out is asked again. The
         # app's job runner hands it to a worker thread, so its answer arrives
         # after this method has returned.
@@ -7923,7 +7935,7 @@ class ControllerView(QWidget):
         # "unknown", not "stopped": Docker not answering says nothing about the
         # server (T188 final fix round). A hold is left alone by a failure older
         # than its job's own follow-up read; that read failing ends it here.
-        if self._badge_held is None or not stale:
+        if self._badge_held is None or ends_the_hold:
             self._badge_held = None
             self.realm_badge.set_status("unknown")
         self._offer_docker_repair()
@@ -7944,6 +7956,7 @@ class ControllerView(QWidget):
         and failure alike, asks for that reading.
         """
         self._badge_held = status
+        self._hold_ends_at = None
         self.realm_badge.set_status(status)
         self._clear_the_verdict()
 
@@ -8164,7 +8177,13 @@ class ControllerView(QWidget):
             # T188: the job that held the badge is over; the reading that ends
             # the hold is asked for here, because not every way out of a job
             # asks for one (a Start refused over a port does not).
+            if self._hold_ends_at is None:
+                self._hold_ends_at = self._status_asks + 1
             self.refresh_status()
+
+    def _ends_the_hold(self) -> bool:
+        """Whether the status read answering now was asked once the holding job had ended."""
+        return self._hold_ends_at is not None and self._status_ask_out >= self._hold_ends_at
 
     @Slot()
     def start_server(self) -> None:

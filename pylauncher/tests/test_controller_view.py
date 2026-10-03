@@ -23598,6 +23598,60 @@ def test_a_poll_from_before_the_press_that_fails_after_it_keeps_the_hold(
     assert view.realm_badge.status == "stopped"
 
 
+def test_a_stops_follow_up_read_lets_go_even_when_a_rebuild_has_started(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Final review (minor): a Rebuild pressed between the stop ending and its
+    follow-up read answering made that read stale (`_busy`), so STOPPING stayed
+    on the badge for the whole rebuild. The read belongs to the stop."""
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)  # the stop is over; its follow-up read is out
+
+    view.rebuild_log.run_started.emit()  # what a rebuild starting tells the tab
+    assert view._busy is True
+
+    _drain_polls(view, jobs)
+
+    assert view.realm_badge.status == "stopped"
+    assert view._badge_held is None
+    assert view._busy is True, "the rebuild is still running"
+    assert view.start_button.isEnabled() is False, "the rebuild still locks Start"
+
+
+def test_a_stops_follow_up_read_that_fails_during_a_rebuild_says_unknown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The same read failing ends the hold too: STATUS UNKNOWN, not STOPPING for the rebuild."""
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)
+    view.rebuild_log.run_started.emit()
+
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+
+    assert view.realm_badge.status == "unknown"
+    assert view._badge_held is None
+    assert view._busy is True, "the rebuild is still running"
+
+
+def test_a_read_asked_during_the_stop_does_not_end_its_hold_under_a_rebuild(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Only reads asked by the press that holds the badge, or after it, end the hold."""
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    view._tick()  # asked while the stop runs
+    _finish(jobs, view._stop_done)  # its own read is dropped behind that one
+    view.rebuild_log.run_started.emit()
+
+    _finish(jobs, view._status_ready)  # the read asked mid-stop answers
+    assert view.realm_badge.status == "stopping", "a read from during the stop ended the hold"
+
+    _drain_polls(view, jobs)  # the stop's own read, asked again
+    assert view.realm_badge.status == "stopped"
+
+
 def test_a_partly_up_server_with_nothing_of_ours_running_says_partly_up(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

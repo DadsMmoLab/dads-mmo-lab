@@ -119,6 +119,35 @@ STARTING_BANNER = "The server is starting…"
 STOPPING_BANNER = "The server is stopping…"
 PARTIAL_BANNER = "The server is partly up: PLAY starts the rest"
 UNKNOWN_BANNER = "Yu'lon cannot ask Docker about this server right now"
+STOPPED_REASON = "The server is stopped: PLAY starts it, waits for the realm, then starts the game."
+STOPPING_REASON = (
+    "The server is stopping. Once it has stopped, PLAY starts it again, waits for the "
+    "realm, then starts the game."
+)
+STARTING_REASON = "The server is starting. Once the realm is up, PLAY starts the game."
+RESTARTING_REASON = "The server is restarting. Once the realm is back up, PLAY starts the game."
+PARTIAL_REASON = (
+    "The server is partly up: PLAY starts the rest, waits for the realm, then starts the game."
+)
+UNKNOWN_REASON = (
+    "Yu'lon can't ask Docker about this server right now, so it cannot tell whether the "
+    "server is up."
+)
+"""The line under PLAY for each realm badge word but REALM ONLINE (T188).
+
+Pressed while a Stop, Start or Restart of the Server tab runs, PLAY refuses
+("busy with another action"), so the in-between words say when it works.
+A Start that PLAY asked for itself goes on to the game once it is done."""
+_REASONS = {
+    "stopping": STOPPING_REASON,
+    "starting": STARTING_REASON,
+    "importing": STARTING_REASON,
+    "working": STARTING_REASON,
+    "building": STARTING_REASON,
+    "restarting": RESTARTING_REASON,
+    "partial": PARTIAL_REASON,
+    "unknown": UNKNOWN_REASON,
+}
 VIEW_GONE = (
     "This server's tab was closed, so nothing can be started from here. Open the launcher "
     "again from the server."
@@ -1208,24 +1237,10 @@ class LauncherWindow(QWidget):
             self.play_reason_label.setText(
                 "Starts World of Warcraft from this server's ready-to-play client."
             )
-        elif self.realm_badge.status == "unknown":
-            # T188: Docker did not answer; neither "stopped" nor "PLAY starts it"
-            # is known to be true.
-            self.play_reason_label.setText(
-                "Yu'lon can't ask Docker about this server right now, so it cannot tell "
-                "whether the server is up."
-            )
-        elif self.realm_badge.status == "partial":
-            # T188: only part of it is up, which "The server is stopped" was not.
-            self.play_reason_label.setText(
-                "The server is partly up: PLAY starts the rest, waits for the realm, then "
-                "starts the game."
-            )
         else:
-            self.play_reason_label.setText(
-                "The server is stopped: PLAY starts it, waits for the realm, then starts "
-                "the game."
-            )
+            # T188: "The server is stopped" was every other word's line too, under
+            # a banner saying STOPPING, STARTING or RESTARTING.
+            self.play_reason_label.setText(_REASONS.get(self.realm_badge.status, STOPPED_REASON))
 
     def _render_banner(self) -> None:
         status = self.realm_badge.status

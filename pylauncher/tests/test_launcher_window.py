@@ -374,6 +374,50 @@ def test_a_stopping_realm_does_not_say_play_starts_it(
     assert window.realm_badge.status == "stopping"
     assert window.online_label.text() == launcher_window.STOPPING_BANNER
     assert window.online_label.text() != launcher_window.STOPPED_BANNER
+    # And the line under PLAY (final review): it said "The server is stopped:
+    # PLAY starts it" while the banner above it said the server was stopping.
+    assert window.play_reason_label.text() == launcher_window.STOPPING_REASON
+    assert window.play_reason_label.text() != launcher_window.STOPPED_REASON
+
+
+_REASONS = {
+    "stopping": launcher_window.STOPPING_REASON,
+    "starting": launcher_window.STARTING_REASON,
+    "restarting": launcher_window.RESTARTING_REASON,
+    "unknown": launcher_window.UNKNOWN_REASON,
+    "partial": launcher_window.PARTIAL_REASON,
+}
+"""The line under PLAY for each badge word that is neither REALM ONLINE nor OFFLINE."""
+
+
+@pytest.mark.parametrize("state", list(_REASONS))
+def test_the_line_under_play_says_what_the_badge_says(
+    qapp: object, ps: _Ps, tmp_path: Path, state: str
+) -> None:
+    """Final review: every state but running fell through to "The server is stopped:
+    PLAY starts it, waits for the realm, then starts the game." -- under STOPPING,
+    STARTING and RESTARTING alike."""
+    window, view, _ = _launcher(ps, tmp_path)
+    _online(view)
+
+    view.realm_badge.set_status(state)
+
+    assert window.realm_badge.status == state
+    said = window.play_reason_label.text()
+    assert said == _REASONS[state], said
+    assert not said.startswith("The server is stopped"), said
+
+
+def test_the_line_under_play_for_a_stopped_server_is_unchanged(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    window, view, _ = _launcher(ps, tmp_path)
+    _online(view)
+
+    view.realm_badge.set_status("stopped")
+
+    assert window.play_reason_label.text() == launcher_window.STOPPED_REASON
+    assert len(set(_REASONS.values()) | {launcher_window.STOPPED_REASON}) == len(_REASONS) + 1
 
 
 def test_a_partly_up_server_is_not_called_stopped_under_play(
