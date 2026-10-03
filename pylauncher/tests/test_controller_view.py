@@ -21256,6 +21256,33 @@ def test_the_dialog_warns_about_a_folder_onedrive_syncs(
     assert elsewhere.onedrive_label.isHidden()
 
 
+def test_make_offers_a_folder_outside_onedrive_and_warns_only_for_one_picked_inside(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T184 steps 1 and 2: the default needs no action; Browse… into OneDrive still warns."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    root = tmp_path / "OneDrive"
+    monkeypatch.setenv("OneDrive", str(root))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    original = _game_client(root / "clients" / "WoW")
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+
+    view.make_play_client()
+
+    offer = asker.offers[0]
+    assert offer.target.parent == tmp_path / "Local" / "Yu'lon" / "Clients"
+    assert offer.plan.same_volume, "the folder chosen must still share the archives"
+    dialog = controller_view_module.PlayClientDialog(offer, jobs=run_inline)
+    assert dialog.onedrive_label.isHidden()
+
+    picked = root / "WoW (Yu'lon)"
+    dialog.path_edit.setText(str(picked))
+    dialog.path_edit.editingFinished.emit()
+    assert not dialog.onedrive_label.isHidden()
+    assert str(root) in dialog.onedrive_label.text()
+
+
 def test_the_client_folder_is_not_forgotten_while_make_is_planning(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

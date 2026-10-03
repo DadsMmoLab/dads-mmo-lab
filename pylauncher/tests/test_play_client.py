@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import types
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -471,6 +472,132 @@ def test_default_target_names_the_server_when_the_plain_name_is_not_yulons(
     (tmp_path / "WoW (Yu'lon – WoW WotLK)").mkdir()
     assert play_client.default_target(orig, "WoW WotLK", tmp_path / "srv-b") == (
         tmp_path / "WoW (Yu'lon – WoW WotLK, srv-b)"
+    )
+
+
+# -- T184: the default avoids OneDrive by itself ------------------------------------
+
+NAME = "WoW (Yu'lon \u2013 WoW WotLK)"
+
+
+def _synced(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """An original inside OneDrive, and a Windows env naming OneDrive and LOCALAPPDATA."""
+    original = tmp_path / "OneDrive" / "Games" / "WoW"
+    env = {"OneDrive": str(tmp_path / "OneDrive"), "LOCALAPPDATA": str(tmp_path / "Local")}
+    return original, env
+
+
+def _volumes(elsewhere: Path) -> Callable[[Path], object]:
+    """The volume seam: everything under `elsewhere` is another volume, the rest one."""
+
+    def volume(path: Path) -> object:
+        return "D:" if elsewhere == path or elsewhere in path.parents else "C:"
+
+    return volume
+
+
+def test_default_target_leaves_onedrive_for_localappdata_on_the_same_volume(
+    tmp_path: Path,
+) -> None:
+    """Step 1, first choice; the volume is the real one (all of `tmp_path` is one)."""
+    original, env = _synced(tmp_path)
+    got = play_client.default_target(original, "WoW WotLK", env=env, os_name="windows")
+    assert got == tmp_path / "Local" / "Yu'lon" / "Clients" / NAME
+    assert play_client.onedrive_folder(got, env=env, os_name="windows") is None
+
+
+def test_default_target_falls_back_to_the_drive_root_when_localappdata_is_elsewhere(
+    tmp_path: Path,
+) -> None:
+    """Step 1, second choice: LOCALAPPDATA on another volume, where links cannot reach."""
+    original, env = _synced(tmp_path)
+    got = play_client.default_target(
+        original, "WoW WotLK", env=env, os_name="windows", volume=_volumes(tmp_path / "Local")
+    )
+    assert got == Path(original.anchor) / "Yu'lon Clients" / NAME
+
+
+def test_default_target_falls_back_to_the_drive_root_without_localappdata(
+    tmp_path: Path,
+) -> None:
+    original, env = _synced(tmp_path)
+    del env["LOCALAPPDATA"]
+    got = play_client.default_target(
+        original, "WoW WotLK", env=env, os_name="windows", volume=lambda _p: "C:"
+    )
+    assert got == Path(original.anchor) / "Yu'lon Clients" / NAME
+
+
+def test_default_target_stays_in_onedrive_when_no_folder_outside_it_shares_the_volume(
+    tmp_path: Path,
+) -> None:
+    """Nothing worse than before: a full copy is never chosen for the player."""
+    original, env = _synced(tmp_path)
+    got = play_client.default_target(
+        original, "WoW WotLK", env=env, os_name="windows", volume=_volumes(original)
+    )
+    assert got == original.parent / NAME
+
+
+def test_default_target_names_the_server_when_another_server_has_the_name_outside_onedrive(
+    tmp_path: Path,
+) -> None:
+    """Step 1: the same collision rule as beside the original."""
+    original, env = _synced(tmp_path)
+    plain = tmp_path / "Local" / "Yu'lon" / "Clients" / NAME
+    plain.mkdir(parents=True)
+    theirs = play_client.Marker(
+        game="g", server_dir=tmp_path / "srv-a", source_client_dir=original, created_at=WHEN
+    )
+    (plain / play_client.MARKER).write_text(theirs.model_dump_json(), encoding="utf-8")
+    got = play_client.default_target(
+        original, "WoW WotLK", tmp_path / "srv-b", env=env, os_name="windows"
+    )
+    assert got == plain.with_name("WoW (Yu'lon \u2013 WoW WotLK, srv-b)")
+
+
+def test_default_target_keeps_this_servers_client_where_it_already_is_in_onedrive(
+    tmp_path: Path,
+) -> None:
+    """Step 3: an existing ready-to-play client is not moved."""
+    original, env = _synced(tmp_path)
+    mine = original.parent / NAME
+    mine.mkdir(parents=True)
+    marker = play_client.Marker(
+        game="g", server_dir=tmp_path / "srv", source_client_dir=original, created_at=WHEN
+    )
+    (mine / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+    got = play_client.default_target(
+        original, "WoW WotLK", tmp_path / "srv", env=env, os_name="windows"
+    )
+    assert got == mine
+
+
+def test_default_target_stays_the_sibling_without_the_onedrive_variables(tmp_path: Path) -> None:
+    """Step 3: no OneDrive variable, so nothing is synced and nothing changes."""
+    original, env = _synced(tmp_path)
+    del env["OneDrive"]
+    got = play_client.default_target(original, "WoW WotLK", env=env, os_name="windows")
+    assert got == original.parent / NAME
+
+
+def test_default_target_stays_the_sibling_off_windows(tmp_path: Path) -> None:
+    """Step 3: OneDrive variables mean nothing off Windows."""
+    original, env = _synced(tmp_path)
+    got = play_client.default_target(original, "WoW WotLK", env=env, os_name="linux")
+    assert got == original.parent / NAME
+
+
+def test_default_target_reads_this_pcs_env_and_os_when_given_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Make… button calls it with no env or OS: those must come from the PC itself."""
+    original, env = _synced(tmp_path)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(play_client.platform, "detect", lambda: "windows")
+    assert play_client.default_target(original, "WoW WotLK") == (
+        tmp_path / "Local" / "Yu'lon" / "Clients" / NAME
     )
 
 

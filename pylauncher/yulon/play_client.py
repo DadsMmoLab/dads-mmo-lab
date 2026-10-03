@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from yulon import platform
 from yulon.log import get_logger
 from yulon.steam import client_executable
 
@@ -182,22 +183,77 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def default_target(original: Path, game_display_name: str, server_dir: Path | None = None) -> Path:
+def default_target(
+    original: Path,
+    game_display_name: str,
+    server_dir: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    os_name: str | None = None,
+    volume: Callable[[Path], object] | None = None,
+) -> Path:
     """A sibling of the original, on the same drive, named after the game.
 
     Two servers of the same game would want the same name. When the plain name
     is taken by anything but this server's own ready-to-play client, and the
     server is known, its folder name is added to tell them apart.
+
+    When that sibling would be inside OneDrive (on Windows, by its variables), the
+    same name goes into the first folder outside OneDrive on the original's volume,
+    so the archives can still be shared (links cannot cross volumes):
+    `%LOCALAPPDATA%\\Yu'lon\\Clients`, else `Yu'lon Clients` at the drive's root
+    (T184). This server's client that already exists there stays where it is, and
+    with no such folder the sibling is kept, the dialog then warning about it.
+
+    `env` and `os_name` default to this PC's; `volume` names a path's volume
+    (default: the device of its nearest existing folder).
     """
-    plain = original.parent / f"{original.name} (Yu'lon \u2013 {game_display_name})"
+    env = os.environ if env is None else env
+    os_name = platform.detect() if os_name is None else os_name
+    sibling = _named(original.parent, original, game_display_name, server_dir)
+    if onedrive_folder(sibling, env=env, os_name=os_name) is None:
+        return sibling
+    mine = read_marker(sibling)
+    if server_dir is not None and mine is not None and mine.server_dir == server_dir:
+        return sibling  # not moved
+    volume_of = volume if volume is not None else _volume
+    here = volume_of(original)
+    for parent in _outside_onedrive(original, env):
+        target = _named(parent, original, game_display_name, server_dir)
+        if onedrive_folder(target, env=env, os_name=os_name) is not None:
+            continue
+        if here is not None and volume_of(parent) == here:
+            return target
+    return sibling
+
+
+def _named(parent: Path, original: Path, game_display_name: str, server_dir: Path | None) -> Path:
+    """`<parent>/<original's name> (Yu'lon – <game>)`, plus the server's folder name when taken."""
+    plain = parent / f"{original.name} (Yu'lon \u2013 {game_display_name})"
     if server_dir is None or not plain.exists():
         return plain
     marker = read_marker(plain)
     if marker is not None and marker.server_dir == server_dir:
         return plain
-    return original.parent / (
-        f"{original.name} (Yu'lon \u2013 {game_display_name}, {server_dir.name})"
-    )
+    return parent / f"{original.name} (Yu'lon \u2013 {game_display_name}, {server_dir.name})"
+
+
+def _outside_onedrive(original: Path, env: Mapping[str, str]) -> Iterator[Path]:
+    """Where `default_target()` looks instead of OneDrive, in order (T184)."""
+    local = env.get("LOCALAPPDATA")
+    if local:
+        yield Path(local) / "Yu'lon" / "Clients"
+    anchor = Path(os.path.abspath(original)).anchor
+    if anchor:
+        yield Path(anchor) / "Yu'lon Clients"
+
+
+def _volume(path: Path) -> object:
+    """The device `path`, or its nearest existing folder, is on; None if it cannot be read."""
+    try:
+        return os.stat(_existing_ancestor(path)).st_dev
+    except OSError:
+        return None
 
 
 def _partial(target: Path) -> Path:
