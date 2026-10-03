@@ -1473,7 +1473,11 @@ def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_table
 def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay(
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T197: `keep()`'s failure is added to the sentence, never in its place."""
+    """T197: a folder that takes no record at all: said, never in place of the sentence.
+
+    Both the plan's own write and the fallback from the names fail, so nothing can
+    refuse a start; the sentence says so rather than claiming a refusal that is not there.
+    """
     box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
     _docker_gone_after_the_compile(box)
     _refuse_the_failed_name(box)
@@ -1490,20 +1494,115 @@ def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay
     said = str(failed.value)
     assert "could not be given a name to undo onto" in said
     assert "Permission denied" in said
-    assert f"Start is refused until this is done: {native.WORLD_TABLES_OWED_REFUSAL}" in said
+    assert "so nothing stops this server starting its new build on the old world tables." in said
+    assert said.endswith(
+        native.SOURCES_LEFT_UNTOUCHED_NOTE
+    ), "nothing refuses, so it says Start runs it"
     assert box.head() == NEW
     assert box.pending() is None, "the ground: no world record could be written"
     assert needs_reextract(box.server_dir, ENTRY) is not None, "the flag went first"
+
+
+def _plan_fails_once(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """`_reimport_runs()` refuses the FIRST time it is asked (keep's `prepare()`), then works.
+
+    The record cannot come from the plan then, so `keep()` writes it from the names the
+    move read; a later "Finish the world update" expands the plan as it always does.
+    """
+    asked: list[int] = []
+    real = trinitycore.TrinityCoreInstaller._reimport_runs
+
+    def runs(self: trinitycore.TrinityCoreInstaller, *args: object, **kwargs: object) -> object:
+        asked.append(1)
+        if len(asked) == 1:
+            raise InstallerError("the plan could not be expanded")
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(trinitycore.TrinityCoreInstaller, "_reimport_runs", runs)
+    return asked
+
+
+def _kept_without_its_tables(box: Box, monkeypatch: pytest.MonkeyPatch) -> str:
+    """An update whose rollback stopped early, untouched, and whose `prepare()` then failed."""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    box.seams.clear()  # Docker answers again, and tags as it should
+    return str(failed.value)
+
+
+def test_a_kept_build_whose_plan_fails_still_records_its_tables_and_refuses_start(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3: T179's own record names what the kept build needs, from the move's names.
+
+    A controller made fresh over the folder -- the app restarted -- refuses, naming the
+    press that finishes it, and the press's sentence says the same.
+    """
+    said = _kept_without_its_tables(box, monkeypatch)
+    assert "the plan could not be expanded" in said
+    assert box.streamed() == []
+    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    assert said.endswith(f"Start is refused until this is done: {UNFINISHED}")
     with pytest.raises(StartRefused) as refused:
         CenturionController(ENTRY, box.server_dir).refuse_start()
-    assert str(refused.value) == native.WORLD_TABLES_OWED_REFUSAL
+    assert str(refused.value) == UNFINISHED
 
 
-def test_a_successful_update_clears_a_world_tables_refusal(box: Box) -> None:
-    """Its tables went in with the servers down and its build came up on them."""
-    assert native.owe_start(box.server_dir, native.OWED_WORLD_TABLES) == ""
-    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+def test_finishing_the_kept_builds_world_update_imports_its_tables_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_without_its_tables(box, monkeypatch)
+    box.finish()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature; -- new"], "from the kept checkout"
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_finish_that_fails_keeps_the_kept_builds_record(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_without_its_tables(box, monkeypatch)
+    box.m.db.fail_on = "creature"
+    with pytest.raises(InstallerError):
+        box.finish()
+    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_an_unrelated_update_folds_the_kept_builds_tables_in_and_clears_only_once_in(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3: a later update that changes another table imports the owed one too.
+
+    The record goes only once every file it names went in; the update first fails on the
+    owed table, and the record survives that, then the next one lands.
+    """
+    _kept_without_its_tables(box, monkeypatch)
+    box.m.rec.heads[box.checkout] = NEW
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+    box.m.db.fail_on = "creature"
+    box.ready = [True]
+    with pytest.raises(InstallerError):
+        box.press()
+    assert f"{WORLD_SQL}/creature.sql" in cast(list[str], (box.pending() or {})["reimport"])
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+    box.m.db.fail_on = ""
+    box.m.db.streams.clear()
+    box.m.rec.heads[box.checkout] = NEW
     said = box.press()
     assert said[-1] == "Centurion is running on the newest upstream code."
-    assert native.owed_start_refusal(box.server_dir) is None
+    assert set(first_lines(box)) >= {
+        "DROP TABLE IF EXISTS creature; -- new",
+        "DROP TABLE IF EXISTS version;",
+    }, "the owed table went in with the update's own"
+    assert box.pending() is None
     CenturionController(ENTRY, box.server_dir).refuse_start()

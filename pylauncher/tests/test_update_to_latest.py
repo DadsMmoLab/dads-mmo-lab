@@ -2170,8 +2170,10 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
         f"({REFUSED}) and undoing it failed too, so the tags are MIXED: {refs[0]} name the old "
         "build and the rest name the new one. Do not start this server until they agree; the "
         "old images are under their -rollback tags. The source folders were put back on the "
-        "commits they were on before this update. Its image tags are mixed, so it must be "
-        "rebuilt before it can start, and Start is refused until it is: press “Rebuild the "
+        "commits they were on before this update. None of your server's containers was "
+        "replaced, so it is still running the build from before this update if it is up. Its "
+        "image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
+        "until it is: press “Rebuild the "
         "server…” under “Server build ▾” on the Modules tab, which compiles every image from "
         "those commits."
     )
@@ -2236,7 +2238,7 @@ def test_a_rebuild_that_succeeds_clears_the_refusal_and_one_that_fails_keeps_it(
 ) -> None:
     """Fix round 2: Rebuild is the repair, so it is not refused, and only its success clears."""
     rec, server_dir = _ready(tmp_path)
-    assert native.owe_start(server_dir, native.OWED_REBUILD) == ""
+    assert native.owe_start(server_dir) == ""
     rec.build_result = AttachedRun(2, ("error: no",))
     with pytest.raises(InstallerError):
         list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
@@ -2248,17 +2250,6 @@ def test_a_rebuild_that_succeeds_clears_the_refusal_and_one_that_fails_keeps_it(
     assert native.owed_start_refusal(server_dir) is None
     assert not (server_dir / native.START_REFUSED_FILE).exists()
     Controller(ENTRY.container_spec(), server_dir).refuse_start()
-
-
-def test_a_world_tables_refusal_refuses_the_rebuild_too_and_survives_it(tmp_path: Path) -> None:
-    """A Rebuild imports no table, so it is no repair for `OWED_WORLD_TABLES`."""
-    rec, server_dir = _ready(tmp_path)
-    assert native.owe_start(server_dir, native.OWED_WORLD_TABLES) == ""
-    with pytest.raises(InstallerError, match="could not record for import"):
-        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
-    assert "build" not in rec.calls
-    assert native.owe_start(server_dir, native.OWED_REBUILD) == ""
-    assert native.owed_start_refusal(server_dir) == native.WORLD_TABLES_OWED_REFUSAL
 
 
 def test_a_record_nobody_can_read_still_refuses_and_asks_for_a_rebuild(tmp_path: Path) -> None:

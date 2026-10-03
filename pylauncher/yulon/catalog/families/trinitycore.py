@@ -75,7 +75,6 @@ from yulon.catalog.installer import InstallerError, InstallOptions, UpdateRefuse
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
-    OWED_WORLD_TABLES,
     InstallState,
     Seams,
     ServersDownWork,
@@ -83,7 +82,6 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
-    owe_start,
     read_state,
 )
 from yulon.log import get_logger
@@ -1110,13 +1108,14 @@ class TrinityCoreInstaller(CmangosInstaller):
         prepared: list[bool] = []
 
         def prepare() -> Iterator[str]:
-            prepared.append(True)
             if not changes.imports():
+                prepared.append(True)
                 return
             ctx = self._world_ctx(server_dir, None)
             runs[:] = self._reimport_runs(ctx, changes)
             before[:] = [_read_bytes(server_dir / WORLD_REIMPORT_FILE)]
             self._write_pending(server_dir, runs)
+            prepared.append(True)
             yield (
                 f"{server_dir / WORLD_REIMPORT_FILE} names the {len(runs)} world table file(s) "
                 "to import again, until the last is in."
@@ -1187,12 +1186,23 @@ class TrinityCoreInstaller(CmangosInstaller):
                 return
             try:
                 yield from prepare()
-            except (InstallerError, OSError):
-                # Nothing records the tables the kept build needs, so nothing
-                # would stop a start on the old ones: the spine's record does.
-                warned = owe_start(server_dir, OWED_WORLD_TABLES)
-                if warned:
-                    yield warned
+            except (InstallerError, OSError) as exc:
+                # Fix round 3: the record is written from the names the move
+                # already read, without the plan `prepare()` could not expand, so
+                # every start refuses and "Finish the world update" (or the next
+                # update, which folds it in) imports them from this checkout. A
+                # record nobody can read is left: it already means every table.
+                waiting = _read_pending(server_dir)
+                if not changes.imports() or (waiting is not None and waiting.unreadable):
+                    raise
+                try:
+                    self._write_names(server_dir, set(changes.reimport), set(changes.parts))
+                except InstallerError as also:
+                    raise InstallerError(
+                        f"{exc} The world tables the new build needs could not be recorded "
+                        f"either ({also.__cause__ or also}), so nothing stops this server "
+                        "starting its new build on the old world tables."
+                    ) from exc
                 raise
 
         return ServersDownWork(
@@ -1489,10 +1499,14 @@ class TrinityCoreInstaller(CmangosInstaller):
         or imported, since a failure after it would leave nobody knowing what to
         finish.
         """
-        path = server_dir / WORLD_REIMPORT_FILE
-        before = _read_pending(server_dir)
         reimport = {run.rel for run in runs if _PART.match(run.rel) is None}
         parts = {match["stem"] for run in runs if (match := _PART.match(run.rel)) is not None}
+        self._write_names(server_dir, reimport, parts)
+
+    def _write_names(self, server_dir: Path, reimport: set[str], parts: set[str]) -> None:
+        """`_write_pending()` from the files' names and split tables' stems (T197 fix round 3)."""
+        path = server_dir / WORLD_REIMPORT_FILE
+        before = _read_pending(server_dir)
         if before is not None and not before.unreadable:
             reimport |= set(before.reimport)
             parts |= set(before.parts)

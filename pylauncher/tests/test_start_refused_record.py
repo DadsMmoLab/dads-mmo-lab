@@ -26,8 +26,9 @@ from tests.test_controller_view import (
 from tests.test_launcher_window import _launcher
 from yulon import runner
 from yulon.catalog import native
+from yulon.catalog.catalog import load_catalog
 from yulon.controller import Controller, StartRefused
-from yulon.controller_wow_tortoise import botdash
+from yulon.controller_wow_tortoise import botdash, botpool
 from yulon.controller_wow_tortoise.controller import TortoiseController
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerView
@@ -62,7 +63,7 @@ def launched(monkeypatch: pytest.MonkeyPatch) -> list[object]:
 
 
 def _owed(server_dir: Path) -> None:
-    assert native.owe_start(server_dir, native.OWED_REBUILD) == ""
+    assert native.owe_start(server_dir) == ""
 
 
 def _touched(ps: _Ps, since: int = 0) -> list[list[str]]:
@@ -167,3 +168,46 @@ def test_a_tortoise_start_is_refused_before_its_bot_dashboard_starts(
     with pytest.raises(StartRefused, match="must be rebuilt"):
         TortoiseController(tmp_path).start()
     assert asked == []
+
+
+class _Running(Controller):
+    """A real controller over the folder whose server is up: it records any stop or start."""
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(TORTOISE.container_spec(), server_dir)
+        self.calls: list[str] = []
+
+    def stop(self) -> bool:
+        self.calls.append("stop")
+        return True
+
+    def start(self) -> None:
+        self.calls.append("start")
+
+
+TORTOISE = load_catalog().get("wow-tortoise")
+
+
+def test_the_bot_reload_leaves_a_running_server_running_and_says_why(tmp_path: Path) -> None:
+    """Fix round 3: `botpool.restart_world()` asks before its stop, as `_do_restart` does.
+
+    The bot reload and the pool rebuild's restart both go through it.
+    """
+    running = _Running(tmp_path)
+    _owed(tmp_path)
+    with pytest.raises(StartRefused) as refused:
+        botpool.restart_world(running)
+    assert str(refused.value) == REFUSED
+    assert running.calls == [], "not stopped, so still running"
+
+
+def test_the_dashboard_switch_restart_leaves_it_running_and_says_why(tmp_path: Path) -> None:
+    """The bot dashboard's Yes restarts through the same call; its log says the refusal."""
+    running = _Running(tmp_path)
+    _owed(tmp_path)
+    said = list(botdash.Dashboard(TORTOISE, tmp_path, running).restart_world())
+    assert running.calls == []
+    assert said[-1] == (
+        f"The restart failed ({REFUSED}). Restart the server from the Server tab so the bots "
+        "module reads its settings."
+    )
