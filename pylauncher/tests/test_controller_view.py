@@ -5782,6 +5782,41 @@ def test_a_channel_rolled_back_off_a_taken_port_offers_the_enable_button_again(
     assert view.enable_channel_button.isHidden() is False
 
 
+class _UnprovedSetup(_StubSetup):
+    """Each settle creates the account once, then fails its round trip: GaveUp on the third."""
+
+    def settle(self) -> object:
+        self.settles += 1
+        if isinstance(self.state, channel_setup.Idle):
+            self.state = self.state.created("YULON_AB", "pw")
+        self.state = self.state.verify_failed()
+        return self.state
+
+
+def test_a_channel_that_gave_up_after_a_press_offers_the_button_again(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 fix round 1 (M1): GaveUp means the press did not take, so it is offered again."""
+    stub = _UnprovedSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+    assert view.enable_channel_button.isHidden() is True
+
+    for settle in (1, 2, 3):
+        ps.names = ""
+        view.refresh_status()
+        view.start_button.click()
+        assert stub.settles == settle
+        if settle < 3:
+            assert isinstance(stub.state, channel_setup.Pending)
+            assert view.enable_channel_button.isHidden() is True, settle
+
+    assert isinstance(stub.state, channel_setup.GaveUp)
+    assert view.enable_channel_button.isHidden() is False
+
+
 class _Probe:
     """Stands in for the console channel the tab is handed."""
 
@@ -6170,6 +6205,10 @@ def test_keep_my_characters_is_unticked_by_default_and_is_what_reaches_run(
 # -- T188 A14: Keep my characters sits with the plan it changes ---------------
 
 
+UNINSTALL_KEEP = "Uninstall this server and keep my characters"
+UNINSTALL_DELETE = "Uninstall this server and delete my characters"
+
+
 def _server_box_index(view: ControllerView, widget: Any) -> int:
     return view.uninstall_label.parentWidget().layout().indexOf(widget)
 
@@ -6229,6 +6268,38 @@ def test_the_confirm_button_names_what_happens_to_the_characters(
     view.keep_characters_check.click()
     view.uninstall_confirm_button.click()
     assert fake.runs == [True]
+
+
+class _VolumeGoesAway(_FakeUninstall):
+    """A plan that finds the database volume, then one that does not (removed by hand)."""
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(server_dir)
+        self.volume = True
+
+    def plan(self) -> purge.PurgePlan:
+        found = super().plan()
+        return found if self.volume else replace(found, character_volume=None, client_volume=None)
+
+
+def test_a_plan_with_no_character_volume_offers_no_keep_and_says_delete(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 fix round 1 (M3): there is nothing to keep, so a tick from before cannot promise it."""
+    fake = _VolumeGoesAway(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.uninstall_button.click()
+    view.keep_characters_check.click()
+    assert view.uninstall_confirm_button.text() == UNINSTALL_KEEP
+
+    fake.volume = False
+    view.uninstall_button.click()
+
+    assert view.keep_characters_check.isHidden() is True
+    assert view.keep_characters_check.isChecked() is False
+    assert view.uninstall_confirm_button.text() == UNINSTALL_DELETE
+    view.uninstall_confirm_button.click()
+    assert fake.runs == [False]
 
 
 def test_a_ticked_uninstall_says_where_the_kept_database_password_went(

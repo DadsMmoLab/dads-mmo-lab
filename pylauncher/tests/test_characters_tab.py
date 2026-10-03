@@ -1150,3 +1150,25 @@ def test_raising_a_level_never_asks(tmp_path: Path) -> None:
 
     assert asked == []
     assert [c for c in play.calls if c[0] == "set_level"] == [("set_level", ("Ganaar", 20))]
+
+
+def test_after_a_raise_lowering_by_one_still_asks(tmp_path: Path) -> None:
+    """T188 fix round 1 (M2): the row's level is the sent one at once, not after the re-read.
+
+    The re-read lands 750ms later; until then the row still said 78, so typing
+    79 after setting 80 lowered the character without a question.
+    """
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+    asked = _asking(view, False)
+
+    view.new_level.setValue(80)
+    view.set_level_button.click()
+    assert asked == []
+    view.new_level.setValue(79)
+    view.set_level_button.click()
+
+    assert len(asked) == 1 and "80" in asked[0][1], asked
+    assert [c for c in play.calls if c[0] == "set_level"] == [("set_level", ("Guglu", 80))]

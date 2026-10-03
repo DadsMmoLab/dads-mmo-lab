@@ -7514,12 +7514,19 @@ class ControllerView(QWidget):
         self.repair_channel_button.setVisible(isinstance(state, channel_setup.Refused))
         # T188 A4: offered only while there is something to turn on -- not under
         # "verified as …", not while an account waits to be proved, not where
-        # Repair is the answer, and not again after a press that took.
+        # Repair is the answer, and not again after a press that took. GaveUp
+        # is offered even after a press: it means the press did not take.
         self.enable_channel_button.setVisible(
             self.services.channel_setup is not None
-            and not self._channel_written
-            and not isinstance(
-                state, channel_setup.Verified | channel_setup.Pending | channel_setup.Refused
+            and (
+                isinstance(state, channel_setup.GaveUp)
+                or (
+                    not self._channel_written
+                    and not isinstance(
+                        state,
+                        channel_setup.Verified | channel_setup.Pending | channel_setup.Refused,
+                    )
+                )
             )
         )
 
@@ -8664,7 +8671,11 @@ class ControllerView(QWidget):
             return
         self._uninstall_plan = result
         self.uninstall_confirm_button.setVisible(True)
-        self.keep_characters_check.setVisible(True)
+        # T188 fix round 1: a plan that found no database volume has nothing to
+        # keep, so a tick left from an earlier plan must not promise it.
+        if not result.character_volume:
+            self.keep_characters_check.setChecked(False)
+        self.keep_characters_check.setVisible(bool(result.character_volume))
         # T181 §4: offered only for a folder that still carries this server's
         # marker -- `play_client.delete()` would refuse any other, and an offer
         # the press cannot keep is worse than none.
@@ -11001,6 +11012,8 @@ class ControllerView(QWidget):
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
+        # (name, level) of a Set level press whose answer is out (T188 fix round 1).
+        self._level_sent: tuple[str, int] | None = None
         self._gear_generation = 0
         # One gear read at a time, and only the newest row waits behind it
         # (T96 review): see `_ask_for_gear()`.
@@ -11373,9 +11386,15 @@ class ControllerView(QWidget):
     def _characters_failed(self, exc: object) -> None:
         self.character_report.setText(f"Could not read this server's characters: {exc}")
 
-    def _character_action(self, what: str, run: object) -> None:
-        """One press, one sentence, all three outcomes."""
+    def _character_action(self, what: str, run: object, *, level: int | None = None) -> None:
+        """One press, one sentence, all three outcomes.
+
+        `level` is a Set level press's level: on success the row keeps it at
+        once (T188 fix round 1), because the list is re-read 750ms later and a
+        lower level typed in between was compared with the old one.
+        """
         name = self._chosen_character()
+        self._level_sent = (name, level) if level is not None and name else None
         if self.services.play is None or not name:
             return
         self.character_report.setText(f"{what} {name}…")
@@ -11386,6 +11405,12 @@ class ControllerView(QWidget):
         done = bool(getattr(outcome, "done", False))
         said = getattr(outcome, "text", "") if done else getattr(outcome, "problem", "")
         self.character_report.setText(said.strip() or ("Done." if done else "It did not work."))
+        sent, self._level_sent = self._level_sent, None
+        if done and sent is not None:
+            for row in range(self.character_list.count()):
+                item = self.character_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == sent[0]:
+                    item.setData(_LEVEL_ROLE, sent[1])
         if done:
             # NOT `self.refresh_characters()`. Measured on the live server,
             # 2026-09-07: the command answers in about 0.15s and its own row
@@ -11428,7 +11453,9 @@ class ControllerView(QWidget):
         ):
             return
         self._character_action(
-            "Setting the level of", lambda: play.set_level(name, level)  # type: ignore[attr-defined]
+            "Setting the level of",
+            lambda: play.set_level(name, level),  # type: ignore[attr-defined]
+            level=level,
         )
 
     @Slot()
