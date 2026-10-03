@@ -2252,6 +2252,50 @@ def test_a_rebuild_that_succeeds_clears_the_refusal_and_one_that_fails_keeps_it(
     Controller(ENTRY.container_spec(), server_dir).refuse_start()
 
 
+def test_the_repair_rebuild_after_mixed_tags_runs_to_the_end_and_starts_the_server(
+    tmp_path: Path,
+) -> None:
+    """Fix round 8: the record a real mixed rollback wrote, then the repair, with no stage faked.
+
+    The round-8 review read `stage_up()`'s refusal (asked without `rebuilding`) as on
+    this path. It is not: `rebuild_stages()` ends in `recreate` and `ready`, never the
+    install's `up`, so the press's own `rebuilding=True` question is the only one it asks
+    before the start. Bound here so a stage tuple that grows an `up` fails this.
+    """
+    rec, server_dir = _ready(tmp_path)
+    rec.ready = False
+    with pytest.raises(RollbackNotDone):
+        list(engine(rec, **_mixed(rec)).rebuild(InstallOptions(server_dir=server_dir)))
+    _start_is_refused_for_a_rebuild(server_dir)
+    rec.ready = True
+    rec.calls.clear()
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
+    assert [c for c in rec.calls if c in ("build", "recreate")] == ["build", "recreate"]
+    assert not (server_dir / native.START_REFUSED_FILE).exists()
+    Controller(ENTRY.container_spec(), server_dir).refuse_start()
+
+
+def test_a_repair_rebuild_whose_build_does_not_come_up_leaves_the_mixed_build_stopped(
+    tmp_path: Path,
+) -> None:
+    """Fix round 8: its rollback puts back the MIXED tags, so it must not start them.
+
+    Until round 8 only the update route's rollback asked `start_refusal()` before its
+    restart, so a failed repair recreated the very images the record refuses to start.
+    """
+    rec, server_dir = _ready(tmp_path)
+    assert native.owe_start(server_dir) == ""
+    rec.ready = False
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert rec.calls.count("recreate") == 1, "the new build's only: the rollback started nothing"
+    assert rec.calls.count("start") == 0
+    assert "its servers were left STOPPED: " + MIXED_REFUSAL in str(raised.value)
+    assert "is running again" not in str(raised.value)
+    _start_is_refused_for_a_rebuild(server_dir)
+
+
 def test_a_record_nobody_can_read_still_refuses_and_asks_for_a_rebuild(tmp_path: Path) -> None:
     server_dir = tmp_path
     (server_dir / native.START_REFUSED_FILE).write_text("not json", encoding="utf-8")

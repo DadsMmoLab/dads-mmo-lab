@@ -1899,7 +1899,9 @@ Read by every start: `Controller.refuse_start()` (Start, Start and play, the lau
 PLAY, Restart, Recreate, the bot reload) and the engine's `start_refusal()`. Written in the
 server folder beside the install record, so it outlives the app; `{"version":1,
 "why":"rebuild"}`, and a record nobody can read refuses the same. Only a successful
-Rebuild clears it (`rebuild()`), and only the Rebuild press is not refused by it.
+Rebuild clears it (`rebuild()`), and only the Rebuild press is not refused by it; a
+Rebuild that fails leaves the servers its rollback put back stopped (fix round 8), and
+TrinityCore's "Finish the world update" is refused by it too.
 
 A Centurion build kept without its world tables is not recorded here: T179's own
 world-update record holds the tables it still needs (`ServersDownWork.keep`), and only an
@@ -7141,26 +7143,29 @@ class StagedInstaller:
             "is NOT put back by this -- the lines above say whether its updater ran -- so "
             "the old build is running on the database as the new one left it."
         )
+        back_failed = ""
         if servers_down is not None:
-            back_failed = ""
             try:
                 yield from servers_down.back(replace(ctx, cancel=None))
             except (InstallerError, OSError) as exc:
                 back_failed = f"\n{exc}"
             database = f"{database}{back_failed}"
-            refused = self.start_refusal(ctx.server_dir)
-            if refused is not None:
-                # T179 (lead ruling): the old build is not started on world tables
-                # its rollback could not all put back. Its servers stay stopped and
-                # the tags name it; the finish starts it (with a recreate). Said
-                # without "running" anywhere: nothing of this server runs now.
-                yield from self._release(named)
-                yield from self._release(kept)
-                return _LeftStopped(
-                    f"{failure} The build from before this rebuild was put back, and its servers "
-                    f"were left STOPPED: {refused}{said}{ROLLBACK_LEFT_STOPPED_DATABASE}"
-                    f"{back_failed}"
-                )
+        # Asked on every rollback, not only the update route's (T197 fix round 8): a
+        # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed
+        # tags as its rollback, and a repair that failed must not start them again.
+        refused = self.start_refusal(ctx.server_dir)
+        if refused is not None:
+            # T179 (lead ruling): the old build is not started on world tables
+            # its rollback could not all put back, nor on mixed tags. Its servers
+            # stay stopped and the tags name it; the finish or the Rebuild starts
+            # it. Said without "running" anywhere: nothing of this server runs now.
+            yield from self._release(named)
+            yield from self._release(kept)
+            return _LeftStopped(
+                f"{failure} The build from before this rebuild was put back, and its servers "
+                f"were left STOPPED: {refused}{said}{ROLLBACK_LEFT_STOPPED_DATABASE}"
+                f"{back_failed}"
+            )
         try:
             yield from self.stage_recreate(ctx, rollback=True)
             # The `-failed` names again, and the second attempt is the one that

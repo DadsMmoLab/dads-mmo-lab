@@ -1225,6 +1225,54 @@ def test_finish_is_the_one_start_allowed_and_it_starts_once_the_record_is_gone(b
     assert box.world.running is True
 
 
+# T197 fix round 8: both records at once. It cannot happen today -- the mixed-tags record
+# (`native.START_REFUSED_FILE`) needs a rollback that moved one image tag of several, and
+# a TrinityCore server builds ONE image, so its rollback is never part-way -- but nothing
+# keeps a TrinityCore server single-image, so each record's way out is bound against the
+# other: the Rebuild first (any start on mixed tags, the finish's included, runs two
+# builds side by side), then "Finish the world update".
+
+
+def _both_records(box: Box) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    assert native.owe_start(box.server_dir) == ""
+
+
+def test_with_mixed_tags_the_finish_imports_nothing_and_names_the_rebuild(box: Box) -> None:
+    _both_records(box)
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value) == f"{native.REBUILD_OWED_REFUSAL} Nothing was changed."
+    assert box.streamed() == [] and box.world.running is True
+    assert box.pending() is not None, "the world update still waits"
+
+
+def test_with_mixed_tags_the_finishs_own_start_starts_nothing(box: Box) -> None:
+    """The belt under the refusal above: the start the finish ends in asks again."""
+    _both_records(box)
+    box.world.running = False
+    with pytest.raises(InstallerError) as refused:
+        list(box.engine()._start_after_finish(context(box.m)))
+    assert str(refused.value) == (
+        f"The world update is finished, but {native.REBUILD_OWED_REFUSAL} The server was not "
+        "started."
+    )
+    assert "recreate" not in box.m.rec.calls and box.world.running is False
+
+
+def test_with_both_records_the_rebuild_goes_first_and_then_the_finish(box: Box) -> None:
+    _both_records(box)
+    said = list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    assert said[-1].endswith(f"was rebuilt and is running in {box.server_dir}")
+    assert not (box.server_dir / native.START_REFUSED_FILE).exists()
+    assert box.pending() is not None, "the Rebuild finishes no world update"
+    with pytest.raises(InstallerError, match=UNFINISHED):
+        list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    box.finish()
+    assert box.pending() is None and box.world.running is True
+
+
 def test_inside_a_wsl_distro_the_engine_names_the_update_press(box: Box) -> None:
     box.leave_pending([f"{WORLD_SQL}/creature.sql"])
     box.distro = "Ubuntu"

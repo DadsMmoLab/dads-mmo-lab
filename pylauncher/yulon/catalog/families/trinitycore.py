@@ -82,6 +82,7 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
+    owed_start_refusal,
     past_the_tested_pin,
     read_state,
 )
@@ -1074,10 +1075,21 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
-        """The spine's refusal, then a world update left unfinished (T179)."""
-        return super().start_refusal(
-            server_dir, rebuilding=rebuilding
-        ) or world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
+        """The spine's refusal, then a world update left unfinished (T179).
+
+        A Rebuild with the mixed-tags record there too (T197 fix round 8) is not refused
+        for the world update: it is the one way out of the pair. The finish refuses on
+        mixed tags (`finish_world_reimport()`), so the Rebuild goes first and leaves the
+        world update for the finish. Both records cannot co-occur today: the mixed-tags
+        record needs a rollback that moved one image tag of several, and a TrinityCore
+        server builds one image.
+        """
+        refused = super().start_refusal(server_dir, rebuilding=rebuilding)
+        if refused is not None:
+            return refused
+        if owed_start_refusal(server_dir) is not None:
+            return None  # reached by the Rebuild alone: any other press was refused above
+        return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
 
     def servers_down_work(
         self, server_dir: Path, changes: object, *, press: str
@@ -1329,6 +1341,12 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"No world update of {self.entry.name}'s is waiting to be finished. Nothing was "
                 "changed."
             )
+        # T197 fix round 8: the finish ends in a start, and mixed image tags refuse every
+        # start but the Rebuild's, which goes first (`start_refusal()`). Cannot happen
+        # today: a TrinityCore server builds one image, so its tags are never mixed.
+        mixed = owed_start_refusal(server_dir)
+        if mixed is not None:
+            raise InstallerError(f"{mixed} Nothing was changed.")
         self._refuse_unless_the_checkout_is_built(server_dir, state)
         changes = SnapshotChanges(
             reimport=pending.reimport, parts=pending.parts, everything=pending.unreadable
@@ -1384,7 +1402,15 @@ class TrinityCoreInstaller(CmangosInstaller):
         (`docker.staged_up_argv`), so the finish asks for the replacement outright,
         as a rebuild does; on a server with nothing to replace it costs a recreate
         of containers whose world was already stopped. The volumes are untouched.
+
+        Asks the mixed-tags record again (T197 fix round 8), the belt under the finish's
+        own refusal of it: this start must not run two builds side by side either.
         """
+        mixed = owed_start_refusal(ctx.server_dir)
+        if mixed is not None:
+            raise InstallerError(
+                f"The world update is finished, but {mixed} The server was not started."
+            )
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
