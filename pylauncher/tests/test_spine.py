@@ -2502,6 +2502,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "name a location that cannot be found or cannot be read, answers None, which the "
         "caller renders *unchecked*"
     ),
+    ("platform.py", "_legacy_disk_folder"): (
+        "T199. Lists the folder a legacy Docker Desktop settings key (`dataFolder`/`diskPath`) "
+        "names, looking for a `.vhdx`/`.raw` disk image directly inside it, as proof that "
+        "Docker's disk lives there before preflight measures that drive. It decides no write: "
+        "the folder is handed to `shutil.disk_usage` and no further, and a folder that cannot "
+        "be listed answers None - 'could not be established' - which the caller renders "
+        "*unchecked*, never a guessed drive"
+    ),
     ("purge.py", "folder_bytes"): (
         "measures the server folder for the uninstall dialog; every OSError per entry is "
         "skipped and the total is short rather than absent, because a folder whose size "
