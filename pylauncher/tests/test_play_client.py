@@ -588,6 +588,72 @@ def test_default_target_stays_the_sibling_off_windows(tmp_path: Path) -> None:
     assert got == original.parent / NAME
 
 
+def test_default_target_skips_a_localappdata_that_is_itself_in_onedrive(tmp_path: Path) -> None:
+    """Fix round 1: each folder outside OneDrive is checked again, not assumed outside."""
+    original, env = _synced(tmp_path)
+    env["LOCALAPPDATA"] = str(tmp_path / "OneDrive" / "AppData" / "Local")
+    got = play_client.default_target(
+        original, "WoW WotLK", env=env, os_name="windows", volume=lambda _p: "C:"
+    )
+    assert got == Path(original.anchor) / "Yu'lon Clients" / NAME
+
+
+def test_default_target_keeps_the_sibling_when_the_volumes_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """Fix round 1: an unreadable volume never counts as the same one; the warning then shows."""
+    original, env = _synced(tmp_path)
+    got = play_client.default_target(
+        original, "WoW WotLK", env=env, os_name="windows", volume=lambda _p: None
+    )
+    assert got == original.parent / NAME
+    assert play_client.onedrive_folder(got, env=env, os_name="windows") == tmp_path / "OneDrive"
+
+
+def _refusing_mkdir(monkeypatch: pytest.MonkeyPatch, refused: str) -> None:
+    """`os.mkdir` refuses a folder named `refused`, as a drive root refuses a standard user."""
+    real = os.mkdir
+
+    def mkdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).name == refused:
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+
+
+def test_create_names_the_folder_it_cannot_make_and_points_to_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1: the drive-root default refused (a standard or locked-down user)."""
+    orig = fake_client(tmp_path)
+    clients = tmp_path / "root" / "Yu'lon Clients"
+    target = clients / "WoW (Yu'lon \u2013 WoW WotLK)"
+    _refusing_mkdir(monkeypatch, "Yu'lon Clients")
+    with pytest.raises(play_client.PlayClientError) as info:
+        build(orig, target, tmp_path)
+    message = str(info.value)
+    assert f"could not create the folder {clients}" in message
+    assert "Change\u2026" in message
+    assert "Nothing was created" in message
+    assert not clients.exists()
+    assert not (tmp_path / "root").exists(), "a folder made on the way is left behind"
+
+
+def test_create_removes_the_folders_it_made_on_the_way_when_one_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1: `Yu'lon` made under LOCALAPPDATA, then `Clients` refused: nothing stays."""
+    orig = fake_client(tmp_path)
+    local = tmp_path / "Local"
+    local.mkdir()
+    target = local / "Yu'lon" / "Clients" / "WoW (Yu'lon \u2013 WoW WotLK)"
+    _refusing_mkdir(monkeypatch, "Clients")
+    with pytest.raises(play_client.PlayClientError, match="Change\u2026"):
+        build(orig, target, tmp_path)
+    assert list(local.iterdir()) == []
+
+
 def test_default_target_reads_this_pcs_env_and_os_when_given_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

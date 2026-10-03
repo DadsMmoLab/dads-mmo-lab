@@ -683,6 +683,48 @@ _ACROSS_DRIVES_ADVICE = (
 )
 
 
+_CHOOSE_ANOTHER = (
+    "Make it again and choose a folder you can write to with Change\u2026, for example "
+    "one next to your client."
+)
+
+
+def _cannot_create(target: Path, partial: Path, exc: OSError) -> str:
+    """`create()`'s sentence for a folder it could not make: the one refused, by name (T184)."""
+    refused = Path(exc.filename) if exc.filename else partial
+    reason = exc.strerror or str(exc)
+    if refused == partial:
+        return f"Yu'lon could not create the folder {target} ({reason})."
+    return (
+        f"Yu'lon could not create the folder {refused} ({reason}), which {target} would " "be in."
+    )
+
+
+def _make_parents(folder: Path, made: list[Path]) -> None:
+    """Make `folder` and its missing parents, top first, adding each one made to `made`.
+
+    Kept apart so a failed `create()` can take away exactly what it added on the
+    way (`_remove_empty`): the default folder outside OneDrive (T184) can be
+    `Yu'lon\\Clients` under LOCALAPPDATA or `Yu'lon Clients` at a drive's root.
+    """
+    missing = [p for p in (folder, *folder.parents) if not p.exists()]
+    for path in reversed(missing):
+        try:
+            path.mkdir()
+        except FileExistsError:
+            continue  # made meanwhile by someone else: not ours to remove
+        made.append(path)
+
+
+def _remove_empty(made: list[Path]) -> None:
+    """Remove the folders `_make_parents` made, deepest first, while they are still empty."""
+    for path in reversed(made):
+        try:
+            path.rmdir()
+        except OSError:
+            return  # not empty (another build put something there) or not ours to remove
+
+
 class _Stop(Exception):
     """A build that stops: what happened, and what to do next (the middle is the cleanup)."""
 
@@ -751,8 +793,15 @@ def create(
 
     full_copy = False
     made = False
+    on_the_way: list[Path] = []
     try:
-        partial.mkdir(parents=True)
+        try:
+            _make_parents(partial.parent, on_the_way)
+            partial.mkdir()
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                raise
+            raise _Stop(_cannot_create(target, partial, exc), _CHOOSE_ANOTHER) from exc
         made = True
         marker = Marker(
             game=game, server_dir=server_dir, source_client_dir=original, created_at=now()
@@ -819,6 +868,7 @@ def create(
                 sleep(_RENAME_DELAY)
     except BaseException as exc:
         cleaned = _discard(partial, original, sleep=sleep) if made else None
+        _remove_empty(on_the_way)
         if not isinstance(exc, Exception):
             raise
         if isinstance(exc, _Stop):
