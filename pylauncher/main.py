@@ -170,10 +170,15 @@ def build_catalog_tab(
     from PySide6.QtWidgets import QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon.ui.icons import get_tab_icon
+    from yulon.ui.sidebar import SidebarRail
     from yulon.ui.widgets.update_bar import UpdateBar
 
     tabs = QTabWidget(window)
     tabs.setObjectName("sidebar-tabs")
+    # Before any tab exists: `setTabBar` is only honoured on an empty widget.
+    # The rail keeps its width with every tab hidden, and never draws or
+    # leaves current a hidden tab (T192, `sidebar.py`).
+    tabs.setTabBar(SidebarRail(tabs))
     tabs.setTabPosition(QTabWidget.TabPosition.West)
     tabs.setIconSize(QSize(18, 18))
     # The sidebar grows by one tab per remembered install; once there are more
@@ -181,7 +186,10 @@ def build_catalog_tab(
     # until the text clips rather than scroll. Scroll buttons keep each tab at
     # its styled size and let the rail scroll instead, on any window height.
     tabs.setUsesScrollButtons(True)
-    tabs.setElideMode(Qt.TextElideMode.ElideRight)
+    # Never elided (T192): with ElideRight every tab shrank to its elided
+    # minimum once the rail overflowed -- "WoW…", "Cata…". The titles are short
+    # now (`tab_titles.sidebar_titles`) and the rail scrolls instead.
+    tabs.setElideMode(Qt.TextElideMode.ElideNone)
     central = QWidget(window)
     column = QVBoxLayout(central)
     # The app's identity banner, styled like a Dadcraft title bar
@@ -566,6 +574,7 @@ def build_window() -> object:
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.launcher_window import LauncherWindow
     from yulon.ui.logs_view import LogsView
+    from yulon.ui.sidebar import SidebarPins
     from yulon.ui.tab_titles import retitle_controller_tabs
     from yulon.ui.theme import (
         CHECK_UPDATES_BUTTON,
@@ -606,6 +615,8 @@ def build_window() -> object:
         yulon_log_panels: list[LogPanel]
         # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
         yulon_logs_view: LogsView
+        # T192: the Catalog and Logs buttons pinned above the rail.
+        yulon_sidebar_pins: SidebarPins
         # T179: the runner of the start-up sweep of temporary client copies, held
         # so the job is not collected while it runs.
         yulon_sweep_jobs: Any
@@ -730,6 +741,19 @@ def build_window() -> object:
     logs_view = LogsView(lambda: list(state.installs), catalog)
     tabs.insertTab(1, logs_view, get_tab_icon("console"), "Logs")
     tabs.setTabToolTip(1, "Yu'lon's own logs, and a file to send when something goes wrong")
+    # T192: both stay tabs 0 and 1 -- `indexOf()`, the bumpers and
+    # `setCurrentIndex(0)` all still reach them -- but are drawn as two pinned
+    # buttons above the rail, so a rail of servers scrolls and they never do.
+    # Hiding the current tab moves the bar off it, so the Catalog is made
+    # current again after: a hidden tab can be current, and the rail draws
+    # nothing selected while it is.
+    tabs.tabBar().setTabVisible(0, False)
+    tabs.tabBar().setTabVisible(1, False)
+    tabs.setCurrentIndex(0)
+    window.yulon_sidebar_pins = SidebarPins(
+        tabs,
+        [(0, get_tab_icon("catalog"), "Catalog"), (1, get_tab_icon("console"), "Logs")],
+    )
     navigator.invalidate()
 
     def _build_tab_menu(pos: QPoint) -> QMenu | None:
@@ -737,36 +761,34 @@ def build_window() -> object:
         index = tab_bar.tabAt(pos)
         if index < 0:
             return None
+        # Only a server tab has a menu. The Catalog's own branch (one disabled
+        # caption) went with T192: Catalog and Logs are pinned above the bar
+        # and have no tab in it to right-click, so this guard is the backstop.
+        widget = tabs.widget(index)
+        if not isinstance(widget, ControllerView):
+            return None
         menu = QMenu(tab_bar)
-        if index == 0:
-            act = menu.addAction("Catalog of Server Emulators")
-            act.setEnabled(False)
-        else:
-            widget = tabs.widget(index)
-            if not isinstance(widget, ControllerView):
-                # The Logs tab (T93): nothing to open or start from its handle.
-                return None
-            cv = widget
-            sd = cv.services.controller.server_dir
-            open_dir_act = menu.addAction("Open Server Folder in File Manager")
-            open_dir_act.triggered.connect(
-                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
-            )
-            copy_path_act = menu.addAction("Copy Server Path")
-            copy_path_act.triggered.connect(lambda: QGuiApplication.clipboard().setText(str(sd)))
-            menu.addSeparator()
-            if cv.start_button.isEnabled() and cv.start_button.isVisible():
-                start_act = menu.addAction("Start Server")
-                start_act.triggered.connect(cv.start_server)
-            if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
-                stop_act = menu.addAction("Stop Server")
-                stop_act.triggered.connect(cv.stop_server)
-            # T95: the ×'s dialog, for anyone who reads the menu first.
-            # The same entry point and the same refusals.
-            menu.addSeparator()
-            remove_act = menu.addAction(forgetting.BUTTON_LABEL)
-            menu_key = (cv.entry.id, sd)
-            remove_act.triggered.connect(lambda _checked=False, k=menu_key: request_removal(*k))
+        cv = widget
+        sd = cv.services.controller.server_dir
+        open_dir_act = menu.addAction("Open Server Folder in File Manager")
+        open_dir_act.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
+        )
+        copy_path_act = menu.addAction("Copy Server Path")
+        copy_path_act.triggered.connect(lambda: QGuiApplication.clipboard().setText(str(sd)))
+        menu.addSeparator()
+        if cv.start_button.isEnabled() and cv.start_button.isVisible():
+            start_act = menu.addAction("Start Server")
+            start_act.triggered.connect(cv.start_server)
+        if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
+            stop_act = menu.addAction("Stop Server")
+            stop_act.triggered.connect(cv.stop_server)
+        # T95: the ×'s dialog, for anyone who reads the menu first.
+        # The same entry point and the same refusals.
+        menu.addSeparator()
+        remove_act = menu.addAction(forgetting.BUTTON_LABEL)
+        menu_key = (cv.entry.id, sd)
+        remove_act.triggered.connect(lambda _checked=False, k=menu_key: request_removal(*k))
         return menu
 
     def _on_tab_bar_context_menu(pos: QPoint) -> None:

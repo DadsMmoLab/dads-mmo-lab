@@ -1424,15 +1424,19 @@ def test_two_installs_under_different_parents_do_not_get_the_same_tab_title(
 
 
 def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_path: Any) -> None:
-    """The rail is narrow, so a long install name elides — the full server dir
-    must stay reachable on hover, or elision becomes information loss."""
+    """The rail shows the short game name (T192) — the full server dir must stay
+    reachable on hover, or the short title becomes information loss.
+
+    T192 changed the tooltip from the bare path to "WoW WotLK — <path>", so the
+    whole game name is on it too; the path is still all of it.
+    """
     server_dir = tmp_path / "DadsMmoLab"
     catalog = _catalog_view(window)
     catalog.installed.emit("wow-wotlk", server_dir, None)
 
     tabs = window.property("tabs")
     index = tabs.indexOf(_tab_for(window, server_dir))
-    assert tabs.tabToolTip(index) == str(server_dir)
+    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
 
 
 def test_the_logs_tab_sits_under_the_catalog_and_stays_there(window: Any, tmp_path: Any) -> None:
@@ -2176,11 +2180,10 @@ def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
     assert [title for title, _, _ in asked] == [forgetting.TITLE], "not the same dialog"
     assert tabs.indexOf(view) != -1, "answered No, yet the tab went"
 
-    catalog = window.yulon_tab_menu(bar.tabRect(0).center())
-    assert catalog.actions(), "not the Catalog's menu"
-    assert forgetting.BUTTON_LABEL not in [
-        a.text() for a in catalog.actions()
-    ], "the Catalog's menu offers a removal"
+    # T192: the Catalog is pinned above the rail, no longer a tab in it, so
+    # there is nothing of it in the bar to right-click (its menu offered one
+    # disabled caption and nothing else).
+    assert not bar.isTabVisible(0) and bar.tabRect(0).isEmpty()
 
 
 def test_the_tab_menu_answered_yes_removes_the_server(
@@ -4312,8 +4315,10 @@ def test_a_server_folder_with_an_ampersand_keeps_it_on_its_tab(window: Any, tmp_
 
     title = tabs.tabText(index)
     assert QKeySequence.mnemonic(title).isEmpty(), title
-    assert "Raids & Dungeons" in title.replace("&&", "&"), title
-    assert tabs.tabToolTip(index) == str(server_dir)
+    # T192: the folder is on the tab only when another tab has the same game
+    # (`test_tab_titles.py` asks that case); the tooltip always carries it.
+    assert "Raids & Dungeons" in tabs.tabToolTip(index), tabs.tabToolTip(index)
+    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
 
 
 def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
@@ -4823,3 +4828,159 @@ def test_the_header_check_button_is_never_cut_off(shown_window: Any, size: tuple
     inside = header.contentsRect().marginsRemoved(header.layout().contentsMargins())
     assert inside.contains(button.geometry()), (button.geometry(), inside)
     assert button.height() >= TOUCH_TARGET_PX
+
+
+# -- T192: whole short names on the rail; Catalog and Logs pinned above it -----------
+
+
+@pytest.fixture
+def five_servers(shown_window: Any, tmp_path: Any) -> Iterator[list[Any]]:
+    """Five server tabs, the second WotLK on another disk with the same folder name.
+
+    Removed again afterwards through the tab's own `uninstalled`, as every test
+    on the shared window must.
+    """
+    made = [
+        ("wow-tbc", tmp_path / "WoW TBC"),
+        ("wow-vanilla", tmp_path / "WoW Vanilla"),
+        ("wow-tortoise", tmp_path / "WoW Tortoise"),
+        ("wow-centurion", tmp_path / "WoW Centurion"),
+        ("wow-wotlk", tmp_path / "disk2" / "WoW WotLK"),
+    ]
+    catalog = _catalog_view(shown_window)
+    for game, folder in made:
+        catalog.installed.emit(game, folder, None)
+    process_events(30)
+    yield [_tab_for(shown_window, folder) for _, folder in made]
+    for game, folder in made:
+        view = _tab_for(shown_window, folder)
+        view.uninstalled.emit(game, folder)
+    process_events(20)
+
+
+SIZES = [(960, 640), (1280, 800), (1920, 1080)]
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_every_server_tab_shows_its_whole_short_name(
+    shown_window: Any, five_servers: list[Any], size: tuple[int, int]
+) -> None:
+    """A3/B5/C9: with more tabs than fit, every tab shrank to "WoW…" / "Cata…".
+
+    Short names ("TBC", not "WoW TBC — WoW TBC"), never elided: the rail
+    scrolls instead, so each tab is at least as long as its text asks.
+
+    Mutation: `ElideRight` back and the 960 tabs are shorter than their hints.
+    """
+    _at_width(shown_window, size)
+    tabs = shown_window.property("tabs")
+    bar = tabs.tabBar()
+    for view in five_servers:
+        index = tabs.indexOf(view)
+        assert (
+            bar.tabRect(index).height() >= bar.tabSizeHint(index).height()
+        ), f"{bar.tabText(index)!r} at {size}: {bar.tabRect(index)} < {bar.tabSizeHint(index)}"
+        assert not bar.tabText(index).startswith("WoW "), bar.tabText(index)
+    # Its first line, whatever other TBC tab an earlier test on the shared
+    # window left open (that one would add the folder as a second line).
+    assert bar.tabText(tabs.indexOf(five_servers[0])).split("\n")[0] == "TBC"
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_catalog_and_logs_are_pinned_above_the_rail_at_every_size(
+    shown_window: Any, five_servers: list[Any], size: tuple[int, int]
+) -> None:
+    """The Catalog was tab 0 of a scrolling bar, so with a few servers it scrolled away.
+
+    Both are pinned buttons above the bar, inside the tab widget, each at least
+    its own size hint, and the bar starts below them -- after the restyle at
+    each size, which is what moves the bar.
+
+    Mutation: drop the `::tab-bar` offset and the bar starts at the top, under
+    the pins.
+    """
+    _at_width(shown_window, size)
+    tabs = shown_window.property("tabs")
+    bar = tabs.tabBar()
+    pins = shown_window.yulon_sidebar_pins
+    assert pins.isVisible()
+    assert tabs.rect().contains(pins.geometry()), (pins.geometry(), tabs.rect())
+    assert pins.geometry().bottom() < bar.geometry().top(), (pins.geometry(), bar.geometry())
+    for button in pins.buttons.values():
+        assert button.isVisible()
+        assert button.width() >= button.sizeHint().width(), (button.size(), button.sizeHint())
+        assert button.height() >= button.sizeHint().height(), (button.size(), button.sizeHint())
+    assert not bar.isTabVisible(0) and not bar.isTabVisible(1)
+
+
+def test_the_catalog_pin_stays_put_and_visible_with_the_last_server_current(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    _at_width(shown_window, (960, 640))
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    catalog = pins.buttons[0]
+    tabs.setCurrentIndex(0)
+    process_events(20)
+    where = catalog.mapTo(shown_window, catalog.rect().topLeft())
+
+    tabs.setCurrentWidget(five_servers[-1])
+    process_events(20)
+
+    assert catalog.isVisible()
+    assert catalog.mapTo(shown_window, catalog.rect().topLeft()) == where
+    assert not catalog.isChecked() and not pins.buttons[1].isChecked()
+
+
+def test_pressing_the_catalog_pin_shows_the_catalog(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    """The pin is the Catalog's tab now: it shows tab 0, is checked, and the header
+    hides the realm badge as it does on the Catalog (T188 C6)."""
+    tabs = shown_window.property("tabs")
+    header = shown_window.property("header")
+    pins = shown_window.yulon_sidebar_pins
+    tabs.setCurrentWidget(five_servers[-1])
+    process_events(10)
+    assert header._badge.isHidden() is False
+
+    pins.buttons[0].click()
+    process_events(10)
+
+    assert tabs.currentIndex() == 0
+    assert pins.buttons[0].isChecked() and not pins.buttons[1].isChecked()
+    assert header._badge.isHidden() is True
+
+    pins.buttons[1].click()
+    process_events(10)
+    assert tabs.currentIndex() == 1
+    assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+
+
+def test_the_next_tab_bumper_from_the_last_server_lands_on_the_catalog(
+    shown_window: Any, five_servers: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LB/RB still walk tabs 0..n (they stayed tabs), and the pin follows them.
+
+    The bumper acts on the tab widget around the FOCUSED widget. On the shared
+    window, after the module's earlier tests, offscreen Qt will not make this
+    window active again (measured: `requestActivate()` never lands), so the
+    focus is answered as the rail's bar -- what a pad user on the rail has.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui import gamepad
+    from yulon.ui.gamepad import Action
+
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    tabs.setCurrentIndex(tabs.count() - 1)
+    monkeypatch.setattr(gamepad.QApplication, "focusWidget", staticmethod(tabs.tabBar))
+    assert QApplication.focusWidget() is tabs.tabBar()
+    process_events(10)
+
+    shown_window.yulon_keyboard._navigator.perform(Action.CYCLE_NEXT)
+    process_events(10)
+
+    assert tabs.currentIndex() == 0
+    assert pins.buttons[0].isChecked()

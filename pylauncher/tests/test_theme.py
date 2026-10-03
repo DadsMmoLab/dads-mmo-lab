@@ -42,7 +42,7 @@ def test_dadcraft_theme_qss_covers_essential_controls() -> None:
     assert "QMainWindow" in DADCRAFT_THEME_QSS
     assert "QTabWidget" in DADCRAFT_THEME_QSS
     assert "QTabBar::tab" in DADCRAFT_THEME_QSS
-    assert "QTabWidget#sidebar-tabs QTabBar::tab" in DADCRAFT_THEME_QSS
+    assert "QTabWidget#sidebar-tabs > QTabBar::tab" in DADCRAFT_THEME_QSS
     assert "QMenu" in DADCRAFT_THEME_QSS
     assert "QMenu::item" in DADCRAFT_THEME_QSS
     assert "QPushButton" in DADCRAFT_THEME_QSS
@@ -173,7 +173,7 @@ def test_the_sidebar_tab_is_bounded_to_a_narrow_rail() -> None:
     # The West sidebar (objectName "sidebar-tabs") reads as an icon-first rail:
     # `max-width` caps it near the icon-plus-padding width, `min-width` keeps it
     # from collapsing, and it carries a real touch-target height.
-    west = DADCRAFT_THEME_QSS.split("QTabWidget#sidebar-tabs QTabBar::tab {")[1].split("}")[0]
+    west = DADCRAFT_THEME_QSS.split("QTabWidget#sidebar-tabs > QTabBar::tab {")[1].split("}")[0]
     assert "max-width: 64px" in west
     assert "min-width: 48px" in west
     assert "min-height: 44px" in west

@@ -152,6 +152,18 @@ it the size the launcher is built around, in the theme's colours.
 """
 
 
+SIDEBAR_PIN_BUTTON = "sidebar-pin"
+"""objectName of the Catalog and Logs buttons pinned above the sidebar rail (T192, `sidebar.py`)."""
+
+SIDEBAR_PIN_GAP = 4
+"""The gap (px) above, between and below the two pinned buttons (`sidebar.SidebarPins`)."""
+
+SIDEBAR_RAIL_WIDTH = 64
+"""The rail's thickness (px): what a server tab measures across it under the
+`QTabWidget#sidebar-tabs > QTabBar::tab` rule (measured offscreen 2026-10-03), and
+the floor `sidebar.SidebarRail` keeps when every tab in it is hidden."""
+
+
 CHECK_UPDATES_BUTTON = "check-for-updates"
 """objectName of the header's "Check for updates" (T90; a real button since T193).
 
@@ -307,8 +319,10 @@ QTabBar::tab:focus, QTabBar::tab:top:focus {{
    Selected by objectName (`sidebar-tabs` in main.py), never by a negation and
    never by the `:west` pseudo-state: Qt does not reliably honour positional
    pseudo-states on `::tab` (measured). The right edge is left unbordered so the
-   rail merges into the pane beside it. */
-QTabWidget#sidebar-tabs QTabBar::tab {{
+   rail merges into the pane beside it. A CHILD selector (T193, found by T189):
+   with a space it reached every tab bar below the rail too, and capped a
+   server page's own sub-tabs at the rail's 64px. */
+QTabWidget#sidebar-tabs > QTabBar::tab {{
     background-color: {COLOR_BG_PANEL};
     color: {COLOR_TEXT_MUTED};
     border: 1px solid transparent;
@@ -321,21 +335,59 @@ QTabWidget#sidebar-tabs QTabBar::tab {{
     min-height: {_touch(44, scale)};
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:hover {{
+QTabWidget#sidebar-tabs > QTabBar::tab:hover {{
     background-color: #242424;
     color: {COLOR_GOLD_LIGHT};
     border: 1px solid {COLOR_GOLD_BRASS};
     border-left: 3px solid {COLOR_GOLD_BRASS};
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:selected {{
+QTabWidget#sidebar-tabs > QTabBar::tab:selected {{
     background-color: {COLOR_BG_CONTAINER};
     color: {COLOR_GOLD_BRIGHT};
     border: 1px solid {COLOR_BRASS_DARK};
     border-left: 3px solid {COLOR_GOLD_BRIGHT};
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:focus {{
+QTabWidget#sidebar-tabs > QTabBar::tab:focus {{
+    border: 1px solid {COLOR_GOLD_BRIGHT};
+    border-left: 3px solid {COLOR_GOLD_BRIGHT};
+}}
+
+/* T192: Catalog and Logs, pinned above the rail, each drawn as a rail tab is:
+   muted at rest, the gold left edge while its page is on screen. The bar is
+   pushed down by the strip they fill, and that offset is set by `SidebarPins`
+   from the pins' own size hint, not here: their height is the platform font's
+   (an icon over a label), and an offset spelled in this sheet would have to
+   guess it. No horizontal padding: "Catalog" plus the 3px edge just fits the
+   64px rail, and with 2px a side it asked for 66 (measured). */
+QToolButton#{SIDEBAR_PIN_BUTTON} {{
+    background-color: {COLOR_BG_PANEL};
+    color: {COLOR_TEXT_MUTED};
+    border: 1px solid transparent;
+    border-left: 3px solid transparent;
+    border-radius: 0px;
+    padding: 2px 0px;
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(12, scale)};
+    min-height: {_touch(30, scale)};
+}}
+
+QToolButton#{SIDEBAR_PIN_BUTTON}:hover {{
+    background-color: {COLOR_BG_PARCHMENT_LIGHT};
+    color: {COLOR_GOLD_LIGHT};
+    border: 1px solid {COLOR_GOLD_BRASS};
+    border-left: 3px solid {COLOR_GOLD_BRASS};
+}}
+
+QToolButton#{SIDEBAR_PIN_BUTTON}:checked {{
+    background-color: {COLOR_BG_CONTAINER};
+    color: {COLOR_GOLD_BRIGHT};
+    border: 1px solid {COLOR_BRASS_DARK};
+    border-left: 3px solid {COLOR_GOLD_BRIGHT};
+}}
+
+QToolButton#{SIDEBAR_PIN_BUTTON}:focus {{
     border: 1px solid {COLOR_GOLD_BRIGHT};
     border-left: 3px solid {COLOR_GOLD_BRIGHT};
 }}
