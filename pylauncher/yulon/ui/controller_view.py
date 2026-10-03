@@ -4539,10 +4539,13 @@ would fold the log and the report at the 1280x800 the app opens at, which T80
 and T85 measured and the gates photographed open.
 
 Two rows and not the three the ticket floated, because three is 185px and the
-tab does not have it: at 960x640, past the pins and with the bar wrapped, the
-list is 152px with the card on one line and the log and the report already
-folded -- everything left above and below it is a toolbar line, the version
-lines, or a strip whose only way of being shorter is to cut its words.
+tab did not have it in the state that folds the card: at 960x640, past the pins,
+with the bar wrapped and a job's row on the tab, the list measured 161px
+(2026-10-03; 152 when T153 measured it) with the card on one line and the log
+and the report already folded -- everything left above and below it is a
+toolbar line, the version lines, or a strip whose only way of being shorter is
+to cut its words. Without a job's row the list had its two rows there beside
+the card whole, and the card kept its sentence.
 """
 
 _LIST_FLOOR_FLOOR = 40

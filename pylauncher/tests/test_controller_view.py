@@ -18640,23 +18640,44 @@ def test_past_its_pins_with_a_rebuild_owed_nothing_on_the_modules_tab_is_cut(
 
 
 def _the_list_needs_the_cards_sentence(view: ControllerView) -> None:
-    """Put a job's row on the Modules tab: the state where 960x640 folds the card.
+    """Put a job's row on the Modules tab: past the pins, the state where 960x640 folds the card.
 
-    Past the pins and nothing else, the list now has its two rows at 960x640
-    with the card whole, so the card is right to keep its sentence there.
-    T191 took the job's row off the tab until a job has run (74px), which left
-    the list 140px on T189's branch: 5px under the 145 it folds for. Two
-    changes each close that gap alone: T193's rail rule stopped reaching the
-    server's sub-tab bar (60px tall at 960 -> 51, 9px more page; 149 after
-    the merge), and T194's shorter sentence wraps to two lines at 824px, not
-    three (card 136 -> 122; 163 with both). Measured themed at 960x640.
-
-    A job's row is the state T153 measured, and what
-    `test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate` already
-    runs for the same reason since T191: with it on the tab the list has 89px
-    with the card whole, so the card folds at 960x640 and is whole at 1280x800.
+    Without it the list has its two rows at 960x640 beside the card whole, and
+    the card keeps its sentence there
+    (`test_at_the_smallest_window_the_card_folds_for_a_jobs_row_and_not_before`).
     """
     _ran_a_job(view)
+
+
+def test_at_the_smallest_window_the_card_folds_for_a_jobs_row_and_not_before(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Both sides of the card's rule at ONE size: whole where the list has its rows, else a line.
+
+    Past the pins at 960x640, the list beside the card whole has the two rows the
+    card would give its sentence for, so folding it there would take the words
+    away for nothing. A job's row on the tab takes that room, and then the card
+    goes to its one line. A fit that over-bills the tab -- counting a row that is
+    not drawn -- folds the first state and is caught here, which the tests that
+    only ever run with the job's row cannot see.
+    """
+    import main
+
+    view = _past_its_pin(ps, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.custom_module_card.isVisible(), "the card folded with the list's rows to spare"
+    assert view.custom_module_line.isHidden(), "the one-line card is on screen beside the card"
+    rows = controller_view_module.MODULE_LIST_ROWS_HEIGHT
+    assert view.modules_panel.height() >= rows, (
+        f"the card is whole over a list of {view.modules_panel.height()}px, "
+        f"under the {rows} it gives its sentence for"
+    )
+
+    _the_list_needs_the_cards_sentence(view)
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.custom_module_card.isHidden(), "a job's row took the room and the card stayed whole"
+    assert view.custom_module_line.isVisible(), "neither form of the card is on screen"
 
 
 def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
