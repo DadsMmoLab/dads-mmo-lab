@@ -2743,17 +2743,17 @@ class ServersDownWork:
     record saying something is waiting would then be false. Must not raise.
     """
     keep: Callable[[], Iterator[str]] = lambda: iter(())
-    done: Callable[[], Iterator[str]] = lambda: iter(())
-    """Once the new build is up, or kept after its banner (T197 fix round 6).
-
-    Nothing the work recorded is removed before this: a build that fails its ready
-    wait is rolled back, and the old build still needs what the record owed then.
-    """
     """Instead of `settle()`, when the rollback stopped before the old build was back (T197).
 
     The new build stays on its tags, so what it needs and `forward()` did not get to
     is left waiting for it rather than undone: there, a record naming the tables to
     import is true. A raise is said in the press's sentence, not in its place.
+    """
+    done: Callable[[], Iterator[str]] = lambda: iter(())
+    """Once the new build is up, or kept after its banner (T197 fix round 6).
+
+    Nothing the work recorded is removed before this: a build that fails its ready
+    wait is rolled back, and the old build still needs what the record owed then.
     """
 
 

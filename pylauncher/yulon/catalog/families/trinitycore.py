@@ -1002,10 +1002,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         left = list(changes.left)
         notes = list(changes.notes)
         gone = {cast(re.Match[str], _PART.match(rel))["stem"] for rel in changes.left_parts}
-        # A file the kept build needed (`required`) that this move's checkout no longer
-        # has is left like any other (fix round 5): the new build replaces the kept one,
-        # so nothing it needed is owed any more. Only "Finish the world update", which
-        # starts the kept build itself, refuses to leave one out.
+        # A file this move's commit deleted (`changes.left`) is left, owed or not (fix
+        # round 5): the new build replaces the kept one, so nothing it needed is owed
+        # any more. A file gone from the disk alone is left only when no kept build
+        # needs it (`required`); one that does is imported, and refused as missing.
         for rel in pending.reimport:
             if rel in reimport or rel in left:
                 continue
@@ -1016,10 +1016,13 @@ class TrinityCoreInstaller(CmangosInstaller):
             # deleted it (`changes.left`, above); gone from the disk alone, it is
             # still imported, and the plan refuses it as missing (fix round 6).
             reimport.append(rel)
+        # Split tables the same way (fix round 7): one a part of which this move's
+        # commit deleted (`gone`) is left whole; one gone from the disk alone is left
+        # only when no kept build needs it, else the plan refuses it as missing.
         for stem in pending.parts:
             if stem in parts or stem in gone:
                 continue
-            if not _parts_on_disk(server_dir, stem):
+            if not _parts_on_disk(server_dir, stem) and stem not in pending.required:
                 notes.append(
                     f"{stem}.*.sql is no longer in {self.entry.name}'s snapshot; its table is left "
                     "in your world database as it is."
@@ -1238,7 +1241,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                         server_dir,
                         set(changes.reimport),
                         set(changes.parts),
-                        required=frozenset(changes.reimport),
+                        required=frozenset((*changes.reimport, *changes.parts)),
                     )
                 except InstallerError as also:
                     raise InstallerError(
@@ -1333,10 +1336,15 @@ class TrinityCoreInstaller(CmangosInstaller):
         ctx = self._world_ctx(server_dir, cancel, state=state)
         runs = self._reimport_runs(ctx, changes, missing_ok=True)
         names = [run.rel for run in runs]
-        found = set(names)
+        found = set(names) | {m["stem"] for rel in names if (m := _PART.match(rel)) is not None}
         # T197 (fix rounds 4-5): a file the kept build needs is never left out, whether
-        # it is gone from the sources or only from the import plan that reads them.
-        missing = [rel for rel in pending.required if rel not in found]
+        # it is gone from the sources or only from the import plan that reads them; nor
+        # is a split table it needs, none of whose parts the plan reads (fix round 7).
+        missing = [
+            f"{rel}.*.sql" if rel in pending.parts else rel
+            for rel in pending.required
+            if rel not in found
+        ]
         if missing:
             raise InstallerError(
                 _needed_and_missing(self.entry, missing, past_the_pin=past_the_tested_pin(state))
@@ -1533,7 +1541,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         )
         found = {run.rel for run in runs}
-        missing = sorted(wanted - found)
+        found_stems = {m["stem"] for rel in found if (m := _PART.match(rel)) is not None}
+        # A split table none of whose parts the plan reads is missing too (fix round 7).
+        missing = sorted(wanted - found) + sorted(f"{stem}.*.sql" for stem in stems - found_stems)
         if missing and not missing_ok:
             raise InstallerError(
                 f"The world tables this update changed are not all in the server's sources "
@@ -1563,8 +1573,9 @@ class TrinityCoreInstaller(CmangosInstaller):
     ) -> None:
         """`_write_pending()` from the files' names and split tables' stems (T197 fix round 3).
 
-        `required`: files a kept build needs (fix round 4), which "Finish the world
-        update" and the next update refuse to leave out when they are missing.
+        `required`: files, and split tables' stems (fix round 7), a kept build needs
+        (fix round 4), which "Finish the world update" and the next update refuse to
+        leave out when they are missing.
         """
         path = server_dir / WORLD_REIMPORT_FILE
         before = _read_pending(server_dir)
@@ -1614,7 +1625,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._forget_pending(server_dir)
             return
         body: dict[str, object] = {"version": 1, "reimport": reimport, "parts": parts}
-        required = [rel for rel in pending.required if rel in reimport]
+        required = [rel for rel in pending.required if rel in reimport or rel in parts]
         if required:
             body["required"] = required
         _put_back(server_dir / WORLD_REIMPORT_FILE, (json.dumps(body, indent=2) + "\n").encode())
@@ -2028,7 +2039,8 @@ class _Pending:
     parts: tuple[str, ...] = ()
     unreadable: bool = False
     required: tuple[str, ...] = ()
-    """Files a kept build needs (T197 fix round 4): one missing is never "left", it refuses."""
+    """Files a kept build needs (T197 fix round 4), and the stems of split tables it needs
+    (fix round 7): one missing is never "left", it refuses."""
 
 
 def _read_pending(server_dir: Path) -> _Pending | None:

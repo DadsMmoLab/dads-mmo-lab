@@ -1429,6 +1429,28 @@ def test_a_rollback_that_stops_early_after_the_import_keeps_the_new_tables_and_s
     assert failed.value.sources_kept is True
 
 
+def test_a_rollback_that_stops_early_after_a_failed_import_keeps_what_was_not_imported(
+    box: Box,
+) -> None:
+    """Fix round 7: `forward()` failed on its first table, then the rollback stopped early.
+
+    `back()` never ran, so the new build stays on the old table: the record keeps the
+    name it did not import and every start refuses -- `keep()` must not clear it.
+    """
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    box.m.db.fail_on = "creature"
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    assert "could not be given a name to undo onto" in str(failed.value)
+    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    assert box.head() == NEW
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
 def _docker_gone_after_the_compile(box: Box) -> None:
     """Docker answers until the compile is done, then not: the recreate replaces nothing."""
     box.seams["docker_ready"] = lambda: "build" not in box.m.rec.calls
@@ -1795,6 +1817,130 @@ def test_a_rebuild_is_refused_while_a_kept_builds_tables_are_owed(
         list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
     assert str(refused.value) == f"{UNFINISHED} Nothing was changed."
     assert box.m.rec.calls.count("build") == builds
+
+
+LOCALE = f"{WORLD_SQL}/broadcast_text_locale"
+LOCALE_PARTS = ("broadcast_text_locale.1.sql", "broadcast_text_locale.2.sql")
+
+
+def _kept_with_a_split_table(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build B changed a split table and was kept without its tables imported (fix round 7)."""
+    second = box.checkout / REPO_SQL / "world" / LOCALE_PARTS[1]
+    second.write_text("INSERT INTO broadcast_text_locale VALUES (2);\n", encoding="utf-8")
+    box.changes(("M", f"{REPO_SQL}/world/broadcast_text_locale.2.sql"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
+        box.press()
+    box.seams.clear()
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+
+
+def _without_the_parts(folder: Path) -> None:
+    for name in LOCALE_PARTS:
+        (folder / REPO_SQL / "world" / name).unlink(missing_ok=True)
+
+
+def test_a_needed_split_table_the_new_commit_still_has_is_not_excused_by_the_disk(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 7: round 6's rule for split tables -- missing on disk alone excuses nothing."""
+    _kept_with_a_split_table(box, monkeypatch)
+    box.m.rec.on_clone = _without_the_parts  # the checkout lacks them; the commit kept them
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+    with pytest.raises(InstallerError) as refused:
+        box.press()
+    assert f"are not all in the server's sources ({LOCALE}.*.sql)" in str(refused.value)
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+    assert box.head() == NEW
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_an_update_whose_commit_deleted_the_kept_builds_split_table_lands_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_split_table(box, monkeypatch)
+    box.m.rec.on_clone = _without_the_parts
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(
+        *(("D", f"{REPO_SQL}/world/{name}") for name in LOCALE_PARTS), old=NEW, new="c" * 40
+    )
+    said = box.press()
+    assert said[-1] == "Centurion is running on the newest upstream code."
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_finish_will_not_leave_out_a_split_table_the_kept_build_needs(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_split_table(box, monkeypatch)
+    _without_the_parts(box.checkout)
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value).startswith(
+        f"{LOCALE}.*.sql is not among the world table files Centurion's import reads"
+    )
+    assert box.streamed() == []
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+
+
+def test_finishing_the_kept_builds_split_table_imports_it_whole_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_split_table(box, monkeypatch)
+    box.finish()
+    assert first_lines(box) == [
+        "DROP TABLE IF EXISTS broadcast_text_locale;",
+        "INSERT INTO broadcast_text_locale VALUES (2);",
+    ]
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_failed_update_that_excused_a_split_table_keeps_it_owed_after_the_rollback(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 7: B owes a split table and a table; C deletes the split table and fails.
+
+    The rollback imports the table from B's checkout and takes it off the record; the
+    split table stays owed, still marked as one B needs.
+    """
+    second = box.checkout / REPO_SQL / "world" / LOCALE_PARTS[1]
+    second.write_text("INSERT INTO broadcast_text_locale VALUES (2);\n", encoding="utf-8")
+    box.changes(
+        ("M", f"{REPO_SQL}/world/creature.sql"),
+        ("M", f"{REPO_SQL}/world/broadcast_text_locale.2.sql"),
+    )
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- b\n"})
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
+        box.press()
+    box.seams.clear()
+    creature = f"{WORLD_SQL}/creature.sql"
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [creature],
+        "parts": [LOCALE],
+        "required": [LOCALE, creature],
+    }
+
+    box.m.rec.on_clone = _without_the_parts
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(
+        *(("D", f"{REPO_SQL}/world/{name}") for name in LOCALE_PARTS), old=NEW, new="c" * 40
+    )
+    box.ready = [False, True]
+    with pytest.raises(InstallerError):
+        box.press()
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
 
 
 def test_a_new_table_the_old_build_never_had_is_not_owed_after_the_rollback(
