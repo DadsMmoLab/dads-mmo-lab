@@ -2492,7 +2492,9 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("platform.py", "_desktop_wsl_vhdx"): (
         "T39. Lists `<drive>/Users` to find the profile holding Docker Desktop's "
-        "`docker_data.vhdx`, so preflight measures the drive the images actually land on "
+        "`docker_data.vhdx` - since T199 the disk that profile's `settings-store.json` says "
+        "was moved (`CustomWslDistroDir`, reached as `/mnt/<letter>/...`), else the default "
+        "one - so preflight measures the drive the images actually land on "
         "rather than a `/var/lib/docker` that does not exist in the distro. Nothing is "
         "written anywhere near it - the path is handed to `shutil.disk_usage` and no further "
         "- and the OSError per drive is skipped because a drive with no `Users` is the "

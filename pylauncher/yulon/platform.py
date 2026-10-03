@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal, Protocol
 
 from yulon import runner
@@ -4356,10 +4356,23 @@ _DOCKER_DESKTOP_SETTINGS_KEYS = (
 )
 """Keys Docker Desktop is believed to store its data root under.
 
-Four spellings because the file has been through several: `rust-prior-art.md`
-§3 names `DataFolder`/`dataFolder`/`diskPath`, and the casing differs between
-Docker Desktop versions. All four are read and the first present one wins;
-absent means the platform default.
+Six spellings — three names, each in two casings — because the file has been
+through several: `rust-prior-art.md` §3 names `DataFolder`/`dataFolder`/
+`diskPath`, and the casing differs between Docker Desktop versions. All six are
+read in this order and the first non-empty one wins; absent means the platform
+default. On Windows `_WINDOWS_CUSTOM_DISK_KEY` is read before any of them; it is
+deliberately not in this tuple, which macOS reads too.
+"""
+
+_WINDOWS_CUSTOM_DISK_KEY = "CustomWslDistroDir"
+"""Where Docker Desktop on Windows records a disk moved with "Disk image location".
+
+Settings → Resources → Advanced → Disk image location, the move the "Docker's
+disk" refusal tells the player to make. Seen on the Windows gate box (Docker
+Desktop 29.7.2, 2026-10-03) after that move to `E:\\DockerDesktopWSL`: the key
+held that folder, the data disk was `<folder>\\disk\\docker_data.vhdx` and the
+distro's own disk `<folder>\\main\\ext4.vhdx`. Windows only: there is no
+evidence of an equivalent on macOS.
 """
 
 
@@ -4367,8 +4380,9 @@ def docker_desktop_settings_file() -> Path | None:
     """Where Docker Desktop keeps the settings JSON that names its data root.
 
     Windows: `%APPDATA%\\Docker\\settings-store.json`, with `settings.json` as
-    the older name. **Verified on no machine by this project** — it is read
-    defensively and a miss falls through to the default.
+    the older name. The first was measured on the Windows gate box (Docker
+    Desktop 29.7.2, 2026-10-03), holding `CustomWslDistroDir` after a disk move;
+    it is still read defensively, and a miss falls through to the default.
 
     macOS: `~/Library/Group Containers/group.com.docker/settings-store.json` is
     what the design believes, and believing is not knowing (phase6-decisions,
@@ -4494,7 +4508,11 @@ def _desktop_wsl_vhdx() -> Path | None:
             # not an error worth a log line per drive per preflight.
             continue
         for profile in profiles:
-            candidate = profile.joinpath(*_DESKTOP_WSL_VHDX)
+            # At most one candidate per profile: the disk its Desktop says it
+            # moved (T199), else the default one, so a C: copy left behind by
+            # the move does not turn one install into "several candidates".
+            moved = _wsl_moved_vhdx(profile)
+            candidate = moved if moved is not None else profile.joinpath(*_DESKTOP_WSL_VHDX)
             try:
                 if candidate.is_file():
                     found.append(candidate)
@@ -4505,6 +4523,53 @@ def _desktop_wsl_vhdx() -> Path | None:
     logger.info(
         f"Docker Desktop provides the daemon, but its data disk could not be pinned down "
         f"on a Windows drive ({len(found)} candidates); its free space stays unchecked"
+    )
+    return None
+
+
+_DESKTOP_WSL_SETTINGS = ("AppData", "Roaming", "Docker", "settings-store.json")
+"""Docker Desktop's settings store, relative to a Windows user profile (`%APPDATA%`)."""
+
+
+def _wsl_moved_vhdx(profile: Path) -> Path | None:
+    """The data disk this profile's Docker Desktop says it moved, as the distro sees it.
+
+    `CustomWslDistroDir` = `E:\\DockerDesktopWSL` is
+    `/mnt/e/DockerDesktopWSL/disk/docker_data.vhdx` under `_WSL_MOUNT_ROOT`.
+    None when the profile's settings name no move, the named folder holds no
+    data disk, or the value is not a drive path — a UNC share or a relative
+    name has no `/mnt/<letter>` to stand for it — and the caller then takes the
+    profile's default disk, as before T199.
+    """
+    store = profile.joinpath(*_DESKTOP_WSL_SETTINGS)
+    try:
+        if not store.is_file():
+            return None
+    except OSError:
+        return None
+    settings = _read_settings(store)
+    value = settings.get(_WINDOWS_CUSTOM_DISK_KEY) if settings is not None else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    moved = PureWindowsPath(value)
+    drive = moved.drive
+    if len(drive) != 2 or not drive[0].isalpha() or drive[1] != ":" or not moved.root:
+        logger.info(
+            f"{store} names {_WINDOWS_CUSTOM_DISK_KEY}={value!r}, which is not a drive path "
+            f"this distro can reach; the profile's default disk is used"
+        )
+        return None
+    candidate = _WSL_MOUNT_ROOT.joinpath(
+        drive[0].lower(), *moved.parts[1:], "disk", "docker_data.vhdx"
+    )
+    try:
+        if candidate.is_file():
+            return candidate
+    except OSError:
+        pass
+    logger.info(
+        f"{store} names {_WINDOWS_CUSTOM_DISK_KEY}={value!r}, but {candidate} is not there; "
+        f"the profile's default disk is used"
     )
     return None
 
@@ -4548,8 +4613,10 @@ def docker_desktop_data_root(run: RunCmd | None = None) -> Path | None:
       the constant `/var/lib/docker`, which is only true of an engine installed
       in this filesystem; under Docker Desktop's WSL integration it named a
       directory that does not exist in the distro at all (T39).
-    * Windows: the `dataFolder`/`diskPath` in Docker Desktop's settings store,
-      falling back to `%LOCALAPPDATA%\\Docker\\wsl` — the WSL2 backend's default
+    * Windows: see `_windows_data_root()`. In order: the folder a disk moved
+      with "Disk image location" sits in (`CustomWslDistroDir`, T199), the
+      `dataFolder`/`diskPath` in Docker Desktop's settings store, then
+      `%LOCALAPPDATA%\\Docker\\wsl` — the WSL2 backend's default
       home for `docker_data`. The fallback stopped being merely believed on
       2026-09-16: on a Windows 11 box with Docker Desktop 29.7.2 and no
       `dataFolder` key set at all, the disk was
@@ -4576,26 +4643,101 @@ def docker_desktop_data_root(run: RunCmd | None = None) -> Path | None:
         store = docker_desktop_settings_file()
         configured = _settings_data_folder(store) if store is not None else None
         return configured if configured is not None else _macos_default_data_root()
+    return _windows_data_root()
+
+
+def _windows_data_root() -> Path | None:
+    """Windows' answer for `docker_desktop_data_root()`: moved disk, legacy key, default.
+
+    A disk moved with "Disk image location" (`_WINDOWS_CUSTOM_DISK_KEY`) wins,
+    as the folder holding it: `<dir>\\disk`, the data disk's own folder, on the
+    same volume as the distro's `main\\ext4.vhdx`. Before T199 this key was
+    never read, so a player who followed the "Docker's disk" refusal's advice
+    and moved the disk was refused again for the drive they had moved it off.
+
+    A key that names no usable disk — not a non-empty string, not absolute
+    (drive or UNC), or no `disk\\docker_data.vhdx` in it — is logged once and
+    passed over. The legacy keys still answer after it. If none does, the
+    default is taken only when its data disk is really there: the settings say
+    the disk was moved, so the default folder alone would be the free space of
+    a drive the disk may have left, under a refusal. None is *unchecked*.
+
+    No key at all is exactly the answer from before T199: the default folder,
+    unconditionally, because there it is where Desktop will create its disk.
+    """
     store = docker_desktop_settings_file()
-    configured = _settings_data_folder(store) if store is not None else None
+    settings = _read_settings(store) if store is not None else None
+    local = os.environ.get("LOCALAPPDATA")
+    default = (Path(local) / "Docker" / "wsl") if local else None
+    if settings is None:
+        return default
+    moved_named = _WINDOWS_CUSTOM_DISK_KEY in settings
+    if moved_named:
+        moved = _custom_wsl_disk(settings[_WINDOWS_CUSTOM_DISK_KEY])
+        if moved is not None:
+            return moved
+    configured = _legacy_data_folder(settings)
     if configured is not None:
         return configured
-    local = os.environ.get("LOCALAPPDATA")
-    return (Path(local) / "Docker" / "wsl") if local else None
+    if not moved_named or default is None:
+        return default
+    try:
+        if (default / "disk" / "docker_data.vhdx").is_file():
+            return default
+    except OSError as exc:
+        logger.debug(f"could not look for Docker Desktop's default disk under {default}: {exc}")
+    return None
 
 
-def _settings_data_folder(store: Path) -> Path | None:
-    """The data root Docker Desktop's settings name, if that file can be read at all."""
+def _custom_wsl_disk(value: object) -> Path | None:
+    """The folder holding the data disk a `CustomWslDistroDir` of `value` names, or None.
+
+    None, with one log line naming the key and the value, unless `value` is a
+    non-empty string, an absolute path (`Path` on Windows is `WindowsPath`, so
+    that is a drive or a UNC share) and `<value>\\disk\\docker_data.vhdx` is a
+    file. The folder rather than the file, because `disk_usage` on a file path
+    is not reliable on every Windows Python, and both are on one volume.
+    """
+    if isinstance(value, str) and value.strip() and Path(value).is_absolute():
+        folder = Path(value) / "disk"
+        try:
+            if (folder / "docker_data.vhdx").is_file():
+                return folder
+        except OSError as exc:
+            logger.debug(f"could not look for {folder / 'docker_data.vhdx'}: {exc}")
+    logger.info(
+        f"Docker Desktop's settings name {_WINDOWS_CUSTOM_DISK_KEY}={value!r}, which is not "
+        f"an absolute folder holding disk\\docker_data.vhdx; it is passed over"
+    )
+    return None
+
+
+def _read_settings(store: Path) -> dict[str, object] | None:
+    """Docker Desktop's settings store as a JSON object, or None if it cannot be read as one.
+
+    Strict UTF-8, not `utf-8-sig`: Docker Desktop itself refuses a store that
+    starts with a BOM (measured on the Windows gate box, 2026-09-16), so a BOM
+    file names nothing Desktop is using.
+    """
     try:
         with store.open(encoding="utf-8") as fh:
             parsed = json.load(fh)
     except (OSError, ValueError) as exc:
         logger.debug(f"could not read {store}: {exc}")
         return None
-    if not isinstance(parsed, dict):
-        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _settings_data_folder(store: Path) -> Path | None:
+    """The data root Docker Desktop's settings name, if that file can be read at all."""
+    settings = _read_settings(store)
+    return _legacy_data_folder(settings) if settings is not None else None
+
+
+def _legacy_data_folder(settings: Mapping[str, object]) -> Path | None:
+    """The first non-empty `_DOCKER_DESKTOP_SETTINGS_KEYS` value, in tuple order."""
     for key in _DOCKER_DESKTOP_SETTINGS_KEYS:
-        value = parsed.get(key)
+        value = settings.get(key)
         if isinstance(value, str) and value.strip():
             return Path(value)
     return None
