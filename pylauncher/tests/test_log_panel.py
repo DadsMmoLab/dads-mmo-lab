@@ -1570,3 +1570,39 @@ def test_a_recorded_line_carries_no_t35_marker(qapp: object) -> None:
     body = _recorded(path)[1:-1]
     assert all(STAMP.match(line) for line in body), body
     assert [STAMP.sub("", line, count=1) for line in body] == ["compiling", "not a reading"]
+
+
+# -- T188 A15: a run can name its own clean ending ------------------------------
+
+
+def test_a_run_given_an_ending_says_it_instead_of_finished(qapp: object) -> None:
+    panel = LogPanel()
+    panel.run(lambda: iter(["a line"]), ended="log ended — nothing is running")
+    wait_for_panel(panel)
+
+    assert panel.status_text() == "log ended — nothing is running"
+
+
+def test_a_run_given_an_ending_that_fails_still_says_failed(qapp: object) -> None:
+    """The ending is for a clean end only: a refusal is still a refusal."""
+
+    def broken() -> Iterator[str]:
+        yield "a line"
+        raise RuntimeError("docker went away")
+
+    panel = LogPanel()
+    panel.run(broken, ended="log ended — nothing is running")
+    wait_for_panel(panel)
+
+    assert panel.status_text().startswith("FAILED: ")
+
+
+def test_the_next_run_without_an_ending_says_finished_again(qapp: object) -> None:
+    """The panel is reused (Console, then an install): the ending must not stick."""
+    panel = LogPanel()
+    panel.run(lambda: iter(["a line"]), ended="log ended — nothing is running")
+    wait_for_panel(panel)
+    panel.run(lambda: iter(["install line"]))
+    wait_for_panel(panel)
+
+    assert panel.status_text() == "finished: done"

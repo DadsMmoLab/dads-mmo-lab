@@ -4319,6 +4319,13 @@ the gate this tab really has rather than a second confirmation idiom nobody
 here has learned.
 """
 
+FOLLOW_ENDED = "log ended \u2014 the world server is not running"
+"""The Console's header when `docker logs -f` returns (T188 A15).
+
+It returns because the world container is not running, which "finished: done"
+read as a job completed.
+"""
+
 UNINSTALL_KEEP_CHARACTERS = "Uninstall this server and keep my characters"
 UNINSTALL_DELETE_CHARACTERS = "Uninstall this server and delete my characters"
 """The confirm press, named for the Keep my characters choice it carries out (T188 A14)."""
@@ -10705,7 +10712,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def follow_logs(self) -> None:
-        self.console_log.run(self.services.logs_source, title="worldserver log")
+        self.console_log.run(self.services.logs_source, title="worldserver log", ended=FOLLOW_ENDED)
 
     @Slot()
     def send_console_command(self) -> None:

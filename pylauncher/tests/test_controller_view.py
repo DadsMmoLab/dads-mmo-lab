@@ -23521,3 +23521,21 @@ def test_a_partly_up_server_with_nothing_of_ours_running_says_partly_up(
 
     assert view.realm_badge.status == "partial"
     assert view.start_button.isEnabled() and view.stop_button.isEnabled()
+
+
+# -- T188 A15: a followed log that ends says why --------------------------------
+
+
+def test_a_followed_log_that_ends_says_the_world_is_not_running(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Audit A15: `docker logs -f` returns when the world stops; it said "finished: done"."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.follow_button.click()
+    wait_for_panel(view.console_log)
+
+    said = view.console_log.status_text()
+    assert not said.startswith("finished"), said
+    assert "not running" in said, said
+    assert "world log line" in view.console_log.text()

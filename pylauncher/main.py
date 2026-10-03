@@ -204,7 +204,7 @@ def build_catalog_tab(
     console_tabs = QTabWidget()
     console_tabs.setObjectName("catalog-console-tabs")
     console_tabs.setIconSize(QSize(16, 16))
-    console_tabs.addTab(log_panel, get_tab_icon("console"), "Console & Install Logs")
+    console_tabs.addTab(log_panel, get_tab_icon("console"), "Console and Install Logs")
 
     def _set_console_visible(visible: bool) -> None:
         console_tabs.setVisible(visible)

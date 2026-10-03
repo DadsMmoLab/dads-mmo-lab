@@ -4242,6 +4242,44 @@ def test_closing_the_tab_on_screen_leaves_the_header_on_what_is_left(
         assert header._badge.isHidden() is True
 
 
+# -- T188 A7/B7/C10: "&" in a label is shown, never read as a shortcut ---------
+
+
+def _mnemonic_texts(window: Any) -> list[str]:
+    """Every button text, group title and tab title in the window carrying a shortcut."""
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtWidgets import QAbstractButton, QGroupBox, QTabBar
+
+    texts = [b.text() for b in window.findChildren(QAbstractButton)]
+    texts += [g.title() for g in window.findChildren(QGroupBox)]
+    for bar in window.findChildren(QTabBar):
+        texts += [bar.tabText(i) for i in range(bar.count())]
+    return [t for t in texts if not QKeySequence.mnemonic(t).isEmpty()]
+
+
+def test_no_label_in_the_window_turns_a_letter_into_a_shortcut(window: Any, tmp_path: Any) -> None:
+    """Audit A7/C10: "Console & Install Logs" drew as "Console _Install Logs"."""
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "a7-sweep", None)
+
+    assert _mnemonic_texts(window) == []
+
+
+def test_a_server_folder_with_an_ampersand_keeps_it_on_its_tab(window: Any, tmp_path: Any) -> None:
+    """B7: the tab title comes from the folder name, which nobody types for Qt."""
+    from PySide6.QtGui import QKeySequence
+
+    server_dir = tmp_path / "Raids & Dungeons"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    index = tabs.indexOf(view)
+
+    title = tabs.tabText(index)
+    assert QKeySequence.mnemonic(title).isEmpty(), title
+    assert "Raids & Dungeons" in title.replace("&&", "&"), title
+    assert tabs.tabToolTip(index) == str(server_dir)
+
+
 def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

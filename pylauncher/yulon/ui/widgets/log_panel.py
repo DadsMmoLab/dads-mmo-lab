@@ -661,6 +661,7 @@ class LogPanel(QWidget):
         layout.addWidget(self._text, 1)
 
         self._cancel: threading.Event | None = None
+        self._ended: str | None = None
         self._job_label = "log panel (no job yet)"
         self._started_at: float | None = None
         # One second, because the field it drives has a seconds place; a faster
@@ -914,8 +915,14 @@ class LogPanel(QWidget):
         title: str = "running",
         cancel: threading.Event | None = None,
         record_as: str | None = None,
+        ended: str | None = None,
     ) -> bool:
         """Start streaming `source()` into the panel. Returns False if a job is already running.
+
+        `ended`, when given, is what the header says when the source runs out on
+        its own instead of "finished: done" (T188 A15): the Console's
+        `docker logs -f` ends because the world stopped, which is not a job done.
+        A failure still says FAILED and a Stop still says cancelled.
 
         `cancel`, when given, is set by `stop()` so a source that supports it
         (e.g. an engine's `run(cancel=...)`) can be interrupted even while blocked
@@ -934,6 +941,7 @@ class LogPanel(QWidget):
             self._record = runlog.RunLog.open(runlog.runs_dir(), record_as)
             self._record.write(f"--- {title}")
         self._cancel = cancel
+        self._ended = ended
         self._stop_requested = False
         self._job_label = f'log panel "{title}"'
         # The zero the elapsed clock counts from. Set on the RUN, not on the
@@ -1059,6 +1067,8 @@ class LogPanel(QWidget):
         # server.
         if self._stop_requested:
             verdict = "cancelled"
+        elif ok and self._ended is not None:
+            verdict = self._ended
         else:
             verdict = ("finished: " if ok else "FAILED: ") + message
         self._status.say(verdict)

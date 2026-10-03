@@ -401,7 +401,12 @@ class DadcraftCampaignCard(QFrame):
         # rather than the card being an invisible gap in the D-pad chain. The
         # card itself has no action; Confirm falls through to its children.
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        self.setStyleSheet("background: transparent; border: none;")
+        # Scoped to the card itself (T188 C1). A selector-less sheet here
+        # cascaded to every child and beat the app sheet, so the Install button
+        # lost its amber fill and kept its near-black text on the dark card.
+        self.setStyleSheet(
+            f"QFrame#catalog-tile-{game_id} {{ background: transparent; border: none; }}"
+        )
         self._time = 0.0
         self._hovered = False
         self._hover_progress = 0.0

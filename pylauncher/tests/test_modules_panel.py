@@ -1833,3 +1833,19 @@ def test_an_uncounted_update_gets_the_chip_and_no_number() -> None:
     assert chip.action == "update"
     assert "cannot count" in chip.detail
     assert not any(ch.isdigit() for ch in chip.label + chip.detail), chip.detail
+
+
+# -- T188 A7: no card title carries a keyboard shortcut by accident -------------
+
+
+def test_no_family_card_title_turns_a_letter_into_a_shortcut(qapp: object) -> None:
+    """Audit A7: "SQL & config mods" drew as "SQL _config mods" -- Qt read "& " as a mnemonic."""
+    from PySide6.QtGui import QKeySequence
+
+    catalog = [_m("mod-a"), _m("a1", "ale"), _m("k1", "keg"), _m("m1", "mod")]
+    panel = _panel(_rows(catalog, None, None))
+
+    cards = panel.findChildren(mp._FamilyCard)
+    assert {card.family for card in cards} == set(mp.FAMILY_FILES), "a family drew no card"
+    for card in cards:
+        assert QKeySequence.mnemonic(card.title()).isEmpty(), card.title()
