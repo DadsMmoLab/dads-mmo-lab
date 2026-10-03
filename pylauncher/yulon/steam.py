@@ -914,9 +914,9 @@ def confirmation_details(report: AddReport) -> str:
     """Every file the press wrote or backed up, by name, for the Details fold."""
     client, _server = report.entries
     backup = (
-        f" It was backed up first as {report.backup.name}."
+        f"It was backed up first as {report.backup.name}."
         if report.backup is not None
-        else " There was no shortcuts.vdf before this, so there was nothing to back up."
+        else "There was no shortcuts.vdf before this, so there was nothing to back up."
     )
     compat_backup = (
         f", backed up as {report.compat_backup.name}" if report.compat_backup is not None else ""

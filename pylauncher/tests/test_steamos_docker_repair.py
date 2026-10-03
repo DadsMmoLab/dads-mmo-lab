@@ -359,7 +359,12 @@ def test_a_deck_with_a_password_is_asked_for_it_once_and_never_offered_a_new_one
 
     report = _repair(deck, ask)
 
-    assert asked == [platform.STEAMOS_DOCKER_REPAIR_QUESTION, platform.SUDO_PASSWORD_QUESTION]
+    assert asked == [
+        platform.STEAMOS_DOCKER_REPAIR_QUESTION,
+        platform.SUDO_REPAIR_PASSWORD_QUESTION,
+    ]
+    # T194 C29: the repair says what the password is for, not the install's errand.
+    assert "to reinstall Docker." in asked[1] and "for the install" not in asked[1]
     assert deck.steps == SCRIPT_ORDER
     assert report.docker_ready
 

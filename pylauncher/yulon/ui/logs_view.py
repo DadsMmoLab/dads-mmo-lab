@@ -120,8 +120,9 @@ class _ReadFailed(Exception):
     """
 
     def __init__(self, generation: int, cause: Exception) -> None:
-        # The cause's own words; its class goes to the log in `_read_failed`.
-        super().__init__(str(cause))
+        # Only the class: the job runner logs this message, and the cause's own
+        # text can quote a credential file (`_logged()`).
+        super().__init__(type(cause).__name__)
         self.generation = generation
         self.cause = cause
 
@@ -163,7 +164,7 @@ def _read_logs(
             for item in support_sources.viewables(sources)
         )
     except Exception as exc:  # boundary: the tab says so rather than losing the read
-        logger.warning(f"the Logs tab could not list its files: {type(exc).__name__}: {exc}")
+        logger.warning(f"the Logs tab could not list its files: {_logged(exc)}")
         return _Read(generation, (), None, LOGS_NOT_LISTED)
     shown = next((item.path for item in items if str(item.path) == wanted), None)
     if shown is None and items:
@@ -193,6 +194,19 @@ def _size_text(size: int) -> str:
     if size >= 1_000_000:
         return f"{size / 1_000_000:.1f} MB"
     return f"{max(1, round(size / 1000))} KB"
+
+
+def _logged(error: object) -> str:
+    """What the app log may say about an error met while reading logs and credentials.
+
+    `yulon.log` is not redacted, and these reads open the credential files
+    (`gather_known`): a parse error can quote the line it choked on, password
+    and all. So the class only -- except for an `OSError`, whose text is the
+    system's own words about a file (fix round 1, M5).
+    """
+    if isinstance(error, OSError):
+        return f"{type(error).__name__}: {error}"
+    return type(error).__name__
 
 
 LOGS_NOT_LISTED = "The logs could not be listed. Yu'lon's own log has the details."
@@ -359,7 +373,7 @@ class LogsView(QWidget):
             if error.generation != self._generation:
                 return
             error = error.cause
-        logger.warning(f"a Logs tab read failed: {type(error).__name__}: {error}")
+        logger.warning(f"a Logs tab read failed: {_logged(error)}")
         if self._reading:
             self._reading = False
             self.viewer.setPlainText(LOGS_NOT_READ)
@@ -460,7 +474,7 @@ class LogsView(QWidget):
         self._set_saving(None)
         if not isinstance(error, OSError):
             # The line on screen names no class (T194 C8); this is the log it points at.
-            logger.warning(f"support file not saved: {type(error).__name__}: {error}")
+            logger.warning(f"support file not saved: {_logged(error)}")
         self.status.setText(_why_not_saved(name, error))
 
     def _set_saving(self, dest: Path | None) -> None:

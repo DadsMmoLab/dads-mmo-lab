@@ -936,3 +936,16 @@ def test_no_proton_at_all_is_no_proton_script(tmp_path: Path) -> None:
     root.mkdir(parents=True)
 
     assert steam.find_proton_script(root) is None
+
+
+def test_the_details_have_no_doubled_spaces(tmp_path: Path) -> None:
+    """Fix round 1, M6: "….vdf.  It was backed up" carried a space from the old sentence."""
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    (config / "shortcuts.vdf").write_bytes(steam.vdf_dump({"shortcuts": {}}))
+
+    details = steam.confirmation_details(_shortcuts(tmp_path, client_dir=client).add())
+
+    assert "  " not in details, details
+    assert ".vdf. It was backed up first as" in details, details

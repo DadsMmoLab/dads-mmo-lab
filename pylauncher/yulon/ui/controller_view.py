@@ -4025,6 +4025,12 @@ def _safe_bindings(wsl_distro: str | None = None) -> dict[int, str] | None:
         return None
 
 
+LAN_CHOICE = "LAN (same Wi-Fi)"
+"""The Networking tab's first radio, and how a plan names that mode (T194)."""
+
+INTERNET_CHOICE = "Internet play (friends elsewhere)"
+"""The Networking tab's second radio, and how a plan names that mode (T194)."""
+
 LOOPBACK_CHOICE = "Only this computer (127.0.0.1)"
 """The Networking tab's third radio, bug-checklist §41.
 
@@ -8959,9 +8965,7 @@ class ControllerView(QWidget):
             "Reinstalling Docker. Answer the questions as they come; this can take a few minutes."
         )
         if self._docker_prompter is None:
-            self._docker_prompter = InputPrompter(
-                self, title=DOCKER_REINSTALL_PROMPT_TITLE, purpose="reinstall Docker"
-            )
+            self._docker_prompter = InputPrompter(self, title=DOCKER_REINSTALL_PROMPT_TITLE)
         self._docker_prompter.bind_cancel(cancel)
         ask = self._docker_prompter.ask
         self._run(
@@ -17463,8 +17467,8 @@ class ControllerView(QWidget):
     def _build_networking_tab(self) -> None:
         tab = QWidget(self)
         box = QVBoxLayout(tab)
-        self.lan_radio = QRadioButton("LAN (same Wi-Fi)", tab)
-        self.internet_radio = QRadioButton("Internet play (friends elsewhere)", tab)
+        self.lan_radio = QRadioButton(LAN_CHOICE, tab)
+        self.internet_radio = QRadioButton(INTERNET_CHOICE, tab)
         self.loopback_radio = QRadioButton(LOOPBACK_CHOICE, tab)
         self.lan_radio.setChecked(True)
         group = QButtonGroup(tab)
@@ -17551,6 +17555,9 @@ class ControllerView(QWidget):
         self._network_applying = False
         if isinstance(result, NetworkReport):
             self.network_text.appendPlainText("\n" + _format_network_report(result))
+            # The plan's commands, then what became of each one (fix round 1, M3).
+            held = [_plan_details(result.plan), _network_report_details(result)]
+            self.network_details.set_text("\n\n".join(part for part in held if part))
         self.apply_button.setEnabled(True)
 
     @Slot(object)
@@ -17933,8 +17940,8 @@ def _format_report(report: ApplyReport) -> str:
 
 
 _MODE_WORDS: dict[str, str] = {
-    "lan": "LAN (same Wi-Fi)",
-    "internet": "Internet play (friends elsewhere)",
+    "lan": LAN_CHOICE,
+    "internet": INTERNET_CHOICE,
     "loopback": LOOPBACK_CHOICE,
 }
 """A plan's mode in the words its radio button uses."""
@@ -18009,11 +18016,34 @@ def _plan_details(plan: NetworkPlan) -> str:
 
 
 def _format_network_report(report: NetworkReport) -> str:
-    lines = ["Applied:"]
-    lines += [f"  ✓ {d}" for d in report.done] or ["  (nothing)"]
+    """What Apply did, as a player reads it; the commands and SQL are `_network_report_details`'s.
+
+    Fix round 1, M3: `done` is the commands that ran and `skipped` is the ones
+    that did not (and the realmlist SQL), each spelled as the command itself.
+    """
+    total = len(report.done) + len(report.skipped)
+    if total == 0:
+        lines = ["Apply had nothing to do."]
+    else:
+        lines = [f"Apply finished {len(report.done)} of {total} steps."]
+    if report.skipped:
+        lines.append(
+            f"{len(report.skipped)} could not be done; Details lists them, with what to run "
+            "by hand."
+        )
+    if report.restart_required:
+        lines.append(f"The realm list now gives players {report.plan.client_realmlist}.")
+        lines.append("⚠ Restart the server so it hands out the new address.")
+    return "\n".join(lines)
+
+
+def _network_report_details(report: NetworkReport) -> str:
+    """Every step Apply ran and every one it could not, as run; "" when there were none."""
+    lines: list[str] = []
+    if report.done:
+        lines.append("Applied:")
+        lines += [f"  ✓ {d}" for d in report.done]
     if report.skipped:
         lines.append("Could not do (run by hand):")
         lines += [f"  – {s}" for s in report.skipped]
-    if report.restart_required:
-        lines.append("⚠ restart the server so the new realmlist address is used")
     return "\n".join(lines)

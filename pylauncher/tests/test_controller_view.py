@@ -2276,8 +2276,8 @@ def test_networking_tab_plans_and_applies(qapp: object, ps: _Ps, tmp_path: Path)
     assert "allow inbound TCP 3724, 8085 by hand" in text  # firewall=none → manual step
     assert view.apply_button.isEnabled() is True
     view.apply_network_plan()
-    assert "realmlist → 192.168.1.25" in view.network_text.toPlainText()
-    assert "restart the server" in view.network_text.toPlainText()
+    assert "The realm list now gives players 192.168.1.25." in view.network_text.toPlainText()
+    assert "Restart the server" in view.network_text.toPlainText()
 
 
 def test_the_networking_tab_offers_the_loopback_and_a_real_click_selects_it(
@@ -25870,22 +25870,50 @@ def test_a_good_poll_leaves_any_other_problem_line_alone(
     assert view.problem_label.text() == "Port 3724 is in use by another program."
 
 
-def test_the_docker_reinstall_asks_for_the_password_by_saying_what_it_is_for(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_apply_result_reads_as_words_and_the_commands_are_in_details(
+    qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """C29: the Deck repair's sudo prompt says why, then the raw line."""
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
-    _steam_deck_without_docker(monkeypatch)
-    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        yulon_platform,
-        "repair_docker_after_steamos_update",
-        lambda **kw: yulon_platform.ProvisionReport("linux"),
+    """Fix round 1, M3: Apply printed the netsh lines it ran and the SQL it could not."""
+    from tests.support_player_text import visible_texts
+
+    plan = _netsh_plan("lan")
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: plan
+    services.network_apply = lambda p: NetworkReport(
+        plan=p,
+        done=(" ".join(plan.firewall_commands[0]),),
+        skipped=(
+            " ".join(plan.portproxy_commands[0]) + ": exit 1 Access is denied. — run it by hand",
+            f"realmlist not updated (no DB access): {plan.realmlist_sql}",
+        ),
     )
-    view.reinstall_docker()
-    prompter = view._docker_prompter
-    assert prompter is not None
-    label = prompter._dialog_for("[sudo] password for deck:", True).labelText()
-    assert label.startswith("Yu'lon needs this computer's password"), label
-    assert "to reinstall Docker." in label, label
-    assert label.endswith("[sudo] password for deck:"), label
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    page = view.network_text.parentWidget()
+    view.show_network_plan()
+    view.apply_network_plan()
+
+    shown = view.network_text.toPlainText()
+    for word in ("netsh", "UPDATE", "advfirewall", "portproxy", "realmlist not updated"):
+        assert word not in shown, f"{word!r} is in what Apply says:\n{shown}"
+    assert "Apply finished 1 of 3 steps." in shown, shown
+    assert "2 could not be done" in shown, shown
+    for _name, _where, text in visible_texts(page):
+        assert "netsh" not in text and "UPDATE" not in text, text
+    held = view.network_details.text()
+    assert "netsh interface portproxy add v4tov4" in held and "Access is denied" in held, held
+    assert "realmlist not updated (no DB access): UPDATE realmlist" in held, held
+    assert "netsh advfirewall firewall add rule" in held, held
+    assert view.network_details.collapsed
+
+
+def test_the_modes_are_named_as_their_radio_buttons_say_them(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 1, M7: the plan's mode words are the radio labels, not a second copy."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    for radio in (view.lan_radio, view.internet_radio, view.loopback_radio):
+        radio.setChecked(True)
+        view.show_network_plan()
+        assert f"Playing: {radio.text()}" in view.network_text.toPlainText()

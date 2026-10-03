@@ -1717,3 +1717,19 @@ def test_a_failure_in_under_a_second_shows_no_elapsed_time(
     panel.run(refused)
     wait_for_panel(panel)
     assert panel.elapsed_text() == shown, panel.elapsed_text()
+
+
+def test_a_failure_during_a_busy_progress_reading_stops_the_bar_moving(qapp: object) -> None:
+    """A stage with no percent puts up Qt's busy bar; after a failure it went on moving, red."""
+
+    def refused() -> Iterator[str]:
+        yield "Step 3 of 9 (33%): clone-core"
+        yield lines.PROGRESS + "clone-core - Enumerating objects"
+        raise RuntimeError("the clone failed")
+
+    panel = LogPanel()
+    panel.run(refused)
+    wait_for_panel(panel)
+
+    bar = panel._bar
+    assert bar.maximum() != 0 or not bar.isVisibleTo(panel), "the busy bar is still moving"

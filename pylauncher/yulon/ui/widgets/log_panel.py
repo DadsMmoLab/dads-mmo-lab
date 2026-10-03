@@ -1122,6 +1122,12 @@ class LogPanel(QWidget):
         # own wrapped line under the strip.
         if not ok:
             self._bar.setStyleSheet(_bar_style(self._text.palette()))
+            if self._bar.maximum() == 0:
+                # Qt's busy bar (a reading with no percent) never stops moving:
+                # left up, it went on sweeping in red after the run had died.
+                # It says nothing about how far the run got, so it goes.
+                self._bar.setRange(0, 100)
+                self._bar.setVisible(False)
             if self._step is not None:
                 step = self._step
                 self._step_label.say(f"Stopped at step {step.number} of {step.total} · {step.name}")

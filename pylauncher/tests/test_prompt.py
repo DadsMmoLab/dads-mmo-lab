@@ -1114,74 +1114,77 @@ def test_a_prompter_can_name_its_own_dialog_title(
     assert titles == ["Reinstalling Docker", prompt_module.INSTALLER_TITLE]
 
 
-# -- T194 C29: a sudo prompt says whose password and why ----------------------
+# -- T194 C29: the sudo question says whose password and why ------------------
+#
+# Installs and the Deck repair ask through `platform.SudoSession`, which runs
+# `sudo -S -p ""` (sudo prints no prompt of its own) and puts a fixed question
+# to the prompter. These drive that session through a real `InputPrompter` and
+# read the dialog it shows.
 
 
-def test_a_sudo_prompt_says_whose_password_it_is_and_what_it_is_for(qapp: object) -> None:
-    """`[sudo] password for pk:` under "The installer needs an answer" was all a player got."""
+def _ask_through_the_dialog(
+    monkeypatch: pytest.MonkeyPatch, question: str | None
+) -> tuple[list[tuple[str, bool]], list[tuple[list[str], str]]]:
+    """Run `SudoSession(prompter.ask, ...).verify()` on a worker; return what was shown and fed."""
     from yulon.ui.widgets import prompt as prompt_module
 
-    dialog = InputPrompter(purpose="reinstall Docker")._dialog_for(
-        "[sudo] password for user:", True
+    shown: list[tuple[str, bool]] = []
+
+    def answers(dialog: Any) -> object:
+        echo = dialog.textEchoMode() == prompt_module.QLineEdit.EchoMode.Password
+        shown.append((dialog.labelText(), echo))
+        dialog.setTextValue("hunter 2!")
+        return prompt_module.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", answers)
+    fed: list[tuple[list[str], str]] = []
+
+    def run_input(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        fed.append((argv, text))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    prompter = InputPrompter()
+    session = (
+        platform.SudoSession(prompter.ask, run_input)
+        if question is None
+        else platform.SudoSession(prompter.ask, run_input, question=question)
     )
-
-    label = dialog.labelText()
-    assert label.startswith("Yu'lon needs this computer's password"), label
-    assert "(the one you log in with) to reinstall Docker." in label, label
-    assert "never saved" in label, label
-    assert label.endswith("[sudo] password for user:"), label
-    assert dialog.textEchoMode() == prompt_module.QLineEdit.EchoMode.Password
-
-
-def test_a_prompt_that_is_not_sudo_is_shown_as_it_came(qapp: object) -> None:
-    """Only sudo's line is explained; a script's own question already says what it wants."""
-    dialog = InputPrompter(purpose="reinstall Docker")._dialog_for("Go on? (y/n): ", False)
-    assert dialog.labelText() == "Go on? (y/n):"
+    verified: list[bool] = []
+    worker = threading.Thread(target=lambda: verified.append(session.verify()))
+    worker.start()
+    pump_until(lambda: not worker.is_alive(), "verify() returned")
+    worker.join(timeout=HANG_BOUND)
+    assert verified == [True]
+    return shown, fed
 
 
-def test_the_shown_dialog_is_the_one_dialog_for_builds(
+def test_the_install_asks_for_this_computers_password_and_says_why(
     qapp: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_show` must put up `_dialog_for`'s dialog, not a second copy of the wording."""
-    from yulon.ui.widgets import prompt as prompt_module
+    """The install's question, as the dialog shows it; the answer reaches sudo unchanged."""
+    shown, fed = _ask_through_the_dialog(monkeypatch, None)
 
-    shown: list[str] = []
-
-    def fake_exec(dialog: Any) -> object:
-        shown.append(dialog.labelText())
-        return prompt_module.QDialog.DialogCode.Rejected
-
-    monkeypatch.setattr(prompt_module.QInputDialog, "exec", fake_exec)
-    prompter = InputPrompter(purpose="set up Docker for the install")
-    prompter._show("[sudo] password for pk:", True)
-
-    assert shown == [prompter._dialog_for("[sudo] password for pk:", True).labelText()]
-    assert "to set up Docker for the install." in shown[0]
+    ((label, masked),) = shown
+    assert label.startswith(
+        "Yu'lon needs this computer's password (the one you log in with) to set up Docker "
+        "for the install."
+    ), label
+    assert "It goes to sudo and is never saved." in label, label
+    assert "Leave it empty to skip the steps that need it." in label, label
+    assert masked, "the password was echoed"
+    assert fed == [(["sudo", "-S", "-p", "", "-v"], "hunter 2!\n")]
 
 
-def test_the_catalog_asks_for_the_password_to_set_up_docker(qapp: object, tmp_path: Path) -> None:
-    """The install's prompter is built with its purpose, so its sudo line says why."""
-    from yulon.catalog.catalog import load_catalog
-    from yulon.ui.catalog_view import CatalogView
+def test_the_deck_repair_asks_for_the_password_to_reinstall_docker(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair's own question, through the same dialog."""
+    shown, fed = _ask_through_the_dialog(monkeypatch, platform.SUDO_REPAIR_PASSWORD_QUESTION)
 
-    catalog = load_catalog()
-    panel = LogPanel()
-    view = CatalogView(
-        catalog,
-        lambda e: _NoopInstaller(e),
-        panel,
-        platform_id=lambda: "linux",
-        pick_dir=lambda *_: tmp_path,
-        home=tmp_path,
-    )
-    try:
-        view.start_install(catalog.get("wow-wotlk"))
-        wait_for_panel(panel)
-        prompter = view._prompter
-        assert prompter is not None
-        label = prompter._dialog_for("[sudo] password for pk:", True).labelText()
-        assert "to set up Docker for the install." in label, label
-    finally:
-        panel.stop()
-        assert panel.wait(HANG_BOUND_MS), "the panel's job never joined after stop()"
-        process_events(50)
+    ((label, masked),) = shown
+    assert label.startswith(
+        "Yu'lon needs this computer's password (the one you log in with) to reinstall Docker."
+    ), label
+    assert "It goes to sudo and is never saved." in label, label
+    assert masked
+    assert fed == [(["sudo", "-S", "-p", "", "-v"], "hunter 2!\n")]

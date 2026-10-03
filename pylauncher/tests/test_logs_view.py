@@ -347,9 +347,9 @@ def test_a_failed_read_says_so_in_words_and_logs_the_class_name(
     with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
         _settle(held[0])
     assert view.shown_text() == "The logs could not be read. Yu'lon's own log has the details."
-    assert any(
-        "RuntimeError" in r.getMessage() and "broke" in r.getMessage() for r in caplog.records
-    ), [r.getMessage() for r in caplog.records]
+    assert any("RuntimeError" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
 
 
 def test_a_listing_that_fails_says_so_without_a_class_name(
@@ -512,3 +512,56 @@ def test_without_a_short_password_the_tab_warns_of_nothing(qapp: object, tmp_pat
     view.save_for_support()
     assert "already taken out" in view.status.text()
     assert "very short password" not in view.status.text()
+
+
+SECRET_LINE = "line 3: password=Hunter2Secret"
+"""What a credentials parse error can quote: the line it could not read."""
+
+
+def test_a_listing_error_quoting_a_credential_line_keeps_it_out_of_the_log(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fix round 1, M5: `gather_known` reads credential files, and the log is not redacted."""
+
+    def sources_for_app(*args: Any, **kwargs: Any) -> object:
+        raise ValueError(SECRET_LINE)
+
+    monkeypatch.setattr(support_sources, "sources_for_app", sources_for_app)
+    view = _view()
+    with caplog.at_level(logging.DEBUG):
+        view.refresh()
+    said = [r.getMessage() for r in caplog.records]
+    assert any("ValueError" in m for m in said), said
+    assert not any("Hunter2Secret" in m for m in said), said
+
+
+def test_a_read_error_quoting_a_credential_line_keeps_it_out_of_the_log(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same rule past `_read_logs`, where `_read_failed` writes the warning."""
+
+    def read_logs(*args: Any) -> object:
+        raise ValueError(SECRET_LINE)
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    view = _view()
+    with caplog.at_level(logging.DEBUG):
+        view.refresh()
+    said = [r.getMessage() for r in caplog.records]
+    assert any("ValueError" in m for m in said), said
+    assert not any("Hunter2Secret" in m for m in said), said
+
+
+def test_an_os_error_is_logged_with_what_the_system_said(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An OSError's text is the system's own words about a path, so it is kept."""
+
+    def read_logs(*args: Any) -> object:
+        raise PermissionError(13, "Permission denied", "/some/where/yulon.log")
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    view = _view()
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        view.refresh()
+    assert any("Permission denied" in r.getMessage() for r in caplog.records)

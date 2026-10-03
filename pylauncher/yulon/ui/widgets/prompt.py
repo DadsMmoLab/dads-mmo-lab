@@ -60,35 +60,15 @@ def is_secret(prompt: str) -> bool:
 
 
 def tidy(prompt: str) -> str:
-    """The child's raw prompt as a question worth showing a person.
+    """A question as it is shown: trimmed, never truncated.
 
-    Scripts colour their output and rarely end a prompt with a newline, so what
-    arrives is a fragment like `[sudo] password for pk:`. That is already the
-    clearest possible description of what is wanted, so it is shown as-is —
-    only trimmed, and never truncated, because the tail is usually the part
-    that says what is being asked.
+    The questions that arrive are Yu'lon's own sentences -- the docker-group
+    consent, `platform.SUDO_PASSWORD_QUESTION` and the Deck repair's questions
+    -- and passwd's lines on the Deck, all relayed whole. Trimmed because a
+    trailing space or newline would only pad the dialog; never cut, because the
+    tail is the part that says what is being asked.
     """
     return prompt.strip()
-
-
-def explain(prompt: str, purpose: str | None) -> str:
-    """The question as a player reads it: sudo's line said in words first (T194 C29).
-
-    `[sudo] password for pk:` under "The installer needs an answer" does not
-    say whose password, or why. A prompt that starts with `[sudo]` -- in any
-    language, since sudo keeps its tag -- gets a sentence saying it is this
-    computer's login password, what it is for, and that it is not kept; sudo's
-    own line follows, so nothing it asked is hidden. Any other prompt is the
-    script's own question and is shown as `tidy()` leaves it.
-    """
-    line = tidy(prompt)
-    if not line.startswith("[sudo]"):
-        return line
-    why = f" to {purpose}" if purpose else ""
-    return (
-        f"Yu'lon needs this computer's password (the one you log in with){why}. "
-        f"It goes to sudo and is never saved.\n\n{line}"
-    )
 
 
 class InputPrompter(QObject):
@@ -102,17 +82,9 @@ class InputPrompter(QObject):
     #: (prompt text, whether the answer must be masked). Emitted from the worker.
     requested = Signal(str, bool)
 
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        title: str = INSTALLER_TITLE,
-        purpose: str | None = None,
-    ) -> None:
-        """`purpose` finishes "Yu'lon needs this computer's password ... to <purpose>" (T194)."""
+    def __init__(self, parent: QWidget | None = None, *, title: str = INSTALLER_TITLE) -> None:
         super().__init__(parent)
         self._title = title
-        self._purpose = purpose
         self._answer: str | None = None
         self._answered = threading.Event()
         self._cancel: threading.Event | None = None
@@ -182,7 +154,7 @@ class InputPrompter(QObject):
         dialog = QInputDialog(parent if isinstance(parent, QWidget) else None)
         dialog.setWindowTitle(self._title)
         dialog.setInputMode(QInputDialog.InputMode.TextInput)
-        dialog.setLabelText(explain(prompt, self._purpose))
+        dialog.setLabelText(tidy(prompt))
         dialog.setTextEchoMode(QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal)
         dialog.setTextValue("")
         return dialog
