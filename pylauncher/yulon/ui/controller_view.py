@@ -5773,6 +5773,10 @@ TUNING_NO_FILE_BACKUP = (
     "first save on this tab is what creates it."
 )
 
+TUNING_NAMED_BACKUP_GONE = (
+    "The backup Revert file names, {backup}, is no longer beside {file}, so nothing was written."
+)
+
 TUNING_CORE_FILE = (
     "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
     "this version: who owns core configuration is a bigger question than one module's conf."
@@ -15862,6 +15866,8 @@ class ControllerView(QWidget):
         is cheap enough to run after every install and every save.
         """
         if self._waits_for_the_distro("tuning", self.reload_tuning):
+            # A card's Save or Revert that led here still redraws as that card's (T190).
+            self.tuning_panel.defer_pressed_card()
             return
         manifests, _broken = self._load_manifests()
         rows = tuning.rows_for(
@@ -16916,7 +16922,8 @@ class ControllerView(QWidget):
         named = self.tuning_panel.backup_name()
         backups = tuple(b for b in tuning.backups_of(path) if named is None or b.name == named)
         if not backups:
-            self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
+            gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
+            self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
         try:
             note = self._put_back(backups[-1], path)

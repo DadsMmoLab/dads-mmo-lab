@@ -240,20 +240,39 @@ CHOICE_RELOAD = "Reload instead"
 """The answers to the panel's two questions (T190): typing in the editor and another
 file picked; typing in the editor and Save file over a file changed on disk."""
 
+UNSAVED_ANSWERS = (CHOICE_SAVE, CHOICE_DISCARD, CHOICE_CANCEL)
 UNSAVED_TITLE = "Unsaved typing"
 UNSAVED_QUESTION = (
     "{name} has typing you have not saved. Save it before opening {other}, or discard it?"
 )
+UNSAVED_GONE_QUESTION = (
+    "{name} is no longer offered on this tab, so your typing in it cannot be saved here. "
+    "Discard it and open {other}?"
+)
 STALE_TITLE = "File changed on disk"
 STALE_QUESTION = (
-    "{name} changed on disk after the editor read it, and the editor does not show that "
-    "change. Overwrite it with your typing, or reload the file and lose your typing?"
+    "{name} changed on disk after the editor read it, or could not be read again, so the "
+    "editor may not show what the file holds now. Overwrite it with your typing, or reload "
+    "the file and lose your typing?"
 )
 
 EDITOR_STALE = (
     "This file changed on disk after the editor read it, and the editor kept your typing, "
     "so it does not show that change. Save file asks before writing over it."
 )
+EDITOR_UNREAD = (
+    "The editor kept your typing: the file could not be read again, so the editor cannot "
+    "tell whether it changed. Save file asks before writing over it."
+)
+"""Under a re-read that FAILED with typing in the editor (T190 fix round 2): the read's
+error says what went wrong, this says the typing was not blanked with it."""
+
+EDITOR_GONE = (
+    "This file is no longer offered on this tab, so Save file is off. The editor kept your "
+    "typing so you can copy it; pick another file to leave it."
+)
+"""Under typing whose file a reload no longer lists (T190 fix round 2)."""
+
 """What the editor's note says when a re-read found the file changed under typing (T190).
 
 A card's Save, Revert or Reset, or Reload from disk, read the open file again;
@@ -935,6 +954,8 @@ class TuningPanel(QWidget):
         self._pressed_card: tuple[str, str] | None = None
         """The card whose Save or Revert is being handled: its redraw shows the
         file, not the typing that press just wrote or put back (T190)."""
+        self._owed_cards: set[tuple[str, str]] = set()
+        """Pressed cards whose redraw the view put off (`defer_pressed_card`)."""
         self.choose: Callable[[str, str, tuple[str, ...]], str | None] = self._ask
         """`(title, question, answers) -> the answer pressed`, `None` for none.
 
@@ -1026,7 +1047,13 @@ class TuningPanel(QWidget):
         self._loaded_text = ""
         """The text last put in the editor from disk: what any typing started from."""
         self._stale = False
-        """Whether a re-read under typing found the file changed since `_loaded_text`."""
+        """Whether a re-read under typing found the file changed since `_loaded_text`,
+        or could not read it at all: Save file asks before writing over it."""
+        self._kept = ""
+        """Why the editor still holds typing a re-read did not replace: `EDITOR_STALE`,
+        `EDITOR_UNREAD`, `EDITOR_GONE`, or `""`. Said in `file_note`."""
+        self._gone = False
+        """Whether the open file's typing outlived the file's place in the list."""
         self._note = ""
         """The note `set_file_text` was handed; `file_note` adds `EDITOR_STALE` to it."""
         self._reverting = False
@@ -1125,11 +1152,14 @@ class TuningPanel(QWidget):
         typed: dict[tuple[str, str, str], bool | int | str | None] = {}
         if keep_edits:
             for (family, module_id), widget in self._cards.items():
-                if (family, module_id) == self._pressed_card:
+                if (family, module_id) == self._pressed_card or (
+                    (family, module_id) in self._owed_cards
+                ):
                     continue
                 for key, editor in widget.editors.items():
                     if editor.changed:
                         typed[(family, module_id, key)] = editor.control_state()
+        self._owed_cards.clear()
         for widget in self._cards.values():
             widget.setParent(None)
             widget.deleteLater()
@@ -1166,6 +1196,19 @@ class TuningPanel(QWidget):
             signal.emit(family, module_id)
         finally:
             self._pressed_card = None
+
+    def defer_pressed_card(self) -> None:
+        """The redraw a card's Save or Revert caused is put off; it still shows that card's file.
+
+        The view calls this when it keeps its reload for later (WSL's distro
+        not running yet, `_waits_for_the_distro`): by the time the reload runs
+        the press is over, and the card's typing was carried across as if no
+        press had been made -- a Revert that looked like it did nothing (T190
+        fix round 2). Kept until the next `set_cards`, so a second put-off
+        reload replacing the first cannot drop it.
+        """
+        if self._pressed_card is not None:
+            self._owed_cards.add(self._pressed_card)
 
     def set_header(self, widget: QWidget) -> None:
         """Put `widget` above the cards, in the same scrolling column (T171).
@@ -1220,10 +1263,9 @@ class TuningPanel(QWidget):
         for widget in self._cards.values():
             widget.set_enabled_actions(enabled)
         self.files.setEnabled(enabled)
-        self.file_save_button.setEnabled(enabled and not self.editor.isReadOnly())
-        self.file_revert_button.setEnabled(
-            enabled and bool(self.backup_label.text()) and not self.editor.isReadOnly()
-        )
+        writable = not self.editor.isReadOnly() and not self._gone
+        self.file_save_button.setEnabled(enabled and writable)
+        self.file_revert_button.setEnabled(enabled and bool(self.backup_label.text()) and writable)
 
     # ------------------------------------------------------------- the file
 
@@ -1266,6 +1308,16 @@ class TuningPanel(QWidget):
             # Under typing too: `set_file_text` keeps the typing and says when
             # the file changed (`EDITOR_STALE`).
             self._file_picked(keep)
+        elif keep and self._editor_dirty:
+            # The open file is no longer offered, and the player typed into
+            # it: the typing stays on screen and nothing switches until they
+            # pick another file (which asks first). It cannot be saved here.
+            self._mark_current(keep)
+            self._gone = True
+            self._kept = EDITOR_GONE
+            self.file_save_button.setEnabled(False)
+            self.file_revert_button.setEnabled(False)
+            self._draw_file_note()
         elif files:
             self._file_picked(files[0])
         else:
@@ -1346,11 +1398,21 @@ class TuningPanel(QWidget):
         for that question to be asked.
         """
         same = self._text_file == self._current_file
-        if same and self._editor_dirty and not read_only and not self._reverting:
+        if same and self._editor_dirty and not self._reverting:
             # The same file read again under typing (a card's Save, Revert or
             # Reset, or Reload): the typing stays, and the editor says when the
             # file it started from is no longer what is on disk (T190).
-            self._stale = text != self._loaded_text
+            self._gone = False
+            if read_only:
+                # A read that failed (the view hands its error as the note): the
+                # file was writable when the typing began, and the typing is
+                # not blanked with the read (T190 fix round 2).
+                read_only = self.editor.isReadOnly()
+                self._stale = True
+                self._kept = EDITOR_UNREAD
+            else:
+                self._stale = text != self._loaded_text
+                self._kept = EDITOR_STALE if self._stale else ""
         else:
             self._put_text(text, keep_place=same)
         self._text_file = self._current_file
@@ -1390,6 +1452,8 @@ class TuningPanel(QWidget):
         self._editor_dirty = False
         self._loaded_text = text
         self._stale = False
+        self._kept = ""
+        self._gone = False
         if keep_place:
             cursor = self.editor.textCursor()
             cursor.setPosition(min(place[2], len(text)))
@@ -1409,12 +1473,15 @@ class TuningPanel(QWidget):
         Discard opens it; Cancel, or no answer, leaves the editor as it was.
         """
         if self._editor_dirty:
+            # No Save for a file the list no longer offers: it cannot be written here.
+            answers = (CHOICE_DISCARD, CHOICE_CANCEL) if self._gone else UNSAVED_ANSWERS
+            asked = UNSAVED_GONE_QUESTION if self._gone else UNSAVED_QUESTION
             answer = self.choose(
                 UNSAVED_TITLE,
-                UNSAVED_QUESTION.format(
+                asked.format(
                     name=self._current_file.rsplit("/", 1)[-1], other=name.rsplit("/", 1)[-1]
                 ),
-                (CHOICE_SAVE, CHOICE_DISCARD, CHOICE_CANCEL),
+                answers,
             )
             if answer == CHOICE_DISCARD:
                 self._editor_dirty = False
@@ -1525,8 +1592,8 @@ class TuningPanel(QWidget):
         # On screen, not merely shown: scrolled out of the column's view it says
         # nothing to anybody (T190 final review).
         echoed = said == self.rule_note.text() and not self.rule_note.visibleRegion().isEmpty()
-        if self._stale:
-            said = EDITOR_STALE if echoed or not said else f"{said}\n{EDITOR_STALE}"
+        if self._kept:
+            said = self._kept if echoed or not said else f"{said}\n{self._kept}"
             echoed = False
         self.file_note.setText(said)
         self.file_note.setVisible(bool(said) and not echoed)

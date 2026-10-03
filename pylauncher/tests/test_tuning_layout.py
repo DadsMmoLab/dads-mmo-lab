@@ -727,3 +727,139 @@ def test_a_card_save_under_typing_in_the_editor_says_so_and_save_file_asks(
     process_events()
     assert ask.asked == [(tp.CHOICE_OVERWRITE, tp.CHOICE_RELOAD, tp.CHOICE_CANCEL)]
     assert conf.read_text(encoding="utf-8") == on_disk, "Cancel wrote the file"
+
+
+# -- fix round 2: a failed or missing re-read, a gone backup, a put-off reload --
+
+
+def _type_into_the_editor(panel: tp.TuningPanel, text: str) -> None:
+    from PySide6.QtTest import QTest
+
+    panel.editor.moveCursor(panel.editor.textCursor().MoveOperation.End)
+    QTest.keyClicks(panel.editor, text)
+
+
+def test_a_re_read_that_cannot_open_the_file_keeps_the_typing_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 9p hiccup on Reload blanked the editor and made it read-only, typing and all."""
+    import builtins
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, MEDIUM)
+    assert panel.current_file() == BEAST_CONF, "control: the beastmaster conf is open"
+    _type_into_the_editor(panel, "# mine")
+
+    def hiccup(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(file).endswith("mod_npc_beastmaster.conf"):
+            raise OSError(5, "Input/output error")
+        return builtins.open(file, *args, **kwargs)
+
+    monkeypatch.setattr(controller_view_module, "open", hiccup, raising=False)
+    _press(view.tuning_reload_button)
+    assert panel.editor.toPlainText().endswith("# mine"), "the failed read blanked the typing"
+    assert not panel.editor.isReadOnly()
+    note = panel.file_note.text()
+    assert panel.file_note.isVisible() and "Input/output error" in note, note
+    assert tp.EDITOR_UNREAD in note
+
+
+def test_a_re_read_of_a_file_that_is_no_longer_utf8_keeps_the_typing_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, MEDIUM)
+    _type_into_the_editor(panel, "# mine")
+    (tmp_path / BEAST_CONF).write_bytes(b"BeastMaster.Enable = \xff\n")
+    _press(view.tuning_reload_button)
+    assert panel.editor.toPlainText().endswith("# mine"), "the failed read blanked the typing"
+    assert not panel.editor.isReadOnly()
+    note = panel.file_note.text()
+    assert "UTF-8" in note and tp.EDITOR_UNREAD in note, note
+
+
+def _press(button: Any) -> None:
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    process_events()
+
+
+def test_typing_in_a_file_the_reload_no_longer_lists_stays_until_the_player_leaves_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open file gone from the list: the editor jumped to the first file, typing lost."""
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, MEDIUM)
+    _type_into_the_editor(panel, "# mine")
+    (tmp_path / BEAST_CONF).unlink()
+    _press(view.tuning_reload_button)
+    assert BEAST_CONF not in [b.toolTip() for b in panel.file_buttons()], "control: not listed"
+    assert panel.current_file() == BEAST_CONF
+    assert panel.editor.toPlainText().endswith("# mine"), "the reload switched away"
+    assert panel.file_note.isVisible() and tp.EDITOR_GONE in panel.file_note.text()
+    assert not panel.file_save_button.isEnabled(), "Save file would write a file not offered"
+    assert not any(b.isChecked() for b in panel.file_buttons())
+
+    ask = _Answers(tp.CHOICE_CANCEL)
+    panel.choose = ask
+    _press(panel.file_buttons()[0])
+    assert ask.asked == [(tp.CHOICE_DISCARD, tp.CHOICE_CANCEL)], "no Save for a file not offered"
+    assert panel.current_file() == BEAST_CONF and panel.editor.toPlainText().endswith("# mine")
+    assert not panel.file_buttons()[0].isChecked()
+
+
+def test_revert_file_says_so_when_the_backup_it_names_is_gone_and_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import tuning
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    conf = tmp_path / BEAST_CONF
+    _at(window, MEDIUM)
+    _type_into_the_editor(panel, "BeastMaster.HunterOnly = 1")
+    _press(panel.file_save_button)
+    named = panel.backup_label.text().rsplit(": ", 1)[-1]
+    _uncheck_and_save(view, "BeastMaster.Enable")
+    (conf.parent / named).unlink()
+    assert len(tuning.backups_of(conf)) == 1, "control: another backup is still there"
+    before = conf.read_text(encoding="utf-8")
+
+    _press(panel.file_revert_button)
+    assert conf.read_text(encoding="utf-8") == before, "Revert wrote a backup it did not name"
+    said = view.tuning_report.toPlainText()
+    assert said == controller_view_module.TUNING_NAMED_BACKUP_GONE.format(
+        backup=named, file=BEAST_CONF
+    ), said
+
+
+def test_a_cards_revert_whose_reload_waits_for_the_distro_still_drops_that_cards_typing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WSL: the reload ran after the press was over and carried the reverted card's typing."""
+    from PySide6.QtTest import QTest
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    _at(window, MEDIUM)
+    level = _card_with(view, "BeastMaster.MinLevel").editors["BeastMaster.MinLevel"].control
+    assert level is not None
+    QTest.keyClick(level, Qt.Key.Key_Up)
+    transmog_key = "Transmogrification.Enable"
+    switch = _card_with(view, transmog_key).editors[transmog_key].control
+    assert switch is not None
+    QTest.mouseClick(switch, Qt.MouseButton.LeftButton)
+    assert _card_with(view, "BeastMaster.MinLevel").edits(), "control: typed"
+
+    view._distro = "stopped"
+    revert = _card_with(view, "BeastMaster.MinLevel").revert_button
+    assert revert is not None
+    _press(revert)
+    assert "tuning" in view._waiting_on_distro, "control: the reload was put off"
+    view._distro_answered("running")
+    process_events()
+    assert _card_with(view, "BeastMaster.MinLevel").edits() == {}, "Revert kept the typing"
+    assert _card_with(view, transmog_key).edits() == {transmog_key: "0"}

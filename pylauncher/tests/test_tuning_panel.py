@@ -1349,3 +1349,42 @@ def test_revert_file_replaces_the_typing_with_the_file_it_put_back(qapp: object)
         assert tp.EDITOR_STALE not in panel.file_note.text()
     finally:
         panel.close()
+
+
+def test_the_question_box_makes_cancel_the_default_and_the_escape_answer(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return or Escape on the question must never overwrite or discard anything."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+
+    seen: dict[str, str] = {}
+
+    def escape(box: QMessageBox) -> int:
+        default, escape_button = box.defaultButton(), box.escapeButton()
+        seen["default"] = default.text() if default is not None else ""
+        seen["escape"] = escape_button.text() if escape_button is not None else ""
+        box.show()
+        QTest.keyClick(box, Qt.Key.Key_Escape)
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", escape)
+    panel = tp.TuningPanel()
+    try:
+        answer = panel._ask("t", "q", STALE_CHOICES)
+        assert seen == {"default": tp.CHOICE_CANCEL, "escape": tp.CHOICE_CANCEL}
+        assert answer == tp.CHOICE_CANCEL
+    finally:
+        panel.close()
+
+
+def test_a_reload_that_cannot_read_the_file_blanks_only_a_clean_editor(qapp: object) -> None:
+    """The view hands a failed read as empty, read-only text; with no typing that is shown."""
+    panel = tp.TuningPanel()
+    panel.set_files(["a/mod.conf"])
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+    panel.set_files(["a/mod.conf"])
+    panel.set_file_text("", read_only=True, note="a/mod.conf: gone")
+    assert panel.editor.toPlainText() == "" and panel.editor.isReadOnly()
+    assert tp.EDITOR_UNREAD not in panel.file_note.text()
