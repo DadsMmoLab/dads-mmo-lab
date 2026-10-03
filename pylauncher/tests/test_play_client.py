@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import types
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1930,14 +1931,14 @@ def test_a_flag_that_cannot_be_put_back_is_named_and_the_folder_still_goes(
 ) -> None:
     archive, play = _shared_read_only(tmp_path)
     calls = _put_back_refused(monkeypatch, archive, times=2)
-    lost: list[Path] = []
+    lost: list[play_client.LostFlag] = []
 
     play_client.remove_folder(
         play, original=archive.parents[1], unlink=_windows_like_unlink([]), flags_lost=lost
     )
 
     assert not play.exists(), "the link was gone already: the removal is not failed for it"
-    assert lost == [archive]
+    assert lost == [play_client.LostFlag(archive)]
     assert calls == [0o444, 0o444], "tried once more, and no more"
     assert archive.read_bytes() == b"mpq" * 1000
 
@@ -1948,7 +1949,7 @@ def test_a_flag_refused_once_is_put_back_on_the_second_try_and_nothing_is_named(
 ) -> None:
     archive, play = _shared_read_only(tmp_path)
     calls = _put_back_refused(monkeypatch, archive, times=1)
-    lost: list[Path] = []
+    lost: list[play_client.LostFlag] = []
 
     play_client.remove_folder(
         play, original=archive.parents[1], unlink=_windows_like_unlink([]), flags_lost=lost
@@ -2014,3 +2015,286 @@ def test_a_delete_that_stops_part_way_names_the_lost_flag_too(
     assert str(archive) in str(info.value)
     assert not (play / "Data").exists(), "the shared file was removed before the refusal"
     assert archive.read_bytes() == b"mpq" * 1000
+
+
+# -- T198 fix round 1 -------------------------------------------------------------------------
+
+
+def _windows(blocked_names: Collection[str] = ()) -> Any:
+    """Windows' unlink: a read-only file refuses, and so does any name in `blocked_names`."""
+
+    def unlink(path: object) -> None:
+        if Path(path).name in blocked_names:  # type: ignore[arg-type]
+            raise PermissionError(errno.EACCES, "in use", str(path))
+        if not os.lstat(path).st_mode & 0o200:  # type: ignore[arg-type]
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        os.unlink(path)  # type: ignore[arg-type]
+
+    return unlink
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_two_lost_flags_are_both_named_in_the_plural(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, play = _shared_read_only(tmp_path)
+    locale = archive.parent / "enUS" / "locale-enUS.MPQ"
+    os.chmod(locale, 0o444)
+    os.unlink(play / "Data" / "enUS" / "locale-enUS.MPQ")
+    os.link(locale, play / "Data" / "enUS" / "locale-enUS.MPQ")
+    real = os.chmod
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        if Path(path) in (archive, locale):
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real(path, mode, **kw)
+
+    monkeypatch.setattr(play_client.os, "chmod", chmod)
+    lost: list[play_client.LostFlag] = []
+
+    play_client.remove_folder(play, original=archive.parents[1], unlink=_windows(), flags_lost=lost)
+
+    said = play_client.flags_lost_warning(lost)
+    assert said.startswith("These files of your own client are no longer read-only")
+    assert str(archive) in said and str(locale) in said
+
+
+def test_one_file_named_twice_is_named_once_in_the_singular(tmp_path: Path) -> None:
+    file = tmp_path / "WoW" / "Data" / "common.MPQ"
+    said = play_client.flags_lost_warning(
+        [
+            play_client.LostFlag(file),
+            play_client.LostFlag(file),
+            play_client.LostFlag(file, "unchecked"),
+        ]
+    )
+    assert said.count(str(file)) == 1
+    assert said.startswith(f"Your own client's file {file} is no longer read-only")
+    assert "could not check" not in said, "a file whose loss is sure is not also unsure"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("first_look", ["fails", "confirms"])
+def test_a_file_never_confirmed_as_the_shared_one_is_said_as_unchecked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_look: str
+) -> None:
+    """The second try's look fails: confirmed by the first look it is lost, else unchecked."""
+    archive, play = _shared_read_only(tmp_path)
+    real_lstat = Path.lstat
+    looks: list[int] = []
+
+    def lstat(self: Path) -> os.stat_result:
+        if self == archive:
+            looks.append(1)
+            if first_look == "fails" or len(looks) > 1:
+                raise PermissionError(errno.EACCES, "Access is denied", str(self))
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    _put_back_refused(monkeypatch, archive, times=2)
+    lost: list[play_client.LostFlag] = []
+
+    play_client.remove_folder(play, original=archive.parents[1], unlink=_windows(), flags_lost=lost)
+
+    assert len(looks) == 2
+    said = play_client.flags_lost_warning(lost)
+    if first_look == "fails":
+        assert lost == [play_client.LostFlag(archive, "unchecked")]
+        assert "could not check" in said and "no longer read-only" not in said
+    else:
+        assert lost == [play_client.LostFlag(archive)]
+        assert "no longer read-only" in said
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("survivor", ["the same file", "another file"])
+def test_a_shared_file_that_stays_writable_after_a_failed_delete_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, survivor: str
+) -> None:
+    """The delete is refused after the flag was cleared, and the flag will not go back on."""
+    archive, play = _shared_read_only(tmp_path)
+    mine = play / "Data" / "common.MPQ"
+    if survivor == "another file":
+        os.link(mine, tmp_path / "elsewhere.MPQ")  # still shared, but not with the player's name
+        os.unlink(archive)
+        archive.write_bytes(b"the player's patched common.MPQ")
+    real = os.chmod
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        if Path(path) == mine and not mode & 0o200:
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real(path, mode, **kw)
+
+    monkeypatch.setattr(play_client.os, "chmod", chmod)
+    real_unlink = _windows()
+
+    def unlink(path: object) -> None:
+        if Path(path) == mine and os.lstat(mine).st_mode & 0o200:  # type: ignore[arg-type]
+            raise PermissionError(errno.EACCES, "in use", str(path))
+        real_unlink(path)
+
+    lost: list[play_client.LostFlag] = []
+    with pytest.raises(PermissionError, match="in use"):
+        play_client.remove_folder(play, original=archive.parents[1], unlink=unlink, flags_lost=lost)
+
+    if survivor == "the same file":
+        assert lost == [play_client.LostFlag(archive)]
+    else:
+        assert lost == [play_client.LostFlag(mine, "shared")]
+        assert str(mine) in play_client.flags_lost_warning(lost)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_delete_refused_after_the_flag_was_cleared_does_not_say_your_client_was_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, play = _shared_read_only(tmp_path)
+    mine = play / "Data" / "common.MPQ"
+    real = os.chmod
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        if Path(path) == mine and not mode & 0o200:
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real(path, mode, **kw)
+
+    monkeypatch.setattr(play_client.os, "chmod", chmod)
+    windows = _windows()
+
+    def unlink(path: object) -> None:
+        if Path(path) == mine and os.lstat(mine).st_mode & 0o200:  # type: ignore[arg-type]
+            raise PermissionError(errno.EACCES, "in use", str(path))
+        windows(path)
+
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client, "remove_folder", lambda folder, **kw: real_remove(folder, **kw, unlink=unlink)
+    )
+
+    with pytest.raises(play_client.PlayClientError) as info:
+        play_client.delete(play, game="g", server_dir=tmp_path / "s")
+
+    assert str(archive) in str(info.value)
+    assert "left as it was" not in str(info.value)
+
+
+def _failing_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int) -> Path:
+    """A read-only shared archive, a build that fails after linking it, a Windows cleanup."""
+    orig = fake_client(tmp_path)
+    archive = orig / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, **kw, unlink=_windows()),
+    )
+
+    def broken_copy(src: object, dst: object, **kw: object) -> object:
+        raise OSError(errno.EIO, "I/O error")  # after every linked file is in place
+
+    monkeypatch.setattr(play_client.shutil, "copy2", broken_copy)
+    _put_back_refused(monkeypatch, archive, times=refused)
+    return archive
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_a_failed_build_names_the_file_whose_flag_it_could_not_put_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    archive = _failing_build(tmp_path, monkeypatch, refused)
+
+    with pytest.raises(play_client.PlayClientError, match="I/O error") as info:
+        build(archive.parents[1], tmp_path / "t", tmp_path)
+
+    said = str(info.value)
+    assert not partial_of(tmp_path / "t").exists()
+    assert archive.read_bytes() == b"mpq" * 1000
+    assert (str(archive) in said) is bool(refused)
+    assert ("your client was left as it was" in said) is not bool(refused)
+
+
+def _leftover_partial(tmp_path: Path) -> tuple[Path, Path]:
+    """This server's marked `.yulon-partial`, sharing the player's read-only archive."""
+    orig = fake_client(tmp_path)
+    archive = orig / "Data" / "common.MPQ"
+    os.chmod(archive, 0o444)
+    partial = partial_of(tmp_path / "t")
+    mark(partial, orig, server_dir=tmp_path / "s")
+    (partial / "Data").mkdir()
+    os.link(archive, partial / "Data" / "common.MPQ")
+    return archive, partial
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_clearing_a_leftover_partial_names_a_lost_flag_and_makes_nothing_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, partial = _leftover_partial(tmp_path)
+    _put_back_refused(monkeypatch, archive, times=2)
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, **kw, unlink=_windows()),
+    )
+
+    with pytest.raises(play_client.PlayClientError) as info:
+        play_client.clean_partials(tmp_path / "t", game="g", server_dir=tmp_path / "s")
+
+    assert not partial.exists(), "removed: the removal itself is not failed"
+    assert str(archive) in str(info.value) and "was removed" in str(info.value)
+    assert archive.read_bytes() == b"mpq" * 1000
+    assert play_client.clean_partials(tmp_path / "t", game="g", server_dir=tmp_path / "s") is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_a_leftover_partial_that_stays_names_a_lost_flag_and_not_your_client_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, partial = _leftover_partial(tmp_path)
+    _put_back_refused(monkeypatch, archive, times=2)
+    real_remove = play_client.remove_folder
+    monkeypatch.setattr(
+        play_client,
+        "remove_folder",
+        lambda folder, **kw: real_remove(folder, **kw, unlink=_windows([play_client.MARKER])),
+    )
+
+    with pytest.raises(play_client.PlayClientError, match="could not be removed") as info:
+        play_client.clean_partials(tmp_path / "t", game="g", server_dir=tmp_path / "s")
+
+    assert str(archive) in str(info.value)
+    assert "left as it was" not in str(info.value)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_refresh_names_the_file_a_crashed_temporary_shared_whose_flag_it_could_not_put_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    orig = fake_client(tmp_path)
+    play = tmp_path / "t"
+    build(orig, play, tmp_path)
+    src = orig / "Data" / "common.MPQ"
+    replace_file(src, b"MPQ patched")  # stale now: refresh shares the new one
+    os.chmod(src, 0o444)
+    os.link(src, play / "Data" / ("common.MPQ" + play_client.REFRESH_SUFFIX))  # a crash's
+    real_unlink = os.unlink
+
+    def windows_unlink(path: Any, **kw: Any) -> None:
+        # Windows: a read-only file refuses (refresh's own removal calls `os.unlink`).
+        if not os.lstat(path).st_mode & 0o200:
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        real_unlink(path, **kw)
+
+    monkeypatch.setattr(os, "unlink", windows_unlink)
+    _put_back_refused(monkeypatch, src, times=refused)
+    lost: list[play_client.LostFlag] = []
+
+    done = refresh(play, orig, tmp_path, flags_lost=lost)
+
+    assert Path("Data/common.MPQ") in done
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"MPQ patched"
+    assert src.read_bytes() == b"MPQ patched"
+    assert lost == ([play_client.LostFlag(src)] if refused else [])

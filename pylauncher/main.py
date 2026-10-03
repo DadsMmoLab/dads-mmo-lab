@@ -407,12 +407,12 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> LeftoverN
     the GUI thread (`build_window()`): removing a client-sized folder of links takes
     a while on a slow disk.
     """
+    from yulon import play_client, ui_settings
     from yulon.catalog.families import trinitycore
 
-    lost: list[Path] = []
+    lost: list[play_client.LostFlag] = []
     for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir, flags_lost=lost):
         logger.warning(warning)
-    from yulon import play_client, ui_settings
 
     # T198: a file of the player's whose read-only flag could not be put back, said
     # every time it happens (it happens once: the copy that shared it is gone).

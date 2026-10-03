@@ -1483,6 +1483,7 @@ class _Compared:
 
     stale: tuple[Path, ...]
     left_out: tuple[Path, ...]
+    flags_lost: str = ""  # T198: `play_client.flags_lost_warning()` of the Refresh
 
 
 @dataclass(frozen=True)
@@ -10404,6 +10405,7 @@ class ControllerView(QWidget):
         source = marker.source_client_dir
 
         def work() -> _Compared:
+            lost: list[play_client.LostFlag] = []
             done = play_client.refresh(
                 play,
                 source,
@@ -10412,8 +10414,10 @@ class ControllerView(QWidget):
                 keep=module_kept_files(server_dir, play, client_dir),
                 exe_patch=self.entry.client.exe_patch,
                 catalog_always=_catalog_always(self.entry.client.config_wtf),
+                flags_lost=lost,
             )
-            return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
+            left_out = archives_left_out(server_dir, play, source, client_dir)
+            return _Compared(done, left_out, play_client.flags_lost_warning(lost))
 
         self._run(work, self._play_client_refreshed, self._play_client_job_failed)
         return True
@@ -10429,6 +10433,9 @@ class ControllerView(QWidget):
             said = "Nothing needed refreshing: it matches your own client."
         if compared.left_out:
             said += " " + left_out_sentence(compared.left_out)
+        if compared.flags_lost:  # T198: on the label and in front of the player
+            said += " " + compared.flags_lost
+            QMessageBox.warning(self._play_parent(), self.entry.name, compared.flags_lost)
         self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False

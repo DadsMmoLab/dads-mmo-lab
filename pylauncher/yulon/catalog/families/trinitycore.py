@@ -488,7 +488,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         """
         tc = self._tc()
         temp = extraction_client_dir(original, ctx.server_dir)
-        lost: list[Path] = []  # the player's files whose read-only flag stayed cleared (T198)
+        lost: list[play_client.LostFlag] = (
+            []
+        )  # the player's files whose read-only flag stayed cleared (T198)
         left = remove_leftover_extraction_client(
             ctx.server_dir, self.entry.id, also=temp, flags_lost=lost
         )
@@ -546,8 +548,10 @@ class TrinityCoreInstaller(CmangosInstaller):
             if lost:
                 told = play_client.flags_lost_warning(lost)
                 logger.warning(told)
-                if type(failure) is InstallerError:  # its words are what the person reads
-                    raise InstallerError(f"{failure} {told}") from failure
+                if not isinstance(failure, GeneratorExit):  # a closed stream takes no line
+                    yield f"warning: {told}"  # the install panel shows it whatever ends this
+                if isinstance(failure, InstallerError):  # its words are what the person reads
+                    failure.args = (f"{failure} {told}",)  # same object: its type is kept
             raise
         left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id, flags_lost=lost)
         if lost:
@@ -2262,7 +2266,11 @@ class LeftoverProblem:
 
 
 def remove_leftover_extraction_client(
-    server_dir: Path, game: str, *, also: Path | None = None, flags_lost: list[Path] | None = None
+    server_dir: Path,
+    game: str,
+    *,
+    also: Path | None = None,
+    flags_lost: list[play_client.LostFlag] | None = None,
 ) -> LeftoverProblem | None:
     """Remove the temporary extraction client this install left anywhere; None when none is left.
 
@@ -2301,7 +2309,7 @@ def remove_leftover_extraction_client(
 
 
 def _remove_target(
-    target: Path, game: str, server_dir: Path, *, flags_lost: list[Path]
+    target: Path, game: str, server_dir: Path, *, flags_lost: list[play_client.LostFlag]
 ) -> LeftoverProblem | None:
     """Remove one extraction client and its `.yulon-partial`; None when neither is left.
 
@@ -2430,7 +2438,7 @@ def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None
             written (or the list could not be read): the server folder must be kept.
     """
     recorded = _recorded_target(server_dir)
-    lost: list[Path] = []
+    lost: list[play_client.LostFlag] = []
     left = remove_leftover_extraction_client(server_dir, game, flags_lost=lost)
     told = play_client.flags_lost_warning(lost)  # T198: "" when every flag went back
     if left is None:
@@ -2462,7 +2470,7 @@ def recorded_leftover_targets(*, config_dir: Path | None = None) -> list[str] | 
 
 
 def remove_recorded_leftovers(
-    *, config_dir: Path | None = None, flags_lost: list[Path] | None = None
+    *, config_dir: Path | None = None, flags_lost: list[play_client.LostFlag] | None = None
 ) -> list[str]:
     """Retry every copy Uninstall could not remove; drop the ones now gone; the warnings left.
 
@@ -2623,6 +2631,8 @@ def _no_copy_beside(original: Path, target: Path, exc: play_client.PlayClientErr
         f"{original.parent}, whose game files are shared with your client rather than copied"
     )
     tail = "Nothing was extracted and your client was not changed."
+    if exc.flags_lost:  # T198: removing the unfinished copy cleared a flag of the player's
+        tail = f"Nothing was extracted. {play_client.flags_lost_warning(exc.flags_lost)}"
     if not isinstance(cause, OSError):
         return f"{head}, and that copy could not be made: {exc} {tail}"
     if cause.errno == errno.ENOSPC:

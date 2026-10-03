@@ -1794,6 +1794,140 @@ def test_the_startup_sweep_says_which_file_lost_its_flag_and_only_then(
         assert mode(archive) == 0o444
 
 
+# -- T198 fix round 1 -------------------------------------------------------------------------
+
+
+def run_until_raised(
+    machine: Machine, name: str, **overrides: object
+) -> tuple[list[str], BaseException]:
+    """A stage's lines up to the exception it ends with, and that exception."""
+    said: list[str] = []
+    try:
+        for line in engine(machine, **overrides).stage_named(name).run(context(machine)):
+            said.append(line)
+    except BaseException as exc:  # noqa: BLE001 - the test inspects whatever ends it
+        return said, exc
+    raise AssertionError(f"{name} did not raise")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+@pytest.mark.parametrize("ending", ["InstallerError", "a subclass", "another error"])
+def test_an_extraction_that_fails_says_the_lost_flag_first_whatever_ends_it(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    from yulon.catalog.installer import DockerUnavailableError
+
+    archive = read_only_common(machine)
+    lay_for_client_data(machine)
+    if ending == "InstallerError":
+        machine.tools.fail_tool = "vmap4extractor"
+    elif ending == "a subclass":
+
+        def run_plan(*args: object, **kwargs: object) -> None:
+            assert os.path.lexists(copy_dir(machine)), "the copy exists when it fails"
+            raise DockerUnavailableError("Docker went away")
+
+        monkeypatch.setattr(extract, "run_plan", run_plan)
+    else:  # the extractors' own errors are said as InstallerError: a bug in between is not
+
+        def image_ref(*args: object, **kwargs: object) -> str:
+            assert os.path.lexists(copy_dir(machine)), "the copy exists when it fails"
+            raise ValueError("a bug")
+
+        monkeypatch.setattr(TrinityCoreInstaller, "_image_ref", image_ref)
+    put_back_refused(monkeypatch, archive, 2)
+
+    said, failure = run_until_raised(machine, "client-data")
+
+    told = [line for line in said if LOST in line]
+    assert len(told) == 1 and told[0].startswith("warning: ") and str(archive) in told[0]
+    assert not os.path.lexists(copy_dir(machine))
+    if ending == "InstallerError":
+        assert type(failure) is InstallerError and str(archive) in str(failure)
+    elif ending == "a subclass":
+        assert type(failure) is DockerUnavailableError, "its type is kept"
+        assert str(failure).startswith("Docker went away") and str(archive) in str(failure)
+    else:
+        assert type(failure) is ValueError and str(failure) == "a bug"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+def test_a_copy_that_could_not_be_made_says_the_lost_flag_of_its_unfinished_folder(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = read_only_common(machine)
+    lay_for_client_data(machine)
+
+    def broken_copy(src: object, dst: object, **kw: object) -> object:
+        raise OSError(errno.EIO, "I/O error")  # after the archives were shared
+
+    monkeypatch.setattr(play_client.shutil, "copy2", broken_copy)
+    put_back_refused(monkeypatch, archive, 2)
+
+    with pytest.raises(InstallerError) as info:
+        run_stage(machine, "client-data")
+
+    assert str(archive) in str(info.value) and LOST in str(info.value)
+    assert "your client was not changed" not in str(info.value)
+    assert archive.read_bytes() == b"MPQ common"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+def test_two_leftover_copies_sharing_one_file_name_it_once(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, config_dir: Path
+) -> None:
+    archive = read_only_common(machine)
+    first = leftover_copy(machine)
+    other_server = machine.server_dir.with_name("another-server")
+    second = extraction_client_dir(machine.client, other_server)
+    play_client.create(
+        machine.client, second, game=ENTRY.id, server_dir=other_server, allow_full_copy=False
+    )
+    noted_list(
+        config_dir,
+        [
+            {
+                "target": os.fspath(first),
+                "game": ENTRY.id,
+                "server_dir": os.fspath(machine.server_dir),
+            },
+            {"target": os.fspath(second), "game": ENTRY.id, "server_dir": os.fspath(other_server)},
+        ],
+    )
+    put_back_refused(monkeypatch, archive, 99)
+
+    (told,) = trinitycore.remove_recorded_leftovers()
+
+    assert not os.path.lexists(first) and not os.path.lexists(second)
+    assert told.count(str(archive)) == 1
+    assert told.startswith(f"Your own client's file {archive} is no longer read-only")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.usefixtures("windows_like_removal")
+def test_an_uninstall_whose_folder_cannot_go_still_says_the_lost_flag(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = read_only_common(machine)
+    target = leftover_copy(machine)
+    put_back_refused(monkeypatch, archive, 2)
+
+    def explode(path: Path) -> None:
+        raise purge.PurgeError(f"{path} could not be deleted")
+
+    rec = PurgeRecorder(machine.server_dir, remove_folder=explode)
+
+    with pytest.raises(purge.PurgeError) as info:
+        rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
+
+    assert not os.path.lexists(target)
+    assert "could not be deleted" in str(info.value)
+    assert str(archive) in str(info.value) and LOST in str(info.value)
+
+
 def crashed_after_moving_aside(machine: Machine) -> Path:
     """The copy a press that died after `_drop_unlisted_archives()` leaves, and its record."""
     target = leftover_copy(machine)

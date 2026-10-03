@@ -42,7 +42,7 @@ import shutil
 import stat
 import sys
 import time
-from collections.abc import Callable, Collection, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +77,23 @@ PARTIAL_SUFFIX = ".yulon-partial"
 _PACK_SWAP_NAME = re.compile(r"(.+)\.yulon-pack-(?:tmp|old)(?:\.\d+)?", re.IGNORECASE)
 """A name `client_packs`' swap gives a file beside its target `<name>` (its `_STAGING` and
 `_ASIDE`, numbered when the plain one is taken), matched whole; group 1 is `<name>`."""
+
+
+@dataclass(frozen=True)
+class LostFlag:
+    """A read-only flag of the player's own client that a removal cleared and did not put back.
+
+    `kind` says what is known (T198): "lost", `path` is the player's file, seen to
+    share the cleared flag, and the flag could not be set again; "unchecked", `path`
+    is the player's file at the place the flag belongs to, but it could not be looked
+    at to confirm it is that file; "shared", `path` is the copy's own file, still
+    there and no longer read-only, sharing its flag with a file of the player's that
+    is not at the same place.
+    """
+
+    path: Path
+    kind: Literal["lost", "unchecked", "shared"] = "lost"
+
 
 _FICLONE = 0x40049409  # linux/fs.h: _IOW(0x94, 9, int)
 
@@ -164,7 +181,13 @@ class PlayClientError(RuntimeError):
     """A refusal or failure whose message is shown to the player as it is.
 
     Every message says what happened, what was left as it was, and what to do next.
+    `flags_lost` are the player's files whose read-only flag stayed cleared, which the
+    message already names (T198): for a caller that says the failure in its own words.
     """
+
+    def __init__(self, *args: object, flags_lost: Collection[LostFlag] = ()) -> None:
+        super().__init__(*args)
+        self.flags_lost = tuple(flags_lost)
 
 
 @dataclass(frozen=True)
@@ -400,7 +423,7 @@ def remove_folder(
     *,
     original: Path | None = None,
     unlink: Callable[[Path], None] = os.unlink,
-    flags_lost: list[Path] | None = None,
+    flags_lost: list[LostFlag] | None = None,
 ) -> None:
     """Delete a ready-to-play client folder without changing the original through a link.
 
@@ -415,7 +438,7 @@ def remove_folder(
     freely. Raises OSError if something cannot be removed.
 
     A file of the original whose recorded mode could not be put back (tried twice)
-    is appended to `flags_lost`, also when the removal stops later with OSError:
+    is appended to `flags_lost` (`LostFlag`), also when the removal stops with OSError:
     the shared name is gone by then, so the removal is not failed for it, and the
     caller tells the player (`flags_lost_warning()`, T198).
     """
@@ -433,7 +456,7 @@ def _empty(
     folder: Path,
     original: Path | None,
     unlink: Callable[[Path], None],
-    flags_lost: list[Path],
+    flags_lost: list[LostFlag],
 ) -> None:
     """Remove everything inside `here`, bottom up, never entering a link.
 
@@ -457,9 +480,7 @@ def _empty(
             _empty(child, folder, original, unlink, flags_lost)
             _remove_dir(child)
         else:
-            lost = _remove_file(child, _survivor(child, folder, original), unlink)
-            if lost is not None:
-                flags_lost.append(lost)
+            _remove_file(child, _survivor(child, folder, original), unlink, flags_lost)
 
 
 def _survivor(path: Path, folder: Path, original: Path | None) -> Path | None:
@@ -505,7 +526,12 @@ def _make_writable(path: Path) -> None:
         pass
 
 
-def _remove_file(path: Path, survivor: Path | None, unlink: Callable[[Path], None]) -> Path | None:
+def _remove_file(
+    path: Path,
+    survivor: Path | None,
+    unlink: Callable[[Path], None],
+    flags_lost: list[LostFlag],
+) -> None:
     """Delete one file, clearing its own read-only flag only if nothing else helps.
 
     First the directory (this folder's own: on POSIX its write bit is what
@@ -513,17 +539,19 @@ def _remove_file(path: Path, survivor: Path | None, unlink: Callable[[Path], Non
     attribute), because on a hard link that flag is the original's too. The
     recorded mode is put back on `survivor`, the name in the player's client
     this file may share its inode with, if it still does; a refusal is tried
-    once more. Returns `survivor` when its mode could not be put back, else None.
+    once more. A shared flag that stays cleared is appended to `flags_lost`: after
+    the delete, when it cannot be put back on `survivor`, and when the delete is
+    refused and it cannot be put back on `path` itself.
     """
     st = path.lstat()
     try:
         unlink(path)
-        return None
+        return
     except PermissionError:
         _make_writable(path.parent)
     try:
         unlink(path)
-        return None
+        return
     except PermissionError:
         if stat.S_ISLNK(st.st_mode):
             raise
@@ -540,58 +568,126 @@ def _remove_file(path: Path, survivor: Path | None, unlink: Callable[[Path], Non
                 path,
                 exc_info=True,
             )
+            if st.st_nlink > 1:  # the flag is a file of the player's too
+                flags_lost.append(
+                    LostFlag(survivor)
+                    if survivor is not None and _same_file(survivor, st)
+                    else LostFlag(path, "shared")
+                )
         raise
     if st.st_nlink <= 1:
-        return None
+        return
     if survivor is not None:
+        confirmed = False  # a look saw `survivor` share the cleared flag
         for attempt in (1, 2):
             try:
                 now = survivor.lstat()
-                if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
-                    break  # not that file (any more): the other name is not the player's here
-                os.chmod(survivor, stat.S_IMODE(st.st_mode))
-                return None
             except FileNotFoundError:
                 break
             except OSError:
                 if attempt == 2:
-                    logger.warning(
-                        "ready-to-play client: the read-only flag of %s, cleared to delete %s, "
-                        "could not be put back",
-                        survivor,
-                        path,
-                        exc_info=True,
-                    )
-                    return survivor
+                    _flag_not_put_back(survivor, path, flags_lost, confirmed)
+                    return
+                continue
+            if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+                break  # not that file (any more): the other name is not the player's here
+            confirmed = True
+            try:
+                os.chmod(survivor, stat.S_IMODE(st.st_mode))
+                return
+            except OSError:
+                if attempt == 2:
+                    _flag_not_put_back(survivor, path, flags_lost, confirmed)
+                    return
     logger.warning(
         "ready-to-play client: %s was shared with another file whose read-only flag "
         "could not be put back",
         path,
     )
-    return None
 
 
-def flags_lost_warning(paths: Collection[Path]) -> str:
+def _same_file(path: Path, st: os.stat_result) -> bool:
+    try:
+        now = path.lstat()
+    except OSError:
+        return False
+    return (now.st_dev, now.st_ino) == (st.st_dev, st.st_ino)
+
+
+def _flag_not_put_back(
+    survivor: Path, path: Path, flags_lost: list[LostFlag], confirmed: bool
+) -> None:
+    logger.warning(
+        "ready-to-play client: the read-only flag of %s, cleared to delete %s, could not be " "%s",
+        survivor,
+        path,
+        "put back" if confirmed else "checked",
+        exc_info=True,
+    )
+    flags_lost.append(LostFlag(survivor) if confirmed else LostFlag(survivor, "unchecked"))
+
+
+def flags_lost_warning(flags: Collection[LostFlag]) -> str:
     """What to tell the player about `remove_folder()`'s `flags_lost`; "" when there are none.
 
-    Each is a file of the player's own client, unchanged but no longer read-only:
-    Windows deletes a read-only file only once its flag is cleared, the flag is the
-    one every hard link to it shares, and putting it back was refused (T198).
+    Each file is named once (a file both lost and unchecked is lost). Windows
+    deletes a read-only file only once its flag is cleared, and the flag is the one
+    every hard link to the file shares (T198).
     """
-    if not paths:
+    lost = sorted({flag.path for flag in flags if flag.kind == "lost"})
+    unchecked = sorted({f.path for f in flags if f.kind == "unchecked"} - set(lost))
+    shared = sorted({flag.path for flag in flags if flag.kind == "shared"})
+    if not (lost or unchecked or shared):
         return ""
-    names = ", ".join(str(path) for path in sorted(paths))
-    if len(paths) == 1:
-        return (
-            f"Your own client's file {names} is no longer read-only: Yu'lon had to clear that "
-            "flag to delete the copy that shared it, and could not set it again. The file "
-            "itself did not change. Set it read-only again yourself if you want it protected."
+    said: list[str] = []
+    if len(lost) == 1:
+        said.append(
+            f"Your own client's file {lost[0]} is no longer read-only: Yu'lon had to clear that "
+            "flag to delete the copy that shared it, and could not set it again."
         )
-    return (
-        f"These files of your own client are no longer read-only: {names}. Yu'lon had to clear "
-        "that flag to delete the copies that shared them, and could not set it again. The files "
-        "themselves did not change. Set them read-only again yourself if you want them protected."
-    )
+    elif lost:
+        said.append(
+            f"These files of your own client are no longer read-only: {_listed(lost)}. Yu'lon "
+            "had to clear that flag to delete the copy that shared them, and could not set it "
+            "again."
+        )
+    if len(unchecked) == 1:
+        said.append(
+            f"Yu'lon had to clear the read-only flag of your own client's file {unchecked[0]} "
+            "to delete the copy that shared it, and could not check whether it is set again."
+        )
+    elif unchecked:
+        said.append(
+            "Yu'lon had to clear the read-only flag of these files of your own client to "
+            "delete the copy that shared them, and could not check whether it is set again: "
+            f"{_listed(unchecked)}."
+        )
+    if len(shared) == 1:
+        said.append(
+            f"A file of your own client is no longer read-only: it shares that flag with "
+            f"{shared[0]}, which Yu'lon could not delete, and the flag could not be set again."
+        )
+    elif shared:
+        said.append(
+            "Files of your own client are no longer read-only: they share that flag with "
+            f"{_listed(shared)}, which Yu'lon could not delete, and the flag could not be set "
+            "again."
+        )
+    if len(lost) + len(unchecked) + len(shared) == 1:
+        said.append(
+            "The file itself did not change. Set it read-only again yourself if you want it "
+            "protected."
+        )
+    else:
+        said.append(
+            "The files themselves did not change. Set them read-only again yourself if you want "
+            "them protected."
+        )
+    return " ".join(said)
+
+
+def _listed(paths: Sequence[Path]) -> str:
+    return ", ".join(str(path) for path in paths)
 
 
 def _remove_dir(path: Path, *, parent_is_ours: bool = True) -> None:
@@ -618,11 +714,20 @@ def _retrying(action: Callable[[], None], *, sleep: Callable[[float], None]) -> 
 
 
 def _discard(
-    partial: Path, original: Path | None, *, sleep: Callable[[float], None] = time.sleep
+    partial: Path,
+    original: Path | None,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    flags_lost: list[LostFlag] | None = None,
 ) -> bool:
-    """Remove an unfinished build; False (logged) if it could not be removed."""
+    """Remove an unfinished build; False (logged) if it could not be removed.
+
+    Its shared archives are the player's: a flag not put back goes to `flags_lost`.
+    """
     try:
-        _retrying(lambda: remove_folder(partial, original=original), sleep=sleep)
+        _retrying(
+            lambda: remove_folder(partial, original=original, flags_lost=flags_lost), sleep=sleep
+        )
     except OSError:
         logger.warning("ready-to-play client: could not remove %s", partial, exc_info=True)
         return False
@@ -646,15 +751,35 @@ def _whose(marker: Marker, *, game: str, server_dir: Path) -> str | None:
 
 
 def _remove_partial(partial: Path, marker: Marker) -> None:
+    """Remove this server's unfinished earlier attempt; raise PlayClientError to say anything.
+
+    A read-only flag of the player's that could not be put back stops what was
+    to come next even when the folder went (T198): the player reads which file,
+    and the next press goes on, with nothing left to remove.
+    """
     logger.info("ready-to-play client: removing an unfinished earlier attempt at %s", partial)
+    lost: list[LostFlag] = []
     try:
-        remove_folder(partial, original=marker.source_client_dir)
+        remove_folder(partial, original=marker.source_client_dir, flags_lost=lost)
     except OSError as exc:
+        if lost:
+            raise PlayClientError(
+                f"An unfinished earlier attempt at {partial} could not be removed: {exc}. "
+                f"Nothing new was created. {flags_lost_warning(lost)} Try again: what is left "
+                "keeps Yu'lon's marker, so it is removed first.",
+                flags_lost=lost,
+            ) from exc
         raise PlayClientError(
             f"An unfinished earlier attempt at {partial} could not be removed: {exc}. "
             "Nothing new was created and your client was left as it was. Delete that "
             "folder yourself, then try again."
         ) from exc
+    if lost:
+        raise PlayClientError(
+            f"An unfinished earlier attempt at {partial} was removed. "
+            f"{flags_lost_warning(lost)} Nothing new was made yet: try again to go on.",
+            flags_lost=lost,
+        )
 
 
 def _remove_leftover_partial(partial: Path, *, game: str, server_dir: Path) -> None:
@@ -836,7 +961,8 @@ def create(
                 logger.info("ready-to-play client: renaming %s refused, trying again", partial)
                 sleep(_RENAME_DELAY)
     except BaseException as exc:
-        cleaned = _discard(partial, original, sleep=sleep) if made else None
+        lost: list[LostFlag] = []
+        cleaned = _discard(partial, original, sleep=sleep, flags_lost=lost) if made else None
         if not isinstance(exc, Exception):
             raise
         if isinstance(exc, _Stop):
@@ -863,6 +989,14 @@ def create(
             )
         if cleaned is None:  # the folder itself could not be made
             outcome = "Nothing was created and your client was left as it was."
+        elif lost:  # T198: the unfinished folder cleared a flag of the player's
+            removed = (
+                "The unfinished folder was removed."
+                if cleaned
+                else f"The unfinished folder {partial} could not be removed; it keeps Yu'lon's "
+                "marker, so the next attempt removes it."
+            )
+            outcome = f"{removed} {flags_lost_warning(lost)}"
         elif cleaned:
             outcome = "The unfinished folder was removed and your client was left as it was."
         else:
@@ -870,7 +1004,7 @@ def create(
                 f"The unfinished folder {partial} could not be removed; it keeps Yu'lon's "
                 "marker, so the next attempt removes it. Your client was left as it was."
             )
-        raise PlayClientError(f"{stop.what} {outcome} {stop.next_step}") from exc
+        raise PlayClientError(f"{stop.what} {outcome} {stop.next_step}", flags_lost=lost) from exc
 
     logger.info(
         "ready-to-play client for %s built at %s (%d linked, %d copied%s)",
@@ -1044,8 +1178,12 @@ def stale(play_dir: Path, original: Path, *, keep: Collection[Path] = ()) -> tup
     return tuple(sorted(found))
 
 
-def _drop_temp(tmp: Path, survivor: Path | None) -> None:
-    """Remove a refresh's temporary file (this run's, or a crashed one's); raise if in the way."""
+def _drop_temp(tmp: Path, survivor: Path | None, flags_lost: list[LostFlag]) -> None:
+    """Remove a refresh's temporary file (this run's, or a crashed one's); raise if in the way.
+
+    A shared temporary is a hard link to the player's `survivor`: a flag not put
+    back on it goes to `flags_lost` (T198).
+    """
     try:
         st = _lstat(tmp)
     except FileNotFoundError:
@@ -1055,7 +1193,7 @@ def _drop_temp(tmp: Path, survivor: Path | None) -> None:
     elif stat.S_ISDIR(st.st_mode):
         raise IsADirectoryError(errno.EISDIR, "a folder is in the way", str(tmp))
     else:
-        _remove_file(tmp, survivor, os.unlink)
+        _remove_file(tmp, survivor, os.unlink, flags_lost)
 
 
 def _replace(tmp: Path, dst: Path) -> None:
@@ -1098,8 +1236,13 @@ def refresh(
     exe_patch: ExePatch | None,
     catalog_always: Mapping[str, str],
     opener: Any = None,
+    flags_lost: list[LostFlag] | None = None,
 ) -> tuple[Path, ...]:
     """Bring what `stale()` lists back in step with the original; return what was changed.
+
+    A temporary file left by a crashed refresh may be a hard link to the player's
+    archive; a read-only flag its removal could not put back is appended to
+    `flags_lost`, for the caller to say (T198), and a refresh that stops says it.
 
     Only this game's and server's ready-to-play client, made from `original`.
     Each file is made beside the old one under a temporary name and then put in
@@ -1146,6 +1289,7 @@ def refresh(
         )
     is_kept = _kept({*keep, *_packs_installed(play_dir)})
     done: list[Path] = []
+    lost = flags_lost if flags_lost is not None else []
     if exe_patch is None and _exe_record(play_dir) is not None:
         # The catalog dropped the exe patch: the patched exe goes, the original's comes back.
         if restore_original_exe(play_dir, original, game=game, server_dir=server_dir):
@@ -1176,7 +1320,7 @@ def refresh(
         try:
             if _original_file(src) is None:
                 continue  # gone since stale() looked: keep what the client has
-            _drop_temp(tmp, src)
+            _drop_temp(tmp, src, lost)
             if archive and not marker.full_copy:
                 try:
                     _share(src, tmp, link=link, reflink=reflink)
@@ -1194,7 +1338,7 @@ def refresh(
             _replace(tmp, dst)
         except Exception as exc:
             try:
-                _drop_temp(tmp, src)
+                _drop_temp(tmp, src, lost)
             except OSError:
                 logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
             if isinstance(exc, _Stop):
@@ -1210,8 +1354,11 @@ def refresh(
                 else f"{len(done)} file(s) were refreshed before it and the rest were left "
                 "as they were"
             )
+            yours = (
+                f". {flags_lost_warning(lost)}" if lost else "; your own client was left as it was."
+            )
             raise PlayClientError(
-                f"{stop.what} {kept}; your own client was left as it was. {stop.next_step}"
+                f"{stop.what} {kept}{yours} {stop.next_step}", flags_lost=lost
             ) from exc
         done.append(rel)
     if done:
@@ -1239,13 +1386,14 @@ def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_di
         logger.info("ready-to-play client: %s has no readable Wow.exe, patched exe kept", original)
         return False
     tmp = dst.with_name(dst.name + REFRESH_SUFFIX)
+    never: list[LostFlag] = []  # its temporary is always a copy (`copy2`), never a link
     try:
-        _drop_temp(tmp, src)
+        _drop_temp(tmp, src, never)
         shutil.copy2(src, tmp)
         _replace(tmp, dst)
     except (OSError, _Stop) as exc:
         try:
-            _drop_temp(tmp, src)
+            _drop_temp(tmp, src, never)
         except OSError:
             logger.warning("ready-to-play client: could not remove %s", tmp, exc_info=True)
         raise PlayClientError(
@@ -1352,7 +1500,7 @@ def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool =
             f"{play_dir} is the ready-to-play client of {whose}, so it was left as it "
             "was. Delete it from that server instead."
         )
-    lost: list[Path] = []
+    lost: list[LostFlag] = []
     try:
         remove_folder(play_dir, original=marker.source_client_dir, flags_lost=lost)
     except OSError as exc:
@@ -1374,7 +1522,8 @@ def delete(play_dir: Path, *, game: str, server_dir: Path, can_try_again: bool =
         if lost:
             raise PlayClientError(
                 f"{play_dir} could not be deleted completely: {exc}. {rest} "
-                f"{flags_lost_warning(lost)}"
+                f"{flags_lost_warning(lost)}",
+                flags_lost=lost,
             ) from exc
         raise PlayClientError(
             f"{play_dir} could not be deleted completely: {exc}. Your own client was "

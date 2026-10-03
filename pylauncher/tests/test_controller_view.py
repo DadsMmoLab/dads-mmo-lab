@@ -20953,6 +20953,58 @@ def test_uninstall_tells_the_player_which_file_lost_its_read_only_flag_and_only_
     assert (str(archive) in said and "no longer read-only" in said) is bool(refused)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_refresh_tells_the_player_which_file_lost_its_read_only_flag_and_only_then(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    """T198 fix round 1: a crashed refresh's temporary shares the player's read-only archive."""
+    qmb = controller_view_module.QMessageBox
+    warned: list[str] = []
+    monkeypatch.setattr(qmb, "warning", lambda *a, **_k: warned.append(a[2]))
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    src = original / "Data" / "common.MPQ"
+    src.unlink()
+    src.write_bytes(b"MPQ patched")  # a new file: the copy is stale and is shared it again
+    os.chmod(src, 0o444)
+    os.link(src, play / "Data" / ("common.MPQ" + play_client.REFRESH_SUFFIX))  # a crash's
+    real_unlink = os.unlink
+
+    def windows_unlink(path: Any, **kw: Any) -> None:
+        if os.path.isfile(path) and not os.lstat(path).st_mode & stat.S_IWRITE:
+            raise PermissionError(13, "Access is denied", str(path))
+        real_unlink(path, **kw)
+
+    monkeypatch.setattr(os, "unlink", windows_unlink)
+    real_chmod = os.chmod
+    calls: list[int] = []
+
+    def chmod(path: Any, mode: int, **kw: Any) -> None:
+        if Path(path) == src:
+            calls.append(mode)
+            if len(calls) <= refused:
+                raise PermissionError(13, "Access is denied", str(path))
+        real_chmod(path, mode, **kw)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+
+    view.refresh_play_client()
+
+    said = view.play_label.text()
+    assert (play / "Data" / "common.MPQ").read_bytes() == b"MPQ patched"
+    assert src.read_bytes() == b"MPQ patched"
+    assert "Refreshed from your own client" in said
+    if refused:
+        assert str(src) in said and "no longer read-only" in said
+        (told,) = warned
+        assert str(src) in told
+    else:
+        assert "read-only" not in said
+        assert warned == []
+
+
 # -- T181a Task 5, fix round 1 --------------------------------------------------
 
 

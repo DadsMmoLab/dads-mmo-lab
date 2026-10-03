@@ -4715,12 +4715,11 @@ def test_a_copy_that_stays_is_logged_and_said_in_one_line(
     assert any(str(foreign) in record.getMessage() for record in caplog.records)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
-@pytest.mark.parametrize("refused", [0, 2])
-def test_the_sweep_says_which_file_lost_its_read_only_flag_and_only_then(
+def _noted_copy_whose_flag_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
-) -> None:
-    """T198: a noted copy is removed, and a flag of the player's it could not put back is said."""
+) -> tuple[Path, Path]:
+    """A noted extraction copy sharing the player's read-only archive, removed as Windows does,
+    with putting that archive's flag back refused `refused` times (T198)."""
     import errno
 
     from yulon import play_client
@@ -4769,6 +4768,16 @@ def test_the_sweep_says_which_file_lost_its_read_only_flag_and_only_then(
         real_chmod(path, mode, **kw)
 
     monkeypatch.setattr(os, "chmod", chmod)
+    return archive, copy
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+@pytest.mark.parametrize("refused", [0, 2])
+def test_the_sweep_says_which_file_lost_its_read_only_flag_and_only_then(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: int
+) -> None:
+    """T198: a noted copy is removed, and a flag of the player's it could not put back is said."""
+    archive, copy = _noted_copy_whose_flag_is_refused(tmp_path, monkeypatch, refused)
 
     notice = _REAL_SWEEP(config_dir=tmp_path)
 
@@ -4780,6 +4789,38 @@ def test_the_sweep_says_which_file_lost_its_read_only_flag_and_only_then(
         assert notice.folders == ()
     else:
         assert notice is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_the_sweep_says_a_lost_flag_beside_a_copy_that_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, copy = _noted_copy_whose_flag_is_refused(tmp_path, monkeypatch, 2)
+    foreign = _leftover(tmp_path, "WoW (Yu'lon map data, temporary)")
+
+    notice = _REAL_SWEEP(config_dir=tmp_path)
+
+    assert not copy.exists()
+    assert notice is not None and "\n" not in notice.text
+    assert "a temporary copy of a game client" in notice.text
+    assert str(archive) in notice.text and "no longer read-only" in notice.text
+    assert notice.folders == (str(foreign),)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake stands in for Windows' read-only rule")
+def test_the_sweep_says_a_lost_flag_when_the_list_cannot_be_read_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.catalog.families import trinitycore
+
+    archive, copy = _noted_copy_whose_flag_is_refused(tmp_path, monkeypatch, 2)
+    monkeypatch.setattr(trinitycore, "recorded_leftover_targets", lambda **_kw: None)
+
+    notice = _REAL_SWEEP(config_dir=tmp_path)
+
+    assert not copy.exists()
+    assert notice is not None and notice.text.startswith(main.LEFTOVER_LIST_UNREAD)
+    assert str(archive) in notice.text and "no longer read-only" in notice.text
 
 
 def test_a_notice_is_remembered_only_once_it_was_shown(
