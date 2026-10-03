@@ -23550,15 +23550,51 @@ def test_a_failed_poll_during_a_stop_leaves_the_hold_alone(
     assert view.realm_badge.status == "stopped"
 
 
-def test_a_failed_poll_with_nothing_of_ours_running_says_stopped(
+def test_a_failed_poll_with_nothing_of_ours_running_says_unknown(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Unchanged since before T188: an idle poll that cannot reach Docker says stopped."""
+    """Final fix round: Docker not answering is not the server being stopped."""
     view, jobs = _held_view(ps, tmp_path)
 
     view._tick()
     _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
 
+    assert view.realm_badge.status == "unknown"
+
+
+def test_a_press_whose_follow_up_read_fails_says_unknown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)
+
+    # Every read the stop asked for fails: Docker went away as the stop ended.
+    while any(d == view._status_ready for _w, d, _e in jobs.queue):
+        _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+
+    assert view.realm_badge.status == "unknown"
+    assert view._badge_held is None
+
+
+def test_a_poll_from_before_the_press_that_fails_after_it_keeps_the_hold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Final fix round: only the action's own follow-up read ends the hold.
+
+    A poll asked before Stop, answering (with a failure) after the stop ended,
+    is older than the stop; the read the stop asked for is still to come.
+    """
+    view, jobs = _held_view(ps, tmp_path)
+    view._tick()  # out before the press
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)  # asks again; the old poll is still out
+    assert view._status_superseded is True
+
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+    assert view.realm_badge.status == "stopping", "an older read than the stop ended its hold"
+
+    _drain_polls(view, jobs)
     assert view.realm_badge.status == "stopped"
 
 

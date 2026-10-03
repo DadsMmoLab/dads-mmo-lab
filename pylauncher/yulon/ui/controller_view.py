@@ -33,7 +33,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, cast
+from typing import Any, NamedTuple, Protocol, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -518,6 +518,14 @@ the moment they arrive, and only the LIST is scheduled.
 
 _LEVEL_ROLE = Qt.ItemDataRole.UserRole + 2
 """Where a character row keeps its level, for the Level box to start from (T188 A6)."""
+
+
+class _CharacterAnswer(NamedTuple):
+    """A Characters action's outcome, with the (name, level) a Set level press sent."""
+
+    outcome: object
+    level_sent: tuple[str, int] | None
+
 
 _ROW_SETTLE_TRIES = 4
 """How many times to re-read before giving up on the row catching up.
@@ -7903,17 +7911,21 @@ class ControllerView(QWidget):
     def _status_failed(self, exc: object) -> None:
         self._status_pending = False
         self._last_status = None
+        # Read before the ask below, which resets them: a poll that was asked
+        # while a job of ours ran, or that some later ask was dropped behind, is
+        # older than that job's own follow-up read (T188).
+        stale = self._status_superseded or self._status_asked_busy or self._busy
         # T95: the refresh dropped while this poll was out is asked again. The
         # app's job runner hands it to a worker thread, so its answer arrives
         # after this method has returned.
         self._ask_again_if_superseded(self._status_superseded)
         self.status_label.setText(f"status: Docker not reachable ({exc})")
-        # An idle failed poll says "stopped", as it always has. One that fails
-        # while our Start/Stop/Restart runs leaves its hold alone: the job is
-        # still doing what the badge says (T188 fix round 1).
-        if self._badge_held is None or not self._busy:
+        # "unknown", not "stopped": Docker not answering says nothing about the
+        # server (T188 final fix round). A hold is left alone by a failure older
+        # than its job's own follow-up read; that read failing ends it here.
+        if self._badge_held is None or not stale:
             self._badge_held = None
-            self.realm_badge.set_status("stopped")
+            self.realm_badge.set_status("unknown")
         self._offer_docker_repair()
         # T54. The reveal used to run only on the success path, and the control
         # it reveals exists for an install that is GONE -- which is the case
@@ -11022,8 +11034,6 @@ class ControllerView(QWidget):
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
-        # (name, level) of a Set level press whose answer is out (T188 fix round 1).
-        self._level_sent: tuple[str, int] | None = None
         self._gear_generation = 0
         # One gear read at a time, and only the newest row waits behind it
         # (T96 review): see `_ask_for_gear()`.
@@ -11401,21 +11411,28 @@ class ControllerView(QWidget):
 
         `level` is a Set level press's level: on success the row keeps it at
         once (T188 fix round 1), because the list is re-read 750ms later and a
-        lower level typed in between was compared with the old one.
+        lower level typed in between was compared with the old one. It rides
+        WITH this job's answer (`_CharacterAnswer`), never in a field on the
+        tab: the buttons stay live while an action runs, so a second press can
+        overlap the first, and a shared field was overwritten by it.
         """
         name = self._chosen_character()
-        self._level_sent = (name, level) if level is not None and name else None
         if self.services.play is None or not name:
             return
+        sent = (name, level) if level is not None else None
         self.character_report.setText(f"{what} {name}…")
-        self._run(run, self._character_done, self._characters_failed)  # type: ignore[arg-type]
+        self._run(
+            lambda: _CharacterAnswer(run(), sent),  # type: ignore[operator]
+            self._character_done,
+            self._characters_failed,
+        )
 
     @Slot(object)
-    def _character_done(self, outcome: object) -> None:
+    def _character_done(self, answer: object) -> None:
+        outcome, sent = cast(_CharacterAnswer, answer)
         done = bool(getattr(outcome, "done", False))
         said = getattr(outcome, "text", "") if done else getattr(outcome, "problem", "")
         self.character_report.setText(said.strip() or ("Done." if done else "It did not work."))
-        sent, self._level_sent = self._level_sent, None
         if done and sent is not None:
             for row in range(self.character_list.count()):
                 item = self.character_list.item(row)

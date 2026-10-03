@@ -1172,3 +1172,75 @@ def test_after_a_raise_lowering_by_one_still_asks(tmp_path: Path) -> None:
 
     assert len(asked) == 1 and "80" in asked[0][1], asked
     assert [c for c in play.calls if c[0] == "set_level"] == [("set_level", ("Guglu", 80))]
+
+
+class _HeldJobs:
+    """A job runner that holds every job until the test delivers it: two in flight at once."""
+
+    def __init__(self) -> None:
+        self.queue: list[tuple[object, object, object]] = []
+
+    def __call__(self, work: object, on_done: object, on_error: object) -> None:
+        self.queue.append((work, on_done, on_error))
+
+    def deliver(self, matching: object, nth: int = 0) -> None:
+        """Run the `nth` held job whose answer goes to `matching`, as the worker would."""
+        found = [i for i, (_w, done, _e) in enumerate(self.queue) if done == matching]
+        work, on_done, on_error = self.queue.pop(found[nth])
+        run_inline(work, on_done, on_error)  # type: ignore[arg-type]
+
+    def deliver_all(self, matching: object) -> None:
+        while any(done == matching for _w, done, _e in self.queue):
+            self.deliver(matching)
+
+
+def test_a_level_lands_on_its_row_when_another_action_overlaps_it(tmp_path: Path) -> None:
+    """Final fix round: the sent level rode in one shared field, so a Revive pressed
+    while Set level was out wiped it, and the row kept 78 after the server said 80.
+    The buttons stay live while an action runs, so the two can overlap."""
+    play = _Play(characters=_people())
+    jobs = _HeldJobs()
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    services.play = play
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=jobs)
+    view.refresh_characters()
+    jobs.deliver_all(view._characters_arrived)
+    view.character_list.setCurrentRow(0)
+
+    view.new_level.setValue(80)
+    view.set_level_button.click()
+    assert view.revive_button.isEnabled(), "the premise: a second press is possible"
+    view.revive_button.click()
+    jobs.deliver(view._character_done, 0)  # Set level's answer
+    jobs.deliver(view._character_done, 0)  # then Revive's
+
+    asked = _asking(view, False)
+    view.new_level.setValue(79)
+    view.set_level_button.click()
+    assert len(asked) == 1 and "80" in asked[0][1], asked
+
+
+def test_an_action_landing_first_does_not_take_the_level_of_one_still_out(
+    tmp_path: Path,
+) -> None:
+    """Revive pressed first and Set level second: Revive's answer, landing first, must
+    not write the level Set level is still sending; Set level's own answer then does."""
+    play = _Play(characters=_people())
+    jobs = _HeldJobs()
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    services.play = play
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=jobs)
+    view.refresh_characters()
+    jobs.deliver_all(view._characters_arrived)
+    view.character_list.setCurrentRow(0)
+    row = view.character_list.item(0)
+    level_role = Qt.ItemDataRole.UserRole + 2
+
+    view.revive_button.click()
+    view.new_level.setValue(80)
+    view.set_level_button.click()
+
+    jobs.deliver(view._character_done, 0)  # Revive's answer
+    assert row.data(level_role) == 78, "Revive's answer stored a level it never sent"
+    jobs.deliver(view._character_done, 0)  # Set level's answer
+    assert row.data(level_role) == 80

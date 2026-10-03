@@ -316,7 +316,10 @@ def test_dadcraft_realm_badge(qapp: QApplication) -> None:
     assert "OFFLINE" in badge._label.text()
 
 
-@pytest.mark.parametrize(("status", "says"), [("stopping", "STOPPING"), ("partial", "PARTLY UP")])
+@pytest.mark.parametrize(
+    ("status", "says"),
+    [("stopping", "STOPPING"), ("partial", "PARTLY UP"), ("unknown", "STATUS UNKNOWN")],
+)
 def test_the_realm_badge_names_stopping_and_partly_up(
     qapp: QApplication, status: str, says: str
 ) -> None:

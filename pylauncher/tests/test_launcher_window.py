@@ -389,6 +389,30 @@ def test_a_partly_up_server_is_not_called_stopped_under_play(
     said = window.play_reason_label.text()
     assert "partly up" in said, said
     assert "stopped" not in said, said
+    assert window.online_label.text() == launcher_window.PARTIAL_BANNER
+    assert window.online_label.text() != launcher_window.STOPPED_BANNER
+
+
+def test_a_realm_yulon_cannot_ask_about_is_not_called_stopped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final fix round: Docker not answering says so; it neither claims stopped nor
+    promises that PLAY starts the server."""
+    from yulon import docker
+
+    window, view, _ = _launcher(ps, tmp_path)
+
+    def unreachable() -> object:
+        raise docker.DockerCommandError("Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(view.services.controller, "status", unreachable)
+    view.refresh_status()
+
+    assert window.realm_badge.status == "unknown"
+    assert window.online_label.text() == launcher_window.UNKNOWN_BANNER
+    said = window.play_reason_label.text()
+    assert "Docker" in said, said
+    assert "stopped" not in said and "starts it" not in said, said
 
 
 def test_a_count_that_could_not_be_read_is_left_out_not_shown_as_zero(

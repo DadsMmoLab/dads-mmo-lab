@@ -117,6 +117,8 @@ SAVING = "Saving your choice…"
 STOPPED_BANNER = "Play starts the server first (about 1 minute)"
 STARTING_BANNER = "The server is starting…"
 STOPPING_BANNER = "The server is stopping…"
+PARTIAL_BANNER = "The server is partly up: PLAY starts the rest"
+UNKNOWN_BANNER = "Yu'lon cannot ask Docker about this server right now"
 VIEW_GONE = (
     "This server's tab was closed, so nothing can be started from here. Open the launcher "
     "again from the server."
@@ -1206,6 +1208,13 @@ class LauncherWindow(QWidget):
             self.play_reason_label.setText(
                 "Starts World of Warcraft from this server's ready-to-play client."
             )
+        elif self.realm_badge.status == "unknown":
+            # T188: Docker did not answer; neither "stopped" nor "PLAY starts it"
+            # is known to be true.
+            self.play_reason_label.setText(
+                "Yu'lon can't ask Docker about this server right now, so it cannot tell "
+                "whether the server is up."
+            )
         elif self.realm_badge.status == "partial":
             # T188: only part of it is up, which "The server is stopped" was not.
             self.play_reason_label.setText(
@@ -1235,6 +1244,10 @@ class LauncherWindow(QWidget):
             # T188 C5: the tab's Stop holds the badge here; "Play starts the
             # server first" under a stop in progress was a promise to undo it.
             text = STOPPING_BANNER
+        elif status == "partial":
+            text = PARTIAL_BANNER
+        elif status == "unknown":
+            text = UNKNOWN_BANNER
         elif status in ("starting", "importing", "working", "building", "restarting"):
             text = STARTING_BANNER
         else:

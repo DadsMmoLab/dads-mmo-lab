@@ -156,6 +156,13 @@ class DadcraftRealmBadge(QWidget):
             border_color = COLOR_RARE
             text_color = "#EBF5FB"
             display_text = "◆ RESTARTING"
+        elif self._status == "unknown":
+            # T188: Docker did not answer, so nothing is known about the realm.
+            # The offline sheet's neutral colours, with words that do not claim it.
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
+            border_color = "#555560"
+            text_color = "#A0A0AA"
+            display_text = "? STATUS UNKNOWN"
         else:
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
             border_color = "#555560"

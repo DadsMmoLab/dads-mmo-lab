@@ -4195,6 +4195,27 @@ def test_a_window_opened_with_no_servers_hides_the_header_badge(window: Any) -> 
     assert window.header_badge_hidden_at_start is True
 
 
+def test_the_header_says_unknown_when_docker_cannot_be_asked(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final fix round: the header follows the tab's badge into "unknown"."""
+    from yulon import docker
+
+    header = window.property("header")
+    server_dir = tmp_path / "c6-unknown"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+
+    def unreachable() -> object:
+        raise docker.DockerCommandError("Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(view.services.controller, "status", unreachable)
+    view.refresh_button.click()
+    pump_until(lambda: header._badge.status == "unknown", "the header to say unknown")
+
+    assert "UNKNOWN" in header._badge._label.text()
+
+
 def test_the_header_badge_is_hidden_on_the_catalog(window: Any, tmp_path: Any) -> None:
     header = window.property("header")
     tabs = window.property("tabs")
