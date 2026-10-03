@@ -358,11 +358,22 @@ def test_no_site_is_registered_twice() -> None:
 
 
 def test_my_party_is_not_offered_on_trinitycore() -> None:
-    """Spec §2: My Party needs AzerothCore's Lua bridge; it is WotLK-only."""
+    """Spec §2: My Party needs AzerothCore's Lua bridge; it is WotLK-only.
+
+    The note is drawn on the Bots tab as it is, so since T194 it says where My
+    Party works in the player's words; the Lua bridge is named in the docstring
+    of `decisions.PARTY_REASON`, not on screen. ("WotLK server" rather than the
+    game's name: this module may not spell a catalog value.)
+    """
+    from tests.support_player_text import text_faults
+
     party = next(site for site in FAMILY_DECISIONS if site.scope.endswith("for_entry_is_possible"))
     decision = party.decisions["trinitycore"]
     assert decision.kind == "not-available"
-    assert "Lua bridge" in decision.note
+    assert "works on the WotLK server only" in decision.note, decision.note
+    assert text_faults(decision.note) == [], decision.note
+    for developer_word in ("Lua bridge", "addclass", "mod-ale"):
+        assert developer_word not in decision.note, decision.note
 
 
 # -- coverage -------------------------------------------------------------------
