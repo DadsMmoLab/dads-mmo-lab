@@ -27,6 +27,8 @@ from typing import Literal
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QResizeEvent
 from PySide6.QtWidgets import (
+    QAbstractButton,
+    QButtonGroup,
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
@@ -178,12 +180,57 @@ NOTHING_TO_TUNE = (
 )
 
 NARROW_WIDTH = 900
-"""Below this, the cards and the file editor stack instead of sitting side by side.
+"""Below this, the cards and the file editor take turns instead of sitting side by side.
 
 A number and not a stylesheet query, because a `QSplitter` cannot be told to
-wrap: it is one orientation or the other, and the resize is where the app finds
-out which.
+wrap, and the resize is where the app finds out which shape it is in.
+
+Turns and not a stack (T190). Stacked, the 960x640 tab gave the cards a 72px
+strip over the editor -- and the vertical split's 20/80 heights came back as
+20/80 WIDTHS the moment the window grew, because nothing reset them: every
+session passes a narrow layout first, so every wide window had a 219px column
+of cards that scrolled sideways.
 """
+
+CARDS_MIN_WIDTH = 440
+"""The narrowest the card column may be side by side (T190): a card, its rows and
+their values still read across. Raised by `TuningPanel.set_header` when the
+header above the cards asks for more."""
+
+CARDS_MAX_WIDTH = 760
+"""The widest a fresh split makes the card column: past it the rows only spread out."""
+
+EDITOR_MIN_WIDTH = 360
+"""The narrowest the file editor may be side by side (T190)."""
+
+SIDE_SETTINGS = "Settings"
+SIDE_EDIT_FILE = "Edit file"
+"""The narrow window's two-button switch (T190).
+
+Two checkable buttons and not a `QTabWidget`: the gamepad's RB/LB go to the
+nearest tab widget (`gamepad._nearest_tab_widget`), and an inner one would take
+them from the app's own tabs whenever the focus was on this panel.
+"""
+
+
+def split_sizes(total: int, cards_min: int = CARDS_MIN_WIDTH) -> tuple[int, int]:
+    """`(cards, editor)` for a side-by-side split `total` pixels wide (T190).
+
+    Half each, the cards held between `cards_min` and `CARDS_MAX_WIDTH` -- and
+    `cards_min` wins over the cap, because a header the column has to hold is
+    not something a maximum can shrink.
+    """
+    cards = min(max(total // 2, cards_min), max(CARDS_MAX_WIDTH, cards_min))
+    return cards, total - cards
+
+
+def is_narrow(width: int, cards_min: int = CARDS_MIN_WIDTH) -> bool:
+    """Whether a panel `width` wide shows one half at a time (T190).
+
+    Under `NARROW_WIDTH`, or under what both halves need side by side.
+    """
+    return width < max(NARROW_WIDTH, cards_min + EDITOR_MIN_WIDTH)
+
 
 BOOL_WORDS: dict[str, tuple[str, str]] = {
     "true": ("true", "false"),
@@ -699,13 +746,44 @@ class TuningPanel(QWidget):
         self._cards: dict[tuple[str, str], CardWidget] = {}
         self._order: list[tuple[str, str]] = []
         self._actions_enabled = True
+        self._header: QWidget | None = None
+        self._narrow: bool | None = None
+        """The shape last laid out: `None` until the first resize, so the first
+        one -- wide or narrow -- is a change and sets the split up (T190)."""
         self.setStyleSheet(panel_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        # The narrow window's switch (T190): which half has the whole panel.
+        # Hidden until a resize finds the panel narrow; starts on the settings,
+        # and the choice is kept across a trip through a wide window.
+        self.side_buttons = QWidget(self)
+        side_box = QHBoxLayout(self.side_buttons)
+        side_box.setContentsMargins(0, 0, 0, 0)
+        side_box.setSpacing(4)
+        self.settings_button = QPushButton(SIDE_SETTINGS, self.side_buttons)
+        self.edit_file_button = QPushButton(SIDE_EDIT_FILE, self.side_buttons)
+        self._side_group = QButtonGroup(self)
+        self._side_group.setExclusive(True)
+        for button in (self.settings_button, self.edit_file_button):
+            button.setCheckable(True)
+            self._side_group.addButton(button)
+            side_box.addWidget(button)
+        side_box.addStretch(1)
+        self.settings_button.setChecked(True)
+        self._side_group.buttonClicked.connect(self._side_picked)
+        self.side_buttons.setVisible(False)
+        outer.addWidget(self.side_buttons)
+        # Always side by side (T190). A vertical split's sizes came back as
+        # widths when the window grew; one half is hidden instead when narrow.
         self.split = QSplitter(Qt.Orientation.Horizontal, self)
+        self.split.setChildrenCollapsible(False)
 
         self._area = QScrollArea(self.split)
         self._area.setWidgetResizable(True)
+        # Never sideways: the cards wrap to the column they are given, and the
+        # column has a floor (`CARDS_MIN_WIDTH`) that they fit in.
+        self._area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._area.setMinimumWidth(CARDS_MIN_WIDTH)
         self._content = QWidget(self._area)
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setSpacing(8)
@@ -718,6 +796,8 @@ class TuningPanel(QWidget):
         self.split.addWidget(self._area)
 
         right = QWidget(self.split)
+        right.setMinimumWidth(EDITOR_MIN_WIDTH)
+        self._file_side = right
         right_box = QVBoxLayout(right)
         right_box.setContentsMargins(4, 0, 0, 0)
         # The picker as BUTTONS (T44 item 13). A combo box shows one file and
@@ -783,7 +863,7 @@ class TuningPanel(QWidget):
         file_actions.addWidget(self.file_save_button)
         right_box.addLayout(file_actions)
         self.split.addWidget(right)
-        outer.addWidget(self.split)
+        outer.addWidget(self.split, 1)
 
     # ------------------------------------------------------------ the cards
 
@@ -815,6 +895,10 @@ class TuningPanel(QWidget):
         """
         widget.setParent(self._content)
         self._content_layout.insertWidget(0, widget)
+        # The header is a floor for the column under it (T190): asked at every
+        # resize (`_cards_min`), because its width follows the font, and the
+        # app restyles the font with the window's width.
+        self._header = widget
 
     def cards(self) -> tuple[CardWidget, ...]:
         return tuple(self._cards[key] for key in self._order)
@@ -981,16 +1065,59 @@ class TuningPanel(QWidget):
 
     # ------------------------------------------------------------ the shape
 
+    def _cards_min(self) -> int:
+        """The card column's floor: `CARDS_MIN_WIDTH`, or the header plus the column's chrome.
+
+        The chrome is the column's own -- its frame, its scroll bar, the
+        margins of the box the cards sit in -- read off the widgets, not typed.
+        """
+        if self._header is None:
+            return CARDS_MIN_WIDTH
+        margins = self._content_layout.contentsMargins()
+        chrome = (
+            2 * self._area.frameWidth()
+            + self._area.verticalScrollBar().sizeHint().width()
+            + margins.left()
+            + margins.right()
+        )
+        return max(CARDS_MIN_WIDTH, self._header.sizeHint().width() + chrome)
+
+    def _side_picked(self, _button: QAbstractButton) -> None:
+        self._show_sides()
+
+    def _show_sides(self) -> None:
+        """Both halves when wide; when narrow, the one the switch names."""
+        narrow = bool(self._narrow)
+        editing = self.edit_file_button.isChecked()
+        self.side_buttons.setVisible(narrow)
+        self._area.setVisible(not narrow or not editing)
+        self._file_side.setVisible(not narrow or editing)
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
-        """Side by side while there is room, stacked when there is not."""
-        wide = self.width() >= NARROW_WIDTH
-        self.split.setOrientation(Qt.Orientation.Horizontal if wide else Qt.Orientation.Vertical)
+        """Side by side while there is room, one half at a time when there is not (T190).
+
+        On every switch to side by side -- and the first layout -- the split
+        is set to `split_sizes()`; between switches a drag of the handle is the
+        user's and is kept.
+        """
+        cards_min = self._cards_min()
+        self._area.setMinimumWidth(cards_min)
+        narrow = is_narrow(self.width(), cards_min)
+        if narrow != self._narrow:
+            self._narrow = narrow
+            self._show_sides()
+            if not narrow:
+                total = self.width() - self.split.handleWidth()
+                self.split.setSizes(list(split_sizes(total, cards_min)))
         super().resizeEvent(event)
 
 
 __all__ = [
+    "CARDS_MAX_WIDTH",
+    "CARDS_MIN_WIDTH",
     "CHANGED_FROM",
     "CardWidget",
+    "EDITOR_MIN_WIDTH",
     "NOTHING",
     "NOTHING_TO_TUNE",
     "NOT_IN_THE_FILE",
@@ -1000,6 +1127,8 @@ __all__ = [
     "bool_words",
     "build_tuning_cards",
     "control_kind",
+    "is_narrow",
+    "split_sizes",
     "starting_value",
     "value_note",
 ]

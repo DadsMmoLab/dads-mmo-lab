@@ -309,7 +309,12 @@ def test_the_file_save_hands_up_the_text_that_is_in_the_box(qapp: object) -> Non
     assert sent == ["A = 2\n"]
 
 
-def test_a_narrow_window_stacks_the_two_halves(qapp: object) -> None:
+def test_a_narrow_window_shows_the_switch_and_never_stacks_the_two_halves(qapp: object) -> None:
+    """T190: stacked, the cards got a 72px strip at 960x640; now a switch picks one half.
+
+    The split stays side by side at every width -- a vertical split's sizes
+    were what came back as a 20/80 column of widths in a wide window.
+    """
     from PySide6.QtCore import Qt
 
     panel = tp.TuningPanel()
@@ -318,8 +323,12 @@ def test_a_narrow_window_stacks_the_two_halves(qapp: object) -> None:
     panel.show()
     panel.resize(1200, 600)
     assert panel.split.orientation() == Qt.Orientation.Horizontal
+    assert not panel.side_buttons.isVisible()
     panel.resize(500, 600)
-    assert panel.split.orientation() == Qt.Orientation.Vertical
+    assert panel.split.orientation() == Qt.Orientation.Horizontal
+    assert panel.side_buttons.isVisible()
+    panel.resize(1200, 600)
+    assert not panel.side_buttons.isVisible(), "the switch outlived the narrow window"
     panel.close()
 
 

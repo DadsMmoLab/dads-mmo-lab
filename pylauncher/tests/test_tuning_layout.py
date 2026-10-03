@@ -1,0 +1,316 @@
+"""The Tuning tab's shape across the window sizes a player drags it to (T190, T186).
+
+Measured on the real widgets inside the window `main.build_window()` builds,
+resized the way a drag resizes it (`_at`), never by calling the layout code
+directly: the defect T190 fixes lived in the ORDER of resizes -- the window
+always passes a narrow layout before it reaches a wide one, and the narrow
+split's 20/80 heights were carried over as 20/80 widths.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+from PySide6.QtCore import Qt
+
+from tests.conftest import process_events
+from tests.test_controller_view import (
+    TRANSMOG_CONF,
+    _at,
+    _clipped,
+    _controller_in_the_real_window,
+    _deploy,
+    _drawn_under_their_minimum,
+    _Ps,
+    _services,
+    _with_the_core_confs,
+    _wotlk_override,
+)
+from yulon import runner, server_time_zone
+from yulon.catalog import composegen, time_zone
+from yulon.catalog.catalog import load_catalog
+from yulon.ui import controller_view as controller_view_module
+from yulon.ui.controller_view import TIME_ZONE_HOST, ControllerView
+from yulon.ui.widgets import tuning_panel as tp
+from yulon.ui.widgets.job import run_inline
+
+WOTLK = load_catalog().get("wow-wotlk")
+OSLO = "Europe/Oslo"
+SMALL, MEDIUM, LARGE = (960, 640), (1280, 800), (1920, 1080)
+DRAG = (SMALL, MEDIUM, LARGE, SMALL, MEDIUM)
+"""The order a session really goes through: narrow first, then wide, then back.
+
+Each wide size is reached from a narrow one, and 1280x800 is reached TWICE --
+the second time after 1920 and 960 -- so a reset that happened only once, on
+the first switch, answers differently the second time.
+"""
+
+
+@pytest.fixture(autouse=True)
+def _inline_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
+
+
+@pytest.fixture
+def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
+    fake = _Ps()
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
+
+
+def _tuning_window(
+    ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ControllerView, Any, Any]:
+    """Two modules' cards, the core confs, and this computer's time zone, in the real window.
+
+    The core confs because every real WotLK install has them, and they are what
+    T190 needed to show: with five file buttons the editor's half asks for more
+    than with two, and the 219px column only appears with them on disk.
+    """
+    _with_the_core_confs(tmp_path)
+    monkeypatch.setattr(time_zone, "host_zone", lambda: OSLO)
+    installed = _wotlk_override(tmp_path)
+    # Both servers name this computer's zone -- `test_time_zone_view`'s own
+    # spelling of an applied zone -- so the box reads "Same as this computer".
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(
+        installed + f'      TZ: "{OSLO}"\n  ac-authserver:\n    environment:\n      TZ: "{OSLO}"\n',
+        encoding="utf-8",
+    )
+    _deploy(tmp_path, "env/dist/etc/modules/mod_npc_beastmaster.conf", "BeastMaster.Enable = 1\n")
+    _deploy(tmp_path, TRANSMOG_CONF, "[worldserver]\nTransmogrification.Enable = 1\n")
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "installed_modules",
+        lambda: {"module": frozenset({"mod-npc-beastmaster", "mod-transmog"})},
+    )
+    object.__setattr__(services, "time_zone", server_time_zone.time_zone_route(WOTLK, tmp_path))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Tuning")
+    return view, window, tab
+
+
+def _file_side(panel: tp.TuningPanel) -> Any:
+    """The editor's half of the split: the splitter child that is not the cards."""
+    return panel.split.widget(1)
+
+
+# -- the rules, as data -------------------------------------------------------
+
+
+def test_the_cards_get_half_the_width_between_their_minimum_and_their_maximum() -> None:
+    assert tp.split_sizes(1144, 440) == (572, 572)
+    assert tp.split_sizes(1784, 440) == (tp.CARDS_MAX_WIDTH, 1784 - tp.CARDS_MAX_WIDTH)
+    assert tp.split_sizes(820, 440) == (440, 380), "under half, the minimum wins"
+    assert tp.split_sizes(2000, 900) == (900, 1100), "a header wider than the cap still fits"
+
+
+def test_narrow_is_under_900_or_under_what_both_halves_need() -> None:
+    assert tp.is_narrow(899, 440) is True
+    assert tp.is_narrow(900, 440) is False
+    assert tp.is_narrow(900, 600) is True, "600 + the editor's 360 do not fit in 900"
+    assert tp.is_narrow(960, 600) is False
+
+
+# -- the real window, dragged ---------------------------------------------------
+
+
+def test_every_wide_window_gives_the_cards_a_real_column_after_a_narrow_one(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1/B2: after 960x640 the cards were left a 219px column at 1280 and 351 at 1920.
+
+    Mutation: drop the narrow->wide `setSizes` and the narrow split's ratio
+    comes back as widths; do it only once and the second 1280 fails.
+    """
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    area = panel._area
+    found: list[str] = []
+    for size in DRAG:
+        _at(window, size)
+        if size == SMALL:
+            continue
+        where = f"{size[0]}x{size[1]}"
+        if area.viewport().width() < tp.CARDS_MIN_WIDTH:
+            found.append(f"{where}: the cards have {area.viewport().width()}px")
+        if area.widget().width() > area.viewport().width():
+            found.append(
+                f"{where}: the cards are {area.widget().width()}px in a "
+                f"{area.viewport().width()}px column, the rest is cut off"
+            )
+        if area.horizontalScrollBar().isVisible():
+            found.append(f"{where}: the cards scroll sideways")
+        half = min((panel.width() - panel.split.handleWidth()) // 2, tp.CARDS_MAX_WIDTH)
+        if area.width() < half:
+            found.append(f"{where}: the cards have {area.width()}px of a {panel.width()}px panel")
+        if _file_side(panel).width() < tp.EDITOR_MIN_WIDTH:
+            found.append(f"{where}: the editor has {_file_side(panel).width()}px")
+        if not (area.isVisible() and _file_side(panel).isVisible()):
+            found.append(f"{where}: both halves are not shown side by side")
+    assert found == [], found
+
+
+def test_a_narrow_window_gives_one_side_the_whole_height_and_a_press_swaps_them(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1/B2 at 960x640: the cards had a 72px strip over the file editor.
+
+    Now a "Settings | Edit file" switch shows one of them at a time, the
+    choice is kept across a trip to a wide window, and it starts on Settings.
+    """
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QAbstractButton
+
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    area = panel._area
+    _at(window, SMALL)
+
+    switch = (panel.settings_button, panel.edit_file_button)
+    assert panel.side_buttons.isVisible(), "no switch at 960x640"
+    for button in switch:
+        assert isinstance(button, QAbstractButton) and button.isEnabled() and button.isVisible()
+    assert [b.text() for b in switch] == ["Settings", "Edit file"]
+    assert area.isVisible() and not _file_side(panel).isVisible(), "it starts on the settings"
+    assert (
+        area.viewport().height() >= 0.8 * panel.height()
+    ), f"the cards have {area.viewport().height()}px of the panel's {panel.height()}"
+
+    QTest.mouseClick(panel.edit_file_button, Qt.MouseButton.LeftButton)
+    process_events()
+    assert not area.isVisible(), "the cards are still drawn beside the editor"
+    assert panel.editor.isVisible() and panel.file_save_button.isVisible()
+    assert all(b.isVisible() for b in panel.file_buttons()) and panel.file_buttons()
+    assert (
+        _file_side(panel).height() == panel.split.height()
+    ), f"the file side has {_file_side(panel).height()}px of the split's {panel.split.height()}"
+    assert panel.editor.height() >= panel.editor.minimumSizeHint().height()
+
+    _at(window, MEDIUM)
+    assert not panel.side_buttons.isVisible(), "the switch is still there with room for both"
+    assert area.isVisible() and _file_side(panel).isVisible()
+    _at(window, SMALL)
+    assert panel.edit_file_button.isChecked() and not area.isVisible(), "the choice was lost"
+
+    QTest.mouseClick(panel.settings_button, Qt.MouseButton.LeftButton)
+    process_events()
+    assert area.isVisible() and not _file_side(panel).isVisible()
+
+
+def _edit_field_width(combo: Any) -> int:
+    """The part of the combo its text is drawn in, from the style that draws it."""
+    from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+
+    option = QStyleOptionComboBox()
+    combo.initStyleOption(option)
+    rect = combo.style().subControlRect(
+        QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, combo
+    )
+    return rect.width()
+
+
+def test_the_time_zone_box_shows_this_computers_zone_whole_at_every_size(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T186: "Same as this computer (Europe/O" -- a 22-character box for 35 characters.
+
+    And the "Now Europe/Oslo" after the press, which was given 0px at 1280x800
+    once the box above it had eaten the column.
+    """
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    combo, note = view.time_zone_where, view.time_zone_note
+    whole = TIME_ZONE_HOST.format(zone=OSLO)
+    assert combo.currentText() == whole, "control: the file names this computer's zone"
+    assert note.text() == f"Now {OSLO}", "control: the status says so"
+    found: list[str] = []
+    for size in DRAG:
+        _at(window, size)
+        where = f"{size[0]}x{size[1]}"
+        need = combo.fontMetrics().horizontalAdvance(whole)
+        if _edit_field_width(combo) < need:
+            found.append(f"{where}: {_edit_field_width(combo)}px box for {need}px of text")
+        said = note.fontMetrics().horizontalAdvance(note.text())
+        if size != SMALL and note.width() < said:
+            found.append(f"{where}: the status has {note.width()}px for {said}px")
+    assert found == [], found
+
+
+def test_nothing_on_the_tuning_tab_is_cut_at_any_step_of_the_drag(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No button with its label cut, nothing drawn under its minimum, either side at 960."""
+    from PySide6.QtWidgets import QPushButton
+
+    view, window, tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    found: list[str] = []
+
+    def look(where: str) -> None:
+        found.extend(f"{where}: {cut}" for cut in _drawn_under_their_minimum(tab))
+        # The file picker's own buttons are a row that cannot wrap yet (a
+        # `QHBoxLayout`, T83's class of defect); T190's later step puts them in
+        # a `FlowLayout` and takes them out of this exclusion.
+        picker = set(panel.file_buttons())
+        for button in tab.findChildren(QPushButton):
+            if button in picker:
+                continue
+            if button.isVisible() and (why := _clipped(button)) is not None:
+                found.append(f"{where}: {why}")
+
+    for size in DRAG:
+        _at(window, size)
+        look(f"{size[0]}x{size[1]}")
+        if size == SMALL:
+            panel.edit_file_button.click()
+            process_events()
+            look(f"{size[0]}x{size[1]} editing")
+            panel.settings_button.click()
+            process_events()
+    assert found == [], found
+
+
+def _drag_the_handle(panel: tp.TuningPanel, dx: int) -> None:
+    """Drag the split's handle `dx` pixels, with the mouse, as a player does."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    handle = panel.split.handle(1)
+    start = handle.rect().center()
+    QTest.mousePress(handle, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    QTest.mouseMove(handle, start + QPoint(dx // 2, 0))
+    QTest.mouseMove(handle, start + QPoint(dx, 0))
+    QTest.mouseRelease(
+        handle, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start + QPoint(dx, 0)
+    )
+    process_events()
+
+
+def test_a_dragged_split_is_kept_while_wide_and_reset_after_a_narrow_window(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handle is the player's until the window goes narrow; coming back is a fresh split.
+
+    Two arrivals at 1280x800, each after a narrow window, with a drag in
+    between: a reset made only on the first arrival leaves the drag in place
+    the second time. And a resize that stays wide keeps the drag, so a reset on
+    EVERY resize fails too.
+    """
+    view, window, _tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    area = panel._area
+    _at(window, SMALL)
+    _at(window, MEDIUM)
+    fresh = area.width()
+    _drag_the_handle(panel, 120)
+    dragged = area.width()
+    assert dragged >= fresh + 100, f"control: the drag moved the handle {dragged - fresh}px"
+
+    _at(window, (1300, 800))
+    assert area.width() >= dragged, f"a wide resize undid the drag: {area.width()}px"
+
+    _at(window, SMALL)
+    _at(window, MEDIUM)
+    assert area.width() == fresh, f"the drag outlived a narrow window: {area.width()} != {fresh}"

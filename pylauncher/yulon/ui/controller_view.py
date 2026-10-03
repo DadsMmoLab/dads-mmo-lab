@@ -12174,7 +12174,10 @@ class ControllerView(QWidget):
         grid = QGridLayout(self.time_zone_group)
         self.time_zone_where = QComboBox(self.time_zone_group)
         self.time_zone_place = QComboBox(self.time_zone_group)
-        for box, chars in ((self.time_zone_where, 22), (self.time_zone_place, 16)):
+        for box, chars in (
+            (self.time_zone_where, len(TIME_ZONE_HOST.format(zone=time_zone.host_zone()))),
+            (self.time_zone_place, 16),
+        ):
             box.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )

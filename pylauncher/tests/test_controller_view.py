@@ -18077,12 +18077,16 @@ def test_every_stop_on_every_page_is_in_the_pads_reach(
 def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The live check's first press: 960x640, the conf list, Down (T175).
+    """The live check's first press: 960x640, the control above the conf list, Down (T175).
 
-    It lands on the conf button straight under the middle of the list --
-    `authserver.conf`, 2 px off the list's centre -- and not on the full-width
-    strip at the bottom of the tab, which is 0 px off it.
+    It lands on the first conf button straight under it, and not on the
+    full-width strip at the bottom of the tab. Since T190 the conf list and the
+    cards share 960x640 through a "Settings | Edit file" switch, so the press
+    starts on the switch with the file side shown -- the row a player is on
+    when the conf buttons are what they came for.
     """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
 
     from yulon.ui.gamepad import Direction, install_gamepad_navigation
@@ -18093,23 +18097,25 @@ def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
     _at(window, (960, 640))
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     try:
-        confs = view.tuning_panel.file_buttons()
+        panel = view.tuning_panel
+        QTest.mouseClick(panel.edit_file_button, Qt.MouseButton.LeftButton)
+        process_events()
+        confs = panel.file_buttons()
         assert [b.text().split(" ")[0] for b in confs] == [
             "worldserver.conf",
             "authserver.conf",
             "playerbots.conf",
         ], "the Tuning tab does not list the three core confs this press is about"
-        conf_list = view.tuning_panel._area
+        switch = panel.edit_file_button
         assert (
-            _edges_in(confs[1], window)[1] >= _edges_in(conf_list, window)[3]
-        ), "the conf buttons are not under the list at 960x640, so this is not the live layout"
-        conf_list.setFocus()
+            _edges_in(confs[0], window)[1] >= _edges_in(switch, window)[3]
+        ), "the conf buttons are not under the switch at 960x640, so this is not the layout"
+        switch.setFocus()
         process_events()
         nav.navigate(Direction.DOWN)
         landed = QApplication.focusWidget()
-        assert (
-            landed is confs[1]
-        ), f"Down from the conf list went to {_pad_describe(landed, window)}"
+        assert landed is not view.tuning_report_strip, "Down went past the conf buttons"
+        assert landed is confs[0], f"Down from the switch went to {_pad_describe(landed, window)}"
     finally:
         keyboard.stop()
         gamepad.stop()
