@@ -294,12 +294,16 @@ _CAMPAIGN_GLYPHS = {
 }
 
 _CAMPAIGN_SUBTITLES = {
-    "wow-wotlk": "Wrath of the Lich King (3.3.5a)",
-    "wow-tbc": "The Burning Crusade (2.4.3)",
-    "wow-vanilla": "Classic Vanilla (1.12.1)",
-    "wow-tortoise": "Turtle WoW Solo (1.17.2)",
-    "wow-centurion": "Level-60 PvP with bots (3.3.5a)",
+    "wow-wotlk": "Wrath of the Lich King",
+    "wow-tbc": "The Burning Crusade",
+    "wow-vanilla": "Classic Vanilla",
+    "wow-tortoise": "Turtle WoW Solo",
+    "wow-centurion": "Level-60 PvP with bots",
 }
+"""The tile's second line; the client version in brackets comes from the entry (T194 C18).
+
+Typed here, the Tortoise tile said 1.17.2 for a server whose client must be 1.18.1.
+"""
 
 
 class CatalogView(QWidget):
@@ -455,7 +459,9 @@ class CatalogView(QWidget):
                 role="tile-title",
             )
         )
-        sub_title = QLabel(_CAMPAIGN_SUBTITLES.get(entry.id, entry.emulator.name), frame)
+        sub_title = QLabel(
+            f"{_CAMPAIGN_SUBTITLES.get(entry.id, entry.name)} ({entry.client.version})", frame
+        )
         sub_title.setObjectName("tile-subtitle")
         title_col.addWidget(sub_title)
         header_box.addLayout(title_col, 1)

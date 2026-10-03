@@ -2564,3 +2564,29 @@ def test_the_install_button_on_a_tile_is_drawn_amber(qapp: object) -> None:
     view.hide()
 
     assert near >= 0.8 * len(points), f"{near} of {len(points)} sampled pixels are the amber fill"
+
+
+# -- what a tile says (T194) ---------------------------------------------------
+
+
+def test_every_tile_subtitle_names_the_client_version_the_game_needs(qapp: object) -> None:
+    """C18 (T194): the Tortoise tile said 1.17.2 while its client must be 1.18.1."""
+    from PySide6.QtWidgets import QLabel
+
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    for entry in CATALOG.games:
+        subtitle = view.button_for(entry.id).parentWidget().findChild(QLabel, "tile-subtitle")
+        assert subtitle is not None, entry.id
+        assert entry.client.version in subtitle.text(), (entry.id, subtitle.text())
+
+
+def test_the_wotlk_tile_does_not_describe_itself_in_developer_words(qapp: object) -> None:
+    """C19 (T194): "module/ALE/mod/keg management is manifest-driven" was on the tile."""
+    from PySide6.QtWidgets import QLabel
+
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    frame = view.button_for("wow-wotlk").parentWidget()
+    description = frame.findChild(QLabel, "tile-desc")
+
+    assert description is not None and description.text()
+    assert "manifest" not in description.text().lower(), description.text()

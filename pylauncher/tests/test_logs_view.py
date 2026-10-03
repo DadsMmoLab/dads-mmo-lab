@@ -137,7 +137,7 @@ def test_save_writes_the_zip_and_says_where_and_how_big(qapp: object, tmp_path: 
     assert view.save_button.isEnabled()
 
 
-def test_a_bundle_over_the_cap_warns_about_discord_and_points_at_the_manifest(
+def test_a_bundle_over_the_cap_warns_about_discord_and_points_at_the_list_inside(
     qapp: object, tmp_path: Path
 ) -> None:
     dest = tmp_path / "big.zip"
@@ -148,7 +148,8 @@ def test_a_bundle_over_the_cap_warns_about_discord_and_points_at_the_manifest(
     assert view.save_for_support() is True
     text = view.status.text()
     assert str(dest) in text
-    assert "Discord" in text and "MANIFEST.txt" in text, text
+    # T194: the list is MANIFEST.txt in the zip; the screen does not say the file's name.
+    assert "Discord" in text and "list of contents inside the zip" in text, text
 
 
 def test_a_bundle_at_the_cap_does_not_warn(qapp: object, tmp_path: Path) -> None:

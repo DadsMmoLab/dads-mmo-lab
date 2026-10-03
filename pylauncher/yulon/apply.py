@@ -340,8 +340,8 @@ def requirement_refusal(item_id: str, needed: str) -> str:
     should be made to guess the other's.
     """
     return (
-        f"{item_id} needs {needed}, which is not installed here: this manifest names it in "
-        f"`requires`, and {item_id} does nothing without it. Install {needed} first."
+        f"{item_id} needs {needed}, which is not installed here, and {item_id} does nothing "
+        f"without it. Install {needed} first."
     )
 
 

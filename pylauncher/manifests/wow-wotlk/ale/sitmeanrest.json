@@ -130,7 +130,7 @@
     },
     {
       "key": "regen_aura",
-      "question": "Regen aura spell id",
+      "question": "Spell id of the aura you get while you sit to rest",
       "kind": "int",
       "default": "25990"
     },

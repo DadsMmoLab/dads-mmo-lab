@@ -262,7 +262,7 @@ class LogsView(QWidget):
         self.save_button = QPushButton("Save logs for support…", self)
         self.save_button.setToolTip(
             "One zip of every log and settings file, passwords taken out, to send to support "
-            "(MANIFEST.txt inside says if one was too short to take out everywhere)"
+            "(a list inside the zip says if one was too short to take out everywhere)"
         )
         self.save_button.clicked.connect(self.save_for_support)
         self.open_folder_button = QPushButton("Open log folder", self)
@@ -443,8 +443,8 @@ class LogsView(QWidget):
         if report.size > bundle.ZIP_CAP:
             text += (
                 f" It is larger than the {bundle.ZIP_CAP // 1_000_000} MB Yu'lon aims for, so it "
-                "may not fit Discord's free upload limit; MANIFEST.txt inside lists what was "
-                "trimmed."
+                "may not fit Discord's free upload limit; the list of contents inside the zip "
+                "says what was trimmed."
             )
         self.status.setText(text)
         logger.info(f"support file saved: {len(report.included)} files, {report.size} bytes")

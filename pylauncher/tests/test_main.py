@@ -5303,3 +5303,197 @@ def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wide
         assert not title.geometry().intersects(header._badge.geometry())
     finally:
         _drop(shown_window, "wow-wotlk", server_dir)
+
+
+# ------------------------------------------------- what a player reads (T194)
+
+_FIVE_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
+
+
+@pytest.mark.parametrize(
+    ("text", "rule"),
+    [
+        ("Pressed live on the test box (T86).", "ticket number"),
+        ("Scope is an owner decision, 2026-09-06.", "owner decision"),
+        ("Module management is Manifest-driven.", "manifest"),
+        ("It carries the headless bot sessions.", "headless"),
+        ("RuntimeError: port in use", "exception class"),
+        ("Traceback (most recent call last):", "traceback"),
+        ("open //./pipe/dockerDesktopLinuxEngine failed", "pipe path"),
+        ("the npipe transport is closed", "npipe"),
+    ],
+)
+def test_the_sweep_names_each_kind_of_developer_note(qapp: object, text: str, rule: str) -> None:
+    """Each sentence breaks exactly one rule, and the fault names it and the widget."""
+    from PySide6.QtWidgets import QLabel, QWidget
+
+    from tests.support_player_text import player_text_faults
+
+    root = QWidget()
+    QLabel(text, root).setObjectName("probe")
+
+    assert player_text_faults(root) == [f"probe text [{rule}]: {text!r}"]
+
+
+def test_the_sweep_reads_every_place_text_is_shown_and_skips_what_is_not(qapp: object) -> None:
+    """T1-T7 are read where a player sees them; T8-T11 are not text Yu'lon shows them.
+
+    T8 is typed by the player, T9 is on a hidden widget, T10 is in the install
+    console and T11 is a line of a log file in the Logs viewer.
+    """
+    import re
+
+    from PySide6.QtWidgets import (
+        QGroupBox,
+        QLabel,
+        QPlainTextEdit,
+        QPushButton,
+        QTabWidget,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    from tests.support_player_text import player_text_faults
+    from yulon.catalog.catalog import load_catalog
+    from yulon.ui.logs_view import LogsView
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    root = QWidget()
+    lay = QVBoxLayout(root)
+    lay.addWidget(QPushButton("T1 on a button"))
+    tipped = QPushButton("Start")
+    tipped.setToolTip("T2 in a tooltip")
+    lay.addWidget(tipped)
+    lay.addWidget(QGroupBox("T3 as a group title"))
+    tabs = QTabWidget()
+    tabs.addTab(QWidget(), "T4 on a tab")
+    tabs.tabBar().setTabToolTip(0, "T5 on a tab's tooltip")
+    lay.addWidget(tabs)
+    shown = QPlainTextEdit("T6 in a read-only box")
+    shown.setReadOnly(True)
+    lay.addWidget(shown)
+    hint = QPlainTextEdit()
+    hint.setReadOnly(True)
+    hint.setPlaceholderText("T7 as a placeholder")
+    lay.addWidget(hint)
+    lay.addWidget(QPlainTextEdit("T8 typed by the player"))
+    hidden = QLabel("T9 on a hidden label")
+    lay.addWidget(hidden)
+    hidden.setVisible(False)
+    console = LogPanel()
+    QLabel("T10 inside the install console", console)
+    lay.addWidget(console)
+    logs = LogsView(lambda: (), load_catalog(), jobs=lambda *_a: None)
+    logs.viewer.setPlainText("T11 a line of a log file")
+    lay.addWidget(logs)
+
+    found = {
+        match.group(0)
+        for fault in player_text_faults(root)
+        if (match := re.search(r"T\d+", fault)) is not None
+    }
+
+    assert found == {"T1", "T2", "T3", "T4", "T5", "T6", "T7"}
+
+
+@pytest.fixture
+def one_of_each_game(window: Any, tmp_path: Any) -> Iterator[dict[str, Any]]:
+    """A tab for each of the five games, dropped again afterwards."""
+    dirs = {game: tmp_path / f"t194-{game}" for game in _FIVE_GAMES}
+    for game, server_dir in dirs.items():
+        _catalog_view(window).installed.emit(game, server_dir, None)
+    tabs = window.property("tabs")
+    current = tabs.currentIndex()
+    try:
+        yield {game: _tab_for(window, server_dir) for game, server_dir in dirs.items()}
+    finally:
+        tabs.setCurrentIndex(current)
+        for game, server_dir in dirs.items():
+            _drop(window, game, server_dir)
+
+
+def _every_screen(window: Any, views: dict[str, Any]) -> Iterator[str]:
+    """Make each screen current in turn: the Catalog, the Logs, every server's every sub-tab."""
+    tabs = window.property("tabs")
+    logs_view = window.yulon_logs_view
+    for index in range(tabs.count()):
+        page = tabs.widget(index)
+        if page is logs_view or page.isAncestorOf(logs_view):
+            tabs.setCurrentIndex(index)
+            yield "Logs"
+    tabs.setCurrentWidget(_catalog_view(window))
+    if tabs.currentWidget() is not _catalog_view(window):
+        tabs.setCurrentIndex(0)
+    yield "Catalog"
+    for game, view in views.items():
+        tabs.setCurrentWidget(view)
+        for index in range(view._tabs.count()):
+            view._tabs.setCurrentIndex(index)
+            yield f"{game} {view._tabs.tabText(index)}"
+
+
+def test_no_screen_shows_a_player_a_developer_note(window: Any, one_of_each_game: Any) -> None:
+    """A17/I1, I2, C19, C25, A25, C20 (T194): every screen, all five games, read in full.
+
+    Ticket numbers, owner decisions, "manifest", "headless", exception class
+    names, tracebacks and Docker pipe paths are notes to ourselves. They live in
+    comments, docstrings and `CatalogEntry.notes`, never on screen.
+    """
+    from tests.support_player_text import player_text_faults
+
+    faults: list[str] = []
+    for screen in _every_screen(window, one_of_each_game):
+        process_events(5)
+        faults += [f"{screen}: {fault}" for fault in player_text_faults(window)]
+
+    faults = list(dict.fromkeys(faults))
+    assert faults == [], "\n".join(faults)
+
+
+def test_the_catalogs_developer_notes_load_and_are_never_drawn(
+    window: Any, one_of_each_game: Any
+) -> None:
+    """C19 (T194): what moved out of the descriptions is kept beside the entry, not shown."""
+    from tests.support_player_text import visible_texts
+    from yulon.catalog.catalog import CATALOG_FILE, load_catalog
+
+    written = {
+        game["id"]: tuple(game.get("notes", ()))
+        for game in json.loads(CATALOG_FILE.read_text(encoding="utf-8"))["games"]
+    }
+    loaded = {entry.id: entry.notes for entry in load_catalog().games}
+    assert loaded == written
+    assert written["wow-tortoise"], "the Tortoise description's history was not kept"
+
+    shown: list[str] = []
+    for _screen in _every_screen(window, one_of_each_game):
+        shown += [text for _name, _where, text in visible_texts(window)]
+    drawn = [
+        (game, note)
+        for game, notes in loaded.items()
+        for note in notes
+        if any(note[:60] in text for text in shown)
+    ]
+    assert drawn == []
+
+
+def test_the_bot_party_sentence_on_tortoise_names_wotlk_and_no_decision(
+    one_of_each_game: Any,
+) -> None:
+    """A17/I1 (T194): the reason is the player's, not the meeting that settled it."""
+    absent = one_of_each_game["wow-tortoise"].my_party_absent
+
+    assert not absent.isHidden()
+    assert "WoW WotLK" in absent.text(), absent.text()
+    assert "owner decision" not in absent.text(), absent.text()
+    assert "mod-ale" not in absent.text(), absent.text()
+
+
+def test_the_tortoise_set_level_sentence_is_short_and_plain(one_of_each_game: Any) -> None:
+    """I2 (T194): it was 470 characters of console commands in backticks."""
+    said = one_of_each_game["wow-tortoise"].set_level_absent
+
+    assert not said.isHidden()
+    assert said.text(), "the sentence is gone, not shortened"
+    assert len(said.text()) < 200, len(said.text())
+    assert "`" not in said.text(), said.text()

@@ -568,7 +568,7 @@ def test_my_party_on_centurion_is_the_registrys_note_and_the_shipped_games_keep_
         entry = load_catalog().get(game)
         said = view_module._no_my_party(entry)
         assert said.startswith("Building a bot party from the launcher works on WoW WotLK only")
-        assert f"so {entry.name} would need a route of its own" in said
+        assert f"so {entry.name} has no party control here" in said
 
 
 def test_the_withheld_line_uses_a_dash() -> None:

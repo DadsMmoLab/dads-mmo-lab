@@ -391,6 +391,24 @@ def test_every_build_time_the_confirmation_quotes_is_still_recorded_in_pyplan() 
         assert quoted in checklist, f"{quoted} is no longer recorded in pyplan/checklist.md"
 
 
+def test_the_build_times_are_said_without_naming_our_own_machines() -> None:
+    """C25 (T194): "an Apple M4 Pro", "the Linux boxes this project is usually built on".
+
+    The numbers stay (the test above pins them); the machines they were timed on
+    are described the way a player would describe their own.
+    """
+    from yulon.catalog.installer import rebuild_confirmation
+    from yulon.catalog.native import update_to_latest_confirmation
+
+    for text in (
+        rebuild_confirmation(ENTRY, Path("/srv")),
+        update_to_latest_confirmation(ENTRY, Path("/srv"), "azerothcore-wotlk"),
+    ):
+        for word in ("M4", "Apple", "this project", "11.7 GB"):
+            assert word not in text, f"{word!r} is still in: {text}"
+        assert "35-72 minutes" in text and "68 minutes" in text and "15 minutes" in text
+
+
 def test_the_confirmation_says_what_it_costs_before_it_says_yes(tmp_path: Path) -> None:
     """Everything a person needs to answer the question, in the question.
 

@@ -354,11 +354,13 @@ def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
 
 
 MEASURED_BUILD_TIMES = (
-    "about 15 minutes on an Apple M4 Pro, 35-72 minutes on the Linux boxes this project is "
-    "usually built on, and 68 minutes on a Windows machine that gave Docker 11.7 GB and two "
-    "compiler jobs"
+    "about 15 minutes on a fast Mac, 35-72 minutes on a typical Linux PC, and about 68 minutes "
+    "on a Windows PC that gives Docker little memory"
 )
 """How long the compile took, on machines this project actually timed it on.
+
+The screen describes those machines the way a player would describe their own
+(T194, Decision 2); which machines they were is below.
 
 Every number is a citation, and `test_rebuild.py` pins each one to the page it
 came from so a friendlier figure cannot be substituted quietly:
@@ -475,7 +477,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
         f"This compiles the server again from the source and modules in that folder. It is "
-        f"the same compile an install does, and this project has timed it at "
+        f"the same compile an install does, and it has taken "
         f"{MEASURED_BUILD_TIMES}. Yours depends on your machine, and nothing here can "
         f"predict it better than that range does.\n\n"
         f"{recipe}"

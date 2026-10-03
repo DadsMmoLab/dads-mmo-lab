@@ -665,18 +665,17 @@ def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(
 
     said = view.set_level_absent.text()
 
-    assert "reset level" in said, said
-    assert "logged in" in said, said
-    assert "configured starting level" in said, said
+    # T194 (I2): what each console route does, in the player's words; the
+    # commands themselves (`.reset level`, `.rndbot create level=<n>`) are not drawn.
+    assert "reset a logged-in character to the starting level" in said, said
     assert "level 1" not in said, said
     # The route the review found, and the reason the sentence is narrower than
     # it was: `rndbot` IS console-allowed (`Chat.cpp:1012`) and
     # `rndbot create level=<n>` reaches `CreateBot`, which parses `level=` and
     # calls `SetLevel` (`PlayerbotMgr.cpp:2389`, `:2497-2510`). What it cannot
     # do is move a character that already exists, and that is the true clause.
-    assert "rndbot create level=" in said, said
-    assert "existing character" in said, said
-    assert "NEW character" in said, said
+    assert "can't move a character to a level you pick" in said, said
+    assert "make a new bot at the level you name" in said, said
     assert _in_the_layout(view.set_level_absent) is True
     assert _shown(view.set_level_absent) is True
     assert _in_the_layout(view.set_level_button) is False

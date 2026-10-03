@@ -91,10 +91,10 @@ drift.
 """
 
 FAMILY_HINTS: dict[ManifestType, str] = {
-    "module": "compiled into the worldserver — a rebuild is owed before one of these runs",
+    "module": "compiled into the world server — it runs once you rebuild the server",
     "ale": "no rebuild — the world reloads them on restart",
     "keg": "Dad's MMO Lab bundles: server side plus a client addon",
-    "mod": "SQL and conf only — no compile; the importer applies the SQL",
+    "mod": "SQL and settings only — no compile; Yu'lon applies the SQL for you",
 }
 """The sentence under each card's title, saying what that family COSTS (T44 item 3).
 
@@ -617,8 +617,8 @@ def _chips_for(
             Chip(
                 "owed",
                 chip_update_label(behind),
-                f"{item_id}: {_upstream_has(behind)} It is part of the server: the server "
-                "install cloned it, no module manifest covers it, and it is updated with the "
+                f"{item_id}: {_upstream_has(behind)} It is part of the server: it came with "
+                "the server install and is updated with the "
                 f"server. This press is {CHIP_ACTION_LABELS['server_update']}, which asks first "
                 f"and then moves the server's code and {item_id} together to upstream's newest "
                 "and rebuilds.",
@@ -639,8 +639,8 @@ def _chips_for(
             Chip(
                 "owed",
                 chip_update_label(behind, release, key in session.updated),
-                said + "then re-deploys "
-                "and re-applies everything the manifest declares — and it may ask this "
+                said + "then sets it up "
+                "again the way an install does — and it may ask this "
                 "module's install questions again. It REFUSES rather than reset if the "
                 "folder is a different repository, has uncommitted changes in it, or "
                 "carries commits the upstream does not, and says which.",

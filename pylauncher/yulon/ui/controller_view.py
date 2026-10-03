@@ -561,13 +561,14 @@ selection rather than silently mislabel.
 """
 
 _NO_MY_PARTY = (
-    "Building a bot party from the launcher works on WoW WotLK only (owner decision, "
-    "2026-09-06). The route is a pair of AzerothCore modules — the mod-ale Lua bridge, "
-    "and mod-playerbots' own addclass — so {game} would need a route of its own before "
-    "there could be a control here. One that sent these commands at it would be a "
-    "button that cannot work."
+    "Building a bot party from the launcher works on WoW WotLK only. It needs two modules "
+    "that only the WotLK server has, so {game} has no party control here."
 )
 """The whole My Party surface on the three games that have no route to it.
+
+The route is a pair of AzerothCore modules -- the mod-ale Lua bridge and
+mod-playerbots' own addclass -- and the scope is the owner's decision of
+2026-09-06; both stay here and off the screen (T194).
 
 A sentence rather than a disabled panel, which is `_build_characters_tab`'s rule
 for the same situation: a control that cannot work is a promise this tab cannot
@@ -6084,8 +6085,8 @@ CUSTOM_MODULE_CARD_TITLE = "A module this app does not ship"
 """The custom-module card's title, and the first words of its one-line form (T153)."""
 
 CUSTOM_MODULE_CARD_NOTE = (
-    "Paste a repository link, or point at a folder on this computer. Yu'lon derives "
-    "a manifest from it and installs it the same way as any row above."
+    "Paste a repository link, or point at a folder on this computer. Yu'lon reads it and "
+    "installs it the same way as any row above."
 )
 """The card's sentence: drawn in the card whole, and the line's tooltip (T153)."""
 
@@ -6113,8 +6114,8 @@ MODULE_FOLDER_TIP = (
 the user points at is read, never moved and never written into."""
 
 MODULE_CUSTOM_NO_ROUTE = (
-    "Only WoW WotLK takes custom modules — on this game a module is a configuration key or a "
-    "SQL mod, and those ship as manifests."
+    "Only WoW WotLK takes modules you add yourself. On this game a module is a setting or a "
+    "database change, and the ones that work here are listed above."
 )
 """Why the two buttons are dead on the three CMaNGOS games.
 

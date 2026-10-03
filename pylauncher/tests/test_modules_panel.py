@@ -1784,8 +1784,8 @@ def test_the_tab_and_the_applier_refuse_the_same_install_in_the_same_words(
     # says they agree; it does not say what they agree on, and a mutation that
     # emptied `requirement_refusal()` would satisfy that comparison happily.
     sentence = (
-        "lootpet needs mod-ale, which is not installed here: this manifest names it in "
-        "`requires`, and lootpet does nothing without it. Install mod-ale first."
+        "lootpet needs mod-ale, which is not installed here, and lootpet does nothing "
+        "without it. Install mod-ale first."
     )
     assert requirement_refusal("lootpet", "mod-ale") == sentence
 

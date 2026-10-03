@@ -2682,6 +2682,15 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+    notes: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Facts about this server for the people who maintain the entry: which branch and "
+            "pull requests it rests on, which ticket measured what. Nothing reads them and "
+            "nothing may draw them; `description` is the sentence a player reads on the "
+            "Catalog tile (T194). The shape `Client.notes` and `SqlPhase.notes` already have."
+        ),
+    )
 
     @model_validator(mode="after")
     def _the_channel_rank_is_one_this_tree_can_hold(self) -> CatalogEntry:
