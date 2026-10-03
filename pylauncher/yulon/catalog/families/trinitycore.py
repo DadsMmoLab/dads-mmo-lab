@@ -1001,6 +1001,13 @@ class TrinityCoreInstaller(CmangosInstaller):
         left = list(changes.left)
         notes = list(changes.notes)
         gone = {cast(re.Match[str], _PART.match(rel))["stem"] for rel in changes.left_parts}
+        needed = [
+            rel
+            for rel in pending.required
+            if rel not in reimport and not (server_dir / rel).is_file()
+        ]
+        if needed:
+            raise InstallerError(_needed_and_missing(self.entry, needed))
         for rel in pending.reimport:
             if rel in reimport or rel in left:
                 continue
@@ -1196,7 +1203,12 @@ class TrinityCoreInstaller(CmangosInstaller):
                 if not changes.imports() or (waiting is not None and waiting.unreadable):
                     raise
                 try:
-                    self._write_names(server_dir, set(changes.reimport), set(changes.parts))
+                    self._write_names(
+                        server_dir,
+                        set(changes.reimport),
+                        set(changes.parts),
+                        required=frozenset(changes.reimport),
+                    )
                 except InstallerError as also:
                     raise InstallerError(
                         f"{exc} The world tables the new build needs could not be recorded "
@@ -1284,6 +1296,9 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "changed."
             )
         self._refuse_unless_the_checkout_is_built(server_dir, state)
+        missing = [rel for rel in pending.required if not (server_dir / rel).is_file()]
+        if missing:
+            raise InstallerError(_needed_and_missing(self.entry, missing))
         changes = SnapshotChanges(
             reimport=pending.reimport, parts=pending.parts, everything=pending.unreadable
         )
@@ -1503,14 +1518,33 @@ class TrinityCoreInstaller(CmangosInstaller):
         parts = {match["stem"] for run in runs if (match := _PART.match(run.rel)) is not None}
         self._write_names(server_dir, reimport, parts)
 
-    def _write_names(self, server_dir: Path, reimport: set[str], parts: set[str]) -> None:
-        """`_write_pending()` from the files' names and split tables' stems (T197 fix round 3)."""
+    def _write_names(
+        self,
+        server_dir: Path,
+        reimport: set[str],
+        parts: set[str],
+        *,
+        required: frozenset[str] = frozenset(),
+    ) -> None:
+        """`_write_pending()` from the files' names and split tables' stems (T197 fix round 3).
+
+        `required`: files a kept build needs (fix round 4), which "Finish the world
+        update" and the next update refuse to leave out when they are missing.
+        """
         path = server_dir / WORLD_REIMPORT_FILE
         before = _read_pending(server_dir)
+        needed = set(required)
         if before is not None and not before.unreadable:
             reimport |= set(before.reimport)
             parts |= set(before.parts)
-        body = {"version": 1, "reimport": sorted(reimport), "parts": sorted(parts)}
+            needed |= set(before.required)
+        body: dict[str, object] = {
+            "version": 1,
+            "reimport": sorted(reimport),
+            "parts": sorted(parts),
+        }
+        if needed:
+            body["required"] = sorted(needed)
         staged = path.with_name(path.name + ".yulon-new")
         try:
             staged.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
@@ -1934,6 +1968,8 @@ class _Pending:
     reimport: tuple[str, ...] = ()
     parts: tuple[str, ...] = ()
     unreadable: bool = False
+    required: tuple[str, ...] = ()
+    """Files a kept build needs (T197 fix round 4): one missing is never "left", it refuses."""
 
 
 def _read_pending(server_dir: Path) -> _Pending | None:
@@ -1949,17 +1985,29 @@ def _read_pending(server_dir: Path) -> _Pending | None:
     try:
         raw = json.loads(text)
         reimport, parts = raw["reimport"], raw["parts"]
-    except (ValueError, KeyError, TypeError) as exc:
+        required = raw.get("required", [])
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         logger.warning(
             f"{path} is not one Yu'lon wrote ({exc}); every world table is imported again"
         )
         return _Pending(unreadable=True)
     if not all(
         isinstance(names, list) and all(isinstance(name, str) for name in names)
-        for names in (reimport, parts)
+        for names in (reimport, parts, required)
     ):
         return _Pending(unreadable=True)
-    return _Pending(reimport=tuple(reimport), parts=tuple(parts))
+    return _Pending(reimport=tuple(reimport), parts=tuple(parts), required=tuple(required))
+
+
+def _needed_and_missing(entry: CatalogEntry, missing: Sequence[str]) -> str:
+    """Why a world update the kept build needs cannot go on: its files are not on disk (T197)."""
+    one = len(missing) == 1
+    return (
+        f"{_listed(missing)} {'is' if one else 'are'} not in {entry.name}'s sources, and the "
+        f"build this server was left on needs {'that table' if one else 'those tables'}: the "
+        "world update stays waiting, so the server is still refused a start. Nothing was "
+        "imported."
+    )
 
 
 WORLD_UPDATE_UNFINISHED = (

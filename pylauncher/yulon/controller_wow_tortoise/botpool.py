@@ -47,7 +47,7 @@ from yulon import docker, git
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.native import LatestRoute
 from yulon.channel import Answer, Channel
-from yulon.controller import Controller
+from yulon.controller import Controller, StartRefused
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -298,6 +298,10 @@ def module_dir(entry: CatalogEntry, server_dir: Path) -> Path | None:
     return server_dir / inside[-1].dest if inside else None
 
 
+RESTART_REFUSED = "The restart was refused, so the server was not stopped:"
+"""How a bots press says its restart was refused (T197): the refusal follows, naming its repair."""
+
+
 class StopFailed(Exception):
     """`restart_world()`'s STOP raised: the world that may still be up is the OLD run (T144).
 
@@ -412,6 +416,13 @@ def after_update(
         return
     try:
         restart()
+    except StartRefused as exc:
+        # T197: Restart is refused too; the refusal names its own repair.
+        yield (
+            f"{RESTART_REFUSED} {exc} The older bots log in again at the next start. "
+            f"{AFTER_A_STOP}"
+        )
+        return
     except Exception as exc:  # noqa: BLE001 - the update succeeded; this is one press left
         logger.warning(f"the restart after the adoption failed: {exc}")
         yield (

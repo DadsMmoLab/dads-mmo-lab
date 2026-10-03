@@ -1546,7 +1546,12 @@ def test_a_kept_build_whose_plan_fails_still_records_its_tables_and_refuses_star
     said = _kept_without_its_tables(box, monkeypatch)
     assert "the plan could not be expanded" in said
     assert box.streamed() == []
-    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql"],
+        "parts": [],
+        "required": [f"{WORLD_SQL}/creature.sql"],
+    }
     assert said.endswith(f"Start is refused until this is done: {UNFINISHED}")
     with pytest.raises(StartRefused) as refused:
         CenturionController(ENTRY, box.server_dir).refuse_start()
@@ -1570,7 +1575,12 @@ def test_a_finish_that_fails_keeps_the_kept_builds_record(
     box.m.db.fail_on = "creature"
     with pytest.raises(InstallerError):
         box.finish()
-    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql"],
+        "parts": [],
+        "required": [f"{WORLD_SQL}/creature.sql"],
+    }
     with pytest.raises(StartRefused):
         CenturionController(ENTRY, box.server_dir).refuse_start()
 
@@ -1606,3 +1616,48 @@ def test_an_unrelated_update_folds_the_kept_builds_tables_in_and_clears_only_onc
     }, "the owed table went in with the update's own"
     assert box.pending() is None
     CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+ARENA = f"{WORLD_SQL}/arena_season.sql"
+NEEDED_AND_MISSING = (
+    f"{ARENA} is not in Centurion's sources, and the build this server was left on needs that "
+    "table: the world update stays waiting, so the server is still refused a start. Nothing "
+    "was imported."
+)
+
+
+def _kept_with_a_table_missing(box: Box) -> None:
+    """A kept build whose update added a world table file the checkout does not have."""
+    box.changes(("A", f"{REPO_SQL}/world/arena_season.sql"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    assert "are not all in the server's sources" in str(failed.value)
+    box.seams.clear()
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+
+
+def test_finish_will_not_leave_out_a_table_the_kept_build_needs(box: Box) -> None:
+    """Fix round 4: a missing file the kept build needs is never "left": the record stays."""
+    _kept_with_a_table_missing(box)
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value) == NEEDED_AND_MISSING
+    assert box.streamed() == []
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_the_next_update_will_not_fold_out_a_table_the_kept_build_needs(box: Box) -> None:
+    _kept_with_a_table_missing(box)
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+    builds = box.m.rec.calls.count("build")
+    with pytest.raises(InstallerError) as refused:
+        box.press()
+    assert NEEDED_AND_MISSING in str(refused.value)
+    assert box.m.rec.calls.count("build") == builds, "refused before the compile"
+    assert box.head() == NEW, "the move put back"
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
