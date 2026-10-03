@@ -1830,31 +1830,142 @@ The tags still name the new build, so a start runs it: the old commits put back 
 it would disagree with every start, under `SOURCES_PUT_BACK_NOTE`'s "agree again".
 """
 
-SOURCES_LEFT_UNTOUCHED_NOTE = (
+SOURCES_LEFT_UNTOUCHED = (
     "The source folders were left on the new commits, because the image tags name the new "
     "build made from them. None of your server's containers was replaced, so it is still "
-    "running the build from before this update if it is up, and its next Start runs the new "
-    "build."
+    "running the build from before this update if it is up"
 )
-"""`SOURCES_LEFT_NOTE` when no container was replaced (`RollbackNotDone.touched`, fix round 1).
+"""The first half of the note when no container was replaced (`RollbackNotDone.touched`).
 
 The tags and the sources name the new build, the containers still hold the old one: both
 said, because "what is on disk is what the new build was made from" alone reads as if the
-new build were what runs now."""
+new build were what runs now. `untouched_note()` says what the next Start does."""
+
+SOURCES_LEFT_UNTOUCHED_NOTE = f"{SOURCES_LEFT_UNTOUCHED}, and its next Start runs the new build."
+"""`SOURCES_LEFT_NOTE` when no container was replaced and nothing refuses a start (fix round 1)."""
+
+
+def untouched_note(refused: str | None) -> str:
+    """The untouched note, with what the next Start does: runs the new build, or is refused.
+
+    Fix round 2: on Centurion the kept build's world tables are left waiting
+    (`ServersDownWork.keep`), so the next Start is refused until they are in, and the
+    note says so with the refusal's own sentence, which names the press that finishes it.
+    """
+    if refused is None:
+        return SOURCES_LEFT_UNTOUCHED_NOTE
+    return f"{SOURCES_LEFT_UNTOUCHED}, and Start is refused until this is done: {refused}"
+
 
 SOURCES_MIXED_NOTE = (
-    "The source folders were put back on the commits they were on, which are the ones Yu'lon "
-    "has recorded for this server. Its image tags are mixed, so it must be rebuilt before it "
-    "can start: press "
+    "The source folders were put back on the commits they were on before this update. Its "
+    "image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
+    "until it is: press "
     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}, which compiles "
     "every image from those commits."
 )
-"""Appended when the rollback left the tags MIXED (`RollbackNotDone.mixed`, fix round 1).
+"""Appended when the rollback left the tags MIXED (`RollbackNotDone.mixed`, fix rounds 1-2).
 
 No single build is on the tags, so there is no new build for the sources to stay with and
 nothing new to record: the record is left as it was and the sources go back to the commits
-it names. Yu'lon keeps no record that refuses a Start until a Rebuild, so the sentence is
-what says it, beside the rollback's own "Do not start this server until they agree"."""
+they were on. `rebuild()` writes `START_REFUSED_FILE`, so every start refuses until a
+Rebuild succeeds."""
+
+START_REFUSED_FILE = ".yulon-start-refused.json"
+"""A press left this server in a state no start may run on (T197 fix round 2).
+
+Read by every start: `Controller.refuse_start()` (Start, Start and play, the launcher's
+PLAY, Restart, Recreate) and the engine's `start_refusal()`. Written in the server folder
+beside the install record, so it outlives the app. `why` is `OWED_REBUILD` or
+`OWED_WORLD_TABLES`; a record nobody can read refuses as `OWED_REBUILD`."""
+
+OWED_REBUILD = "rebuild"
+"""The image tags were left mixed: a successful Rebuild clears it (`rebuild()`)."""
+
+OWED_WORLD_TABLES = "world-tables"
+"""A kept Centurion build's world tables could not be recorded for import (`keep()`).
+
+A Rebuild imports no table, so it does not clear this; a successful update-route press,
+which imports what it moves while the servers are down, does."""
+
+REBUILD_OWED_REFUSAL = (
+    "This server's image tags are mixed: an update or rebuild could not put the build from "
+    "before it back, and left some images on one build and the rest on the other. It must be "
+    "rebuilt before it can start: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+)
+"""Why no start is allowed while `START_REFUSED_FILE` says `OWED_REBUILD`."""
+
+WORLD_TABLES_OWED_REFUSAL = (
+    "This server's new build needs world tables that Yu'lon could not record for import, so "
+    "it must not start on the old ones: press "
+    f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)}, which "
+    "builds the tested commit and imports the world tables that differ from it."
+)
+"""Why no start is allowed while `START_REFUSED_FILE` says `OWED_WORLD_TABLES`."""
+
+
+def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | None:
+    """Why no start may run here (`START_REFUSED_FILE`), or None. Never raises.
+
+    `rebuilding` is the Rebuild press's own question: the rebuild it is about to run is
+    the repair `OWED_REBUILD` asks for, so that one does not refuse it.
+    """
+    path = server_dir / START_REFUSED_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); it refuses as mixed tags")
+        text = ""
+    try:
+        raw = json.loads(text)
+        why = raw.get("why") if isinstance(raw, dict) else None
+    except ValueError:
+        why = None
+    if why == OWED_WORLD_TABLES:
+        return WORLD_TABLES_OWED_REFUSAL
+    return None if rebuilding else REBUILD_OWED_REFUSAL
+
+
+def owe_start(server_dir: Path, why: str) -> str:
+    """Write `START_REFUSED_FILE` saying `why`. Returns a warning sentence, or "" once written.
+
+    `OWED_WORLD_TABLES` is never replaced by `OWED_REBUILD`: a Rebuild does not clear it.
+    """
+    path = server_dir / START_REFUSED_FILE
+    if why == OWED_REBUILD and owed_start_refusal(server_dir) == WORLD_TABLES_OWED_REFUSAL:
+        return ""
+    staged = path.with_name(path.name + ".yulon-new")
+    try:
+        staged.write_text(json.dumps({"version": 1, "why": why}) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not remove {staged}: {also}")
+        return (
+            f"warning: {path} could not be written ({exc}), so nothing stops this server being "
+            "started before it is repaired."
+        )
+    return ""
+
+
+def forget_owed_start(server_dir: Path, why: str) -> str:
+    """Remove `START_REFUSED_FILE` when it says `why`. Returns a warning sentence, or ""."""
+    path = server_dir / START_REFUSED_FILE
+    said = owed_start_refusal(server_dir)
+    if said is None:
+        return ""
+    if (said == WORLD_TABLES_OWED_REFUSAL) != (why == OWED_WORLD_TABLES):
+        return ""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"warning: {path} could not be removed ({exc}); every start will go on refusing."
+    return ""
 
 
 class ServersLeftStopped(InstallerError):
@@ -4251,15 +4362,17 @@ class StagedInstaller:
         """
         return None
 
-    def start_refusal(self, server_dir: Path) -> str | None:
-        """Why the server must not be started now, or None (T179); the spine never refuses.
+    def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
+        """Why the server must not be started now, or None (T179).
 
         Asked by `stage_up()`, by `rebuild()` before anything (a press that would
         start the server and does not finish what stops it), and by the rollback
-        before it starts the old build again. TrinityCore's: a world update left
-        unfinished (`trinitycore.world_update_start_refusal`).
+        before it starts the old build again. The spine's: `START_REFUSED_FILE`
+        (T197 fix round 2), which a Rebuild (`rebuilding`) may clear for itself.
+        TrinityCore's adds a world update left unfinished
+        (`trinitycore.world_update_start_refusal`).
         """
-        return None
+        return owed_start_refusal(server_dir, rebuilding=rebuilding)
 
     # -- the contract ----------------------------------------------------
 
@@ -5601,7 +5714,7 @@ class StagedInstaller:
         if servers_down is None:
             # T179: a rebuild ends in a start, and this press does not finish what
             # refuses one (the update route's `servers_down` does).
-            refused = self.start_refusal(server_dir)
+            refused = self.start_refusal(server_dir, rebuilding=True)
             if refused is not None:
                 raise InstallerError(f"{refused} Nothing was changed.")
         planned = self.rebuild_stages()
@@ -5770,8 +5883,14 @@ class StagedInstaller:
             if isinstance(message, _NotPutBack):
                 # T197: the tags still name the new build (or are mixed), so the
                 # update route must not put the old sources back under it.
+                # Fix round 2: mixed tags are refused by every start until a
+                # Rebuild succeeds -- in this geometry `compose up -d` would run
+                # the new import image beside the old world server.
+                warned = owe_start(server_dir, OWED_REBUILD) if message.mixed else ""
                 raise RollbackNotDone(
-                    str(message), touched=message.touched, mixed=message.mixed
+                    f"{message} {warned}" if warned else str(message),
+                    touched=message.touched,
+                    mixed=message.mixed,
                 ) from exc
             raise InstallerError(message) from exc
         except BaseException:
@@ -5808,6 +5927,9 @@ class StagedInstaller:
         yield from self._release(kept)
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
+        left = forget_owed_start(server_dir, OWED_REBUILD)
+        if left:
+            yield left
         yield from self.after_ready(server_dir)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
@@ -6299,7 +6421,11 @@ class StagedInstaller:
                     yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
                 except InstallerError as after:
                     also = f"{also} {after}"
-                left = SOURCES_LEFT_NOTE if exc.touched else SOURCES_LEFT_UNTOUCHED_NOTE
+                left = (
+                    SOURCES_LEFT_NOTE
+                    if exc.touched
+                    else untouched_note(self.start_refusal(server_dir))
+                )
                 raise RollbackNotDone(
                     f"{exc} {left}{also}", touched=exc.touched, sources_kept=True
                 ) from exc
@@ -6328,6 +6454,12 @@ class StagedInstaller:
                 moved,
                 {repo: said.tag for repo, said in targets.items() if said.tag},
             )
+            # T197 fix round 2: the tables this press moved went in with the servers
+            # down and its build came up on them, so a kept build's unrecorded
+            # tables no longer refuse the start.
+            cleared = forget_owed_start(server_dir, OWED_WORLD_TABLES)
+            if cleared:
+                yield cleared
             landed = (
                 "the commit this app was tested against" if to_pin else "the newest upstream code"
             )

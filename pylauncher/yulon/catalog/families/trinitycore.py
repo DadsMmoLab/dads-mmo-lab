@@ -75,6 +75,7 @@ from yulon.catalog.installer import InstallerError, InstallOptions, UpdateRefuse
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
+    OWED_WORLD_TABLES,
     InstallState,
     Seams,
     ServersDownWork,
@@ -82,6 +83,7 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
+    owe_start,
     read_state,
 )
 from yulon.log import get_logger
@@ -1062,9 +1064,11 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"that into {whose} safely yet. Nothing was changed."
         )
 
-    def start_refusal(self, server_dir: Path) -> str | None:
-        """No start while a world update is unfinished: `world_update_start_refusal` (T179)."""
-        return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
+    def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
+        """The spine's refusal, then a world update left unfinished (T179)."""
+        return super().start_refusal(
+            server_dir, rebuilding=rebuilding
+        ) or world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
 
     def servers_down_work(
         self, server_dir: Path, changes: object, *, press: str
@@ -1175,10 +1179,21 @@ class TrinityCoreInstaller(CmangosInstaller):
                 # `forward()` began: it flagged the map data first, and what it did
                 # not import is still in the record it leaves.
                 return
-            if not prepared:
-                yield from prepare()
+            # The flag first (fix round 2): it never raises, and a record that
+            # cannot be written below must not cost it.
             if changes.map_data:
                 yield self._flag_map_data(server_dir, changes.map_data)
+            if prepared:
+                return
+            try:
+                yield from prepare()
+            except (InstallerError, OSError):
+                # Nothing records the tables the kept build needs, so nothing
+                # would stop a start on the old ones: the spine's record does.
+                warned = owe_start(server_dir, OWED_WORLD_TABLES)
+                if warned:
+                    yield warned
+                raise
 
         return ServersDownWork(
             prepare=prepare, forward=forward, back=back, settle=settle, keep=keep

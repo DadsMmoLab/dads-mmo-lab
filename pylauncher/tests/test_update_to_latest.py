@@ -47,6 +47,7 @@ from yulon.catalog.installer import (
     RollbackNotDone,
     WorldStoppedAfterReadyError,
 )
+from yulon.controller import Controller, StartRefused
 from yulon.docker import AttachedRun
 
 PINNED = ENTRY.emulator.sources[0].rev or ""
@@ -2061,6 +2062,7 @@ def test_a_rollback_that_stops_early_leaves_the_sources_with_the_new_build(
     assert native.SOURCES_PUT_BACK_NOTE not in said and "agree again" not in said
     assert raised.value.sources_kept is True, "the outcome the tab reads, typed"
     assert raised.value.touched is True and raised.value.mixed is False
+    assert native.owed_start_refusal(server_dir) is None, "one build on the tags: Start may run"
 
 
 @pytest.mark.parametrize("entry", SPINE_GAMES, ids=lambda entry: entry.id)
@@ -2168,8 +2170,8 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
         f"({REFUSED}) and undoing it failed too, so the tags are MIXED: {refs[0]} name the old "
         "build and the rest name the new one. Do not start this server until they agree; the "
         "old images are under their -rollback tags. The source folders were put back on the "
-        "commits they were on, which are the ones Yu'lon has recorded for this server. Its "
-        "image tags are mixed, so it must be rebuilt before it can start: press “Rebuild the "
+        "commits they were on before this update. Its image tags are mixed, so it must be "
+        "rebuilt before it can start, and Start is refused until it is: press “Rebuild the "
         "server…” under “Server build ▾” on the Modules tab, which compiles every image from "
         "those commits."
     )
@@ -2177,6 +2179,7 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
     assert state is not None and state.source_revs == before, "the record is as it was"
     assert set(_heads(rec, server_dir).values()) == {OLD}
     assert raised.value.mixed is True and raised.value.sources_kept is False
+    _start_is_refused_for_a_rebuild(server_dir)
 
 
 def test_a_rollback_that_leaves_the_tags_mixed_after_the_containers_moved_records_nothing(
@@ -2197,6 +2200,72 @@ def test_a_rollback_that_leaves_the_tags_mixed_after_the_containers_moved_record
     assert state is not None and state.source_revs == before
     assert set(_heads(rec, server_dir).values()) == {OLD}
     assert raised.value.mixed is True and raised.value.touched is True
+    _start_is_refused_for_a_rebuild(server_dir)
+
+
+MIXED_REFUSAL = (
+    "This server's image tags are mixed: an update or rebuild could not put the build from "
+    "before it back, and left some images on one build and the rest on the other. It must be "
+    "rebuilt before it can start: press “Rebuild the server…” under “Server build ▾” on the "
+    "Modules tab."
+)
+
+
+def _start_is_refused_for_a_rebuild(server_dir: Path) -> None:
+    """A NEW controller over the folder -- the app restarted -- refuses, and so does the engine."""
+    with pytest.raises(StartRefused) as refused:
+        Controller(ENTRY.container_spec(), server_dir).refuse_start()
+    assert str(refused.value) == MIXED_REFUSAL
+    assert (server_dir / native.START_REFUSED_FILE).is_file()
+
+
+def test_a_plain_rebuild_that_leaves_the_tags_mixed_refuses_every_start_too(
+    tmp_path: Path,
+) -> None:
+    """Fix round 2: the geometry is the Rebuild press's as much as the update's."""
+    rec, server_dir = _ready(tmp_path)
+    rec.ready = False
+    with pytest.raises(RollbackNotDone) as raised:
+        list(engine(rec, **_mixed(rec)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert raised.value.mixed is True
+    _start_is_refused_for_a_rebuild(server_dir)
+
+
+def test_a_rebuild_that_succeeds_clears_the_refusal_and_one_that_fails_keeps_it(
+    tmp_path: Path,
+) -> None:
+    """Fix round 2: Rebuild is the repair, so it is not refused, and only its success clears."""
+    rec, server_dir = _ready(tmp_path)
+    assert native.owe_start(server_dir, native.OWED_REBUILD) == ""
+    rec.build_result = AttachedRun(2, ("error: no",))
+    with pytest.raises(InstallerError):
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls, "the ground: the Rebuild was not refused, it failed"
+    assert native.owed_start_refusal(server_dir) == MIXED_REFUSAL, "a failed Rebuild keeps it"
+
+    rec.build_result = AttachedRun(0, ("built",))
+    list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert native.owed_start_refusal(server_dir) is None
+    assert not (server_dir / native.START_REFUSED_FILE).exists()
+    Controller(ENTRY.container_spec(), server_dir).refuse_start()
+
+
+def test_a_world_tables_refusal_refuses_the_rebuild_too_and_survives_it(tmp_path: Path) -> None:
+    """A Rebuild imports no table, so it is no repair for `OWED_WORLD_TABLES`."""
+    rec, server_dir = _ready(tmp_path)
+    assert native.owe_start(server_dir, native.OWED_WORLD_TABLES) == ""
+    with pytest.raises(InstallerError, match="could not record for import"):
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls
+    assert native.owe_start(server_dir, native.OWED_REBUILD) == ""
+    assert native.owed_start_refusal(server_dir) == native.WORLD_TABLES_OWED_REFUSAL
+
+
+def test_a_record_nobody_can_read_still_refuses_and_asks_for_a_rebuild(tmp_path: Path) -> None:
+    server_dir = tmp_path
+    (server_dir / native.START_REFUSED_FILE).write_text("not json", encoding="utf-8")
+    assert native.owed_start_refusal(server_dir) == MIXED_REFUSAL
+    assert native.owed_start_refusal(server_dir, rebuilding=True) is None
 
 
 def test_a_rollback_that_put_the_tags_back_before_any_container_moved_puts_the_sources_back(

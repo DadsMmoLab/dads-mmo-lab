@@ -57,6 +57,8 @@ from yulon.catalog.installer import (
     RollbackNotDone,
     WorldStoppedAfterReadyError,
 )
+from yulon.controller import StartRefused
+from yulon.controller_wow_centurion.controller import CenturionController
 from yulon.install_wiring import (
     reextract_for_app,
     update_to_latest_for_app,
@@ -1452,7 +1454,19 @@ def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_table
     assert box.head() == NEW
     assert box.engine().start_refusal(box.server_dir) == UNFINISHED
     assert box.world.running is True, "the build from before still runs in its containers"
-    assert str(failed.value).endswith(native.SOURCES_LEFT_UNTOUCHED_NOTE)
+    assert str(failed.value) == (
+        "Docker is not answering, so the containers were not replaced -- the server you have "
+        "is still the one that was running before this rebuild. Nothing was touched. Check the "
+        "docker daemon is up, then press the same entry under “Server build ▾” on the Modules "
+        "tab again. Putting the build from before this rebuild back was not attempted, because "
+        "the new build could not be given a name to undo onto (read-only layer store); the tags "
+        "still name the new build, all of them. The old images are on the daemon under their "
+        "-rollback tags. The source folders were left on the new commits, because the image "
+        "tags name the new build made from them. None of your server's containers was "
+        "replaced, so it is still running the build from before this update if it is up, and "
+        f"Start is refused until this is done: {UNFINISHED}"
+    )
+    assert "next Start runs" not in str(failed.value)
     assert failed.value.touched is False
 
 
@@ -1460,7 +1474,7 @@ def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """T197: `keep()`'s failure is added to the sentence, never in its place."""
-    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
     _docker_gone_after_the_compile(box)
     _refuse_the_failed_name(box)
     real_write = Path.write_text
@@ -1475,6 +1489,21 @@ def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay
         box.press()
     said = str(failed.value)
     assert "could not be given a name to undo onto" in said
-    assert native.SOURCES_LEFT_UNTOUCHED_NOTE in said
     assert "Permission denied" in said
+    assert f"Start is refused until this is done: {native.WORLD_TABLES_OWED_REFUSAL}" in said
     assert box.head() == NEW
+    assert box.pending() is None, "the ground: no world record could be written"
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the flag went first"
+    with pytest.raises(StartRefused) as refused:
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+    assert str(refused.value) == native.WORLD_TABLES_OWED_REFUSAL
+
+
+def test_a_successful_update_clears_a_world_tables_refusal(box: Box) -> None:
+    """Its tables went in with the servers down and its build came up on them."""
+    assert native.owe_start(box.server_dir, native.OWED_WORLD_TABLES) == ""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    said = box.press()
+    assert said[-1] == "Centurion is running on the newest upstream code."
+    assert native.owed_start_refusal(box.server_dir) is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()

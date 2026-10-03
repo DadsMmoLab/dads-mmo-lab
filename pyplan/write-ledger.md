@@ -359,6 +359,10 @@ descriptions are written by hand.
 | `catalog/native.py::write_state::os.replace` | that record renamed into place | install time |
 | `catalog/native.py::write_state::unlink` | the temp record after a failure | install time |
 | `catalog/native.py::write_state::write_text` | the install's own stage record, to a temp name | install time |
+| `catalog/native.py::owe_start::write_text` | **new (T197 fix round 2)** `<server>/.yulon-start-refused.json.yulon-new`: why no start may run on this server (`{"version":1,"why":"rebuild"|"world-tables"}`), written by `rebuild()` when its rollback left the image tags mixed and by Centurion's `keep()` when the world tables a kept build needs could not be recorded. Read by `Controller.refuse_start()` and the engine's `start_refusal()` | **yes** -- written after the rollback, with the servers stopped or never touched; the world server never reads it |
+| `catalog/native.py::owe_start::os.replace` | **new (T197 fix round 2)** that temporary file renamed onto `.yulon-start-refused.json`, so the record is whole or absent | yes (as above) |
+| `catalog/native.py::owe_start::unlink` | **new (T197 fix round 2)** the record's own `.yulon-new` temporary file when writing or renaming it failed | yes (as above) |
+| `catalog/native.py::forget_owed_start::unlink` | **new (T197 fix round 2)** `.yulon-start-refused.json`, once a Rebuild succeeded (`rebuild`) or an update-route press landed (`world-tables`) | **yes** -- the new build is up; the world server never reads it |
 | `catalog/upstream.py::forget::unlink` | **new (T124)** `.yulon-upstream.json`, the day's cached count of what upstream has past each source, dropped when an update or a return moves the sources. A cache: losing it costs one more ask | **yes** — nothing the server reads |
 | `catalog/upstream.py::write_cached::os.replace` | **new (T124)** that cache renamed into place beside `.yulon-install.json`, written only in a folder that already has an install record | **yes** — nothing the server reads |
 | `catalog/upstream.py::write_cached::unlink` | the temp cache after a failure | **yes** — as above |
