@@ -4651,7 +4651,7 @@ def test_a_fresh_install_settles_its_channel_without_waiting_for_a_start(
         WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
     )
     assert stub.settles == 0, "opening the tab must not settle"
-    monkeypatch.setattr(controller_view_module.QTimer, "singleShot", lambda ms, fn: None)
+    monkeypatch.setattr(controller_view_module.QTimer, "singleShot", lambda ms, *call: None)
 
     view.settle_channel_after_install()
 
@@ -4676,7 +4676,9 @@ def test_a_fresh_install_asks_again_only_while_the_first_answer_is_pending(
     )
     scheduled: list[tuple[int, object]] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+        controller_view_module.QTimer,
+        "singleShot",
+        lambda ms, *call: scheduled.append((ms, call[-1])),
     )
 
     view.settle_channel_after_install()
@@ -4722,7 +4724,9 @@ def test_closing_while_the_channel_is_pending_and_reopening_proves_it_without_a_
 
     scheduled: list[tuple[int, object]] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+        controller_view_module.QTimer,
+        "singleShot",
+        lambda ms, *call: scheduled.append((ms, call[-1])),
     )
     reopened = ControllerView(
         WOTLK,
@@ -4749,7 +4753,7 @@ def test_a_tab_that_opens_on_no_pending_channel_schedules_no_second_ask(
     """The extra ask is for a row an earlier run left un-proved, and only then."""
     scheduled: list[int] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append(ms)
+        controller_view_module.QTimer, "singleShot", lambda ms, *call: scheduled.append(ms)
     )
     stub = _StubSetup(
         state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-27 01:00 UTC")
@@ -4779,7 +4783,9 @@ def test_a_tab_torn_down_within_the_minute_is_not_asked_again(
     )
     scheduled: list[tuple[int, object]] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+        controller_view_module.QTimer,
+        "singleShot",
+        lambda ms, *call: scheduled.append((ms, call[-1])),
     )
     view.settle_channel_after_install()
     assert stub.settles == 1
@@ -4787,6 +4793,55 @@ def test_a_tab_torn_down_within_the_minute_is_not_asked_again(
     view.shutdown()
     scheduled[0][1]()
     assert stub.settles == 1, "a closed tab must not start a job"
+
+
+@pytest.mark.parametrize("deleted", [True, False], ids=["deleted", "kept"])
+@pytest.mark.parametrize("armed_by", ["install", "opening"])
+def test_a_tab_deleted_without_shutdown_drops_the_deferred_channel_ask(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    armed_by: str,
+    deleted: bool,
+) -> None:
+    """T213 (adversarial review): the minute-later re-settle names the tab as its context.
+
+    Both arms -- `settle_channel_after_install()` and a tab that opens on a
+    `Pending` channel -- queued `self._resettle_if_pending` with no context
+    object. `_closed` covers a tab that was shut down, but not one whose C++
+    half went without `shutdown()`: the ask then ran a minute later on a
+    dead view. The `kept` cases prove the recorder is reached at all.
+
+    Mutation: drop `self` from either `singleShot` and that arm's `deleted`
+    case records a call.
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    asked: list[object] = []
+    monkeypatch.setattr(ControllerView, "_resettle_if_pending", lambda self: asked.append(self))
+    monkeypatch.setattr(controller_view_module, "_POST_INSTALL_RESETTLE_MS", 1)
+    if armed_by == "install":
+        stub = _StubSetup(state=channel_setup.Idle())
+        stub.settled = channel_setup.Pending(account="YULON_AB", password="pw", tries=1)
+        view = ControllerView(
+            WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+        )
+        view.settle_channel_after_install()
+    else:
+        stub = _StubSetup(state=channel_setup.Pending(account="YULON_AB", password="pw", tries=1))
+        view = ControllerView(
+            WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=5, job_runner=run_inline
+        )
+
+    if deleted:
+        view.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    process_events(100)
+
+    assert len(asked) == (0 if deleted else 1), asked
+    if not deleted:
+        view.shutdown()
 
 
 def test_a_finished_start_asks_the_channel_where_it_now_stands(

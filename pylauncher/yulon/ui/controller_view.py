@@ -6565,7 +6565,7 @@ class ControllerView(QWidget):
             )
             self._check_the_channel()
             if found_pending:
-                QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
+                QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
 
     # ------------------------------------------------------------- sub-tabs
 
@@ -8288,12 +8288,14 @@ class ControllerView(QWidget):
         on it re-verifies rather than re-creates.
         """
         self._settle_the_channel()
-        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
 
     def _resettle_if_pending(self) -> None:
         # A minute is long enough for the tab to have been torn down (install,
         # then uninstall): `shutdown()` sets `_closed`, and a job started after
-        # it would connect its `done` to a slot of a deleted widget. `settle()`
+        # it would connect its `done` to a slot of a deleted widget. Both arms
+        # name `self` as the timer's context object (T213), so a tab deleted
+        # without `shutdown()` never gets here at all. `settle()`
         # on `Pending` re-verifies and never creates, which is why the tab-open
         # path may schedule this too (T138).
         if getattr(self, "_closed", False):
