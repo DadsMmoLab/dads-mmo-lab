@@ -1977,6 +1977,17 @@ class _LeftStopped(str):
     """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
 
 
+class LeaveStopped(InstallerError):
+    """Raised by a `ServersDownWork.back()`: the old build must NOT be started (T217).
+
+    The update route's rollback could not put back something the old build would
+    start on -- its copy of the databases the new build changed, or a source folder
+    whose database updates the old build reads -- so `_restore_rollback()` leaves
+    the servers stopped and says this sentence, which names the fix, instead of
+    starting them.
+    """
+
+
 class _NotPutBack(str):
     """`_restore_rollback()`'s sentence when it stopped before the old build was back (T197).
 
@@ -2020,6 +2031,138 @@ true is `_put_sources_back()`, which yields its own line per source, INCLUDING
 when a restore failed: a user who sees that line and this sentence has the
 contradiction in front of them rather than only the comfortable half.
 """
+
+SOURCES_PUT_BACK_DATABASE_NOT_NOTE = (
+    "The source folders were put back on the commits they were on, so what is on disk is the "
+    "build that was put back; it stays stopped until its databases are restored."
+)
+"""`SOURCES_PUT_BACK_NOTE` when the update's copy of the databases could not go back (T217)."""
+
+
+def _listed(names: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`: names as a sentence reads them."""
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _as_it_was(names: Sequence[str]) -> str:
+    return "as it was" if len(names) == 1 else "as they were"
+
+
+def _in_backups(paths: Sequence[Path]) -> str:
+    """Files as the player finds them in the server folder: `backups/<file>`, joined."""
+    return ", ".join(f"{path.parent.name}/{path.name}" for path in paths)
+
+
+def _megabytes(size: int) -> str:
+    return f"{size / 1_048_576:.1f} MB"
+
+
+def copy_taking_line(names: Sequence[str]) -> str:
+    """Said before the update copies the databases its new build can change (T217)."""
+    return (
+        f"Copying {_listed(names)} with your servers stopped, right before the new build first "
+        "starts, so it can be put back if that build does not come up."
+    )
+
+
+def copy_taken_line(copy: snapshot.Snapshot) -> str:
+    """Said once the copy is on disk: what, how big, and the file the player would restore."""
+    return (
+        f"Copied {_listed(copy.databases)} ({_megabytes(copy.size_bytes)}) to "
+        f"{_in_backups(copy.files)} before starting the new build."
+    )
+
+
+def copy_not_taken(names: Sequence[str], reason: str) -> str:
+    """The failure sentence when the copy could not be taken: the new build was not started."""
+    return (
+        f"Yu'lon could not copy {_listed(names)} before starting the new build ({reason}), so it "
+        "did not start it."
+    )
+
+
+COPY_NOT_TAKEN_DATABASE = (
+    "Nothing in your databases was changed by the update: the new build never started."
+)
+"""The rollback's database sentence when the copy failed, so the new build never ran (T217)."""
+
+
+def copy_putting_back_line(copy: snapshot.Snapshot) -> str:
+    return (
+        f"Putting {_listed(copy.databases)} back {_as_it_was(copy.databases)} just before the "
+        "new build started, before the build from before this update starts again."
+    )
+
+
+def copy_put_back_line(put: snapshot.PutBack) -> str:
+    kept = f"; what the new build left is kept in {_in_backups(put.safety)}" if put.safety else ""
+    return f"Put {_listed(put.restored)} back{kept}."
+
+
+def copy_put_back_database(put: snapshot.PutBack, *, not_copied: Sequence[str] = ()) -> str:
+    """The rollback's database sentence once the copy went back (T217).
+
+    Replaces "What the new build wrote into the database ... is NOT put back". The
+    order it states is the order `update_to_latest()` runs: tags, then source
+    folders, then this copy, then the old build. "Nobody played on it" holds
+    because a build is rolled back only before its ready banner; a build that
+    stops after it is KEPT (`WorldStoppedAfterReadyError`, T71), and its copy is
+    not put back.
+    """
+    names = put.restored
+    kept = (
+        f"; what it left in {'that database' if len(names) == 1 else 'those databases'} is kept "
+        f"in {_in_backups(put.safety)}"
+        if put.safety
+        else ""
+    )
+    said = (
+        f"Its source folders were put back first, then {_listed(names)} {_as_it_was(names)} "
+        "just before the new build started, so the old build starts on the database it knows. "
+        f"The new build never reported ready, so nobody played on it{kept}."
+    )
+    if not_copied:
+        said += (
+            f" {_listed(not_copied)} {'was' if len(not_copied) == 1 else 'were'} not copied, so "
+            "what the new build's updater wrote into "
+            f"{'it' if len(not_copied) == 1 else 'them'}, if anything, is NOT put back."
+        )
+    return said
+
+
+def copy_not_put_back(copy: snapshot.Snapshot, reason: str) -> str:
+    """Why the old build was left stopped: its database copy would not go back (T217)."""
+    names = copy.databases
+    return (
+        f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
+        f"started ({reason}), so the old build was not started on the database the new one "
+        f"changed. Open Maintenance, choose {_in_backups(copy.files)} and press Restore (it "
+        "works with the server stopped), then press Start."
+    )
+
+
+def copy_kept_note(copy: snapshot.Snapshot) -> str:
+    """Added when the new build stays: its copy was not needed (T217, T197's exits)."""
+    names = copy.databases
+    return (
+        f"The copy of {_listed(names)} taken before it started is kept in "
+        f"{_in_backups(copy.files)}; it was not put back, because the new build is what runs."
+    )
+
+
+@dataclass
+class _UpdateCopy:
+    """One update press's copy of the databases its new build can change (T217)."""
+
+    names: tuple[str, ...]
+    not_copied: tuple[str, ...] = ()
+    taken: snapshot.Snapshot | None = None
+    put: snapshot.PutBack | None = None
+    take_failed: bool = False
+    put_failed: bool = False
+
 
 REPAIR_FILES_LABEL = "Repair server files…"
 """The Server tab's T106/T137 press, here because the engine's own sentences name it (T170).
@@ -2757,6 +2900,23 @@ class ServersDownWork:
 
     Nothing the work recorded is removed before this: a build that fails its ready
     wait is rolled back, and the old build still needs what the record owed then.
+    """
+    database: Callable[[], str | None] = lambda: None
+    """What the rollback says about the database, read after `back()` (T217); None = its own.
+
+    The rollback's own sentence says the database is NOT put back. The update route
+    puts back its copy of the databases a new build changes (`snapshot`), and then
+    this says what went back, or that nothing was changed because the new build
+    never started.
+    """
+    finishes_start_refusal: bool = True
+    """This work finishes what refuses a start, so `rebuild()` need not ask first (T217).
+
+    True for T179's world tables, which `forward()` imports. The update route now
+    hands every family a `ServersDownWork` (its sources and its database copy go
+    back inside `back()`), and for a family with no work of its own this is False,
+    so `rebuild()` still asks `start_refusal()` before anything is compiled, as it
+    always did with no work at all.
     """
 
 
@@ -4380,10 +4540,21 @@ class StagedInstaller:
         """
         return ()
 
+    def databases_changed_but_not_copied(self) -> tuple[Db, ...]:
+        """Databases the new build can change that the update does NOT copy, by role (T217).
+
+        Said in the rollback's sentence, so a player is not told a database went
+        back that did not. Empty on the spine.
+        """
+        return ()
+
     def snapshot_databases(self) -> tuple[str, ...]:
         """`databases_a_new_build_changes()` in this entry's own schema names (T217)."""
+        return self._schema_names(self.databases_a_new_build_changes())
+
+    def _schema_names(self, roles: Sequence[Db]) -> tuple[str, ...]:
         named = self.entry.schema_map()
-        return tuple(named[role] for role in self.databases_a_new_build_changes() if role in named)
+        return tuple(named[role] for role in roles if role in named)
 
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
         """Why the server must not be started now, or None (T179).
@@ -5734,9 +5905,9 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         state = self._refuse_unless_rebuildable(server_dir)
-        if servers_down is None:
+        if servers_down is None or not servers_down.finishes_start_refusal:
             # T179: a rebuild ends in a start, and this press does not finish what
-            # refuses one (the update route's `servers_down` does).
+            # refuses one (the update route's `servers_down` does, when it says so).
             refused = self.start_refusal(server_dir, rebuilding=True)
             if refused is not None:
                 raise InstallerError(f"{refused} Nothing was changed.")
@@ -6279,6 +6450,13 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         state = self._refuse_unless_rebuildable(server_dir)
+        # T217 (Decision 9): asked here, before the first fetch, because `rebuild()`
+        # now always receives this route's work and the work finishes only what the
+        # family's own work finishes. Mixed image tags are repaired by a Rebuild
+        # alone (`START_REFUSED_FILE`), never by moving the sources under them.
+        owed = owed_start_refusal(server_dir)
+        if owed is not None:
+            raise InstallerError(f"{owed} Nothing was started.")
         moving = self.sources_that_move()
         if not moving:
             raise InstallerError(
@@ -6375,30 +6553,55 @@ class StagedInstaller:
             # T179: what the family does while the rebuild's servers are down. Its
             # rollback half needs the OLD checkout, so the sources go back first,
             # inside the rollback, and the handler below does not do it twice.
+            #
+            # T217: and for EVERY family now, not only one with work of its own. The
+            # rollback puts the tags back, then the sources (the old WotLK worldserver
+            # reads its module's SQL from the folder), then the copy of the databases
+            # the new build could change, and only then starts the old build. The
+            # copy is taken with the servers down, right before the new build first
+            # starts.
             sources_back = False
-            work = self.servers_down_work(server_dir, changes, press=press)
-            if work is not None:
-                family_back = work.back
+            copy = _UpdateCopy(
+                names=self.snapshot_databases() if self._snapshot is not None else (),
+                not_copied=self._schema_names(self.databases_changed_but_not_copied()),
+            )
+            family = self.servers_down_work(server_dir, changes, press=press)
 
-                def back(stage_ctx: StageContext) -> Iterator[str]:
-                    nonlocal sources_back
-                    yield from self._restore_the_folder(moved, server_dir, opts, state, press)
-                    sources_back = True
-                    yield from family_back(stage_ctx)
+            def forward(stage_ctx: StageContext) -> Iterator[str]:
+                if copy.names:
+                    yield from self._take_copy(server_dir, copy)
+                if family is not None:
+                    yield from family.forward(stage_ctx)
 
-                work = replace(work, back=back)
+            def back(stage_ctx: StageContext) -> Iterator[str]:
+                nonlocal sources_back
+                yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                sources_back = True
+                yield from self._put_copy_back(server_dir, copy)
+                if family is not None:
+                    yield from family.back(stage_ctx)
+
+            work = ServersDownWork(
+                prepare=family.prepare if family is not None else lambda: iter(()),
+                forward=forward,
+                back=back,
+                settle=family.settle if family is not None else lambda: None,
+                keep=family.keep if family is not None else lambda: iter(()),
+                done=family.done if family is not None else lambda: iter(()),
+                database=lambda: self._copy_database_sentence(copy),
+                finishes_start_refusal=family is not None,
+            )
             try:
                 yield from self.rebuild(opts, cancel=cancel, servers_down=work)
-                if work is not None:
-                    yield from work.done()
+                yield from work.done()
+                self._forget_older_copies(server_dir, copy)
             except WorldStoppedAfterReadyError as exc:
                 # T71: the rebuild KEPT the new build -- it came up, then stopped
                 # on its data -- so the sources it was made from stay with it, and
                 # are recorded as what the running build is (T179 fix round 2).
                 # Putting the old commits back here would be this route's own
                 # invariant broken by its own recovery.
-                if work is not None:
-                    yield from work.done()
+                yield from work.done()
                 self._record_source_revs(
                     server_dir,
                     state,
@@ -6421,8 +6624,7 @@ class StagedInstaller:
                     # build to keep the sources with or to record. They go back to
                     # the commits the record still names, and the sentence says the
                     # server needs a Rebuild before it can start.
-                    if work is not None:
-                        work.settle()
+                    work.settle()
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                     raise RollbackNotDone(
                         f"{exc} {mixed_note(exc.touched)}", touched=exc.touched, mixed=True
@@ -6433,11 +6635,10 @@ class StagedInstaller:
                 # putting the old commits back would leave them under a build they
                 # did not make, with a sentence saying the two agree again.
                 also = ""
-                if work is not None:
-                    try:
-                        yield from work.keep()
-                    except (InstallerError, OSError) as kept_failed:
-                        also = f" {kept_failed}"
+                try:
+                    yield from work.keep()
+                except (InstallerError, OSError) as kept_failed:
+                    also = f" {kept_failed}"
                 self._record_source_revs(
                     server_dir,
                     state,
@@ -6460,20 +6661,25 @@ class StagedInstaller:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
                 # It puts the IMAGE back; this puts the SOURCE back; and it is the
                 # pair that makes the folder and the running container agree again.
-                if work is not None:
-                    work.settle()
+                work.settle()
                 if not sources_back:
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 if isinstance(exc, ServersLeftStopped):
-                    # T179: nothing runs, so the note must not say it does.
-                    raise ServersLeftStopped(f"{exc} {SOURCES_PUT_BACK_STOPPED_NOTE}") from exc
+                    # T179: nothing runs, so the note must not say it does. T217: and
+                    # when it is the database that did not go back, the note says so.
+                    note = (
+                        SOURCES_PUT_BACK_DATABASE_NOT_NOTE
+                        if copy.put_failed
+                        else SOURCES_PUT_BACK_STOPPED_NOTE
+                    )
+                    raise ServersLeftStopped(f"{exc} {note}") from exc
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
                 # record of tables to import is put back if nothing was imported
                 # (fix round 3); nothing may be yielded here (`rebuild()`'s reason).
-                if work is not None:
-                    work.settle()
+                # T217: nor is the copy put back -- that needs a yield and a restore.
+                work.settle()
                 raise
             self._record_source_revs(
                 server_dir,
@@ -6793,6 +6999,59 @@ class StagedInstaller:
                 )
                 continue
             yield f"{source.repo} was put back on {old[:7]}."
+
+    def _take_copy(self, server_dir: Path, copy: _UpdateCopy) -> Iterator[str]:
+        """Copy the databases the new build can change; servers down, before it starts (T217).
+
+        A copy that cannot be taken raises: `forward()` raising is "the new build
+        never started", which the rebuild rolls back, and nothing in the databases
+        was changed.
+        """
+        if self._snapshot is None:
+            return
+        yield copy_taking_line(copy.names)
+        try:
+            copy.taken = self._snapshot.take(server_dir, copy.names)
+        except (InstallerError, OSError) as exc:
+            copy.take_failed = True
+            raise InstallerError(copy_not_taken(copy.names, str(exc))) from exc
+        yield copy_taken_line(copy.taken)
+
+    def _put_copy_back(self, server_dir: Path, copy: _UpdateCopy) -> Iterator[str]:
+        """Put the copy back in the rollback's window: after the sources, before the old build.
+
+        One that will not go back raises `LeaveStopped`: the old build is not
+        started on the database the new one changed (the owner's rule, 2026-10-04).
+        """
+        if copy.taken is None or self._snapshot is None:
+            return
+        yield copy_putting_back_line(copy.taken)
+        try:
+            copy.put = self._snapshot.put_back(server_dir, copy.taken)
+        except (InstallerError, OSError) as exc:
+            copy.put_failed = True
+            raise LeaveStopped(copy_not_put_back(copy.taken, str(exc))) from exc
+        yield copy_put_back_line(copy.put)
+        self._forget_older_copies(server_dir, copy)
+
+    def _copy_database_sentence(self, copy: _UpdateCopy) -> str | None:
+        """What the rollback says about the database, or None for its own sentence (T217)."""
+        if not copy.names:
+            return None
+        if copy.take_failed:
+            return COPY_NOT_TAKEN_DATABASE
+        if copy.put is not None:
+            return copy_put_back_database(copy.put, not_copied=copy.not_copied)
+        return None
+
+    def _forget_older_copies(self, server_dir: Path, copy: _UpdateCopy) -> None:
+        """Keep only this press's copy (owner, 2026-10-04), once it is not the only good one."""
+        if copy.taken is None or self._snapshot is None:
+            return
+        try:
+            self._snapshot.prune(server_dir, copy.taken)
+        except (InstallerError, OSError) as exc:
+            logger.warning(f"could not forget the older update copies in {server_dir}: {exc}")
 
     def _record_source_revs(
         self,
@@ -7166,16 +7425,36 @@ class StagedInstaller:
             "the old build is running on the database as the new one left it."
         )
         back_failed = ""
+        stay: str | None = None
+        stopped_database = ROLLBACK_LEFT_STOPPED_DATABASE
         if servers_down is not None:
             try:
                 yield from servers_down.back(replace(ctx, cancel=None))
+            except LeaveStopped as exc:
+                # T217: what the old build would start on could not be put back
+                # (the copy of its databases, a source folder). It is not started.
+                stay = str(exc)
             except (InstallerError, OSError) as exc:
                 back_failed = f"\n{exc}"
+            put_back = servers_down.database()
+            if put_back is not None:
+                # T217: the update route put its copy back (or never started the
+                # new build), so the sentence says that instead of "NOT put back".
+                database = f"\n{put_back}"
+                stopped_database = database
             database = f"{database}{back_failed}"
         # Asked on every rollback, not only the update route's (T197 fix round 8): a
         # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed
         # tags as its rollback, and a repair that failed must not start them again.
         refused = self.start_refusal(ctx.server_dir)
+        if stay is not None:
+            yield from self._release(named)
+            yield from self._release(kept)
+            also = f" {refused}" if refused is not None else ""
+            return _LeftStopped(
+                f"{failure} The build from before this rebuild was put back, and its servers "
+                f"were left STOPPED: {stay}{also}{said}{back_failed}"
+            )
         if refused is not None:
             # T179 (lead ruling): the old build is not started on world tables
             # its rollback could not all put back, nor on mixed tags. Its servers
@@ -7185,7 +7464,7 @@ class StagedInstaller:
             yield from self._release(kept)
             return _LeftStopped(
                 f"{failure} The build from before this rebuild was put back, and its servers "
-                f"were left STOPPED: {refused}{said}{ROLLBACK_LEFT_STOPPED_DATABASE}"
+                f"were left STOPPED: {refused}{said}{stopped_database}"
                 f"{back_failed}"
             )
         try:

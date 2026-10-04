@@ -870,9 +870,17 @@ class Recorder:
         control: docker.StopControl | None = None,
         before_signal: Callable[[], None] | None = None,
     ) -> None:
-        """`docker.stop_servers_staged()`: recorded, with whether the stop was forced (T158)."""
+        """`docker.stop_servers_staged()`: recorded, with whether the stop was forced (T158).
+
+        `before_signal` is called after the wait and before the stop, as the real
+        one does (T217): the update route's stop is where `rebuild()` learns the
+        servers were touched, and a double that dropped it read a stop followed by
+        a failed copy as "no container was replaced".
+        """
         if self.on_stop_servers is not None:
             self.on_stop_servers(control)
+        if before_signal is not None:
+            before_signal()
         forced = control is not None and control.forced()
         self.calls.append("stop_servers:forced" if forced else "stop_servers")
 

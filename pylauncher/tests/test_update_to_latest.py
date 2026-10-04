@@ -1860,17 +1860,19 @@ def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
 def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
     """The spine's hooks are no-ops: WotLK and TBC updates ask the same questions as before.
 
-    And their rebuild replaces the containers in the one `recreate` call it always made:
-    no family work between a stop and a start (T179 Task 6, fix round 1).
+    Since T217 their update's rebuild stops the servers first and then recreates
+    (it copies the databases its new build can change in between, and its rollback
+    puts the sources back in that window), as T179's family work always did; a plain
+    Rebuild still replaces them in the one `recreate` call.
     """
     rec, server_dir = _ready(tmp_path / "wotlk")
     _press(rec, server_dir)
     assert not [call for call in rec.calls if call.startswith("changed-")]
-    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
+    assert rec.calls.index("stop_servers") < rec.calls.index("recreate")
     rec, server_dir, tbc = _tbc(tmp_path)
     list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert not [call for call in rec.calls if call.startswith("changed-")]
-    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
+    assert rec.calls.index("stop_servers") < rec.calls.index("recreate")
 
 
 ABORTED_AFTER_READY = native.WorldOutput(
@@ -1962,10 +1964,16 @@ def _tags(rec: Recorder, refuse: Callable[[str, str, int], bool]) -> Callable[[s
 
 
 def _stop_refused(rec: Recorder) -> dict[str, object]:
-    """The rollback's stop of the failed build fails (`docker.DockerCommandError`)."""
+    """The rollback's stop of the failed build fails (`docker.DockerCommandError`).
+
+    Only the ROLLBACK's: since T217 the update route stops the old build's servers
+    itself before the new build first starts (to copy its databases), and that stop
+    comes before any `recreate`. The rollback's is the one after the new build's.
+    """
 
     def refuse(control: object) -> None:
-        raise docker.DockerCommandError("the daemon did not answer the stop")
+        if "recreate" in rec.calls:
+            raise docker.DockerCommandError("the daemon did not answer the stop")
 
     rec.on_stop_servers = refuse
     return {}
@@ -2094,12 +2102,18 @@ def test_a_rollback_that_put_the_old_build_back_still_puts_the_sources_back(
 
 
 def _recreate_given_up(rec: Recorder) -> None:
-    """The recreate is given up in the load wait, before its signal: no container replaced."""
+    """The recreate is given up in the load wait, before its signal: no container replaced.
+
+    On the update route the load wait is in its own stop since T217 (the stop that
+    lets it copy the databases before the new build starts), so the give-up is
+    armed there too; a plain Rebuild's is still inside its one `recreate`.
+    """
 
     def give_up(control: object) -> None:
         raise docker.StopAbandoned("the world was still loading")
 
     rec.on_recreate = give_up
+    rec.on_stop_servers = give_up
 
 
 def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_sources_too(
