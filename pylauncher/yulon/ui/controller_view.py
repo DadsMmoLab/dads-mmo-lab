@@ -20,6 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import math
 import os
@@ -472,10 +473,34 @@ class DatabaseAlone:
     step nearer to useless.
     """
 
-    bring_up: Callable[[], bool]
-    """Start the database alone and wait for it to be healthy. True if it had to."""
+    bring_up: Callable[[str], bool]
+    """Start the database alone and wait for it to be healthy. True if it had to.
+
+    The argument is `because`: what was NOT done if the start fails, completing
+    `docker.start_database()`'s timeout sentence. A parameter since T205, when
+    Restore became the second caller: bound once in the factory, a restore
+    whose database never came up told the player *"…so no backup was taken"*.
+
+    One that raises has answered nothing, so `take_down` is not called after
+    it; it has put back whatever it started itself (`_database_alone()`).
+    """
     take_down: Callable[[], None]
     """Stop the database again. Called only where `bring_up` answered True."""
+
+
+class PlanRestore(Protocol):
+    """`maintenance.plan_restore()` bound to one install: the Maintenance tab's planner.
+
+    A Protocol and not `Callable[[Path], RestorePlan]` for T205's keyword. Only
+    a tab that holds a `DatabaseAlone` passes `can_start_database=True`, which
+    turns "the database is not running" from a refusal into a plan that starts
+    it; every other caller, and every call that omits it, gets the planner as it
+    was. The restore's own re-plan, made once the database is up, never needs it.
+    """
+
+    def __call__(
+        self, path: Path, *, can_start_database: bool = False
+    ) -> wotlk_maintenance.RestorePlan: ...
 
 
 _ROW_SETTLE_MS = 750
@@ -1575,7 +1600,7 @@ class ControllerServices:
     create_account: Callable[[str, str, int], wotlk_accounts.AccountResult]
     backup: Callable[[], wotlk_maintenance.BackupReport]
     backups_dir: Callable[[], Path]
-    plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan]
+    plan_restore: PlanRestore
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
@@ -2303,27 +2328,69 @@ def _mysql_for(
 def _database_alone(
     spec: docker.ContainerSpec, server_dir: Path, *, wsl_distro: str | None
 ) -> DatabaseAlone:
-    """The two halves of "bring the database up for a backup, then put it back" (T76).
+    """The two halves of "bring the database up for a backup or a restore, then put it back".
 
-    One factory and four call sites, because the four games must not disagree
-    about this: the reason the backup needed it is identical in all four (a
-    `mysqldump` through `docker exec` needs the container to exist and be
-    running), and so is the reason it is stopped again.
+    T76 for the backup, T205 for the restore. One factory and four call sites,
+    because the four games must not disagree about this: the reason both need
+    it is identical in all four (a `mysqldump` or `mysql` through `docker exec`
+    needs the container to exist and be running), and so is the reason it is
+    stopped again.
 
-    `because` completes `docker.start_database()`'s timeout sentence, and it
-    says what was not done rather than what was attempted -- a user reading
-    *"…did not report healthy within 180s, so no backup was taken"* knows the
-    state their server is in, which is the whole job of that sentence.
+    `because` is the caller's, since T205: it completes `docker.start_database()`'s
+    timeout sentence and says what was not done rather than what was attempted
+    -- a user reading *"…did not report healthy within 180s, so no backup was
+    taken"* knows the state their server is in, which is the whole job of that
+    sentence. Bound here it was the backup's alone, and a restore whose
+    database never came up would have said a backup was not taken.
 
     `stop_containers([spec.db])` and not `stop_staged()`: only the container
     this started may be stopped. `stop_staged()` takes the compose project down,
     and a backup that stopped a server somebody was playing on would be a far
     worse press than one that failed.
+
+    **A start that fails puts back what it started** (T205). `start_database()`
+    raises when the container does not report healthy in time, and by then
+    `compose up -d` has already started it: the press failed, and left a
+    database up that nobody asked to run -- after a restore that said "nothing
+    was restored". So the census is taken HERE first: a database that was down
+    before this call and is up after a failed start was started by it, and is
+    stopped again -- "is up" asked again after the failure, because a `compose
+    up` that failed outright may have created nothing, and a `docker stop` of
+    nothing fails and would have reported a start that never happened (review
+    round 1). If even that stop fails, the sentence says the database may still
+    be running and names the command. One that was already up returns False
+    at once, exactly as `start_database()` would, so nothing this did not start
+    is ever stopped. A census that fails raises before anything is started, and
+    stops nothing.
     """
+
+    def bring_up(because: str) -> bool:
+        if spec.db in set(docker.status(wsl_distro=wsl_distro)):
+            return False
+        try:
+            return docker.start_database(spec, server_dir, because=because, wsl_distro=wsl_distro)
+        except docker.DockerCommandError as exc:
+            # Asked again rather than assumed (review round 1): when `compose up`
+            # itself failed there may be no container at all, and a `docker stop`
+            # of it fails too. A census that will not answer cannot rule the
+            # container out, so the stop is tried.
+            try:
+                up = spec.db in set(docker.status(wsl_distro=wsl_distro))
+            except docker.DockerCommandError:
+                up = True
+            if not up:
+                raise
+            try:
+                docker.stop_containers([spec.db], wsl_distro=wsl_distro)
+            except docker.DockerCommandError as stop_exc:
+                raise docker.DockerCommandError(
+                    f"{exc} {spec.db} may still be running: it could not be stopped again "
+                    f"({stop_exc}). `docker stop {spec.db}` stops it."
+                ) from exc
+            raise
+
     return DatabaseAlone(
-        bring_up=lambda: docker.start_database(
-            spec, server_dir, because="no backup was taken", wsl_distro=wsl_distro
-        ),
+        bring_up=bring_up,
         take_down=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
     )
 
@@ -2375,7 +2442,7 @@ def _assemble(
     store: ManifestStore | None,
     applier: Applier | None,
     backup: Callable[[], wotlk_maintenance.BackupReport],
-    plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan],
+    plan_restore: PlanRestore,
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport],
     dashboard: Callable[[], dashboard_module.Verdict] | None = None,
     log_snapshot: logsnap.Recorder | None = None,
@@ -2966,8 +3033,12 @@ def _for_wotlk(
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
         ),
-        plan_restore=lambda path: wotlk_maintenance.plan_restore(
-            path, server_dir, spec=spec, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: wotlk_maintenance.plan_restore(
+            path,
+            server_dir,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            can_start_database=can_start_database,
         ),
         # `confirm=plan.token` is not a rubber stamp: the token can only come
         # from a plan, a plan can only come from a real file, and the human
@@ -3119,8 +3190,8 @@ def _for_tbc(
             else None
         ),
         backup=lambda: tbc_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
-        plan_restore=lambda path: tbc_maintenance.plan_restore(
-            path, server_dir, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: tbc_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
         ),
         restore=lambda plan: tbc_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
@@ -3281,8 +3352,8 @@ def _for_vanilla(
             else None
         ),
         backup=lambda: vanilla_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
-        plan_restore=lambda path: vanilla_maintenance.plan_restore(
-            path, server_dir, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: vanilla_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
         ),
         restore=lambda plan: vanilla_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
@@ -3701,8 +3772,8 @@ def _for_tortoise(
             else None
         ),
         backup=lambda: tortoise_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
-        plan_restore=lambda path: tortoise_maintenance.plan_restore(
-            path, server_dir, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: tortoise_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
         ),
         restore=lambda plan: tortoise_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
@@ -10376,10 +10447,18 @@ class ControllerView(QWidget):
         self.repair_button.setText(REPAIR_IDLE)
 
     def _disarm_actions(self) -> None:
-        """Any other server action means the user moved on from all of them."""
+        """Any other server action means the user moved on from all of them.
+
+        The restore plan included (T205 review round 1): a plan is a census of
+        what ran when it was shown, and a Start, Stop or Remove changes exactly
+        that. The press re-plans anyway; a plan on screen that the server has
+        since moved away from is still one the player would be agreeing to.
+        """
         self._disarm_remove()
         self._disarm_repair()
         self._hide_stop_other()
+        self._restore_plan = None
+        self.restore_button.setEnabled(False)
 
     @Slot(object)
     def _remove_done(self, result: object) -> None:
@@ -12743,15 +12822,51 @@ class ControllerView(QWidget):
         through must not leave the container up either, and `MaintenanceError`
         is the ordinary way out of here.
         """
+        from yulon import forgetting
+
+        # T205 review round 3: the databases are leased for the WHOLE backup,
+        # a hot copy included -- one Backup or Restore of a server at a time.
+        with contextlib.ExitStack() as leased:
+            try:
+                leased.enter_context(
+                    docker.maintenance_lease(
+                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES
+                    )
+                )
+            except docker.MaintenanceLeaseTaken as exc:
+                raise wotlk_maintenance.MaintenanceError(f"{exc} No backup was taken.") from exc
+            return self._back_up_under_the_lease()
+
+    def _back_up_under_the_lease(self) -> object:
+        """`_backup_with_the_database()`'s work, once it holds the databases (worker thread)."""
+        from yulon import forgetting
+
         alone = self.services.database_alone
         if alone is None:
             return self.services.backup()
-        started = alone.bring_up()
-        try:
-            return self.services.backup()
-        finally:
-            if started:
-                alone.take_down()
+        # T205 review round 1: held while the database this press started is
+        # up, because the `finally` below stops it -- and a Start pressed in
+        # between (still enabled: only the database runs) would have had its
+        # database stopped under it. A database that was already up is not
+        # stopped afterwards, so a hot copy releases the hold at once.
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(
+                    docker.hold_the_server(
+                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_SERVER
+                    )
+                )
+            except docker.ServerHeldError as exc:
+                # Led with what was not done, as the restore's refusal is (review round 2).
+                raise wotlk_maintenance.MaintenanceError(f"No backup was taken: {exc}") from exc
+            started = alone.bring_up("no backup was taken")
+            if not started:
+                held.close()
+            try:
+                return self.services.backup()
+            finally:
+                if started:
+                    alone.take_down()
 
     @Slot()
     def back_up(self) -> None:
@@ -12803,12 +12918,118 @@ class ControllerView(QWidget):
         )
 
     def _plan_with_the_bot_request(self, path: Path) -> object:
-        """The plan, plus T144's `always` warning where this game has the bot request (worker)."""
-        plan = self.services.plan_restore(path)
+        """The plan, plus T144's `always` warning where this game has the bot request (worker).
+
+        T205: a tab that can start its database alone asks for a plan that
+        allows a stopped one, and the press (`_restore_with_the_database()`)
+        does the starting. Planning itself starts nothing -- a plan is read,
+        often several times, and a press of "Show restore plan" that brought a
+        container up would change the server before anyone agreed to anything.
+        """
+        if self.services.database_alone is None:
+            plan = self.services.plan_restore(path)
+        else:
+            plan = self.services.plan_restore(path, can_start_database=True)
         seam = self.services.bot_pool_rebuild
         if seam is None:
             return plan
         return _PlanWithWarning(plan, seam.restore_warning())
+
+    def _restore_with_the_database(self, plan: wotlk_maintenance.RestorePlan) -> object:
+        """Restore, starting the database alone first if it is down (T205; worker thread).
+
+        `_backup_with_the_database()`'s handling, given to the restore it was
+        never given to. Reported from a Steam Deck on WotLK (2026-10-03): the
+        plan refused while the world and login servers ran -- "Stop the server
+        and try again" -- and refused again once Stop had run, because the one
+        Stop takes the database down too and the plan then said there was
+        "nothing to restore into". No press reached a restorable state; the
+        player stopped two containers by hand in a terminal. Per-container
+        buttons were asked for and are not the answer: the maintainer's reply in
+        the same thread was that there is one Stop because everything has to
+        stop at once.
+
+        Only the database is started, never the world: a worldserver holds
+        characters in memory and saves them back over the restored rows, which
+        is the whole reason the plan refuses while one runs.
+
+        **The plan is asked again with the database up**, by `maintenance.
+        restore()` itself on the plain path and by `_restore_with_the_bot_
+        request()` before it touches the conf on Tortoise's -- and without
+        `can_start_database`, because at that point a database that is not up is
+        a refusal again. A server started between the plan and the press is
+        caught there: the database is already up, so nothing is started or
+        stopped, and the running world refuses as it always did. The token is
+        the file's identity, length and schemas and not the census, so the plan
+        made with the database down still confirms the one made with it up, and
+        a file replaced in between is still refused.
+
+        **Nothing starts, stops or recreates the server while it runs**
+        (`docker.hold_the_server()`, review round 1, 2026-10-03). With the
+        server stopped, only the database is up during the restore, so Start
+        stays enabled and the view is not busy: a Start pressed during the load
+        brought the world up on the databases being written, and the `finally`
+        below then stopped the database under it. The hold is taken whether or
+        not this press starts the database -- a world started under a restore
+        is the hazard either way -- and it cannot be taken while a Start, Stop
+        or recreate of this server is running, whose world may exist without
+        running yet and so pass the census.
+
+        **One Backup or Restore of a server at a time** (`docker.maintenance_
+        lease()`, review round 3). Separate from the hold, which is about the
+        containers: a Back up pressed during the load ran its mysqldump beside
+        it, and a Restore pressed while a stopped server's Backup had the
+        database up loaded into it -- then the backup's cleanup stopped the
+        database under the half-loaded restore. Taken first, before the hold.
+
+        **The database is left as it was found**, by `bring_up()`'s own answer:
+        only True runs `take_down()`, in `finally`, so a refusal at the press, a
+        failed load and a success all put it back. A start that fails raises
+        before the restore is reached, and `bring_up()` has already stopped
+        anything it started (`_database_alone()`); the sentence leads with what
+        the player needs to know, that nothing was restored.
+        """
+        from yulon import forgetting
+
+        with contextlib.ExitStack() as leased:
+            try:
+                leased.enter_context(
+                    docker.maintenance_lease(
+                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_DATABASES
+                    )
+                )
+            except docker.MaintenanceLeaseTaken as exc:
+                raise wotlk_maintenance.MaintenanceError(f"{exc} Nothing was restored.") from exc
+            return self._restore_under_the_lease(plan)
+
+    def _restore_under_the_lease(self, plan: wotlk_maintenance.RestorePlan) -> object:
+        """`_restore_with_the_database()`'s work, once it holds the databases (worker thread)."""
+        from yulon import forgetting
+
+        alone = self.services.database_alone
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(
+                    docker.hold_the_server(
+                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_SERVER
+                    )
+                )
+            except docker.ServerHeldError as exc:
+                raise wotlk_maintenance.MaintenanceError(f"Nothing was restored: {exc}") from exc
+            started = False
+            if alone is not None:
+                try:
+                    started = alone.bring_up("the restore was not started")
+                except Exception as exc:
+                    raise wotlk_maintenance.MaintenanceError(
+                        "Nothing was restored: the database could not be started on its own "
+                        f"for it. {exc}"
+                    ) from exc
+            try:
+                return self._restore_with_the_bot_request(plan)
+            finally:
+                if started:
+                    alone.take_down()  # type: ignore[union-attr]
 
     def _restore_with_the_bot_request(self, plan: wotlk_maintenance.RestorePlan) -> object:
         """T144: take a pending `once:` bot rebuild back, THEN restore (worker thread).
@@ -12823,7 +13044,7 @@ class ControllerView(QWidget):
         own words, so a restore that would refuse does not touch the conf.
 
         **A restore that raises anyway** (round 5): `maintenance.restore()`
-        (controller_wow_wotlk/maintenance.py:949) runs "re-census, safety dump,
+        (controller_wow_wotlk/maintenance.py:973) runs "re-census, safety dump,
         marker, load, marker removed". Everything before `_write_marker()` -- the
         confirmation, the re-census, `_safety_backup()`, the marker write itself
         ("nothing was restored") -- raises with nothing loaded; from the marker
@@ -12905,6 +13126,13 @@ class ControllerView(QWidget):
             # user to discount it (review, 2026-08-24).
             named = ", ".join(result.databases) if result.databases else "nothing"
             lines.append(f"This overwrites: {named}.")
+            if result.starts_database:
+                # T205: said before the press, because it is something the press
+                # does to the server that the player did not do themselves.
+                lines.append(
+                    "The database will be started on its own for this restore and stopped again "
+                    "afterwards; the game servers stay stopped."
+                )
             lines.append(
                 "Tables the backup does not contain are LEFT AS THEY ARE — a restore merges "
                 "into the databases it names rather than returning them to the state the backup "
@@ -12938,7 +13166,7 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
         self._run(
-            lambda: self._restore_with_the_bot_request(plan),
+            lambda: self._restore_with_the_database(plan),
             self._restore_done,
             self._restore_failed,
         )
@@ -15952,11 +16180,15 @@ class ControllerView(QWidget):
 
     def _do_restart(self) -> bool:
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
-        start by hand is a server left down by a control that promised a restart."""
+        start by hand is a server left down by a control that promised a restart.
+
+        And one lifecycle command (`docker.lifecycle()`, T205 review round 3), so a
+        restore cannot take its hold between the two and leave the server stopped."""
         controller = self.services.controller
         controller.refuse_start()  # T179: before the stop, so a refusal leaves it running
-        stopped = controller.stop()
-        controller.start()
+        with docker.lifecycle(controller.server_dir):
+            stopped = controller.stop()
+            controller.start()
         return stopped
 
     def _do_recreate(self) -> bool:
@@ -15965,8 +16197,10 @@ class ControllerView(QWidget):
         the Server tab's own sentence for the same pair of calls."""
         controller = self.services.controller
         controller.refuse_start()  # T179: before the removal, so a refusal leaves it as it was
-        removed = controller.remove()
-        controller.start()
+        # One lifecycle command, as `_do_restart()` is: a gap here leaves the server removed.
+        with docker.lifecycle(controller.server_dir):
+            removed = controller.remove()
+            controller.start()
         return removed
 
     @Slot(object)

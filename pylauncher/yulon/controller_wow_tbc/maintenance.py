@@ -147,6 +147,7 @@ def plan_restore(
     *,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
+    can_start_database: bool = False,
 ) -> RestorePlan:
     """What restoring `backup_file` would do, censused against this game's containers.
 
@@ -160,6 +161,7 @@ def plan_restore(
         spec=docker_ctl.SPEC,
         running=running,
         wsl_distro=wsl_distro,
+        can_start_database=can_start_database,
     )
 
 

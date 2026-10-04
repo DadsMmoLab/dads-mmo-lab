@@ -757,6 +757,16 @@ class RestorePlan:
     keeping is that restore's, not one taken now. It says nothing about any
     other database: `restore()` still dumps everything it is about to overwrite
     that this marker does not already hold a usable copy of."""
+    starts_database: bool = False
+    """The database container was down and the caller can start it alone (T205).
+
+    Not a refusal and not a promise kept here: `plan_restore()` starts nothing.
+    It records that the press will -- `ControllerView._restore_with_the_database()`
+    brings the container up, the restore re-plans against it, and the container
+    is stopped again afterwards -- so the plan on screen can say so before the
+    player agrees to it. Left out of `token` on purpose: the press re-plans with
+    the database UP, so a token that carried this would call every such restore
+    "changed in between"."""
 
     @property
     def allowed(self) -> bool:
@@ -864,6 +874,7 @@ def plan_restore(
     spec: docker.ContainerSpec = docker_ctl.SPEC,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
+    can_start_database: bool = False,
 ) -> RestorePlan:
     """Work out what restoring `backup_file` would do, without doing any of it.
 
@@ -879,7 +890,15 @@ def plan_restore(
       report success and then undo itself. The check is by container name, which
       is honest about what it proves (see `Controller.status()`): something is
       using these names. That is the conservative direction here.
-    * the database container is not running. There is nothing to restore into.
+    * the database container is not running. There is nothing to restore into
+      -- unless `can_start_database`, when the plan records `starts_database`
+      instead (T205). The app's one Stop takes the database down with the world
+      and the login server, so without this the refusal above ("Stop the server
+      and try again") and this one between them left no press that reached a
+      restorable state; a player on a Steam Deck got there with `docker compose
+      stop` in a terminal (2026-10-03). Only a caller that holds a way to start
+      the database alone, and to stop it again, may pass it: the planner still
+      starts nothing.
     * Docker would not say what is running. Fail closed, like
       `docker._refuse_without_an_identity()`: an unprovable "the server is
       stopped" is not one.
@@ -892,6 +911,7 @@ def plan_restore(
     refusals: list[str] = []
     databases: tuple[str, ...] = ()
     size = 0
+    starts_database = False
 
     if backup_file.suffix == ".gz":
         refusals.append(
@@ -931,7 +951,10 @@ def plan_restore(
                 "would overwrite the restored data within minutes. Stop the server and try again."
             )
         if spec.db not in names:
-            refusals.append(f"{spec.db} is not running, so there is nothing to restore into")
+            if can_start_database:
+                starts_database = True
+            else:
+                refusals.append(f"{spec.db} is not running, so there is nothing to restore into")
 
     plan = RestorePlan(
         backup=backup_file,
@@ -940,6 +963,7 @@ def plan_restore(
         size_bytes=size,
         refusals=tuple(refusals),
         interrupted=interrupted_restore(server_dir),
+        starts_database=starts_database,
     )
     if refusals:
         logger.info(f"restore of {backup_file.name} refused: {'; '.join(refusals)}")
