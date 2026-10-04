@@ -1383,6 +1383,8 @@ def test_a_fresh_conf_is_written_without_the_lines_the_server_refuses(
     assert len(said) == 1, said
     assert str(etc / "worldserver.conf") in said[0]
     assert "9, 10" in said[0]
+    # Both reasons the reader refuses a line, the unclosed `[` included (review).
+    assert "has no '='" in said[0] and "opens a '[' it never closes" in said[0], said[0]
 
 
 def test_pressing_install_again_repairs_a_conf_written_before_the_fix(

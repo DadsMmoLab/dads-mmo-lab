@@ -152,10 +152,10 @@ def _centurion_etc(tmp_path: Path, world_conf: str) -> Path:
     return etc
 
 
-def test_install_and_install_again_write_the_freeze_detectors_wait(tmp_path: Path) -> None:
-    """A first install patches the .dist's 60; Install again over a conf an earlier
-    install wrote with 60 rewrites it too, because the conf stage patches every
-    table key on every press."""
+def test_the_conf_table_writes_the_freeze_detectors_wait_over_a_60(tmp_path: Path) -> None:
+    """`apply_table()` over Centurion's own table: the .dist's 60 becomes 300, and a conf
+    that says 60 again is rewritten and reported changed. The conf stage makes exactly
+    this call; no press that reaches it on a remembered server is claimed here."""
     tokens = {**composegen.entry_tokens(ENTRY), "DB_PASSWORD": "tc-secret", "WORLD_PORT": "8085"}
     etc = _centurion_etc(tmp_path, "[worldserver]\nMaxCoreStuckTime = 60\n")
     conf_files.apply_table(TC.conf, etc, tokens)

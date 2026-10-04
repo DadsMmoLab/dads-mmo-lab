@@ -344,7 +344,8 @@ def apply_table(
         if refused:
             logger.warning(
                 f"commented out line(s) {', '.join(map(str, refused))} of {path}: the server "
-                "refuses a line that is not blank, not a comment and has no '='"
+                "refuses a line that is not blank and not a comment but has no '=' or opens a "
+                "'[' it never closes"
             )
         after = patch(readable, table_patch, tokens)
         if after == before:

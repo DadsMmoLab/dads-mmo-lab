@@ -1459,7 +1459,11 @@ class CmangosInstaller(StagedInstaller):
         reads the world again after this and is the one place that refuses.
 
         Only a clear `True` is stopped; `False` needs nothing and `None` is left
-        to the refusal, which names Docker.
+        to the refusal, which names Docker. And only a container whose compose
+        project is THIS folder's (`composegen.project_name()`, as
+        `_refuse_foreign_containers()` computes it): the world's name is the same
+        for every install of the game, so a container without that label, or
+        with another project's, is refused, never stopped (T206 review).
         """
         if not ctx.state.last_error:
             return
@@ -1470,6 +1474,23 @@ class CmangosInstaller(StagedInstaller):
             logger.warning(f"could not tell whether {container} is running: {exc}")
             return
         if running is not True:
+            return
+        ours = composegen.project_name(
+            self.entry.id,
+            ctx.server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(ctx.server_dir),
+        )
+        try:
+            owner = self._seams.container_project(container)
+        except Exception as exc:  # noqa: BLE001 - not proved ours: the refusal says the rest
+            logger.warning(f"could not read the compose project of {container}: {exc}")
+            return
+        if owner != ours:
+            # The name is fixed per game, so it proves nothing: a container
+            # with no compose label (`None`, which `_refuse_foreign_containers`
+            # lets through), another project's, or an unreadable one is not
+            # this folder's, and is refused below rather than stopped.
             return
         yield (
             f"The world server ({container}) that the last, unfinished run of this install "
@@ -1530,7 +1551,12 @@ class CmangosInstaller(StagedInstaller):
         the table.
 
         Not stopped on the user's behalf: a stop is its own consent (T7's
-        rule), and this function only ever refuses or returns.
+        rule), and this function only ever refuses or returns. The one
+        exception runs just before it, in `_stop_a_world_the_failed_run_left()`
+        (T206): a world of this folder's own compose project, left running by
+        a previous run of this install that failed, is stopped there -- an
+        unfinished install has no Server tab to press Stop on -- and this
+        function then reads the world again.
 
         Fails closed on anything short of an explicit `False`, the same
         discipline `apply.Applier`'s and `native`'s guards use: `None` and a

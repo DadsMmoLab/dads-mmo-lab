@@ -4889,7 +4889,8 @@ def _comment_unreadable_lines(path: Path) -> None:
         fh.write(readable)
     logger.warning(
         f"commented out line(s) {', '.join(map(str, refused))} of {path}: the server "
-        "refuses a line that is not blank, not a comment and has no '='"
+        "refuses a line that is not blank and not a comment but has no '=' or opens a "
+        "'[' it never closes"
     )
 
 

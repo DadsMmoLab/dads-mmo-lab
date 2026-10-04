@@ -4761,22 +4761,59 @@ class _CrashLoopingWorld:
         self.running = False
 
 
+def _our_project(server_dir: Path) -> str:
+    """The compose project this folder's install brings its containers up under."""
+    return composegen.project_name(
+        ENTRY.id,
+        server_dir,
+        platform_id=lambda: "linux",
+        install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+    )
+
+
+def _after_a_failed_run(server_dir: Path) -> native.StageContext:
+    """A stage context for a press whose previous run of this install failed."""
+    ctx = context(server_dir)
+    return replace(
+        ctx, state=replace(ctx.state, last_error="centurion-worldserver restarted 7 times")
+    )
+
+
 def test_an_unfinished_installs_own_world_is_stopped_before_the_rerun(tmp_path: Path) -> None:
     """T206: the previous run of THIS install failed, so the world container left
     running is that failed install's own, crash-looping; there is no Server tab
     to press Stop on. It is stopped, said so, and the import goes on."""
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     world = _CrashLoopingWorld(rec)
-    ctx = context(server_with_sql(tmp_path))
-    ctx = replace(
-        ctx, state=replace(ctx.state, last_error="centurion-worldserver restarted 7 times")
-    )
+    ctx = _after_a_failed_run(server_with_sql(tmp_path))
+    rec.containers[ENTRY.container_spec().world] = _our_project(ctx.server_dir)
     said = list(
         engine(rec, world_running=world.world_running, stop_world=world.stop_world)._import(ctx)
     )
     assert world.stopped == [[ENTRY.container_spec().world]]
     assert any("left running" in line for line in said), said
     assert any("leaving them alone" in line for line in said), said
+
+
+@pytest.mark.parametrize("owner", [None, "yulon-wow-tbc-someoneelse", docker.UNREADABLE])
+def test_a_world_container_this_folder_did_not_bring_up_is_refused_not_stopped(
+    tmp_path: Path, owner: str | None
+) -> None:
+    """T206 review: the fixed name is not proof of ownership. A container wearing
+    it with no compose label, another project's label, or one Docker would not
+    read is not this unfinished install's own, so it is refused as before."""
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    ctx = _after_a_failed_run(server_with_sql(tmp_path))
+    rec.containers[ENTRY.container_spec().world] = owner
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, world_running=world.world_running, stop_world=world.stop_world)._import(
+                ctx
+            )
+        )
+    assert "world server is running" in str(raised.value)
+    assert world.stopped == []
 
 
 def test_a_world_with_no_failed_run_behind_it_is_still_refused_and_never_stopped(
@@ -4816,6 +4853,7 @@ def test_pressing_install_again_after_a_crash_looping_install_finishes_it(
             stop_world=world.stop_world,
         )
     world.running = True  # `up` started it, and it is restarting over and over
+    rec.containers[ENTRY.container_spec().world] = _our_project(server_dir)
     rec.ready = True
     said = install(
         rec,
