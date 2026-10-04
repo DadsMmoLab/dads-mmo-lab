@@ -774,6 +774,7 @@ class Recorder:
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
+            image_id=self.image_id,
             build=build,
             one_shot=one_shot,
             verify_import=verify,
@@ -838,6 +839,19 @@ class Recorder:
         if refs and all(ref in self.ids for ref in refs):
             return True
         return self.images
+
+    def image_id(self, ref: str) -> str | None:
+        """`docker.image_id()` on a machine where no tag ever moves (T225). NOT evidence.
+
+        A ref and its `-rollback` name answer the SAME id, so a rebuild that fails
+        reads "the live tags did not move" and keeps the path it took before T225;
+        a `-parked` name answers None, so no kept build is ever found (T224). Every
+        test about which image a name holds drives `test_rebuild._Daemon` instead,
+        whose names are moved by the build, the tags and the removals it is asked for.
+        """
+        if ref.endswith(native.PARKED_TAG_SUFFIX):
+            return None
+        return "sha256:" + ref.removesuffix(native.ROLLBACK_TAG_SUFFIX)
 
     def gather(self, entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:
         self.calls.append("gather")

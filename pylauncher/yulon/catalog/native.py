@@ -220,6 +220,22 @@ lists the pair side by side and a purge that enumerates the install's refs can
 find the leftover by the same rule.
 """
 
+PARKED_TAG_SUFFIX = "-parked"
+"""What a finished build is KEPT as, when its rebuild replaced no container (T224).
+
+Owner answer D1 (2026-10-04): a rebuild whose compile finished and which then
+ended before any container was replaced -- Docker silent through the wait, a
+Stop, a refused tag put right -- puts the live tags back on the build from
+before and keeps the new one as `<ref>-parked`, one per image of
+`composegen.built_image_refs()`, beside `PARKED_BUILD_FILE`, which records the
+image ids and the fingerprint of the files it was made from. The next Rebuild,
+Update or Return to the tested pin uses it instead of compiling when that
+fingerprint is the same (D2). Start, Restart, Recreate and Install never use it:
+they name only the live `<ref>` tags. A suffix on the TAG, for
+`ROLLBACK_TAG_SUFFIX`'s reason. Not transient: it outlives the press on purpose,
+and Uninstall removes it with the rest (`purge.Uninstaller`).
+"""
+
 FAILED_TAG_SUFFIX = "-failed"
 """What the NEW build is named while the old one is being put back over its tags.
 
@@ -4253,6 +4269,9 @@ class Seams:
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
     """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
+    image_id: Callable[[str], str | None] = docker.image_id
+    """T224/T225: the image a ref names, or None. A rebuild reads whether its live tags moved
+    (against their `-rollback` names) and whether a kept build's names still hold it."""
     build: Callable[..., docker.AttachedRun] = docker.build_staged
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
@@ -4605,6 +4624,7 @@ class Seams:
             changed_files=repo.changed_files,
             changed_lines=repo.changed_lines,
             images_built=on(docker.images_built, wsl_distro=distro),
+            image_id=on(docker.image_id, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
             one_shot=on(docker.run_one_shot, wsl_distro=distro),
             verify_import=refused("Checking a database import"),
