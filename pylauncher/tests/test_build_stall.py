@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 from tests.support_native import Recorder, engine, install
-from yulon import docker
+from yulon import docker, server_build_presses
 from yulon.catalog import native
 from yulon.catalog.installer import InstallerError, InstallOptions
 
@@ -137,6 +137,7 @@ def test_the_stalled_notice_says_how_to_check_and_what_to_do_and_stops_nothing()
     assert "docker info" in said and "Task Manager" in said and "top" in said
     assert "restart Docker Desktop" in said and "docker service" in said
     assert "build cache" in said, "pressing again resumes"
+    assert server_build_presses.under_server_build(server_build_presses.REBUILD) in said
     assert "will not stop it" in said
     assert "stopped" not in native.build_quiet_notice().replace("not stopped", "")
 

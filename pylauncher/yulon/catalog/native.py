@@ -1657,8 +1657,9 @@ def build_stalled_notice() -> str:
         "To check: `docker info` should answer at once, and Docker's CPU use (Task Manager on "
         "Windows, `top` on Linux or a Mac) should not sit near zero. If it has stalled, restart "
         "Docker Desktop (on Linux, the docker service): the build then ends, and pressing Install "
-        "or Rebuild again resumes it, because the steps it finished are kept in Docker's build "
-        "cache."
+        "again -- or, for a rebuild, "
+        f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} -- resumes it, "
+        "because the steps it finished are kept in Docker's build cache."
     )
 
 
