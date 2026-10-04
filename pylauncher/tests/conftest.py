@@ -528,6 +528,18 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform, "_resolved_docker_cli", "docker")
 
 
+@pytest.fixture(autouse=True)
+def _each_test_starts_with_no_unread_container_on_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`docker` logs a failed state read once per change, and remembers it to know (PR 291).
+
+    A fresh memory per test, so one test's failed read cannot hide the next
+    test's first line, whatever order the suite runs in.
+    """
+    from yulon import docker
+
+    monkeypatch.setattr(docker, "_UNREAD_SAID", {})
+
+
 @pytest.fixture(scope="session")
 def qapp() -> Iterator[object]:
     """One offscreen `QApplication` for the whole session (Qt allows exactly one)."""

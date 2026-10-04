@@ -423,6 +423,29 @@ QTabBar QToolButton:disabled {{
     color: #5A5A5A;
 }}
 
+/* Their glyphs. Styling the button replaces the base style's arrow, and a sheet
+   draws only what it names: at 960x640 the two were dark boxes with nothing in
+   them (PR 291 Linux live test). */
+QTabBar QToolButton::left-arrow {{
+    image: {_image("arrow-left.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QTabBar QToolButton::left-arrow:disabled {{
+    image: {_image("arrow-left-disabled.svg")};
+}}
+
+QTabBar QToolButton::right-arrow {{
+    image: {_image("arrow-right.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QTabBar QToolButton::right-arrow:disabled {{
+    image: {_image("arrow-right-disabled.svg")};
+}}
+
 /* T95: the × on a server's sidebar tab. Exempt, by objectName, from the scroll
    arrows' touch floor just above. At that floor it was a 37px square on a 64px
    rail and made every server tab 41px longer (measured offscreen 2026-09-23);

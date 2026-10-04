@@ -26795,6 +26795,86 @@ def test_every_greyed_press_says_why_after_the_tabs_have_read_the_server(
     assert faults == [], "\n".join(faults)
 
 
+def _a_running_wotlk(ps: _Ps) -> str:
+    spec = WOTLK.container_spec()
+    ps.names = "".join(f"{name}\n" for name in (spec.db, spec.auth, spec.world))
+    return ps.names
+
+
+def test_docker_going_away_under_a_running_server_greys_stop_as_well_as_start(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux live test of PR 291, item 2: Stop stayed live under "Start and Stop come back...".
+
+    The server was running, so Stop was enabled; Docker stopped answering, the
+    box went up, and only the greyed Start took the box's reason. Pressing Stop
+    then ran a stop that could only fail.
+
+    Mutation: grey only the presses that were already greyed, and Stop is
+    enabled at the second block.
+    """
+    names = _a_running_wotlk(ps)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.refresh_status()
+    assert view.stop_button.isEnabled() and not view.start_button.isEnabled()
+
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    down.names = names
+    view.refresh_status()
+
+    assert view.docker_banner.isVisibleTo(view)
+    said = controller_view_module.DOCKER_UNKNOWN
+    for press in (view.start_button, view.stop_button):
+        assert not press.isEnabled(), press.text()
+        assert press.toolTip() == said, press.text()
+    assert view.server_reasons.text() == said
+
+    down.down = False
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert view.stop_button.isEnabled(), "Docker answered and the server runs"
+    assert not view.start_button.isEnabled()
+    assert said not in view.server_reasons.text()
+
+
+def test_a_stop_docker_could_not_hear_says_so_plainly_and_goes_when_docker_answers(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2's other half: a Stop pressed before the box went up printed Docker's raw words.
+
+    "could not ask Docker what is running, so the stop cannot be confirmed", in
+    lower case under the presses, and it stayed there after Docker came back.
+
+    Mutation: show `str(exc)` again, and the first assert reads the raw words;
+    leave the line out of `_POINTERS_AT_THE_BANNER`, and it outlives the box.
+    """
+    from tests.support_player_text import player_text_faults
+
+    names = _a_running_wotlk(ps)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.refresh_status()
+    assert view.stop_button.isEnabled()
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    down.names = names
+
+    view.stop_server()
+
+    line = controller_view_module.STOP_FAILED_NO_DOCKER
+    assert view.problem_label.text() == line
+    assert failures == [line]
+    assert view.docker_banner.isVisibleTo(view), "the follow-up poll failed too"
+    assert player_text_faults(view) == []
+
+    down.down = False
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert view.problem_label.text() == ""
+
+
 def test_a_good_reading_during_a_busy_job_replaces_the_see_above_line(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

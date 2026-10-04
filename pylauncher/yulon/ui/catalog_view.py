@@ -109,7 +109,32 @@ def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | No
 
 
 SuggestionAsker = Callable[[QWidget, str, Path], bool]
-"""Offer a folder that does not exist yet: True to take it, False to open the picker."""
+"""Offer the default folder, new or already there: True to take it, False to open the picker."""
+
+
+def _suggestion_question(game: str, suggested: Path) -> str:
+    """The Install dialog's words for `suggested`: a new folder, an empty one, or a server's.
+
+    `default_server_dir()` offers a former default folder only when it holds a
+    server, and the dialog said "into this new folder" and "Yu'lon makes the
+    folder" about it all the same (PR 291 Linux live test).
+    """
+    elsewhere = "Choose another folder if you would rather put it somewhere else."
+    if compose_file(suggested) is not None:
+        return (
+            f"Install {game} into this existing server folder?\n\n{suggested}\n\n"
+            f"A server from an earlier install is already in this folder, and Yu'lon uses it. "
+            f"{elsewhere}"
+        )
+    if suggested.is_dir():
+        return (
+            f"Install {game} into this folder?\n\n{suggested}\n\n"
+            f"The folder is already there. {elsewhere}"
+        )
+    return (
+        f"Install {game} into this new folder?\n\n{suggested}\n\n"
+        f"Yu'lon makes the folder when the install starts. {elsewhere}"
+    )
 
 
 def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
@@ -140,9 +165,7 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
     box = FittedMessageBox(
         QMessageBox.Icon.Question,
         f"Install {game}",
-        f"Install {game} into this new folder?\n\n{suggested}\n\n"
-        "Yu'lon makes the folder when the install starts. Choose another folder "
-        "if you would rather put it somewhere else.",
+        _suggestion_question(game, suggested),
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         parent,
     )

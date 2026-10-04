@@ -2798,3 +2798,59 @@ def test_install_keeps_the_former_folder_when_the_new_one_is_empty(
     _with_install(tmp_path / "wow-server-playerbots")
     (tmp_path / "yulon-wotlk").mkdir()
     assert _suggested(tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+def _install_question(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The Install dialog's words, from the REAL asker: only its `exec()` is stood in for."""
+    said: list[str] = []
+
+    def answer_no(box: QMessageBox) -> object:
+        said.append(box.text())
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "exec", answer_no)
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, [], installs=False),
+        LogPanel(),
+        pick_dir=lambda *_: None,
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is False
+    (text,) = said
+    return text
+
+
+def test_the_install_question_says_a_new_folder_only_when_it_is_new(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = _install_question(tmp_path, monkeypatch)
+    assert "into this new folder?" in text and str(tmp_path / "yulon-wotlk") in text
+    assert "Yu'lon makes the folder when the install starts." in text
+
+
+def test_the_install_question_for_an_old_server_folder_says_it_uses_that_server(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux live test of PR 291, item 3: ~/wow-server-playerbots found and offered.
+
+    The dialog said "into this new folder" and "Yu'lon makes the folder when
+    the install starts" about a folder that held a server already.
+
+    Mutation: drop the existing-folder wording, and "new folder" is back.
+    """
+    _with_install(tmp_path / "wow-server-playerbots")
+    text = _install_question(tmp_path, monkeypatch)
+    assert str(tmp_path / "wow-server-playerbots") in text
+    assert "into this existing server folder?" in text
+    assert "already in this folder, and Yu'lon uses it" in text
+    assert "new folder" not in text and "makes the folder" not in text
+
+
+def test_the_install_question_for_an_empty_folder_says_it_is_already_there(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "yulon-wotlk").mkdir()
+    text = _install_question(tmp_path, monkeypatch)
+    assert "into this folder?" in text and "The folder is already there." in text
+    assert "new folder" not in text and "makes the folder" not in text

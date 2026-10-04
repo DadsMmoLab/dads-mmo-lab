@@ -4328,6 +4328,14 @@ DOCKER_REINSTALL_PROMPT_TITLE = "Reinstalling Docker"
 START_FAILED_NO_DOCKER = "The server could not start because Docker isn't answering."
 """A Start's own line when Docker did not answer it; the banner above says what to do (T194)."""
 
+STOP_FAILED_NO_DOCKER = (
+    "Yu'lon couldn't ask Docker what is running, so it can't tell whether the server stopped."
+)
+"""A Stop's own line when Docker did not answer its census (PR 291 Linux live test).
+
+Docker's words go to the log; this goes when Docker answers again, as the
+status line then says what runs."""
+
 START_FAILED_DOCKER_GONE = (
     "The server could not start: a SteamOS update removed Docker from this Steam Deck. Press "
     f'"{platform.STEAMOS_DOCKER_REPAIR_LABEL}" in the box above.'
@@ -4420,9 +4428,14 @@ def wait_for(job: str) -> str:
 
 
 _POINTERS_AT_THE_BANNER = frozenset(
-    {START_FAILED_NO_DOCKER, START_FAILED_DOCKER_GONE, START_FAILED_DOCKER_MISSING}
+    {
+        START_FAILED_NO_DOCKER,
+        START_FAILED_DOCKER_GONE,
+        START_FAILED_DOCKER_MISSING,
+        STOP_FAILED_NO_DOCKER,
+    }
 )
-"""A failed Start's lines that send the player to the Docker banner (T194).
+"""A failed Start's or Stop's lines that are about Docker not answering (T194).
 
 When the banner goes, a problem line holding one of these points at nothing,
 so it goes too; any other problem line is a refusal of its own and stays.
@@ -8517,10 +8530,12 @@ class ControllerView(QWidget):
         self._clear_the_verdict()
         # F1 (T195): a greyed Start or Stop says the box is why. A reading that
         # answers replaces it (`_status_ready`); a job of ours keeps its "Wait:".
+        # Both, not only the greyed one: a running server's Stop stayed live
+        # under that sentence, and pressing it ran a stop that could only fail
+        # (PR 291 Linux live test).
         if not self._busy:
             for press in (self.start_button, self.stop_button):
-                if not press.isEnabled():
-                    set_enabled_why(press, DOCKER_UNKNOWN)
+                set_enabled_why(press, DOCKER_UNKNOWN)
         # The reinstall lives in the banner, so it is offered with it and
         # never switched on inside a banner the hold keeps down.
         self._offer_docker_repair()
@@ -9249,10 +9264,21 @@ class ControllerView(QWidget):
         the silent bug it replaced looked like (review, 2026-08-22).
         """
         self._set_busy(False)
-        msg = str(exc)
+        msg = self._stop_failure_words(exc)
         self.problem_label.setText(msg)
         self.action_failed.emit(msg)
         self.refresh_status()
+
+    def _stop_failure_words(self, exc: object) -> str:
+        """What a failed stop says: its own refusal, or one plain line when Docker did not answer.
+
+        Docker's words go to the log, as a failed Start's do (T194 C7); the
+        follow-up read puts the box up with what to do.
+        """
+        if isinstance(exc, docker.DockerUnansweredError) or docker_advice.unreachable(exc):
+            logger.warning(f"{self.entry.name}: Stop could not reach Docker: {exc}")
+            return STOP_FAILED_NO_DOCKER
+        return str(exc)
 
     def stop_for_removal(self) -> None:
         """Stop this server on the job runner because it is about to leave Yu'lon's list (T95).
@@ -9289,7 +9315,7 @@ class ControllerView(QWidget):
     def _stop_for_removal_failed(self, exc: object) -> None:
         """Say why here, as `_stop_failed()` does; the window asks whether to go on anyway."""
         self._set_busy(False)
-        message = str(exc)
+        message = self._stop_failure_words(exc)
         self.problem_label.setText(message)
         self.action_failed.emit(message)
         # As `_stop_failed()` does: the status line said "stopping…", and the

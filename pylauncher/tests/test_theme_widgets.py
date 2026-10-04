@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QStyleOptionButton,
     QStyleOptionComboBox,
     QStyleOptionSpinBox,
+    QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -54,6 +56,10 @@ THEME_IMAGES = (
     "minus-disabled.svg",
     "plus.svg",
     "plus-disabled.svg",
+    "arrow-left.svg",
+    "arrow-left-disabled.svg",
+    "arrow-right.svg",
+    "arrow-right-disabled.svg",
 )
 
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b|#[0-9A-Fa-f]{3}\b")
@@ -346,6 +352,51 @@ def test_a_combo_box_shows_its_arrow(themed, width: int) -> None:
     assert glyph > 6, f"no arrow at {width}: {glyph} px in {arrow}"
 
 
+@pytest.mark.parametrize("width", WIDTHS)
+def test_a_scrolling_tab_bar_shows_its_arrows(themed, width: int) -> None:
+    """Linux live test of PR 291, item 4: at 960x640 the sub-tab bar overflows, and its two
+    scroll arrows were dark boxes with no glyph -- the sheet styles `QTabBar QToolButton`,
+    which replaces the base style's arrow, and named none.
+
+    Each arrow is read lit and greyed: at the first tab, then scrolled to the last.
+
+    Mutation: drop the image from any of the four arrow rules, and that box has no
+    glyph pixel in it.
+    """
+    from PySide6.QtCore import Qt
+
+    tabs = QTabWidget()
+    tabs.setUsesScrollButtons(True)
+    tabs.setElideMode(Qt.TextElideMode.ElideNone)
+    tabs.setDocumentMode(True)
+    for index in range(12):
+        tabs.addTab(QWidget(), f"A long sub-tab name {index}")
+    themed(width, tabs)
+    arrows = {
+        arrow.arrowType(): arrow
+        for arrow in tabs.tabBar().findChildren(QToolButton)
+        if arrow.isVisible()
+    }
+    left, right = arrows.get(Qt.ArrowType.LeftArrow), arrows.get(Qt.ArrowType.RightArrow)
+    assert left is not None and right is not None, f"the bar does not scroll: {arrows}"
+
+    def drawn(arrow: QToolButton) -> tuple[int, int]:
+        image = arrow.grab().toImage()
+        lit = _count(image, image.rect(), lambda c: _near(c, theme.COLOR_TEXT_PRIMARY))
+        greyed = _count(image, image.rect(), lambda c: _near(c, theme.COLOR_TEXT_MUTED, 16))
+        return lit, greyed
+
+    # At the first tab, then scrolled to the last: each arrow is read lit and greyed.
+    for live, dead in ((right, left), (left, right)):
+        assert live.isEnabled() and not dead.isEnabled(), tabs.currentIndex()
+        lit, _greyed = drawn(live)
+        assert lit > 6, f"no {live.arrowType().name} at {width}: {lit} px"
+        lit, greyed = drawn(dead)
+        assert lit == 0 and greyed > 6, f"{dead.arrowType().name} at {width}: {lit}/{greyed}"
+        tabs.setCurrentIndex(tabs.count() - 1)
+        process_events(10)
+
+
 # ------------------------------------------------------- tokens and shipping
 
 
@@ -378,8 +429,14 @@ T193_SELECTORS = (
     "QSpinBox::down-arrow, QDoubleSpinBox::down-arrow",
     "QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled",
     "QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled",
+    "QTabBar QToolButton::left-arrow",
+    "QTabBar QToolButton::left-arrow:disabled",
+    "QTabBar QToolButton::right-arrow",
+    "QTabBar QToolButton::right-arrow:disabled",
 )
-"""Every rule T193 added or changed. Older literals elsewhere in the sheet stay."""
+"""Every rule T193 added or changed, and the tab bar's arrows (PR 291 Linux live test).
+
+Older literals elsewhere in the sheet stay."""
 
 
 @pytest.mark.parametrize("width", WIDTHS)
