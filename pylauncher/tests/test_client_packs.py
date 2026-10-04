@@ -329,6 +329,193 @@ def test_a_duplicate_part_number_is_refused_before_joining(tmp_path: Path) -> No
     assert not client_packs.cache_dir().exists()
 
 
+# --- the checksum read from the checkout (`md5_file`, T179 Task 7) ---------------------------
+
+
+MD5_FILE = "centurion/patches/patches.md5"
+
+
+def _md5_pack(path: str = "centurion/patches/patch-Y.zip") -> ClientPack:
+    return _checkout_pack(path, md5_file=MD5_FILE)
+
+
+def _md5_lines(**zips: bytes) -> bytes:
+    """`md5sum` output for `name=bytes` (`patch_Y_zip` spells `patch-Y.zip`), Centurion's shape."""
+    return b"".join(
+        f"{hashlib.md5(data).hexdigest()}  {_zip_name(name)}\n".encode()
+        for name, data in zips.items()
+    )
+
+
+def _zip_name(keyword: str) -> str:
+    return keyword.replace("_zip", ".zip").replace("_", "-")
+
+
+def _lay_split(server: Path, data: bytes, md5s: bytes) -> Path:
+    folder = server / "centurion" / "patches"
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob("patch-Y.zip.part*"):
+        old.unlink()
+    _split(data, folder, "patch-Y.zip", 3)
+    (folder / "patches.md5").write_bytes(md5s)
+    return folder
+
+
+def test_a_checkout_pack_takes_its_md5_from_the_md5_file_at_the_checked_out_commit(
+    tmp_path: Path,
+) -> None:
+    """Centurion's own `patches.md5` (md5sum lines, the joined zips by name) proves the join."""
+    server = tmp_path / "server"
+    data = _zip({"patch-Y.MPQ": bytes(range(256)) * 300})
+    other = _zip({"addons/x.toc": b"## Title: x"})
+    _lay_split(server, data, _md5_lines(addons_zip=other, patch_Y_zip=data))
+
+    got = fetch_checkout(_md5_pack(), server)
+
+    md5 = hashlib.md5(data).hexdigest()
+    assert got.path == client_packs.cache_dir() / "checkout" / md5 / "patch-Y.zip"
+    assert got.path.read_bytes() == data
+    assert got.sha256 == hashlib.sha256(data).hexdigest()
+    assert client_packs.checkout_checksum(_md5_pack(), server) == md5
+
+
+def test_the_md5_file_may_mark_binary_mode_and_end_its_lines_in_crlf(tmp_path: Path) -> None:
+    """`md5sum -b` writes `<md5> *<name>`; a file saved on Windows ends `\\r\\n`."""
+    server = tmp_path / "server"
+    data = _zip()
+    md5 = hashlib.md5(data).hexdigest()
+    _lay_split(server, data, f"{'0' * 32}  addons.zip\r\n{md5} *patch-Y.zip\r\n".encode())
+
+    assert fetch_checkout(_md5_pack(), server).sha256 == hashlib.sha256(data).hexdigest()
+
+
+def test_a_pack_changed_in_the_checkout_with_a_matching_md5_file_is_used_at_the_next_play(
+    tmp_path: Path,
+) -> None:
+    """The server's makers update a pack and its line in `patches.md5` in one commit.
+
+    Nothing in the catalog changes, and the next fetch -- Play's, or the map data's
+    re-extraction -- gets the new zip under a new checksum, so the ready-to-play
+    client's record (by sha256) no longer matches and the pack is installed again.
+    """
+    server = tmp_path / "server"
+    first = _zip({"patch-Y.MPQ": b"MPQ\x1a the art base, 1.00024"})
+    _lay_split(server, first, _md5_lines(patch_Y_zip=first))
+    before = fetch_checkout(_md5_pack(), server)
+
+    second = _zip({"patch-Y.MPQ": b"MPQ\x1a the art base, 1.00025, a little larger"})
+    _lay_split(server, second, _md5_lines(patch_Y_zip=second))
+    after = fetch_checkout(_md5_pack(), server)
+
+    assert after.sha256 == hashlib.sha256(second).hexdigest() != before.sha256
+    assert after.path.read_bytes() == second
+    assert after.path.parent.name == hashlib.md5(second).hexdigest()
+
+
+def test_a_zip_that_does_not_match_its_line_in_the_md5_file_is_refused(tmp_path: Path) -> None:
+    """A pack changed WITHOUT its line (or a piece lost) is refused, and nothing is kept."""
+    server = tmp_path / "server"
+    old = _zip({"patch-Y.MPQ": b"MPQ\x1a old"})
+    _lay_split(server, _zip({"patch-Y.MPQ": b"MPQ\x1a new"}), _md5_lines(patch_Y_zip=old))
+
+    with pytest.raises(PackError, match="does not match its published checksum") as caught:
+        fetch_checkout(_md5_pack(), server)
+    assert LATEST in str(caught.value)
+    cached = client_packs.cache_dir() / "checkout" / hashlib.md5(old).hexdigest()
+    assert list(cached.iterdir()) == []
+
+
+def test_a_plain_checkout_file_is_proved_against_the_md5_file_too(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    folder = server / "centurion" / "patches"
+    folder.mkdir(parents=True)
+    data = _zip({"dinput8.dll": b"MZ"})
+    (folder / "client-tweaks.zip").write_bytes(data)
+    (folder / "patches.md5").write_bytes(_md5_lines(client_tweaks_zip=data))
+    pack = _md5_pack("centurion/patches/client-tweaks.zip")
+
+    assert fetch_checkout(pack, server).path == folder / "client-tweaks.zip"
+
+    (folder / "patches.md5").write_bytes(_md5_lines(client_tweaks_zip=b"another"))
+    with pytest.raises(PackError, match="does not match its published checksum"):
+        fetch_checkout(pack, server)
+    assert (folder / "client-tweaks.zip").read_bytes() == data  # never deleted
+
+
+def test_a_missing_md5_file_is_refused_naming_it_before_anything_is_joined(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server"
+    folder = _lay_split(server, _zip(), b"")
+    (folder / "patches.md5").unlink()
+
+    with pytest.raises(PackError) as caught:
+        fetch_checkout(_md5_pack(), server)
+    assert MD5_FILE in str(caught.value)
+    assert LATEST in str(caught.value)
+    assert not client_packs.cache_dir().exists()
+
+
+def test_an_md5_file_without_the_packs_line_is_refused_naming_both(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    _lay_split(server, _zip(), _md5_lines(addons_zip=b"a", patch_Z_zip=b"z"))
+
+    with pytest.raises(PackError) as caught:
+        fetch_checkout(_md5_pack(), server)
+    assert "patch-Y.zip" in str(caught.value)
+    assert MD5_FILE in str(caught.value)
+    assert not client_packs.cache_dir().exists()
+
+
+def test_a_missing_zip_is_named_as_missing_before_its_md5_line_is_looked_for(
+    tmp_path: Path,
+) -> None:
+    """T179 Task 7 review: a checkout that lost the zip AND its line names the zip."""
+    server = tmp_path / "server"
+    folder = server / "centurion" / "patches"
+    folder.mkdir(parents=True)
+    (folder / "patches.md5").write_bytes(_md5_lines(addons_zip=b"a"))
+
+    with pytest.raises(PackError) as caught:
+        fetch_checkout(_md5_pack(), server)
+    assert "checkout has no centurion/patches/patch-Y.zip (nor its .partNN pieces)" in str(
+        caught.value
+    )
+    assert "has no line for" not in str(caught.value)
+
+
+def test_an_md5_file_naming_the_pack_twice_with_two_answers_is_refused(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    data = _zip()
+    md5s = _md5_lines(patch_Y_zip=data) + f"{'1' * 32}  patch-Y.zip\n".encode()
+    _lay_split(server, data, md5s)
+
+    with pytest.raises(PackError, match="more than once"):
+        fetch_checkout(_md5_pack(), server)
+
+
+def test_a_line_for_a_file_of_a_similar_name_is_not_the_packs(tmp_path: Path) -> None:
+    """`xpatch-Y.zip` and `patch-Y.zip.old` are other files: only the exact name answers."""
+    server = tmp_path / "server"
+    data = _zip()
+    md5 = hashlib.md5(data).hexdigest()
+    _lay_split(server, data, f"{md5}  xpatch-Y.zip\n{md5}  patch-Y.zip.old\n".encode())
+
+    with pytest.raises(PackError, match="has no line for patch-Y.zip"):
+        fetch_checkout(_md5_pack(), server)
+
+
+def test_the_pinned_checksum_is_what_checkout_checksum_answers_without_an_md5_file(
+    tmp_path: Path,
+) -> None:
+    assert client_packs.checkout_checksum(_checkout_pack("p/x.zip", md5="a" * 32), tmp_path) == (
+        "a" * 32
+    )
+    assert client_packs.checkout_checksum(_checkout_pack("p/x.zip", sha256="b" * 64), tmp_path) == (
+        "b" * 64
+    )
+
+
 def test_unpadded_part_numbers_are_joined_numerically_part2_before_part10(
     tmp_path: Path,
 ) -> None:

@@ -402,6 +402,24 @@ def test_module_install_touches_include_sh_activates_conf_and_writes_keys(tmp_pa
     assert [p.db for p in report.pending_sql] == ["world"]
 
 
+def test_a_module_conf_is_activated_without_the_lines_the_server_refuses(tmp_path: Path) -> None:
+    """T204: the same rule as the server's own confs, at the moment the `.dist` is copied."""
+    git = _FakeGit(
+        {
+            "conf/mod_ahbot.conf.dist": "[worldserver]\n#    printf '600\n"
+            "A new patch is on the way...\n' > FILE\nAuctionHouseBot.GUID = 0\n",
+            "data/sql/db-world/a.sql": "-- a",
+        }
+    )
+    applier = Applier(tmp_path, git=git, sql=_FakeSql())
+    applier.install(parse_manifest(MODULE), {"bot_guid": "42"})
+    conf = (tmp_path / "env/dist/etc/modules/mod_ahbot.conf").read_text(encoding="utf-8")
+    assert conf.startswith(
+        "[worldserver]\n#    printf '600\n# A new patch is on the way...\n# ' > FILE\n"
+        "AuctionHouseBot.GUID = 42\n"
+    )
+
+
 def _ahbot_git(*sql_files: str) -> _FakeGit:
     files = {"conf/mod_ahbot.conf.dist": "AuctionHouseBot.GUID = 0\n"}
     files.update({name: f"-- {name}" for name in sql_files})

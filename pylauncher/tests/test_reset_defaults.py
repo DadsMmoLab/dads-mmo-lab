@@ -277,6 +277,26 @@ def test_the_default_of_each_file_is_what_the_install_itself_wrote(
     assert f"WorldServerPort = {entry.ports.world}" in mangosd
 
 
+def test_the_default_comments_out_the_lines_the_install_comments_out(tmp_path: Path) -> None:
+    """T204: the install writes a refused template line as a comment, so the default
+    does too -- or a reset would put back the line that stops the server starting."""
+    templates = {
+        **TEMPLATES["wow-tbc"],
+        "mangosd.conf.dist": (
+            "[MangosdConf]\n#    printf '600\nA new patch is on the way...\n' > FILE\n"
+            + TEMPLATES["wow-tbc"]["mangosd.conf.dist"]
+        ),
+    }
+    server, _ = _server(tmp_path, "wow-tbc")
+    installed = _fresh_install("wow-tbc", server, FakeImage(templates))
+    texts, reasons = reset_defaults.default_texts(
+        TBC, server, ["etc/mangosd.conf"], seams=_seams(FakeImage(templates))
+    )
+    assert reasons == {}
+    assert texts["etc/mangosd.conf"].encode("utf-8") == installed["etc/mangosd.conf"]
+    assert "\n# A new patch is on the way...\n# ' > FILE\n" in texts["etc/mangosd.conf"]
+
+
 @pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
 def test_a_reset_never_switches_the_cmangos_command_channel_off(tmp_path: Path, game: str) -> None:
     """Spec correction 12: every key the Enable press writes is in the default too."""

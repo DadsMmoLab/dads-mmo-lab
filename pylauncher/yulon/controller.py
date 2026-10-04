@@ -110,6 +110,14 @@ class InstallStatus:
         return self.db and self.auth and self.world
 
 
+class StartRefused(RuntimeError):
+    """Raised by `Controller.start()` when the install's `start_guard` says it must not start.
+
+    T179: a Centurion server whose last update did not finish importing its world
+    tables. The message is the sentence the player reads; nothing was started or stopped.
+    """
+
+
 class Controller:
     """Lifecycle surface for one server install: a `ContainerSpec` + a server dir.
 
@@ -128,9 +136,15 @@ class Controller:
         import_probe: docker.ImportProbe | None = None,
         reset_unfinished: docker.ResetUnfinished | None = None,
         pre_stop: Callable[[], object] | None = None,
+        start_guard: Callable[[], str | None] | None = None,
     ) -> None:
         self.spec = spec
         self.server_dir = server_dir
+        # Why this install must not be started now, or None (T179): asked first by
+        # `start()` and `stop_conflicting_and_start()`, the one door every Start,
+        # Start and play, the launcher's PLAY, Restart and recreate goes through.
+        # Composed, like `import_probe`: the reason is a family's fact.
+        self.start_guard = start_guard
         # The WSL2 distro this server lives inside, if it does. Every docker
         # command this controller issues carries it, because a server inside a
         # distro is reached by that distro's own docker - and asking the wrong
@@ -170,6 +184,10 @@ class Controller:
         # starts, since `start()` is the one door every Start, Restart and
         # recreate goes through.
         self.zone_problem: str | None = None
+        # The catalog entry this install is, where the subclass knows it (T179).
+        # `None` reads it off the shipped catalog by container names
+        # (`_entry_for`), which every game but one in the making can answer.
+        self.entry: CatalogEntry | None = None
 
     # -- queries ---------------------------------------------------------
 
@@ -283,7 +301,9 @@ class Controller:
             PortConflictError: A container that is not part of this install
                 already binds one of `spec.ports`. Nothing is started.
             docker.DockerCommandError: The `docker` CLI itself failed.
+            StartRefused: `start_guard` gave a reason. Nothing is started.
         """
+        self.refuse_start()
         conflicts = self.port_conflicts()
         if conflicts:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
@@ -311,7 +331,7 @@ class Controller:
         nothing is done there, and a game this catalogue does not know is left
         alone.
         """
-        entry = _entry_for(self.spec)
+        entry = self.entry or _entry_for(self.spec)
         if entry is None or not time_zone.needs_files(entry):
             return None
         try:
@@ -388,8 +408,23 @@ class Controller:
                 )
         return to_stop
 
+    def refuse_start(self) -> None:
+        """Raise `StartRefused` when `start_guard` gives a reason; ask before stopping anything.
+
+        Called by `start()` itself, and first by every press that would stop
+        something on the way to a start (Restart, recreate, "stop the other
+        server"), so a refused start leaves everything as it was.
+        """
+        if self.start_guard is None:
+            return
+        reason = self.start_guard()
+        if reason:
+            logger.warning(f"start() refused: {reason}")
+            raise StartRefused(reason)
+
     def stop_conflicting_and_start(self) -> list[str]:
         """Stop the server holding our ports, then start this one."""
+        self.refuse_start()
         stopped = self.stop_conflicting()
         self.start()
         return stopped

@@ -41,7 +41,7 @@ from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, WorldStoppedAfterReadyError
 from yulon.docker import AttachedRun
 
 PINNED = ENTRY.emulator.sources[0].rev or ""
@@ -157,8 +157,8 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
     # "nine sources, seven shallow" when the catalog held ten and nine. A number
     # in prose that nothing recomputes is a number that was true once.
     every = [source for entry in load_catalog().games for source in entry.emulator.sources]
-    assert len(every) == 10, [s.repo for s in every]
-    assert sum(1 for s in every if s.depth is not None) == 9
+    assert len(every) == 11, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 10
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
@@ -168,6 +168,7 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         "wow-tbc": ("cmangos/mangos-tbc", "cmangos/playerbots"),
         "wow-vanilla": ("cmangos/mangos-classic", "cmangos/playerbots"),
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
+        "wow-centurion": ("thomasjteachey/TrinityCore112",),
     }, moving
 
 
@@ -236,6 +237,7 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
         "wow-tbc": True,
         "wow-vanilla": True,
         "wow-tortoise": True,
+        "wow-centurion": True,
     }
     assert update_to_latest_for_app(ENTRY, Path("/srv/x")) is not None
     unflagged = ENTRY.install.native.model_copy(update={"update_to_latest": False})
@@ -1443,7 +1445,7 @@ def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:
 def test_a_shallow_clone_answers_could_not_count_rather_than_one_commit(
     origin: Path, tmp_path: Path
 ) -> None:
-    """Nine of the ten shipped sources are `depth: 1`, and the count lies on every one.
+    """Ten of the eleven shipped sources are `depth: 1`, and the count lies on every one.
 
     `Source.depth` defaults to 1 and only AzerothCore's core overrides it, and
     `_pin()` fetches at that depth (as `ContainerGit.clone()`'s update fetch
@@ -1844,3 +1846,137 @@ def test_the_rewritten_history_refusal_says_where_the_press_is() -> None:
     said = str(native.RewrittenHistory("cmangos/x", "The release is on rewritten history."))
     assert "“Update the server to latest…”" in said
     assert "“Server build ▾”" in said, said
+
+
+# -- T179: what changed between two commits (the TrinityCore route's question) ---------------
+
+
+def test_the_other_families_never_ask_git_what_changed(tmp_path: Path) -> None:
+    """The spine's hooks are no-ops: WotLK and TBC updates ask the same questions as before.
+
+    And their rebuild replaces the containers in the one `recreate` call it always made:
+    no family work between a stop and a start (T179 Task 6, fix round 1).
+    """
+    rec, server_dir = _ready(tmp_path / "wotlk")
+    _press(rec, server_dir)
+    assert not [call for call in rec.calls if call.startswith("changed-")]
+    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
+    rec, server_dir, tbc = _tbc(tmp_path)
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert not [call for call in rec.calls if call.startswith("changed-")]
+    assert "recreate" in rec.calls and "stop_servers" not in rec.calls
+
+
+ABORTED_AFTER_READY = native.WorldOutput(
+    text="ready...\nAvg Diff: 15ms\nWorld server is up and running\n>> ABORTED",
+    restarts=0,
+    status="exited",
+)
+"""A world that said ready, then stopped (T71): the rebuild keeps the new build."""
+
+
+def test_a_kept_build_keeps_the_sources_it_was_made_from_and_records_them(
+    tmp_path: Path,
+) -> None:
+    """T179 Task 6 fix round 2: the build is kept (T71), so its sources are too.
+
+    Putting the old commits back under a kept new build would leave the folder and
+    the running binary disagreeing -- the invariant this route exists for -- and
+    the sentence would say they agree again.
+    """
+    rec, server_dir = _ready(tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        list(
+            engine(rec, world_output=lambda spec: ABORTED_AFTER_READY).update_to_latest(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    said = str(raised.value)
+    assert set(_heads(rec, server_dir).values()) == {NEW}
+    assert not [call for call in rec.calls if call.startswith("restore:")], rec.calls
+    assert said.endswith(native.SOURCES_KEPT_NOTE)
+    assert native.SOURCES_PUT_BACK_NOTE not in said and "put back" not in said
+    state = native.read_state(server_dir, valid=())
+    assert state is not None and state.source_revs, "what the kept build was made from"
+    assert raised.value.sources_kept is True, "the outcome the tab reads, typed"
+
+
+def test_a_kept_build_whose_after_work_fails_still_says_the_build_was_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3: the after-work's failure is added to the sentence, never in its place."""
+    rec, server_dir = _ready(tmp_path)
+    made = engine(rec, world_output=lambda spec: ABORTED_AFTER_READY)
+
+    def breaks(*_args: object, **_kwargs: object) -> Iterator[str]:
+        raise InstallerError("the after-work broke")
+        yield ""  # pragma: no cover - makes this a generator
+
+    monkeypatch.setattr(made, "after_update", breaks)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "came up and then stopped" in said
+    assert "the after-work broke" in said
+    assert native.SOURCES_KEPT_NOTE in said
+    assert raised.value.sources_kept is True
+
+
+def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_and_its_new_one(
+    origin: Path, tmp_path: Path
+) -> None:
+    """Real git, at depth 1, as the update route leaves a checkout: the old commit's tree is
+    still in the store, so the two can be compared with no network and no history between.
+
+    Added, modified and removed are three different answers to the route (import, import,
+    leave the table), and a path outside the asked folders is not reported.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    (origin / "sql").mkdir()
+    (origin / "sql" / "old.sql").write_text("DROP TABLE old;\n", encoding="utf-8", newline="\n")
+    (origin / "sql" / "keep.sql").write_text(
+        "-- a comment\nINSERT INTO `realmlist` VALUES (1);\nINSERT INTO `other` VALUES (1);\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _git(["add", "-A"], origin)
+    _git(["commit", "-qm", "sql"], origin)
+    real = git.RunnerGit()
+    dest = tmp_path / "work"
+    spec = git.CloneSpec(url=f"file://{origin}", dest=dest, branch="main", depth=1)
+    real.clone(spec)
+    first = real.head_sha(dest)
+    assert first is not None
+
+    (origin / "sql" / "old.sql").unlink()
+    (origin / "sql" / "new.sql").write_text("DROP TABLE new;\n", encoding="utf-8", newline="\n")
+    (origin / "sql" / "keep.sql").write_text(
+        "-- another comment\n"
+        "INSERT INTO `realmlist` VALUES (2);\n"
+        "INSERT INTO `other` VALUES (1);\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (origin / "README").write_text("moved\n", encoding="utf-8", newline="\n")
+    _git(["add", "-A"], origin)
+    _git(["commit", "-qm", "moved"], origin)
+    real.clone(spec)
+    moved = real.head_sha(dest)
+    assert moved is not None and moved != first
+
+    assert sorted(real.changed_files(dest, first, moved, ["sql"]) or ()) == [
+        ("A", "sql/new.sql"),
+        ("D", "sql/old.sql"),
+        ("M", "sql/keep.sql"),
+    ]
+    assert real.changed_files(dest, moved, first, ["sql"]) is not None, "either direction"
+    # A removed SQL comment prints as `--- a comment`, the shape of a diff header.
+    assert real.changed_lines(dest, first, moved, "sql/keep.sql") == (
+        "--- a comment",
+        "-INSERT INTO `realmlist` VALUES (1);",
+        "+-- another comment",
+        "+INSERT INTO `realmlist` VALUES (2);",
+    )
+    assert real.changed_files(dest, first, "f" * 40, ["sql"]) is None, "an unknown commit"
+    assert real.changed_files(tmp_path / "nowhere", first, moved, ["sql"]) is None

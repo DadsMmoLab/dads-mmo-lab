@@ -90,6 +90,18 @@ class UiSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     launchers: dict[str, LauncherPlace] = Field(default_factory=dict)
+    noticed_leftovers: list[str] = Field(default_factory=list)
+    """T179: the temporary client copies Yu'lon has already said it could not remove,
+    by folder, so the start-up notice is said once per folder and not at every start."""
+
+    @field_validator("noticed_leftovers", mode="before")
+    @classmethod
+    def _only_paths(cls, value: object) -> list[str]:
+        return (
+            [str(item) for item in value if isinstance(item, str)]
+            if isinstance(value, list)
+            else []
+        )
 
 
 def launcher_key(game: str, server_dir: Path) -> str:
@@ -197,4 +209,32 @@ def forget_launcher(game: str, server_dir: Path, path: Path | None = None) -> bo
         if key not in settings.launchers:
             return True
         del settings.launchers[key]
+        return save_ui_settings(settings, path)
+
+
+def unnoticed_leftovers(targets: Iterable[str], path: Path | None = None) -> list[str]:
+    """The folders in `targets` not yet shown in a notice; the record pruned to `targets`.
+
+    Reads, and writes only to FORGET a folder that is no longer left, so one that is
+    removed and later left again is said again. Nothing is marked as said here: that
+    is `remember_leftover_notices()`, called when a notice is really on screen.
+    """
+    left = list(dict.fromkeys(targets))
+    with _LOCK:
+        settings = load_ui_settings(path)
+        kept = [target for target in settings.noticed_leftovers if target in left]
+        if kept != settings.noticed_leftovers:
+            settings.noticed_leftovers = kept
+            save_ui_settings(settings, path)
+    return [target for target in left if target not in kept]
+
+
+def remember_leftover_notices(targets: Iterable[str], path: Path | None = None) -> bool:
+    """Mark these folders as said: a notice naming them was shown. False = not written."""
+    with _LOCK:
+        settings = load_ui_settings(path)
+        added = [target for target in targets if target not in settings.noticed_leftovers]
+        if not added:
+            return True
+        settings.noticed_leftovers = [*settings.noticed_leftovers, *added]
         return save_ui_settings(settings, path)

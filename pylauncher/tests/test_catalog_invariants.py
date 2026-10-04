@@ -39,7 +39,7 @@ from tests import catalog_provenance
 from yulon import resources
 from yulon.catalog import composegen, families, native
 from yulon.catalog.catalog import CATALOG_FILE, CatalogEntry, NativeInstall, load_catalog
-from yulon.catalog.families import FAMILIES
+from yulon.catalog.families import FAMILIES, decisions
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
 
@@ -334,7 +334,17 @@ def test_the_named_template_dirs_and_the_shipped_ones_are_the_same_set() -> None
             for name in DOCKERFILE_TEMPLATES:
                 assert (build_context / name).is_file(), f"{entry.id}: {build_context / name}"
     orphans = sorted(str(path.relative_to(TEMPLATES)) for path in on_disk - named)
+    # T179: the TrinityCore family's templates land before the entry that names them, the same
+    # way its family-decision sites may be `pending` -- and only while no shipped entry is of
+    # that family. From the day one is, they must be named like every other set.
+    if decisions.PENDING_FAMILY not in {native_of(entry).family for entry in ENTRIES}:
+        orphans = [p for p in orphans if p.replace("\\", "/") not in AWAITING_THEIR_ENTRY]
     assert not orphans, f"template directories no catalog entry names: {orphans}"
+
+
+AWAITING_THEIR_ENTRY = ("shared/trinitycore", "wow-centurion/native")
+"""Template sets of the `trinitycore` family (T179 Task 2) whose catalog entry is a later task's;
+`tests/support_trinitycore.py` renders them meanwhile."""
 
 
 # -- what `render()` writes ---------------------------------------------------
@@ -500,7 +510,7 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
                 # T165: a folder token may follow the label; what it renders is
                 # counted below, and every line it renders is held to `:z` there.
                 bare = line.rstrip()
-                for token in composegen.SERVER_FOLDER_CONFS:
+                for token in composegen.folder_confs(entry):
                     bare = bare.removesuffix("{{" + token + "}}")
                 assert bare.endswith("{{BIND_LABEL}}"), f"{entry.id} {name}: {item}"
                 if name != "build.yml.tmpl":
@@ -528,7 +538,7 @@ def test_every_mount_is_a_labelled_host_bind_or_an_unlabelled_named_volume(
     ]
     folders = sum(
         len(composegen.server_folders(entry, conf))
-        for conf in composegen.SERVER_FOLDER_CONFS.values()
+        for conf in composegen.folder_confs(entry).values()
     )
     assert len(rendered) == labelled + folders, (entry.id, len(rendered), labelled, folders)
     assert all(line.rstrip().endswith(":z") for line in rendered), (entry.id, rendered)
@@ -1110,8 +1120,8 @@ def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -
     # would go red on a number instead of on the sentence naming what to do
     # about it. It still earns its place. A field added AND marked in the same
     # commit is a deliberate act and reads the count as its receipt.
-    assert len(values) == 39, (
-        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 39; "
+    assert len(values) == 51, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 51; "
         f"if that is intended, move the number: {sorted(values)}"
     )
 
@@ -1176,7 +1186,27 @@ def test_a_read_from_source_provenance_cites_a_line_and_not_a_sentence() -> None
     """
     kinds = {key: mark.kind for key, mark in catalog_provenance.PROVENANCE.items()}
     predictions = [key for key, kind in kinds.items() if kind == "read-from-source"]
-    assert predictions == ["wow-tortoise:play.rename_offline_refusal"], predictions
+    assert predictions == [
+        "wow-tortoise:play.rename_offline_refusal",
+        # Centurion's twelve: read at CENTURION @ faac5fc9, live in T179 Task 9.
+        *(
+            f"wow-centurion:{path}"
+            for path in (
+                "play.equipped.template_column",
+                "play.equipped.instance_table",
+                "play.equipped.inventory_column",
+                "play.teleport_command",
+                "play.mail_item_cap",
+                "play.rename_command",
+                "play.set_level_command",
+                "accounts.level.table",
+                "accounts.level.account_column",
+                "accounts.level.level_column",
+                "accounts.level.max_level",
+                "accounts.scheme",
+            )
+        ),
+    ], predictions
     for key in predictions:
         cite = catalog_provenance.PROVENANCE[key].cite
         assert catalog_provenance.SOURCE_CITE.match(cite), f"{key}: {cite!r} is not a path:line"

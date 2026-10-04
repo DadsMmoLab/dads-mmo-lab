@@ -44,7 +44,7 @@ from pathlib import Path, PurePosixPath
 
 from yulon import platform, tuning
 from yulon.catalog import bot_dashboard, time_zone
-from yulon.catalog.catalog import CatalogEntry, NativeInstall
+from yulon.catalog.catalog import CatalogEntry, CmangosData, NativeInstall, TrinityCoreData
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -387,6 +387,26 @@ def _native_of(entry: CatalogEntry) -> NativeInstall:
     return entry.install.native
 
 
+def built_here(native: NativeInstall) -> CmangosData | TrinityCoreData | None:
+    """The family block of a game whose Dockerfile, confs and folder binds this app writes.
+
+    CMaNGOS (7.3) and TrinityCore (T179) both build from a `Dockerfile.tmpl` this
+    repo ships, keep their confs in a catalog conf table under `{CORE_DIR}/etc`, and
+    run their servers in `{CORE_DIR}/bin`; what this module reads off the block --
+    `dockerfile.make_jobs`, `conf.source_dir`, `conf.files` -- has the same shape on
+    both. AzerothCore has none of it (its checkout ships the Dockerfile and its image
+    makes the confs), so it answers None and every caller keeps its old answer.
+
+    Public since T179 Task 3: `preflight` asks it for the build's job count and the
+    client-folder rules (`client` has the same shape on both blocks), and the spine
+    for the conf table a compose repair edits, so the choice of block is made here
+    once rather than re-implemented by each caller.
+    """
+    if native.cmangos is not None:
+        return native.cmangos
+    return native.trinitycore
+
+
 def image_tag(
     server_dir: Path,
     *,
@@ -583,7 +603,7 @@ def render(
             # token no template uses costs nothing — `fill()` minds unfilled
             # placeholders, not unused values — so the WotLK files render byte
             # for byte as before (A16), and `MAKE_JOBS`/`CORE_DIR` are simply
-            # absent for a non-`cmangos` entry rather than blank.
+            # absent for an AzerothCore entry rather than blank.
             **entry_tokens(entry),
         },
     )
@@ -720,6 +740,15 @@ _fill = fill
 """The pre-7.1 private name, kept so nothing that imported it moves twice."""
 
 
+def container_prefix(entry: CatalogEntry) -> str:
+    """`_container_prefix()` for a caller outside this module (T179: the mmaps job's name).
+
+    One derivation, so a container this app names beside the compose services
+    carries the same prefix the services do, with the same refusals.
+    """
+    return _container_prefix(entry)
+
+
 def _container_prefix(entry: CatalogEntry) -> str:
     """The part the three container names share: `ac-` for WotLK, `tbc-` for TBC.
 
@@ -839,10 +868,14 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     schema names are `databases.*`, and `LOGS_DB` is the first `extra` schema
     — omitted, not blanked, when there is none, so a template that wants it
     fails in `fill()` instead of writing `;;` into a conf. `MAKE_JOBS` and
-    `CORE_DIR` exist only for a `cmangos` block: `CORE_DIR` is the core's
+    `CORE_DIR` exist only for a family whose Dockerfile this app writes
+    (`built_here()`: CMaNGOS, TrinityCore): `CORE_DIR` is the core's
     in-image install prefix, derived as the parent of `conf.source_dir`
     (`/opt/mangos/etc` → `/opt/mangos`), which is where the binaries, the
-    `etc/` bind and the `data/` bind all hang. `CmangosInstaller` adds the
+    `etc/` bind and the `data/` bind all hang. A TrinityCore block adds two
+    more (T179): `CHECKOUT`, the core's folder in the server dir that the
+    Dockerfile copies, and `CMAKE_OPTIONS`, its `-D` defines one per line,
+    continued with ` \\` so they sit in a Dockerfile `RUN`. `CmangosInstaller` adds the
     per-install ones on top of this mapping, in TWO sets since 7.3:
     `_public_tokens()` adds `REALM_HOST`, the three ports, the project name and
     the image prefix and tag, and is what the build context is rendered from;
@@ -868,10 +901,22 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     }
     if entry.databases.extra:
         tokens["LOGS_DB"] = entry.databases.extra[0]
-    if native.cmangos is not None:
-        tokens["MAKE_JOBS"] = str(native.cmangos.dockerfile.make_jobs)
-        tokens["CORE_DIR"] = str(PurePosixPath(native.cmangos.conf.source_dir).parent)
+    built = built_here(native)
+    if built is not None:
+        tokens["MAKE_JOBS"] = str(built.dockerfile.make_jobs)
+        tokens["CORE_DIR"] = str(PurePosixPath(built.conf.source_dir).parent)
+    if native.trinitycore is not None:
+        tokens["CHECKOUT"] = native.trinitycore.checkout
+        tokens["CMAKE_OPTIONS"] = CMAKE_OPTION_JOINER.join(
+            native.trinitycore.dockerfile.cmake_options
+        )
     return tokens
+
+
+CMAKE_OPTION_JOINER = " \\\n        "
+"""Between two `CMAKE_OPTIONS` defines: a line continuation, then the indent of a `-D`
+under `cmake` in the TrinityCore `Dockerfile.tmpl` (T179). Each define is already held
+to `-DNAME=VALUE` with no shell character by the catalog (`TrinityCoreDockerfile`)."""
 
 
 SERVER_FOLDER_KEYS: tuple[str, ...] = ("LogsDir", "HonorDir", "PDumpDir")
@@ -885,7 +930,8 @@ Found on a Tortoise install on 2026-09-28: `realmd.conf` said `LogsDir =
 report and the automatic character dumps were written nowhere. `DataDir` is not here: the
 template binds `./data` itself, and extraction, not the server, fills it.
 TBC's and Vanilla's confs name only `LogsDir` (T169: `""` upstream, which
-writes into `bin/`, inside the container).
+writes into `bin/`, inside the container). So do TrinityCore's authserver.conf and
+worldserver.conf (T179; `LogsDir = ""` in both `.dist`s, facts §4), which the same rule binds.
 """
 
 SERVER_WORKING_DIR = "bin"
@@ -904,7 +950,30 @@ SERVER_FOLDER_CONFS: Mapping[str, str] = {
     "REALMD_FOLDERS": "realmd.conf",
     "MANGOSD_FOLDERS": "mangosd.conf",
 }
-"""The base template's per-service token, and the conf that service's binary reads."""
+"""The base template's per-service token, and the conf that service's binary reads.
+
+CMaNGOS's; TrinityCore's is `TRINITYCORE_FOLDER_CONFS`, and `folder_confs()` picks."""
+
+TRINITYCORE_FOLDER_CONFS: Mapping[str, str] = {
+    "AUTHSERVER_FOLDERS": "authserver.conf",
+    "WORLDSERVER_FOLDERS": "worldserver.conf",
+}
+"""The same, for `shared/trinitycore/base.yml.tmpl` (T179): its services are
+`{{CONTAINER_PREFIX}}authserver` and `..worldserver`, and each reads the conf of its
+own name from `{CORE_DIR}/etc` (facts §1: CONF_DIR is `<prefix>/etc`)."""
+
+
+def folder_confs(entry: CatalogEntry) -> Mapping[str, str]:
+    """This entry's base-template folder tokens, each with the conf its service reads.
+
+    An AzerothCore entry gets CMaNGOS's map, as it did before T179: its conf table is
+    empty (`built_here()` is None), so every token renders to nothing, and its
+    templates spell none of them.
+    """
+    if _native_of(entry).trinitycore is not None:
+        return TRINITYCORE_FOLDER_CONFS
+    return SERVER_FOLDER_CONFS
+
 
 _FOLDER_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 
@@ -926,12 +995,17 @@ class ServerFolder:
         return f"./{self.name}:{self.target}"
 
 
-SERVER_CONF_SERVICE: Mapping[str, str] = {
-    conf: token.removesuffix("_FOLDERS").lower() for token, conf in SERVER_FOLDER_CONFS.items()
-}
-"""Each conf, and the service (after `{{CONTAINER_PREFIX}}`) whose binary reads it (T169).
+def conf_service(entry: CatalogEntry, conf: str) -> str | None:
+    """The service (after `{{CONTAINER_PREFIX}}`) whose binary reads `conf`; None for none (T169).
 
-Read off `SERVER_FOLDER_CONFS`' token names, so the two cannot disagree."""
+    Read off `folder_confs()`' token names, so the two cannot disagree: `realmd`,
+    `mangosd` on CMaNGOS, `authserver`, `worldserver` on TrinityCore (T179).
+    """
+    for token, name in folder_confs(entry).items():
+        if name == conf:
+            return token.removesuffix("_FOLDERS").lower()
+    return None
+
 
 _SERVICE_KEY = re.compile(r"^  ([^\s#:][^:#]*):\s*(#.*)?$")
 
@@ -945,7 +1019,7 @@ def bound_folders(entry: CatalogEntry, text: str, conf: str) -> frozenset[str]:
     and all: a two-space service key under the top-level `services:`, and its
     `- ./` items. A conf no service reads, or a service the file lacks, binds nothing.
     """
-    role = SERVER_CONF_SERVICE.get(conf)
+    role = conf_service(entry, conf)
     if role is None:
         return frozenset()
     wanted = f"{_container_prefix(entry)}{role}"
@@ -970,10 +1044,10 @@ def bound_folders(entry: CatalogEntry, text: str, conf: str) -> frozenset[str]:
 
 def folder_target(entry: CatalogEntry, value: str) -> str:
     """Where a `*Dir` value lands in the container, read from the servers' working directory."""
-    native = _native_of(entry)
-    if native.cmangos is None:
+    built = built_here(_native_of(entry))
+    if built is None:
         return value
-    core = PurePosixPath(native.cmangos.conf.source_dir).parent
+    core = PurePosixPath(built.conf.source_dir).parent
     return _folder_at(core, _unquoted(value))[0]
 
 
@@ -1072,13 +1146,13 @@ def folder_settings(
         ComposeGenError: a value the TABLE states is not a folder this engine can
             bind -- a catalog bug; a conf's own value never raises.
     """
-    native = _native_of(entry)
-    if native.cmangos is None:
+    built = built_here(_native_of(entry))
+    if built is None:
         return ()
-    core = PurePosixPath(native.cmangos.conf.source_dir).parent
+    core = PurePosixPath(built.conf.source_dir).parent
     texts = confs or {}
     found: list[FolderSetting] = []
-    for name, patch in native.cmangos.conf.files.items():
+    for name, patch in built.conf.files.items():
         if conf_file is not None and name != conf_file:
             continue
         text = texts.get(name)
@@ -1121,11 +1195,11 @@ def conf_texts(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
     be read is left out and answered from the table. T106's check reads them
     strictly itself, and refuses on one it cannot read.
     """
-    native = _native_of(entry)
-    if native.cmangos is None:
+    built = built_here(_native_of(entry))
+    if built is None:
         return {}
     texts: dict[str, str] = {}
-    for name, patch in native.cmangos.conf.files.items():
+    for name, patch in built.conf.files.items():
         if any(key in patch.keys for key in SERVER_FOLDER_KEYS):
             text = _read_if_there(server_dir / SERVER_CONF_DIR / name)
             if text is not None:
@@ -1165,7 +1239,7 @@ def server_folders(
 
 
 def _folder_binds(entry: CatalogEntry, bind_label: str, server_dir: Path) -> dict[str, str]:
-    """`SERVER_FOLDER_CONFS`'s tokens: one `- ./<name>:<target><label>` line per folder.
+    """`folder_confs()`'s tokens: one `- ./<name>:<target><label>` line per folder.
 
     Each value starts with its own newline, so the token sits at the end of the
     bind line before it and an entry with no folders renders the same services
@@ -1177,7 +1251,7 @@ def _folder_binds(entry: CatalogEntry, bind_label: str, server_dir: Path) -> dic
             f"\n      - ./{folder.name}:{folder.target}{bind_label}"
             for folder in server_folders(entry, conf, server_dir=server_dir)
         )
-        for token, conf in SERVER_FOLDER_CONFS.items()
+        for token, conf in folder_confs(entry).items()
     }
 
 

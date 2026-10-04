@@ -59,7 +59,9 @@ def _client() -> dict[str, Any]:
                 "id": "client-tweaks",
                 "label": "Client tweaks",
                 "source": {"kind": "checkout", "path": "centurion/patches/client-tweaks.zip"},
-                "md5": "2" * 32,
+                # Its md5 is read from the server's checkout at the commit it is on
+                # (T179 Task 7, the lead's ruling), not pinned here.
+                "md5_file": "centurion/patches/patches.md5",
                 "install": [{"member": "*", "to_dir": "."}],
             },
             {
@@ -130,6 +132,8 @@ def test_the_fixture_every_refusal_below_is_cut_from_loads() -> None:
     assert client.exe_patch.writes[0].payload() == b"12342\x00"
     assert client.config_wtf is not None
     assert client.config_wtf.always["realmName"] == "Centurion"
+    assert client.packs[2].md5_file == "centurion/patches/patches.md5"
+    assert client.packs[2].md5 is None and client.packs[2].sha256 is None
 
 
 def test_hosts_names_every_host_a_download_may_reach_and_nothing_else() -> None:
@@ -152,12 +156,18 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
     assert client.hosts() == frozenset()
 
 
-def test_the_shipped_catalog_loads_with_no_entry_using_the_new_fields() -> None:
-    """Groundwork only: until T179 adds Centurion, every entry behaves exactly as before."""
+def test_the_shipped_catalog_uses_the_new_fields_on_centurion_alone() -> None:
+    """Groundwork for T179: Centurion is the first entry with a ready-to-play client section,
+    and every other entry behaves exactly as before (its own tests: test_catalog_centurion)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
-        assert set(entry["client"]) <= {"version", "build", "realmlist_file", "notes"}
+        if entry["id"] != "wow-centurion":
+            assert set(entry["client"]) <= {"version", "build", "realmlist_file", "notes"}
     for game in load_catalog().games:
+        if game.id == "wow-centurion":
+            assert game.client.packs and game.client.exe_patch and game.client.config_wtf
+            assert game.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
+            continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None
         assert game.client.config_wtf is None
@@ -321,7 +331,31 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
     ),
     "pack with two checksums": (
         _set("packs.0.sha256", "3" * 64),
-        "at most one of sha256 and md5",
+        "takes exactly one of sha256, md5 and md5_file",
+    ),
+    "pack with a pinned md5 and an md5_file": (
+        _set("packs.2.md5", "3" * 32),
+        "takes exactly one of sha256, md5 and md5_file",
+    ),
+    "pack with a pinned sha256 and an md5_file": (
+        _set("packs.1.md5_file", "centurion/patches/patches.md5"),
+        "takes exactly one of sha256, md5 and md5_file",
+    ),
+    "url pack naming an md5_file": (
+        _set("packs.3.md5_file", "centurion/patches/patches.md5"),
+        "only a checkout pack takes md5_file",
+    ),
+    "md5_file leaving the server dir": (
+        _set("packs.2.md5_file", "../patches.md5"),
+        "must be a relative POSIX path",
+    ),
+    "md5_file absolute": (
+        _set("packs.2.md5_file", "/srv/patches.md5"),
+        "must be a relative POSIX path",
+    ),
+    "md5_file in another folder than the zip": (
+        _set("packs.2.md5_file", "centurion/other/patches.md5"),
+        "inside the folder of its md5_file",
     ),
     "sha256 not hex": (_set("packs.1.sha256", "z" * 64), "String should match pattern"),
     "required pack defaulting on": (

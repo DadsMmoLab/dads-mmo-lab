@@ -1,12 +1,20 @@
 """How many random bots a server runs, read and changed where its install wrote it (T99).
 
 Asked for on #yulon ("is there a way to lower the bot count?"). Every install
-pins the population to 500, Min = Max (owner decision 2026-08-28), and each game
-keeps that number in its install's own place:
+pins the population, Min = Max: to 500 on WotLK, TBC, Vanilla and Tortoise
+(owner decision 2026-08-28), and to 150 on Centurion -- its live realm's value
+(`centurion/conf/playerbots.conf:83,90`), because its bots are 232 pre-made
+characters on accounts 76-78 and 500 is a number it cannot reach (T179). Each
+game keeps that number in its install's own place:
 
 * **TBC, Vanilla, Tortoise** (CMaNGOS family): `AiPlayerbot.MinRandomBots` and
   `MaxRandomBots` in `etc/aiplayerbot.conf`, from the install's conf table
   (`catalog.json`). `./etc` is bound into the containers, so a restart applies it.
+* **Centurion** (TrinityCore, T179): `Playerbot.RandomPopulation.TargetMin` and
+  `TargetMax` in `etc/playerbots.conf`, beside `worldserver.conf` -- the one place
+  its worldserver reads it from (`worldserver/Main.cpp:242-250`) -- from the
+  install's conf table. Its bots are the characters of fixed accounts
+  (`Playerbot.RandomPopulation.BotAccountIds`), so no key states a ceiling.
 * **WotLK** (AzerothCore): `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS` in the compose
   override's environment, from `azerothcore.world_env`. The environment WINS
   over `playerbots.conf` (`Config.cpp:540-552`), and a container keeps the
@@ -59,6 +67,9 @@ MAX_ENV = bot_count.MAX_ENV
 CONF_NAME = bot_count.CONF_NAME
 CONF_FILE = f"{ETC_DIR}/{CONF_NAME}"
 
+TC_MIN_KEY = bot_count.TC_MIN_KEY
+TC_MAX_KEY = bot_count.TC_MAX_KEY
+
 CHARACTERS_PER_ACCOUNT = 9
 """cmangos playerbots' own cap outside `MANGOSBOT_TWO` (`RandomPlayerbotFactory.cpp:755-760`)."""
 
@@ -75,21 +86,23 @@ CARD_NAME = "Playerbots (server settings)"
 
 Route = Literal["conf", "env"]
 
-_COUNT_KEYS = (MIN_KEY, MAX_KEY, ACCOUNT_KEY)
+_COUNT_KEYS = (MIN_KEY, MAX_KEY, ACCOUNT_KEY, TC_MIN_KEY, TC_MAX_KEY)
+_RANGE = (
+    "The server keeps between the lowest and the highest number of random bots online. "
+    "The Random bots box on the Bots tab sets both to one number."
+)
 _LABELS = {
     MIN_KEY: "Random bots (lowest)",
     MAX_KEY: "Random bots (highest)",
     ACCOUNT_KEY: "Bot accounts",
+    TC_MIN_KEY: "Random bots (lowest)",
+    TC_MAX_KEY: "Random bots (highest)",
 }
 _EXPLAIN = {
-    MIN_KEY: (
-        "The server keeps between the lowest and the highest number of random bots online. "
-        "The Random bots box on the Bots tab sets both to one number."
-    ),
-    MAX_KEY: (
-        "The server keeps between the lowest and the highest number of random bots online. "
-        "The Random bots box on the Bots tab sets both to one number."
-    ),
+    MIN_KEY: _RANGE,
+    MAX_KEY: _RANGE,
+    TC_MIN_KEY: _RANGE,
+    TC_MAX_KEY: _RANGE,
     ACCOUNT_KEY: (
         f"How many accounts the bots are made on. Each holds at most "
         f"{CHARACTERS_PER_ACCOUNT} bot characters, so this caps how many random bots can exist."
@@ -166,6 +179,36 @@ class Written:
         return self.backup is not None
 
 
+@dataclass(frozen=True)
+class _CountConf:
+    """Where a conf-route game keeps its count: the file, its table, and its key names."""
+
+    file: str
+    patch: ConfPatch
+    low: str
+    high: str
+    accounts: str | None
+    """The key whose value bounds the pool, or `None` where no key states a ceiling."""
+
+
+def _count_conf(entry: CatalogEntry) -> _CountConf | None:
+    """The conf the install table writes the bot count into, for a conf-route family."""
+    native_block = entry.install.native
+    if native_block is None:
+        return None
+    if native_block.family == "cmangos" and native_block.cmangos is not None:
+        patch = native_block.cmangos.conf.files.get(CONF_NAME)
+        if patch is not None:
+            return _CountConf(CONF_FILE, patch, MIN_KEY, MAX_KEY, ACCOUNT_KEY)
+    if native_block.family == "trinitycore" and native_block.trinitycore is not None:
+        table = native_block.trinitycore.conf
+        patch = table.files.get(table.playerbots_conf)
+        if patch is not None:
+            file = f"{ETC_DIR}/{table.playerbots_conf}"
+            return _CountConf(file, patch, TC_MIN_KEY, TC_MAX_KEY, None)
+    return None
+
+
 def where(entry: CatalogEntry) -> tuple[str, Route] | None:
     """The file this game's install writes its bot count into, and how, or `None`."""
     native_block = entry.install.native
@@ -176,18 +219,21 @@ def where(entry: CatalogEntry) -> tuple[str, Route] | None:
         if MIN_ENV in env and MAX_ENV in env:
             return (composegen.OVERRIDE_FILE, "env")
         return None
-    if native_block.family == "cmangos" and native_block.cmangos is not None:
-        patch = native_block.cmangos.conf.files.get(CONF_NAME)
-        if patch is not None and MIN_KEY in patch.keys and MAX_KEY in patch.keys:
-            return (CONF_FILE, "conf")
+    found = _count_conf(entry)
+    if found is not None and found.low in found.patch.keys and found.high in found.patch.keys:
+        return (found.file, "conf")
     return None
 
 
+def card_file(entry: CatalogEntry) -> str | None:
+    """The file the Tuning tab's bot card (`CARD`) edits for this game, or `None`."""
+    found = _count_conf(entry)
+    return None if found is None else found.file
+
+
 def _table(entry: CatalogEntry) -> ConfPatch | None:
-    native_block = entry.install.native
-    if native_block is None or native_block.cmangos is None:
-        return None
-    return native_block.cmangos.conf.files.get(CONF_NAME)
+    found = _count_conf(entry)
+    return None if found is None else found.patch
 
 
 def conf_keys(entry: CatalogEntry) -> dict[str, ConfKey]:
@@ -216,12 +262,13 @@ def conf_keys(entry: CatalogEntry) -> dict[str, ConfKey]:
 
 
 def _rows(entry: CatalogEntry, text: str | None) -> tuple[tuning.TuningRow, ...]:
+    file = card_file(entry) or CONF_FILE
     return tuple(
         tuning.TuningRow(
             module_id=CARD[1],
             module_name=CARD_NAME,
             family=CARD[0],
-            file=CONF_FILE,
+            file=file,
             key=key,
             label=spec.label or key,
             explain=spec.explain,
@@ -322,9 +369,16 @@ def read(entry: CatalogEntry, server_dir: Path) -> Reading:
     except OSError as exc:
         return Reading(file, route, problem=UNREADABLE.format(file=path.name, exc=exc))
     if route == "conf":
-        low = _number(tuning.conf_value(text, MIN_KEY))
-        high = _number(tuning.conf_value(text, MAX_KEY))
-        ceiling, why = _ceiling(tuning.conf_value(text, ACCOUNT_KEY))
+        keys = _count_conf(entry)
+        if keys is None:  # `where()` answered conf, so there is one
+            return Reading(file, route, problem=NO_ROUTE.format(game=entry.name))
+        low = _number(tuning.conf_value(text, keys.low))
+        high = _number(tuning.conf_value(text, keys.high))
+        ceiling, why = (
+            _ceiling(tuning.conf_value(text, keys.accounts))
+            if keys.accounts is not None
+            else (NO_CEILING, CEILING_NONE)
+        )
         return Reading(file, route, low, high, ceiling, why, rows=_rows(entry, text))
     lines = text.split("\n")
     try:
@@ -384,12 +438,14 @@ def write(entry: CatalogEntry, server_dir: Path, n: int) -> Written:
     path = server_dir / file
     try:
         if route == "conf":
-            table = _table(entry)
+            keys = _count_conf(entry)
+            if keys is None:  # `read()` above refused a conf route without one
+                raise BotCountError(NO_ROUTE.format(game=entry.name))
             text = conf.patch(
                 _read_text(path),
                 ConfPatch(
-                    keys={MIN_KEY: str(n), MAX_KEY: str(n)},
-                    match_commented=table.match_commented if table is not None else False,
+                    keys={keys.low: str(n), keys.high: str(n)},
+                    match_commented=keys.patch.match_commented,
                 ),
                 {},
             )
@@ -419,8 +475,8 @@ def installed_count(entry: CatalogEntry) -> int | None:
         return None
     if spot[1] == "env":
         return _number(composegen.world_env(entry).get(MAX_ENV))
-    table = _table(entry)
-    return _number(table.keys.get(MAX_KEY)) if table is not None else None
+    keys = _count_conf(entry)
+    return _number(keys.patch.keys.get(keys.high)) if keys is not None else None
 
 
 def question(entry: CatalogEntry, reading: Reading, n: int) -> str:

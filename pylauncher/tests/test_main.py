@@ -552,7 +552,38 @@ def _app_window(qapp: object) -> Iterator[Any]:
 
     monkeypatch.setattr(ControllerView, "__init__", _no_polling)
 
+    # T179: the start-up sweep of temporary client copies an Uninstall left. It
+    # would read the REAL config dir here (see above), so it is recorded instead,
+    # with the thread it ran on, and answers a notice the test can look for.
+    import threading
+
+    swept: list[str] = []
+
+    def _sweep(*, config_dir: Path | None = None) -> Any:
+        swept.append(threading.current_thread().name)
+        return main.LeftoverNotice(LEFTOVER_NOTICE_SEEN, ("/nowhere/a copy",))
+
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", _sweep)
+    from yulon.ui.widgets.update_bar import UpdateBar
+
+    bar_said: list[str] = []
+
+    bar_callbacks: list[Any] = []
+
+    def _offer(self: Any, text: str, on_shown: Any = None) -> None:
+        # The record is made when the notice is SHOWN (fix round 2): kept for the test.
+        bar_callbacks.append(on_shown)
+        # Recorded, not shown: the window is shared, and a notice on the bar (or one
+        # waiting to be shown when it clears) would change what the update tests read.
+        # `test_update_bar_notice.py` holds what the bar does with it.
+        bar_said.append(text)
+
+    monkeypatch.setattr(UpdateBar, "offer_notice", _offer)
+
     window = main.build_window()
+    window.swept = swept
+    window.bar_said = bar_said
+    window.bar_callbacks = bar_callbacks
     window.saved_states = saved
     window.update_state_dir = scratch
     yield window
@@ -564,6 +595,11 @@ def _app_window(qapp: object) -> Iterator[Any]:
     QApplication.processEvents()
     monkeypatch.undo()
     shutil.rmtree(scratch, ignore_errors=True)
+
+
+LEFTOVER_NOTICE_SEEN = "a leftover copy is still there (test)"
+_REAL_SWEEP = main.sweep_leftover_client_copies
+"""The real sweep: `_app_window` replaces the module's for the whole module."""
 
 
 @pytest.fixture
@@ -959,6 +995,7 @@ def test_a_message_with_no_offer_behind_it_keeps_no_button(window: Any, update_h
     bar = window.property("update_bar")
     assert "You have the newest version" in bar.text()
     assert bar.details_button.isHidden()
+    assert bar.fading(), "the answer to a check must clear itself (T179 fix round 2)"
 
 
 def test_a_link_in_the_notes_is_not_announced_as_the_download_page(
@@ -2310,9 +2347,12 @@ class _Bar:
 
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.fading: list[str] = []
 
-    def show_message(self, text: str, *, keep_details: bool = False) -> None:
+    def show_message(self, text: str, *, keep_details: bool = False, fade: bool = False) -> None:
         self.messages.append(text)
+        if fade:
+            self.fading.append(text)
 
 
 def _swapped_install(tmp_path: Path) -> Any:
@@ -2353,6 +2393,8 @@ def test_the_first_start_after_a_swap_removes_the_old_build_and_says_so(tmp_path
 
     assert not (tmp_path / "app" / ".yulon-old").exists()
     assert bar.messages == ["Updated to Yu'lon 2."]
+    # T179 fix round 2: it clears itself, so a notice waiting behind it gets its turn.
+    assert bar.fading == ["Updated to Yu'lon 2."]
 
 
 def test_an_ordinary_start_removes_nothing_and_says_nothing(tmp_path: Path) -> None:
@@ -4446,3 +4488,99 @@ def test_the_launchers_server_tab_button_brings_its_tab_forward(
     launcher.server_tab_button.click()
 
     assert tabs.currentWidget() is view
+
+
+# ------------------------------------------- temporary client copies (T179 Task 5)
+
+
+def test_the_window_sweeps_leftover_client_copies_once_off_the_gui_thread(window: Any) -> None:
+    """`trinitycore.remove_recorded_leftovers()` at start, never on the GUI thread.
+
+    It removes folders of hard links to the player's own client, which can take a
+    while on a slow disk; a notice is said when anything is left.
+    """
+    import threading
+
+    from PySide6.QtWidgets import QApplication
+
+    for _ in range(200):
+        if window.swept:
+            break
+        QApplication.processEvents()
+        threading.Event().wait(0.01)
+    assert len(window.swept) == 1
+    assert window.swept[0] != threading.main_thread().name
+    for _ in range(200):
+        if LEFTOVER_NOTICE_SEEN in window.bar_said:
+            break
+        QApplication.processEvents()
+        threading.Event().wait(0.01)
+    assert window.bar_said.count(LEFTOVER_NOTICE_SEEN) == 1
+    # Shown -> recorded: the callback the bar is handed records THIS notice's folders.
+    (on_shown,) = window.bar_callbacks
+    recorded: list[Any] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(main, "leftover_notice_shown", lambda notice, **kw: recorded.append(notice))
+        on_shown()
+    assert [notice.folders for notice in recorded] == [("/nowhere/a copy",)]
+
+
+def test_the_sweep_says_nothing_when_nothing_is_left(tmp_path: Path) -> None:
+    assert _REAL_SWEEP(config_dir=tmp_path) is None
+
+
+def _leftover(tmp_path: Path, name: str) -> Path:
+    """A folder at a noted place that is not ours: kept, warned about, noticed."""
+    import json
+
+    from yulon.catalog.families import trinitycore
+
+    folder = tmp_path / name
+    folder.mkdir()
+    (folder / "keep.txt").write_text("not Yu'lon's", encoding="utf-8")
+    listing = tmp_path / trinitycore.LEFTOVERS_FILE
+    listed = json.loads(listing.read_text(encoding="utf-8")) if listing.is_file() else []
+    listed.append({"target": str(folder), "game": "wow-centurion", "server_dir": str(tmp_path)})
+    listing.write_text(json.dumps(listed), encoding="utf-8")
+    return folder
+
+
+def test_a_copy_that_stays_is_logged_and_said_in_one_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    foreign = _leftover(tmp_path, "WoW (Yu'lon map data, temporary)")
+    with caplog.at_level("WARNING", logger="main"):
+        notice = _REAL_SWEEP(config_dir=tmp_path)
+
+    assert notice is not None and "\n" not in notice.text
+    assert "temporary" in notice.text and "next time" in notice.text
+    assert notice.folders == (str(foreign),)
+    assert (foreign / "keep.txt").is_file(), "a folder that is not ours was touched"
+    assert any(str(foreign) in record.getMessage() for record in caplog.records)
+
+
+def test_a_notice_is_remembered_only_once_it_was_shown(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T179 fix round 2: a notice that never reached the screen is said at the next start."""
+    from yulon import ui_settings
+
+    foreign = _leftover(tmp_path, "WoW (Yu'lon map data, temporary)")
+    first = _REAL_SWEEP(config_dir=tmp_path)
+    assert first is not None
+    # Never shown (it waited behind an update offer the whole session): said again.
+    again = _REAL_SWEEP(config_dir=tmp_path)
+    assert again is not None and again.folders == (str(foreign),)
+
+    main.leftover_notice_shown(again, config_dir=tmp_path)
+    remembered = ui_settings.load_ui_settings(ui_settings.ui_settings_path(tmp_path))
+    assert remembered.noticed_leftovers == [str(foreign)]
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="main"):
+        assert _REAL_SWEEP(config_dir=tmp_path) is None, "said again after it was shown"
+    assert any(str(foreign) in record.getMessage() for record in caplog.records)
+
+    other = _leftover(tmp_path, "WoW 2 (Yu'lon map data, temporary)")
+    notice = _REAL_SWEEP(config_dir=tmp_path)
+    assert notice is not None and notice.folders == (str(other),)
+    assert "a temporary copy of a game client" in notice.text

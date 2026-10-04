@@ -2767,6 +2767,42 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete raises PlayClientError naming the files already removed, rather than "
         "reporting files removed"
     ),
+    ("catalog/families/trinitycore.py", "_drop_unlisted_archives"): (
+        "T179 Task 3 (fix round 1). Walks `Data/` of the TEMPORARY extraction client "
+        "`play_client.create()` has just made beside the player's client (its marker names "
+        "this game and server) for every `.MPQ` the block's `client_archives` does not keep, "
+        "and RENAMES each into `.yulon-left-out/` inside the same copy (fix round 2), so the "
+        "extractors, which read `Data/` only, never see another server's patch or an HD pack. "
+        "A rename changes no flag on the inode the copy shares with the player's file; the "
+        "player's own client is never listed or written, and the copy is removed through "
+        "`play_client.remove_folder()` either way"
+    ),
+    ("catalog/families/trinitycore.py", "_put_left_out_back"): (
+        "T179 Task 3 (fix round 3). Walks `.yulon-left-out/` of the TEMPORARY extraction "
+        "client beside the player's client to rename each archive moved aside there back to "
+        "its own path under the copy's `Data/` (and remove the emptied folders), before any "
+        "removal of the copy, so `play_client.remove_folder()` maps every name to the "
+        "player's file at the same path. Only ever inside a copy whose marker and place were "
+        "checked; the player's own client is never listed or written"
+    ),
+    ("catalog/families/trinitycore.py", "_parts_on_disk"): (
+        "T179 Task 6 (fix round 1). Lists one world SQL folder of the server's own checkout "
+        "to ask whether any `<stem>.<n>.sql` part of a split table a pending world update "
+        "names is still there. Read-only; it decides only whether that table is imported "
+        "again or left, never whether the app may write anywhere"
+    ),
+    ("catalog/families/extract.py", "overlay_files"): (
+        "T179 Task 3. Lists the server's own checkout folder `dbc_overlay_from` "
+        "(Centurion's `centurion/dbc`) to copy each file over the same name under "
+        "`data/dbc` in the server folder, through a temporary name renamed into place. "
+        "Read-only on the checkout; it writes only under the install's own `data/`, and a "
+        "folder with no files is a refusal, never a quiet no-op"
+    ),
+    ("catalog/families/extract.py", "missing_map_data"): (
+        "T179 Task 3. Lists `data/maps` under the server folder to ask whether a map file "
+        "exists for each map the world server checks at start. Read-only, and a listing that "
+        "fails reads as the maps missing, which refuses -- never as there"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 

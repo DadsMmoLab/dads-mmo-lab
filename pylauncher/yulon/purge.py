@@ -77,11 +77,15 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from yulon import dbsecret, docker, forgetting, logsnap, platform, rmtree
 from yulon.catalog import composegen
 from yulon.log import get_logger
 from yulon.ownership import Ownership
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import CatalogEntry
 
 logger = get_logger(__name__)
 
@@ -266,6 +270,22 @@ def refusal_for(
     return sentence
 
 
+def catalog_entry(game: str) -> CatalogEntry | None:
+    """The shipped catalog's entry for `game`, or None when it cannot be read or has none.
+
+    For the one Uninstall step that must name a container its own record cannot
+    (T179 Task 4 fix round 1: a background job whose record is unreadable).
+    Imported here rather than at module scope for `_default_claim`'s reason.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    try:
+        return load_catalog().get(game)
+    except (OSError, ValueError, KeyError) as exc:
+        logger.warning(f"could not read the catalog entry of {game}: {exc}")
+        return None
+
+
 class Uninstaller:
     """One install's uninstall, with every reach into the world as a seam.
 
@@ -303,6 +323,8 @@ class Uninstaller:
         remove_image: Callable[[str], str] | None = None,
         remove_folder: Callable[[Path], None] | None = None,
         forget_pending: Callable[[], None] | None = None,
+        remove_extraction_client: Callable[[], str] | None = None,
+        stop_background_jobs: Callable[[], None] | None = None,
     ) -> None:
         self.game = game
         self.server_dir = server_dir
@@ -329,6 +351,16 @@ class Uninstaller:
         self._remove_folder = remove_folder if remove_folder is not None else remove_tree
         self._forget_pending = (
             forget_pending if forget_pending is not None else self._real_forget_pending
+        )
+        self._remove_extraction_client = (
+            remove_extraction_client
+            if remove_extraction_client is not None
+            else self._real_remove_extraction_client
+        )
+        self._stop_background_jobs = (
+            stop_background_jobs
+            if stop_background_jobs is not None
+            else self._real_stop_background_jobs
         )
         # How the containers' removal is heard and steered while it waits for a
         # world that is still loading (T158, `docker.StopControl`). Set by the
@@ -384,6 +416,49 @@ class Uninstaller:
         from yulon import channel_setup
 
         channel_setup.remove_pending(self.game, composegen.install_id(self.server_dir))
+
+    def _real_remove_extraction_client(self) -> str:
+        """A temporary extraction client a crashed TrinityCore install left beside a client (T179).
+
+        It lives OUTSIDE the server folder, beside the player's own client, and its
+        game archives are hard links of the player's: the server folder's removal
+        never reaches it, and `rmtree` must never be pointed at it, because clearing
+        a read-only flag there clears it on the player's file. The family's own
+        remover finds it through the record in the server folder -- so it runs
+        BEFORE that folder goes -- and removes it through `play_client`'s, or notes
+        it in Yu'lon's own folder for the next start. When it can do neither, the
+        server folder holds the only note of it, so this raises and the folder is
+        kept (T179 fix round 5).
+        Imported here rather than at module scope for `_default_claim`'s reason.
+
+        Raises:
+            PurgeError: the copy could not be removed and could not be noted.
+        """
+        from yulon.catalog.families.trinitycore import LeftoverNotNoted, remove_for_uninstall
+
+        try:
+            return remove_for_uninstall(self.server_dir, self.game)
+        except LeftoverNotNoted as exc:
+            raise PurgeError(str(exc)) from exc
+
+    def _real_stop_background_jobs(self) -> None:
+        """A TrinityCore server's movement-map job, removed before its containers (T179 Task 4).
+
+        Started with `docker run -d`, not by compose, so `_remove_containers()`
+        never reaches it: left running it would hold the server image the loop
+        below removes and write into the folder being deleted. Found through its
+        record in the server folder, so a server with none asks Docker nothing.
+        Imported here rather than at module scope for `_default_claim`'s reason.
+
+        Raises:
+            PurgeError: the job could not be removed; nothing else was.
+        """
+        from yulon.catalog.families.mmaps import MmapsError, remove_for_uninstall
+
+        try:
+            remove_for_uninstall(self.server_dir, entry_of=lambda: catalog_entry(self.game))
+        except MmapsError as exc:
+            raise PurgeError(str(exc)) from exc
 
     def _pending_record(self) -> Path:
         """Where that record is, keyed as the channel keys it, for a sentence that names it."""
@@ -537,6 +612,9 @@ class Uninstaller:
         if snapshot.problem:
             logger.warning(f"uninstall: no log snapshot ({snapshot.problem}); going ahead anyway")
 
+        # BEFORE the containers: a background job (T179's movement maps) holds the
+        # server image and writes into the folder, and compose does not own it.
+        self._stop_background_jobs()
         removed_containers = self._remove_containers()
 
         kept: list[str] = []
@@ -574,6 +652,14 @@ class Uninstaller:
                 warnings.append(f"{ref} was left behind: {problem}")
             else:
                 removed_images.append(ref)
+
+        # BEFORE the folder: the record of where a leftover copy is lives in it. A
+        # copy it could neither remove nor note elsewhere raises here, and the
+        # folder and the install's record are kept (T179 fix round 5).
+        leftover = self._remove_extraction_client()
+        if leftover:
+            # Its own words, which never ask the person to delete the copy by hand.
+            warnings.append(leftover)
 
         self._remove_folder(self.server_dir)
 

@@ -16,7 +16,10 @@ import sys
 from pathlib import Path, PurePosixPath
 
 import pytest
+import yaml
 
+from tests import support_rendered
+from tests.support_trinitycore import CHECKOUT, CMAKE_OPTIONS, CORE_DIR, centurion_like
 from yulon import platform, resources
 from yulon.catalog import composegen
 from yulon.catalog.catalog import (
@@ -2317,3 +2320,197 @@ def test_the_importer_reads_its_module_list_from_the_environment(tmp_path: Path)
     # empty value as a third meaning — allow NO modules — measured on the real
     # image 2026-09-07 as `Loading modules: none`.
     assert "${AC_UPDATES_ALLOWED_MODULES:-}" not in plan.base
+
+
+# -- T179: the CMaNGOS renders are the bytes they were before TrinityCore --------
+
+
+@pytest.mark.parametrize("game", support_rendered.CMANGOS_GAMES)
+def test_every_cmangos_render_reproduces_its_committed_snapshot_byte_for_byte(game: str) -> None:
+    """The three compose files, the Dockerfile and the .dockerignore of each CMaNGOS game.
+
+    T179 widened the helpers these renders go through (`entry_tokens`, the folder
+    binds) from one built-here family to two. The snapshots under
+    `tests/data/cmangos-rendered/` were written from the code before that change,
+    so a TrinityCore case that leaks into a CMaNGOS render fails here by name.
+    """
+    texts = support_rendered.rendered(load_catalog().get(game))
+    folder = support_rendered.SNAPSHOT_ROOT / game
+    assert set(texts) == {path.name for path in folder.iterdir() if path.is_file()}
+    for name, text in texts.items():
+        assert text == (folder / name).read_text(encoding="utf-8"), f"{game}: {name}"
+    base = texts[composegen.BASE_FILE]
+    assert support_rendered.PASSWORD not in "".join(texts.values())
+    assert f"name: yulon-{game}-{support_rendered.linux_install_id(game)}\n" in base
+
+
+# -- T179: the TrinityCore family's templates ---------------------------------------
+
+CENTURION = centurion_like()
+TC_PASSWORD = "tc-0123456789abcdef"
+
+
+def render_trinitycore(server_dir: Path, bind_label: str = ":z") -> composegen.ComposePlan:
+    return composegen.render(
+        CENTURION,
+        server_dir,
+        templates_root=TEMPLATES,
+        db_password=TC_PASSWORD,
+        bind_label=bind_label,
+        platform_id=lambda: "linux",
+    )
+
+
+def tc_services(plan: composegen.ComposePlan) -> dict:
+    return yaml.safe_load(plan.base)["services"]
+
+
+def test_the_trinitycore_entry_tokens_carry_its_build_facts() -> None:
+    tokens = composegen.entry_tokens(CENTURION)
+    assert tokens["CORE_DIR"] == CORE_DIR, "the parent of conf.source_dir"
+    assert tokens["MAKE_JOBS"] == "2"
+    assert tokens["CHECKOUT"] == CHECKOUT
+    assert tokens["CMAKE_OPTIONS"].split(composegen.CMAKE_OPTION_JOINER) == list(CMAKE_OPTIONS)
+    assert tokens["CONTAINER_PREFIX"] == "centurion-"
+    assert tokens["DB_IMAGE"] == "mysql:8.4"
+
+
+def test_the_cmake_and_checkout_tokens_are_trinitycores_alone() -> None:
+    """A CMaNGOS or AzerothCore render cannot pick up a TrinityCore token by accident."""
+    for entry in [ENTRY, *CMANGOS_ENTRIES]:
+        tokens = composegen.entry_tokens(entry)
+        assert "CMAKE_OPTIONS" not in tokens, entry.id
+        assert "CHECKOUT" not in tokens, entry.id
+
+
+def test_the_trinitycore_compose_defines_every_service_the_entry_selects(tmp_path: Path) -> None:
+    plan = render_trinitycore(tmp_path / "wow")
+    for text in (plan.base, plan.override, plan.build):
+        assert text.startswith(composegen.GENERATED_MARKER)
+        assert "{{" not in text
+    services = tc_services(plan)
+    spec = CENTURION.container_spec()
+    selected = {spec.db, spec.auth, spec.world}
+    assert (
+        set(services)
+        == selected
+        == {
+            "centurion-db",
+            "centurion-authserver",
+            "centurion-worldserver",
+        }
+    )
+    for name, service in services.items():
+        assert service["container_name"] == name
+    image = f"{CENTURION.install.native.image_prefix}server:"  # type: ignore[union-attr]
+    assert services["centurion-authserver"]["image"].startswith(image)
+    assert services["centurion-worldserver"]["image"] == services["centurion-authserver"]["image"]
+    assert services["centurion-authserver"]["command"] == ["./authserver"]
+    assert services["centurion-worldserver"]["command"] == ["./worldserver"]
+    for name in ("centurion-authserver", "centurion-worldserver"):
+        assert services[name]["working_dir"] == f"{CORE_DIR}/bin"
+        assert services[name]["depends_on"] == {"centurion-db": {"condition": "service_healthy"}}
+
+
+def test_the_trinitycore_worldserver_holds_its_stdin_open(tmp_path: Path) -> None:
+    """The worldserver stops on stdin EOF (CliRunnable.cpp:183-186, facts §4)."""
+    world = tc_services(render_trinitycore(tmp_path / "wow"))["centurion-worldserver"]
+    assert world["stdin_open"] is True
+    assert world["tty"] is True
+    assert world["stop_grace_period"] == "5m"
+
+
+def test_the_trinitycore_database_is_mysql_8_4_with_the_generated_root_password(
+    tmp_path: Path,
+) -> None:
+    """The MySQL proof's verdict (8.4 OK), and the password only ever in `.env`."""
+    plan = render_trinitycore(tmp_path / "wow")
+    db = tc_services(plan)["centurion-db"]
+    assert db["image"] == "mysql:8.4"
+    assert db["environment"] == {
+        "MYSQL_ROOT_PASSWORD": "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}"
+    }
+    assert db["command"] == ["mysqld"]
+    assert db["ports"] == ["127.0.0.1:${DOCKER_DB_EXTERNAL_PORT:-3306}:3306"]
+    assert db["volumes"] == ["db-data:/var/lib/mysql"]
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": TC_PASSWORD}
+    for text in (plan.base, plan.override, plan.build):
+        assert TC_PASSWORD not in text
+        for mariadb in ("MARIADB_ROOT_PASSWORD", "mariadbd", "mariadb -u", "healthcheck.sh"):
+            assert mariadb not in text, f"{mariadb} is the MariaDB image's, not mysql:8.4's"
+
+
+def test_the_trinitycore_healthcheck_waits_for_the_real_server_over_tcp(tmp_path: Path) -> None:
+    """A socket probe answers during the image's --skip-networking init server; TCP cannot.
+
+    And healthy means root LOGS IN (T179 Task 2 review): `mysqladmin ping` exits 0 on
+    a refused login, so it proved "listening", not "the import can connect".
+    """
+    db = tc_services(render_trinitycore(tmp_path / "wow"))["centurion-db"]
+    test = db["healthcheck"]["test"]
+    assert test[0] == "CMD-SHELL"
+    probe = test[1]
+    assert "mysqladmin" not in probe, "ping answers 0 even when the login is refused"
+    assert probe.split(" mysql ", 1)[1].startswith("-h 127.0.0.1 --protocol=TCP -uroot -e")
+    assert "'SELECT 1'" in probe, "a statement, so the login is proved and not only the port"
+    assert "-h 127.0.0.1" in probe, "loopback keeps the probe out of the shutdown hold's count"
+    assert probe.startswith('MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql ')
+    assert "-p" not in probe.split(), "the password stays out of argv"
+
+
+def test_the_trinitycore_ports_are_auth_world_and_a_loopback_channel(tmp_path: Path) -> None:
+    plan = render_trinitycore(tmp_path / "wow")
+    services = tc_services(plan)
+    assert services["centurion-authserver"]["ports"] == ["${DOCKER_AUTH_EXTERNAL_PORT:-3724}:3724"]
+    assert services["centurion-worldserver"]["ports"] == [
+        "${DOCKER_WORLD_EXTERNAL_PORT:-8085}:8085"
+    ]
+    assert "7878" not in published_ports(plan.base)
+    assert published_ports(plan.override) == {"7878"}
+    override = yaml.safe_load(plan.override)["services"]
+    assert override == {
+        "centurion-worldserver": {"ports": ["${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878"]}
+    }
+    assert "ports" not in keys_in(plan.build)
+
+
+def test_the_trinitycore_binds_are_etc_data_and_the_confs_log_folders(tmp_path: Path) -> None:
+    """./etc on both servers (the compiled-in CONF_DIR), ./data on the world, and each
+    conf's LogsDir bound from the server folder, every host bind with the label."""
+    services = tc_services(render_trinitycore(tmp_path / "wow"))
+    assert services["centurion-authserver"]["volumes"] == [
+        f"./etc:{CORE_DIR}/etc:z",
+        f"./logs:{CORE_DIR}/logs:z",
+    ]
+    assert services["centurion-worldserver"]["volumes"] == [
+        f"./etc:{CORE_DIR}/etc:z",
+        f"./data:{CORE_DIR}/data:z",
+        f"./logs:{CORE_DIR}/logs:z",
+    ]
+    assert composegen.folder_confs(CENTURION) == composegen.TRINITYCORE_FOLDER_CONFS
+    assert composegen.conf_service(CENTURION, "worldserver.conf") == "worldserver"
+    assert composegen.conf_service(CENTURION, "playerbots.conf") is None
+
+
+def test_the_trinitycore_bound_folders_are_read_per_service(tmp_path: Path) -> None:
+    plan = render_trinitycore(tmp_path / "wow", bind_label="")
+    etc, logs = f"./etc:{CORE_DIR}/etc", f"./logs:{CORE_DIR}/logs"
+    assert composegen.bound_folders(CENTURION, plan.base, "authserver.conf") == {etc, logs}
+    assert composegen.bound_folders(CENTURION, plan.base, "worldserver.conf") == {
+        etc,
+        f"./data:{CORE_DIR}/data",
+        logs,
+    }
+    assert composegen.bound_folders(CENTURION, plan.base, "playerbots.conf") == frozenset()
+
+
+def test_the_trinitycore_build_overlay_builds_the_one_server_image(tmp_path: Path) -> None:
+    plan = render_trinitycore(tmp_path / "wow")
+    build = yaml.safe_load(plan.build)["services"]
+    assert build == {
+        "centurion-worldserver": {"build": {"context": ".", "dockerfile": "Dockerfile"}}
+    }
+    assert set(build) <= set(tc_services(plan))
+    assert composegen.built_image_refs(
+        CENTURION, tmp_path / "wow", platform_id=lambda: "linux"
+    ) == (tc_services(plan)["centurion-worldserver"]["image"],)

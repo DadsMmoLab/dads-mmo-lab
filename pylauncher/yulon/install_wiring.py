@@ -36,7 +36,7 @@ from yulon.catalog import upstream
 # imported at the top of the file is exactly the kind of shadow that type-checks
 # in one function and not in the other.
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.families import azerothcore
+from yulon.catalog.families import azerothcore, trinitycore
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
     SUDO_PROMPT_PREFIX,
@@ -403,6 +403,84 @@ def update_to_latest_for_app(
     )
 
 
+ReextractPress = Callable[..., Iterator[str]]
+"""`press(cancel=None, client_dir=None)`: the "Re-extract map data" run, its lines live (T179)."""
+
+
+def reextract_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> ReextractPress | None:
+    """T179 Task 6's "Re-extract map data" press for this install, or None when it has none.
+
+    Offered where the entry's family extracts its map data through the TrinityCore
+    engine's temporary client (`trinitycore.needs_reextract()` says when it is
+    due). Not for a server inside a WSL distro: the extraction runs an install's
+    containers, which `Seams.in_wsl()` refuses, and the movement-map job it
+    restarts lives on this host's Docker. The engine is built per press, for
+    `rebuild_for_app()`'s reason; `client_dir` None uses the client the map data
+    was last made from.
+    """
+    native = entry.install.native
+    if wsl_distro is not None or native is None or native.trinitycore is None:
+        return None
+
+    def press(
+        cancel: threading.Event | None = None, client_dir: Path | None = None
+    ) -> Iterator[str]:
+        engine = installer_for_app(entry)
+        if not isinstance(engine, trinitycore.TrinityCoreInstaller):
+            raise InstallerError(
+                f"{entry.name}'s install engine cannot extract map data again. That is a bug in "
+                "this build. Nothing was started."
+            )
+        yield from engine.reextract(
+            InstallOptions(server_dir=server_dir, client_dir=client_dir), cancel=cancel
+        )
+
+    return press
+
+
+WorldReimportPress = Callable[..., Iterator[str]]
+"""`press(cancel=None)`: the "Finish the world update" run, its lines live (T179)."""
+
+
+def world_reimport_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> WorldReimportPress | None:
+    """T179 Task 6's "Finish the world update" press for this install, or None when it has none.
+
+    Offered where the entry's family is the TrinityCore engine, whose update
+    route imports the world tables it changed and leaves a record when they did
+    not all go in (`trinitycore.pending_world_reimport()` says when). A server in
+    a WSL distro is offered it too: the press asks git, the database and the
+    world server, all of which `Seams.in_wsl()` addresses to the distro.
+    """
+    native = entry.install.native
+    if native is None or native.trinitycore is None:
+        return None
+
+    def press(cancel: threading.Event | None = None) -> Iterator[str]:
+        if wsl_distro is not None:
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
+        engine = installer_for_app(entry, wsl_distro=wsl_distro)
+        if not isinstance(engine, trinitycore.TrinityCoreInstaller):
+            raise InstallerError(
+                f"{entry.name}'s install engine cannot finish a world update. That is a bug in "
+                "this build. Nothing was started."
+            )
+        yield from engine.finish_world_reimport(
+            InstallOptions(server_dir=server_dir), cancel=cancel
+        )
+
+    return press
+
+
 def repair_compose_for_app(
     entry: CatalogEntry,
     server_dir: Path,
@@ -411,9 +489,10 @@ def repair_compose_for_app(
 ) -> ComposeRepairRoute | None:
     """T106's "Repair server files…" for this install, or None when it has none.
 
-    Offered to the CMaNGOS family (TBC, Vanilla, Tortoise) and, since T170, to
-    AzerothCore (WotLK), read off `install.native.family`. The CMaNGOS installs
-    keep the `docker-compose.yml` they were installed with: `rebuild_stages()`
+    Offered to the CMaNGOS family (TBC, Vanilla, Tortoise), since T170 to
+    AzerothCore (WotLK), and since T179 to TrinityCore (Centurion), read off
+    `install.native.family`. The CMaNGOS and TrinityCore installs keep the
+    `docker-compose.yml` they were installed with: `rebuild_stages()`
     leaves generate-compose out on purpose, and Update-to-latest rewrites a
     compose file only for a source whose `dest` is the server dir
     (`app_written_paths()`), which is WotLK's alone. So WotLK's own file is
@@ -434,7 +513,7 @@ def repair_compose_for_app(
     if wsl_distro is not None:
         return None
     block = entry.install.native
-    if block is None or block.family not in ("cmangos", "azerothcore"):
+    if block is None or block.family not in ("cmangos", "azerothcore", "trinitycore"):
         return None
     options = InstallOptions(server_dir=server_dir)
     return ComposeRepairRoute(

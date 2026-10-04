@@ -363,8 +363,72 @@ def announce_previous_update(
     # (`v0.8.73-Public`) and the window title carries `__version__`
     # (`0.8.73-Public`), and the first live gate put the two side by side on
     # one screen (round 3, F9).
-    bar.show_message(f"Updated to Yu'lon {without_v(outcome.version or running)}.")
+    bar.show_message(f"Updated to Yu'lon {without_v(outcome.version or running)}.", fade=True)
     return True
+
+
+LEFTOVER_COPIES_NOTICE = (
+    "Yu'lon could not remove {count} yet. It tries again the next time it starts; the log "
+    "says where."
+)
+LEFTOVER_LIST_UNREAD = (
+    "Yu'lon could not read its list of temporary game-client copies to remove. It tries again "
+    "the next time it starts; the log says why."
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class LeftoverNotice:
+    """What the start-up sweep wants said, and the folders it names (none when unreadable)."""
+
+    text: str
+    folders: tuple[str, ...] = ()
+
+
+def leftover_notice_shown(notice: LeftoverNotice, *, config_dir: Path | None = None) -> None:
+    """The notice is on the bar: its folders are said, and not said again at the next start."""
+    from yulon import ui_settings
+
+    if notice.folders and not ui_settings.remember_leftover_notices(
+        notice.folders, ui_settings.ui_settings_path(config_dir)
+    ):
+        logger.info("could not note that the leftover-copy notice was shown; it is said again")
+
+
+def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> LeftoverNotice | None:
+    """T179: remove the temporary client copies an Uninstall could not; the notice, or None.
+
+    A Centurion install extracts its map data from a temporary copy of the player's
+    client made of HARD LINKS beside the original. An Uninstall that could not remove
+    one notes it in Yu'lon's own folder (`trinitycore.LEFTOVERS_FILE`), and this is the
+    retry it promised: once, at start, through the same link-safe remover. Every
+    warning goes to the log at every start; one line is said for a folder still there
+    until a notice naming it was shown (`ui_settings.unnoticed_leftovers`). Runs off
+    the GUI thread (`build_window()`): removing a client-sized folder of links takes
+    a while on a slow disk.
+    """
+    from yulon.catalog.families import trinitycore
+
+    for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir):
+        logger.warning(warning)
+    from yulon import ui_settings
+
+    targets = trinitycore.recorded_leftover_targets(config_dir=config_dir)
+    if targets is None:
+        return LeftoverNotice(LEFTOVER_LIST_UNREAD)
+    # Once per folder (T179 Task 5 fix rounds 1-2): a copy left at every start is in
+    # the log every time, and said in the bar until a notice naming it was SHOWN
+    # (`leftover_notice_shown`, called by the bar) -- not merely offered.
+    fresh = ui_settings.unnoticed_leftovers(targets, ui_settings.ui_settings_path(config_dir))
+    left = len(fresh)
+    if left == 0:
+        return None
+    copies = (
+        "a temporary copy of a game client"
+        if left == 1
+        else f"{left} temporary copies of a game client"
+    )
+    return LeftoverNotice(LEFTOVER_COPIES_NOTICE.format(count=copies), tuple(fresh))
 
 
 HELPER_STAMP_SECONDS = 30.0
@@ -541,6 +605,9 @@ def build_window() -> object:
         yulon_log_panels: list[LogPanel]
         # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
         yulon_logs_view: LogsView
+        # T179: the runner of the start-up sweep of temporary client copies, held
+        # so the job is not collected while it runs.
+        yulon_sweep_jobs: Any
 
         # The input sources, so `_stop_background_threads()` can shut them down.
         # Typed as `Any`-free references to their concrete classes, imported in
@@ -1554,7 +1621,9 @@ def build_window() -> object:
             elif result.error:
                 update_bar.show_message(f"Could not check for updates: {result.error}")
             else:
-                update_bar.show_message(f"You have the newest version ({result.current}).")
+                update_bar.show_message(
+                    f"You have the newest version ({result.current}).", fade=True
+                )
 
         @Slot(object)
         def manual_failed(self, problem: object) -> None:
@@ -2031,6 +2100,23 @@ def build_window() -> object:
         window.yulon_controllers = controller_views
         assert isinstance(window, QWidget)
         return window
+
+    # T179: the temporary client copies an Uninstall could not remove, retried once
+    # now and off the GUI thread; what is left is logged and said in the bar. Not
+    # under the smoke test above, which must change nothing on the machine.
+
+    sweep_jobs = threaded_job_runner(window)
+    window.yulon_sweep_jobs = sweep_jobs
+
+    def _swept(notice: object) -> None:
+        # Below an update offer and the "Updated to" announcement: it waits for them.
+        if isinstance(notice, LeftoverNotice):
+            update_bar.offer_notice(notice.text, on_shown=lambda: leftover_notice_shown(notice))
+
+    def _sweep_failed(exc: object) -> None:
+        logger.warning(f"could not retry removing the temporary client copies: {exc}")
+
+    sweep_jobs(lambda: sweep_leftover_client_copies(), _swept, _sweep_failed)
 
     update_thread = QThread(window)
     update_worker = _UpdateWorker()

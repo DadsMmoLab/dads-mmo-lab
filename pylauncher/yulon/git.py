@@ -407,6 +407,13 @@ class CloneSpec:
         rev: Full commit SHA to check out after the clone (and after every
             update), or None for the tip of `branch`. A pin for cores whose
             upstream moves under a gate — Tortoise is pinned the day 7.6 passes.
+        sparse_exclude: Folders inside the repository the checkout leaves out,
+            everything else checked out (T179: Centurion's never-compiled
+            `playerbot reference/` and its `centurion/launcher/`). The clone is
+            then blob-less (`--filter=blob:none --no-checkout`), so what is
+            left out is neither downloaded nor written. Plain paths: the
+            catalog refuses git pattern syntax in them. Not with
+            `sparse_path`, which keeps one folder and drops the rest.
     """
 
     url: str
@@ -415,6 +422,56 @@ class CloneSpec:
     sparse_path: str | None = None
     depth: int | None = 1
     rev: str | None = None
+    sparse_exclude: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.sparse_exclude and self.sparse_path is not None:
+            raise ValueError(
+                "a clone keeps one folder (sparse_path) or leaves folders out (sparse_exclude), "
+                "not both"
+            )
+
+
+def sparse_exclude_patterns(paths: Sequence[str]) -> list[str]:
+    """The `--no-cone` sparse-checkout patterns that keep everything but `paths` (T179).
+
+    `/*` keeps every top-level entry and all beneath it; each `!/<path>/` then
+    drops one folder. Anchored with a leading `/` so `centurion/launcher` cannot
+    also match a `launcher` folder somewhere else, and ended with `/` so it names
+    the folder and not a file of that name. Non-cone because cone mode takes
+    folders to KEEP and cannot express "all but"; `ContainerGit` passes
+    `--no-cone` for `sparse_path` for the same reason of agreeing on one tree.
+    """
+    return ["/*", *(f"!/{path.strip('/')}/" for path in paths)]
+
+
+def _excluding_clone_args(spec: CloneSpec, *, progress: bool) -> list[str]:
+    """`git clone` for a `sparse_exclude` spec: blob-less and with no checkout (T179).
+
+    `--filter=blob:none` fetches commits and trees only, so the files of a left-out
+    folder are never downloaded; `--no-checkout` leaves the work tree empty until
+    the sparse patterns are set, so they are never written either. The checkout
+    that follows fetches exactly the blobs the patterns keep. A server that does
+    not know the filter answers with a full clone and a warning, which costs
+    bandwidth and changes nothing about the tree.
+    """
+    argv = [
+        "clone",
+        *(["--progress"] if progress else []),
+        *_LINE_ENDING_CONFIG,
+        *_HTTP_VERSION_CONFIG,
+        *_depth_args(spec.depth),
+        "--filter=blob:none",
+        "--no-checkout",
+    ]
+    if spec.branch:
+        argv += ["--branch", spec.branch]
+    return argv
+
+
+def _sparse_exclude_set_args(spec: CloneSpec) -> list[str]:
+    """`sparse-checkout set --no-cone` with `sparse_exclude_patterns()`, as git arguments."""
+    return ["sparse-checkout", "set", "--no-cone", *sparse_exclude_patterns(spec.sparse_exclude)]
 
 
 class Git(Protocol):
@@ -757,6 +814,66 @@ def _parse_count(raw: str) -> int | None:
     except ValueError:
         logger.debug(f"git rev-list --count did not answer with a number: {raw!r}")
         return None
+
+
+_DIFF_ARGS = ["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color"]
+"""What both diff questions ask, spelled once so the two `Git` bodies cannot drift (T179).
+
+`--no-renames` because a rename is then a removal and an addition, which is what
+the update route needs to hear -- a table file renamed is a table that moved --
+and because rename detection reads blobs, which a blob-less checkout may not
+hold. `--no-ext-diff`/`--no-textconv`: no program a repository names is run.
+"""
+
+
+def changed_files_args(old: str, new: str, paths: Sequence[str]) -> list[str]:
+    """`git diff --name-status -z <old> <new> -- <paths>`: which files differ, and how (T179)."""
+    return [*_DIFF_ARGS, "--name-status", "-z", old, new, "--", *paths]
+
+
+def parse_changed_files(raw: str) -> tuple[tuple[str, str], ...] | None:
+    """`(status letter, path)` pairs from a `--name-status -z` answer; None when malformed.
+
+    `-z` prints `M\\0path\\0A\\0path\\0`, unquoted. With `--no-renames` there is no
+    three-field record, so an odd count of fields is an answer this cannot read --
+    and "could not read" is not "nothing changed", for `_parse_count()`'s reason.
+    """
+    fields = raw.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 2:
+        logger.debug(f"git diff --name-status gave an answer this cannot read: {raw!r}")
+        return None
+    pairs = tuple((fields[i][:1], fields[i + 1]) for i in range(0, len(fields), 2))
+    if any(not status or not path for status, path in pairs):
+        return None
+    return pairs
+
+
+def changed_lines_args(old: str, new: str, path: str) -> list[str]:
+    """`git diff -U0 <old> <new> -- <path>`: one file's added and removed lines (T179)."""
+    return [*_DIFF_ARGS, "-U0", old, new, "--", path]
+
+
+def parse_changed_lines(raw: str) -> tuple[str, ...]:
+    """The `+`/`-` lines inside the hunks of a `-U0` diff, sign kept, in order.
+
+    Only lines AFTER a hunk header count: before the first `@@`, the `--- a/` and
+    `+++ b/` headers begin with the same characters as a removed SQL comment
+    (`--- a comment`) and an added line, and a parser going by the first
+    character alone would read a header as a change. A binary change has no hunk
+    and answers empty, which a caller must not read as "only harmless lines".
+    """
+    lines: list[str] = []
+    inside = False
+    for line in raw.splitlines():
+        if line.startswith("diff --git "):
+            inside = False
+        elif line.startswith("@@"):
+            inside = True
+        elif inside and line[:1] in ("+", "-"):
+            lines.append(line)
+    return tuple(lines)
 
 
 _SHALLOW_HEAD_AND_FETCHED = ["rev-parse", "--is-shallow-repository", "HEAD", "FETCH_HEAD"]
@@ -1301,7 +1418,7 @@ class RunnerGit:
         remote. It is affordable on a tab reload for that reason.
 
         **A SHALLOW clone is refused outright, and that is what makes the number
-        trustworthy at all.** Nine of the ten sources this app ships are
+        trustworthy at all.** Ten of the eleven sources this app ships are
         `depth: 1` (`Source.depth` defaults to 1, and only AzerothCore's core
         overrides it), and a checkout whose HEAD is a graft -- `_pin()`'s
         depth-1 fetch makes one, and `ContainerGit.clone()` made one on every
@@ -1335,6 +1452,35 @@ class RunnerGit:
             logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
             return None
         return _parse_count(proc.stdout)
+
+    def changed_files(
+        self, dest: Path, old: str, new: str, paths: Sequence[str]
+    ) -> tuple[tuple[str, str], ...] | None:
+        """Which files under `paths` differ between two commits, and how. None = cannot ask.
+
+        Read-only and local: both commits are in this checkout's store -- T179's
+        update route asks right after a move, about the commit it moved from and
+        the one it landed on. Trees only, so a blob-less checkout answers too.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *changed_files_args(old, new, paths)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
+            return None
+        return parse_changed_files(proc.stdout)
+
+    def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
+        """One file's added (`+`) and removed (`-`) lines between two commits. None = cannot ask."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *changed_lines_args(old, new, path)], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read how {path} changed in {dest}: {exc}")
+            return None
+        return parse_changed_lines(proc.stdout)
 
     def restore_rev(self, dest: Path, rev: str) -> None:
         """Put this checkout back on `rev`, detached, discarding what is in the way.
@@ -1462,6 +1608,19 @@ class RunnerGit:
         spec.dest.parent.mkdir(parents=True, exist_ok=True)
         if clear_only:
             return
+        if spec.sparse_exclude:
+            _run_git(
+                [
+                    "git",
+                    *_LINE_ENDING_ARGS,
+                    *_HTTP_VERSION_ARGS,
+                    *_excluding_clone_args(spec, progress=False),
+                    spec.url,
+                    str(spec.dest),
+                ]
+            )
+            self._fill_excluding(spec)
+            return
         if spec.sparse_path is None:
             argv = [
                 "git",
@@ -1511,6 +1670,22 @@ class RunnerGit:
             self.clone(spec)
             return
         self.clone(spec, clear_only=True)
+        if spec.sparse_exclude:
+            # Streamed in both of its long halves: the clone (commits and trees)
+            # and the checkout, which is where the kept files' blobs arrive.
+            yield from _streamed_git(
+                [
+                    "git",
+                    *_LINE_ENDING_ARGS,
+                    *_HTTP_VERSION_ARGS,
+                    *_excluding_clone_args(spec, progress=True),
+                    spec.url,
+                    str(spec.dest),
+                ],
+                stage=stage,
+            )
+            yield from self._fill_excluding_lines(spec, stage)
+            return
         argv = [
             "git",
             *_LINE_ENDING_ARGS,
@@ -1541,6 +1716,42 @@ class RunnerGit:
         )
         if _resets_to_the_tip(spec):
             _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
+
+    def _fill_excluding(self, spec: CloneSpec) -> None:
+        """Set the `sparse_exclude` patterns, then check the tree out: the tip, or the pin.
+
+        After a `--no-checkout` clone the work tree is empty and HEAD names the
+        branch; a plain `git checkout` writes the branch's tree through the
+        patterns. A pinned spec skips it and lets `_pin()` check out the pin
+        instead, so the blobs of a tip that is not the pin are never fetched.
+        """
+        _run_git(["git", *_LINE_ENDING_ARGS, *_sparse_exclude_set_args(spec)], cwd=spec.dest)
+        if spec.rev is None:
+            _run_git(["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "checkout"], cwd=spec.dest)
+            return
+        self._pin(spec, in_place=False)
+
+    def _fill_excluding_lines(self, spec: CloneSpec, stage: str) -> Iterator[str]:
+        """`_fill_excluding()`, its fetch and checkout streamed: the checkout fetches the blobs."""
+        _run_git(["git", *_LINE_ENDING_ARGS, *_sparse_exclude_set_args(spec)], cwd=spec.dest)
+        if spec.rev is None:
+            yield from _streamed_git(
+                ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "checkout", "--progress"],
+                cwd=spec.dest,
+                stage=stage,
+            )
+            return
+        fetch, checkout = _pin_args(spec, in_place=False)
+        yield from _streamed_git(
+            ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, *_with_progress(fetch)],
+            cwd=spec.dest,
+            stage=stage,
+        )
+        yield from _streamed_git(
+            ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, *_checkout_with_progress(checkout)],
+            cwd=spec.dest,
+            stage=stage,
+        )
 
     def _sparse_clone(self, spec: CloneSpec) -> None:
         assert spec.sparse_path is not None
@@ -1674,6 +1885,12 @@ def _with_progress(fetch: list[str]) -> list[str]:
     """A `fetch` argv with `--progress`, which git needs to report into a pipe at all."""
     assert fetch[0] == "fetch"
     return ["fetch", "--progress", *fetch[1:]]
+
+
+def _checkout_with_progress(checkout: list[str]) -> list[str]:
+    """A `checkout` argv with `--progress`: on a blob-less clone it is the long download."""
+    assert checkout[0] == "checkout"
+    return ["checkout", "--progress", *checkout[1:]]
 
 
 def _resets_to_the_tip(spec: CloneSpec) -> bool:
@@ -2056,6 +2273,34 @@ class ContainerGit:
             return None
         return _parse_count(proc.stdout)
 
+    def changed_files(
+        self, dest: Path, old: str, new: str, paths: Sequence[str]
+    ) -> tuple[tuple[str, str], ...] | None:
+        """`RunnerGit.changed_files()`, containerised; `writes=False`, nothing is fetched.
+
+        The read-only container has no network, so a diff that needed an object
+        this checkout does not hold fails, and answers None: "could not ask".
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, changed_files_args(old, new, paths), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what changed in {dest} from {old} to {new}: {exc}")
+            return None
+        return parse_changed_files(proc.stdout)
+
+    def changed_lines(self, dest: Path, old: str, new: str, path: str) -> tuple[str, ...] | None:
+        """`RunnerGit.changed_lines()`, containerised; `writes=False`, nothing is fetched."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, changed_lines_args(old, new, path), writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read how {path} changed in {dest}: {exc}")
+            return None
+        return parse_changed_lines(proc.stdout)
+
     def restore_rev(self, dest: Path, rev: str) -> None:
         """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
 
@@ -2203,6 +2448,28 @@ class ContainerGit:
             rmtree.remove_tree(spec.dest)  # T49
         spec.dest.mkdir(parents=True, exist_ok=True)
         if clear_only:
+            return
+        if spec.sparse_exclude:
+            try:
+                self._clone_with_mount_race_retry(
+                    spec, [*_excluding_clone_args(spec, progress=False), spec.url, "."]
+                )
+            except GitError as exc:
+                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                    logger.warning(
+                        f"containerized git clone failed in {spec.dest} ({exc}); "
+                        "falling back to host git"
+                    )
+                    RunnerGit().clone(spec)
+                    return
+                raise
+            # Outside the fallback's try, as the pin below always has been: a
+            # pattern or a pin git refuses is not "containerised git cannot run".
+            self._run(spec, _sparse_exclude_set_args(spec))
+            if spec.rev is None:
+                self._run(spec, ["checkout"])
+            else:
+                self._pin(spec, in_place=False)
             return
         argv = [
             "clone",
@@ -2574,6 +2841,32 @@ class ContainerGit:
             yield from self._pin_lines(spec, stage)
             return
         self.clone(spec, clear_only=True)
+        if spec.sparse_exclude:
+            try:
+                yield from self._streamed_clone_with_mount_race_retry(
+                    spec, [*_excluding_clone_args(spec, progress=True), spec.url, "."], stage=stage
+                )
+            except GitError as exc:
+                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                    logger.warning(
+                        f"containerized git clone failed in {spec.dest} ({exc}); "
+                        "falling back to host git"
+                    )
+                    yield from RunnerGit().clone_lines(spec, stage=stage)
+                    return
+                raise
+            self._run(spec, _sparse_exclude_set_args(spec))
+            if spec.rev is None:
+                yield from self._streamed_capture(
+                    spec.dest, ["checkout", "--progress"], stage=stage
+                )
+                return
+            fetch, checkout = _pin_args(spec, in_place=False)
+            yield from self._streamed_capture(spec.dest, _with_progress(fetch), stage=stage)
+            yield from self._streamed_capture(
+                spec.dest, _checkout_with_progress(checkout), stage=stage
+            )
+            return
         argv = [
             "clone",
             "--progress",

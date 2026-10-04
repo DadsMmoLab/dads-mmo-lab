@@ -23,9 +23,12 @@ from pathlib import Path
 
 import pytest
 
-from yulon import party, serverlock
+from yulon import install_wiring, party, serverlock
 from yulon.catalog import bot_dashboard, native
-from yulon.catalog.families import azerothcore
+from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.families import azerothcore, mmaps
+from yulon.controller_wow_centurion import accounts as centurion_accounts
+from yulon.controller_wow_centurion import maintenance as centurion_maintenance
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -179,6 +182,7 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-vanilla": (vanilla_accounts, vanilla_maintenance),
         "wow-tortoise": (tortoise_accounts, tortoise_maintenance),
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
+        "wow-centurion": (centurion_accounts, centurion_maintenance),
     }
     catalog = load_catalog()
     assert set(packages) == {
@@ -195,14 +199,17 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                 builder = getattr(mod, name, None)
                 if builder is None or not inspect.isfunction(builder):
                     continue
-                first = next(iter(inspect.signature(builder).parameters))
+                params = list(inspect.signature(builder).parameters)
+                # Centurion's package takes its entry first (T179 Task 5).
+                lead = (catalog.get(game),) if params[0] == "entry" else ()
+                first = params[len(lead)]
                 if first == "server_dir":
                     install = tmp_path / (game + "-" + name)
                     install.mkdir(exist_ok=True)
                     (install / ".db_password").write_text("hunter2", encoding="utf-8")
-                    seam = builder(install)
+                    seam = builder(*lead, install)
                 else:
-                    seam = builder("pw")
+                    seam = builder(*lead, "pw")
                 assert seam.client == expected, (
                     game
                     + " "
@@ -213,8 +220,8 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
                     + repr(expected)
                 )
                 checked += 1
-    assert checked == 11, (
-        str(checked) + " builders were exercised, not 11. An exact count, not a floor: the "
+    assert checked == 14, (
+        str(checked) + " builders were exercised, not 14. An exact count, not a floor: the "
         "floor this replaced had slack of one, so a deleted builder still passed it."
     )
 
@@ -332,9 +339,18 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     # per game in `test_controller_view.py`; what is required here is only that
     # the exception stays deliberate.
 
+    from yulon.ui.controller_view import _FACTORIES
+
     catalog = load_catalog()
-    for game in sorted(g.id for g in catalog.games):
-        entry = catalog.get(game)
+    shipped = {g.id for g in catalog.games}
+    assert shipped <= set(_FACTORIES), "a shipped game has no factory"
+    # T179: a factory whose game is not shipped yet is driven over its fixture entry,
+    # so its surface is held to the same rule (`wow-centurion` was, until Task 7).
+    entries = [catalog.get(game) for game in sorted(shipped)] + [
+        _fixture_entry(game) for game in sorted(set(_FACTORIES) - shipped)
+    ]
+    for entry in entries:
+        game = entry.id
         server_dir = tmp_path / game
         server_dir.mkdir()
         password_file = entry.install.password.file
@@ -539,8 +555,29 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         native_block = entry.install.native
         unrepaired = (
             set()
-            if native_block is not None and native_block.family in ("cmangos", "azerothcore")
+            if native_block is not None
+            and native_block.family in ("cmangos", "azerothcore", "trinitycore")
             else {"repair_compose"}
+        )
+        # T179's movement-map line: a catalog fact, the job the entry makes after the
+        # server is up (`mmaps.background_block`). Every shipped game makes its maps in
+        # the install, so it is absent there, the reference included.
+        unpathed = set() if mmaps.background_block(entry) is not None else {"pathfinding"}
+        # T179 Task 6's map-data and world-update lines: offered where the entry's
+        # engine leaves either owing after an update, read through the wiring the
+        # tab reads. Every shipped game's update leaves neither, the reference too.
+        unowed = (
+            set()
+            if install_wiring.world_reimport_for_app(entry, server_dir) is not None
+            else {"world_upkeep"}
+        )
+        # T64's Update to latest, decided by the entry's own flag (the route's first
+        # refusal); every shipped entry sets it. The trinitycore update route is T179
+        # Task 6's, and the fixture does not set it until then.
+        unlatest = (
+            set()
+            if native_block is not None and native_block.update_to_latest
+            else {"update_to_latest"}
         )
 
         # T137's conf repair, decided by the CATALOG: only an entry whose
@@ -573,6 +610,9 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         unlocked = set() if serverlock.applies() else {"lock_folder"}
         allowed = (
             unrepaired
+            | unpathed
+            | unowed
+            | unlatest
             | unconfed
             | unstocked
             | unmeasured
@@ -596,6 +636,8 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         if game == "wow-wotlk":
             reference = (
                 unprobed
+                | unpathed
+                | unowed
                 | unupdatable
                 | unadoptable
                 | unwindowed
@@ -624,3 +666,36 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 "say `has_manifests`, so a non-None store here means this game was handed "
                 "somebody else's manifests"
             )
+
+
+def _fixture_entry(game: str) -> CatalogEntry:
+    """The fixture entry of a game with a factory and no shipped catalog entry yet (T179)."""
+    if game == "wow-centurion":
+        from tests.support_trinitycore import centurion_like
+
+        return centurion_like()
+    raise KeyError(f"{game} has a factory and neither a catalog entry nor a fixture")
+
+
+def test_the_centurion_seam_builders_bind_the_entrys_declared_client(tmp_path: Path) -> None:
+    """The CMaNGOS builders' test above, for the package that takes its entry (T179).
+
+    Its builders take the entry first; the client must be the one the entry declares,
+    never a default. The shipped entry since T179 Task 7.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    entry = load_catalog().get("wow-centurion")
+    native_block = entry.install.native
+    assert native_block is not None
+    (tmp_path / ".db_password").write_text("hunter2", encoding="utf-8")
+    seams = [
+        centurion_accounts.sql_for(entry, "pw"),
+        centurion_accounts.sql_for_install(entry, tmp_path),
+        centurion_maintenance.mysql_for(entry, "pw"),
+    ]
+    for seam in seams:
+        assert seam.client == native_block.db.client == "mysql"
+        assert seam.db_container == entry.container_spec().db
+    with pytest.raises(centurion_accounts.AccountError, match="not knowable"):
+        centurion_accounts.sql_for_install(entry, tmp_path / "elsewhere")

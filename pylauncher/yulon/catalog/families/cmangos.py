@@ -67,7 +67,7 @@ import os
 import queue
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
 
@@ -99,6 +99,8 @@ from yulon.catalog.native import (
     StageContext,
     StagedInstaller,
     _put_all,
+    _speaking,
+    _stop_control,
     import_reads_as_finished,
     rerunnable_phases,
     secret_token_name,
@@ -1320,6 +1322,7 @@ class CmangosInstaller(StagedInstaller):
         yield from self.stage_import(ctx, gate, None)
         seen = gate.last
         if seen is not None and import_reads_as_finished(seen):
+            yield from self._stop_a_world_the_failed_run_left(ctx)
             self._refuse_rerun_into_a_running_world()
             yield from self._rerun_on_marked(ctx, plan)
             return
@@ -1340,7 +1343,7 @@ class CmangosInstaller(StagedInstaller):
                     charset=db.charset,
                     exec_stdin=self._seams.exec_stdin,
                 )
-            runs = sqlplan.expand(plan, ctx.server_dir, schemas, self._secret_tokens(ctx))
+            runs = self._expand(plan, ctx.server_dir, self._secret_tokens(ctx))
         except InstallerError:
             # Ahead of the broad clause, as everywhere else in this class:
             # `InstallerError` subclasses `RuntimeError`, and every refusal
@@ -1436,6 +1439,91 @@ class CmangosInstaller(StagedInstaller):
             ) from exc
         yield "The databases are imported and marked complete."
 
+    def _stop_a_world_the_failed_run_left(self, ctx: StageContext) -> Iterator[str]:
+        """Stop this install's own world container when its previous run failed (T206).
+
+        Seen live on Centurion: an install failed at `ready` with its world
+        server restarting over and over, and the next Install press was refused
+        here by that very container ("Press Stop on the Server tab") -- but an
+        install that never finished has no Server tab, so there was no press
+        that could follow the advice.
+
+        `ctx.state.last_error` is the previous run's failure sentence, and it is
+        still there when this stage runs: a resume records nothing new before
+        `import` (every stage up to it is already in `completed`, and
+        `with_stage()` leaves the state untouched then), and a run whose import
+        itself had not finished never reaches this branch. So a world running
+        here behind a failed run is the one that failed run's `up` started. A
+        finished install has no `last_error` (`_clear_error()`), and its running
+        world is still refused by `_refuse_rerun_into_a_running_world()`, which
+        reads the world again after this and is the one place that refuses.
+
+        Only a clear `True` is stopped; `False` needs nothing and `None` is left
+        to the refusal, which names Docker. And only a container whose compose
+        project is THIS folder's (`composegen.project_name()`, as
+        `_refuse_foreign_containers()` computes it): the world's name is the same
+        for every install of the game, so a container without that label, or
+        with another project's, is refused, never stopped (T206 review).
+        """
+        if not ctx.state.last_error:
+            return
+        container = self.entry.container_spec().world
+        try:
+            running = self._seams.ask_world_running(container)
+        except Exception as exc:  # noqa: BLE001 - the refusal reads it again and says so
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            return
+        if running is not True:
+            return
+        ours = composegen.project_name(
+            self.entry.id,
+            ctx.server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(ctx.server_dir),
+        )
+        try:
+            owner = self._seams.container_project(container)
+        except Exception as exc:  # noqa: BLE001 - not proved ours: the refusal says the rest
+            logger.warning(f"could not read the compose project of {container}: {exc}")
+            return
+        if owner != ours:
+            # The name is fixed per game, so it proves nothing: a container
+            # with no compose label (`None`, which `_refuse_foreign_containers`
+            # lets through), another project's, or an unreadable one is not
+            # this folder's, and is refused below rather than stopped.
+            return
+        yield (
+            f"The world server ({container}) that the last, unfinished run of this install "
+            "left running is still up or restarting; stopping it before the databases are "
+            "written."
+        )
+        spec = self.entry.container_spec()
+        # A world restarting while it is waited on never finishes loading (T159).
+        control = replace(_stop_control(ctx, rollback=False), restart_ends_the_wait=True)
+
+        def stop_it(say: docker.OutputSink) -> None:
+            self._seams.stop_world(
+                [container],
+                known=(spec,),
+                control=replace(control, say=say),
+                deadline=docker.STOP_PROCESS_DEADLINE_SECONDS,
+            )
+
+        try:
+            yield from _speaking(stop_it, control.abandon)
+        except docker.StopAbandoned as exc:
+            raise InstallerError(
+                f"This was stopped while {self.entry.name}'s world server was being stopped, so "
+                "nothing was imported. Press Install again to go on."
+            ) from exc
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"Yu'lon could not stop {self.entry.name}'s world server ({exc}), which the last, "
+                "unfinished run of this install left running. Nothing was imported. Check that "
+                "Docker is answering, then press Install again."
+            ) from exc
+        yield "The world server is stopped."
+
     def _refuse_rerun_into_a_running_world(self) -> None:
         """Owner answer 7, at the ordinary install route's own enforcement point.
 
@@ -1463,7 +1551,12 @@ class CmangosInstaller(StagedInstaller):
         the table.
 
         Not stopped on the user's behalf: a stop is its own consent (T7's
-        rule), and this function only ever refuses or returns.
+        rule), and this function only ever refuses or returns. The one
+        exception runs just before it, in `_stop_a_world_the_failed_run_left()`
+        (T206): a world of this folder's own compose project, left running by
+        a previous run of this install that failed, is stopped there -- an
+        unfinished install has no Server tab to press Stop on -- and this
+        function then reads the world again.
 
         Fails closed on anything short of an explicit `False`, the same
         discipline `apply.Applier`'s and `native`'s guards use: `None` and a
@@ -1653,10 +1746,9 @@ class CmangosInstaller(StagedInstaller):
         writes two files.
         """
         try:
-            return sqlplan.expand(
+            return self._expand(
                 plan.model_copy(update={"phases": rerunnable_phases(plan)}),
                 ctx.server_dir,
-                self._schemas(),
                 self._secret_tokens(ctx),
             )
         except InstallerError:
@@ -1746,10 +1838,9 @@ class CmangosInstaller(StagedInstaller):
     ) -> tuple[sqlplan.PhaseRun, ...]:
         """`_rerunnable_runs()`'s expansion, for the subset of the plan's phases a press names."""
         try:
-            return sqlplan.expand(
+            return self._expand(
                 plan.model_copy(update={"phases": tuple(phases)}),
                 ctx.server_dir,
-                self._schemas(),
                 self._secret_tokens(ctx),
             )
         except InstallerError:
@@ -2041,6 +2132,18 @@ class CmangosInstaller(StagedInstaller):
         undecided, and it is left where it is recorded.
         """
         return cast("sqlplan.SqlQuery", self._seams.sql_query)
+
+    def _expand(
+        self, plan: SqlPlan, server_dir: Path, tokens: Mapping[str, str]
+    ) -> tuple[sqlplan.PhaseRun, ...]:
+        """`sqlplan.expand()` over this game's schemas: the ONE spelling of a plan's runs.
+
+        The import, the re-runnable phases and the corrections press all come
+        through here, so a family whose plan changes what a run streams -- the
+        TrinityCore family's database-name renames (T179) -- overrides one method
+        and every route that applies its SQL agrees with the import about it.
+        """
+        return sqlplan.expand(plan, server_dir, self._schemas(), tokens)
 
     def _schemas(self) -> dict[str, str]:
         """The identity mapping over this game's schema NAMES, keyed by name (A10).

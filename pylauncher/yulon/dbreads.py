@@ -138,6 +138,10 @@ def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
     if ops is None:
         return MarkerAnswer(problem=f"{entry.id} has no measured bot marker yet")
     bots = ops.bots
+    if bots.prefix_conf_file is None or bots.prefix_conf_key is None:
+        # A tree with no prefix setting (T179: Centurion's fixed bot accounts):
+        # the catalog's prefix is the marker, and nothing on disk can change it.
+        return _checked(Marker(bots.account_prefix, "default"), bots)
     conf = server_dir / bots.prefix_conf_file
     try:
         text = conf.read_text(encoding="utf-8", errors="replace")
@@ -188,7 +192,8 @@ def _checked(marker: Marker, bots: BotMarker) -> MarkerAnswer:
     if not _SAFE_PREFIX.match(marker.prefix):
         return MarkerAnswer(
             problem=(
-                f"the bot account prefix {marker.prefix!r} ({bots.prefix_conf_key}) contains "
+                f"the bot account prefix {marker.prefix!r} "
+                f"({bots.prefix_conf_key or 'from the catalog'}) contains "
                 "characters that cannot be used in a query; nothing is counted until it is "
                 "changed"
             )

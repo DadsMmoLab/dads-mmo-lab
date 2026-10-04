@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_trinitycore import CHECKOUT, CMAKE_OPTIONS, CORE_DIR, centurion_like
 from yulon import resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -1599,3 +1600,137 @@ def test_a_render_that_copies_the_core_elsewhere_breaks_only_the_copy_rule() -> 
     assert elsewhere != text
     problems = playerbots_pin_problems(entry, elsewhere, ignore)
     assert len(problems) == 1 and "no COPY" in problems[0], problems
+
+
+# -- T179: the TrinityCore (Centurion) Dockerfile -----------------------------------
+
+CENTURION = centurion_like()
+CENTURION_TOOLS = ("mapextractor", "vmap4extractor", "vmap4assembler", "mmaps_generator")
+
+
+def centurion_pair() -> tuple[str, str]:
+    docker, ignore = dockerfile.render(
+        shipped(CENTURION),
+        composegen.entry_tokens(CENTURION),
+        secrets=native.Secrets(db_password="tc-0123456789abcdef"),
+    )
+    return str(docker), str(ignore)
+
+
+def run_lines(text: str) -> list[str]:
+    """Each Dockerfile instruction as one line: continuations joined, comments dropped."""
+    joined: list[str] = []
+    current = ""
+    for line in text.splitlines():
+        if line.lstrip().startswith("#") or not line.strip():
+            continue
+        current += line.rstrip().removesuffix("\\") + " "
+        if not line.rstrip().endswith("\\"):
+            joined.append(" ".join(current.split()))
+            current = ""
+    return joined
+
+
+def test_the_centurion_dockerfile_renders_whole_and_marked() -> None:
+    docker, ignore = centurion_pair()
+    for text in (docker, ignore):
+        assert text.startswith(composegen.GENERATED_MARKER)
+        assert "{{" not in text and "\r" not in text
+    froms = [line for line in run_lines(docker) if line.startswith("FROM ")]
+    assert froms == ["FROM ubuntu:24.04 AS builder", "FROM ubuntu:24.04"]
+
+
+def test_the_centurion_build_compiles_the_bots_and_the_tools_with_the_catalogs_defines() -> None:
+    """-DPLAYERBOT=ON is what compiles the bots at all (cmake/options.cmake:12, facts §1)."""
+    lines = run_lines(centurion_pair()[0])
+    cmake = [line for line in lines if line.startswith("RUN cmake ")]
+    assert len(cmake) == 1, cmake
+    for define in CMAKE_OPTIONS:
+        assert f" {define}" in cmake[0], define
+    assert "-DPLAYERBOT=ON" in cmake[0] and "-DTOOLS=ON" in cmake[0]
+    assert f"-DCMAKE_INSTALL_PREFIX={CORE_DIR}" in cmake[0]
+    assert "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache" in cmake[0]
+    assert f'COPY ["{CHECKOUT}", "/src/core"]' in lines
+
+
+def test_the_centurion_configure_never_asks_git_about_a_tree_with_no_repository() -> None:
+    """Build spike 2026-10-02: with `.git` left out of the context and `git` installed,
+    cmake/genrev.cmake read the revision as "+", skipped its "unknown" fallback and
+    failed configure at genrev.cmake:116. `-DWITHOUT_GIT=ON` (cmake/options.cmake:65)
+    is what built, and with it `git` is not needed in the builder at all."""
+    docker, ignore = centurion_pair()
+    lines = run_lines(docker)
+    (cmake,) = [line for line in lines if line.startswith("RUN cmake ")]
+    assert " -DWITHOUT_GIT=ON " in cmake
+    assert cmake.index("-DWITHOUT_GIT=ON") < cmake.index(CMAKE_OPTIONS[0]), "the template's own"
+    assert not in_build_context(ignore, f"{CHECKOUT}/.git/HEAD"), "why the define is needed"
+    builder_apt = next(line for line in lines if "apt-get install" in line)
+    assert " git " not in f"{builder_apt} ", "unused with WITHOUT_GIT=ON"
+
+
+def test_the_centurion_runtime_installs_the_boost_thread_library_the_worldserver_links() -> None:
+    """`ldd worldserver` names libboost_thread.so.1.83.0 (build spike 2026-10-02); it was in
+    the image only as another package's dependency, so it is named outright."""
+    lines = run_lines(centurion_pair()[0])
+    runtime = lines[[i for i, line in enumerate(lines) if line.startswith("FROM ")][1] :]
+    runtime_apt = next(line for line in runtime if "apt-get install" in line)
+    assert " libboost-thread1.83.0 " in runtime_apt
+
+
+def test_the_centurion_compile_keeps_its_objects_in_a_ccache_mount() -> None:
+    """As AzerothCore's Dockerfile does: a killed build keeps what it compiled."""
+    lines = run_lines(centurion_pair()[0])
+    compile_ = [line for line in lines if "make -j" in line]
+    assert len(compile_) == 1, compile_
+    assert compile_[0].startswith(
+        "RUN --mount=type=cache,id=yulon-centurion-ccache,target=/ccache,sharing=locked "
+    )
+    assert "make -j2 && make install" in compile_[0], "-j is the catalog's make_jobs"
+    assert "ENV CCACHE_DIR=/ccache" in lines
+    builder_apt = next(line for line in lines if "apt-get install" in line)
+    assert " ccache " in builder_apt, "ccache is installed in the builder"
+
+
+def test_the_centurion_runtime_carries_the_servers_the_tools_and_the_dists() -> None:
+    """The client-data and mmaps stages run the tools from THIS image (spec §1 steps 6, 10)."""
+    docker = centurion_pair()[0]
+    lines = run_lines(docker)
+    runtime = lines[[i for i, line in enumerate(lines) if line.startswith("FROM ")][1] :]
+    assert f"COPY --from=builder {CORE_DIR} {CORE_DIR}" in runtime
+    check = next(line for line in runtime if "ldd" in line)
+    for program in ("worldserver", "authserver", *CENTURION_TOOLS):
+        assert f" {program}" in check, program
+    for conf in ("worldserver", "authserver", "playerbots"):
+        assert f" {conf}" in check.split("for conf in", 1)[1].split(";", 1)[0], conf
+    assert "libmysqlclient21" in docker, "Oracle's client, never MariaDB Connector/C"
+    assert not [line for line in lines if "mariadb" in line.lower()], "comments aside"
+    assert " libmysqlclient-dev " in next(line for line in lines if "apt-get install" in line)
+    assert runtime[-1] == 'CMD ["./worldserver"]'
+    assert f"WORKDIR {CORE_DIR}/bin" in runtime
+    assert not [line for line in lines if re.match(r"^USER\s", line)]
+
+
+def test_the_centurion_context_is_the_core_without_what_is_never_compiled() -> None:
+    ignore = [
+        line
+        for line in centurion_pair()[1].splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert ignore[:2] == ["*", f"!{CHECKOUT}"]
+    for left_out in (".git", "build", "centurion/patches", "centurion/sql", "centurion/dbc", "sql"):
+        assert f"{CHECKOUT}/{left_out}" in ignore, left_out
+    assert f"{CHECKOUT}/src" not in ignore
+
+
+@pytest.mark.parametrize("never_compiled", ["centurion/launcher", "playerbot reference"])
+def test_what_centurion_never_compiles_stays_out_of_the_build_context(never_compiled: str) -> None:
+    """Asked of `.dockerignore`'s own rule (last match wins), not of the line's spelling.
+
+    `playerbot reference/` is a non-compiled copy of mod-playerbots (README.md:34,
+    0.96 GB) and `centurion/launcher/` is Centurion's own launcher; the sparse clone
+    leaves both out too (T179 Task 3), and the context must not depend on that.
+    """
+    ignore = centurion_pair()[1]
+    assert not in_build_context(ignore, f"{CHECKOUT}/{never_compiled}/src/main.cpp")
+    assert not in_build_context(ignore, f"{CHECKOUT}/{never_compiled}")
+    assert in_build_context(ignore, f"{CHECKOUT}/src/server/worldserver/Main.cpp")

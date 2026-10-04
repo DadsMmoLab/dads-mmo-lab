@@ -179,6 +179,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     # rebuild must NOT roll the images back for. An exception type, not
     # machinery — this module still runs no subprocess.
     "WorldStoppedAfterReadyError",
+    # Added deliberately with T179's final round: an update refused for one
+    # upstream commit, which the update route remembers so the tab stops
+    # offering it. An exception type, not machinery.
+    "UpdateRefused",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",
@@ -658,7 +662,13 @@ def test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks
         entry.id: tuple(source.dest for source in entry.emulator.sources)
         for entry in load_catalog().games
     }
-    assert set(landings) == {"wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"}, landings
+    assert set(landings) == {
+        "wow-wotlk",
+        "wow-tbc",
+        "wow-vanilla",
+        "wow-tortoise",
+        "wow-centurion",
+    }, landings
     into_server_dir = {
         game_id
         for game_id, dests in landings.items()

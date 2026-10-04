@@ -187,6 +187,47 @@ def patch(text: str, patch: ConfPatch, tokens: Mapping[str, str]) -> str:
     return "".join(lines)
 
 
+_C_SPACE = " \t\r\n\v\f"
+"""What C's `isspace` calls whitespace in the classic locale, which is what the reader trims."""
+
+
+def comment_unreadable(text: str) -> tuple[str, tuple[int, ...]]:
+    """`text` with every line the server's reader refuses written as a comment (T204).
+
+    Returns the new text and the 1-based numbers of the lines it commented out.
+
+    A refused line is one that is not blank once trimmed, does not start with `#`,
+    and either has no `=` or opens a `[` it never closes. TrinityCore's reader
+    (boost's ini parser) stops on the first one -- `'=' character not found in
+    line`, or `unmatched '['` -- so the world server never starts. A `[` closed
+    later on its line is a section header and is kept. The case that made this
+    rule: CENTURION's `worldserver.conf.dist` (line 4505 at 5e732762) has a printf
+    example inside a comment whose string holds real newlines, so two lines of it
+    are bare text.
+
+    Trimmed the way the reader trims, C `isspace` in the classic locale (space,
+    tab, CR, LF, VT, FF) and nothing more, after a leading BOM is dropped:
+    `str.strip()` would also take a no-break space and call a refused line blank.
+
+    Each refused line gets `# ` in front, with its own text and line ending kept;
+    every other line stays byte-for-byte as it was. Lines are split on `\n` alone,
+    as the reader's `std::getline` splits them: `str.splitlines()` also breaks at
+    U+2028 or a form feed and would comment out the back half of a real setting.
+    """
+    lines = text.split("\n")
+    refused: list[int] = []
+    for index, line in enumerate(lines):
+        body = line.lstrip("\ufeff").strip(_C_SPACE)
+        if not body or body.startswith("#"):
+            continue
+        # A section must close its `[`; any other line must carry a `=`.
+        if "]" in body[1:] if body.startswith("[") else "=" in body:
+            continue
+        lines[index] = f"# {line}"
+        refused.append(index + 1)
+    return "\n".join(lines), tuple(refused)
+
+
 def materialise(
     table: ConfPatchTable, *, image_ref: str, etc_dir: Path, copy_from_image: CopyFromImage
 ) -> tuple[Path, ...]:
@@ -296,13 +337,44 @@ def apply_table(
     for name, table_patch in table.files.items():
         path = etc_dir / name
         before = _read(path)
-        after = patch(before, table_patch, tokens)
+        # T204: here rather than in `materialise()`, because a resume keeps the file
+        # `materialise()` made and comes through here, so pressing Install again
+        # repairs a conf an earlier install wrote with these lines in it.
+        readable, refused = comment_unreadable(before)
+        if refused:
+            logger.warning(
+                f"commented out line(s) {', '.join(map(str, refused))} of {path}: the server "
+                "refuses a line that is not blank and not a comment but has no '=' or opens a "
+                "'[' it never closes"
+            )
+        after = patch(readable, table_patch, tokens)
         if after == before:
             continue
         _write(path, after)
         logger.info(f"patched {path}")
         changed.append(path)
     return tuple(changed)
+
+
+def set_keys(path: Path, keys: Mapping[str, str]) -> bool:
+    """Set `keys` in the conf at `path` in place, by `patch()`'s rules; True if its bytes changed.
+
+    For a key changed after the install (T179: `mmap.enablePathFinding` once the
+    movement maps are finished), through the same reader, patcher and writer the
+    conf stage uses, so the file keeps its line endings, its other keys and its
+    mode, and is never half-written. Written only on change, so asking twice is
+    harmless. The values are literal: no `{{TOKEN}}` is filled.
+
+    Raises:
+        InstallerError: the file could not be read or written.
+    """
+    before = _read(path)
+    after = patch(before, ConfPatch(keys=dict(keys)), {})
+    if after == before:
+        return False
+    replace_file(path, after)
+    logger.info(f"set {', '.join(keys)} in {path}")
+    return True
 
 
 def replace_file(path: Path, text: str, *, mode: int | None = None) -> None:

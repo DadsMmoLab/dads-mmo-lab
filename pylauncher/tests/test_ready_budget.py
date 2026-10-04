@@ -1026,7 +1026,10 @@ def _drive_every_wait(server_dir: Path, distro: str) -> dict[str, Callable[[], b
     somebody drives it, which is the failure the four-name parametrize could
     not produce.
     """
+    from tests.support_trinitycore import centurion_like
     from yulon.controller import Controller
+    from yulon.controller_wow_centurion import controller as centurion_controller
+    from yulon.controller_wow_centurion import docker_ctl as centurion_ctl
     from yulon.controller_wow_tbc import controller as tbc_controller
     from yulon.controller_wow_tbc import docker_ctl as tbc_ctl
     from yulon.controller_wow_tortoise import controller as tortoise_controller
@@ -1036,7 +1039,17 @@ def _drive_every_wait(server_dir: Path, distro: str) -> dict[str, Callable[[], b
     from yulon.controller_wow_wotlk import docker_ctl as wotlk_ctl
 
     host, port = "127.0.0.1", 8085
+    # T179: Centurion's package takes its entry (its shipped one is Task 7's).
+    centurion = centurion_like()
     return {
+        "yulon/controller_wow_centurion/controller.py::CenturionController.wait_ready": (
+            lambda: centurion_controller.CenturionController(
+                centurion, server_dir, wsl_distro=distro
+            ).wait_ready(host, port)
+        ),
+        "yulon/controller_wow_centurion/docker_ctl.py::wait_server_ready": (
+            lambda: centurion_ctl.wait_server_ready(centurion, wsl_distro=distro)
+        ),
         "yulon/controller.py::Controller.wait_ready": lambda: Controller(
             tbc_ctl.SPEC, server_dir, wsl_distro=distro
         ).wait_ready(host, port),
@@ -1199,7 +1212,7 @@ def test_a_ready_wait_asks_one_daemon_for_the_wait_the_state_and_the_log(
     # sites and T71's watch asks each of them whether THIS run's log still holds
     # its own banner. A log without them is a container that restarted, which is
     # a true thing to say about a fake that was never meant to say it.
-    up = "ready...\nAvg Diff: 15ms\nWorld server is up and running\n"
+    up = "ready...\nAvg Diff: 15ms\nWorld server is up and running\nWorld initialized\n"
     printed = [f"loading\n{up}", f"loading\nloaded the maps\n{up}"]
 
     def wait(spec: docker.ContainerSpec, ready: docker.ReadySpec, **kwargs: object) -> bool:
