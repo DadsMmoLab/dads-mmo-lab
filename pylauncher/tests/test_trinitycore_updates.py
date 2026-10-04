@@ -1594,10 +1594,14 @@ def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay
     said = str(failed.value)
     assert "could not be given a name to undo onto" in said
     assert "Permission denied" in said
-    assert "so nothing stops this server starting its new build on the old world tables." in said
+    # T223 (scoped re-review): the family's record could not be written, so its
+    # refusal is not there -- and the untested one is, so nothing runs the new build
+    # that never started, and no sentence says something would.
+    assert "nothing stops this server starting" not in said, said
     assert said.endswith(
-        native.SOURCES_LEFT_UNTOUCHED_NOTE
-    ), "nothing refuses, so it says Start runs it"
+        native.untouched_note(native.UNTESTED_BUILD_REFUSAL)
+    ), "the untested refusal is what refuses"
+    assert box.engine().start_refusal(box.server_dir) == native.UNTESTED_BUILD_REFUSAL
     assert box.head() == NEW
     assert box.pending() is None, "the ground: no world record could be written"
     assert needs_reextract(box.server_dir, ENTRY) is not None, "the flag went first"
@@ -1686,6 +1690,52 @@ def test_a_kept_build_is_left_to_the_finish_and_not_given_the_untested_refusal(
     box.finish()
     assert box.pending() is None
     CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_folder_that_takes_neither_record_says_nothing_stops_the_start(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T223: with the untested record unwritable too, nothing refuses, and the sentence says so."""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    real_write = Path.write_text
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name.startswith((trinitycore.WORLD_REIMPORT_FILE, native.START_REFUSED_FILE)):
+            raise PermissionError(13, "Permission denied")
+        return real_write(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    said = str(failed.value)
+    assert native.owed_start_refusal(box.server_dir) is None, "the ground: no record at all"
+    assert "nothing stops this server being started before it is rebuilt" in said, said
+    assert "so nothing stops this server starting its new build on the old world tables." in said
+    assert said.endswith(native.SOURCES_LEFT_UNTOUCHED_NOTE), said
+
+
+def test_a_kept_build_with_only_map_data_changed_is_given_the_untested_refusal(box: Box) -> None:
+    """T223 (scoped re-review): family work that records no world tables refuses nothing.
+
+    Only the map data changed, so `keep()` flags the re-extract and writes no world
+    record; without the untested refusal "its next Start runs the new build" -- one
+    that never started.
+    """
+    box.changes(("M", "centurion/dbc/Spell.dbc"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    said = str(failed.value)
+    assert "could not be given a name to undo onto" in said, "the ground: the untouched exit"
+    assert box.pending() is None, "the ground: no world record"
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the ground: map data flagged"
+    assert box.engine().start_refusal(box.server_dir) == native.UNTESTED_BUILD_REFUSAL
+    assert said.endswith(native.untouched_note(native.UNTESTED_BUILD_REFUSAL)), said
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
 
 
 def test_a_finish_that_fails_keeps_the_kept_builds_record(

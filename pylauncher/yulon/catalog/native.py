@@ -4851,6 +4851,15 @@ class StagedInstaller:
         """
         return owed_start_refusal(server_dir, rebuilding=rebuilding)
 
+    def family_start_refusal(self, server_dir: Path) -> str | None:
+        """The family's own reason no start may run, apart from `START_REFUSED_FILE` (T223).
+
+        None in the spine. TrinityCore's is a world update left unfinished. Asked by
+        the update route to decide whether a kept build's start is already refused
+        by its family, which then lets its own finish start it.
+        """
+        return None
+
     # -- the contract ----------------------------------------------------
 
     def server_dir(self, options: InstallOptions) -> Path:
@@ -6466,11 +6475,10 @@ class StagedInstaller:
                 # Rebuild succeeds -- in this geometry `compose up -d` would run
                 # the new import image beside the old world server.
                 warned = owe_start(server_dir) if message.mixed else ""
-                # T223 (lead ruling, option 1): exempt where the family's own work
-                # refuses Start -- T179's "Finish the world update" imports the kept
-                # build's tables and then starts it, the owner-approved exit.
-                family_refuses = servers_down is not None and servers_down.finishes_start_refusal
-                if message.untested and not family_refuses:
+                # Written on every untested exit; on the update route, taken back
+                # after `keep()` where the family's own record refuses Start instead
+                # (the lead's option 1, scoped re-review: judged by the record, not a flag).
+                if message.untested:
                     # T223 (cold review, then the lead): owner answer D1 -- a new build
                     # that never started is never what the next Start runs, whether
                     # Docker went silent or refused a tag. The update route says the
@@ -7078,6 +7086,18 @@ class StagedInstaller:
                     yield from work.keep()
                 except (InstallerError, OSError) as kept_failed:
                     also = f" {kept_failed}"
+                if (
+                    owed_start_refusal(server_dir) == UNTESTED_BUILD_REFUSAL
+                    and self.family_start_refusal(server_dir) is not None
+                ):
+                    # T223 (lead ruling, option 1): the family's own record refuses
+                    # Start, and T179's "Finish the world update" imports the kept
+                    # build's tables and then starts it -- the owner-approved exit.
+                    # Asked of the record `keep()` left, not of a flag: map data
+                    # alone, or a record that could not be written, refuses nothing.
+                    left_over = forget_owed_start(server_dir)
+                    if left_over:
+                        also += f" {left_over}"
                 # T217: the database stays with the new build too; its copy is kept.
                 self._forget_older_copies(server_dir, copy)
                 also += self._copy_kept(copy)
