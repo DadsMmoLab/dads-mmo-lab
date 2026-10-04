@@ -2809,8 +2809,10 @@ def test_a_thirty_minute_import_is_not_kept_in_memory(
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
     said = str(raised.value)
-    assert "line 9999" in said and "line 0 " not in said, said
-    assert len(said) < 1000, f"a {len(said)}-character message for a QLabel"
+    detail = raised.value.detail  # T214 review: the last words are Details', not the line's
+    assert "line 9999" in detail and "line 0 " not in detail, detail
+    assert "line 9999" not in said, said
+    assert len(said) + len(detail) < 1000, f"a {len(said) + len(detail)}-character failure"
 
 
 def test_a_sink_that_has_gone_away_cannot_kill_a_running_import(
