@@ -717,15 +717,7 @@ def stop_for_route(
                     f"not be removed ({exc}), so {route} was not started: it must not run while "
                     f"the server is rebuilt. Nothing was changed. {again}"
                 ) from exc
-            if not clear or not record.resumable:
-                return None
-            _clear_output(job)
-            _forget_record(server_dir)
-            return (
-                f"The {record.kept} pathfinding tiles kept from an earlier run were removed "
-                f"before {route}, which can change how they are made. It starts again from the "
-                "beginning once the server has been rebuilt, or from the Server tab."
-            )
+            return _drop_kept(job, record, route) if clear else None
         # Reconciled first: a run that FINISHED since the last status is a complete
         # set, switched on here, and never thrown away by the stop below. An
         # unreadable record has nothing to reconcile.
@@ -733,6 +725,11 @@ def stop_for_route(
             "queued",
             "running",
         ):
+            # It ended since the last poll. A failure there kept its finished
+            # tiles (`_fail`), which a route with `clear` must still remove.
+            after = read_record(server_dir)
+            if clear and after is not None and not after.unreadable and after.state == "failed":
+                return _drop_kept(job, after, route)
             return None
         try:
             kept = _stop(job, run, keep=None if clear else f"it was stopped for {route}.")
@@ -752,6 +749,19 @@ def stop_for_route(
             "removed and pathfinding stays off. It starts again from the beginning once the "
             "server has been rebuilt, or from the Server tab."
         )
+
+
+def _drop_kept(job: Job, record: Record, route: str) -> str | None:
+    """A failed run's kept tiles removed and its record forgotten before `route` (`clear`)."""
+    if not record.resumable:
+        return None
+    _clear_output(job)
+    _forget_record(job.server_dir)
+    return (
+        f"The {record.kept} pathfinding tiles kept from an earlier run were removed "
+        f"before {route}, which can change how they are made. It starts again from the "
+        "beginning once the server has been rebuilt, or from the Server tab."
+    )
 
 
 def discard(

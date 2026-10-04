@@ -1335,3 +1335,51 @@ def test_one_warning_per_failure_however_often_it_is_polled(
         )
     failed = [rec for rec in caplog.records if " failed: " in rec.getMessage()]
     assert len(failed) == 1
+
+
+def test_an_update_route_clears_the_tiles_of_a_run_that_crashed_since_the_last_poll(
+    server: Path,
+) -> None:
+    """Codex review: the route's own reconcile turns the run `failed` and keeps its tiles;
+    an update must still throw them away (the record still said `running`)."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    assert record(server)["state"] == "running", "nobody polled since it crashed"
+    said = mmaps.stop_for_route(
+        server,
+        ENTRY,
+        "the update to the newest code",
+        clear=True,
+        runner=fake,
+        install_id=INSTALL_ID,
+    )
+    assert output(server) == []
+    assert not (server / mmaps.RECORD_FILE).exists()
+    assert said is not None and said.startswith("The 3 pathfinding tiles kept from an earlier run")
+
+
+def test_a_rebuild_route_keeps_the_tiles_of_a_run_that_crashed_since_the_last_poll(
+    server: Path,
+) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    said = mmaps.stop_for_route(
+        server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+    )
+    assert said is None
+    assert len(output(server)) == 3 and record(server)["resumable"] is True
+
+
+def test_a_record_written_before_t209_is_never_continued(server: Path) -> None:
+    """No `resumable` and no `evidence` in it: its tiles are not known to be whole or current."""
+    lay_tiles(server, {"0000000.mmtile": mmtile(), "0000001.mmtile": mmtile()})
+    (server / mmaps.RECORD_FILE).write_text(
+        json.dumps({"version": 1, "state": "failed", "container": NAME}), "utf-8"
+    )
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
