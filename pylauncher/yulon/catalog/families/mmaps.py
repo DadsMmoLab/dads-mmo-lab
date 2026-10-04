@@ -26,17 +26,31 @@ name and id, why it failed, and when pathfinding was switched on. No record is
 what the container is really doing (`_reconcile()`), so a status after the app
 was closed and opened again is the same answer the first process would have
 given. Docker answering that the container is gone while the record says it
-runs is a failed run: its partial output is removed and it can be started
-again. Docker not answering at all changes nothing.
+runs is a failed run, which can be started again. Docker not answering at all
+changes nothing.
 
 **Pathfinding on only after a complete run** (Review Focus 3). A run is
 complete when its container exited with one of the plan's `success_codes`
 AND `data/mmaps` holds at least `min_files` files (`extract.counts()`, the rule
 the CMaNGOS `mmaps` stage records on). Then, and only then, worldserver.conf
 gets `mmap.enablePathFinding = 1` (`conf.set_keys()`, the conf stage's own
-writer), once; a failed, stopped or short run leaves it as it was and removes
-its partial output, because the generator SKIPS every tile it finds a file for
-(MapBuilder.cpp:1133-1150) and a set left by a dead run would look finished.
+writer), once; a failed, stopped or short run leaves it off.
+
+**A run that stops part-way keeps its finished tiles (T209).** The generator
+SKIPS every tile whose file has a header it can read (MapBuilder.cpp:1133-1152 at
+faac5fc9) and never checks the length, while each tile is its own file written
+header first (:977-988). So when a run fails, Docker loses its container, the
+player presses Stop, or a Rebuild stops it, `_keep_finished()` removes only the
+tiles that are not whole (the entry's `tile_header`: the magic, and a length of
+header plus `size`) and the record says `resumable` with the count kept. The
+next start continues from them -- but only while the map data is the one the run
+began with (`evidence`, a hash of `data/.yulon-extract.json` taken at its start);
+otherwise, and for a record that cannot be read or a folder of tiles with no
+record, it empties `data/mmaps` first as before. Update to latest, Return to the
+tested pin (`stop_for_route(clear=True)`: the generator's code may change while
+`MMAP_VERSION` does not) and Re-extract map data (`discard()`) still throw every
+tile away. After the generator CRASHED on a set, its later runs use the entry's
+`retry_threads` (Centurion: 1, the owner's stopgap for the crash at 16 %).
 
 **Never during a rebuild.** Rebuild, Update to latest, Return to the tested pin
 and Uninstall stop a job first (`stop_for_route()`, `remove_for_uninstall()`),
@@ -46,6 +60,7 @@ once a rebuild's server is ready.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -58,7 +73,7 @@ from typing import Literal, Protocol, cast
 
 from yulon import docker, platform, rmtree, server_build_presses
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry, ConfPatchTable, TrinityCoreData
+from yulon.catalog.catalog import CatalogEntry, ConfPatchTable, MmapTileHeader, TrinityCoreData
 from yulon.catalog.families import conf, extract
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
@@ -82,6 +97,10 @@ WORK_MOUNT = "/out"
 
 LOG_TAIL_LINES = 200
 """How much of the generator's log a status reads: bounded, the progress is in its last line."""
+
+TILE_SUFFIX = ".mmtile"
+"""`mmaps/MMMYYXX.mmtile`, one finished navmesh tile (MapBuilder.cpp:963 at faac5fc9); the
+per-map `MMM.mmap` is rewritten whenever a map starts (:649-651) and is never checked."""
 
 _PROGRESS = re.compile(r"^\s*(\d{1,3})% \[Map (\d+)\] Building tile", re.MULTILINE)
 """MapBuilder.cpp:547 at CENTURION faac5fc9:
@@ -204,6 +223,16 @@ class Record:
     error: str = ""
     pathfinding_on_at: str = ""
     """When `mmap.enablePathFinding = 1` was written; empty until it was."""
+    evidence: str = ""
+    """T209: the hash of `data/.yulon-extract.json` when this run started (`_evidence()`);
+    empty when there was none. A run is continued only while the hash is the same."""
+    resumable: bool = False
+    """T209: failed or stopped with `kept` finished tiles left for the next run."""
+    kept: int = 0
+    """T209: how many whole tiles it left (`_keep_finished()`), or a resume started from."""
+    crashed: bool = False
+    """T209: the generator crashed on this set (an exit outside `success_codes`); its later
+    runs use `retry_threads`. Carried while the set is continued."""
     unreadable: bool = False
     """Read off a file that could not be read or parsed: says nothing about the container.
     Never written."""
@@ -241,6 +270,10 @@ def read_record(server_dir: Path) -> Record | None:
             map=_int_or_none(raw.get("map")),
             error=str(raw.get("error", "")),
             pathfinding_on_at=str(raw.get("pathfinding_on_at", "")),
+            evidence=str(raw.get("evidence", "")),
+            resumable=raw.get("resumable") is True,
+            kept=_int_or_none(raw.get("kept")) or 0,
+            crashed=raw.get("crashed") is True,
         )
     except (ValueError, KeyError, TypeError) as exc:
         return Record(
@@ -311,6 +344,8 @@ class MmapsStatus:
     it reads the switch at start, so it uses the maps from its next start."""
     docker_unanswered: bool = False
     """Docker could not be asked this time; the state is the record's last word."""
+    kept: int = 0
+    """T209: a failed or stopped run's finished tiles, which the next run continues from."""
 
     @property
     def can_start(self) -> bool:
@@ -331,6 +366,11 @@ class MmapsStatus:
             done = f"{self.percent} %" if self.percent is not None else "being made (takes hours)"
             unasked = " (Docker did not answer just now)" if self.docker_unanswered else ""
             return f"Pathfinding data: {done}{unasked} — {RUNS_WITHOUT_IT}."
+        if self.state == "failed" and self.kept:
+            return (
+                f"Pathfinding data stopped part-way: {self.error} Its {self.kept} finished "
+                f"tiles are kept, and the next run continues from there."
+            )
         if self.state == "failed":
             return f"Pathfinding data could not be made: {self.error} It can be started again."
         if self.error:
@@ -490,9 +530,11 @@ def start_mmaps(
     """Start the job unless it is running or finished; the sentence that says what happened.
 
     Never a second job: the record is reconciled first, and a queued or running
-    one is left alone. A failed or never-started one begins clean -- a container
-    left under this folder's name is removed and `data/mmaps` is emptied first,
-    because the generator skips every tile it finds a file for.
+    one is left alone. A container left under this folder's name is removed. A
+    failed or stopped run that kept finished tiles is CONTINUED from them while
+    the map data is the one it began with (T209, `_resume_or_clear()`); any other
+    start empties `data/mmaps` first, because the generator skips every tile it
+    finds a file for.
 
     Raises:
         MmapsError: the map data is not there yet, `data/` is not inside the
@@ -522,11 +564,17 @@ def start_mmaps(
             if user_args is not None
             else tuple(platform.container_user_args(platform_id=_platform_id(ask)))
         )
-        argv = _filled_argv(job, run)
+        before = read_record(server_dir)
+        crashed = before is not None and not before.unreadable and before.crashed
+        evidence = _evidence(job)
+        argv = _filled_argv(job, run, retry=crashed)
         _remove_container(run, job.container)
-        _clear_output(job)
+        kept = _resume_or_clear(job, before, evidence)
         started = _stamp(now())
-        _write_record(server_dir, Record("queued", job.container, started=started))
+        queued = Record(
+            "queued", job.container, started=started, evidence=evidence, kept=kept, crashed=crashed
+        )
+        _write_record(server_dir, queued)
         spec = docker.ContainerRun(
             image=ref,
             argv=argv,
@@ -550,22 +598,26 @@ def start_mmaps(
                 logger.warning(f"could not remove {job.container} after its start failed: {again}")
             _write_record(
                 server_dir,
-                Record(
-                    "failed",
-                    job.container,
-                    started=started,
+                replace(
+                    queued,
+                    state="failed",
                     finished=_stamp(now()),
                     error=f"Docker could not start it ({exc}).",
+                    resumable=kept > 0,
                 ),
             )
             raise MmapsError(
                 f"Pathfinding data could not be started: Docker refused ({exc}). The server "
                 "runs without it."
             ) from exc
-        _write_record(
-            server_dir, Record("running", job.container, container_id=cid, started=started)
-        )
-        logger.info(f"started {job.container} ({cid}) in {server_dir}")
+        _write_record(server_dir, replace(queued, state="running", container_id=cid))
+        logger.info(f"started {job.container} ({cid}) in {server_dir} ({kept} tiles kept)")
+        if kept:
+            return (
+                f"Continuing the pathfinding data in the background from its {kept} finished "
+                "tiles; the server already runs without it. When it is finished, restart the "
+                "server to use it."
+            )
         return (
             "Making the pathfinding data in the background; this takes hours, and the "
             "server already runs without it. When it is finished, restart the server to use it."
@@ -580,13 +632,15 @@ def stop_mmaps(
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
 ) -> str:
-    """Stop a queued, running or failed job: its container and partial output gone, no record.
+    """Stop a queued, running or failed job: its container gone, its finished tiles kept.
 
-    A finished one is left exactly as it is: its maps are complete.
+    T209: the tiles a run finished stay for the next run (`_stop()` with a reason), and
+    the record says so; a run that finished none leaves no record, as before. A
+    finished one is left exactly as it is: its maps are complete.
 
     Raises:
         MmapsError: Docker could not remove the container (the record is kept),
-            or the partial output could not be removed.
+            or a cut-off tile or the output could not be removed.
     """
     job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
     with _LOCK:
@@ -596,7 +650,12 @@ def stop_mmaps(
             return "Pathfinding data is not being made; there was nothing to stop."
         if state == "done":
             return "Pathfinding data is already made; there was nothing to stop."
-        _stop(job, run)
+        kept = _stop(job, run, keep="you stopped it.")
+        if kept:
+            return (
+                f"Stopped making the pathfinding data. Its {kept} finished tiles are kept, and "
+                "the next run continues from there. Pathfinding stays off until a run finishes."
+            )
         return (
             "Stopped making the pathfinding data and removed what it had made so far. "
             "Pathfinding stays off until a run finishes."
@@ -608,6 +667,7 @@ def stop_for_route(
     entry: CatalogEntry,
     route: str,
     *,
+    clear: bool,
     press: str = server_build_presses.REBUILD,
     runner: Runner | None = None,
     platform_id: Callable[[], str] | None = None,
@@ -626,6 +686,13 @@ def stop_for_route(
     derived name. A removal or stop that fails raises, ending in what to do and
     `press`, the entry to press again; the route does not start, because the job
     must never run while the server is rebuilt.
+
+    `clear` (T209, the owner's word of 2026-10-04): False for a Rebuild, which
+    keeps the server's code, so a stopped run keeps its finished tiles and the
+    run started once the server is ready continues from them; True for Update to
+    latest, Return to the tested pin and Re-extract map data, whose new code or
+    map data the tiles were not made with -- then a failed run's kept tiles go too
+    and its record is forgotten.
     """
     again = f"Check that Docker is running, then press \u201c{press}\u201d again."
     if background_block(entry) is None:
@@ -649,7 +716,15 @@ def stop_for_route(
                     f"not be removed ({exc}), so {route} was not started: it must not run while "
                     f"the server is rebuilt. Nothing was changed. {again}"
                 ) from exc
-            return None
+            if not clear or not record.resumable:
+                return None
+            _clear_output(job)
+            _forget_record(server_dir)
+            return (
+                f"The {record.kept} pathfinding tiles kept from an earlier run were removed "
+                f"before {route}, which can change how they are made. It starts again from the "
+                "beginning once the server has been rebuilt, or from the Server tab."
+            )
         # Reconciled first: a run that FINISHED since the last status is a complete
         # set, switched on here, and never thrown away by the stop below. An
         # unreadable record has nothing to reconcile.
@@ -659,12 +734,18 @@ def stop_for_route(
         ):
             return None
         try:
-            _stop(job, run)
+            kept = _stop(job, run, keep=None if clear else f"it was stopped for {route}.")
         except MmapsError as exc:
             raise MmapsError(
                 f"{exc} The pathfinding data is still being made, so {route} was not started: "
                 f"it must not run while the server is rebuilt. Nothing was changed. {again}"
             ) from exc
+        if kept:
+            return (
+                f"Stopped making the pathfinding data before {route}; its {kept} finished tiles "
+                "are kept and pathfinding stays off. It continues from there once the server "
+                "has been rebuilt, or from the Server tab."
+            )
         return (
             f"Stopped making the pathfinding data before {route}; what it had made so far was "
             "removed and pathfinding stays off. It starts again from the beginning once the "
@@ -802,7 +883,11 @@ def _finished(
     if facts.exit_code not in plan.success_codes:
         words = docker.last_words(tuple((tail or "").splitlines()[-20:]))
         return _fail(
-            job, record, f"the generator stopped with exit {facts.exit_code}. {words}", run, now
+            job,
+            replace(record, crashed=True),
+            f"the generator stopped with exit {facts.exit_code}. {words}",
+            run,
+            now,
         )
     have = _set_size(job)
     if have < plan.min_files:
@@ -814,7 +899,13 @@ def _finished(
             now,
         )
     done = replace(
-        record, state="done", finished=_stamp(now()), percent=100, error="", map=record.map
+        record,
+        state="done",
+        finished=_stamp(now()),
+        percent=100,
+        error="",
+        map=record.map,
+        resumable=False,
     )
     _write_record(job.server_dir, done)
     try:
@@ -868,25 +959,43 @@ def _done_status(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStat
 def _fail(
     job: Job, record: Record, why: str, run: Runner, now: Clock, *, remove: bool = True
 ) -> MmapsStatus:
-    """Record a failed run: its container and partial output gone, pathfinding off."""
+    """Record a failed run: its container gone, its finished tiles kept, pathfinding off.
+
+    T209: `_keep_finished()` removes only the tiles that are not whole, and the
+    record says how many are left for the next run to continue from.
+    """
     if remove:
         try:
             run.remove(job.container, timeout=CHANGE_TIMEOUT)
         except docker.DockerCommandError as exc:
             logger.warning(f"could not remove the failed {job.container}: {exc}")
     try:
-        _clear_output(job)
+        kept = _keep_finished(job)
         cleared = ""
     except MmapsError as exc:
-        cleared = f" {exc}"
-    failed = replace(record, state="failed", finished=_stamp(now()), error=f"{why}{cleared}")
+        kept, cleared = 0, f" {exc}"
+    failed = replace(
+        record,
+        state="failed",
+        finished=_stamp(now()),
+        error=f"{why}{cleared}",
+        resumable=kept > 0,
+        kept=kept,
+    )
     _write_record(job.server_dir, failed)
     logger.warning(f"{job.container} failed: {failed.error}")
     return _status_of(failed, pathfinding_on=_pathfinding_on(job))
 
 
-def _stop(job: Job, run: Runner) -> None:
-    """Container removed, partial output removed, record gone: not started."""
+def _stop(job: Job, run: Runner, *, keep: str | None) -> int:
+    """Container removed, then the finished tiles kept (`keep`, the reason) or all removed.
+
+    `keep` is what the record's error says (T209): the run's whole tiles stay and
+    the record reads failed and resumable, so the next start continues from them.
+    Kept only from a record this module can read (it holds the map data's hash);
+    with `keep` None, no record, or no whole tile, `data/mmaps` is emptied and the
+    record forgotten: not started. The number of tiles kept.
+    """
     name = job.container
     try:
         run.remove(name, timeout=CHANGE_TIMEOUT)
@@ -895,19 +1004,40 @@ def _stop(job: Job, run: Runner) -> None:
             f"The background job making the pathfinding data ({name}) could not be stopped "
             f"({exc})."
         ) from exc
+    record = read_record(job.server_dir)
+    kept = 0
+    if keep is not None and record is not None and not record.unreadable:
+        kept = _keep_finished(job)
+    if kept and record is not None:
+        stopped = replace(
+            record,
+            state="failed",
+            finished=_stamp(_utc_now()),
+            error=keep or "",
+            resumable=True,
+            kept=kept,
+        )
+        _write_record(job.server_dir, stopped)
+        logger.info(f"stopped {name} in {job.server_dir}; {kept} finished tiles kept")
+        return kept
     _clear_output(job)
     _forget_record(job.server_dir)
     logger.info(f"stopped {name} in {job.server_dir}")
+    return 0
 
 
-def _filled_argv(job: Job, run: Runner) -> tuple[str, ...]:
+def _filled_argv(job: Job, run: Runner, *, retry: bool = False) -> tuple[str, ...]:
     """The plan's argv with `{{THREADS}}` filled (`TrinityCoreMmaps.threads`).
 
     `half` is half the DAEMON's CPUs, at least 1: on Docker Desktop that is the
     VM's share, not this host's `os.cpu_count()`. A daemon that does not say is 1.
+    `retry` (T209): the generator crashed on this set before, so the plan's
+    `retry_threads` is used when it has one.
     """
     plan = job.block.mmaps
-    if isinstance(plan.threads, int):
+    if retry and plan.retry_threads is not None:
+        threads = plan.retry_threads
+    elif isinstance(plan.threads, int):
         threads = plan.threads
     else:
         cpus = run.cpus(timeout=CHANGE_TIMEOUT)
@@ -946,14 +1076,8 @@ def _checked_data_dir(job: Job) -> Path:
     return data_dir
 
 
-def _clear_output(job: Job) -> None:
-    """Pathfinding switched off, then `data/mmaps` emptied and present for the next bind.
-
-    Off FIRST, whenever the maps are emptied, whatever switched it on: a record
-    that was lost or edited may hide that an earlier complete run turned it on,
-    and a world server told to path over an empty folder is worse than one told
-    not to. So "pathfinding on" never outlives the set it was switched on for.
-    """
+def _switch_off(job: Job) -> None:
+    """`mmap.enablePathFinding = 0` before any tile is removed (see `_clear_output()`)."""
     if _pathfinding_on(job):
         try:
             conf.set_keys(job.world_conf, {PATHFINDING_KEY: "0"})
@@ -962,6 +1086,122 @@ def _clear_output(job: Job) -> None:
                 f"pathfinding could not be switched off in the world server's conf ({exc}), so the "
                 "movement maps it would read were left as they are."
             ) from exc
+
+
+def _evidence(job: Job) -> str:
+    """The hash of `data/.yulon-extract.json` (`extract.EVIDENCE_FILE`); empty without one.
+
+    The extraction writes that file whenever it makes the map data, and Re-extract
+    map data removes it first, so a different hash means the maps, vmaps or DBCs a
+    run's tiles were made from may have changed under them (T209).
+    """
+    try:
+        raw = (job.data_dir / extract.EVIDENCE_FILE).read_bytes()
+    except OSError:
+        return ""
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:
+    """Before a start: the whole tiles a resumable run kept, or `data/mmaps` emptied (0).
+
+    Continued only from a readable record that says `resumable`, whose map data
+    hash is not empty and is the one `data/` has now, and only when the entry
+    says how to tell a whole tile (`tile_header`). The tiles are checked again
+    here, because files can change between the failure and the start.
+    """
+    resumable = (
+        before is not None
+        and not before.unreadable
+        and before.state == "failed"
+        and before.resumable
+        and job.block.mmaps.tile_header is not None
+    )
+    if resumable and before is not None and (not before.evidence or before.evidence != evidence):
+        logger.warning(
+            f"the map data in {job.data_dir} changed since the pathfinding run that stopped "
+            f"part-way began, so its {before.kept} finished tiles were removed and the run "
+            "starts again from the beginning"
+        )
+        resumable = False
+    if resumable:
+        return _keep_finished(job)
+    _clear_output(job)
+    return 0
+
+
+def _keep_finished(job: Job) -> int:
+    """Pathfinding switched off, then every `.mmtile` that is not whole removed; the count kept.
+
+    Whole is the entry's `tile_header` (`_whole_tile()`): the file starts with the
+    magic and is the header plus the `size` it states long. Anything else under
+    `*.mmtile` is a tile the generator was writing when it stopped, which it would
+    otherwise skip as finished. `MMM.mmap` and every other file are left alone.
+    With no `tile_header` the entry cannot tell, and the folder is emptied (0).
+    """
+    header = job.block.mmaps.tile_header
+    if header is None:
+        _clear_output(job)
+        return 0
+    _switch_off(job)
+    data_dir = _checked_data_dir(job)
+    out = data_dir / MMAPS_DIR
+    if not out.is_dir():
+        if data_dir.is_dir():
+            _clear_output(job)
+        return 0
+    kept = 0
+    try:
+        tiles = [
+            path
+            for path in out.iterdir()
+            if path.name.endswith(TILE_SUFFIX) and (path.is_symlink() or not path.is_dir())
+        ]
+    except OSError as exc:
+        raise MmapsError(f"{out} could not be read ({exc}).") from exc
+    for path in tiles:
+        if _whole_tile(path, header):
+            kept += 1
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise MmapsError(
+                f"{path} was cut off when the generator stopped and could not be removed "
+                f"({exc}); the generator would skip it as finished."
+            ) from exc
+    return kept
+
+
+def _whole_tile(path: Path, header: MmapTileHeader) -> bool:
+    """Does `path` start with the magic and run to exactly the header plus its `size`?"""
+    try:
+        if not path.is_file() or path.is_symlink():
+            return False
+        length = path.stat().st_size
+        with path.open("rb") as tile:
+            head = tile.read(header.length)
+    except OSError:
+        return False
+    if len(head) < header.length:
+        return False
+    if int.from_bytes(head[:4], "little") != header.magic:
+        return False
+    size = int.from_bytes(head[header.size_offset : header.size_offset + 4], "little")
+    return length == header.length + size
+
+
+def _clear_output(job: Job) -> None:
+    """Pathfinding switched off, then `data/mmaps` emptied and present for the next bind.
+
+    Off FIRST, whenever the maps are emptied, whatever switched it on: a record
+    that was lost or edited may hide that an earlier complete run turned it on,
+    and a world server told to path over an empty folder is worse than one told
+    not to. So "pathfinding on" never outlives the set it was switched on for.
+    """
+    _switch_off(job)
     data_dir = _checked_data_dir(job)
     out = data_dir / MMAPS_DIR
     try:
@@ -1035,6 +1275,7 @@ def _status_of(record: Record, *, pathfinding_on: bool = False) -> MmapsStatus:
         finished=record.finished,
         error=record.error if record.state == "failed" else "",
         pathfinding_on=pathfinding_on,
+        kept=record.kept if record.state == "failed" and record.resumable else 0,
     )
 
 

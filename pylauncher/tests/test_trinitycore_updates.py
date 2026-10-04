@@ -1095,6 +1095,7 @@ def test_a_failed_job_whose_container_is_already_gone_stops_nothing(tmp_path: Pa
             ENTRY,
             "the rebuild",
             press="Rebuild the server…",
+            clear=False,
             runner=fake,
             install_id="0123abcd",
         )
@@ -1121,6 +1122,7 @@ def test_a_route_the_job_holds_up_says_to_check_docker_and_press_it_again(
             ENTRY,
             "the update to the newest code",
             press="Update the server to latest…",
+            clear=True,
             runner=fake,
             install_id="0123abcd",
         )

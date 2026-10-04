@@ -503,3 +503,54 @@ def test_the_extraction_client_keeps_only_the_archives_the_entry_names() -> None
 def test_a_client_archive_that_is_not_a_plain_archive_name_is_refused(name: str, rule: str) -> None:
     with pytest.raises(ValidationError, match=re.escape(rule)):
         NativeInstall.model_validate(_native(extract__client_archives=[name]))
+
+
+# -- T209: the tile header a resume checks, and the retry's threads ------------------------
+
+
+def test_centurions_tile_header_is_the_pinned_structs() -> None:
+    """`struct MmapTileHeader` at CENTURION faac5fc9 (MapDefines.h:24-41), as the tests spell it
+    from the C source: magic first, `size` the fourth uint32, 20 bytes in all."""
+    from tests.support_trinitycore import MMAP_MAGIC, TILE_HEADER, mmtile
+    from yulon.catalog.catalog import load_catalog
+
+    block = load_catalog().get("wow-centurion").install.native.trinitycore  # type: ignore[union-attr]
+    assert block is not None
+    header = block.mmaps.tile_header
+    assert header is not None
+    assert (header.length, header.magic) == (TILE_HEADER.size, MMAP_MAGIC)
+    tile = mmtile(1234)
+    assert int.from_bytes(tile[header.size_offset : header.size_offset + 4], "little") == 1234
+    assert block.mmaps.retry_threads == 1, "owner 2026-10-04: one thread after a crash"
+
+
+def test_without_a_tile_header_nothing_is_ever_kept_and_without_retry_threads_none() -> None:
+    block = NativeInstall.model_validate(_native()).trinitycore
+    assert block is not None
+    assert block.mmaps.tile_header is None and block.mmaps.retry_threads is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tile_header", {"length": 20, "magic": 0x4D4D4150, "size_offset": 17}),
+        ("tile_header", {"length": 20, "magic": 1 << 32, "size_offset": 12}),
+        ("tile_header", {"length": 20, "magic": 0x4D4D4150, "size_offset": 2}),
+        ("retry_threads", 0),
+        ("retry_threads", "half"),
+        ("retry_threads", True),
+    ],
+    ids=(
+        "size-past-the-header",
+        "magic-past-uint32",
+        "size-over-the-magic",
+        "zero-threads",
+        "half-is-not-a-retry",
+        "bool",
+    ),
+)
+def test_the_tile_header_and_retry_threads_refuse_nonsense(field: str, value: object) -> None:
+    raw = _native()
+    raw["trinitycore"]["mmaps"][field] = value
+    with pytest.raises(ValidationError):
+        NativeInstall.model_validate(raw)

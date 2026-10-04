@@ -1521,7 +1521,13 @@
                 "{{THREADS}}"
               ],
               "min_files": 500,
-              "background": true
+              "background": true,
+              "retry_threads": 1,
+              "tile_header": {
+                "length": 20,
+                "magic": 1296908624,
+                "size_offset": 12
+              }
             },
             "conf": {
               "source_dir": "/opt/trinitycore/etc",

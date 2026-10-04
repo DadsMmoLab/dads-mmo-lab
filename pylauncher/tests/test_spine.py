@@ -2813,6 +2813,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "exists for each map the world server checks at start. Read-only, and a listing that "
         "fails reads as the maps missing, which refuses -- never as there"
     ),
+    ("catalog/families/mmaps.py", "_keep_finished"): (
+        "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "
+        "or `data/` is a link -- to remove each `.mmtile` that is not whole (the tile the "
+        "generator was writing when it stopped) and count the rest. A listing that fails "
+        "raises `MmapsError`: the run is then recorded with nothing kept, or the start is "
+        "refused, so a cut-off tile is never left for the generator to skip as finished"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 
