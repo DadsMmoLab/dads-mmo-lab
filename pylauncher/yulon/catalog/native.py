@@ -5551,7 +5551,11 @@ class StagedInstaller:
         **Bounded twice, by the clock and by the number of asks.** The clock is the
         bound that holds in use, where each ask can take its own 10 seconds; the
         count is the one that holds where `sleep` costs nothing and the clock is
-        real -- every test -- and without it this would spin real seconds.
+        real -- every test -- and without it this would spin real seconds. No ask
+        STARTS once the three minutes are spent, and the last pause is cut to what
+        is left; an ask started inside them can still run to its own 10-second
+        bound, so the wait can end up to that much past three minutes, and the
+        refusal says the time it measured.
 
         **A Stop ends the wait before the replace, and does not end it in a
         restore.** Before the replace a Stop gives up the new build, which is
@@ -5573,11 +5577,19 @@ class StagedInstaller:
             "server as it is."
         )
         for _ in range(int(DOCKER_PATIENCE_S // DOCKER_PATIENCE_POLL_S)):
+            left = DOCKER_PATIENCE_S - (self._seams.monotonic() - started)
+            if left <= 0:
+                break
+            if not rollback:
+                self._stopped_waiting_for_docker(ctx.cancel)
+            self._seams.sleep(min(DOCKER_PATIENCE_POLL_S, left))
+            # Both read again after the pause and BEFORE the ask, which can take its
+            # own 10 seconds: a Stop pressed during the pause, and a pause that used
+            # up the last of the three minutes (Codex review, both passes).
             if self._seams.monotonic() - started >= DOCKER_PATIENCE_S:
                 break
             if not rollback:
                 self._stopped_waiting_for_docker(ctx.cancel)
-            self._seams.sleep(DOCKER_PATIENCE_POLL_S)
             answered = self._seams.docker_ready()
             if not rollback:
                 self._stopped_waiting_for_docker(ctx.cancel)

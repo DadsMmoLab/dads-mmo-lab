@@ -144,7 +144,7 @@ def test_a_recreate_waits_for_a_docker_that_answers_late_and_keeps_the_new_build
     assert said[-1].endswith(f"was rebuilt and is running in {server_dir}"), said
 
 
-def test_a_docker_that_never_answers_is_asked_every_5_seconds_for_3_minutes_then_refused(
+def test_a_docker_that_never_answers_is_asked_every_5_seconds_until_3_minutes_then_refused(
     tmp_path: Path,
 ) -> None:
     rec = Recorder(images=True)
@@ -162,8 +162,10 @@ def test_a_docker_that_never_answers_is_asked_every_5_seconds_for_3_minutes_then
                 sleep=clock.sleep,
             ).rebuild(InstallOptions(server_dir=server_dir))
         )
-    # One ask, then one every 5 seconds until 180 seconds have gone: 1 + 180 / 5.
-    assert probe.asked == 37, probe.asked
+    # Asked at 0, 5, ... 175 seconds: 36 asks. None is started at 180, when the
+    # three minutes are already spent (adversarial review: one there could carry
+    # the wait to 190 s on its own 10-second bound).
+    assert probe.asked == 36, probe.asked
     assert clock.now == 180.0, clock.now
     message = str(raised.value)
     assert "Docker did not answer for 3 minutes" in message, message
@@ -172,7 +174,10 @@ def test_a_docker_that_never_answers_is_asked_every_5_seconds_for_3_minutes_then
 
 
 def test_the_wait_ends_by_its_count_of_asks_when_the_clock_does_not_move(tmp_path: Path) -> None:
-    """In tests `sleep` is a no-op and the clock is real: the wait must still end, and soon."""
+    """In tests `sleep` is a no-op and the clock is real: the wait must still end, and soon.
+
+    The first ask and one per pause, 1 + 180 / 5: the count alone ends it.
+    """
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)
@@ -190,15 +195,17 @@ def test_the_wait_ends_by_its_count_of_asks_when_the_clock_does_not_move(tmp_pat
     _untouched(daemon, server_dir)
 
 
-def test_the_wait_ends_by_the_clock_when_every_ask_takes_its_full_10_seconds(
-    tmp_path: Path,
-) -> None:
-    """Each ask costs 10 s and each pause 5 s: the 3 minutes are spent after 13 asks, not 37."""
+def test_the_wait_ends_by_the_clock_when_every_ask_is_slow(tmp_path: Path) -> None:
+    """Each ask costs 8 s and each pause 5 s: the 3 minutes are spent after 14 asks, not 37.
+
+    Asks end at 8, 21, ... 177 s; the pause after the last is cut to the 3 s left,
+    so the wait ends at 180 s exactly rather than at 182.
+    """
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)
     clock = _Clock()
-    probe = _Probe(clock, cost=10.0)
+    probe = _Probe(clock, cost=8.0)
     with pytest.raises(InstallerError) as raised:
         list(
             engine(
@@ -209,7 +216,8 @@ def test_the_wait_ends_by_the_clock_when_every_ask_takes_its_full_10_seconds(
                 sleep=clock.sleep,
             ).rebuild(InstallOptions(server_dir=server_dir))
         )
-    assert probe.asked == 13, probe.asked
+    assert probe.asked == 14, probe.asked
+    assert clock.now == 180.0, clock.now
     assert "Docker did not answer for 3 minutes" in str(raised.value), raised.value
     _untouched(daemon, server_dir)
 
@@ -241,6 +249,34 @@ def test_a_stop_during_the_docker_wait_ends_it_at_once_and_replaces_nothing(
     assert REMOVED in message, message
     _untouched(daemon, server_dir)
     assert "after" not in daemon.names.values(), daemon.names
+
+
+def test_a_stop_during_a_pause_is_read_before_docker_is_asked_again(tmp_path: Path) -> None:
+    """Codex review: an ask after the pause can take its own 10 seconds, so the Stop goes first."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    clock = _Clock()
+    stop = threading.Event()
+    probe = _Probe(clock)
+
+    def sleep(seconds: float) -> None:
+        clock.sleep(seconds)
+        stop.set()
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(
+                rec,
+                **_seams_of(rec, daemon),
+                docker_ready=probe,
+                monotonic=clock.monotonic,
+                sleep=sleep,
+            ).rebuild(InstallOptions(server_dir=server_dir), cancel=stop)
+        )
+    assert probe.asked == 1, probe.asked
+    assert "stopped while it waited for Docker" in str(raised.value), raised.value
+    _untouched(daemon, server_dir)
 
 
 # -- D1: what the refusal says about the build that finished ------------------
@@ -368,6 +404,23 @@ HUB_UNREACHABLE = (
     "--------------------",
     "failed to solve: ubuntu:24.04: failed to resolve source metadata for "
     f"docker.io/library/ubuntu:24.04: {_TOKEN_TIMEOUT}",
+)
+
+TOKEN_REFUSED = (
+    # Docker Hub ANSWERED, with a refusal: the same "failed to fetch anonymous
+    # token" wrapper, around an HTTP status rather than a network error (Codex
+    # review). A rate limit or a refusal is not "check your internet connection".
+    "#3 [ac-worldserver internal] load metadata for docker.io/library/ubuntu:24.04",
+    "#3 ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from GET "
+    "request to https://auth.docker.io/token?scope=repository%3Alibrary%2Fubuntu%3Apull&service="
+    "registry.docker.io: 429 Too Many Requests",
+    "------",
+    " > [ac-worldserver internal] load metadata for docker.io/library/ubuntu:24.04:",
+    "------",
+    "failed to solve: ubuntu:24.04: failed to resolve source metadata for "
+    "docker.io/library/ubuntu:24.04: failed to authorize: failed to fetch anonymous token: "
+    "unexpected status from GET request to https://auth.docker.io/token?scope=repository%3A"
+    "library%2Fubuntu%3Apull&service=registry.docker.io: 429 Too Many Requests",
 )
 
 TAG_NOT_FOUND = (
@@ -512,6 +565,7 @@ def test_a_stop_during_the_30_seconds_ends_the_rebuild_without_a_second_build(
     "tail",
     [
         pytest.param(TAG_NOT_FOUND, id="the-base-image-name-was-not-found"),
+        pytest.param(TOKEN_REFUSED, id="docker-hub-answered-with-a-refusal"),
         pytest.param(NETWORK_INSIDE_A_RUN_STEP, id="a-run-step-could-not-reach-the-internet"),
         pytest.param(("cc1plus: error: out of memory",), id="a-compile-error"),
     ],

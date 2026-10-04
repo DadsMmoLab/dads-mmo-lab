@@ -4425,15 +4425,17 @@ _RESOLVE_FAILED = re.compile(r"failed to resolve source metadata for (\S+): ")
 """The same failure in the build's closing `failed to solve:` line."""
 
 _REGISTRY_UNREACHABLE = re.compile(
-    r"TLS handshake timeout|i/o timeout|no such host|failed to fetch anonymous token"
-    r"|connection reset by peer|network is unreachable|context deadline exceeded"
+    r"TLS handshake timeout|i/o timeout|no such host|connection reset by peer"
+    r"|connection refused|network is unreachable|context deadline exceeded"
 )
 """The network's words, as Go's HTTP client and BuildKit's resolver print them.
 
-"failed to fetch anonymous token" is Docker Hub's token service not answering
-(yulon-win11, 2026-10-04, with a TLS handshake timeout after it). An image name
-that does not exist (`...: not found`) is NOT one of these: asking again cannot
-fix it.
+Transport errors only. "failed to fetch anonymous token" is NOT one: it is
+BuildKit's wrapper around whatever the token request met, which was a TLS
+handshake timeout on yulon-win11 (2026-10-04) but is an HTTP status when Docker
+Hub answers and refuses -- 401, 403, or a 429 rate limit -- and telling that
+user to check their internet connection is false (Codex review). Nor is an
+image name that does not exist (`...: not found`): asking again cannot fix it.
 """
 
 
