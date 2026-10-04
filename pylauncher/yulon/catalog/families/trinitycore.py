@@ -82,6 +82,8 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
+    owed_start_refusal,
+    past_the_tested_pin,
     read_state,
 )
 from yulon.log import get_logger
@@ -1001,17 +1003,27 @@ class TrinityCoreInstaller(CmangosInstaller):
         left = list(changes.left)
         notes = list(changes.notes)
         gone = {cast(re.Match[str], _PART.match(rel))["stem"] for rel in changes.left_parts}
+        # A file this move's commit deleted (`changes.left`) is left, owed or not (fix
+        # round 5): the new build replaces the kept one, so nothing it needed is owed
+        # any more. A file gone from the disk alone is left only when no kept build
+        # needs it (`required`); one that does is imported, and refused as missing.
         for rel in pending.reimport:
             if rel in reimport or rel in left:
                 continue
-            if not (server_dir / rel).is_file():
+            if not (server_dir / rel).is_file() and rel not in pending.required:
                 left.append(rel)
                 continue
+            # A file the kept build needs is excused only when this move's commit
+            # deleted it (`changes.left`, above); gone from the disk alone, it is
+            # still imported, and the plan refuses it as missing (fix round 6).
             reimport.append(rel)
+        # Split tables the same way (fix round 7): one a part of which this move's
+        # commit deleted (`gone`) is left whole; one gone from the disk alone is left
+        # only when no kept build needs it, else the plan refuses it as missing.
         for stem in pending.parts:
             if stem in parts or stem in gone:
                 continue
-            if not _parts_on_disk(server_dir, stem):
+            if not _parts_on_disk(server_dir, stem) and stem not in pending.required:
                 notes.append(
                     f"{stem}.*.sql is no longer in {self.entry.name}'s snapshot; its table is left "
                     "in your world database as it is."
@@ -1062,8 +1074,21 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"that into {whose} safely yet. Nothing was changed."
         )
 
-    def start_refusal(self, server_dir: Path) -> str | None:
-        """No start while a world update is unfinished: `world_update_start_refusal` (T179)."""
+    def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
+        """The spine's refusal, then a world update left unfinished (T179).
+
+        A Rebuild with the mixed-tags record there too (T197 fix round 8) is not refused
+        for the world update: it is the one way out of the pair. The finish refuses on
+        mixed tags (`finish_world_reimport()`), so the Rebuild goes first and leaves the
+        world update for the finish. Both records cannot co-occur today: the mixed-tags
+        record needs a rollback that moved one image tag of several, and a TrinityCore
+        server builds one image.
+        """
+        refused = super().start_refusal(server_dir, rebuilding=rebuilding)
+        if refused is not None:
+            return refused
+        if owed_start_refusal(server_dir) is not None:
+            return None  # reached by the Rebuild alone: any other press was refused above
         return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
 
     def servers_down_work(
@@ -1086,11 +1111,21 @@ class TrinityCoreInstaller(CmangosInstaller):
           commit -- puts the map-data flag back as it was and imports the same
           files from the old checkout, so the old build meets its own tables (a
           table only the new version has stays, unread by the old code). If that
-          fails, the record stays and the sentence says how to finish it.
+          fails, the record stays and the sentence says how to finish it;
+        * `keep()` -- the rollback stopped before the old build was back on its
+          tags (T197), so the new build stays: when `forward()` never began, the
+          record `prepare()` wrote (or, if it never ran, writes now) and the map
+          data's flag are left for the new build, so it does not start on the old
+          tables -- "Finish the world update" imports them from its checkout.
         """
         if not isinstance(changes, SnapshotChanges):
             return None
-        if not changes.imports() and not changes.map_data:
+        # A record left by an earlier press keeps the work too (T197 fix round 5): this
+        # move may have excused every file it named, and then `done()` clears it once the
+        # new build is up -- otherwise the rebuild's own start check would refuse the
+        # press that repairs it.
+        waiting = _read_pending(server_dir) is not None
+        if not changes.imports() and not changes.map_data and not waiting:
             return None
         runs: list[sqlplan.PhaseRun] = []
         # What `WORLD_REIMPORT_FILE` held before `prepare()` wrote it (`None`: absent),
@@ -1098,14 +1133,28 @@ class TrinityCoreInstaller(CmangosInstaller):
         # as it was only when neither did, so nothing was imported (fix rounds 2-3).
         before: list[bytes | None] = []
         started: list[bool] = []
+        prepared: list[bool] = []
+        # The record as `forward()` found it, and whether every table it had went in
+        # (T197 fix round 6): nothing is removed until the new build is up (`done()`),
+        # and a rollback puts back what was owed before this press (`back()`).
+        snapshot: list[bytes | None] = []
+        imported: list[bool] = []
+
+        def original() -> bytes | None:
+            """The record as it was before this press touched it."""
+            if before:
+                return before[0]
+            return snapshot[0] if snapshot else None
 
         def prepare() -> Iterator[str]:
             if not changes.imports():
+                prepared.append(True)
                 return
             ctx = self._world_ctx(server_dir, None)
             runs[:] = self._reimport_runs(ctx, changes)
             before[:] = [_read_bytes(server_dir / WORLD_REIMPORT_FILE)]
             self._write_pending(server_dir, runs)
+            prepared.append(True)
             yield (
                 f"{server_dir / WORLD_REIMPORT_FILE} names the {len(runs)} world table file(s) "
                 "to import again, until the last is in."
@@ -1113,9 +1162,11 @@ class TrinityCoreInstaller(CmangosInstaller):
 
         def forward(ctx: StageContext) -> Iterator[str]:
             started.append(True)
+            snapshot[:] = [_read_bytes(server_dir / WORLD_REIMPORT_FILE)]
             if changes.map_data:
                 yield self._flag_map_data(server_dir, changes.map_data)
             if not runs:
+                imported.append(True)
                 return
             names = [run.rel for run in runs]
             yield (
@@ -1126,8 +1177,14 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield WORLD_TABLES_CANCEL_NOTE
             self._refuse_unless_the_world_is_down(names)
             yield from self._import_runs(ctx, runs, cancel_note=WORLD_TABLES_CANCEL_NOTE)
-            yield from self._forget_pending(server_dir)
+            imported.append(True)
             yield f"The {len(runs)} world tables are in; the new build starts on them."
+
+        def done() -> Iterator[str]:
+            # The new build is up (or kept after its banner): what the record owed is in,
+            # or was excused by this move, so it goes now and not before.
+            if imported:
+                yield from self._forget_pending(server_dir)
 
         def back(ctx: StageContext) -> Iterator[str]:
             # Like `forward()`: from here the record may name a table this press
@@ -1135,12 +1192,16 @@ class TrinityCoreInstaller(CmangosInstaller):
             started.append(True)
             if changes.map_data:
                 yield from self._put_flag_back(server_dir, changes.flagged_before)
+            # The record as it was before this press (fix round 6), names this move
+            # excused included: the old build is the one that will run, and it still
+            # needs them.
+            if snapshot or before:
+                _put_back(server_dir / WORLD_REIMPORT_FILE, original())
             if not changes.imports():
                 return
             present = self._reimport_runs(ctx, changes, missing_ok=True)
             names = [run.rel for run in present]
             if not present:
-                yield from self._forget_pending(server_dir)
                 return
             yield (
                 f"Importing the same {len(present)} world tables again from the sources the old "
@@ -1155,7 +1216,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                     f"{_finish_advice(names, press)} The world tables could not all be put back "
                     f"for the build from before this update: {exc}{_backup_advice(press)}"
                 ) from exc
-            yield from self._forget_pending(server_dir)
+            yield from self._drop_from_pending(server_dir, names)
             yield f"The {len(present)} world tables are back as the old build had them."
 
         def settle() -> None:
@@ -1163,7 +1224,48 @@ class TrinityCoreInstaller(CmangosInstaller):
                 return
             _put_back(server_dir / WORLD_REIMPORT_FILE, before[0])
 
-        return ServersDownWork(prepare=prepare, forward=forward, back=back, settle=settle)
+        def keep() -> Iterator[str]:
+            if started:
+                # `forward()` began: it flagged the map data first, and what it did
+                # not import is still in the record it leaves; all of it in, the
+                # kept build has its tables and the record goes.
+                yield from done()
+                return
+            # The flag first (fix round 2): it never raises, and a record that
+            # cannot be written below must not cost it.
+            if changes.map_data:
+                yield self._flag_map_data(server_dir, changes.map_data)
+            if prepared:
+                return
+            try:
+                yield from prepare()
+            except (InstallerError, OSError) as exc:
+                # Fix round 3: the record is written from the names the move
+                # already read, without the plan `prepare()` could not expand, so
+                # every start refuses and "Finish the world update" (or the next
+                # update, which folds it in) imports them from this checkout. A
+                # record nobody can read is left: it already means every table.
+                waiting = _read_pending(server_dir)
+                if not changes.imports() or (waiting is not None and waiting.unreadable):
+                    raise
+                try:
+                    self._write_names(
+                        server_dir,
+                        set(changes.reimport),
+                        set(changes.parts),
+                        required=frozenset((*changes.reimport, *changes.parts)),
+                    )
+                except InstallerError as also:
+                    raise InstallerError(
+                        f"{exc} The world tables the new build needs could not be recorded "
+                        f"either ({also.__cause__ or also}), so nothing stops this server "
+                        "starting its new build on the old world tables."
+                    ) from exc
+                raise
+
+        return ServersDownWork(
+            prepare=prepare, forward=forward, back=back, settle=settle, keep=keep, done=done
+        )
 
     def after_update(
         self,
@@ -1239,6 +1341,12 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"No world update of {self.entry.name}'s is waiting to be finished. Nothing was "
                 "changed."
             )
+        # T197 fix round 8: the finish ends in a start, and mixed image tags refuse every
+        # start but the Rebuild's, which goes first (`start_refusal()`). Cannot happen
+        # today: a TrinityCore server builds one image, so its tags are never mixed.
+        mixed = owed_start_refusal(server_dir)
+        if mixed is not None:
+            raise InstallerError(f"{mixed} Nothing was changed.")
         self._refuse_unless_the_checkout_is_built(server_dir, state)
         changes = SnapshotChanges(
             reimport=pending.reimport, parts=pending.parts, everything=pending.unreadable
@@ -1246,7 +1354,19 @@ class TrinityCoreInstaller(CmangosInstaller):
         ctx = self._world_ctx(server_dir, cancel, state=state)
         runs = self._reimport_runs(ctx, changes, missing_ok=True)
         names = [run.rel for run in runs]
-        found = set(names)
+        found = set(names) | {m["stem"] for rel in names if (m := _PART.match(rel)) is not None}
+        # T197 (fix rounds 4-5): a file the kept build needs is never left out, whether
+        # it is gone from the sources or only from the import plan that reads them; nor
+        # is a split table it needs, none of whose parts the plan reads (fix round 7).
+        missing = [
+            f"{rel}.*.sql" if rel in pending.parts else rel
+            for rel in pending.required
+            if rel not in found
+        ]
+        if missing:
+            raise InstallerError(
+                _needed_and_missing(self.entry, missing, past_the_pin=past_the_tested_pin(state))
+            )
         for rel in pending.reimport:
             if rel not in found:
                 yield (
@@ -1282,7 +1402,15 @@ class TrinityCoreInstaller(CmangosInstaller):
         (`docker.staged_up_argv`), so the finish asks for the replacement outright,
         as a rebuild does; on a server with nothing to replace it costs a recreate
         of containers whose world was already stopped. The volumes are untouched.
+
+        Asks the mixed-tags record again (T197 fix round 8), the belt under the finish's
+        own refusal of it: this start must not run two builds side by side either.
         """
+        mixed = owed_start_refusal(ctx.server_dir)
+        if mixed is not None:
+            raise InstallerError(
+                f"The world update is finished, but {mixed} The server was not started."
+            )
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
@@ -1439,7 +1567,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         )
         found = {run.rel for run in runs}
-        missing = sorted(wanted - found)
+        found_stems = {m["stem"] for rel in found if (m := _PART.match(rel)) is not None}
+        # A split table none of whose parts the plan reads is missing too (fix round 7).
+        missing = sorted(wanted - found) + sorted(f"{stem}.*.sql" for stem in stems - found_stems)
         if missing and not missing_ok:
             raise InstallerError(
                 f"The world tables this update changed are not all in the server's sources "
@@ -1455,14 +1585,38 @@ class TrinityCoreInstaller(CmangosInstaller):
         or imported, since a failure after it would leave nobody knowing what to
         finish.
         """
-        path = server_dir / WORLD_REIMPORT_FILE
-        before = _read_pending(server_dir)
         reimport = {run.rel for run in runs if _PART.match(run.rel) is None}
         parts = {match["stem"] for run in runs if (match := _PART.match(run.rel)) is not None}
+        self._write_names(server_dir, reimport, parts)
+
+    def _write_names(
+        self,
+        server_dir: Path,
+        reimport: set[str],
+        parts: set[str],
+        *,
+        required: frozenset[str] = frozenset(),
+    ) -> None:
+        """`_write_pending()` from the files' names and split tables' stems (T197 fix round 3).
+
+        `required`: files, and split tables' stems (fix round 7), a kept build needs
+        (fix round 4), which "Finish the world update" and the next update refuse to
+        leave out when they are missing.
+        """
+        path = server_dir / WORLD_REIMPORT_FILE
+        before = _read_pending(server_dir)
+        needed = set(required)
         if before is not None and not before.unreadable:
             reimport |= set(before.reimport)
             parts |= set(before.parts)
-        body = {"version": 1, "reimport": sorted(reimport), "parts": sorted(parts)}
+            needed |= set(before.required)
+        body: dict[str, object] = {
+            "version": 1,
+            "reimport": sorted(reimport),
+            "parts": sorted(parts),
+        }
+        if needed:
+            body["required"] = sorted(needed)
         staged = path.with_name(path.name + ".yulon-new")
         try:
             staged.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
@@ -1477,6 +1631,30 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "are still to be imported if this stops part way, so the world server was not "
                 "stopped and nothing was imported again."
             ) from exc
+
+    def _drop_from_pending(self, server_dir: Path, names: Sequence[str]) -> Iterator[str]:
+        """Take the files just imported off `WORLD_REIMPORT_FILE`; the rest stays owed (T197).
+
+        The rollback's half: what it imported from the old checkout is in, and what the
+        record owed before the press and it did not import stays. Gone once empty.
+        """
+        pending = _read_pending(server_dir)
+        if pending is None or pending.unreadable:
+            # Nothing to take off, or a record that means every table: it stays.
+            return
+            yield ""  # pragma: no cover - makes this a generator
+        done = set(names)
+        stems = {m["stem"] for rel in names if (m := _PART.match(rel)) is not None}
+        reimport = [rel for rel in pending.reimport if rel not in done]
+        parts = [stem for stem in pending.parts if stem not in stems]
+        if not reimport and not parts:
+            yield from self._forget_pending(server_dir)
+            return
+        body: dict[str, object] = {"version": 1, "reimport": reimport, "parts": parts}
+        required = [rel for rel in pending.required if rel in reimport or rel in parts]
+        if required:
+            body["required"] = required
+        _put_back(server_dir / WORLD_REIMPORT_FILE, (json.dumps(body, indent=2) + "\n").encode())
 
     def _forget_pending(self, server_dir: Path) -> Iterator[str]:
         """Remove `WORLD_REIMPORT_FILE` once every file it names went in; a warning if it stays."""
@@ -1886,6 +2064,9 @@ class _Pending:
     reimport: tuple[str, ...] = ()
     parts: tuple[str, ...] = ()
     unreadable: bool = False
+    required: tuple[str, ...] = ()
+    """Files a kept build needs (T197 fix round 4), and the stems of split tables it needs
+    (fix round 7): one missing is never "left", it refuses."""
 
 
 def _read_pending(server_dir: Path) -> _Pending | None:
@@ -1901,17 +2082,40 @@ def _read_pending(server_dir: Path) -> _Pending | None:
     try:
         raw = json.loads(text)
         reimport, parts = raw["reimport"], raw["parts"]
-    except (ValueError, KeyError, TypeError) as exc:
+        required = raw.get("required", [])
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         logger.warning(
             f"{path} is not one Yu'lon wrote ({exc}); every world table is imported again"
         )
         return _Pending(unreadable=True)
     if not all(
         isinstance(names, list) and all(isinstance(name, str) for name in names)
-        for names in (reimport, parts)
+        for names in (reimport, parts, required)
     ):
         return _Pending(unreadable=True)
-    return _Pending(reimport=tuple(reimport), parts=tuple(parts))
+    return _Pending(reimport=tuple(reimport), parts=tuple(parts), required=tuple(required))
+
+
+def _needed_and_missing(entry: CatalogEntry, missing: Sequence[str], *, past_the_pin: bool) -> str:
+    """Why "Finish the world update" stops: a file the kept build needs is not imported (T197).
+
+    Names the two ways out: the file put back, or a new build in place of the kept one
+    -- "Return to the tested pin…" only where the tab offers it (`past_the_pin`).
+    """
+    one = len(missing) == 1
+    presses = f"\u201c{server_build_presses.UPDATE_TO_LATEST}\u201d" + (
+        f" or \u201c{server_build_presses.RETURN_TO_PIN}\u201d" if past_the_pin else ""
+    )
+    return (
+        f"{_listed(missing)} {'is' if one else 'are'} not among the world table files "
+        f"{entry.name}'s import reads from its sources, and the build this server was left on "
+        f"needs {'that table' if one else 'those tables'}, so the world update was not "
+        "finished and the server is still refused a start. Nothing was imported. Put "
+        f"{'it' if one else 'them'} back in the sources and press "
+        f"\u201c{FINISH_WORLD_BUTTON}\u201d again, or press {presses} under "
+        f"\u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab, which builds a "
+        "new version in place of the one this server was left on."
+    )
 
 
 WORLD_UPDATE_UNFINISHED = (

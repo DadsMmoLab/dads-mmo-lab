@@ -63,7 +63,7 @@ from yulon.catalog.catalog import (
     load_catalog,
 )
 from yulon.catalog.families import decisions, sqlplan
-from yulon.catalog.installer import InstallerError, WorldStoppedAfterReadyError
+from yulon.catalog.installer import InstallerError, RollbackNotDone, WorldStoppedAfterReadyError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -4651,7 +4651,7 @@ def test_a_fresh_install_settles_its_channel_without_waiting_for_a_start(
         WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
     )
     assert stub.settles == 0, "opening the tab must not settle"
-    monkeypatch.setattr(controller_view_module.QTimer, "singleShot", lambda ms, fn: None)
+    monkeypatch.setattr(controller_view_module.QTimer, "singleShot", lambda ms, *call: None)
 
     view.settle_channel_after_install()
 
@@ -4676,7 +4676,9 @@ def test_a_fresh_install_asks_again_only_while_the_first_answer_is_pending(
     )
     scheduled: list[tuple[int, object]] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+        controller_view_module.QTimer,
+        "singleShot",
+        lambda ms, *call: scheduled.append((ms, call[-1])),
     )
 
     view.settle_channel_after_install()
@@ -4722,7 +4724,9 @@ def test_closing_while_the_channel_is_pending_and_reopening_proves_it_without_a_
 
     scheduled: list[tuple[int, object]] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+        controller_view_module.QTimer,
+        "singleShot",
+        lambda ms, *call: scheduled.append((ms, call[-1])),
     )
     reopened = ControllerView(
         WOTLK,
@@ -4749,7 +4753,7 @@ def test_a_tab_that_opens_on_no_pending_channel_schedules_no_second_ask(
     """The extra ask is for a row an earlier run left un-proved, and only then."""
     scheduled: list[int] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append(ms)
+        controller_view_module.QTimer, "singleShot", lambda ms, *call: scheduled.append(ms)
     )
     stub = _StubSetup(
         state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-27 01:00 UTC")
@@ -4779,7 +4783,9 @@ def test_a_tab_torn_down_within_the_minute_is_not_asked_again(
     )
     scheduled: list[tuple[int, object]] = []
     monkeypatch.setattr(
-        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+        controller_view_module.QTimer,
+        "singleShot",
+        lambda ms, *call: scheduled.append((ms, call[-1])),
     )
     view.settle_channel_after_install()
     assert stub.settles == 1
@@ -4787,6 +4793,55 @@ def test_a_tab_torn_down_within_the_minute_is_not_asked_again(
     view.shutdown()
     scheduled[0][1]()
     assert stub.settles == 1, "a closed tab must not start a job"
+
+
+@pytest.mark.parametrize("deleted", [True, False], ids=["deleted", "kept"])
+@pytest.mark.parametrize("armed_by", ["install", "opening"])
+def test_a_tab_deleted_without_shutdown_drops_the_deferred_channel_ask(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    armed_by: str,
+    deleted: bool,
+) -> None:
+    """T213 (adversarial review): the minute-later re-settle names the tab as its context.
+
+    Both arms -- `settle_channel_after_install()` and a tab that opens on a
+    `Pending` channel -- queued `self._resettle_if_pending` with no context
+    object. `_closed` covers a tab that was shut down, but not one whose C++
+    half went without `shutdown()`: the ask then ran a minute later on a
+    dead view. The `kept` cases prove the recorder is reached at all.
+
+    Mutation: drop `self` from either `singleShot` and that arm's `deleted`
+    case records a call.
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    asked: list[object] = []
+    monkeypatch.setattr(ControllerView, "_resettle_if_pending", lambda self: asked.append(self))
+    monkeypatch.setattr(controller_view_module, "_POST_INSTALL_RESETTLE_MS", 1)
+    if armed_by == "install":
+        stub = _StubSetup(state=channel_setup.Idle())
+        stub.settled = channel_setup.Pending(account="YULON_AB", password="pw", tries=1)
+        view = ControllerView(
+            WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+        )
+        view.settle_channel_after_install()
+    else:
+        stub = _StubSetup(state=channel_setup.Pending(account="YULON_AB", password="pw", tries=1))
+        view = ControllerView(
+            WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=5, job_runner=run_inline
+        )
+
+    if deleted:
+        view.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    process_events(100)
+
+    assert len(asked) == (0 if deleted else 1), asked
+    if not deleted:
+        view.shutdown()
 
 
 def test_a_finished_start_asks_the_channel_where_it_now_stands(
@@ -11336,6 +11391,123 @@ def test_refresh_forgets_every_version_and_a_report_forgets_one(
     assert len(read) == 5, "Refresh re-reads every installed clone"
 
 
+def _walk_that_closes_its_view_on_the_first_read(
+    ps: _Ps, tmp_path: Path, close: Callable[[ControllerView], None]
+) -> tuple[ControllerView, list[Path]]:
+    """A view with two installed clones whose first read runs `close` on the view.
+
+    Closing from INSIDE the read is what makes this deterministic: one
+    `processEvents` can run several zero-delay ticks back to back, so a close
+    made between two pumps could land after the walk had already finished.
+    """
+    read: list[Path] = []
+    views: list[ControllerView] = []
+
+    def reader(path: Path) -> str:
+        read.append(path)
+        if len(read) == 1:
+            close(views[0])
+        return "7c02b1d · 2026-09-01"
+
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "installed_modules",
+        lambda: {"module": frozenset({"mod-solocraft", "mod-transmog"})},
+    )
+    object.__setattr__(services, "module_version", reader)
+    views.append(ControllerView(WOTLK, services, status_poll_ms=0))
+    return views[0], read
+
+
+def test_a_view_shut_down_mid_walk_reads_no_further_clone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T213: `shutdown()` stops the version walk; the next tick reads nothing.
+
+    Mutation: drop the `_closed` check from `_fill_next_version()` and the
+    second clone is still read after the tab said it was shutting down.
+    """
+    view, read = _walk_that_closes_its_view_on_the_first_read(
+        ps, tmp_path, lambda view: view.shutdown()
+    )
+
+    pump_until(lambda: bool(read), "the walk read its first clone")
+    process_events(100)
+
+    assert len(read) == 1, "the walk kept reading after shutdown()"
+    assert not view._filling_versions, "a stopped walk still claims to be running"
+
+
+def test_a_view_removed_mid_walk_raises_nothing_from_a_late_tick(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T213: removing a server mid-walk runs `shutdown()` then `deleteLater()`
+    (main.py `drop_controller`), and the tick already queued must not then
+    touch the deleted widgets.
+
+    Before the fix it did: `set_version` on a deleted `QLabel` raised
+    `RuntimeError` inside a Qt slot -- a traceback for the player, and in the
+    suite a failure in whichever LATER test pumped the loop next
+    (`test_the_networking_tab_offers_the_loopback_and_a_real_click_selects_it`
+    after `test_stopped_distro_reads.py`).
+
+    Mutation: drop the `_closed` check AND the context object from the re-arm
+    and this raises `RuntimeError: ... already deleted`.
+    """
+    import sys
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    hooked: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda _t, value, _tb: hooked.append(value))
+
+    def remove(view: ControllerView) -> None:
+        view.shutdown()
+        view.deleteLater()
+
+    view, read = _walk_that_closes_its_view_on_the_first_read(ps, tmp_path, remove)
+
+    pump_until(lambda: bool(read), "the walk read its first clone")
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    process_events(100)
+
+    assert hooked == [], f"a late tick reached a slot after the delete: {hooked!r}"
+    assert len(read) == 1, "the walk kept reading after the view was deleted"
+
+
+def test_a_view_deleted_without_shutdown_drops_the_queued_tick(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T213: the re-arm names the view as its timer's context object.
+
+    A view can lose its C++ half without `shutdown()` having run first -- its
+    parent going away, or a test dropping it -- and then `_closed` says
+    nothing. With the context object Qt drops a tick queued for a deleted
+    view; without it the tick is delivered to the deleted widgets.
+
+    Mutation: re-arm with `QTimer.singleShot(0, self._fill_next_version)` (no
+    context object) and this raises `RuntimeError: ... already deleted`.
+    """
+    import sys
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    hooked: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda _t, value, _tb: hooked.append(value))
+
+    view, read = _walk_that_closes_its_view_on_the_first_read(
+        ps, tmp_path, lambda view: view.deleteLater()
+    )
+
+    pump_until(lambda: bool(read), "the walk read its first clone")
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    process_events(100)
+
+    assert hooked == [], f"a late tick reached a slot after the delete: {hooked!r}"
+    assert len(read) == 1, "the walk kept reading after the view was deleted"
+
+
 def _update_view(ps: _Ps, tmp_path: Path, **seams: object) -> ControllerView:
     """A view whose applier is rooted at `tmp_path`, with a real clone on disk.
 
@@ -12506,6 +12678,31 @@ def test_an_update_whose_build_was_kept_drops_the_server_cloned_count(
         raise WorldStoppedAfterReadyError(
             "The world server came up and then stopped.", sources_kept=True
         )
+
+    view.services.update_to_latest = replace(route, press=kept)
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update ended")
+
+    assert ("module", "mod-playerbots") not in view._behind
+    assert view._behind.get(("module", "mod-transmog")) == 3
+
+
+def test_an_update_whose_rollback_did_not_put_the_old_build_back_drops_the_count(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T197: a rollback that stopped early left the new build, and its sources with it.
+
+    Read off the route's typed outcome (`RollbackNotDone.sources_kept`), as T179's kept build.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, _ = _server_cloned_view(ps, tmp_path)
+    route = view.services.update_to_latest
+    assert route is not None
+
+    def kept(cancel: object = None) -> Iterator[str]:
+        yield "--- update-sources"
+        raise RollbackNotDone("The tags still name the new build.", sources_kept=True)
 
     view.services.update_to_latest = replace(route, press=kept)
     assert view.update_to_latest() is True
