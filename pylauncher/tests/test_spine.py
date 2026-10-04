@@ -2631,6 +2631,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`Known.missing`, because a password it could not see is one it cannot promise to "
         "have removed"
     ),
+    ("ui/controller_view.py", "_checkout_refusal"): (
+        "T181. Lists the folder of a client pack's zip for its `.partNN` pieces, only to word "
+        "the refusal when Play finds the pack missing from the server's checkout (the file, "
+        "the commit, what to press); reads only, writes nothing. A listing that finds pieces "
+        "answers None and leaves the engine's own message to say what is wrong"
+    ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
@@ -2702,6 +2708,51 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "(under a temporary name, then renamed into place), never a write into the "
         "original; `refresh()` refuses a folder without the marker, or an original other "
         "than the one it names, before it lists anything"
+    ),
+    ("client_packs.py", "_numbered_parts"): (
+        "T181b. Lists the folder of a checkout pack's zip in the server's own checkout for "
+        "its `<name>.zip.partNN` pieces, which are then READ and joined into a `.joining` "
+        "file in Yu'lon's download cache (`client-packs/checkout/<checksum>/`, in "
+        "`%LOCALAPPDATA%` on Windows), renamed into place only once the join matches the "
+        "pack's checksum. Read-only on the checkout: nothing there is written or deleted "
+        "because of it. A folder that cannot be listed answers no parts, and "
+        "`fetch_checkout()` then refuses naming the file"
+    ),
+    ("client_packs.py", "prune_cache"): (
+        "T181 b/c. Lists one pack's folder in Yu'lon's own download cache "
+        "(`client-packs/<entry>/<pack>/`) for the cached "
+        "versions other than the one just installed, and removes them, with any "
+        "orphaned `.part` there, once a newer version of that pack is installed. Only names that "
+        "are one plain folder name are looked at, a link is removed as a name and never followed, "
+        "and the kept version is never touched. It deletes only inside Yu'lon's cache, never in a "
+        "client or a server's checkout, and a failure is logged and ignored"
+    ),
+    ("client_packs.py", "_prune_after_install"): (
+        "T181 b/c. Lists `client-packs/extracted/` in Yu'lon's own cache for the extracted "
+        "`.MPQ` copies of the pack that was just installed from an older version of itself "
+        "(folders named `<server>~<pack>~<checksum>`), and removes those. Cache only: "
+        "a client's file "
+        "hard-linked to one keeps its own name and bytes, since removing a name never changes "
+        "another name of the same file"
+    ),
+    ("client_packs.py", "_strays"): (
+        "T181 b/c. Lists the folder of ONE install target in a ready-to-play client for the "
+        "`<name>.yulon-pack-old[.n]` files a crashed pack install left beside it, before that "
+        "install stages anything. The listing decides a rename or a delete of those aside "
+        "names only: a missing target gets its first aside put back, any other aside is "
+        "deleted (a read-only one with a single name is made writable first; one shared with "
+        "the player's own client is never chmodded and is left). Only in a folder whose step "
+        "(a) marker was checked, never into a link, and never the player's own client"
+    ),
+    ("client_config.py", "remove_locale_realmlists"): (
+        "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
+        "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "
+        "launcher does. The listing decides a delete, but only inside a folder whose step (a) "
+        "marker was read first, only one level under `Data/`, and never into a link: a locale "
+        "folder linked to the player's own client is skipped (and named in a warning), so the "
+        "original's file is never reached. A failure to list raises OSError and a failure to "
+        "delete raises PlayClientError naming the files already removed, rather than "
+        "reporting files removed"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.

@@ -26,15 +26,16 @@ import os
 import re
 import shutil
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -70,6 +71,9 @@ from yulon import bot_population as botpop
 from yulon import (
     botlist,
     channel_setup,
+    client_config,
+    client_exe,
+    client_packs,
     commands,
     dbreads,
     docker,
@@ -105,7 +109,7 @@ from yulon.apply import (
     required_prompts,
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, Client, ClientPack
 from yulon.catalog.families import azerothcore, clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
@@ -699,6 +703,7 @@ MAKE_PLAY_CLIENT_LABEL = "Make a ready-to-play client…"
 PLAY_LABEL = "Play"
 REFRESH_PLAY_CLIENT_LABEL = "Refresh from your original client"
 DELETE_PLAY_CLIENT_LABEL = "Delete ready-to-play client…"
+CLIENT_OPTIONS_LABEL = "Client options…"
 PLAY_CLIENT_ADDRESS = "127.0.0.1"
 """What a ready-to-play client's realmlist names (spec §1, amended 2026-09-30).
 
@@ -740,6 +745,12 @@ def left_out_sentence(names: Collection[Path]) -> str:
     )
 
 
+PLAY_PIPELINE_RUNNING = (
+    "Yu'lon is getting this server's ready-to-play client ready for Play (packs, Wow.exe, "
+    "settings). Press Cancel beside Play to stop it, then close the window. Closing now "
+    "would leave the client with some of its files installed; Play carries on from there."
+)
+
 PLAY_CLIENT_RUNNING = (
     "Yu'lon is still writing this server's ready-to-play client. Closing now would "
     "leave it half made or half refreshed. This window will close normally once it "
@@ -767,6 +778,7 @@ class PlayClientOffer:
     addons: tuple[str, ...]
     replan: Callable[[Path], play_client.BuildPlan]
     free_space: Callable[[Path], int | None]
+    client: Client | None = None
 
     @property
     def originals(self) -> tuple[Path, ...]:
@@ -780,10 +792,174 @@ class PlayClientChoice:
     target: Path
     full_copy: bool
     remove_originals: bool
+    client_choices: dict[str, Any] | None = None
 
 
 PlayClientAsker = Callable[[QWidget, PlayClientOffer], PlayClientChoice | None]
 """How the tab asks the creation dialog: a seam, so a test answers it without a modal."""
+
+
+def has_client_data(client: Client) -> bool:
+    """Whether the entry describes anything to put in a ready-to-play client (T181 b/c)."""
+    return bool(client.packs or client.exe_patch is not None or client.config_wtf is not None)
+
+
+def has_client_choices(client: Client) -> bool:
+    """Whether a player can choose anything: an optional pack or a Wow.exe option."""
+    return any(pack.optional for pack in client.packs) or bool(
+        client.exe_patch is not None and client.exe_patch.options
+    )
+
+
+class ClientOptionsBox(QWidget):
+    """The packs and Wow.exe options of a server's client, as checkboxes (T181 b/c).
+
+    Shared by the creation dialog and "Client options…", so the two cannot
+    disagree about what a choice is. `choices()` is the record's shape:
+    `{"packs": {id: bool}, "exe_options": {name: bool}}`. Only OPTIONAL packs are
+    boxes (a required pack is not a choice), and the required download size
+    (URL packs' `size_hint`; a checkout pack is already on the disk) is a line of
+    its own. An `unavailable` pack (its address answered 404) says so, and is
+    greyed unless an installed copy exists, which the player may still switch off.
+    """
+
+    def __init__(
+        self,
+        client: Client,
+        choices: Mapping[str, Any] | None = None,
+        *,
+        installed: Collection[str] = (),
+        unavailable: Collection[str] = (),
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        picked = choices or {}
+        chosen_packs = picked.get("packs") or {}
+        chosen_exe = picked.get("exe_options") or {}
+        self._client = client
+        box = QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        required = sum(
+            pack.size_hint or 0
+            for pack in client.packs
+            if not pack.optional and pack.source.kind == "url"
+        )
+        self.required_label = QLabel("", self)
+        self.required_label.setWordWrap(True)
+        self.required_label.setText(
+            f"Required download: {_size_text(required)}." if required else "Nothing to download."
+        )
+        self.required_label.setVisible(bool(client.packs))
+        box.addWidget(self.required_label)
+        self.extra_label = QLabel("", self)
+        self.extra_label.setWordWrap(True)
+        box.addWidget(self.extra_label)
+        self.pack_boxes: dict[str, QCheckBox] = {}
+        self._sizes: dict[str, int] = {}
+        for pack in client.packs:
+            if not pack.optional:
+                continue
+            gone = pack.id in unavailable
+            check = QCheckBox(self._pack_text(pack, gone), self)
+            check.setChecked(bool(chosen_packs.get(pack.id, pack.default)))
+            if gone and pack.id not in installed:
+                check.setChecked(False)
+                check.setEnabled(False)
+            if pack.source.kind == "url":
+                self._sizes[pack.id] = pack.size_hint or 0
+            check.toggled.connect(self._update_extra)
+            self.pack_boxes[pack.id] = check
+            box.addWidget(check)
+        self.exe_boxes: dict[str, QCheckBox] = {}
+        if client.exe_patch is not None:
+            for name, option in client.exe_patch.options.items():
+                check = QCheckBox(option.label, self)
+                check.setChecked(bool(chosen_exe.get(name, option.default)))
+                self.exe_boxes[name] = check
+                box.addWidget(check)
+        self._update_extra()
+
+    @staticmethod
+    def _pack_text(pack: ClientPack, gone: bool) -> str:
+        text = pack.label
+        if pack.description:
+            text += f" — {pack.description}"
+        if pack.size_hint:
+            text += f" ({_size_text(pack.size_hint)})"
+        if gone:
+            text += " — unavailable: the server's site no longer has it"
+        return text
+
+    def _update_extra(self) -> None:
+        extra = sum(
+            size
+            for pack_id, size in self._sizes.items()
+            if self.pack_boxes[pack_id].isChecked() and self.pack_boxes[pack_id].isEnabled()
+        )
+        self.extra_label.setText(f"The ticked packs add {_size_text(extra)}." if extra else "")
+        self.extra_label.setVisible(bool(extra))
+
+    def choices(self) -> dict[str, Any]:
+        return {
+            "packs": {pack_id: check.isChecked() for pack_id, check in self.pack_boxes.items()},
+            "exe_options": {name: check.isChecked() for name, check in self.exe_boxes.items()},
+        }
+
+
+@dataclass(frozen=True)
+class ClientOptionsOffer:
+    """What "Client options…" shows: the client section, the record's choices, what is where.
+
+    `installed` are the pack ids the record says are in the ready-to-play client;
+    `unavailable` the optional packs whose address answered 404 at the last Play.
+    """
+
+    client: Client
+    choices: dict[str, Any]
+    installed: frozenset[str]
+    unavailable: frozenset[str]
+
+
+ClientOptionsAsker = Callable[[QWidget, ClientOptionsOffer], dict[str, Any] | None]
+"""How the tab asks "Client options…": a seam, so a test answers it without a modal."""
+
+
+class ClientOptionsDialog(QDialog):
+    """ "Client options…": the checkboxes, Save and Cancel. Save applies at the next Play."""
+
+    def __init__(self, offer: ClientOptionsOffer, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(CLIENT_OPTIONS_LABEL.rstrip("…"))
+        box = QVBoxLayout(self)
+        intro = QLabel(
+            "Choose what this server's ready-to-play client has. A change takes effect "
+            "at your next Play: packs are downloaded and installed, or removed, then.",
+            self,
+        )
+        intro.setWordWrap(True)
+        box.addWidget(intro)
+        self.options = ClientOptionsBox(
+            offer.client,
+            offer.choices,
+            installed=offer.installed,
+            unavailable=offer.unavailable,
+            parent=self,
+        )
+        box.addWidget(self.options)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel, self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        box.addWidget(buttons)
+
+
+def ask_client_options(parent: QWidget, offer: ClientOptionsOffer) -> dict[str, Any] | None:
+    """The real `ClientOptionsAsker`: the dialog, modal; None for Cancel."""
+    dialog = ClientOptionsDialog(offer, parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
+    return dialog.options.choices()
 
 
 def _gb_text(size: int) -> str:
@@ -901,6 +1077,12 @@ class PlayClientDialog(QDialog):
         self.addons_label.setWordWrap(True)
         self.addons_label.setVisible(bool(offer.addons))
         box.addWidget(self.addons_label)
+        # T181 b/c: the server's packs and Wow.exe options, when its entry has any.
+        self.client_options: ClientOptionsBox | None = None
+        client = offer.client
+        if client is not None and (client.packs or has_client_choices(client)):
+            self.client_options = ClientOptionsBox(client, parent=self)
+            box.addWidget(self.client_options)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
         )
@@ -1034,6 +1216,9 @@ class PlayClientDialog(QDialog):
             full_copy=full_copy,
             remove_originals=bool(self._offer.originals)
             and self.remove_originals_check.isChecked(),
+            client_choices=(
+                self.client_options.choices() if self.client_options is not None else None
+            ),
         )
 
 
@@ -1087,6 +1272,73 @@ class _MadePlayClient:
     target: Path
     realmlist_problem: str | None
     copies: tuple[apply_module.ClientCopy, ...]
+    choices_problem: str | None = None
+
+
+class _PackStopped(Exception):
+    """A pack could not be fetched or installed; Play asks what to do (T181 b).
+
+    `pack` is the catalog's; `reason` is the engine's own sentence (or the
+    checkout's, naming the file and commit); the question is the view's.
+    """
+
+    def __init__(self, pack: ClientPack, reason: str) -> None:
+        super().__init__(reason)
+        self.pack = pack
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class _Prepared:
+    """What the Play pipeline did, read on the GUI thread: lines to show, and 404 packs."""
+
+    notes: tuple[str, ...]
+    unavailable: frozenset[str]
+
+
+def _half_installed(entry: Mapping[str, Any]) -> bool:
+    """A record entry a `PartialInstall` left: no version, no checksum, a mix of files."""
+    return entry.get("version") is None and entry.get("sha256") is None
+
+
+def _checkout_commit(server_dir: Path, rel: str, wsl_distro: str | None = None) -> str | None:
+    """The commit the checkout holding `rel` is on, read the way the Server build section does."""
+    folder = (server_dir / rel).parent
+    for candidate in (folder, *folder.parents):
+        if (candidate / ".git").exists():
+            return tortoise_botpool.head_sha(candidate, wsl_distro=wsl_distro)
+        if candidate == server_dir:
+            break
+    return None
+
+
+def _checkout_refusal(
+    pack: ClientPack,
+    server_dir: Path,
+    wsl_distro: str | None = None,
+    again: str = PLAY_LABEL,
+) -> str | None:
+    """The refusal for a checkout pack whose file is not there (decision 3), or None.
+
+    Names the file and the commit the server is on, and points at the Server
+    build menu: a newer commit (or the tested pin) is what has the file. `again`
+    is the press to make afterwards: Play, or Make… when nothing was built.
+    """
+    rel = pack.source.path
+    if pack.source.kind != "checkout" or rel is None:
+        return None
+    path = server_dir / rel
+    if path.is_file() or any(path.parent.glob(f"{path.name}.part*")):
+        return None
+    commit = _checkout_commit(server_dir, rel, wsl_distro=wsl_distro)
+    on = f"commit {commit[:10]}" if commit else "the commit it is on"
+    return (
+        f"“{pack.label}” is needed, but this server's checkout has no {rel} at {on}. Use "
+        f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)} to "
+        f"get a commit that has it (or "
+        f"{server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)}), "
+        f"then press {again} again."
+    )
 
 
 @dataclass(frozen=True)
@@ -5550,6 +5802,7 @@ class ControllerView(QWidget):
         folder_asker: FolderAsker | None = None,
         pick_client_dir: DirPicker = _qt_dir_picker,
         play_client_asker: PlayClientAsker | None = None,
+        client_options_asker: ClientOptionsAsker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -5560,6 +5813,8 @@ class ControllerView(QWidget):
         self._play_client_asker: PlayClientAsker = play_client_asker or (
             lambda parent, offer: ask_play_client(parent, offer, self._pick_client_dir, self._jobs)
         )
+        # T181 b/c: "Client options…" for the same reason.
+        self._client_options_asker: ClientOptionsAsker = client_options_asker or ask_client_options
         # A Make…, Refresh or Delete writing the ready-to-play client: it holds
         # the close (`busy_reason()`) the way the import does.
         self._play_client_running = False
@@ -6061,6 +6316,7 @@ class ControllerView(QWidget):
         if self.play_button is not None and self.play_menu_button is not None:
             row.addWidget(self.play_button)
             row.addWidget(self.play_menu_button)
+            row.addWidget(self.play_cancel_button)
         for b in (self.refresh_button, self.remove_button, self.repair_button):
             row.addWidget(b)
         if self.steam_button is not None:
@@ -6188,7 +6444,7 @@ class ControllerView(QWidget):
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._play_client_running:
-            return PLAY_CLIENT_RUNNING
+            return PLAY_PIPELINE_RUNNING if self._play_preparing else PLAY_CLIENT_RUNNING
         if self._module_sql_running:
             return (
                 "The module importer is still running. It cannot be stopped, and closing now "
@@ -7691,7 +7947,9 @@ class ControllerView(QWidget):
         if self._play_client_running:
             # T181: Make…, Refresh or Delete is writing the ready-to-play
             # client, and the uninstall may delete that very folder.
-            self.uninstall_label.setText(PLAY_CLIENT_RUNNING)
+            self.uninstall_label.setText(
+                PLAY_PIPELINE_RUNNING if self._play_preparing else PLAY_CLIENT_RUNNING
+            )
             return
         if self._play_pending:
             # T181: a Play is on its way and still writes the realmlist into,
@@ -7967,11 +8225,36 @@ class ControllerView(QWidget):
         self._play_holds_busy = False
         self._play_pending = False
         self._play_left_out: tuple[Path, ...] = ()
+        self._play_notes: tuple[str, ...] = ()
+        self._skipped: frozenset[str] = frozenset()
+        self._play_preparing = False
+        # T181 b/c: set by the Cancel button, read by the download between reads.
+        self._play_cancel = threading.Event()
+        # Optional packs whose address answered 404 at the last Play (spec §4).
+        self._client_unavailable: frozenset[str] = frozenset()
+        # The download's lines come from the worker through a signal, never a call.
+        self._play_relay = LineRelay(self)
+        self._play_relay.line.connect(self._play_progress)
+        self.play_cancel_button = QPushButton("Cancel", tab)
+        self.play_cancel_button.setToolTip(
+            "Stop getting the client ready. A download stops between reads, so a stalled one "
+            "can take a moment; what arrived is kept for next time."
+        )
+        self.play_cancel_button.setVisible(False)
+        self.play_cancel_button.clicked.connect(self._cancel_play_download)
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
         self.play_menu.setToolTipsVisible(True)
+        self.client_options_action: QAction | None = None
+        if has_client_choices(self.entry.client):
+            self.client_options_action = self.play_menu.addAction(CLIENT_OPTIONS_LABEL)
+            self.client_options_action.setToolTip(
+                "Choose this server's optional client packs and Wow.exe options. Takes "
+                "effect at your next Play."
+            )
+            self.client_options_action.triggered.connect(self.client_options)
         self.refresh_play_client_action = self.play_menu.addAction(REFRESH_PLAY_CLIENT_LABEL)
         self.refresh_play_client_action.setToolTip(
             "Bring the game files and Wow.exe back in step with your own client after a "
@@ -8012,6 +8295,11 @@ class ControllerView(QWidget):
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)
+
+    @Slot(str)
+    def _play_progress(self, text: str) -> None:
+        """A line from the Play pipeline's worker (through `_play_relay`), on the GUI thread."""
+        self._say_play(text)
 
     def _play_refused(self, message: str) -> None:
         """A Play-side refusal, on the label, in the log and in front of the player."""
@@ -8065,6 +8353,7 @@ class ControllerView(QWidget):
     def _release_play_client(self) -> None:
         """End a Make…, Refresh or Delete: give back the lock only if this took it."""
         self._play_client_running = False
+        self._play_preparing = False
         if self._play_holds_busy:
             self._play_holds_busy = False
             self._set_busy(False)
@@ -8200,6 +8489,18 @@ class ControllerView(QWidget):
         would break that server's client, and the hash cannot tell them apart.
         """
         server_dir = self.services.controller.server_dir
+        # Packs are fetched at Play, but a required one the checkout lacks cannot be
+        # fetched later either: refuse before anything is built (existence only).
+        for pack in self.entry.client.packs:
+            if not pack.optional:
+                missing = _checkout_refusal(
+                    pack,
+                    server_dir,
+                    wsl_distro=self.services.controller.wsl_distro,
+                    again=f"“{MAKE_PLAY_CLIENT_LABEL}”",
+                )
+                if missing is not None:
+                    raise play_client.PlayClientError(missing)
         if self._is_this_servers(play_client.read_marker(target)):
             return target
         build = self._replan(original, target)
@@ -8224,6 +8525,7 @@ class ControllerView(QWidget):
             addons=addons,
             replan=lambda chosen: self._replan(original, chosen),
             free_space=lambda chosen: _free_bytes(chosen.parent),
+            client=self.entry.client if has_client_data(self.entry.client) else None,
         )
 
     def _make_refused_now(self) -> bool:
@@ -8298,7 +8600,18 @@ class ControllerView(QWidget):
             )
         except OSError as exc:
             problem = str(exc)
-        return _MadePlayClient(choice.target, problem, copies)
+        saved: str | None = None
+        if choice.client_choices is not None:
+            try:
+                client_packs.write_record(
+                    choice.target,
+                    client_packs.PackRecord({}, None, choice.client_choices),
+                    game=self.entry.id,
+                    server_dir=self.services.controller.server_dir,
+                )
+            except client_packs.PackError as exc:
+                saved = str(exc)
+        return _MadePlayClient(choice.target, problem, copies, saved)
 
     @Slot(object)
     def _play_client_made(self, result: object) -> None:
@@ -8346,15 +8659,23 @@ class ControllerView(QWidget):
         said.append(f"The ticked files could not be removed from your own client: {exc}.")
         self._finish_make(made.target, said)
 
-    @staticmethod
     def _made_sentences(
-        made: _MadePlayClient, removed: tuple[str, ...], left: tuple[str, ...]
+        self, made: _MadePlayClient, removed: tuple[str, ...], left: tuple[str, ...]
     ) -> list[str]:
         said = [f"The ready-to-play client is at {made.target}. Press Play to start it."]
         if made.realmlist_problem is not None:
             said.append(
                 f"Its realmlist could not be written yet ({made.realmlist_problem}); "
                 "Play writes it again first."
+            )
+        if made.choices_problem is not None:
+            again = (
+                f"choose them again under “{CLIENT_OPTIONS_LABEL}” in the ▾ menu."
+                if has_client_choices(self.entry.client)
+                else "the defaults will be used."
+            )
+            said.append(
+                f"Your client choices could not be saved yet ({made.choices_problem}); {again}"
             )
         if removed:
             said.append("Removed from your own client: " + "; ".join(removed) + ".")
@@ -8433,6 +8754,7 @@ class ControllerView(QWidget):
         """The Play under way is over, started or not."""
         self._play_pending = False
         self._play_left_out = ()
+        self._play_notes = ()
         if said is not None:
             self._say_play(said)
 
@@ -8528,11 +8850,360 @@ class ControllerView(QWidget):
             self._play_end("Nothing was started.")
 
     def _play_launch(self) -> None:
+        """The last step before the game: the client's packs, exe and config, then the launch."""
+        if self.services.play_client_dir is None or self._play_still_usable() is None:
+            return
+        play = self.services.play_client_dir
+        recorded = client_packs.read_record(play) if play is not None else None
+        # Also when the catalog no longer has client data but the record still lists
+        # packs or a patched exe: step 1 takes them out.
+        if has_client_data(self.entry.client) or (
+            recorded is not None and (recorded.packs or recorded.exe is not None)
+        ):
+            self._skipped = frozenset()
+            self._play_prepare()
+            return
+        self._play_start_game()
+
+    def _play_start_game(self) -> None:
         play = self.services.play_client_dir
         if play is None or self._play_still_usable() is None:
             return
         self._say_play("Starting World of Warcraft…")
         self._run(lambda: self._launch(play), self._play_launched, self._play_failed)
+
+    # -- the client's packs, Wow.exe and Config.wtf (T181 b/c) -------------
+
+    def _show_cancel(self, shown: bool) -> None:
+        self.play_cancel_button.setText("Cancel")
+        self.play_cancel_button.setEnabled(True)
+        self.play_cancel_button.setVisible(shown)
+
+    @Slot()
+    def _cancel_play_download(self) -> None:
+        """Stop the whole preparation; it is checked between steps, so a stalled read waits."""
+        self._play_cancel.set()
+        self.play_cancel_button.setEnabled(False)
+        self.play_cancel_button.setText("Cancelling…")
+
+    def _play_prepare(self) -> None:
+        """Run the pipeline on the worker; `_skipped` are optional packs played without.
+
+        Holds the lock the way Refresh does: it writes into the ready-to-play
+        client, so a module install, Make… or a Server action must wait, and so
+        must the close. Not the Play's own wait (`_play_pending` stays set).
+        """
+        marker = self._play_still_usable()
+        play = self.services.play_client_dir
+        if marker is None or play is None:
+            return
+        if self._play_stopped_by_another_action():
+            return
+        self._play_cancel.clear()
+        self._play_client_running = True
+        self._play_preparing = True
+        self._hold_busy()
+        self._show_cancel(True)
+        self._say_play("Getting the ready-to-play client ready…")
+        source = marker.source_client_dir
+        skip = self._skipped
+        self._run(
+            lambda: self._prepare_client(play, source, skip),
+            self._play_prepared,
+            self._play_prepare_failed,
+        )
+
+    def _prepare_client(self, play: Path, source: Path, skip: frozenset[str]) -> _Prepared:
+        """Off the GUI thread: packs, then the exe, then Config.wtf (spec §2, §3).
+
+        Every record write happens as each step finishes, so a Cancel or a
+        failure part-way keeps what was done and the next Play carries on.
+        Talks to the GUI only through `_play_relay`.
+        """
+        client = self.entry.client
+        game = self.entry.id
+        server_dir = self.services.controller.server_dir
+        say = self._play_relay.emit_line
+        cancelled = self._play_cancel.is_set
+        record = client_packs.read_record(play)
+        packs = dict(record.packs)
+        exe = record.exe
+        seeded = record.config_seeded
+        notes: list[str] = []
+        unavailable: set[str] = set()
+
+        def save() -> None:
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(packs, exe, record.choices, seeded),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        def check_cancel() -> None:
+            if cancelled():
+                raise client_packs.Cancelled("Cancelled. Nothing was started.")
+
+        wanted = {pack.id for pack in client_packs.wanted(client, record.choices)}
+        # "Play without" a pack whose update was cut half way: its files are a mix of old
+        # and new, so they go (and the entry) before the game starts.
+        for pack_id in sorted(skip):
+            half = packs.get(pack_id)
+            if half is not None and _half_installed(half):
+                gone = next((p for p in client.packs if p.id == pack_id), None)
+                say(f"Removing the half-installed {client_packs.pack_label(gone)}…")
+                left = client_packs.remove(
+                    play, half, gone, game=game, server_dir=server_dir, when_off=False
+                )
+                files = half.get("files")
+                client_packs.restore_asides(
+                    play,
+                    list(files) if isinstance(files, dict) else [],
+                    game=game,
+                    server_dir=server_dir,
+                )
+                del packs[pack_id]
+                save()
+                notes += self._removal_notes(play, source, half, gone, left)
+        in_catalog = {pack.id: pack for pack in client.packs}
+        # 1a. Switched off, or gone from the catalog: its recorded files go.
+        for pack_id in list(packs):
+            if pack_id in wanted:
+                continue
+            check_cancel()
+            gone = in_catalog.get(pack_id)
+            say(f"Removing {client_packs.pack_label(gone)}…")
+            entry = packs[pack_id]
+            left = client_packs.remove(play, entry, gone, game=game, server_dir=server_dir)
+            del packs[pack_id]
+            save()
+            notes += self._removal_notes(play, source, entry, gone, left)
+        # 1b. Wanted: fetch, and install when what is there differs.
+        for pack in client.packs:
+            if pack.id not in wanted or pack.id in skip:
+                continue
+            check_cancel()
+            say(f"Getting {pack.label}…")
+            try:
+                if pack.source.kind == "checkout":
+                    fetched = client_packs.fetch_checkout(pack, server_dir)
+                else:
+                    fetched = client_packs.fetch_url(
+                        pack,
+                        entry_id=game,
+                        allowed_hosts=client.hosts(),
+                        progress=self._download_progress(pack),
+                        cancelled=cancelled,
+                    )
+            except client_packs.Cancelled:
+                raise
+            except client_packs.PackUnavailable as exc:
+                if pack.optional:
+                    unavailable.add(pack.id)
+                    notes.append(
+                        f"{pack.label} is unavailable: the server's site no longer has it. "
+                        "What is installed stays until you switch it off."
+                    )
+                    continue
+                raise _PackStopped(pack, str(exc)) from exc
+            except client_packs.PackError as exc:
+                raise _PackStopped(
+                    pack,
+                    _checkout_refusal(
+                        pack, server_dir, wsl_distro=self.services.controller.wsl_distro
+                    )
+                    or str(exc),
+                ) from exc
+            have = packs.get(pack.id)
+            if (
+                have is not None
+                and have.get("sha256") == fetched.sha256
+                and have.get("version") == fetched.version
+            ):
+                continue
+            say(f"Installing {pack.label}…")
+            try:
+                done = client_packs.install(
+                    play, pack, fetched, game=game, server_dir=server_dir, previous=have
+                )
+            except client_packs.PartialInstall as exc:
+                packs[pack.id] = exc.entry
+                save()
+                raise _PackStopped(pack, str(exc)) from exc
+            except client_packs.PackError as exc:
+                raise _PackStopped(pack, str(exc)) from exc
+            packs[pack.id] = done
+            save()
+            left_behind = done.get("left_behind")
+            if left_behind:
+                notes.append(
+                    f"{pack.label}: left alone because you changed them: "
+                    + ", ".join(left_behind)
+                    + "."
+                )
+        # 2. Wow.exe.
+        if client.exe_patch is not None:
+            check_cancel()
+            say("Checking Wow.exe…")
+            options = client_exe.options_for(client.exe_patch, record.choices["exe_options"])
+            exe = client_exe.apply(play, source, client.exe_patch, options)
+            try:
+                save()
+            except client_packs.PackError as exc:
+                raise client_exe.ExeError(
+                    f"Wow.exe was patched, but the note of it could not be saved ({exc}). "
+                    "Press Play again: it is checked and noted then. If Play offers to refresh "
+                    "Wow.exe first, say yes."
+                ) from exc
+        elif exe is not None:
+            # The catalog dropped the patch: the original's Wow.exe comes back.
+            say("Putting your own Wow.exe back…")
+            if play_client.restore_original_exe(play, source, game=game, server_dir=server_dir):
+                exe = None
+        # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
+        cfg = client.config_wtf
+        if cfg is not None:
+            check_cancel()
+            say("Setting up Config.wtf…")
+            if cfg.remove_locale_realmlists:
+                client_config.remove_locale_realmlists(play)
+            else:
+                try:
+                    networking.write_ready_to_play_realmlists(
+                        play, PLAY_CLIENT_ADDRESS, client.realmlist_file
+                    )
+                except OSError as exc:
+                    raise play_client.PlayClientError(
+                        f"The realmlist in {play} could not be written ({exc}), so nothing was "
+                        "started. Check that you can write to that folder, then press Play again."
+                    ) from exc
+            client_config.merge_config_wtf(play, cfg, first_run=not record.config_seeded)
+            seeded = True
+            save()
+        return _Prepared(tuple(notes), frozenset(unavailable))
+
+    def _download_progress(self, pack: ClientPack) -> Callable[[int, int], None]:
+        """A progress callback for `pack`'s download: at most five lines a second."""
+        say = self._play_relay.emit_line
+        last = [-1, 0.0]  # percent, time
+
+        def report(done: int, total: int) -> None:
+            percent = int(done * 100 / total) if total else 0
+            now = time.monotonic()
+            if percent == last[0] or (percent < 100 and last[0] >= 0 and now - last[1] < 0.2):
+                return
+            last[0], last[1] = percent, now
+            of = f" of {_size_text(total)}" if total else ""
+            say(f"Downloading {pack.label}… {percent}% ({_size_text(done)}{of})")
+
+        return report
+
+    @staticmethod
+    def _removal_notes(
+        play: Path,
+        source: Path,
+        entry: Mapping[str, Any],
+        pack: ClientPack | None,
+        left: Collection[str],
+    ) -> list[str]:
+        """What to tell the player about a pack taken out (decision 4 and the edited files)."""
+        label = client_packs.pack_label(pack)
+        notes: list[str] = []
+        if left:
+            notes.append(
+                f"{label}: left in place because you changed them: " + ", ".join(left) + "."
+            )
+        files = entry.get("files")
+        candidates = [
+            *(files if isinstance(files, dict) else ()),
+            *(pack.remove_when_off if pack else ()),
+        ]
+        replaced = sorted(
+            rel
+            for rel in dict.fromkeys(candidates)
+            if rel not in left and not (play / rel).exists() and (source / rel).exists()
+        )
+        if replaced:
+            notes.append(
+                f"{label} had replaced {', '.join(replaced)} from your own client, which the "
+                "ready-to-play client now lacks. To bring it back, press "
+                f"“{DELETE_PLAY_CLIENT_LABEL}” and then “{MAKE_PLAY_CLIENT_LABEL}” again."
+            )
+        return notes
+
+    def _torn_down_during_play(self) -> bool:
+        """The tab was dropped while the pipeline ran: no dialog, no launch, locks given back."""
+        if not getattr(self, "_closed", False):
+            return False
+        self._release_play_client()
+        self._play_end()
+        return True
+
+    @Slot(object)
+    def _play_prepared(self, result: object) -> None:
+        if self._torn_down_during_play():
+            return
+        self._release_play_client()
+        self._show_cancel(False)
+        if self._play_cancel.is_set():
+            # Pressed after the last check: the player asked to stop, so nothing starts.
+            self._play_end("Cancelled. Nothing was started.")
+            return
+        if isinstance(result, _Prepared):
+            self._client_unavailable = result.unavailable
+            self._play_notes = result.notes
+        self._play_start_game()
+
+    @Slot(object)
+    def _play_prepare_failed(self, exc: object) -> None:
+        if self._torn_down_during_play():
+            return
+        self._release_play_client()
+        self._show_cancel(False)
+        if isinstance(exc, _PackStopped):
+            self._play_pack_stopped(exc)
+        elif isinstance(exc, client_packs.Cancelled):
+            self._play_end("Cancelled. Nothing was started.")
+        elif isinstance(
+            exc, (client_packs.PackError, client_exe.ExeError, play_client.PlayClientError)
+        ):
+            self._play_end()
+            self._play_refused(str(exc))
+        else:
+            self._play_failed(exc)
+
+    def _play_pack_stopped(self, stopped: _PackStopped) -> None:
+        """A pack failed: a required one blocks Play (Retry); an optional one may be left out."""
+        pack = stopped.pack
+        self.action_failed.emit(f"{self.entry.id}: {stopped.reason}")
+        self._say_play(stopped.reason)
+        if pack.optional:
+            play = self.services.play_client_dir
+            held = client_packs.read_record(play).packs.get(pack.id) if play is not None else None
+            have = held is not None and not _half_installed(held)
+            if have:
+                text = (
+                    f"{stopped.reason}\n\nPlay with the version of “{pack.label}” you have "
+                    "this time, or try again?"
+                )
+                skip: str | None = "Play with the version you have"
+            else:
+                text = f"{stopped.reason}\n\nPlay without “{pack.label}” this time, or try again?"
+                skip = f"Play without {pack.label}"
+        else:
+            text = (
+                f"“{pack.label}” is needed to play on this server, so nothing was started: "
+                f"{stopped.reason}\n\nTry again?"
+            )
+            skip = None
+        answer = _ask_with(self, f"{pack.label} could not be set up", text, "Retry", skip)
+        if answer == "yes":
+            self._play_prepare()
+        elif answer == "save":
+            self._skipped = self._skipped | {pack.id}
+            self._play_prepare()
+        else:
+            self._play_end("Nothing was started.")
 
     def _launch(self, play: Path) -> None:
         """Off the GUI thread: the realmlist again, then the game, detached.
@@ -8541,15 +9212,18 @@ class ControllerView(QWidget):
         `OSError` from starting the process (a Proton that is not executable, a
         Wine that went away) comes through `launch()` raw and is worded here.
         """
-        try:
-            networking.write_ready_to_play_realmlists(
-                play, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
-            )
-        except OSError as exc:
-            raise play_launch.LaunchRefusal(
-                f"The realmlist in {play} could not be written ({exc}), so nothing was "
-                "started. Check that you can write to that folder, then press Play again."
-            ) from exc
+        if self.entry.client.config_wtf is None:
+            # An entry with a `config_wtf` had its Config.wtf merged (and the locale
+            # realmlists removed) by the pipeline; every other entry is step (a)'s.
+            try:
+                networking.write_ready_to_play_realmlists(
+                    play, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+                )
+            except OSError as exc:
+                raise play_launch.LaunchRefusal(
+                    f"The realmlist in {play} could not be written ({exc}), so nothing was "
+                    "started. Check that you can write to that folder, then press Play again."
+                ) from exc
         spec = play_launch.launch_spec(
             play,
             game=self.entry.id,
@@ -8573,6 +9247,8 @@ class ControllerView(QWidget):
         said = "World of Warcraft is starting. Closing Yu'lon does not close it."
         if self._play_left_out:
             said += " " + left_out_sentence(self._play_left_out)
+        if self._play_notes:
+            said += " " + " ".join(self._play_notes)
         self._play_end(said)
 
     @Slot(object)
@@ -8586,6 +9262,52 @@ class ControllerView(QWidget):
                 "▾ menu beside Play first."
             )
         self._play_refused(str(exc))
+
+    # -- Client options… ---------------------------------------------------
+
+    @Slot()
+    def client_options(self) -> None:
+        """Choose the optional packs and Wow.exe options; the next Play applies them (T181 c)."""
+        play = self.services.play_client_dir
+        if self.services.set_play_client_dir is None or play is None:
+            return
+        if self._play_waits_for_play() or self._play_client_blocked():
+            return
+        if self._usable_play_client() is None:
+            return
+        record = client_packs.read_record(play)
+        offer = ClientOptionsOffer(
+            client=self.entry.client,
+            choices=record.choices,
+            installed=frozenset(record.packs),
+            unavailable=self._client_unavailable,
+        )
+        chosen = self._client_options_asker(self, offer)
+        if chosen is None:
+            return
+        # Again: the dialog is modal, and a job may have started behind it.
+        if self._play_waits_for_play() or self._play_client_blocked():
+            return
+        game, server_dir = self.entry.id, self.services.controller.server_dir
+        self._play_client_running = True
+        self._hold_busy()
+        self._say_play("Saving your client choices…")
+
+        def save() -> None:
+            current = client_packs.read_record(play)
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(current.packs, current.exe, chosen, current.config_seeded),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        self._run(save, self._client_options_saved, self._play_client_job_failed)
+
+    @Slot(object)
+    def _client_options_saved(self, _result: object) -> None:
+        self._release_play_client()
+        self._say_play("Your client choices are saved. They take effect at your next Play.")
 
     # -- Refresh and Delete ------------------------------------------------
 
@@ -8623,6 +9345,7 @@ class ControllerView(QWidget):
                 game=self.entry.id,
                 server_dir=server_dir,
                 keep=module_kept_files(server_dir, play, client_dir),
+                exe_patch=self.entry.client.exe_patch,
             )
             return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
 
