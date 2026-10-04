@@ -507,6 +507,13 @@ def _entry_line(box: _Edges, direction: Direction) -> _Edges:
     return right, top, right, bottom
 
 
+BACK_CLOSES = "yulonBackCloses"
+"""A top-level window's Qt property: B on the pad closes it, as it closes a dialog (T187).
+
+The client launcher sets it. Not the main window: B there would quit the app.
+"""
+
+
 class Navigator(QObject):
     """The directional focus engine: resolves movement and executes actions.
 
@@ -917,8 +924,10 @@ class Navigator(QObject):
         return True
 
     def _back(self) -> bool:
-        # Back is "close the thing I am in": a popup, then a modal. If none is
-        # open, it does nothing rather than yanking focus unpredictably.
+        # Back is "close the thing I am in": a popup, then a modal, then a window
+        # that says B closes it (`BACK_CLOSES`: the client launcher, T187). If
+        # none is open, it does nothing rather than yanking focus unpredictably
+        # -- the main window never closes on B.
         app = QApplication.instance()
         if isinstance(app, QApplication):
             popup = app.activePopupWidget()
@@ -928,6 +937,10 @@ class Navigator(QObject):
             modal = app.activeModalWidget()
             if modal is not None:
                 modal.close()
+                return True
+            active = app.activeWindow()
+            if active is not None and active.property(BACK_CLOSES) is True:
+                active.close()
                 return True
         return False
 

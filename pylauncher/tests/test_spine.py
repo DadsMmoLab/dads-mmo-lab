@@ -2671,6 +2671,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "belong to a write still in flight in another copy of Yu'lon. It touches nothing of "
         "a server's and answers an empty listing by doing nothing"
     ),
+    ("ui_settings.py", "_sweep_stale_temporaries"): (
+        "T187: `update_state._sweep_stale_temporaries` for `ui.json` - lists the config dir "
+        "for `ui.json.*.tmp` a killed save left, and deletes only a file this app named "
+        "itself, in its own directory, more than a day old. Nothing of a server's"
+    ),
     ("play_client.py", "plan"): (
         "T181a. Walks the player's own client to sort its files into hard-linked (`*.MPQ`, "
         "`*.dll`) and copied, for a ready-to-play client built BESIDE it. The listing decides "
@@ -2743,6 +2748,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "deleted (a read-only one with a single name is made writable first; one shared with "
         "the player's own client is never chmodded and is left). Only in a folder whose step "
         "(a) marker was checked, never into a link, and never the player's own client"
+    ),
+    ("launcher_reads.py", "_scandir"): (
+        "T187. Lists a ready-to-play client, its `Interface` and its `AddOns` -- one folder "
+        "each, never a walk -- for the NAMES the launcher window shows under Addons in this "
+        "client. It decides no write anywhere: the answer is a read-only list on screen. No "
+        "addon folder is entered, linked or not; an `Interface` or `AddOns` that is a link is "
+        "listed through once, because that is where the game reads its addons. A folder that "
+        "cannot be listed answers no names"
     ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "

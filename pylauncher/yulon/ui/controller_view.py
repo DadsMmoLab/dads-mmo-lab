@@ -34,6 +34,7 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, cast
 
+import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
@@ -109,7 +110,7 @@ from yulon.apply import (
     required_prompts,
 )
 from yulon.catalog import bot_dashboard, composegen, native, preflight, time_zone, upstream
-from yulon.catalog.catalog import CatalogEntry, Client, ClientPack
+from yulon.catalog.catalog import CatalogEntry, Client, ClientPack, ConfigWtf
 from yulon.catalog.families import azerothcore, clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
@@ -152,6 +153,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_GOLD,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_WARNING,
+    PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
@@ -714,6 +716,44 @@ own public address back to it. The world address comes from the realm row the
 Networking tab manages, not from this file.
 """
 
+
+def _realm_address(record: client_packs.PackRecord) -> str:
+    """The address the ready-to-play client points at: the launcher's pick, else this machine."""
+    return str(record.launcher.get("realm_address") or PLAY_CLIENT_ADDRESS)
+
+
+def _launcher_writes(record: client_packs.PackRecord) -> bool:
+    """Whether the launcher's picks (T187) put a key into, or take one out of, Config.wtf.
+
+    Asked only of an entry without `config_wtf`, whose realmlist.wtf carries
+    this computer's address (`_address_written_elsewhere`).
+    """
+    return bool(
+        client_packs.launcher_config_keys(record.launcher, catalog_always={})
+        or client_packs.launcher_config_removals(
+            record.launcher, catalog_always={}, default_address_written=True
+        )
+    )
+
+
+def _catalog_always(cfg: ConfigWtf | None) -> dict[str, str]:
+    """The Config.wtf keys the catalog sets for every player; none without a `config_wtf`."""
+    return dict(cfg.always) if cfg is not None else {}
+
+
+def _address_written_elsewhere(cfg: ConfigWtf | None) -> bool:
+    """Whether this computer's address reaches the game without a typed one in Config.wtf.
+
+    Through realmlist.wtf (no `config_wtf`, or one that keeps the locale
+    realmlists, which Play writes) or through the catalog's own `realmList`.
+    Then "Use this computer" may take a typed address's lines back out of
+    Config.wtf (T187 fix 1); otherwise they are the only address there is.
+    """
+    if cfg is None or not cfg.remove_locale_realmlists:
+        return True
+    return "realmlist" in {key.casefold() for key in cfg.always}
+
+
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
 
 PLAY_PENDING = (
@@ -847,7 +887,7 @@ class ClientOptionsBox(QWidget):
         self.required_label = QLabel("", self)
         self.required_label.setWordWrap(True)
         self.required_label.setText(
-            f"Required download: {_size_text(required)}." if required else "Nothing to download."
+            f"Required download: {size_text(required)}." if required else "Nothing to download."
         )
         self.required_label.setVisible(bool(client.packs))
         box.addWidget(self.required_label)
@@ -885,7 +925,7 @@ class ClientOptionsBox(QWidget):
         if pack.description:
             text += f" — {pack.description}"
         if pack.size_hint:
-            text += f" ({_size_text(pack.size_hint)})"
+            text += f" ({size_text(pack.size_hint)})"
         if gone:
             text += " — unavailable: the server's site no longer has it"
         return text
@@ -896,7 +936,7 @@ class ClientOptionsBox(QWidget):
             for pack_id, size in self._sizes.items()
             if self.pack_boxes[pack_id].isChecked() and self.pack_boxes[pack_id].isEnabled()
         )
-        self.extra_label.setText(f"The ticked packs add {_size_text(extra)}." if extra else "")
+        self.extra_label.setText(f"The ticked packs add {size_text(extra)}." if extra else "")
         self.extra_label.setVisible(bool(extra))
 
     def choices(self) -> dict[str, Any]:
@@ -984,7 +1024,7 @@ def _play_size_text(plan: play_client.BuildPlan, free: int | None) -> str:
     if plan.same_volume:
         return (
             f"{_gb_text(plan.shared_bytes)} of game files are shared with your client and "
-            f"take no extra space; its own files take {_size_text(plan.own_bytes)}{space}."
+            f"take no extra space; its own files take {size_text(plan.own_bytes)}{space}."
         )
     return (
         "This folder is on another drive than your client, so its game files cannot be "
@@ -5711,7 +5751,7 @@ everything under it.
 """
 
 
-def _size_text(size: int) -> str:
+def size_text(size: int) -> str:
     """Bytes as the dialog says them: decimal units, one decimal place.
 
     Decimal rather than binary because that is what a user's file manager and
@@ -5790,6 +5830,17 @@ class ControllerView(QWidget):
     rebuilt tab writes modules into the new folder (or back into the original).
     """
 
+    play_state_changed = Signal()
+    """Play's line, its Cancel, or a lock on the ready-to-play client changed (T187).
+
+    The client launcher window shows the same line and Cancel as the Server tab
+    and greys its settings while `play_client_busy()` says so; it reads both off
+    this view when this fires rather than keeping a second copy of either.
+    """
+
+    launcher_saved = Signal(str)
+    """A `save_launcher_picks()` write ended: `""` when saved, else what went wrong (T187)."""
+
     def __init__(
         self,
         entry: CatalogEntry,
@@ -5808,6 +5859,14 @@ class ControllerView(QWidget):
         super().__init__(parent)
         self.entry = entry
         self.services = services
+        # T187: the client launcher window driving this tab, while its press is
+        # the one being answered: the play-side dialogs open over it rather
+        # than over the main window (`_play_parent`). Set by the launcher before
+        # each of its presses, cleared by this tab's own.
+        self.dialog_host: QWidget | None = None
+        # T187: opens this server's launcher window; `main.py` sets it. While it
+        # is None (a tab outside the app's window) Play plays directly, as before.
+        self.open_launcher: Callable[[], None] | None = None
         # T181's creation dialog, a seam for `prompt_asker`'s reason. The real
         # one is the dialog, with this tab's own folder picker behind "Change…".
         self._play_client_asker: PlayClientAsker = play_client_asker or (
@@ -7348,6 +7407,8 @@ class ControllerView(QWidget):
             # T162: back to what the dashboard's files last said, never unconditionally.
             if self.dashboard_log is not None:
                 self._set_rebuild_dashboard_button()
+        # T187: the launcher window greys its settings while this tab is busy.
+        self.play_state_changed.emit()
 
     @Slot()
     def start_server(self) -> None:
@@ -7896,7 +7957,7 @@ class ControllerView(QWidget):
             return
         keep = self.keep_characters_check.isChecked()
         lines = [
-            f"This removes {plan.server_dir} ({_size_text(plan.folder_bytes)}) and this "
+            f"This removes {plan.server_dir} ({size_text(plan.folder_bytes)}) and this "
             f"server's Docker project {plan.project}:",
             f"  containers: {', '.join(plan.containers) or 'none left'}",
             f"  images: {len(plan.images)} built for this install",
@@ -8260,12 +8321,12 @@ class ControllerView(QWidget):
             "Bring the game files and Wow.exe back in step with your own client after a "
             "patch. Your settings (WTF) and addons (Interface) are never touched."
         )
-        self.refresh_play_client_action.triggered.connect(self.refresh_play_client)
+        self.refresh_play_client_action.triggered.connect(self._from_tab(self.refresh_play_client))
         self.delete_play_client_action = self.play_menu.addAction(DELETE_PLAY_CLIENT_LABEL)
         self.delete_play_client_action.setToolTip(
             "Delete the ready-to-play client. Your own client keeps all its files. Asks first."
         )
-        self.delete_play_client_action.triggered.connect(self.delete_play_client)
+        self.delete_play_client_action.triggered.connect(self._from_tab(self.delete_play_client))
         self.play_label = QLabel("", tab)
         self.play_label.setWordWrap(True)
         self.play_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -8285,9 +8346,11 @@ class ControllerView(QWidget):
                 "Make a copy of your client set up for this server, without changing your "
                 "own client. Game files are shared, so it takes little extra space."
             )
-        self.play_button.clicked.connect(self.play)
+        self.play_button.clicked.connect(self._play_pressed)
         self.play_button.setVisible(has_play or self.services.client_dir is not None)
         self.play_menu_button = QPushButton("▾", tab)
+        # Its label is the arrow: the style's own indicator would be a second (T187).
+        self.play_menu_button.setObjectName(PLAY_MENU_BUTTON)
         self.play_menu_button.setToolTip("More for the ready-to-play client")
         self.play_menu_button.setMenu(self.play_menu)
         self.play_menu_button.setVisible(has_play)
@@ -8295,6 +8358,46 @@ class ControllerView(QWidget):
 
     def _say_play(self, text: str) -> None:
         self.play_label.setText(text)
+        self.play_state_changed.emit()
+
+    def _from_tab(self, press: Callable[[], None]) -> Callable[..., None]:
+        """`press` as this tab's own button makes it: its dialogs open over the tab (T187)."""
+
+        def pressed(*_args: object) -> None:
+            self.dialog_host = None
+            press()
+
+        return pressed
+
+    @Slot()
+    def _play_pressed(self) -> None:
+        """The tab's Play opens the server's launcher window (T187); its Make… stays a Make….
+
+        Without a ready-to-play client the button reads "Make a ready-to-play
+        client…" and does exactly that. With one, PLAY is in the launcher, which
+        is where the realm address, the account and the display are chosen.
+        """
+        self.dialog_host = None
+        if self.services.play_client_dir is not None and self.open_launcher is not None:
+            self.open_launcher()
+            return
+        self.play()
+
+    def _play_parent(self) -> QWidget:
+        """Where a Make…/Play/Refresh/Delete dialog opens: the launcher that pressed, or this tab.
+
+        Only a launcher still on screen: one closed or minimized since its press
+        has nobody looking at it, and a dialog over it is a dialog nobody sees.
+        """
+        host = self.dialog_host
+        if (
+            host is not None
+            and shiboken6.isValid(host)
+            and host.isVisible()
+            and not host.isMinimized()
+        ):
+            return host
+        return self
 
     @Slot(str)
     def _play_progress(self, text: str) -> None:
@@ -8305,7 +8408,7 @@ class ControllerView(QWidget):
         """A Play-side refusal, on the label, in the log and in front of the player."""
         self._say_play(message)
         self.action_failed.emit(message)
-        QMessageBox.warning(self, self.entry.name, message)
+        QMessageBox.warning(self._play_parent(), self.entry.name, message)
 
     def _play_client_refusal(self) -> str | None:
         """Why Make…, Play, Refresh or Delete may not start now, or None.
@@ -8335,7 +8438,7 @@ class ControllerView(QWidget):
         """
         if not self._play_pending:
             return False
-        QMessageBox.information(self, "Something else is running", PLAY_PENDING)
+        QMessageBox.information(self._play_parent(), "Something else is running", PLAY_PENDING)
         return True
 
     def _play_client_blocked(self) -> bool:
@@ -8343,7 +8446,7 @@ class ControllerView(QWidget):
         refusal = self._play_client_refusal()
         if refusal is None:
             return False
-        QMessageBox.information(self, "Something else is running", refusal)
+        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
         return True
 
     def _hold_busy(self) -> None:
@@ -8357,6 +8460,7 @@ class ControllerView(QWidget):
         if self._play_holds_busy:
             self._play_holds_busy = False
             self._set_busy(False)
+        self.play_state_changed.emit()
 
     def _is_this_servers(self, marker: play_client.Marker | None) -> bool:
         return (
@@ -8399,7 +8503,7 @@ class ControllerView(QWidget):
         said = self._play_client_gone_text(play)
         self._say_play(said)
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "The ready-to-play client is gone",
             f"{said}\n\nMake a ready-to-play client for this server again?",
             "Make it again",
@@ -8419,7 +8523,7 @@ class ControllerView(QWidget):
         original = self.services.client_dir
         if original is None:
             QMessageBox.information(
-                self,
+                self._play_parent(),
                 MAKE_PLAY_CLIENT_LABEL,
                 "A ready-to-play client is made from your own client folder, and none is "
                 "set for this server. Press “Set client folder…” on this tab "
@@ -8563,7 +8667,7 @@ class ControllerView(QWidget):
             self._release_play_client()
             return
         offer = result
-        choice = self._play_client_asker(self, offer)
+        choice = self._play_client_asker(self._play_parent(), offer)
         if choice is None:
             self._release_play_client()
             self._say_play("No ready-to-play client was made.")
@@ -8605,7 +8709,12 @@ class ControllerView(QWidget):
             try:
                 client_packs.write_record(
                     choice.target,
-                    client_packs.PackRecord({}, None, choice.client_choices),
+                    client_packs.PackRecord(
+                        {},
+                        None,
+                        choice.client_choices,
+                        launcher=client_packs.read_record(choice.target).launcher,
+                    ),
                     game=self.entry.id,
                     server_dir=self.services.controller.server_dir,
                 )
@@ -8705,7 +8814,7 @@ class ControllerView(QWidget):
     def _finish_make(self, target: Path, said: list[str]) -> None:
         """Say what Make… did, and have the tab rebuilt over the new folder."""
         self._release_play_client()
-        QMessageBox.information(self, "Ready-to-play client", "\n\n".join(said))
+        QMessageBox.information(self._play_parent(), "Ready-to-play client", "\n\n".join(said))
         # Last: main.py drops this tab on it.
         self.play_client_dir_changed.emit(
             self.entry.id, self.services.controller.server_dir, target
@@ -8757,6 +8866,7 @@ class ControllerView(QWidget):
         self._play_notes = ()
         if said is not None:
             self._say_play(said)
+        self.play_state_changed.emit()
 
     def _play_still_usable(self) -> play_client.Marker | None:
         """`_usable_play_client()` part-way through a Play: a gone folder ends it first."""
@@ -8780,7 +8890,7 @@ class ControllerView(QWidget):
         if refusal is None:
             return False
         self._play_end("Nothing was started.")
-        QMessageBox.information(self, "Something else is running", refusal)
+        QMessageBox.information(self._play_parent(), "Something else is running", refusal)
         return True
 
     @Slot(object)
@@ -8791,7 +8901,7 @@ class ControllerView(QWidget):
             self._play_check_stale()
             return
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "Start the server?",
             "The server is stopped. Start it first?",
             "Start and play",
@@ -8833,7 +8943,7 @@ class ControllerView(QWidget):
             return
         left = f"\n\n{left_out_sentence(compared.left_out)}" if compared.left_out else ""
         answer = _ask_with(
-            self,
+            self._play_parent(),
             "Your client was patched",
             f"These files of your own client changed since the ready-to-play client was "
             f"made: {', '.join(names)}. Refresh it from your original client first? "
@@ -8856,9 +8966,12 @@ class ControllerView(QWidget):
         play = self.services.play_client_dir
         recorded = client_packs.read_record(play) if play is not None else None
         # Also when the catalog no longer has client data but the record still lists
-        # packs or a patched exe: step 1 takes them out.
+        # packs or a patched exe: step 1 takes them out. And for the launcher's picks
+        # alone (T187): on an entry with no client data -- every shipped game today --
+        # its display and account choices are Config.wtf keys only the pipeline writes.
         if has_client_data(self.entry.client) or (
-            recorded is not None and (recorded.packs or recorded.exe is not None)
+            recorded is not None
+            and (recorded.packs or recorded.exe is not None or _launcher_writes(recorded))
         ):
             self._skipped = frozenset()
             self._play_prepare()
@@ -8878,6 +8991,7 @@ class ControllerView(QWidget):
         self.play_cancel_button.setText("Cancel")
         self.play_cancel_button.setEnabled(True)
         self.play_cancel_button.setVisible(shown)
+        self.play_state_changed.emit()
 
     @Slot()
     def _cancel_play_download(self) -> None:
@@ -8885,6 +8999,7 @@ class ControllerView(QWidget):
         self._play_cancel.set()
         self.play_cancel_button.setEnabled(False)
         self.play_cancel_button.setText("Cancelling…")
+        self.play_state_changed.emit()
 
     def _play_prepare(self) -> None:
         """Run the pipeline on the worker; `_skipped` are optional packs played without.
@@ -8929,13 +9044,14 @@ class ControllerView(QWidget):
         packs = dict(record.packs)
         exe = record.exe
         seeded = record.config_seeded
+        choices = record.choices
         notes: list[str] = []
         unavailable: set[str] = set()
 
         def save() -> None:
             client_packs.write_record(
                 play,
-                client_packs.PackRecord(packs, exe, record.choices, seeded),
+                client_packs.PackRecord(packs, exe, choices, seeded, record.launcher),
                 game=game,
                 server_dir=server_dir,
             )
@@ -9045,7 +9161,15 @@ class ControllerView(QWidget):
         if client.exe_patch is not None:
             check_cancel()
             say("Checking Wow.exe…")
-            options = client_exe.options_for(client.exe_patch, record.choices["exe_options"])
+            # A window pick decides `borderless`, and is saved as that exe option (T187).
+            picked_exe = client_packs.launcher_exe_options(
+                record.launcher,
+                record.choices["exe_options"],
+                client.exe_patch.options,
+                catalog_always=_catalog_always(client.config_wtf),
+            )
+            choices = {**record.choices, "exe_options": picked_exe}
+            options = client_exe.options_for(client.exe_patch, picked_exe)
             exe = client_exe.apply(play, source, client.exe_patch, options)
             try:
                 save()
@@ -9062,7 +9186,28 @@ class ControllerView(QWidget):
                 exe = None
         # 3. Config.wtf (else step (a)'s realmlist.wtf, written by `_launch`).
         cfg = client.config_wtf
-        if cfg is not None:
+        catalog_always = _catalog_always(cfg)
+        written_elsewhere = _address_written_elsewhere(cfg)
+        picked = client_packs.launcher_config_keys(
+            record.launcher,
+            catalog_always=catalog_always,
+            # Config.wtf the only channel: "Use this computer" writes this computer there.
+            default_address=None if written_elsewhere else PLAY_CLIENT_ADDRESS,
+        )
+        removed = client_packs.launcher_config_removals(
+            record.launcher,
+            catalog_always=catalog_always,
+            default_address_written=written_elsewhere,
+        )
+        if cfg is None and (picked or removed):
+            # An entry without `config_wtf` still gets the launcher's picks (T187); its
+            # realmlist stays `_launch`'s, and no seed was written, so none is used up.
+            check_cancel()
+            say("Setting up Config.wtf…")
+            client_config.merge_config_wtf(
+                play, ConfigWtf(always=picked), first_run=False, remove=removed
+            )
+        elif cfg is not None:
             check_cancel()
             say("Setting up Config.wtf…")
             if cfg.remove_locale_realmlists:
@@ -9070,14 +9215,29 @@ class ControllerView(QWidget):
             else:
                 try:
                     networking.write_ready_to_play_realmlists(
-                        play, PLAY_CLIENT_ADDRESS, client.realmlist_file
+                        play, _realm_address(record), client.realmlist_file
                     )
                 except OSError as exc:
                     raise play_client.PlayClientError(
                         f"The realmlist in {play} could not be written ({exc}), so nothing was "
                         "started. Check that you can write to that folder, then press Play again."
                     ) from exc
-            client_config.merge_config_wtf(play, cfg, first_run=not record.config_seeded)
+            # The catalog's `always` is the server's own: `launcher_config_keys` dropped every
+            # pick it sets except a typed address's `realmList`/`patchList`, which win (lead
+            # ruling). A pick, or a removal, also takes a seed's place.
+            taken = {key.casefold() for key in (*picked, *removed)}
+            cfg = cfg.model_copy(
+                update={
+                    "always": {
+                        **{k: v for k, v in cfg.always.items() if k.casefold() not in taken},
+                        **picked,
+                    },
+                    "seed": {k: v for k, v in cfg.seed.items() if k.casefold() not in taken},
+                }
+            )
+            client_config.merge_config_wtf(
+                play, cfg, first_run=not record.config_seeded, remove=removed
+            )
             seeded = True
             save()
         return _Prepared(tuple(notes), frozenset(unavailable))
@@ -9093,8 +9253,8 @@ class ControllerView(QWidget):
             if percent == last[0] or (percent < 100 and last[0] >= 0 and now - last[1] < 0.2):
                 return
             last[0], last[1] = percent, now
-            of = f" of {_size_text(total)}" if total else ""
-            say(f"Downloading {pack.label}… {percent}% ({_size_text(done)}{of})")
+            of = f" of {size_text(total)}" if total else ""
+            say(f"Downloading {pack.label}… {percent}% ({size_text(done)}{of})")
 
         return report
 
@@ -9196,7 +9356,9 @@ class ControllerView(QWidget):
                 f"{stopped.reason}\n\nTry again?"
             )
             skip = None
-        answer = _ask_with(self, f"{pack.label} could not be set up", text, "Retry", skip)
+        answer = _ask_with(
+            self._play_parent(), f"{pack.label} could not be set up", text, "Retry", skip
+        )
         if answer == "yes":
             self._play_prepare()
         elif answer == "save":
@@ -9217,7 +9379,9 @@ class ControllerView(QWidget):
             # realmlists removed) by the pipeline; every other entry is step (a)'s.
             try:
                 networking.write_ready_to_play_realmlists(
-                    play, PLAY_CLIENT_ADDRESS, self.entry.client.realmlist_file
+                    play,
+                    _realm_address(client_packs.read_record(play)),
+                    self.entry.client.realmlist_file,
                 )
             except OSError as exc:
                 raise play_launch.LaunchRefusal(
@@ -9295,9 +9459,17 @@ class ControllerView(QWidget):
 
         def save() -> None:
             current = client_packs.read_record(play)
+            launcher = current.launcher
+            borderless = chosen.get("exe_options", {}).get("borderless")
+            if isinstance(borderless, bool):
+                # T187: one source -- the launcher's window pick follows this box,
+                # or the next Play would put back what the player just changed.
+                launcher = client_packs.launcher_following_borderless(launcher, borderless)
             client_packs.write_record(
                 play,
-                client_packs.PackRecord(current.packs, current.exe, chosen, current.config_seeded),
+                client_packs.PackRecord(
+                    current.packs, current.exe, chosen, current.config_seeded, launcher
+                ),
                 game=game,
                 server_dir=server_dir,
             )
@@ -9308,6 +9480,110 @@ class ControllerView(QWidget):
     def _client_options_saved(self, _result: object) -> None:
         self._release_play_client()
         self._say_play("Your client choices are saved. They take effect at your next Play.")
+
+    # -- the client launcher window's hooks (T187) --------------------------
+
+    @property
+    def play_unavailable(self) -> frozenset[str]:
+        """The optional packs whose address answered 404 at the last Play (spec §4)."""
+        return self._client_unavailable
+
+    def play_client_busy(self) -> str | None:
+        """Why the ready-to-play client's record may not be written now, or None (T187).
+
+        A Play on its way (it reads the record and writes it back as each step
+        ends), any Server action, and Make…/Refresh/Delete/Client options and a
+        launcher save (`_play_client_running`). A module job is not here: it
+        never writes the record, and the launcher's saves have no reason to wait
+        for one -- its PLAY, Refresh and Delete still go through
+        `_play_client_refusal()`, which does ask about it.
+        """
+        if self._play_pending:
+            return PLAY_PENDING
+        if self._busy or self._play_client_running:
+            return (
+                "This server is busy with another action — wait for it to finish, then "
+                "change this again. Nothing was changed."
+            )
+        return None
+
+    def save_launcher_picks(
+        self,
+        *,
+        launcher: Mapping[str, Any] | None = None,
+        drop: Collection[str] = (),
+        packs: Mapping[str, bool] | None = None,
+        exe_options: Mapping[str, bool] | None = None,
+    ) -> str | None:
+        """Save the launcher window's choices into the record, off the GUI thread (T187).
+
+        `launcher` keys replace the saved ones and `drop` removes keys (a realm
+        address put back to this computer); `packs` and `exe_options` are merged
+        into the choices "Client options…" saves, which are the same record. A
+        window pick also sets the `borderless` exe option where the catalog's
+        patch has one (`launcher_exe_options`), so the two never disagree.
+
+        Read, changed and written in one job under `_play_client_running`, the
+        lock Client options takes: Play's pipeline reads the record and writes it
+        back, and a save landing between the two would be lost. Answers the
+        refusal (nothing is started) or None; the outcome comes through
+        `launcher_saved`. Nothing is downloaded or written into the client here:
+        the next Play applies it.
+        """
+        play = self.services.play_client_dir
+        if self.services.set_play_client_dir is None or play is None:
+            return (
+                "This server has no ready-to-play client to save that in. Make one first. "
+                "Nothing was changed."
+            )
+        refusal = self.play_client_busy()
+        if refusal is not None:
+            return refusal
+        game, server_dir = self.entry.id, self.services.controller.server_dir
+        patch = self.entry.client.exe_patch
+        always = _catalog_always(self.entry.client.config_wtf)
+        changes = dict(launcher or {})
+        gone = frozenset(drop)
+
+        def save() -> None:
+            current = client_packs.read_record(play)
+            picks = {k: v for k, v in current.launcher.items() if k not in gone}
+            picks.update(changes)
+            chosen_packs = {**current.choices["packs"], **(packs or {})}
+            chosen_exe = {**current.choices["exe_options"], **(exe_options or {})}
+            if patch is not None:
+                chosen_exe = client_packs.launcher_exe_options(
+                    picks, chosen_exe, patch.options, catalog_always=always
+                )
+            client_packs.write_record(
+                play,
+                client_packs.PackRecord(
+                    current.packs,
+                    current.exe,
+                    {"packs": chosen_packs, "exe_options": chosen_exe},
+                    current.config_seeded,
+                    picks,
+                ),
+                game=game,
+                server_dir=server_dir,
+            )
+
+        self._play_client_running = True
+        self.play_state_changed.emit()
+        self._run(save, self._launcher_picks_saved, self._launcher_picks_failed)
+        return None
+
+    @Slot(object)
+    def _launcher_picks_saved(self, _result: object) -> None:
+        self._release_play_client()
+        self.launcher_saved.emit("")
+
+    @Slot(object)
+    def _launcher_picks_failed(self, exc: object) -> None:
+        self._release_play_client()
+        if not isinstance(exc, client_packs.PackError):
+            logger.warning(f"{self.entry.id}: saving the launcher's choices: {exc!r}")
+        self.launcher_saved.emit(str(exc) or "Your choice could not be saved.")
 
     # -- Refresh and Delete ------------------------------------------------
 
@@ -9346,6 +9622,7 @@ class ControllerView(QWidget):
                 server_dir=server_dir,
                 keep=module_kept_files(server_dir, play, client_dir),
                 exe_patch=self.entry.client.exe_patch,
+                catalog_always=_catalog_always(self.entry.client.config_wtf),
             )
             return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
 
@@ -9388,6 +9665,7 @@ class ControllerView(QWidget):
             "since the ready-to-play client was made live only in it, so your own client "
             "lacks them until those modules are reinstalled or updated. Yu'lon can make a "
             "ready-to-play client again at any time.",
+            self._play_parent(),
         ):
             return
         # Again: a module job may have started while the question was open.
@@ -14586,16 +14864,17 @@ class ControllerView(QWidget):
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
-    def _confirm(self, title: str, question: str) -> bool:
+    def _confirm(self, title: str, question: str, parent: QWidget | None = None) -> bool:
         """One Yes/No dialog, defaulting to No, read through `said_yes()`.
 
         `said_yes()` and never `== StandardButton.Yes` by hand: PySide6's
         static `question()` returns a plain int on some builds, which is T33's
         closed bug, and one helper is the one place that can be got right.
+        `parent` is for a question the launcher window asked (T187); the tab otherwise.
         """
         return said_yes(
             QMessageBox.question(
-                self,
+                parent if parent is not None else self,
                 title,
                 question,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

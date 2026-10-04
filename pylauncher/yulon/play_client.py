@@ -1022,6 +1022,7 @@ def refresh(
     reflink: Callable[[Path, Path], bool] = try_reflink,
     keep: Collection[Path] = (),
     exe_patch: ExePatch | None,
+    catalog_always: Mapping[str, str],
     opener: Any = None,
 ) -> tuple[Path, ...]:
     """Bring what `stale()` lists back in step with the original; return what was changed.
@@ -1042,6 +1043,8 @@ def refresh(
 
     `exe_patch` has no default on purpose: `None` means the catalog entry has no exe
     patch, so a recorded patched exe is replaced by the original's. A caller must say so.
+    `catalog_always` (the entry's Config.wtf `always`, `{}` without one) likewise has
+    none: where it sets the window, a window pick leaves `borderless` alone.
     """
     marker = read_marker(play_dir)
     if marker is None:
@@ -1083,7 +1086,14 @@ def refresh(
             if exe_patch is None:
                 continue
             _reapply_exe(
-                play_dir, original, exe_patch, opener, rec_exe, game=game, server_dir=server_dir
+                play_dir,
+                original,
+                exe_patch,
+                opener,
+                rec_exe,
+                game=game,
+                server_dir=server_dir,
+                catalog_always=catalog_always,
             )
             done.append(rel)
             continue
@@ -1172,7 +1182,9 @@ def restore_original_exe(play_dir: Path, original: Path, *, game: str, server_di
     try:
         client_packs.write_record(
             play_dir,
-            client_packs.PackRecord(record.packs, None, record.choices, record.config_seeded),
+            client_packs.PackRecord(
+                record.packs, None, record.choices, record.config_seeded, record.launcher
+            ),
             game=game,
             server_dir=server_dir,
         )
@@ -1190,19 +1202,26 @@ def _reapply_exe(
     *,
     game: str,
     server_dir: Path,
+    catalog_always: Mapping[str, str],
 ) -> None:
     """Make the patched Wow.exe again from stock bytes, with the options it was made with."""
     from yulon import client_exe, client_packs
 
     record = client_packs.read_record(play_dir)
     chosen = {**(rec_exe.get("options") or {}), **record.choices.get("exe_options", {})}
+    # A launcher window pick saved since the last Play decides `borderless`, as Play does.
+    chosen = client_packs.launcher_exe_options(
+        record.launcher, chosen, patch.options, catalog_always=catalog_always
+    )
     options = client_exe.options_for(patch, chosen)
     try:
         kwargs = {} if opener is None else {"opener": opener}
         made = client_exe.apply(play_dir, original, patch, options, **kwargs)
         client_packs.write_record(
             play_dir,
-            client_packs.PackRecord(record.packs, made, record.choices, record.config_seeded),
+            client_packs.PackRecord(
+                record.packs, made, record.choices, record.config_seeded, record.launcher
+            ),
             game=game,
             server_dir=server_dir,
         )

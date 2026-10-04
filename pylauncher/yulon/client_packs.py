@@ -52,7 +52,7 @@ import urllib.request
 import zipfile
 import zlib
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -742,13 +742,193 @@ class PackRecord:
     `packs` maps a pack id to `{"version", "sha256", "files": {relative path: sha256}}`;
     `exe` is the Wow.exe patch record (a later step's); `choices` is the player's picks,
     `{"packs": {id: bool}, "exe_options": {name: bool}}`; `config_seeded` is whether Play has
-    merged Config.wtf into this client once (the seed keys are written on that first merge only).
+    merged Config.wtf into this client once (the seed keys are written on that first merge only);
+    `launcher` is the per-server launcher window's picks (T187), see `clean_launcher`.
     """
 
     packs: dict[str, dict[str, Any]]
     exe: dict[str, Any] | None
     choices: dict[str, Any]
     config_seeded: bool = False
+    launcher: dict[str, Any] = field(default_factory=dict)
+
+
+WINDOW_MODES = ("fullscreen", "windowed", "maximized", "borderless")
+_RESOLUTION = re.compile(r"[1-9][0-9]{2,4}x[1-9][0-9]{2,4}")
+# Letters, digits, dots, dashes and colons, with at least one letter or digit and
+# no dot at either end: "10.0." or "." is an address half typed, not one the game
+# can use (T187 final review).
+_ADDRESS = re.compile(r"(?!\.)(?=.*[A-Za-z0-9])[A-Za-z0-9._:\-]{1,253}(?<!\.)")
+ACCOUNT_MAX = 32
+
+
+def clean_account(value: object) -> str | None:
+    """An account name WoW can hold in Config.wtf (upper-cased), or None when it cannot.
+
+    Never a quote, a control character (a CR or LF would start a new `SET` line) or
+    more than 32 characters.
+    """
+    if not isinstance(value, str):
+        return None
+    name = value.strip().upper()
+    if not name or len(name) > ACCOUNT_MAX:
+        return None
+    if '"' in name or "\\" in name or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return None
+    return name
+
+
+def clean_launcher(raw: object) -> dict[str, Any]:
+    """The launcher picks in `raw`, keeping only well-formed known keys.
+
+    `{"display": {"window": one of WINDOW_MODES, "resolution": "1920x1080"},
+    "account": "NAME" | None, "realm_address": "127.0.0.1"}`; anything else is dropped.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    display = raw.get("display")
+    if isinstance(display, dict):
+        shown: dict[str, str] = {}
+        window = display.get("window")
+        if isinstance(window, str) and window in WINDOW_MODES:
+            shown["window"] = window
+        resolution = display.get("resolution")
+        if isinstance(resolution, str) and _RESOLUTION.fullmatch(resolution):
+            shown["resolution"] = resolution
+        if shown:
+            out["display"] = shown
+    if "account" in raw:
+        account = clean_account(raw["account"])
+        if account is not None or raw["account"] is None:
+            out["account"] = account
+    address = raw.get("realm_address")
+    if isinstance(address, str) and _ADDRESS.fullmatch(address):
+        out["realm_address"] = address
+    elif "realm_address" in raw and address is None:
+        # "Use this computer" said so (T187 fix 1): Play takes a typed address back out.
+        out["realm_address"] = None
+    return out
+
+
+def launcher_config_keys(
+    launcher: Mapping[str, Any],
+    *,
+    catalog_always: Mapping[str, str],
+    default_address: str | None = None,
+) -> dict[str, str]:
+    """The Config.wtf keys the launcher picks set; a key the catalog's `always` sets is dropped.
+
+    Display: `gxWindow`/`gxMaximize`/`gxResolution`; the account: `accountName`.
+    A picks dict that is not well formed contributes nothing for the bad part.
+
+    The one exception (lead ruling, T187): a typed realm address sets `realmList`
+    and `patchList` (Centurion's own launcher writes both from one address) even
+    where the catalog's `always` sets them, so the caller lets these keys win.
+
+    `default_address` is for a client whose Config.wtf is the only place the game
+    finds its address (no realmlist.wtf, no catalog `realmList`): "Use this
+    computer" (`realm_address` saved as None) then writes it there, because
+    taking the typed lines out would leave the game with no address, and
+    leaving them would send it to the old one (T187 final review).
+    """
+    picks = clean_launcher(launcher)
+    keys: dict[str, str] = {}
+    display = picks.get("display", {})
+    window = display.get("window")
+    if window == "fullscreen":
+        keys["gxWindow"] = "0"
+    elif window == "windowed":
+        keys.update(gxWindow="1", gxMaximize="0")
+    elif window in ("maximized", "borderless"):
+        keys.update(gxWindow="1", gxMaximize="1")
+    if "resolution" in display:
+        keys["gxResolution"] = display["resolution"]
+    if picks.get("account"):
+        keys["accountName"] = picks["account"]
+    fixed = {key.casefold() for key in catalog_always}
+    keys = {k: v for k, v in keys.items() if k.casefold() not in fixed}
+    address = picks.get("realm_address")
+    if address:
+        keys.update(realmList=address, patchList=address)
+    elif "realm_address" in picks and default_address:
+        keys.update(realmList=default_address, patchList=default_address)
+    return keys
+
+
+def launcher_config_removals(
+    launcher: Mapping[str, Any],
+    *,
+    catalog_always: Mapping[str, str],
+    default_address_written: bool = False,
+) -> tuple[str, ...]:
+    """The Config.wtf keys the launcher's picks take out.
+
+    * `accountName` for "Ask in the game": only an `account` saved as None says
+      so; no `account` at all leaves the file as it is.
+    * `realmList` and `patchList` for "Use this computer" (`realm_address` saved
+      as None, T187 fix 1), when `default_address_written`: this computer's
+      address reaches the game another way -- the realmlist.wtf Play writes, or
+      the catalog's own `realmList` -- so the lines a typed address put in
+      earlier would only send the game to the old address.
+
+    A key the catalog's `always` sets is the catalog's, and is never taken out.
+    """
+    picks = clean_launcher(launcher)
+    fixed = {key.casefold() for key in catalog_always}
+    out: list[str] = []
+    if "account" in picks and picks["account"] is None and "accountname" not in fixed:
+        out.append("accountName")
+    if default_address_written and "realm_address" in picks and picks["realm_address"] is None:
+        out += [key for key in ("realmList", "patchList") if key.casefold() not in fixed]
+    return tuple(out)
+
+
+def launcher_exe_options(
+    launcher: Mapping[str, Any],
+    chosen: Mapping[str, bool],
+    patch_options: Collection[str],
+    *,
+    catalog_always: Mapping[str, str],
+) -> dict[str, bool]:
+    """`chosen` exe options with `borderless` following the launcher's window pick.
+
+    Only where the catalog's exe patch has a `borderless` option and the launcher has
+    picked a window mode: borderless is on for "borderless" and off for any other mode.
+    Not where the catalog's `always` sets `gxWindow` or `gxMaximize`: the server
+    decides the window then, `launcher_config_keys` drops the pick, and the pick
+    says nothing about borderless either (T187 final review).
+    """
+    window = clean_launcher(launcher).get("display", {}).get("window")
+    out = dict(chosen)
+    fixed = {key.casefold() for key in catalog_always}
+    if fixed & {"gxwindow", "gxmaximize"}:
+        return out
+    if window is not None and "borderless" in patch_options:
+        out["borderless"] = window == "borderless"
+    return out
+
+
+def launcher_following_borderless(launcher: Mapping[str, Any], borderless: bool) -> dict[str, Any]:
+    """The launcher picks with the window mode brought in step with a `borderless` exe choice.
+
+    The other half of `launcher_exe_options` (T187): "Client options…" ticking
+    Borderless makes a saved window pick "borderless", and unticking it makes a
+    saved "borderless" pick "windowed" -- else the next Play would put back what
+    the player just changed, because the window pick decides that exe option.
+    No window pick saved leaves the picks as they are: the exe option alone
+    decides then.
+    """
+    picks = clean_launcher(launcher)
+    display = dict(picks.get("display", {}))
+    window = display.get("window")
+    if window is None:
+        return picks
+    if borderless and window != "borderless":
+        display["window"] = "borderless"
+    elif not borderless and window == "borderless":
+        display["window"] = "windowed"
+    return {**picks, "display": display}
 
 
 def _empty_record() -> PackRecord:
@@ -803,6 +983,7 @@ def read_record(play_dir: Path) -> PackRecord:
             "exe_options": _bool_map(choices.get("exe_options")),
         },
         config_seeded=raw.get("config_seeded") is True,
+        launcher=clean_launcher(raw.get("launcher")),
     )
 
 
@@ -905,6 +1086,7 @@ def write_record(
         "exe": record.exe,
         "choices": record.choices,
         "config_seeded": record.config_seeded,
+        "launcher": clean_launcher(record.launcher),
     }
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     target = play_dir / RECORD

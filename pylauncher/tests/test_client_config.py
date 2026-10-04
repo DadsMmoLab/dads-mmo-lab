@@ -478,3 +478,53 @@ def test_a_cleanup_that_fails_does_not_hide_why_the_write_failed(
         client_config.merge_config_wtf(play, CENTURION, first_run=True)
 
     assert config_of(play).read_bytes() == b'SET locale "enUS"\n'
+
+
+# -- removing a key (T187: "Ask in the game") ------------------------------------------
+
+
+def test_a_removed_key_loses_every_line_whatever_its_case_and_nothing_else_changes(
+    tmp_path: Path,
+) -> None:
+    _, play = make_play(tmp_path)
+    config_of(play).write_bytes(
+        b'SET locale "enUS"\r\nSET accountName "BOB"\r\nSET gamma "1.2"\r\n'
+        b'set accountname "ALICE"\r\nSET lastCharacterIndex "0"\r\n'
+    )
+
+    client_config.merge_config_wtf(play, ConfigWtf(), first_run=False, remove=["accountName"])
+
+    assert config_of(play).read_bytes() == (
+        b'SET locale "enUS"\r\nSET gamma "1.2"\r\nSET lastCharacterIndex "0"\r\n'
+    )
+
+
+def test_removing_a_key_that_is_not_there_writes_nothing(tmp_path: Path) -> None:
+    _, play = make_play(tmp_path)
+    before = config_of(play).stat()
+
+    client_config.merge_config_wtf(play, ConfigWtf(), first_run=False, remove=["accountName"])
+
+    after = config_of(play).stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_removing_from_a_missing_config_wtf_creates_none(tmp_path: Path) -> None:
+    _, play = make_play(tmp_path)
+    config_of(play).unlink()
+
+    client_config.merge_config_wtf(play, ConfigWtf(), first_run=False, remove=["accountName"])
+
+    assert not config_of(play).exists()
+
+
+def test_a_removal_from_a_hard_linked_config_wtf_is_refused(tmp_path: Path) -> None:
+    original, play = make_play(tmp_path)
+    config_of(play).unlink()
+    (original / "WTF" / "Config.wtf").write_bytes(b'SET accountName "BOB"\n')
+    os.link(original / "WTF" / "Config.wtf", config_of(play))
+
+    with pytest.raises(play_client.PlayClientError):
+        client_config.merge_config_wtf(play, ConfigWtf(), first_run=False, remove=["accountName"])
+
+    assert (original / "WTF" / "Config.wtf").read_bytes() == b'SET accountName "BOB"\n'

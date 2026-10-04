@@ -54,6 +54,11 @@ COLOR_GOLD_BRIGHT = "#FFB000"  # primary accent: focus rings, active tab, primar
 COLOR_GOLD_LIGHT = "#FFD980"  # lightened accent for hover text
 COLOR_GOLD_BORDER = "#C98A0A"  # accent hairline (focus / primary border)
 COLOR_GOLD_BRASS = "#8A6510"  # dim accent (pressed border, section headers)
+COLOR_EMBER = "#6B3410"
+"""Banked-fire brown: the warm middle of the client launcher's banner gradient (T187).
+
+The approved mockup's banner glows like a hearth; no other colour here is that dark
+and that warm, and a gradient between two of the charcoal sheets reads as grey."""
 COLOR_BRASS_DARK = "#3A3222"  # default hairline border — warm bronze, not neutral gray
 COLOR_BRASS_DEEP = "#262218"  # recessed / divider line
 
@@ -114,11 +119,34 @@ from the tab-bar tool-button touch floor.
 """
 
 
+LAUNCH_TAB_BUTTON = "tab-play"
+"""objectName of the ▶ beside the × on a server's sidebar tab: opens its launcher (T187).
+
+Sized and exempted from the touch floor exactly as the × is, for the same reason;
+the Server tab's Play is the pad's and the thumb's way to the same window.
+"""
+
+TAB_BUTTONS = "tab-buttons"
+"""objectName of the strip that holds a server tab's ▶ and × side by side (T187)."""
+
+
+PLAY_MENU_BUTTON = "play-menu"
+"""objectName of the Server tab's ▾ (T181): one arrow, as on `SERVER_BUILD_BUTTON` (T187)."""
+
+
 SERVER_BUILD_BUTTON = "server-build"
 """objectName of the Modules toolbar's "Server build ▾" menu button (T89).
 
 Its label carries the triangle, so its QSS rule takes away the menu indicator the
 style would otherwise draw -- and reserve width for -- beside it: two arrows.
+"""
+
+
+LAUNCHER_PLAY_BUTTON = "launcher-play"
+"""objectName of the client launcher window's big PLAY (T187).
+
+It is a primary button (`primary="true"`, the amber fill); this rule only makes
+it the size the launcher is built around, in the theme's colours.
 """
 
 
@@ -331,6 +359,30 @@ QTabBar QToolButton#{FORGET_TAB_BUTTON}:hover {{
     color: {COLOR_DANGER};
 }}
 
+/* T187: the ▶ beside it opens the server's launcher. The same exemption and the
+   same size, so the two sit side by side across the 64px rail and the tab is no
+   longer than the × alone made it. Gold at rest, so it reads apart from the muted
+   ×, and brighter on hover, where the × goes red. */
+QTabBar QToolButton#{LAUNCH_TAB_BUTTON} {{
+    background-color: transparent;
+    border: none;
+    color: {COLOR_GOLD_LIGHT};
+    font-size: 15px;
+    padding: 0px;
+    min-width: 16px;
+    min-height: 16px;
+    max-width: 18px;
+    max-height: 18px;
+}}
+
+QTabBar QToolButton#{LAUNCH_TAB_BUTTON}:hover {{
+    color: {COLOR_GOLD_BRIGHT};
+}}
+
+QTabBar QWidget#{TAB_BUTTONS} {{
+    background: transparent;
+}}
+
 /* --- Buttons: flat sheets with a hairline, amber on interaction --- */
 QPushButton {{
     background-color: {COLOR_BG_PANEL};
@@ -376,7 +428,8 @@ QPushButton:disabled {{
 
 /* T89: the menu button says it opens a menu in its own label (its triangle), so the
    style's indicator would be a second arrow, and it reserves width for one too. */
-QPushButton#{SERVER_BUILD_BUTTON}::menu-indicator {{
+QPushButton#{SERVER_BUILD_BUTTON}::menu-indicator,
+QPushButton#{PLAY_MENU_BUTTON}::menu-indicator {{
     image: none;
     width: 0px;
 }}
@@ -430,6 +483,15 @@ QPushButton[objectName^="install-"]:disabled {{
     background-color: #2A2418;
     color: #7A6A48;
     border: 1px solid {COLOR_BRASS_DEEP};
+}}
+
+/* T187: the client launcher's PLAY -- a primary button, the size of the window's purpose. */
+QPushButton#{LAUNCHER_PLAY_BUTTON} {{
+    font-size: {_px(26, scale)};
+    font-weight: bold;
+    letter-spacing: 3px;
+    min-height: {_touch(58, scale)};
+    border-radius: 4px;
 }}
 
 /* Destructive actions (Stop, Purge, Uninstall). */

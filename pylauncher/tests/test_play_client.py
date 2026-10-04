@@ -761,6 +761,7 @@ def refresh(play: Path, orig: Path, tmp_path: Path, **kw: object) -> tuple[Path,
         "server_dir": tmp_path / "s",
         "reflink": no_reflink,
         "exe_patch": None,
+        "catalog_always": {},
     }
     args.update(kw)
     return play_client.refresh(play, orig, **args)  # type: ignore[arg-type]
@@ -1790,6 +1791,51 @@ def test_refresh_remakes_the_exe_with_the_options_the_player_chose(
     refresh(play, orig, tmp_path, exe_patch=patch)
     assert (play / "Wow.exe").read_bytes()[200] == stock[200]  # borderless off: stock byte
     assert client_packs.read_record(play).exe["options"] == {"borderless": False}  # type: ignore[index]
+
+
+def test_putting_the_originals_exe_back_keeps_the_launchers_picks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import client_packs
+
+    play, orig, _stock, _patch = _exe_world(tmp_path, monkeypatch)
+    record = client_packs.read_record(play)
+    picks = {"account": "BOB", "realm_address": "10.0.0.7"}
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(record.packs, record.exe, record.choices, launcher=picks),
+        game="g",
+        server_dir=tmp_path / "s",
+    )
+    assert refresh(play, orig, tmp_path) == (Path("Wow.exe"),)
+    assert client_packs.read_record(play).exe is None, "the record was written"
+    assert client_packs.read_record(play).launcher == picks
+
+
+def test_refresh_remakes_the_exe_with_the_launchers_window_pick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window pick saved since the last Play (T187) decides borderless, as Play would."""
+    from yulon import client_packs
+
+    play, orig, stock, patch = _exe_world(tmp_path, monkeypatch)
+    record = client_packs.read_record(play)
+    client_packs.write_record(
+        play,
+        client_packs.PackRecord(
+            record.packs,
+            record.exe,
+            record.choices,
+            launcher={"display": {"window": "windowed"}},
+        ),
+        game="g",
+        server_dir=tmp_path / "s",
+    )
+    assert client_packs.read_record(play).choices["exe_options"] == {"borderless": True}
+    (play / "Wow.exe").write_bytes(stock)
+    refresh(play, orig, tmp_path, exe_patch=patch)
+    assert (play / "Wow.exe").read_bytes()[200] == stock[200]  # windowed: borderless off
+    assert client_packs.read_record(play).launcher == {"display": {"window": "windowed"}}
 
 
 def _no_network(*args: Any, **kwargs: Any) -> Any:

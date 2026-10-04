@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import random
 
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QEnterEvent,
@@ -97,6 +97,14 @@ def format_dadcraft_tooltip(
 class DadcraftRealmBadge(QWidget):
     """A glowing realm status badge with classic Dadcraft gem styling."""
 
+    status_changed = Signal(str)
+    """The new status, each time `set_status()` changes it (T187).
+
+    The client launcher's realm pill follows the Server tab's badge through
+    this, so the two are one reading: whatever sets the tab's badge -- a poll,
+    or Start's "starting" before a poll has seen it -- sets the launcher's.
+    """
+
     def __init__(self, status: str = "stopped", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._status = status
@@ -111,8 +119,14 @@ class DadcraftRealmBadge(QWidget):
         layout.addWidget(self._label)
         self.set_status(status)
 
+    @property
+    def status(self) -> str:
+        """The status last set, lower-cased (`running`, `starting`, `stopped`, ...)."""
+        return self._status
+
     def set_status(self, status: str) -> None:
         """Update the displayed status with appropriate gem lighting and text."""
+        changed = status.lower() != self._status
         self._status = status.lower()
         if self._status in ("running", "online", "ready", "up"):
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E824C, stop:1 #145A32)"
@@ -144,6 +158,8 @@ class DadcraftRealmBadge(QWidget):
             f"font-size: 11px; font-weight: bold; "
             f"padding: 3px 8px; border-radius: 3px;"
         )
+        if changed:
+            self.status_changed.emit(self._status)
 
 
 class DadcraftHeader(QFrame):

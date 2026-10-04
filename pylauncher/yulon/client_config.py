@@ -21,6 +21,10 @@ Only ever inside a folder carrying step (a)'s marker, and never through a link:
 file is written beside it and renamed into place, so the client never reads
 half of one.
 
+A key in `remove` loses every line that sets it, however it is spelled, and
+nothing else moves (T187: "Ask in the game" takes out the account name an
+earlier "Log in as" filled in).
+
 `remove_locale_realmlists()` deletes `Data/<locale>/realmlist.wtf` (any case),
 as Centurion's launcher does, so the server's address comes from Config.wtf
 alone and not also from a file the player's old server left. Only in the
@@ -34,7 +38,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 from yulon import play_client
@@ -79,11 +83,12 @@ def _split_ending(line: bytes) -> tuple[bytes, bytes]:
     return line, b""
 
 
-def _merged(raw: bytes, cfg: ConfigWtf, *, first_run: bool) -> bytes:
+def _merged(raw: bytes, cfg: ConfigWtf, *, first_run: bool, remove: Collection[str] = ()) -> bytes:
     """`raw` (a Config.wtf's bytes, empty for none) with `cfg` merged in. Pure."""
     lines = raw.splitlines(keepends=True)
     ending = _ending(lines)
     always = {key.casefold(): value for key, value in cfg.always.items()}
+    gone = {key.casefold() for key in remove}
     present: set[str] = set()
     out: list[bytes] = []
     for line in lines:
@@ -91,6 +96,8 @@ def _merged(raw: bytes, cfg: ConfigWtf, *, first_run: bool) -> bytes:
         match = _SET.match(body)
         if match is not None:
             key = match.group(1).decode("ascii", errors="replace").casefold()
+            if key in gone:
+                continue
             present.add(key)
             if key in always:
                 start, stop = match.span(2)
@@ -161,6 +168,7 @@ def merge_config_wtf(
     cfg: ConfigWtf,
     *,
     first_run: bool,
+    remove: Collection[str] = (),
     sleep: Callable[[float], None] = time.sleep,
 ) -> Path:
     """Merge `cfg` into `play_dir`'s `WTF/Config.wtf` (created if absent); returns its path.
@@ -168,7 +176,8 @@ def merge_config_wtf(
     Raises `play_client.PlayClientError` for a folder without the marker, a `WTF`
     that is a link, or a Config.wtf with another name (a hard or symbolic link),
     with nothing written; OSError when the file cannot be read or written, with
-    the old file still whole. A merge that changes nothing writes nothing.
+    the old file still whole. A merge that changes nothing writes nothing (nor
+    creates an empty file). `remove` names keys whose lines are taken out.
 
     The temporary file is created new (`xb`), after any leftover of that name is
     removed, so a leftover that is a link to another file is never written
@@ -182,9 +191,9 @@ def merge_config_wtf(
         raw = target.read_bytes()
     except FileNotFoundError:
         raw = b""
-    new = _merged(raw, cfg, first_run=first_run)
-    if target.exists() and new == raw:
-        return target
+    new = _merged(raw, cfg, first_run=first_run, remove=remove)
+    if new == raw:
+        return target  # nothing changes; an absent file with nothing to hold stays absent
     target.parent.mkdir(exist_ok=True)
     tmp = target.with_name(f"{target.name}.{os.getpid()}.yulon-tmp")
     tmp.unlink(missing_ok=True)
