@@ -1912,7 +1912,11 @@ said, because "what is on disk is what the new build was made from" alone reads 
 new build were what runs now. `untouched_note()` says what the next Start does."""
 
 SOURCES_LEFT_UNTOUCHED_NOTE = f"{SOURCES_LEFT_UNTOUCHED}, and its next Start runs the new build."
-"""`SOURCES_LEFT_NOTE` when no container was replaced and nothing refuses a start (fix round 1)."""
+"""`SOURCES_LEFT_NOTE` when no container was replaced and nothing refuses a start (fix round 1).
+
+Since T223 (the lead's ruling under owner answer D1) every untouched exit writes the
+`untested` start refusal, so this is said only when that record could not be written --
+`owe_start()`'s warning is then in the same message, and the sentence is true."""
 
 
 def untouched_note(refused: str | None) -> str:
@@ -1991,9 +1995,9 @@ UNTESTED_BUILD = "untested"
 
 UNTESTED_BUILD_REFUSAL = (
     "This server's image tags name a new build that has never started: an update or rebuild "
-    "finished compiling it, and Docker did not answer when the build from before it was to be "
-    "put back on its tags. A Start would run that untested build, so it must be rebuilt "
-    f"first: press {server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+    "finished compiling it, and the build from before it could not be put back on its tags. "
+    "A Start would run that untested build, so it must be rebuilt first: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
 )
 """Why no start is allowed while `START_REFUSED_FILE` says `untested` (T223, owner answer D1).
 
@@ -6444,6 +6448,8 @@ class StagedInstaller:
             if not kept:
                 # T170: the compile finished with no build from before to go
                 # back to. `touched` says whether the containers run it yet.
+                # No start refusal here (owner, 2026-09-28; lead, T223): a first
+                # build has no old one to go back to, so one would leave nothing runnable.
                 message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 raise InstallerError(message) from exc
@@ -6460,16 +6466,20 @@ class StagedInstaller:
                 # Rebuild succeeds -- in this geometry `compose up -d` would run
                 # the new import image beside the old world server.
                 warned = owe_start(server_dir) if message.mixed else ""
-                if message.untested:
-                    # T223 (cold review): owner answer D1 -- the new build is never
-                    # what the next Start runs. The update route says the refusal in
-                    # its own note (`untouched_note()`); a Rebuild press says it here.
+                # T223 (lead ruling, option 1): exempt where the family's own work
+                # refuses Start -- T179's "Finish the world update" imports the kept
+                # build's tables and then starts it, the owner-approved exit.
+                family_refuses = servers_down is not None and servers_down.finishes_start_refusal
+                if message.untested and not family_refuses:
+                    # T223 (cold review, then the lead): owner answer D1 -- a new build
+                    # that never started is never what the next Start runs, whether
+                    # Docker went silent or refused a tag. The update route says the
+                    # refusal in its own note (`untouched_note()`); a Rebuild press here.
                     warned = owe_start(server_dir, why=UNTESTED_BUILD)
                     if not warned and servers_down is None:
                         warned = (
                             "Start is refused until this server is rebuilt: press "
-                            f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}"
-                            " once Docker answers."
+                            f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
                         )
                 raise RollbackNotDone(
                     f"{message} {warned}" if warned else str(message),
@@ -7863,6 +7873,9 @@ class StagedInstaller:
                     f"onto ({problem}); the tags still name the new build, all of them. The "
                     f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
                     touched=touched,
+                    # T223 (lead, under owner answer D1): untouched, the new build never
+                    # started, so no Start may run it.
+                    untested=not touched,
                 )
             named.append(name)
         moved: list[str] = []
@@ -7888,6 +7901,7 @@ class StagedInstaller:
                     f"so the tags still name the new build, all of them. The old images are "
                     f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
                     touched=touched,
+                    untested=not touched,
                 )
             moved.append(ref)
         held = yield from self._release(named)

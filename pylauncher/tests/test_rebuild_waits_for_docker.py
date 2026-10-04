@@ -372,7 +372,8 @@ def test_a_docker_silent_through_the_restore_too_leaves_start_refused(tmp_path: 
     message = str(raised.value)
     assert raised.value.touched is False
     assert engine(rec).start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
-    assert "Start is refused" in message, message
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert f"Start is refused until this server is rebuilt: press {rebuild}." in message, message
     assert "No container was replaced" in message, message
     # What is on the daemon is what the sentence says: the new build on the live
     # tags, the old one under its rollback names -- kept, being its only copy.
@@ -381,6 +382,51 @@ def test_a_docker_silent_through_the_restore_too_leaves_start_refused(tmp_path: 
         ref + native.ROLLBACK_TAG_SUFFIX for ref in _refs(server_dir)
     )
     assert len([line for line in said if "before putting the build from before" in line]) == 1
+
+
+@pytest.mark.parametrize("refused", ["the-new-build-cannot-be-named", "a-tag-will-not-move-back"])
+def test_a_tag_docker_refuses_after_it_answered_leaves_start_refused_too(
+    tmp_path: Path, refused: str
+) -> None:
+    """Lead decision (owner answer D1): T197's untouched exits refuse a Start as well.
+
+    Docker answers the restore, but refuses a tag: either the new build's own
+    `-failed` name, or the second tag moved back (the first is then undone, so
+    every live tag names the new build again, not mixed). No container was
+    replaced, the new build never started, and Start would run it.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    clock = _Clock()
+    moved_back: list[str] = []
+
+    def tag_image(src: str, dst: str) -> str:
+        if refused == "the-new-build-cannot-be-named" and dst.endswith(native.FAILED_TAG_SUFFIX):
+            return "Error response from daemon: read-only file system"
+        if refused == "a-tag-will-not-move-back" and src.endswith(native.ROLLBACK_TAG_SUFFIX):
+            moved_back.append(dst)
+            if len(moved_back) == 2:
+                return "Error response from daemon: read-only file system"
+        return daemon.tag_image(src, dst)
+
+    with pytest.raises(RollbackNotDone) as raised:
+        list(
+            engine(
+                rec,
+                **{**_seams_of(rec, daemon), "tag_image": tag_image},
+                docker_ready=_Probe(clock, *SILENT_FOR_THE_WAIT, then=True),
+                monotonic=clock.monotonic,
+                sleep=clock.sleep,
+            ).rebuild(InstallOptions(server_dir=server_dir))
+        )
+    assert raised.value.touched is False and raised.value.mixed is False
+    assert _new_build_live(daemon, server_dir), daemon.names
+    assert engine(rec).start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert f"Start is refused until this server is rebuilt: press {rebuild}." in str(
+        raised.value
+    ), raised.value
 
 
 def test_a_stop_during_the_wait_does_not_cut_the_restores_wait_short(tmp_path: Path) -> None:

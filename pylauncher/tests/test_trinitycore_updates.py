@@ -1668,6 +1668,26 @@ def test_finishing_the_kept_builds_world_update_imports_its_tables_and_clears_it
     CenturionController(ENTRY, box.server_dir).refuse_start()
 
 
+def test_a_kept_build_is_left_to_the_finish_and_not_given_the_untested_refusal(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T223 (lead ruling, option 1): the exemption, pinned.
+
+    The rollback stopped untouched (a tag refused after Docker answered), so the
+    new build never started -- which everywhere else writes the untested start
+    refusal. Here the family's own record refuses Start instead, and T179's
+    "Finish the world update" imports the tables and then starts the build.
+    """
+    said = _kept_without_its_tables(box, monkeypatch)
+    assert "could not be given a name to undo onto" in said, "the ground: the untouched exit"
+    assert native.owed_start_refusal(box.server_dir) is None
+    assert native.UNTESTED_BUILD_REFUSAL not in said, said
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    box.finish()
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
 def test_a_finish_that_fails_keeps_the_kept_builds_record(
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:

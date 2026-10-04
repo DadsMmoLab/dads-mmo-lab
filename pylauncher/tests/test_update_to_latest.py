@@ -2138,8 +2138,14 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
         "-rollback tags. The source folders were left on the new commits, because the image "
         "tags name the new build made from them. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up, and "
-        "its next Start runs the new build."
+        f"Start is refused until this is done: {native.UNTESTED_BUILD_REFUSAL}"
     )
+    # T223 (lead, under owner answer D1): the new build never started, so no Start
+    # may run it; this was "its next Start runs the new build" until then. This
+    # family's update route has no work of its own that refuses Start, so it is
+    # not exempt (lead ruling, option 1; the exemption is pinned in
+    # test_trinitycore_updates).
+    assert native.owed_start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
     assert set(_heads(rec, server_dir).values()) == {NEW}
     assert _recorded_builds(server_dir) == {NEW[:7]}
     assert raised.value.touched is False and raised.value.sources_kept is True
