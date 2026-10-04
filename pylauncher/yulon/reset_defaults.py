@@ -583,7 +583,10 @@ def _from_templates(
             patch = table.files[name]
             template = conf.template_of(name, patch)
             try:
-                texts[file] = conf.patch(_read_text(staged / template), patch, tokens)
+                # T204: commented as `conf.apply_table()` comments them, so a reset
+                # never puts back a line the server refuses to start with.
+                readable, _refused = conf.comment_unreadable(_read_text(staged / template))
+                texts[file] = conf.patch(readable, patch, tokens)
             except FileNotFoundError:
                 reasons[file] = NO_TEMPLATE.format(source=source, template=template)
             except UnicodeDecodeError as exc:

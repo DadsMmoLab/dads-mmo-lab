@@ -187,6 +187,33 @@ def patch(text: str, patch: ConfPatch, tokens: Mapping[str, str]) -> str:
     return "".join(lines)
 
 
+def comment_unreadable(text: str) -> tuple[str, tuple[int, ...]]:
+    """`text` with every line the server's reader refuses written as a comment (T204).
+
+    Returns the new text and the 1-based numbers of the lines it commented out.
+
+    A refused line is one that is not blank once trimmed, does not start with `#`,
+    is not a `[section]` header and has no `=`. TrinityCore's reader (boost's ini
+    parser) stops on the first one with `'=' character not found in line`, so the
+    world server never starts. The case that made this rule: CENTURION's
+    `worldserver.conf.dist` (line 4505 at 5e732762) has a printf example inside a
+    comment whose string holds real newlines, so two lines of it are bare text.
+
+    Each refused line gets `# ` in front, with its own text and line ending kept;
+    every other line stays byte-for-byte as it was. Lines are split on `\n` alone,
+    as the reader's `std::getline` splits them: `str.splitlines()` also breaks at
+    U+2028 or a form feed and would comment out the back half of a real setting.
+    """
+    lines = text.split("\n")
+    refused: list[int] = []
+    for index, line in enumerate(lines):
+        body = line.strip().lstrip("\ufeff")
+        if body and not body.startswith(("#", "[")) and "=" not in body:
+            lines[index] = f"# {line}"
+            refused.append(index + 1)
+    return "\n".join(lines), tuple(refused)
+
+
 def materialise(
     table: ConfPatchTable, *, image_ref: str, etc_dir: Path, copy_from_image: CopyFromImage
 ) -> tuple[Path, ...]:
@@ -296,7 +323,16 @@ def apply_table(
     for name, table_patch in table.files.items():
         path = etc_dir / name
         before = _read(path)
-        after = patch(before, table_patch, tokens)
+        # T204: here rather than in `materialise()`, because a resume keeps the file
+        # `materialise()` made and comes through here, so pressing Install again
+        # repairs a conf an earlier install wrote with these lines in it.
+        readable, refused = comment_unreadable(before)
+        if refused:
+            logger.warning(
+                f"commented out line(s) {', '.join(map(str, refused))} of {path}: the server "
+                "refuses a line that is not blank, not a comment and has no '='"
+            )
+        after = patch(readable, table_patch, tokens)
         if after == before:
             continue
         _write(path, after)

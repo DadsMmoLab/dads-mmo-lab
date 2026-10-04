@@ -28,6 +28,7 @@ this project has shipped in neighbouring modules already:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -1271,3 +1272,115 @@ def test_the_trinitycore_table_turns_the_updater_off_and_points_the_folders(
     assert 'LoginDatabaseInfo = "centurion-db;3306;root;tc-secret;centurion_auth"\n' in world
     assert 'LogsDir = "../logs"\n' in (etc / "authserver.conf").read_text(encoding="utf-8")
     assert "Playerbot.Enable = 1\n" in (etc / "playerbots.conf").read_text(encoding="utf-8")
+
+
+# --- a line the server's reader refuses is written as a comment (T204) -------------------
+
+CENTURION_SHUTDOWN = (
+    "[worldserver]\n"
+    "\n"
+    "Centurion.Hardcore.PlayerKill.MaxLevelHonor = 10\n"
+    "\n"
+    "#\n"
+    "#    Centurion.Shutdown.RequestFile\n"
+    "#                     Written by a deploy as, for example:\n"
+    "#                         printf '600\n"
+    "A new patch is on the way...\n"
+    "' > FILE\n"
+    "#\n"
+    "  # an indented comment, which the reader trims and skips\n"
+    'DataDir = "."\n'
+)
+"""Lines 4490-4507 of `src/server/worldserver/worldserver.conf.dist` at CENTURION
+5e732762, shortened, with the `[worldserver]` header from line 4: a printf example inside
+a comment whose string holds REAL newlines, so its 2nd and 3rd lines are neither blank,
+nor a comment, nor `Key = value`. TrinityCore's reader stops on the first of them with
+`'=' character not found in line`, and the server restarts until the install gives up."""
+
+CENTURION_SHUTDOWN_READABLE = CENTURION_SHUTDOWN.replace(
+    "A new patch is on the way...\n' > FILE\n", "# A new patch is on the way...\n# ' > FILE\n"
+)
+
+CENTURION_TABLE = ConfPatchTable(
+    source_dir="/opt/trinitycore/etc",
+    files={"worldserver.conf": ConfPatch(keys={"DataDir": '"/opt/trinitycore/data"'})},
+)
+
+
+def test_comment_unreadable_comments_only_the_lines_the_reader_refuses() -> None:
+    text, refused = conf.comment_unreadable(CENTURION_SHUTDOWN)
+    assert text == CENTURION_SHUTDOWN_READABLE
+    assert refused == (9, 10)
+
+
+def test_comment_unreadable_keeps_section_headers_comments_and_keys() -> None:
+    """`[MangosdConf]` / `[worldserver]` are read as sections, not refused lines."""
+    assert conf.comment_unreadable(MANGOSD) == (MANGOSD, ())
+    assert conf.comment_unreadable(VANILLA_SYNC) == (VANILLA_SYNC, ())
+
+
+def test_comment_unreadable_keeps_each_lines_own_ending() -> None:
+    crlf = CENTURION_SHUTDOWN.replace("\n", "\r\n")
+    text, _ = conf.comment_unreadable(crlf)
+    assert text == CENTURION_SHUTDOWN_READABLE.replace("\n", "\r\n")
+    assert conf.comment_unreadable("Last line with no ending") == (
+        "# Last line with no ending",
+        (1,),
+    )
+
+
+def test_comment_unreadable_reads_past_a_byte_order_mark() -> None:
+    """A conf saved by a Windows editor starts with U+FEFF; its first line is still
+    the comment or the section it was."""
+    text = "\ufeff# Centurion\n\ufeff[worldserver]\nKey = 1\n"
+    assert conf.comment_unreadable(text) == (text, ())
+
+
+def test_comment_unreadable_splits_lines_on_newline_alone() -> None:
+    """The server's reader splits on `\\n` (`std::getline`); `str.splitlines()` also
+    splits on U+2028 and form feeds, and would comment out half of a real setting."""
+    text = "Motd = one\u2028two\fthree\n"
+    assert conf.comment_unreadable(text) == (text, ())
+
+
+def test_a_fresh_conf_is_written_without_the_lines_the_server_refuses(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The conf stage's two calls, as a first Centurion install makes them."""
+    etc = tmp_path / "etc"
+    conf.materialise(
+        CENTURION_TABLE,
+        image_ref="img",
+        etc_dir=etc,
+        copy_from_image=_Image({"worldserver.conf.dist": CENTURION_SHUTDOWN.encode("utf-8")}),
+    )
+    with caplog.at_level(logging.INFO, logger=conf.logger.name):
+        assert conf.apply_table(CENTURION_TABLE, etc, {}) == (etc / "worldserver.conf",)
+    assert (etc / "worldserver.conf").read_text(encoding="utf-8") == (
+        CENTURION_SHUTDOWN_READABLE.replace('DataDir = "."', 'DataDir = "/opt/trinitycore/data"')
+    )
+    said = [r.getMessage() for r in caplog.records if "commented out" in r.getMessage()]
+    assert len(said) == 1, said
+    assert str(etc / "worldserver.conf") in said[0]
+    assert "9, 10" in said[0]
+
+
+def test_pressing_install_again_repairs_a_conf_written_before_the_fix(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A resume runs the conf stage again; `materialise()` keeps the file, so the
+    repair is `apply_table()`'s, and a third press changes nothing and says nothing."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    live = etc / "worldserver.conf"
+    live.write_text(
+        CENTURION_SHUTDOWN.replace('DataDir = "."', 'DataDir = "/opt/trinitycore/data"'),
+        encoding="utf-8",
+    )
+    assert conf.apply_table(CENTURION_TABLE, etc, {}) == (live,)
+    assert "\nA new patch" not in live.read_text(encoding="utf-8")
+    assert "\n' > FILE" not in live.read_text(encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=conf.logger.name):
+        assert conf.apply_table(CENTURION_TABLE, etc, {}) == ()
+    assert not [r for r in caplog.records if "commented out" in r.getMessage()]

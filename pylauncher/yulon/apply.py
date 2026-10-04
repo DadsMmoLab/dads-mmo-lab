@@ -4143,6 +4143,7 @@ class Applier:
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(template, target)
+                _comment_unreadable_lines(target)
                 log.done.append(
                     f"activate {conf.file} from {conf.template} — the world reads "
                     f"{conf.file} at its next start"
@@ -4863,6 +4864,33 @@ def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:
 
 
 _KeyMode = Literal["replace", "append", "unchanged"]
+
+
+def _comment_unreadable_lines(path: Path) -> None:
+    """Write a just-activated conf's refused lines as comments (T204), logged once.
+
+    `families.conf.comment_unreadable()`'s rule, the one the server confs take: a
+    line that is not blank, not a comment, not a `[section]` and has no `=` stops a
+    TrinityCore-style reader. A conf that is not UTF-8 is left as it was copied,
+    as it always was.
+    """
+    # Local: the families package imports this module (through `installer`).
+    from yulon.catalog.families.conf import comment_unreadable  # noqa: PLC0415
+
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    readable, refused = comment_unreadable(text)
+    if not refused:
+        return
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(readable)
+    logger.warning(
+        f"commented out line(s) {', '.join(map(str, refused))} of {path}: the server "
+        "refuses a line that is not blank, not a comment and has no '='"
+    )
 
 
 def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
