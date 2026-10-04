@@ -2174,6 +2174,8 @@ class _Parking:
     it compiled shows -- and before a failure puts the recipe this press rendered back
     (T8), which would read as a change the compile never saw."""
     made_unix: int = 0
+    tagging: bool = False
+    """The kept build is being put on the live tags: from here a tag may have moved."""
     still_kept: bool = False
     """A kept build was being used and Docker refused a tag part-way: its names and
     record were not touched, so it is still kept and nothing new is."""
@@ -4912,6 +4914,12 @@ class StagedInstaller:
     family: ClassVar[str]
     """The `install.native.family` this class installs; asserted against the entry in preflight."""
 
+    _build_exit: int | None = None
+    """The return code of the last `docker compose build` `stage_build()` ran, None before one
+    returned (T225, cold review). `rebuild()` resets it and reads it: only a run that returned
+    0 or was cancelled can have moved the live tags, so only then does an unanswered image id
+    count as a tag that moved."""
+
     def __init__(
         self,
         entry: CatalogEntry,
@@ -6596,6 +6604,17 @@ class StagedInstaller:
         built = False
         touched = False
         parking = _Parking()
+        self._build_exit = None
+
+        def may_have_tagged() -> bool:
+            """Whether this press ran something that moves the live tags (T225, cold review).
+
+            A build run that returned 0 or was cancelled (compose may have tagged before
+            the Stop killed it), or the kept build being put on the tags. A run that
+            failed otherwise, or none at all, tagged nothing it finished, so an id Docker
+            does not give is read as "not moved" there.
+            """
+            return parking.tagging or self._build_exit in (0, docker.CANCELLED_RETURNCODE)
 
         def build(stage_ctx: StageContext) -> Iterator[str]:
             nonlocal built
@@ -6609,7 +6628,7 @@ class StagedInstaller:
                     yield from self.stage_build(stage_ctx)
                 except InstallerError:
                     # T225: a Stop or a failure after compose tagged can still keep it.
-                    if self._compose_tagged(refs, kept):
+                    if self._compose_tagged(refs, kept, unanswered_moved=may_have_tagged()):
                         parking.after = self._seams.context_fingerprint(server_dir, refs=refs)
                         parking.made_unix = int(time.time())
                     raise
@@ -6680,7 +6699,7 @@ class StagedInstaller:
             if not touched:
                 yield from self._put_recipe_back(ctx, ground)
             failure = str(exc)
-            if not built and self._compose_tagged(refs, kept):
+            if not built and self._compose_tagged(refs, kept, unanswered_moved=may_have_tagged()):
                 # T225: compose moves the live tags as its build finishes, and a
                 # Stop read after that -- or one that killed compose after it
                 # tagged -- raised before `built` was set. The tags are read off
@@ -6789,7 +6808,9 @@ class StagedInstaller:
             # Once a compile HAS finished, those names are the only copy of the
             # old build there is, and an unknown failure is the worst moment to
             # throw it away -- they are kept, and the log says where they are.
-            if not built and not self._compose_tagged(refs, kept):
+            if not built and not self._compose_tagged(
+                refs, kept, unanswered_moved=may_have_tagged()
+            ):
                 self._let_go(kept)
             elif kept:
                 # T225: also when compose had moved the tags before `built` was set
@@ -6798,6 +6819,12 @@ class StagedInstaller:
                     f"rebuild of {self.entry.id} ended unexpectedly after the compile; the "
                     f"build from before it is still on the daemon as {', '.join(kept)}"
                 )
+                # Cold review (lead's decision): nothing here can put the tags back,
+                # since that would yield, so no Start may run the untested build they
+                # name. A file write, not a yield; only a Rebuild that succeeds clears it.
+                warned = owe_start(server_dir, why=UNTESTED_BUILD)
+                if warned:
+                    logger.error(warned)
             else:
                 logger.error(
                     f"rebuild of {self.entry.id} ended unexpectedly after the compile; no build "
@@ -8402,6 +8429,7 @@ class StagedInstaller:
                 why = "its images are no longer on Docker under the names it was kept as"
         if record is not None and not why:
             parking.still_kept = True
+            parking.tagging = True
             for ref, name in zip(refs, names, strict=True):
                 problem = self._seams.tag_image(name, ref)
                 if problem:
@@ -8522,13 +8550,20 @@ class StagedInstaller:
         logger.info(f"rebuild of {self.entry.id}: the finished build is kept as {names}")
         return ""
 
-    def _compose_tagged(self, refs: Sequence[str], kept: Sequence[str]) -> bool:
+    def _compose_tagged(
+        self, refs: Sequence[str], kept: Sequence[str], *, unanswered_moved: bool
+    ) -> bool:
         """Whether this press's build moved a live tag, read off the daemon (T225).
 
         With a rollback kept, a ref moved when its image is not its `-rollback`
-        name's image, and an id Docker does not give counts as moved: putting a
-        tag back that never moved costs a retag onto the image it already names,
-        while trusting the silence lets the only copy of the old build go. With
+        name's image. An id Docker does not give counts as moved when
+        `unanswered_moved` -- the press ran something that tags (`rebuild()`'s
+        `may_have_tagged()`): putting a tag back that never moved costs a retag onto
+        the image it already names, while trusting the silence lets the only copy of
+        the old build go. Otherwise it counts as not moved (cold review): a compile
+        that failed finished no build, and a restore over it would wait for Docker,
+        say the tags name a new build and refuse Start over a build that never
+        existed. With
         none kept (T170) there is nothing to compare against, and the build moved
         the tags when every image is now there. Never raises, and yields nothing:
         the `BaseException` path asks it too.
@@ -8543,10 +8578,15 @@ class StagedInstaller:
             try:
                 now = self._seams.image_id(ref)
                 before = self._seams.image_id(ref + ROLLBACK_TAG_SUFFIX)
-            except Exception as exc:  # noqa: BLE001 - unanswered counts as moved
+            except Exception as exc:  # noqa: BLE001 - an unanswered question
                 logger.warning(f"could not read the image {ref} names: {exc}")
-                return True
-            if now is None or before is None or now != before:
+                if unanswered_moved:
+                    return True
+                continue
+            if now is None or before is None:
+                if unanswered_moved:
+                    return True
+            elif now != before:
                 return True
         return False
 
@@ -10584,6 +10624,7 @@ class StagedInstaller:
         # base image compiled nothing, so it is tried once more after a pause, and
         # a second such failure says what happened instead of "the build failed".
         for second_try in (False, True):
+            self._build_exit = None
             run = yield from self._pump(
                 lambda sink: self._seams.build(
                     ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
@@ -10591,6 +10632,7 @@ class StagedInstaller:
                 cancel=ctx.cancel,
                 stage="build",
             )
+            self._build_exit = run.returncode
             unreachable = (
                 docker.base_image_unreachable(run.tail)
                 if run.returncode not in (0, docker.CANCELLED_RETURNCODE)

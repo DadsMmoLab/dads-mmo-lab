@@ -81,7 +81,7 @@ from typing import TYPE_CHECKING
 
 from yulon import dbsecret, docker, forgetting, logsnap, platform, rmtree
 from yulon.catalog import composegen
-from yulon.catalog.native import PARKED_TAG_SUFFIX
+from yulon.catalog.native import PARKED_TAG_SUFFIX, forget_parked_build
 from yulon.log import get_logger
 from yulon.ownership import Ownership
 
@@ -657,11 +657,19 @@ class Uninstaller:
         # on purpose. Not reported as removed: a name that was never there is "no
         # such image", which `docker.remove_image()` reads as done, so "" cannot
         # tell a kept build removed from one that never existed.
+        parked_left = False
         for ref in self.image_refs:
             parked = ref + PARKED_TAG_SUFFIX
             problem = self._remove_image(parked)
             if problem:
+                parked_left = True
                 warnings.append(f"{parked} (a kept build) was left behind: {problem}")
+        if not parked_left:
+            # Its record too, for a folder the removal below leaves behind (cold
+            # review); kept while Docker keeps a name, so the name stays findable.
+            forgot = forget_parked_build(self.server_dir)
+            if forgot:
+                warnings.append(f"{forgot}.")
 
         # BEFORE the folder: the record of where a leftover copy is lives in it. A
         # copy it could neither remove nor note elsewhere raises here, and the

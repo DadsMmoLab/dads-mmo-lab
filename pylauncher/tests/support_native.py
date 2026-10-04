@@ -185,6 +185,9 @@ class Recorder:
     """Called inside the rollback's `stop_servers`: where a test holds a world in its load."""
     ready: bool = True
     tag_problem: str = ""
+    ids_silent: bool = False
+    """T225 (cold review): `image_id` answers None for every name, as a Docker that does not
+    answer `docker image inspect` does."""
     """What `docker tag` answers when it refuses, or empty when it tags.
 
     The rebuild's rollback is kept through this seam, and a double that could
@@ -849,7 +852,7 @@ class Recorder:
         test about which image a name holds drives `test_rebuild._Daemon` instead,
         whose names are moved by the build, the tags and the removals it is asked for.
         """
-        if ref.endswith(native.PARKED_TAG_SUFFIX):
+        if self.ids_silent or ref.endswith(native.PARKED_TAG_SUFFIX):
             return None
         for suffix in (native.ROLLBACK_TAG_SUFFIX, native.FAILED_TAG_SUFFIX):
             ref = ref.removesuffix(suffix)

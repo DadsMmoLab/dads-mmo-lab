@@ -487,6 +487,27 @@ def test_uninstall_removes_the_parked_names_too(tmp_path: Path) -> None:
     assert not [line for line in report.warnings if native.PARKED_TAG_SUFFIX in line], report
 
 
+def test_uninstall_forgets_the_kept_build_record_with_its_names(tmp_path: Path) -> None:
+    """Cold review: a folder the removal leaves behind must not keep a record of names now gone.
+
+    The fake's folder removal removes nothing, which is the case that matters.
+    """
+    rec = _recorder(tmp_path)
+    record = rec.server_dir / native.PARKED_BUILD_FILE
+    record.write_text('{"version": 1}\n', encoding="utf-8")
+    rec.uninstaller().run(keep_characters=False)
+    assert not record.exists()
+
+
+def test_uninstall_keeps_the_kept_build_record_while_docker_keeps_a_name(tmp_path: Path) -> None:
+    rec = _recorder(tmp_path, image_warning="Error response from daemon: read-only file system")
+    record = rec.server_dir / native.PARKED_BUILD_FILE
+    record.write_text('{"version": 1}\n', encoding="utf-8")
+    report = rec.uninstaller().run(keep_characters=False)
+    assert record.exists()
+    assert [line for line in report.warnings if "(a kept build) was left behind" in line]
+
+
 def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_images(
     tmp_path: Path,
 ) -> None:

@@ -203,6 +203,9 @@ def test_a_consumer_that_stops_reading_after_the_swap_keeps_the_rollback_names(
     run.close()
     assert sorted(daemon.transient()) == _rollback_names(server_dir), daemon.transient()
     assert all(daemon.names[name] == "before" for name in _rollback_names(server_dir))
+    # Nothing could put the tags back without yielding, so no Start may run the
+    # untested build they name (cold review, lead's decision).
+    assert engine(rec).start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
 
 
 def test_a_consumer_that_stops_reading_before_the_swap_lets_the_rollback_names_go(
@@ -221,6 +224,7 @@ def test_a_consumer_that_stops_reading_before_the_swap_lets_the_rollback_names_g
     assert _all_on(daemon, server_dir, "before")
     run.close()
     assert daemon.transient() == [], daemon.transient()
+    assert engine(rec).start_refusal(server_dir) is None
 
 
 def test_a_stop_after_the_swap_with_no_rollback_says_the_new_images_are_there(
@@ -253,3 +257,51 @@ def test_a_stop_after_the_swap_with_no_rollback_says_the_new_images_are_there(
     assert native.NO_ROLLBACK_UNTOUCHED in message, message
     assert native.NO_ROLLBACK_NOT_BUILT not in message, message
     assert _all_on(daemon, server_dir, "after"), daemon.names
+
+
+def test_a_failed_compile_with_docker_silent_is_not_taken_for_a_build_that_moved_the_tags(
+    tmp_path: Path,
+) -> None:
+    """Cold review, CRITICAL: exit 1 and no image id is a compile that never finished.
+
+    An unanswered id counts as moved only when the build run could have tagged
+    (it returned 0, or was cancelled). Here it failed, so nothing is put back,
+    no Start is refused, and the sentence is the compile's own.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.build_result = docker.AttachedRun(1, ("cc1plus: error: out of memory",))
+    rec.ids_silent = True
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in engine(rec).rebuild(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    message = str(raised.value)
+    assert message.startswith("the build failed (exit 1)"), message
+    assert ON_THE_OLD_BUILD not in message and "was removed" not in message, message
+    assert not [line for line in said if "Putting the build from before" in line], said
+    assert not [call for call in rec.calls if call.endswith(native.FAILED_TAG_SUFFIX)], rec.calls
+    assert sorted(c for c in rec.calls if c.startswith("rmi:")) == sorted(
+        f"rmi:{name}" for name in _rollback_names(server_dir)
+    ), rec.calls
+    assert engine(rec).start_refusal(server_dir) is None
+
+
+def test_a_stop_with_docker_silent_after_compose_finished_still_puts_the_tags_back(
+    tmp_path: Path,
+) -> None:
+    """The other half of the rule: run returned 0, no id answers, so the restore runs."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ids_silent = True
+    stop = threading.Event()
+
+    def build(server_dir: Path, files: object, **_kw: object) -> docker.AttachedRun:
+        rec.calls.append("build")
+        stop.set()
+        return docker.AttachedRun(0, ("naming to ... done",))
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir), cancel=stop))
+    assert str(raised.value).startswith(native.STOPPED_AS_THE_BUILD_FINISHED), raised.value
+    assert [call for call in rec.calls if call.endswith(native.FAILED_TAG_SUFFIX)], rec.calls

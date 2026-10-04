@@ -50,6 +50,7 @@ from tests.test_stop_as_the_build_finishes import _StopAfterTagging
 from yulon import docker, server_build_presses
 from yulon.catalog import build_context, composegen, native
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
+from yulon.controller_wow_wotlk import maintenance
 
 RECIPE = "apps/docker/Dockerfile"
 SOURCE = "src/server/game/World.cpp"
@@ -738,3 +739,73 @@ def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
     )
     assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
     assert native.read_parked_build(server_dir) is not None
+
+
+# -- WotLK in normal use: the upstream .dockerignore admits backups and .git ---
+
+UPSTREAM_DOCKERIGNORE = (
+    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-7f12e89e" / "dockerignore"
+)
+"""The root `.dockerignore` of mod-playerbots/azerothcore-wotlk at 7f12e89ee5f467a50e62eba1d525eac7dc953d03
+(the catalog's pin for wow-wotlk, read 2026-10-05), byte for byte. WotLK renders none of
+its own, so this is what Docker filters the server folder with."""
+
+
+def test_on_wotlk_a_new_backup_in_the_server_folder_changes_the_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """Cold review, lead's v1 decision: fail-safe, and pinned so the behaviour is visible.
+
+    Upstream's `.dockerignore` does not leave out `.git`, a module's own `.git`
+    or the Maintenance backups (`maintenance.backups_dir()`, which T217's update
+    copy shares), so each changes the fingerprint and a kept build is not used
+    after it -- though the Dockerfile copies none of them. A follow-up decides
+    what WotLK may leave out; this records what v1 does.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_parkable_install(rec, tmp_path)
+    (server_dir / ".dockerignore").write_bytes(UPSTREAM_DOCKERIGNORE.read_bytes())
+    assert build_context.parse_dockerignore(UPSTREAM_DOCKERIGNORE.read_text("utf-8")) is not None
+    refs = _refs(server_dir)
+    before = build_context.fingerprint(server_dir, refs=refs)
+    assert before is not None, "upstream's .dockerignore must parse, or nothing is ever kept"
+    backups = maintenance.backups_dir(server_dir)
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / "20261005_010000_acore_characters.sql").write_text("-- dump\n", encoding="utf-8")
+    after_backup = build_context.fingerprint(server_dir, refs=refs)
+    assert after_backup is not None and after_backup != before
+    (server_dir / ".git" / "FETCH_HEAD").write_text("c1a9220 branch\n", encoding="utf-8")
+    assert build_context.fingerprint(server_dir, refs=refs) not in (before, after_backup)
+    # And the excluded tree really is left out: a build folder changes nothing.
+    again = build_context.fingerprint(server_dir, refs=refs)
+    (server_dir / "build").mkdir()
+    (server_dir / "build" / "CMakeCache.txt").write_text("x\n", encoding="utf-8")
+    assert build_context.fingerprint(server_dir, refs=refs) == again
+
+
+def test_a_kept_build_refused_part_way_with_docker_silent_about_the_tags_still_puts_them_back(
+    tmp_path: Path,
+) -> None:
+    """Putting the kept build on the tags is a run that tags: an unanswered id counts as moved."""
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    live = set(_refs(server_dir))
+    moved: list[str] = []
+
+    def tag_image(src: str, dst: str) -> str:
+        if src.endswith(native.PARKED_TAG_SUFFIX):
+            moved.append(dst)
+            if len(moved) == 2:
+                return "Error response from daemon: read-only file system"
+        return daemon.tag_image(src, dst)
+
+    def image_id(ref: str) -> str | None:
+        return None if ref in live else daemon.image_id(ref)
+
+    with pytest.raises(InstallerError):
+        list(
+            engine(rec, **_seams_of(rec, daemon, tag_image=tag_image, image_id=image_id)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert daemon.transient() == [], daemon.transient()
