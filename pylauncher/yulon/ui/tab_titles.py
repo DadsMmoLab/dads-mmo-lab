@@ -79,7 +79,10 @@ def retitle_controller_tabs(tabs: QTabWidget, views: Iterable[ControllerView]) -
     for view, title in zip(open_views, titles, strict=True):
         index = tabs.indexOf(view)
         if index != -1:
-            tabs.setTabText(index, title)
+            # "&&": the title is a folder name, and Qt reads a lone "&" in a tab
+            # title as a shortcut marker -- "Raids & Dungeons" drew as
+            # "Raids _Dungeons" (T188 B7).
+            tabs.setTabText(index, title.replace("&", "&&"))
             # The rail is narrow (theme's `QTabBar::tab:west` max-width), so the
             # title elides for longer install names. The full server dir is the
             # one thing the short title leaves out, and the tooltip carries it

@@ -581,6 +581,9 @@ def _app_window(qapp: object) -> Iterator[Any]:
     monkeypatch.setattr(UpdateBar, "offer_notice", _offer)
 
     window = main.build_window()
+    # Read before any test adds a tab: the window as a player with no servers opens it.
+    header = window.property("header")
+    window.header_badge_hidden_at_start = header is not None and header._badge.isHidden()
     window.swept = swept
     window.bar_said = bar_said
     window.bar_callbacks = bar_callbacks
@@ -4158,6 +4161,159 @@ def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
     assert gone is not made
     assert gone.services.play_client_dir is None
     assert gone.services.applier is not None and gone.services.applier.client_dir == client
+
+
+# -- T188 C6: the header's realm badge is the current server tab's ------------
+
+
+def test_the_header_badge_follows_the_server_tab_on_screen(window: Any, tmp_path: Any) -> None:
+    """Audit C6: the header said REALM OFFLINE for a realm the tab said was online."""
+    header = window.property("header")
+    tabs = window.property("tabs")
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", tmp_path / "c6-first", None)
+    first = _tab_for(window, tmp_path / "c6-first")
+    catalog.installed.emit("wow-wotlk", tmp_path / "c6-second", None)
+    second = _tab_for(window, tmp_path / "c6-second")
+    first.realm_badge.set_status("running")
+    second.realm_badge.set_status("stopped")
+
+    tabs.setCurrentWidget(first)
+    assert header._badge.status == "running"
+    assert header._badge.isHidden() is False
+
+    tabs.setCurrentWidget(second)
+    assert header._badge.status == "stopped"
+    first.realm_badge.set_status("starting")
+    assert header._badge.status == "stopped", "it followed a tab that is not on screen"
+    second.realm_badge.set_status("stopping")
+    assert header._badge.status == "stopping"
+
+
+def test_a_window_opened_with_no_servers_hides_the_header_badge(window: Any) -> None:
+    """T188 fix round 1 (M6): the Catalog was current before the header listened."""
+    assert window.header_badge_hidden_at_start is True
+
+
+def test_the_header_says_unknown_when_docker_cannot_be_asked(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final fix round: the header follows the tab's badge into "unknown"."""
+    from yulon import docker
+
+    header = window.property("header")
+    server_dir = tmp_path / "c6-unknown"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+
+    def unreachable() -> object:
+        raise docker.DockerCommandError("Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(view.services.controller, "status", unreachable)
+    view.refresh_button.click()
+    pump_until(lambda: header._badge.status == "unknown", "the header to say unknown")
+
+    assert "UNKNOWN" in header._badge._label.text()
+
+
+def test_the_header_badge_is_hidden_on_the_catalog(window: Any, tmp_path: Any) -> None:
+    header = window.property("header")
+    tabs = window.property("tabs")
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "c6-catalog", None)
+    assert header._badge.isHidden() is False
+
+    tabs.setCurrentIndex(0)  # the Catalog
+
+    assert tabs.tabText(0) == "Catalog"
+    assert header._badge.isHidden() is True
+
+
+def test_the_header_badge_follows_a_tab_rebuilt_under_it(window: Any, tmp_path: Any) -> None:
+    """Review focus 2: Make…/Delete rebuild the tab; the old badge is gone with it."""
+    header = window.property("header")
+    server_dir = tmp_path / "c6-rebuilt"
+    client = tmp_path / "TurtleWoW"
+    play = tmp_path / "TurtleWoW (Yu'lon)"
+    for folder in (client, play):
+        (folder / "Interface").mkdir(parents=True)
+    _catalog_view(window).installed.emit("wow-tortoise", server_dir, client)
+    view = _tab_for(window, server_dir)
+    view.services.set_play_client_dir(play)
+    view.play_client_dir_changed.emit("wow-tortoise", server_dir, play)
+    process_events()  # the old view's deferred delete
+
+    made = _tab_for(window, server_dir)
+    assert made is not view
+    made.realm_badge.set_status("stopping")
+
+    assert header._badge.status == "stopping"
+
+
+def test_closing_the_tab_on_screen_leaves_the_header_on_what_is_left(
+    window: Any, tmp_path: Any
+) -> None:
+    """Review focus 2: an uninstall drops the tab the header was following."""
+    header = window.property("header")
+    tabs = window.property("tabs")
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", tmp_path / "c6-kept", None)
+    kept = _tab_for(window, tmp_path / "c6-kept")
+    server_dir = tmp_path / "c6-closed"
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    closed = _tab_for(window, server_dir)
+    kept.realm_badge.set_status("restarting")
+    closed.realm_badge.set_status("running")
+    tabs.setCurrentWidget(closed)
+    assert tabs.indexOf(closed) == tabs.count() - 1, "the newest tab is the last one"
+    assert header._badge.status == "running"
+
+    closed.uninstalled.emit("wow-wotlk", server_dir)
+    process_events()  # the dropped view's deferred delete
+
+    # Qt selects the tab left of a removed last one: the one added just before.
+    assert tabs.currentWidget() is kept
+    assert header._badge.status == "restarting"
+    assert header._badge.isHidden() is False
+    kept.realm_badge.set_status("running")
+    assert header._badge.status == "running", "the header stopped following"
+
+
+# -- T188 A7/B7/C10: "&" in a label is shown, never read as a shortcut ---------
+
+
+def _mnemonic_texts(window: Any) -> list[str]:
+    """Every button text, group title and tab title in the window carrying a shortcut."""
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtWidgets import QAbstractButton, QGroupBox, QTabBar
+
+    texts = [b.text() for b in window.findChildren(QAbstractButton)]
+    texts += [g.title() for g in window.findChildren(QGroupBox)]
+    for bar in window.findChildren(QTabBar):
+        texts += [bar.tabText(i) for i in range(bar.count())]
+    return [t for t in texts if not QKeySequence.mnemonic(t).isEmpty()]
+
+
+def test_no_label_in_the_window_turns_a_letter_into_a_shortcut(window: Any, tmp_path: Any) -> None:
+    """Audit A7/C10: "Console & Install Logs" drew as "Console _Install Logs"."""
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "a7-sweep", None)
+
+    assert _mnemonic_texts(window) == []
+
+
+def test_a_server_folder_with_an_ampersand_keeps_it_on_its_tab(window: Any, tmp_path: Any) -> None:
+    """B7: the tab title comes from the folder name, which nobody types for Qt."""
+    from PySide6.QtGui import QKeySequence
+
+    server_dir = tmp_path / "Raids & Dungeons"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    index = tabs.indexOf(view)
+
+    title = tabs.tabText(index)
+    assert QKeySequence.mnemonic(title).isEmpty(), title
+    assert "Raids & Dungeons" in title.replace("&&", "&"), title
+    assert tabs.tabToolTip(index) == str(server_dir)
 
 
 def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(

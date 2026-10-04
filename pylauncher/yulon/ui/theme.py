@@ -570,11 +570,12 @@ QFrame#panel:hover {{
 
 /* --- Campaign Tiles ---
    The four tile covers are NOT styled here on purpose. `DadcraftCampaignCard`
-   paints its own backdrop, particles and hover lighting in `paintEvent`, and it
-   sets a widget-level `background: transparent; border: none;` — a widget's own
-   stylesheet always wins over the application sheet, so any rule written here
-   for `QFrame#catalog-tile-*` would be dead text. The tile art has exactly one
-   owner: the decorations module. */
+   paints its own backdrop, particles and hover lighting in `paintEvent`, and its
+   own sheet makes the card itself transparent and borderless — a widget's own
+   stylesheet wins over the application sheet, so any rule written here for
+   `QFrame#catalog-tile-*` would be dead text. The tile art has exactly one
+   owner: the decorations module. That sheet names the card by its id
+   (T188 C1), so the buttons and labels inside it are styled from here. */
 
 /* --- Catalog Tile Text Hierarchy & Scrollable Box Cover Inset --- */
 QScrollArea#catalog-shelf-scroll,

@@ -362,6 +362,103 @@ def test_the_realm_pill_follows_the_server_tabs_badge(
     assert window.online_label.text() == "412 bots and 2 players online · up 3h 12m"
 
 
+def test_a_stopping_realm_does_not_say_play_starts_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 C5: the tab's Stop now holds the badge at "stopping"; the banner says so."""
+    window, view, _ = _launcher(ps, tmp_path)
+    _online(view)
+
+    view.realm_badge.set_status("stopping")
+
+    assert window.realm_badge.status == "stopping"
+    assert window.online_label.text() == launcher_window.STOPPING_BANNER
+    assert window.online_label.text() != launcher_window.STOPPED_BANNER
+    # And the line under PLAY (final review): it said "The server is stopped:
+    # PLAY starts it" while the banner above it said the server was stopping.
+    assert window.play_reason_label.text() == launcher_window.STOPPING_REASON
+    assert window.play_reason_label.text() != launcher_window.STOPPED_REASON
+
+
+_REASONS = {
+    "stopping": launcher_window.STOPPING_REASON,
+    "starting": launcher_window.STARTING_REASON,
+    "restarting": launcher_window.RESTARTING_REASON,
+    "unknown": launcher_window.UNKNOWN_REASON,
+    "partial": launcher_window.PARTIAL_REASON,
+}
+"""The line under PLAY for each badge word that is neither REALM ONLINE nor OFFLINE."""
+
+
+@pytest.mark.parametrize("state", list(_REASONS))
+def test_the_line_under_play_says_what_the_badge_says(
+    qapp: object, ps: _Ps, tmp_path: Path, state: str
+) -> None:
+    """Final review: every state but running fell through to "The server is stopped:
+    PLAY starts it, waits for the realm, then starts the game." -- under STOPPING,
+    STARTING and RESTARTING alike."""
+    window, view, _ = _launcher(ps, tmp_path)
+    _online(view)
+
+    view.realm_badge.set_status(state)
+
+    assert window.realm_badge.status == state
+    said = window.play_reason_label.text()
+    assert said == _REASONS[state], said
+    assert not said.startswith("The server is stopped"), said
+
+
+def test_the_line_under_play_for_a_stopped_server_is_unchanged(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    window, view, _ = _launcher(ps, tmp_path)
+    _online(view)
+
+    view.realm_badge.set_status("stopped")
+
+    assert window.play_reason_label.text() == launcher_window.STOPPED_REASON
+    assert len(set(_REASONS.values()) | {launcher_window.STOPPED_REASON}) == len(_REASONS) + 1
+
+
+def test_a_partly_up_server_is_not_called_stopped_under_play(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 fix round 1 (M3): the tab's badge says PARTLY UP; the line under PLAY agreed."""
+    window, view, _ = _launcher(ps, tmp_path)
+    ps.names = "ac-database\n"
+
+    view.refresh_status()
+
+    assert window.realm_badge.status == "partial"
+    said = window.play_reason_label.text()
+    assert "partly up" in said, said
+    assert "stopped" not in said, said
+    assert window.online_label.text() == launcher_window.PARTIAL_BANNER
+    assert window.online_label.text() != launcher_window.STOPPED_BANNER
+
+
+def test_a_realm_yulon_cannot_ask_about_is_not_called_stopped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final fix round: Docker not answering says so; it neither claims stopped nor
+    promises that PLAY starts the server."""
+    from yulon import docker
+
+    window, view, _ = _launcher(ps, tmp_path)
+
+    def unreachable() -> object:
+        raise docker.DockerCommandError("Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(view.services.controller, "status", unreachable)
+    view.refresh_status()
+
+    assert window.realm_badge.status == "unknown"
+    assert window.online_label.text() == launcher_window.UNKNOWN_BANNER
+    said = window.play_reason_label.text()
+    assert "Docker" in said, said
+    assert "stopped" not in said and "starts it" not in said, said
+
+
 def test_a_count_that_could_not_be_read_is_left_out_not_shown_as_zero(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

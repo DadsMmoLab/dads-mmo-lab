@@ -33,7 +33,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, cast
+from typing import Any, NamedTuple, Protocol, cast
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
@@ -189,15 +189,16 @@ logger = get_logger(__name__)
 def _realm_badge_status(status: InstallStatus) -> str:
     """The `DadcraftRealmBadge` state for an `InstallStatus` (Server tab).
 
-    Maps the three-container reading onto the badge's four visual states: all
-    up reads "online", some up reads "starting" (a realm still coming up), and
-    none up reads "offline". The start/stop transitions set "starting"/"stopping"
-    directly, since a poll has not yet seen the change.
+    All up reads "running", some up reads "partial" (PARTLY UP), none up reads
+    "stopped". Some up used to read "starting", which was false for a database
+    left up on its own (T188 C4). While a Start, Stop or Restart of ours runs
+    the badge holds "starting", "stopping" or "restarting" instead
+    (`ControllerView._hold_badge`), and a poll does not move it.
     """
     if status.all_running:
         return "running"
     if status.any_running:
-        return "starting"
+        return "partial"
     return "stopped"
 
 
@@ -514,6 +515,17 @@ Measured rather than guessed (2026-09-07, WotLK on `yulon-ubuntu`):
 The sentence a person reads never waits for this: the server's own words appear
 the moment they arrive, and only the LIST is scheduled.
 """
+
+_LEVEL_ROLE = Qt.ItemDataRole.UserRole + 2
+"""Where a character row keeps its level, for the Level box to start from (T188 A6)."""
+
+
+class _CharacterAnswer(NamedTuple):
+    """A Characters action's outcome, with the (name, level) a Set level press sent."""
+
+    outcome: object
+    level_sent: tuple[str, int] | None
+
 
 _ROW_SETTLE_TRIES = 4
 """How many times to re-read before giving up on the row catching up.
@@ -4315,6 +4327,17 @@ the gate this tab really has rather than a second confirmation idiom nobody
 here has learned.
 """
 
+FOLLOW_ENDED = "log ended \u2014 the world server is not running"
+"""The Console's header when `docker logs -f` returns (T188 A15).
+
+It returns because the world container is not running, which "finished: done"
+read as a job completed.
+"""
+
+UNINSTALL_KEEP_CHARACTERS = "Uninstall this server and keep my characters"
+UNINSTALL_DELETE_CHARACTERS = "Uninstall this server and delete my characters"
+"""The confirm press, named for the Keep my characters choice it carries out (T188 A14)."""
+
 
 IMPORT_RUNNING = (
     "Running the database import. A full one takes 10-30 minutes and cannot be stopped once "
@@ -6294,6 +6317,19 @@ class ControllerView(QWidget):
         # freeze for the length of a `docker compose up`).
         self._jobs: JobRunner = job_runner or threaded_job_runner(self)
         self._busy = False
+        # T188 C4/C5: the word the realm badge holds while a Start, Stop or
+        # Restart of ours runs. A poll mid-stop used to flip the badge between
+        # OFFLINE and "starting".
+        self._badge_held: str | None = None
+        # The first status read that may end that hold: the one the holding job
+        # asks for as it ends, or any asked after it. None while the job runs.
+        # A number and not `_busy` at answer time: a Rebuild pressed before the
+        # stop's own read answered made it "stale", and STOPPING stayed on the
+        # badge for the whole rebuild (T188 final review).
+        self._hold_ends_at: int | None = None
+        # How many status reads were asked, and which one is out.
+        self._status_asks = 0
+        self._status_ask_out = 0
         self._status_pending = False
         self._verdict_pending = False
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
@@ -6573,6 +6609,10 @@ class ControllerView(QWidget):
         self.console_probe_label.setVisible(False)
         self.enable_channel_button = QPushButton("Turn on the command channel", tab)
         self.enable_channel_button.setVisible(self.services.channel_setup is not None)
+        # T188 A4: set by a press that wrote the channel on. The setup state
+        # stays Idle until the next Start proves it, so the state alone would
+        # keep offering a press that has already been made.
+        self._channel_written = False
         self.enable_channel_button.clicked.connect(self.enable_channel)
         # Hidden until the server has actually refused the saved credential.
         # This is the one control on the tab that can break a channel that
@@ -6739,6 +6779,7 @@ class ControllerView(QWidget):
             "Keep my characters (the database volume is left alone)", tab
         )
         self.keep_characters_check.setChecked(False)  # owner answer 2: unticked by default
+        # Shown only once a plan is on screen (T188 A14), like the T181 box below.
         self.keep_characters_check.setVisible(False)
         # T181 §4: Remove server offers to delete its ready-to-play client too.
         # Ticked by default, and shown only once a plan is on screen and the
@@ -6776,7 +6817,6 @@ class ControllerView(QWidget):
             self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
             self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
             self.delete_play_client_check.toggled.connect(self._redraw_uninstall_plan)
-            self.keep_characters_check.setVisible(True)
             self.uninstall_label.setVisible(True)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
@@ -6894,9 +6934,11 @@ class ControllerView(QWidget):
         box.addWidget(self.repair_label)
         if self.uninstall_button is not None:
             box.addWidget(self.uninstall_button)
+            # T188 A14: the choices come after the plan they change and just
+            # above the press that acts on them, read in that order.
+            box.addWidget(self.uninstall_label)
             box.addWidget(self.keep_characters_check)
             box.addWidget(self.delete_play_client_check)
-            box.addWidget(self.uninstall_label)
             box.addWidget(self.uninstall_confirm_button)
         box.addStretch(1)
         self._add_panel_tab(tab, "server", "Server")
@@ -7113,6 +7155,8 @@ class ControllerView(QWidget):
         self._status_pending = True
         self._status_superseded = False
         self._status_asked_busy = self._busy
+        self._status_asks += 1
+        self._status_ask_out = self._status_asks
         self._run(self.services.controller.status, self._status_ready, self._status_failed)
 
     @Slot()
@@ -7137,6 +7181,11 @@ class ControllerView(QWidget):
     @Slot(object)
     def _verdict_ready(self, result: object) -> None:
         self._verdict_pending = False
+        if self._badge_held is not None:
+            # T188 C4: "up — 3 players" under a badge saying STOPPING is two
+            # readings at once; the line comes back with the first poll after.
+            self._clear_the_verdict()
+            return
         if result is None or self._distro != "running":
             # None is `_world_reading()` finding the distro stopped on the
             # worker; a verdict landing after a poll said stopped is as old.
@@ -7421,6 +7470,7 @@ class ControllerView(QWidget):
             "The command channel is written into this install's configuration. It is checked "
             "the next time you start the server."
         )
+        self._channel_written = True
         self.refresh_channel()
 
     @Slot()
@@ -7487,6 +7537,23 @@ class ControllerView(QWidget):
         self.channel_label.setText(_channel_sentence(state))
         self.channel_label.setVisible(True)
         self.repair_channel_button.setVisible(isinstance(state, channel_setup.Refused))
+        # T188 A4: offered only while there is something to turn on -- not under
+        # "verified as …", not while an account waits to be proved, not where
+        # Repair is the answer, and not again after a press that took. GaveUp
+        # is offered even after a press: it means the press did not take.
+        self.enable_channel_button.setVisible(
+            self.services.channel_setup is not None
+            and (
+                isinstance(state, channel_setup.GaveUp)
+                or (
+                    not self._channel_written
+                    and not isinstance(
+                        state,
+                        channel_setup.Verified | channel_setup.Pending | channel_setup.Refused,
+                    )
+                )
+            )
+        )
 
     @Slot()
     def repair_channel(self) -> None:
@@ -7532,6 +7599,7 @@ class ControllerView(QWidget):
     def _status_ready(self, result: object) -> None:
         self._status_pending = False
         superseded = self._status_superseded
+        ends_the_hold = self._ends_the_hold()
         status = result
         if not isinstance(status, InstallStatus):
             # Same hole, one branch narrower: a result that is not a status
@@ -7564,7 +7632,14 @@ class ControllerView(QWidget):
             self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
-        self.realm_badge.set_status(_realm_badge_status(status))
+        if self._badge_held is not None and ends_the_hold:
+            # Asked after our job ended, so this is the job's own follow-up
+            # reading: the hold ends HERE and not when the job does. Falling back
+            # to the reading from before the press flashed REALM ONLINE between
+            # STOPPING and OFFLINE (T188 fix round 1).
+            self._badge_held = None
+        if self._badge_held is None:
+            self.realm_badge.set_status(_realm_badge_status(status))
         if not stale and status.any_running:
             # T95: something brought the server back without Start, so "nothing
             # to remove" is no longer true, and a lit "Remove from Yu'lon…" beside
@@ -7848,12 +7923,21 @@ class ControllerView(QWidget):
     def _status_failed(self, exc: object) -> None:
         self._status_pending = False
         self._last_status = None
+        # Read before the ask below, which moves `_status_ask_out` on: a poll
+        # asked before the holding job ended is older than that job's own
+        # follow-up read (T188).
+        ends_the_hold = self._ends_the_hold()
         # T95: the refresh dropped while this poll was out is asked again. The
         # app's job runner hands it to a worker thread, so its answer arrives
         # after this method has returned.
         self._ask_again_if_superseded(self._status_superseded)
         self.status_label.setText(f"status: Docker not reachable ({exc})")
-        self.realm_badge.set_status("stopped")
+        # "unknown", not "stopped": Docker not answering says nothing about the
+        # server (T188 final fix round). A hold is left alone by a failure older
+        # than its job's own follow-up read; that read failing ends it here.
+        if self._badge_held is None or ends_the_hold:
+            self._badge_held = None
+            self.realm_badge.set_status("unknown")
         self._offer_docker_repair()
         # T54. The reveal used to run only on the success path, and the control
         # it reveals exists for an install that is GONE -- which is the case
@@ -7862,6 +7946,19 @@ class ControllerView(QWidget):
         # "Forget this install…", and could not be shown it. The predicate needs
         # nothing from Docker: it asks `wsl_distro` and `folder_is_gone()`.
         self._update_forget_visibility()
+
+    def _hold_badge(self, status: str) -> None:
+        """Hold the realm badge at `status` while our own Start/Stop/Restart runs (T188).
+
+        Held until the first status reading asked after the job ended answers
+        (`_status_ready`), or an idle poll fails (`_status_failed`).
+        `_set_busy(False)`, which every one of those jobs reaches on success
+        and failure alike, asks for that reading.
+        """
+        self._badge_held = status
+        self._hold_ends_at = None
+        self.realm_badge.set_status(status)
+        self._clear_the_verdict()
 
     def _set_busy(self, busy: bool) -> None:
         """Lock the Server buttons while an action of ours is running.
@@ -8076,6 +8173,17 @@ class ControllerView(QWidget):
                 self._set_rebuild_dashboard_button()
         # T187: the launcher window greys its settings while this tab is busy.
         self.play_state_changed.emit()
+        if not busy and self._badge_held is not None:
+            # T188: the job that held the badge is over; the reading that ends
+            # the hold is asked for here, because not every way out of a job
+            # asks for one (a Start refused over a port does not).
+            if self._hold_ends_at is None:
+                self._hold_ends_at = self._status_asks + 1
+            self.refresh_status()
+
+    def _ends_the_hold(self) -> bool:
+        """Whether the status read answering now was asked once the holding job had ended."""
+        return self._hold_ends_at is not None and self._status_ask_out >= self._hold_ends_at
 
     @Slot()
     def start_server(self) -> None:
@@ -8086,7 +8194,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
-        self.realm_badge.set_status("starting")
+        self._hold_badge("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
     @Slot()
@@ -8096,7 +8204,7 @@ class ControllerView(QWidget):
         self._stop_forced = ""
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
-        self.realm_badge.set_status("starting")
+        self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
 
     @Slot(object)
@@ -8354,6 +8462,8 @@ class ControllerView(QWidget):
                 f"The server could not start: port {operations.port} on this machine is in use "
                 "by something else. Free it, or stop whatever holds it, and start again."
             )
+        # The press is undone, and the sentence below asks for it again (T188 A4).
+        self._channel_written = False
         self.refresh_channel()
         return (
             f"The server could not start: port {operations.port} on this machine is in use by "
@@ -8498,7 +8608,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping the other server…")
-        self.realm_badge.set_status("starting")
+        self._hold_badge("starting")
         self._run(
             self.services.controller.stop_conflicting_and_start,
             self._server_action_done,
@@ -8533,7 +8643,7 @@ class ControllerView(QWidget):
         self._set_busy(True)
         self.status_label.setText(STOPPING_FOR_REMOVAL)
         self.problem_label.setText(STOPPING_FOR_REMOVAL_WAIT)
-        self.realm_badge.set_status("starting")
+        self._hold_badge("stopping")
         self._run(
             self.services.controller.stop,
             self._stopped_for_removal,
@@ -8581,6 +8691,7 @@ class ControllerView(QWidget):
             return
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
         self._play_delete_offered = False
         self.delete_play_client_check.setVisible(False)
         self.uninstall_label.setText("Working out what would be removed\u2026")
@@ -8596,10 +8707,16 @@ class ControllerView(QWidget):
             # visible Uninstall button would be an offer the app cannot keep.
             self._uninstall_plan = None
             self.uninstall_confirm_button.setVisible(False)
+            self.keep_characters_check.setVisible(False)
             self.uninstall_label.setText(result.refusal)
             return
         self._uninstall_plan = result
         self.uninstall_confirm_button.setVisible(True)
+        # T188 fix round 1: a plan that found no database volume has nothing to
+        # keep, so a tick left from an earlier plan must not promise it.
+        if not result.character_volume:
+            self.keep_characters_check.setChecked(False)
+        self.keep_characters_check.setVisible(bool(result.character_volume))
         # T181 §4: offered only for a folder that still carries this server's
         # marker -- `play_client.delete()` would refuse any other, and an offer
         # the press cannot keep is worse than none.
@@ -8623,6 +8740,10 @@ class ControllerView(QWidget):
         if plan is None:
             return
         keep = self.keep_characters_check.isChecked()
+        # T188 A14: the press names the choice it carries out.
+        self.uninstall_confirm_button.setText(
+            UNINSTALL_KEEP_CHARACTERS if keep else UNINSTALL_DELETE_CHARACTERS
+        )
         lines = [
             f"This removes {plan.server_dir} ({size_text(plan.folder_bytes)}) and this "
             f"server's Docker project {plan.project}:",
@@ -8721,6 +8842,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
         play_said: str | None = None
         if isinstance(result, _UninstallOutcome):
             report, play_said = result.report, result.play_client
@@ -8771,6 +8893,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._uninstall_plan = None
         self.uninstall_confirm_button.setVisible(False)
+        self.keep_characters_check.setVisible(False)
         message = str(exc)
         self.uninstall_label.setText(message)
         self.action_failed.emit(message)
@@ -10623,7 +10746,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def follow_logs(self) -> None:
-        self.console_log.run(self.services.logs_source, title="worldserver log")
+        self.console_log.run(self.services.logs_source, title="worldserver log", ended=FOLLOW_ENDED)
 
     @Slot()
     def send_console_command(self) -> None:
@@ -11026,6 +11149,11 @@ class ControllerView(QWidget):
             return
         name = str(item.data(Qt.ItemDataRole.UserRole) or "")
         online = bool(item.data(Qt.ItemDataRole.UserRole + 1))
+        # T188 A6: the box starts at this character's own level. It said 1 for
+        # everybody, so one press of "Set level Guglu" took a 78 to level 1.
+        level = item.data(_LEVEL_ROLE)
+        if isinstance(level, int):
+            self.new_level.setValue(level)
         for button, label in self._character_actions():
             button.setText(f"{label} {name}")
             button.setEnabled(True)
@@ -11286,6 +11414,7 @@ class ControllerView(QWidget):
             )
             item.setData(Qt.ItemDataRole.UserRole, character.name)
             item.setData(Qt.ItemDataRole.UserRole + 1, bool(character.online))
+            item.setData(_LEVEL_ROLE, int(character.level))
             self.character_list.addItem(item)
             if character.name == chosen:
                 self.character_list.setCurrentItem(item)
@@ -11296,19 +11425,38 @@ class ControllerView(QWidget):
     def _characters_failed(self, exc: object) -> None:
         self.character_report.setText(f"Could not read this server's characters: {exc}")
 
-    def _character_action(self, what: str, run: object) -> None:
-        """One press, one sentence, all three outcomes."""
+    def _character_action(self, what: str, run: object, *, level: int | None = None) -> None:
+        """One press, one sentence, all three outcomes.
+
+        `level` is a Set level press's level: on success the row keeps it at
+        once (T188 fix round 1), because the list is re-read 750ms later and a
+        lower level typed in between was compared with the old one. It rides
+        WITH this job's answer (`_CharacterAnswer`), never in a field on the
+        tab: the buttons stay live while an action runs, so a second press can
+        overlap the first, and a shared field was overwritten by it.
+        """
         name = self._chosen_character()
         if self.services.play is None or not name:
             return
+        sent = (name, level) if level is not None else None
         self.character_report.setText(f"{what} {name}…")
-        self._run(run, self._character_done, self._characters_failed)  # type: ignore[arg-type]
+        self._run(
+            lambda: _CharacterAnswer(run(), sent),  # type: ignore[operator]
+            self._character_done,
+            self._characters_failed,
+        )
 
     @Slot(object)
-    def _character_done(self, outcome: object) -> None:
+    def _character_done(self, answer: object) -> None:
+        outcome, sent = cast(_CharacterAnswer, answer)
         done = bool(getattr(outcome, "done", False))
         said = getattr(outcome, "text", "") if done else getattr(outcome, "problem", "")
         self.character_report.setText(said.strip() or ("Done." if done else "It did not work."))
+        if done and sent is not None:
+            for row in range(self.character_list.count()):
+                item = self.character_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == sent[0]:
+                    item.setData(_LEVEL_ROLE, sent[1])
         if done:
             # NOT `self.refresh_characters()`. Measured on the live server,
             # 2026-09-07: the command answers in about 0.15s and its own row
@@ -11335,8 +11483,25 @@ class ControllerView(QWidget):
         level = self.new_level.value()
         if play is None or not name:
             return
+        # T188 A6: lowering resets the character's experience, the one change a
+        # second press cannot undo, so it alone is asked about. Default No.
+        item = self.character_list.currentItem()
+        now = item.data(_LEVEL_ROLE) if item is not None else None
+        if (
+            isinstance(now, int)
+            and level < now
+            and not self._confirm(
+                f"Lower {name}'s level?",
+                f"Set {name} from level {now} down to level {level}? Lowering a level "
+                "resets the character's experience, and raising it again does not "
+                "give that back.",
+            )
+        ):
+            return
         self._character_action(
-            "Setting the level of", lambda: play.set_level(name, level)  # type: ignore[attr-defined]
+            "Setting the level of",
+            lambda: play.set_level(name, level),  # type: ignore[attr-defined]
+            level=level,
         )
 
     @Slot()
@@ -16149,6 +16314,7 @@ class ControllerView(QWidget):
         ):
             return
         self._set_busy(True)
+        self._hold_badge("restarting")
         self.tuning_report.setPlainText("restarting the server…")
         self._run(
             lambda: ("restart", self._do_restart()), self._tuning_job_done, self._tuning_job_failed
@@ -16171,6 +16337,7 @@ class ControllerView(QWidget):
         ):
             return
         self._set_busy(True)
+        self._hold_badge("restarting")
         self.tuning_report.setPlainText("recreating the containers…")
         self._run(
             lambda: ("recreate", self._do_recreate()),

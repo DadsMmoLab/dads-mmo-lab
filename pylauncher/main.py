@@ -204,7 +204,7 @@ def build_catalog_tab(
     console_tabs = QTabWidget()
     console_tabs.setObjectName("catalog-console-tabs")
     console_tabs.setIconSize(QSize(16, 16))
-    console_tabs.addTab(log_panel, get_tab_icon("console"), "Console & Install Logs")
+    console_tabs.addTab(log_panel, get_tab_icon("console"), "Console and Install Logs")
 
     def _set_console_visible(visible: bool) -> None:
         console_tabs.setVisible(visible)
@@ -1198,6 +1198,24 @@ def build_window() -> object:
     tabs.tabBar().installEventFilter(forget_buttons)
     tabs.currentChanged.connect(forget_buttons.current_changed)
 
+    def follow_the_tab_on_screen(_index: int = -1) -> None:
+        """The header's realm badge is the Server tab badge of the tab on screen (T188 C6).
+
+        Hidden on the Catalog and Logs. `currentChanged` covers a tab added
+        (`add_controller()` makes it current) and a tab dropped while on screen
+        (`removeTab()` moves the selection); a mutation that also called this
+        from both changed no test (T188 fix round 1). It is called once more at
+        start-up, because the Catalog became current before this was connected.
+        """
+        header = window.property("header")
+        if header is None:
+            return
+        current = tabs.currentWidget()
+        badge = getattr(current, "realm_badge", None) if current in controller_views else None
+        header.follow(badge)
+
+    tabs.currentChanged.connect(follow_the_tab_on_screen)
+
     def _tab_buttons(key: tuple[str, Path], name: str) -> QWidget:
         """A server tab's ▶ and × side by side (T187), on the side T95's × alone had.
 
@@ -1429,6 +1447,9 @@ def build_window() -> object:
             )
         except KeyError:
             logger.warning(f"state.json names unknown game {install.game!r}; skipping")
+    # The Catalog was made current before `currentChanged` was connected, so
+    # with no server tab nothing has asked yet.
+    follow_the_tab_on_screen()
 
     def on_installed(game: str, server_dir: object, client_dir: object) -> None:
         sd = Path(str(server_dir))
