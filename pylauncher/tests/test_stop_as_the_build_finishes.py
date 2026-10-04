@@ -305,3 +305,22 @@ def test_a_stop_with_docker_silent_after_compose_finished_still_puts_the_tags_ba
         list(engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir), cancel=stop))
     assert str(raised.value).startswith(native.STOPPED_AS_THE_BUILD_FINISHED), raised.value
     assert [call for call in rec.calls if call.endswith(native.FAILED_TAG_SUFFIX)], rec.calls
+
+
+def test_a_stop_that_killed_compose_with_docker_silent_still_puts_the_tags_back(
+    tmp_path: Path,
+) -> None:
+    """A cancelled run may have tagged before the Stop killed it: silence counts as moved."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ids_silent = True
+    stop = threading.Event()
+
+    def build(server_dir: Path, files: object, **_kw: object) -> docker.AttachedRun:
+        rec.calls.append("build")
+        stop.set()
+        return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ("naming to ...",))
+
+    with pytest.raises(InstallerError):
+        list(engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir), cancel=stop))
+    assert [call for call in rec.calls if call.endswith(native.FAILED_TAG_SUFFIX)], rec.calls
