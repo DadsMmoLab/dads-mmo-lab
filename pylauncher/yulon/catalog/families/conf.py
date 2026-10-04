@@ -187,17 +187,27 @@ def patch(text: str, patch: ConfPatch, tokens: Mapping[str, str]) -> str:
     return "".join(lines)
 
 
+_C_SPACE = " \t\r\n\v\f"
+"""What C's `isspace` calls whitespace in the classic locale, which is what the reader trims."""
+
+
 def comment_unreadable(text: str) -> tuple[str, tuple[int, ...]]:
     """`text` with every line the server's reader refuses written as a comment (T204).
 
     Returns the new text and the 1-based numbers of the lines it commented out.
 
     A refused line is one that is not blank once trimmed, does not start with `#`,
-    is not a `[section]` header and has no `=`. TrinityCore's reader (boost's ini
-    parser) stops on the first one with `'=' character not found in line`, so the
-    world server never starts. The case that made this rule: CENTURION's
-    `worldserver.conf.dist` (line 4505 at 5e732762) has a printf example inside a
-    comment whose string holds real newlines, so two lines of it are bare text.
+    and either has no `=` or opens a `[` it never closes. TrinityCore's reader
+    (boost's ini parser) stops on the first one -- `'=' character not found in
+    line`, or `unmatched '['` -- so the world server never starts. A `[` closed
+    later on its line is a section header and is kept. The case that made this
+    rule: CENTURION's `worldserver.conf.dist` (line 4505 at 5e732762) has a printf
+    example inside a comment whose string holds real newlines, so two lines of it
+    are bare text.
+
+    Trimmed the way the reader trims, C `isspace` in the classic locale (space,
+    tab, CR, LF, VT, FF) and nothing more, after a leading BOM is dropped:
+    `str.strip()` would also take a no-break space and call a refused line blank.
 
     Each refused line gets `# ` in front, with its own text and line ending kept;
     every other line stays byte-for-byte as it was. Lines are split on `\n` alone,
@@ -207,10 +217,14 @@ def comment_unreadable(text: str) -> tuple[str, tuple[int, ...]]:
     lines = text.split("\n")
     refused: list[int] = []
     for index, line in enumerate(lines):
-        body = line.strip().lstrip("\ufeff")
-        if body and not body.startswith(("#", "[")) and "=" not in body:
-            lines[index] = f"# {line}"
-            refused.append(index + 1)
+        body = line.lstrip("\ufeff").strip(_C_SPACE)
+        if not body or body.startswith("#"):
+            continue
+        # A section must close its `[`; any other line must carry a `=`.
+        if "]" in body[1:] if body.startswith("[") else "=" in body:
+            continue
+        lines[index] = f"# {line}"
+        refused.append(index + 1)
     return "\n".join(lines), tuple(refused)
 
 

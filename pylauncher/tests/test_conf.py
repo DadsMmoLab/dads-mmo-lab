@@ -1336,6 +1336,26 @@ def test_comment_unreadable_reads_past_a_byte_order_mark() -> None:
     assert conf.comment_unreadable(text) == (text, ())
 
 
+def test_comment_unreadable_trims_only_what_the_c_reader_trims() -> None:
+    """The reader trims C `isspace` (space, tab, CR, LF, VT, FF) and nothing more: a
+    line holding only a no-break space is not blank to it, and it is refused."""
+    text = "Key = 1\n\u00a0\n\v\t# a comment after a vertical tab\n"
+    assert conf.comment_unreadable(text) == (
+        "Key = 1\n# \u00a0\n\v\t# a comment after a vertical tab\n",
+        (2,),
+    )
+
+
+def test_comment_unreadable_keeps_a_bracket_only_when_it_is_closed() -> None:
+    """`[worldserver]` is a section; a `[` with no `]` after it is refused by the reader
+    (`unmatched '['`), so it is commented out like any other refused line."""
+    text = "[worldserver]\n[not a section\n[Open = 1\n  [indented]\n"
+    assert conf.comment_unreadable(text) == (
+        "[worldserver]\n# [not a section\n# [Open = 1\n  [indented]\n",
+        (2, 3),
+    )
+
+
 def test_comment_unreadable_splits_lines_on_newline_alone() -> None:
     """The server's reader splits on `\\n` (`std::getline`); `str.splitlines()` also
     splits on U+2028 and form feeds, and would comment out half of a real setting."""
@@ -1384,3 +1404,12 @@ def test_pressing_install_again_repairs_a_conf_written_before_the_fix(
     with caplog.at_level(logging.INFO, logger=conf.logger.name):
         assert conf.apply_table(CENTURION_TABLE, etc, {}) == ()
     assert not [r for r in caplog.records if "commented out" in r.getMessage()]
+
+
+def test_the_changelog_line_for_this_fix_names_its_ticket() -> None:
+    """The T204 bullet ends with its ticket, as the bullets around it do."""
+    changelog = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
+    lines = changelog.read_text(encoding="utf-8").splitlines()
+    bullet = [line for line in lines if line.startswith("- A fresh Centurion server no longer")]
+    assert len(bullet) == 1, bullet
+    assert bullet[0].endswith("(T204)"), bullet[0][-80:]
