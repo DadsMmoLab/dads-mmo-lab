@@ -747,8 +747,8 @@ UPSTREAM_DOCKERIGNORE = (
     Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-7f12e89e" / "dockerignore"
 )
 """The root `.dockerignore` of mod-playerbots/azerothcore-wotlk, byte for byte, at commit
-7f12e89ee5f467a50e62eba1d525eac7dc953d03 (the catalog's pin for wow-wotlk, read 2026-10-05). WotLK renders none of
-its own, so this is what Docker filters the server folder with."""
+7f12e89ee5f467a50e62eba1d525eac7dc953d03 (the catalog's pin for wow-wotlk, read 2026-10-05).
+WotLK renders none of its own, so this is what Docker filters the server folder with."""
 
 
 def test_on_wotlk_a_new_backup_in_the_server_folder_changes_the_fingerprint(
