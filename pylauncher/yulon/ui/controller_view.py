@@ -115,6 +115,7 @@ from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, tri
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    RollbackNotDone,
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
@@ -15570,12 +15571,13 @@ class ControllerView(QWidget):
         T179 Task 6 fix round 3: a failure that KEPT the new build
         (`WorldStoppedAfterReadyError.sources_kept`) left the sources on their new
         commits, so `_rebuild_finished()` drops the counts the move made stale, as
-        after a finished press. Runs on the panel's worker; the flag is read on the
-        GUI thread once the job has ended.
+        after a finished press. So did a rollback that stopped before the old build
+        was back (`RollbackNotDone.sources_kept`, T197). Runs on the panel's worker;
+        the flag is read on the GUI thread once the job has ended.
         """
         try:
             yield from lines
-        except WorldStoppedAfterReadyError as exc:
+        except (WorldStoppedAfterReadyError, RollbackNotDone) as exc:
             self._update_sources_kept = exc.sources_kept
             raise
 
