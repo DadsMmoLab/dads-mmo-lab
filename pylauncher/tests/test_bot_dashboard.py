@@ -1672,3 +1672,24 @@ def test_kill_container_is_one_docker_kill_and_raises_on_a_refusal(
     with pytest.raises(docker.DockerCommandError):
         docker.kill_container("tortoise-observability")
     assert seen == [["kill", "tortoise-observability"]]
+
+
+@pytest.mark.parametrize("before", ["unread", "read"])
+def test_every_greyed_press_on_a_tortoise_tab_says_why(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before: str
+) -> None:
+    """Fix round 1, F2 (T195): the dashboard's presses, the bot rebuild's and the
+    bot count's are greyed until a reading lands, and each says why on the tab."""
+    from tests.test_controller_view import T191_SIZES, _greys_without_a_reason, _Ps
+    from yulon import runner
+
+    monkeypatch.setattr(runner, "run", _Ps())
+    view = _view(qapp, tmp_path, _Seam())
+    if before == "read":
+        view.refresh_status()
+        view.refresh_bot_dashboard()
+        view.refresh_bots()
+
+    faults = _greys_without_a_reason(view, T191_SIZES[0])
+
+    assert faults == [], "\n".join(faults)

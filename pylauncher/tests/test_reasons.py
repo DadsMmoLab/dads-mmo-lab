@@ -172,3 +172,42 @@ def test_the_line_is_muted_wrapped_selectable_and_styled_by_its_own_name(row: An
     sheet = line.styleSheet()
     assert sheet.startswith(f"QLabel#{line.objectName()}"), sheet
     assert COLOR_TEXT_MUTED in sheet
+
+
+def test_hiding_the_box_around_a_press_takes_its_reason_off_the_line(row: Any) -> None:
+    """Fix round 1, F3: the Docker banner hides its reinstall press without telling it."""
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    from yulon.ui.widgets.reasons import set_enabled_why
+
+    root, _first, _second, line = row
+    box = QWidget(root)
+    QVBoxLayout(box)
+    root.layout().addWidget(box)
+    inside = QPushButton("Reinstall", root)
+    set_enabled_why(inside, "Wait: Start is running.", line)
+    # Moved into the box after it was watched, as a layout moves a press.
+    box.layout().addWidget(inside)
+    assert line.text() == "Wait: Start is running."
+
+    box.setVisible(False)
+    assert line.isHidden(), line.text()
+
+    box.setVisible(True)
+    assert line.text() == "Wait: Start is running."
+
+
+def test_an_empty_reason_is_refused_and_changes_nothing(row: Any) -> None:
+    """Fix round 1, F4: `""` greyed the press with nothing to say."""
+    from yulon.ui.widgets.reasons import set_enabled_why
+
+    _root, first, _second, line = row
+
+    with pytest.raises(ValueError):
+        set_enabled_why(first, "", line)
+    with pytest.raises(ValueError):
+        set_enabled_why(first, "   ", line)
+
+    assert first.isEnabled()
+    assert first.toolTip() == "Apply the plan"
+    assert line.isHidden()

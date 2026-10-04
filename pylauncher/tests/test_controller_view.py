@@ -26106,13 +26106,14 @@ def test_an_armed_remove_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path
     assert said.endswith("Press it again to go ahead, or Cancel."), said
     assert "Press Refresh to cancel" not in said
 
-    view.problem_label.setText("An older line")
+    view.problem_label.setText("Port 3724 is in use by another program.")
     cancel.click()
 
     assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
     assert cancel.isHidden()
-    assert view.problem_label.text() == ""
     assert view.danger_label.isHidden()
+    # Fix round 1, F5 (the lead's ruling): only what the armed press wrote goes.
+    assert view.problem_label.text() == "Port 3724 is in use by another program."
     view.remove_button.click()
     assert calls == [], "the press after Cancel removed something"
 
@@ -26137,7 +26138,7 @@ def test_an_armed_repair_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path
 
     assert view.repair_button.text() == controller_view_module.REPAIR_IDLE
     assert cancel.isHidden()
-    assert view.problem_label.text() == ""
+    assert view.danger_label.isHidden()
     view.repair_button.click()
     assert calls == [], "the press after Cancel imported something"
 
@@ -26166,20 +26167,17 @@ def test_the_bot_pages_say_which_page_of_how_many(qapp: object, ps: _Ps, tmp_pat
     assert "shown" not in said
 
 
-@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
-def test_every_greyed_press_says_why_on_its_own_sub_tab(
-    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
-) -> None:
-    """I3/A10/A23/I4: a Deck has no hover, so the reason is on the tab, not only in a tooltip.
+def _greys_without_a_reason(view: ControllerView, size: tuple[int, int]) -> list[str]:
+    """Every visible greyed press on `view`'s sub-tabs whose reason is not on its tab.
 
     Tuning and Modules are left out: their greyed presses explain themselves in
     their own tooltips and strips, and both tabs are other tickets' to fit.
+    Each sub-tab is also checked for being drawn squeezed (`_page_faults`).
     """
     from PySide6.QtWidgets import QAbstractButton
 
     from yulon.ui.widgets.reasons import ReasonLine
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Server")
     _at(window, size)
     faults: list[str] = []
@@ -26202,4 +26200,87 @@ def test_every_greyed_press_says_why_on_its_own_sub_tab(
         if found := _page_faults(page):
             faults.append(f"{title}: {found}")
     window.close()
+    return faults
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_greyed_press_says_why_on_its_own_sub_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """I3/A10/A23/I4: a Deck has no hover, so the reason is on the tab, not only in a tooltip."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    faults = _greys_without_a_reason(view, size)
     assert faults == [], "\n".join(faults)
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_greyed_press_says_why_after_the_tabs_have_read_the_server(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """The same rule once a status reading, the accounts, the characters and the bots are in.
+
+    Fix round 1, F2: the first sweep ran on a view that had read nothing, so
+    the presses a reading greys (Stop, Previous, a chosen-nothing list's
+    actions) were never looked at.
+    """
+    from tests.test_characters_tab import _people, _Play
+
+    services = _with_accounts(ps, tmp_path, _StubAccounts())
+    services.play = _Play(characters=_people())
+    services.bots = _StubBots()
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view.refresh_status()
+    view.refresh_accounts()
+    view.refresh_characters()
+    view.refresh_bots()
+    assert not view.stop_button.isEnabled(), "the reading did not grey Stop"
+    assert not view.previous_bots_button.isEnabled(), "the bots are not on their first page"
+
+    faults = _greys_without_a_reason(view, size)
+
+    assert faults == [], "\n".join(faults)
+
+
+def test_cancel_leaves_a_pointer_at_the_docker_box_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, F5: Cancel wiped "See the box above" while the box was still up."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.start_server()
+    pointer = controller_view_module.START_FAILED_NO_DOCKER
+    assert view.problem_label.text() == pointer
+    _watch_remove(view)
+
+    view.remove_button.click()
+    view.arm_cancel_button.click()
+
+    assert view.problem_label.text() == pointer
+    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    assert view.docker_banner.isVisibleTo(view)
+
+
+def test_a_start_docker_could_not_hear_leaves_start_and_stop_saying_why(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, F1: both stayed greyed with an empty tooltip and no line."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    said = controller_view_module.DOCKER_UNKNOWN
+
+    view.start_server()
+
+    assert view.docker_banner.isVisibleTo(view)
+    for press in (view.start_button, view.stop_button):
+        assert not press.isEnabled(), press.text()
+        assert press.toolTip() == said, press.text()
+    assert view.server_reasons.isVisibleTo(view)
+    assert view.server_reasons.text() == said
+
+    down.down = False
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert said not in view.server_reasons.text()
+    assert view.start_button.isEnabled()
+    assert view.stop_button.toolTip() == "The server is not running."

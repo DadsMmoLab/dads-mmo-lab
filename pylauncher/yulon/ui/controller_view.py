@@ -4304,6 +4304,28 @@ CONSOLE_STOP_IDLE = "Nothing to stop yet: Follow worldserver log starts the log,
 CONSOLE_NO_TTY = "This computer can't type at this server's console; the note below says why."
 
 
+BOTS_FIRST_PAGE = "This is the first page of bots."
+BOTS_LAST_PAGE = "This is the last page of bots."
+BOT_COUNT_READING = "Wait: Yu'lon is reading the bot count from this server's settings."
+BOT_COUNT_UNREADABLE = "Yu'lon can't change the bot count here; the line above says why."
+BOT_COUNT_NO_ROUTE = "This game has no bot count Yu'lon can set."
+BOT_REBUILD_STOP_IDLE = "Nothing to stop: no bot rebuild is running."
+DASHBOARD_STOP_IDLE = "Nothing to stop: no dashboard job is running."
+DASHBOARD_WAITS = (
+    "Wait: Yu'lon reads the dashboard's files first, and nothing else may be running on "
+    "this server."
+)
+DASHBOARD_OPEN_WAITS = "The dashboard opens once it is switched on and its files say it is up."
+REINSTALL_STOPPING = "Wait: the Docker reinstall is stopping."
+REINSTALL_ELSEWHERE = "Wait: another server's Docker reinstall is running."
+DOCKER_UNKNOWN = "Yu'lon can't ask Docker about this server; see the box above."
+DASHBOARD_UNREADABLE = "Yu'lon could not read the dashboard's files; the line above says why."
+DASHBOARD_LAN_FIXED = "The network choice is fixed while the dashboard is on; switch it off first."
+DASHBOARD_OFF = "Switch the dashboard on first."
+DASHBOARD_OWED = "Rebuild the dashboard first; the line above says why."
+DASHBOARD_NOTHING_OWED = "Nothing has changed that needs the dashboard rebuilt."
+
+
 def wait_for(job: str) -> str:
     """The reason a press is greyed while `job` runs: "Wait: Start is running."."""
     return f"Wait: {job} is running." if job else "Wait: another job on this server is running."
@@ -8395,6 +8417,12 @@ class ControllerView(QWidget):
         )
         self.status_label.setText(STATUS_SEE_THE_BANNER)
         self._clear_the_verdict()
+        # F1 (T195): a greyed Start or Stop says the box is why. A reading that
+        # answers replaces it (`_status_ready`); a job of ours keeps its "Wait:".
+        if not self._busy:
+            for press in (self.start_button, self.stop_button):
+                if not press.isEnabled():
+                    set_enabled_why(press, DOCKER_UNKNOWN)
         # The reinstall lives in the banner, so it is offered with it and
         # never switched on inside a banner the hold keeps down.
         self._offer_docker_repair()
@@ -8458,34 +8486,24 @@ class ControllerView(QWidget):
                 self._stop_words_shown = False
                 self.problem_label.setText(self._stop_forced)
         if busy:
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(False)
-            self.remove_button.setEnabled(False)
-            self.repair_button.setEnabled(False)
-            # T160: a second repair on top of a running one would reset the
-            # keyring under a pacman that is reading it.
-            self.reinstall_docker_button.setEnabled(False)
-            if self.uninstall_button is not None:
-                self.uninstall_button.setEnabled(False)
-            if self.forget_install_button is not None:
-                self.forget_install_button.setEnabled(False)
-            self.uninstall_confirm_button.setEnabled(False)
-            self.keep_characters_check.setEnabled(False)
-            # T36's client-folder row: a write during any other action races
-            # `main.py`'s rebuild (T36 round 2 review) — the tab this press
-            # would drop and reopen is the very tab a rebuild, an import or a
-            # module install is running ON.
-            if self.set_client_dir_button is not None:
-                self.set_client_dir_button.setEnabled(False)
-            if self.forget_client_dir_button is not None:
-                self.forget_client_dir_button.setEnabled(False)
+            # Every Server press, each saying what it waits for (T195, I4):
+            # `_server_presses()` is the one list. Among them -- T160: a second
+            # Docker repair on top of a running one would reset the keyring
+            # under a pacman that is reading it. T36's client-folder row: a
+            # write during any other action races `main.py`'s rebuild (T36
+            # round 2 review) -- the tab this press would drop and reopen is the
+            # very tab a rebuild, an import or a module install is running ON.
             # T181: Play may Start, and Make…/Refresh/Delete write the folder a
-            # module install writes into and race `main.py`'s rebuild.
-            if self.play_button is not None:
-                self.play_button.setEnabled(False)
-            if self.play_menu_button is not None:
-                self.play_menu_button.setEnabled(False)
-            self.delete_play_client_check.setEnabled(False)
+            # module install writes into and race `main.py`'s rebuild. Refresh,
+            # and this one is not symmetry: `recheck()` blanks `problem_label`
+            # — which during an import is the live output the user is watching
+            # — and then fires `Controller.import_state()`, three `docker exec
+            # ... mysql` probes, at the database the import is writing schemas
+            # into. Worse, the armed paragraph taught "press Refresh now" until
+            # T195 gave it a Cancel, so it was the button a hesitating user
+            # reached for (review, 2026-08-23).
+            for press in self._server_presses():
+                set_enabled_why(press, wait_for(job))
             self.rebuild_action.setEnabled(False)
             # And both T64 presses, for the rebuild's reason exactly: each of
             # them IS that rebuild with a fetch in front of it. Disabled and not
@@ -8501,14 +8519,6 @@ class ControllerView(QWidget):
             # And the adopt press, which starts the database and writes a row
             # into it -- the same rule again, one size smaller.
             self.adopt_button.setEnabled(False)
-            # Refresh too, and this one is not symmetry. `recheck()` blanks
-            # `problem_label` — which during an import is the live output the
-            # user is watching — and then fires `Controller.import_state()`,
-            # three `docker exec ... mysql` probes, at the database the import
-            # is writing schemas into. Worse, the armed paragraph taught
-            # "press Refresh now" until T195 gave it a Cancel, so it was the
-            # button a hesitating user reached for (review, 2026-08-23).
-            self.refresh_button.setEnabled(False)
             # The Modules tab's importer too, and for the reason above rather
             # than for symmetry: `repair_import()` and `apply_module_sql()` run
             # the SAME one-shot service against the same databases, so one
@@ -8548,15 +8558,12 @@ class ControllerView(QWidget):
             # T99: the bot count is one of those confs (or the compose override
             # a recreate is reading), and its owed-job button is the banner's.
             self._set_bot_count_controls()
-            self.bot_count_owed_button.setEnabled(False)
+            set_enabled_why(self.bot_count_owed_button, wait_for(job))
             # T171: the zone is the compose override a recreate is reading.
             self._set_time_zone_controls()
             # T162: the dashboard's rebuild restarts the world like the rest.
             if self.dashboard_log is not None:
-                self.rebuild_dashboard_button.setEnabled(False)
-            # T195 (I4): every Server press greyed above says what it waits for.
-            for press in self._server_presses():
-                set_enabled_why(press, wait_for(job))
+                set_enabled_why(self.rebuild_dashboard_button, wait_for(job))
         else:
             # Start and Stop stay greyed until the next reading says which one
             # the server's state allows; the job they waited for is over. A
@@ -8995,9 +9002,13 @@ class ControllerView(QWidget):
         offered = platform.steamos_docker_removed()
         self.reinstall_docker_button.setVisible(offered)
         if self._docker_repair_cancel is None:
-            self.reinstall_docker_button.setEnabled(
-                not self._busy and not platform.steamos_docker_repair_running()
-            )
+            if self._busy:
+                reason: str | None = wait_for(self._busy_job)
+            elif platform.steamos_docker_repair_running():
+                reason = REINSTALL_ELSEWHERE
+            else:
+                reason = None
+            set_enabled_why(self.reinstall_docker_button, reason)
         return offered
 
     @Slot()
@@ -9046,12 +9057,12 @@ class ControllerView(QWidget):
         """
         if self._docker_repair_cancel is not None:
             self._docker_repair_cancel.set()
-            self.reinstall_docker_button.setEnabled(False)
+            set_enabled_why(self.reinstall_docker_button, REINSTALL_STOPPING)
             self.problem_label.setText(STOPPING_DOCKER_REINSTALL)
             return
         if platform.steamos_docker_repair_running():
             self.problem_label.setText(platform.STEAMOS_DOCKER_REPAIR_BUSY)
-            self.reinstall_docker_button.setEnabled(False)
+            set_enabled_why(self.reinstall_docker_button, REINSTALL_ELSEWHERE)
             return
         cancel = threading.Event()
         self._docker_repair_cancel = cancel
@@ -11161,9 +11172,14 @@ class ControllerView(QWidget):
 
     @Slot()
     def cancel_armed(self) -> None:
-        """Put the armed Remove or Repair down, and the warning with it (C35, T195)."""
-        self._disarm_actions()
-        self.problem_label.setText("")
+        """Put the armed Remove or Repair down, and the warning with it (C35, T195).
+
+        Only what the armed press wrote goes: its paragraph under the presses.
+        A refusal in `problem_label` -- a pointer at the Docker box, a port in
+        use -- and the offer that answers it are another matter's, and stay.
+        """
+        self._disarm_remove()
+        self._disarm_repair()
 
     @Slot(object)
     def _remove_done(self, result: object) -> None:
@@ -11881,7 +11897,7 @@ class ControllerView(QWidget):
             # about the character that was false, in place of a sentence about
             # the server that was true.
             self.send_gear_button.setText(refusal[0])
-            set_enabled_why(self.send_gear_button, refusal[1])
+            set_enabled_why(self.send_gear_button, refusal[1] or refusal[0])
         elif pieces:
             plural = "mail" if mails == 1 else "mails"
             self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} {plural})")
@@ -11907,7 +11923,10 @@ class ControllerView(QWidget):
         if not isinstance(exc, _GearReadBroke) or exc.generation != self._gear_generation:
             return
         self.send_gear_button.setText(f"Could not read what {exc.name} is wearing")
-        set_enabled_why(self.send_gear_button, str(exc.cause))
+        set_enabled_why(
+            self.send_gear_button,
+            str(exc.cause) or f"Could not read what {exc.name} is wearing.",
+        )
 
     def _revive_works_offline(self) -> bool:
         """Only where this tree's own box measured that it does.
@@ -12288,7 +12307,7 @@ class ControllerView(QWidget):
             return
         gm_level = self.account_gm.value()
         self.account_report.setText(f"Creating {name}…")
-        self.create_account_button.setEnabled(False)
+        set_enabled_why(self.create_account_button, f"Wait: Yu'lon is creating {name}.")
         # The password is passed straight into the call and the field cleared; it
         # is never stored on the view, so no later repr or traceback frame of
         # this widget can carry it.
@@ -12374,9 +12393,12 @@ class ControllerView(QWidget):
         row.addWidget(self.filter_bots_button)
         row.addWidget(self.previous_bots_button)
         row.addWidget(self.next_bots_button)
+        # T195: why Previous or Next is greyed, under them.
+        self.bot_page_reasons = ReasonLine(browse)
         browse_box.addWidget(self.bot_summary)
         browse_box.addWidget(self.bot_list)
         browse_box.addLayout(row)
+        browse_box.addWidget(self.bot_page_reasons)
         browse.setVisible(self.services.bots is not None)
         # A stack of cursors, one per page seen. There is no arithmetic that
         # turns "where page three starts" into "where page two starts", so the
@@ -12446,6 +12468,18 @@ class ControllerView(QWidget):
         inside.addWidget(self.bot_count_note)
         inside.addWidget(self.bot_count_report)
         self._build_bot_rebuild(inside)
+        # T195: why a press in this box is greyed, under them all.
+        self.bot_count_reasons = ReasonLine(self.bot_count_group)
+        inside.addWidget(self.bot_count_reasons)
+        self.bot_count_reasons.watch(self.bot_count_apply_button)
+        self.bot_count_reasons.watch(self.bot_count_owed_button)
+        if self.bot_rebuild_button is not None:
+            self.bot_count_reasons.watch(self.bot_rebuild_button)
+        if self.bot_rebuild_log is not None:
+            self.bot_count_reasons.watch(
+                self.bot_rebuild_log.stop_button, standing=BOT_REBUILD_STOP_IDLE
+            )
+        set_enabled_why(self.bot_count_apply_button, self._bot_count_waits_for())
 
     def _build_bot_rebuild(self, inside: QVBoxLayout) -> None:
         """T144: "Rebuild random bots…", its report line and its own log, under the count.
@@ -12488,7 +12522,9 @@ class ControllerView(QWidget):
     def _set_bot_rebuild_button(self) -> None:
         """Live whenever nothing of ours is running: the press itself asks everything else."""
         if self.bot_rebuild_button is not None:
-            self.bot_rebuild_button.setEnabled(not self._busy)
+            set_enabled_why(
+                self.bot_rebuild_button, wait_for(self._busy_job) if self._busy else None
+            )
 
     def _bot_rebuild_refusal(self) -> str | None:
         """Why the rebuild (or its owed restart) may not start now, or None.
@@ -12643,8 +12679,21 @@ class ControllerView(QWidget):
             and not self._bot_count_writing
         )
         self.bot_count_box.setEnabled(live)
-        self.bot_count_apply_button.setEnabled(live)
+        set_enabled_why(self.bot_count_apply_button, None if live else self._bot_count_waits_for())
         self._set_bot_rebuild_button()
+
+    def _bot_count_waits_for(self) -> str:
+        """Why the bot count's Apply is greyed, in the order the gates are asked (T195)."""
+        reading = self._bot_count_reading
+        if self.services.bot_population is None:
+            return BOT_COUNT_NO_ROUTE
+        if self._busy:
+            return wait_for(self._busy_job)
+        if self._bot_count_writing:
+            return wait_for("the new bot count")
+        if reading is not None and reading.problem is not None:
+            return BOT_COUNT_UNREADABLE
+        return BOT_COUNT_READING
 
     def _look_up_bot_count(self) -> None:
         """Read the bot count (and the Tuning tab's bot rows) off the GUI thread."""
@@ -13079,9 +13128,14 @@ class ControllerView(QWidget):
         self.party_panel.read_install_facts()
 
     def _show_page_buttons(self) -> None:
-        """Neither button offers a page that is not there."""
-        self.previous_bots_button.setEnabled(len(self._bot_cursors) > 1)
-        self.next_bots_button.setEnabled(self._bot_next is not None)
+        """Neither button offers a page that is not there, and each says so when greyed."""
+        line = self.bot_page_reasons
+        set_enabled_why(
+            self.previous_bots_button, None if len(self._bot_cursors) > 1 else BOTS_FIRST_PAGE, line
+        )
+        set_enabled_why(
+            self.next_bots_button, None if self._bot_next is not None else BOTS_LAST_PAGE, line
+        )
 
     @Slot()
     def refresh_bots(self) -> None:
@@ -13232,9 +13286,21 @@ class ControllerView(QWidget):
         inside.addWidget(self.dashboard_report)
         inside.addLayout(stale_row)
         inside.addWidget(log)
+        # T195: why a press here is greyed. The standing reasons hold until a
+        # reading gives a sharper one (`_dashboard_state_read`).
+        self.dashboard_reasons = ReasonLine(group)
+        inside.addWidget(self.dashboard_reasons)
         # Unknown until read: the switch is not offered on a guess.
         self.dashboard_switch.setEnabled(False)
         self.dashboard_lan.setEnabled(False)
+        for press, standing in (
+            (self.dashboard_switch, DASHBOARD_WAITS),
+            (self.open_dashboard_button, DASHBOARD_OPEN_WAITS),
+            (self.dashboard_lan, DASHBOARD_WAITS),
+            (self.rebuild_dashboard_button, None),
+            (log.stop_button, DASHBOARD_STOP_IDLE),
+        ):
+            self.dashboard_reasons.watch(press, standing=standing)
         self._dashboard_job = ""
         self._dashboard_owed = False
         return group
@@ -13261,19 +13327,23 @@ class ControllerView(QWidget):
         self.rebuild_dashboard_button.setVisible(owed and not problem)
         self._dashboard_owed = owed and not problem
         self._set_rebuild_dashboard_button()
+        waiting = wait_for("the dashboard job") if running else None
         if problem:
             self.dashboard_report.setText(f"Could not tell whether the dashboard is on: {problem}")
-            self.dashboard_switch.setEnabled(False)
+            set_enabled_why(self.dashboard_switch, DASHBOARD_UNREADABLE)
             return
-        self.dashboard_switch.setEnabled(not running)
+        set_enabled_why(self.dashboard_switch, waiting)
         # The network choice is made at the switch-on and fixed while it is on:
         # changing it means a new container, and so a new address the world
         # would have to be restarted to find.
         self.dashboard_lan.setChecked(
             bool(getattr(state, "lan", False)) if on else self.dashboard_lan.isChecked()
         )
-        self.dashboard_lan.setEnabled(not on and not running)
-        self.open_dashboard_button.setEnabled(on and not owed)
+        set_enabled_why(self.dashboard_lan, waiting or (DASHBOARD_LAN_FIXED if on else None))
+        set_enabled_why(
+            self.open_dashboard_button,
+            None if on and not owed else (DASHBOARD_OWED if on else DASHBOARD_OFF),
+        )
 
     @Slot(object)
     def _dashboard_state_failed(self, exc: object) -> None:
@@ -13334,9 +13404,15 @@ class ControllerView(QWidget):
         """Live only while a rebuild is owed and nothing else of this tab's is running."""
         log = self.dashboard_log
         running = log is not None and log.running
-        self.rebuild_dashboard_button.setEnabled(
-            self._dashboard_owed and not running and not self._busy
-        )
+        if self._busy:
+            reason: str | None = wait_for(self._busy_job)
+        elif running:
+            reason = wait_for("the dashboard job")
+        elif not self._dashboard_owed:
+            reason = DASHBOARD_NOTHING_OWED
+        else:
+            reason = None
+        set_enabled_why(self.rebuild_dashboard_button, reason)
 
     @Slot()
     def rebuild_bot_dashboard(self) -> bool:
@@ -15781,7 +15857,7 @@ class ControllerView(QWidget):
         # only thing on this tab that knows a `mysqldump` is in flight, and
         # `_update_route_busy()` holds what a second press does without it.
         self._backup_before_update = True
-        self.backup_button.setEnabled(False)
+        set_enabled_why(self.backup_button, wait_for("the backup before the update"))
         self.update_to_latest_action.setEnabled(False)
         self.return_to_pin_action.setEnabled(False)
         self.maintenance_report.setPlainText(
@@ -16611,7 +16687,9 @@ class ControllerView(QWidget):
         job = "recreate" if recreate else ("restart" if restart else None)
         # T99: the Bots tab's copy of the banner's button, same job, same slot.
         self.bot_count_owed_button.setVisible(job is not None)
-        self.bot_count_owed_button.setEnabled(not self._busy)
+        set_enabled_why(
+            self.bot_count_owed_button, wait_for(self._busy_job) if self._busy else None
+        )
         if job is not None:
             self.bot_count_owed_button.setText(
                 TUNING_RECREATE_LABEL if job == "recreate" else TUNING_RESTART_LABEL

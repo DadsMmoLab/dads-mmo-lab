@@ -9,7 +9,10 @@ greyed press it watches, one per line, and hides itself when there are none.
 Most of the view still re-enables presses with a plain `setEnabled(True)`, so
 the line watches its presses' own enabled and shown events: a press enabled
 by any route drops its reason and gets its own tooltip back, and nothing on
-the line outlives the state it explained.
+the line outlives the state it explained. It also watches every widget
+between a press and the one that holds both it and the line, because hiding a
+box around a press (the Docker banner around its reinstall press) hides the
+press without telling it.
 """
 
 from __future__ import annotations
@@ -91,6 +94,9 @@ class ReasonLine(QLabel):
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
         self._presses: list[QWidget] = []
+        # The widgets between each press and the holder it shares with this
+        # line, whose own showing and hiding moves what the line says.
+        self._between: list[QWidget] = []
         self.setVisible(False)
 
     def watch(self, press: QWidget, *, standing: str | None = None) -> None:
@@ -102,6 +108,7 @@ class ReasonLine(QLabel):
             press.installEventFilter(self)
         press.setProperty(_LINE, self)
         _settle_tip(press)
+        self._hook()
         self.refresh()
 
     def reasons(self) -> list[str]:
@@ -120,6 +127,30 @@ class ReasonLine(QLabel):
         self.setText("\n".join(said))
         self.setVisible(bool(said))
 
+    def _hook(self) -> None:
+        """Watch every widget between each press and the holder it shares with this line.
+
+        Asked again whenever a press, the line or one of those widgets moves
+        to another parent, which is what a layout does to all of them.
+        """
+        self._between = [node for node in self._between if isValid(node)]
+        for press in self._presses:
+            if not isValid(press):
+                continue
+            node = press.parentWidget()
+            while node is not None and not node.isAncestorOf(self):
+                if node not in self._between:
+                    node.installEventFilter(self)
+                    self._between.append(node)
+                node = node.parentWidget()
+
+    def event(self, event: QEvent) -> bool:
+        # Asked of `_presses` too: Qt can send this from inside the constructor.
+        if event.type() == QEvent.Type.ParentChange and hasattr(self, "_presses"):
+            self._hook()
+            self.refresh()
+        return bool(super().event(event))
+
     def _drawn(self, press: QWidget) -> bool:
         """Whether `press` is shown inside the widget that holds both it and this line.
 
@@ -133,7 +164,14 @@ class ReasonLine(QLabel):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         kind = event.type()
-        if kind == QEvent.Type.EnabledChange and isinstance(watched, QWidget):
+        if kind == QEvent.Type.ParentChange:
+            self._hook()
+            self.refresh()
+        elif (
+            kind == QEvent.Type.EnabledChange
+            and isinstance(watched, QWidget)
+            and watched in self._presses
+        ):
             if watched.isEnabled():
                 # Enabled by any route: whatever it was greyed for is over.
                 watched.setProperty(_REASON, None)
@@ -148,11 +186,15 @@ def set_enabled_why(press: QWidget, reason: str | None, line: ReasonLine | None 
     """Enable `press` (`reason` None) or grey it, saying why on its tooltip and `line`.
 
     `line` is the one watching it; once named, a later call may leave it out.
+    An empty reason is refused: a greyed press with nothing to say is the
+    thing this module exists to stop.
     """
+    if reason is not None and not reason.strip():
+        raise ValueError("a greyed press needs a reason; pass None to enable it")
     if line is not None and press.property(_LINE) is not line:
         line.watch(press)
     watching = press.property(_LINE)
-    press.setProperty(_REASON, reason or None)
+    press.setProperty(_REASON, reason)
     press.setEnabled(reason is None)
     _settle_tip(press)
     if isinstance(watching, ReasonLine):
