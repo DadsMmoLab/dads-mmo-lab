@@ -17,9 +17,13 @@ with all six verbs drawn and pressed each one in Yu'lon on a throwaway character
 then read the result back from the database and the game client. Set level,
 Teleport, Send gold, Send everything worn and Rename at next login each did what
 they said on an offline character. Revive, pressed on an online ghost, crashed
-the world server about three seconds later and did not revive it (T218). So
-`CONFIRMED_LIVE` was set to those five, and Revive was withheld with its own
-sentence, `REVIVE_CRASHED`, rather than the one for a verb nobody had tried.
+the world server about three seconds later and did not revive it (T218). T218
+then traced the crash to the fork's console `revive` itself: it dereferences a
+null session at `cs_misc.cpp:795`, before its `if (target)`, so every revive
+sent through the console or SOAP crashes the server, offline characters
+included. Offline was not a safe way round it. So `CONFIRMED_LIVE` was set to
+those five, and Revive was withheld with its own sentence, `REVIVE_CRASHED`,
+rather than the one for a verb nobody had tried.
 """
 
 from __future__ import annotations

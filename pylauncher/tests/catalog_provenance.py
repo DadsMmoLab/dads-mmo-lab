@@ -370,16 +370,16 @@ PROVENANCE: dict[str, Provenance] = {
         "read-from-source",
         "src/server/scripts/Commands/cs_character.cpp:73",
         note=(
-            "`character rename`, `Console::Yes`; @ faac5fc9; confirmed on a live Centurion in "
-            "T179 Task 9 before the verb is offered"
+            "`character rename`, `Console::Yes`; @ faac5fc9; watched work on a live Centurion "
+            "in T208 (2026-10-04) before the verb was offered"
         ),
     ),
     "wow-centurion:play.set_level_command": Provenance(
         "read-from-source",
         "src/server/scripts/Commands/cs_character.cpp:72",
         note=(
-            "`character level`, `Console::Yes`; @ faac5fc9; confirmed on a live Centurion in T179"
-            " Task 9 before the verb is offered"
+            "`character level`, `Console::Yes`; @ faac5fc9; watched work on a live Centurion in "
+            "T208 (2026-10-04) before the verb was offered"
         ),
     ),
     "wow-centurion:accounts.level.table": Provenance(

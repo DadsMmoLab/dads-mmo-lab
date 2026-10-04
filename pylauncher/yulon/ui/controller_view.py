@@ -2023,7 +2023,7 @@ class ControllerServices:
 
     The tab draws none of them and says the reasons instead; `play.InstallPlay`
     refuses a press of one as well. Empty everywhere but a tree whose verbs have
-    not all been watched to work (Centurion, until T179 Task 9).
+    not all been watched to work (Centurion: Revive, held back after T208's live check).
     """
 
     no_modules_note: str = ""
