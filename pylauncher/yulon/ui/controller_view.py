@@ -3483,8 +3483,8 @@ def _for_centurion(
         backup=lambda: centurion_maintenance.backup(
             entry, server_dir, mysql, wsl_distro=wsl_distro
         ),
-        plan_restore=lambda path: centurion_maintenance.plan_restore(
-            entry, path, server_dir, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: centurion_maintenance.plan_restore(
+            entry, path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
         ),
         restore=lambda plan: centurion_maintenance.restore(
             entry, plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
