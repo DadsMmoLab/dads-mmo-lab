@@ -44,7 +44,8 @@ player presses Stop, or a Rebuild stops it, `_keep_finished()` removes only the
 tiles that are not whole (the entry's `tile_header`: the magic, and a length of
 header plus `size`) and the record says `resumable` with the count kept. The
 next start continues from them -- but only while the map data is the one the run
-began with (`evidence`, a hash of `data/.yulon-extract.json` taken at its start);
+began with (`evidence`, taken at its start: a hash of `data/.yulon-extract.json`
+and of the size and modification time of every file in `dbc/`, `maps/`, `vmaps/`);
 otherwise, and for a record that cannot be read or a folder of tiles with no
 record, it empties `data/mmaps` first as before. Update to latest, Return to the
 tested pin (`stop_for_route(clear=True)`: the generator's code may change while
@@ -224,8 +225,8 @@ class Record:
     pathfinding_on_at: str = ""
     """When `mmap.enablePathFinding = 1` was written; empty until it was."""
     evidence: str = ""
-    """T209: the hash of `data/.yulon-extract.json` when this run started (`_evidence()`);
-    empty when there was none. A run is continued only while the hash is the same."""
+    """T209: what the map data was when this run started (`_evidence()`); empty when it
+    could not be told. A run is continued only while the hash is the same."""
     resumable: bool = False
     """T209: failed or stopped with `kept` finished tiles left for the next run."""
     kept: int = 0
@@ -1088,18 +1089,46 @@ def _switch_off(job: Job) -> None:
             ) from exc
 
 
-def _evidence(job: Job) -> str:
-    """The hash of `data/.yulon-extract.json` (`extract.EVIDENCE_FILE`); empty without one.
+INPUT_DIRS = ("dbc", "maps", "vmaps")
+"""What the generator reads under `data/` (PathGenerator.cpp:44-77 at faac5fc9), and so what a
+kept tile was made from."""
 
-    The extraction writes that file whenever it makes the map data, and Re-extract
-    map data removes it first, so a different hash means the maps, vmaps or DBCs a
-    run's tiles were made from may have changed under them (T209).
+
+def _evidence(job: Job) -> str:
+    """What the map data is now: a hash of the extraction's evidence and every input file's facts.
+
+    `data/.yulon-extract.json` (`extract.EVIDENCE_FILE`) is rewritten whenever the
+    extraction makes the map data, and Re-extract map data removes it first. That
+    alone does not prove the files are the same (Codex adversarial review, T209): a
+    map put back or changed by hand leaves it as it was. So the hash also covers
+    each file under `INPUT_DIRS` -- its path, size and modification time, from one
+    `os.scandir` walk (the directory listing carries them on Windows), never its
+    bytes. Empty when the evidence file is missing or a folder cannot be read: a
+    run whose map data cannot be told apart is never continued.
     """
+    digest = hashlib.sha256()
     try:
-        raw = (job.data_dir / extract.EVIDENCE_FILE).read_bytes()
+        digest.update((job.data_dir / extract.EVIDENCE_FILE).read_bytes())
+        for folder in INPUT_DIRS:
+            for line in sorted(_file_facts(job.data_dir / folder, folder)):
+                digest.update(line.encode("utf-8", "surrogateescape"))
     except OSError:
         return ""
-    return hashlib.sha256(raw).hexdigest()
+    return digest.hexdigest()
+
+
+def _file_facts(folder: Path, prefix: str) -> list[str]:
+    """`<path>\0<size>\0<mtime ns>\n` for every file under `folder`; links are not followed."""
+    facts: list[str] = []
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            name = f"{prefix}/{entry.name}"
+            if entry.is_dir(follow_symlinks=False):
+                facts.extend(_file_facts(Path(entry.path), name))
+                continue
+            info = entry.stat(follow_symlinks=False)
+            facts.append(f"{name}\0{info.st_size}\0{info.st_mtime_ns}\n")
+    return facts
 
 
 def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:

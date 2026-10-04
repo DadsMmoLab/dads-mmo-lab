@@ -19,6 +19,8 @@ Nothing here proves the real generator runs in the image (the live proof).
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1143,6 +1145,45 @@ def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
         "map data" in rec.getMessage() and "changed" in rec.getMessage() for rec in caplog.records
     )
     assert record(server)["kept"] == 0
+
+
+def _change_size_only(path: Path) -> None:
+    stamp = path.stat().st_mtime_ns
+    path.write_bytes(path.read_bytes() + b"!")
+    os.utime(path, ns=(stamp, stamp))
+
+
+def _change_mtime_only(path: Path) -> None:
+    stamp = path.stat().st_mtime_ns + 5_000_000_000
+    os.utime(path, ns=(stamp, stamp))
+
+
+def _add_a_file(path: Path) -> None:
+    (path.parent / "999.vmtree").write_bytes(b"VMAP_4.8")
+
+
+@pytest.mark.parametrize(
+    ("folder", "change"),
+    [
+        ("maps", _change_size_only),
+        ("dbc", _change_mtime_only),
+        ("vmaps", _add_a_file),
+    ],
+    ids=("a-map-file-of-another-size", "a-dbc-file-rewritten", "a-vmap-file-added"),
+)
+def test_map_data_changed_behind_an_unchanged_evidence_file_clears_the_tiles(
+    server: Path, folder: str, change: Callable[[Path], None]
+) -> None:
+    """Codex adversarial review: the evidence file alone does not prove the maps are the same.
+    Each fixture changes ONE fact of ONE file the generator reads; the evidence file stays."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    change(next(iter(sorted((server / "data" / folder).iterdir()))))
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
 
 
 def test_a_run_whose_map_data_had_no_evidence_is_never_continued(server: Path) -> None:
