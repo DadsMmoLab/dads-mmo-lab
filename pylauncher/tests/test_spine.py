@@ -2410,6 +2410,16 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/gamepad.py", "walk"): (
         "the same generator calling itself on each child widget, for the reason above"
     ),
+    ("ui/folder_picker.py", "removable_volumes"): (
+        "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
+        "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "
+        "becomes a SIDEBAR ENTRY in the folder and save pickers and nothing else. It decides "
+        "no write and no refusal: the user still chooses the folder, and whatever they choose "
+        "goes through the same checks as a folder typed by hand. A root that is missing or "
+        "unreadable adds no entries (OSError is caught per root), which leaves the sidebar as "
+        "Qt's own Computer and Home. It reads only the parent's directory entries and never "
+        "stats, opens or follows a mount, so a hung network mount cannot freeze the GUI thread"
+    ),
     ("apply.py", "copy_dbc_dir"): (
         "T62. Lists a folder INSIDE the clone this app just made, to find the `*.dbc` files "
         "a manifest's `server_dbc` step names. It decides nothing about writing to that "
