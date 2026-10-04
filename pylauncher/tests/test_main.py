@@ -4203,6 +4203,60 @@ def test_a_window_opened_with_no_servers_hides_the_header_badge(window: Any) -> 
     assert window.header_badge_hidden_at_start is True
 
 
+def test_a_window_opened_with_a_server_installed_follows_its_badge(
+    qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T210: the T179 live check opened Yu'lon onto a server already installed.
+
+    The header read REALM OFFLINE while the Server tab said REALM ONLINE. Every
+    other header test adds its tab to the shared window AFTER start-up; this one
+    is the start-up a returning player has: the tab comes from `state.json`.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon import update_state
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch.setenv("YULON_SMOKE_TEST", "1")  # no update check, no GitHub
+    scratch = tmp_path / "config"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    server_dir = tmp_path / "t210-server"
+    monkeypatch.setattr(
+        state,
+        "load_state",
+        lambda path=None, repair=True: state.AppState(
+            installs=[state.KnownInstall(game="wow-wotlk", server_dir=server_dir)]
+        ),
+    )
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: None)
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", lambda **kwargs: None)
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+
+    window = main.build_window()
+    try:
+        header = window.property("header")
+        view = _tab_for(window, server_dir)
+        assert window.property("tabs").currentWidget() is view
+        assert header._badge.isHidden() is False, "the header hid the badge of the tab on screen"
+
+        view.realm_badge.set_status("running")
+
+        assert header._badge.status == "running"
+        assert "REALM ONLINE" in header._badge._label.text()
+    finally:
+        main._stop_background_threads(window)
+        QApplication.processEvents()
+
+
 def test_the_header_says_unknown_when_docker_cannot_be_asked(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
