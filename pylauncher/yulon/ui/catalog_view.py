@@ -18,7 +18,6 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -45,6 +44,7 @@ from yulon.catalog.installer import (
 from yulon.log import get_logger
 from yulon.ui import single_instance
 from yulon.ui.answers import said_yes
+from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import COLOR_TEXT_GOLD
@@ -99,9 +99,7 @@ def _existing_ancestor(start: Path | None) -> Path | None:
 
 
 def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | None:
-    opens_at = _existing_ancestor(start)
-    chosen = QFileDialog.getExistingDirectory(parent, title, str(opens_at) if opens_at else "")
-    return Path(chosen) if chosen else None
+    return pick_folder(parent, title, _existing_ancestor(start))
 
 
 SuggestionAsker = Callable[[QWidget, str, Path], bool]

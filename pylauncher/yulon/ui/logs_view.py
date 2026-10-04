@@ -37,7 +37,6 @@ from PySide6.QtCore import QStandardPaths, QUrl, Slot, qVersion
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
-    QFileDialog,
     QLabel,
     QPlainTextEdit,
     QPushButton,
@@ -51,6 +50,7 @@ from yulon.state import KnownInstall
 from yulon.support import bundle, runlog
 from yulon.support import sources as support_sources
 from yulon.support.redact import Redactor
+from yulon.ui.folder_picker import pick_save_file
 from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, threaded_job_runner
 
@@ -77,9 +77,7 @@ SavePicker = Callable[[QWidget, Path], Path | None]
 
 
 def _qt_save_picker(parent: QWidget, suggested: Path) -> Path | None:
-    chosen, _filter = QFileDialog.getSaveFileName(
-        parent, "Save logs for support", str(suggested), "Zip files (*.zip)"
-    )
+    chosen = pick_save_file(parent, "Save logs for support", suggested, "Zip files (*.zip)")
     if not chosen:
         return None
     path = Path(chosen)
