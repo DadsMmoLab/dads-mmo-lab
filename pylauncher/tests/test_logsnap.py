@@ -187,6 +187,32 @@ def test_a_container_the_project_does_not_know_is_reported_and_never_raised(
     assert "ac-worldserver" in snap.problem
 
 
+def test_docker_not_answering_is_not_reported_as_a_container_that_is_not_there(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """T211 5: the live check's Stop said "could not find centurion-worldserver".
+
+    `docker compose ps` had timed out after 30 s while Docker was busy stopping;
+    the container was there. The problem says Docker did not answer, with its words.
+    """
+
+    def busy(cmd: list[str], cwd: Path | None = None, timeout: float | None = None) -> object:
+        if cmd[:3] == ["docker", "compose", "ps"]:
+            return _completed(124, "", "timed out after 30.0s")
+        return _completed()
+
+    monkeypatch.setattr(runner, "run", busy)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+
+    snap = logsnap.capture(SPEC, server_dir, game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert snap.path is None
+    assert "could not find" not in snap.problem
+    assert "did not say which container" in snap.problem
+    assert "timed out after 30.0s" in snap.problem
+
+
 def test_a_logs_directory_that_cannot_be_written_is_reported_and_never_raised(
     tmp_path: Path, monkeypatch
 ) -> None:

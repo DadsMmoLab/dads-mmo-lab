@@ -198,6 +198,11 @@ from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 logger = get_logger(__name__)
 
 
+def _clock() -> str:
+    """The time now, as the Play line says it ("20:14"); a seam for tests."""
+    return time.strftime("%H:%M")
+
+
 class _DockerSilent(NamedTuple):
     """A poll's Docker failure, handed back as an answer instead of raised (T194 fix round 1)."""
 
@@ -10831,7 +10836,10 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _play_launched(self, _result: object) -> None:
-        said = "World of Warcraft is starting. Closing Yu'lon does not close it."
+        # Past tense, with the time (T211): the game is started detached and
+        # Yu'lon never hears it end, so "is starting" stayed on screen after it
+        # had exited. When it was started stays true.
+        said = f"World of Warcraft was started at {_clock()}. Closing Yu'lon does not close it."
         if self._play_left_out:
             said += " " + left_out_sentence(self._play_left_out)
         if self._play_notes:

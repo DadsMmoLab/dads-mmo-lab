@@ -1519,6 +1519,19 @@ def test_remove_takes_away_the_folders_the_pack_made_but_never_a_toplevel_one(ri
     rig.untouched()
 
 
+def test_removing_a_pack_is_a_line_in_the_log(rig: _Rig, caplog: pytest.LogCaptureFixture) -> None:
+    """T211 2: switching an HD pack off left no line in yulon.log."""
+    import logging
+
+    entry = rig.install(ADDONS, rig.fetched(ADDON_FILES))
+
+    with caplog.at_level(logging.INFO, logger="yulon"):
+        rig.remove(entry, ADDONS)
+
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("removed" in line and ADDONS.id in line for line in said), said
+
+
 def test_remove_also_deletes_the_remove_when_off_files_whoever_put_them_there(rig: _Rig) -> None:
     pack = _pack_of(
         [{"member": "t.MPQ", "to": "Data/patch-T.MPQ"}], remove_when_off=["Data/patch-Y.MPQ"]

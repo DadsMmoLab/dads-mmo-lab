@@ -1492,6 +1492,20 @@ def compose_container_id(
     collection, and evidence that cannot be collected must not stop the action
     it was collected for.
     """
+    return compose_container_lookup(service, server_dir, wsl_distro=wsl_distro)[0]
+
+
+def compose_container_lookup(
+    service: str, server_dir: Path, *, wsl_distro: str | None = None
+) -> tuple[str | None, str]:
+    """`compose_container_id()`, with what Docker said when it did not answer (T211).
+
+    `(id, "")` found; `(None, "")` compose knows no such container here; `(None,
+    said)` the lookup itself failed, a timeout among them, and says nothing about
+    whether the container is there. The log snapshot told the last two apart by
+    neither, and said "could not find" a world server that was there while
+    Docker was too busy stopping it to answer within the bound.
+    """
     proc = _docker(
         ["compose", "ps", "-a", "-q", service],
         cwd=server_dir,
@@ -1499,13 +1513,14 @@ def compose_container_id(
         timeout=COMPOSE_PS_TIMEOUT,
     )
     if proc.returncode != 0:
-        logger.warning(f"could not resolve {service} in {server_dir}: {proc.stderr.strip()}")
-        return None
+        said = proc.stderr.strip() or f"exit code {proc.returncode}"
+        logger.warning(f"could not resolve {service} in {server_dir}: {said}")
+        return None, said
     ids = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     if not ids:
         logger.warning(f"compose knows no container for {service} in {server_dir}")
-        return None
-    return ids[0]
+        return None, ""
+    return ids[0], ""
 
 
 def log_tail(

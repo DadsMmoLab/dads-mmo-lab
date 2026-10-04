@@ -4171,6 +4171,86 @@ def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
     assert gone.services.applier is not None and gone.services.applier.client_dir == client
 
 
+# -- T211 4: an install over a server Yu'lon forgot finds its ready-to-play client --
+
+
+def _marked_play_client(game: str, name: str, server_dir: Path, client: Path) -> Path:
+    """A ready-to-play client where Make… puts it, marked as `game` at `server_dir`'s."""
+    from yulon import play_client
+
+    play = play_client.default_target(client, name, server_dir)
+    (play / "Interface").mkdir(parents=True)
+    marker = play_client.Marker(
+        game=game, server_dir=server_dir, source_client_dir=client, created_at=play_client.utc_now()
+    )
+    (play / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+    return play
+
+
+def test_an_install_over_a_forgotten_server_links_its_ready_to_play_client_again(
+    window: Any, tmp_path: Path
+) -> None:
+    """T211 4: Remove from Yu'lon…, then Install into the same folder, offered Make… again.
+
+    The ready-to-play client was still on disk beside the player's own, marked
+    as this server's, but only `state.json` linked it and the removal had
+    dropped that entry. The install finds it where Make… put it.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    game = "wow-tortoise"
+    server_dir = tmp_path / "t211-reinstalled"
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface").mkdir(parents=True)
+    play = _marked_play_client(game, load_catalog().get(game).name, server_dir, client)
+
+    _catalog_view(window).installed.emit(game, server_dir, client)
+
+    view = _tab_for(window, server_dir)
+    assert view.services.play_client_dir == play
+    assert window.saved_states[-1].find(game, server_dir).play_client_dir == play
+
+
+@pytest.mark.parametrize(
+    "whose", ["another server", "another game", "another client folder", "no marker"]
+)
+def test_an_install_links_no_folder_that_is_not_this_servers_own(
+    window: Any, tmp_path: Path, whose: str
+) -> None:
+    """The marker is what makes a folder this server's; a name alone is not."""
+    from yulon import play_client
+    from yulon.catalog.catalog import load_catalog
+
+    game = "wow-tortoise"
+    name = load_catalog().get(game).name
+    server_dir = tmp_path / f"t211-{whose.replace(' ', '-')}"
+    client = tmp_path / f"TurtleWoW-{whose.replace(' ', '-')}"
+    (client / "Interface").mkdir(parents=True)
+    marked_as = {
+        "another server": (game, tmp_path / "elsewhere", client),
+        "another game": ("wow-wotlk", server_dir, client),
+        "another client folder": (game, server_dir, tmp_path / "SomeOtherWoW"),
+        "no marker": None,
+    }[whose]
+    if marked_as is None:
+        (play_client.default_target(client, name, server_dir) / "Interface").mkdir(parents=True)
+    else:
+        marked_game, marked_server, marked_client = marked_as
+        play = play_client.default_target(client, name, server_dir)
+        (play / "Interface").mkdir(parents=True)
+        marker = play_client.Marker(
+            game=marked_game,
+            server_dir=marked_server,
+            source_client_dir=marked_client,
+            created_at=play_client.utc_now(),
+        )
+        (play / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+
+    _catalog_view(window).installed.emit(game, server_dir, client)
+
+    assert _tab_for(window, server_dir).services.play_client_dir is None
+
+
 # -- T188 C6: the header's realm badge is the current server tab's ------------
 
 

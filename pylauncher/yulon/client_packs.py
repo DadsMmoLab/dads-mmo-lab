@@ -1843,9 +1843,12 @@ def remove(
     """
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the removal of {pack_label(pack)}")
     try:
-        return _remove(play_dir, rec_entry, pack, when_off)
+        left = _remove(play_dir, rec_entry, pack, when_off)
     except OSError as exc:
         raise _write_refusal(pack_label(pack), exc) from exc
+    name = pack.id if pack is not None else "a pack no longer in the catalog"
+    logger.info("client-packs: removed %s from %s", name, play_dir)
+    return left
 
 
 def pack_label(pack: ClientPack | None) -> str:
