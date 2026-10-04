@@ -10184,12 +10184,14 @@ def test_a_docker_error_yulon_does_not_recognise_reaches_the_log(
     view.services.controller.status = _docker_says_something_else  # type: ignore[method-assign]
 
     with caplog.at_level(logging.DEBUG):
-        view.refresh_status()
-        pump_until(lambda: not view._status_pending, "the poll's answer")
+        for _ in range(3):
+            view.refresh_status()
+            pump_until(lambda: not view._status_pending, "the poll's answer")
 
+    # R2: once per change, from every logger -- the job runner logged it each poll.
     logged = [r.getMessage() for r in caplog.records if "x509" in r.getMessage()]
-    assert logged, "Docker's own words never reached the log"
-    assert not any("did not answer" in line for line in logged), logged
+    assert len(logged) == 1, logged
+    assert logged[0].startswith("WoW WotLK: Docker answered the status poll with an error:")
     assert _shown(view, view.docker_banner)
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 
@@ -26157,11 +26159,16 @@ def test_a_plan_or_apply_that_fails_says_so_in_a_sentence(
 
     services.network_plan = refuses
     view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
     view.show_network_plan()
+    # R4 (T194 final fix): a sentence, the reason folded under Details, like Apply.
     assert view.network_text.toPlainText() == (
-        "Could not work out the plan: the LAN address could not be read"
+        "Yu'lon could not work out the plan. Details below says why."
     )
-    assert view.network_details.isHidden()
+    assert view.network_details.text() == "What went wrong: the LAN address could not be read"
+    assert view.network_details.collapsed and not view.network_details.isHidden()
+    assert failures == ["the LAN address could not be read"]
 
     services.network_plan = _netsh_plan
 
@@ -26236,6 +26243,43 @@ def test_a_backup_that_breaks_in_docker_says_so_in_words_and_folds_the_reason(
     view.back_up()
     assert "Backed up to" in view.maintenance_report.toPlainText()
     assert view.maintenance_details.isHidden(), "an old failure's reason under a new success"
+
+
+def test_a_backup_whose_docker_exec_fails_keeps_the_pipe_path_off_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 (T194 final fix): `MaintenanceError` carried docker exec's stderr into the box."""
+    from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+
+    pipe = (
+        b"error during connect: open //./pipe/dockerDesktopLinuxEngine: The system cannot "
+        b"find the file specified."
+    )
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
+        if kw.get("input") is not None:
+            return subprocess.CompletedProcess(argv, 0, b"acore_world\n", b"")
+        return subprocess.CompletedProcess(argv, 1, b"", pipe)
+
+    made = _FakeMaintenance()
+    made.back_up = lambda: wotlk_maintenance.backup(  # type: ignore[method-assign]
+        tmp_path,
+        wotlk_maintenance.DockerMysql("ac-database", "pw"),
+        running=lambda: ["ac-database"],
+    )
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    monkeypatch.setattr(wotlk_maintenance.subprocess, "run", fake_run)
+
+    view.back_up()
+
+    shown = view.maintenance_report.toPlainText()
+    assert "pipe" not in shown and "error during connect" not in shown, shown
+    assert "INCOMPLETE" in shown, shown
+    assert "//./pipe/" in view.maintenance_details.text()
+    assert view.maintenance_details.collapsed and not view.maintenance_details.isHidden()
+    assert failures and "//./pipe/" in failures[0], "the detail no longer reaches the app log"
 
 
 def test_a_backup_refusal_yulon_wrote_is_the_report_itself(

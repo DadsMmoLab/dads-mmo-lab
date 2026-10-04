@@ -209,27 +209,22 @@ def _docker_is_away(exc: object) -> bool:
     return isinstance(exc, docker.DockerCliMissingError) or docker_advice.unreachable(exc)
 
 
-def _quiet(work: Callable[[], object], *, every_docker_error: bool = False) -> Callable[[], object]:
+def _quiet(work: Callable[[], object]) -> Callable[[], object]:
     """`work`, with a Docker failure returned as `_DockerSilent` rather than raised.
 
     The job runner logs every job that raises, so a status poll and a verdict
     read that raised put Docker's own words in the log every five seconds,
-    twice. Returned, the slot logs them once per change.
-
-    Only Docker being away (`_docker_is_away`) is kept back from the status poll:
-    any other error Docker answered still raises, so the runner logs it and the
-    banner says Yu'lon doesn't recognise it rather than "Docker isn't running"
-    (T194 F2). `every_docker_error` keeps back every `DockerCommandError` too,
-    for the verdict read, whose own line says it failed and logs it once per change.
+    twice. Returned, the slot logs them once per change, and says which they
+    are: Docker away (`_docker_is_away`), or Docker answering with an error the
+    banner calls unrecognised (T194 F2, R2). Anything that is not Docker's still
+    raises, and the runner logs it.
     """
 
     def run() -> object:
         try:
             return work()
         except Exception as exc:  # noqa: BLE001 - only Docker's own failures are kept
-            if _docker_is_away(exc) or (
-                every_docker_error and isinstance(exc, docker.DockerCommandError)
-            ):
+            if _docker_is_away(exc) or isinstance(exc, docker.DockerCommandError):
                 return _DockerSilent(exc)
             raise
 
@@ -4407,6 +4402,7 @@ VERDICT_UNREADABLE = (
 )
 """The verdict line when the dashboard read broke with Docker answering (T194 F7)."""
 APPLY_DID_NOT_FINISH = "Apply did not finish. Details below says why."
+PLAN_DID_NOT_FINISH = "Yu'lon could not work out the plan. Details below says why."
 MAINTENANCE_BACKUP_FAILED = "The backup did not finish. Details below says why."
 MAINTENANCE_RESTORE_FAILED = "The restore did not finish. Details below says why."
 MAINTENANCE_PLAN_FAILED = "Yu'lon could not check this backup. Details below says why."
@@ -7689,7 +7685,7 @@ class ControllerView(QWidget):
             return
         self._verdict_pending = True
         self._run(
-            _quiet(self._world_reading(self.services.dashboard), every_docker_error=True),
+            _quiet(self._world_reading(self.services.dashboard)),
             self._verdict_ready,
             self._verdict_failed,
         )
@@ -8481,12 +8477,18 @@ class ControllerView(QWidget):
         # after this method has returned.
         self._ask_again_if_superseded(self._status_superseded)
         said = str(exc)
-        if _docker_is_away(exc) and said != self._docker_said:
+        away = _docker_is_away(exc)
+        if (away or isinstance(exc, docker.DockerCommandError)) and said != self._docker_said:
             # What Docker said goes to the log, once per change; the screen
-            # gets the banner's words (T194 C7). Any other failure was raised
-            # past `_quiet`, and the job runner has logged it (T194 F2).
+            # gets the banner's words (T194 C7). Anything not Docker's was
+            # raised past `_quiet`, and the job runner has logged it (T194 R2).
             self._docker_said = said
-            logger.warning(f"{self.entry.name}: Docker did not answer the status poll: {said}")
+            how = (
+                "did not answer the status poll"
+                if away
+                else "answered the status poll with an error"
+            )
+            logger.warning(f"{self.entry.name}: Docker {how}: {said}")
         # "unknown", not "stopped": Docker not answering says nothing about the
         # server (T188 final fix round). A hold is left alone by a failure older
         # than its job's own follow-up read; that read failing ends it here.
@@ -14084,7 +14086,14 @@ class ControllerView(QWidget):
                 else:
                     loaded = marker_after != marker_before
             said = seam.after_a_failed_restore(taken, loaded=loaded)
-            raise wotlk_maintenance.MaintenanceError(f"{exc} {said}") from exc
+            if isinstance(exc, wotlk_maintenance.MaintenanceError):
+                raise wotlk_maintenance.MaintenanceError(
+                    f"{exc} {said}", detail=exc.detail
+                ) from exc
+            # Not a sentence of ours: it goes to Details, the note stays (T194 R1).
+            raise wotlk_maintenance.MaintenanceError(
+                f"The restore did not finish. {said}", detail=str(exc)
+            ) from exc
         return _RestoredWithNote(report, taken.note if taken is not None else None)
 
     @Slot(object)
@@ -14204,9 +14213,10 @@ class ControllerView(QWidget):
         """A refusal of ours as it is; anything else as `said`, with what broke folded (T194 F7).
 
         `MaintenanceError` and `PoolResetError` are sentences Yu'lon wrote for the
-        player ("Nothing was restored; look at it again"), so they are the report.
-        Any other failure is not: the Restore box says `said`, and the raw text goes
-        in Details, folded, and to the app log through `action_failed`.
+        player ("Nothing was restored; look at it again"), so they are the report,
+        and what a program said behind one (`MaintenanceError.detail`, T194 R1) goes
+        in Details. Any other failure is not: the Restore box says `said`, and the
+        raw text goes in Details. Both reach the app log through `action_failed`.
         """
         self.backup_button.setEnabled(True)
         if not self.restore_button.isEnabled():
@@ -14215,11 +14225,11 @@ class ControllerView(QWidget):
         ours = isinstance(
             exc, (wotlk_maintenance.MaintenanceError, tortoise_poolreset.PoolResetError)
         )
+        detail = getattr(exc, "detail", "") if ours else str(exc)
         # Either write takes the last Details down (`maintenance_report.textChanged`).
         self.maintenance_report.setPlainText(str(exc) if ours else said)
-        if not ours:
-            self.maintenance_details.set_text(str(exc))
-        self.action_failed.emit(str(exc))
+        self.maintenance_details.set_text(detail)
+        self.action_failed.emit(f"{exc} ({detail})" if ours and detail else str(exc))
         self._show_interrupted()
 
     # ----------------------------------------------------------- modules tab
@@ -17907,8 +17917,9 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _plan_failed(self, exc: object) -> None:
-        self.network_text.setPlainText(f"Could not work out the plan: {exc}")
-        self.network_details.set_text("")
+        """Said in words; what broke goes in Details, folded, and to the app log (T194 R4)."""
+        self.network_text.setPlainText(PLAN_DID_NOT_FINISH)
+        self.network_details.set_text(f"What went wrong: {exc}")
         self.action_failed.emit(str(exc))
 
     @Slot()

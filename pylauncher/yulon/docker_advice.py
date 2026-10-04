@@ -96,15 +96,27 @@ _UNREACHABLE_WORDINGS = (
 daemon (old and new wording), a refused socket. See `docker.volume_exists()`."""
 
 
+_DESKTOP_ENGINE_PIPES = ("dockerdesktoplinuxengine", "docker_engine")
+"""Docker Desktop's engine pipes, as the CLI names them (URL-encoded in its API route)."""
+
+
 def unreachable(exc: object) -> bool:
     """Whether `exc` is Docker not answering at all, rather than Docker refusing something.
 
     A missing CLI is not: it has its own sentence, which names the install.
+    Docker Desktop's engine while it starts or after it stopped is: the CLI
+    reaches the pipe and is answered "request returned 500 Internal Server
+    Error for API route and version http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/…"
+    (older CLIs: no number, `docker_engine`). That is Desktop's proxy with no
+    engine behind it, not the engine refusing, so it is told as not running
+    and keeps the Open Docker Desktop press (T194 R3).
     """
     if isinstance(exc, docker.DockerCliMissingError):
         return False
     said = str(exc).lower()
-    return any(wording in said for wording in _UNREACHABLE_WORDINGS)
+    if any(wording in said for wording in _UNREACHABLE_WORDINGS):
+        return True
+    return "internal server error" in said and any(pipe in said for pipe in _DESKTOP_ENGINE_PIPES)
 
 
 def problem_of(exc: object, *, distro: str | None, deck_docker_removed: bool) -> Problem:

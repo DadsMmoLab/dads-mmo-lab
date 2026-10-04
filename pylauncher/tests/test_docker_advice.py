@@ -400,3 +400,40 @@ def test_a_probe_that_hangs_is_given_up_on_and_the_press_comes_back(
 
     assert said == yulon_platform._MANUAL_START_DOCKER_DESKTOP
     assert asked and all(t is not None and t <= 60 for t in asked), asked
+
+
+DESKTOP_ENGINE_500 = (
+    "docker ps --format {{.Names}} exited 1: request returned 500 Internal Server Error for API "
+    "route and version http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/containers/json, "
+    "check if the server supports the requested API version"
+)
+"""Docker Desktop on Windows while its engine starts or has stopped (the CLI's own words)."""
+
+DOCKER_ENGINE_500 = (
+    "docker ps exited 1: request returned Internal Server Error for API route and version "
+    "http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.24/containers/json, check if the server supports "
+    "the requested API version"
+)
+"""The same from an older CLI, on the `docker_engine` pipe and without the status number."""
+
+
+@pytest.mark.parametrize("said", [DESKTOP_ENGINE_500, DOCKER_ENGINE_500])
+@pytest.mark.parametrize("host", ["windows", "macos"])
+def test_docker_desktops_engine_starting_or_stopped_is_docker_not_running(
+    said: str, host: docker_advice.Host
+) -> None:
+    """R3 (T194 final fix): a 500 from Docker Desktop's engine pipe fell into "unknown",
+    so every routine Windows start lost the Open Docker Desktop press."""
+    exc = docker.DockerCommandError(said)
+    assert docker_advice.unreachable(exc)
+    advice = docker_advice.advice_for(exc, distro=None, host=host, deck_docker_removed=False)
+    assert advice.action == "open-desktop"
+    assert advice.body.startswith("Docker Desktop isn't running.")
+
+
+def test_a_500_from_a_linux_daemon_is_not_docker_desktop_down() -> None:
+    """A real daemon that answered 500 on a socket is an answer, not Desktop's engine away."""
+    exc = docker.DockerCommandError(
+        "docker ps exited 1: Error response from daemon: 500 Internal Server Error: boom"
+    )
+    assert not docker_advice.unreachable(exc)
