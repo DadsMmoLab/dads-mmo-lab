@@ -28,13 +28,21 @@ the zip, redacted.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, QUrl, Slot, qVersion
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QShowEvent
+from PySide6.QtGui import (
+    QDesktopServices,
+    QGuiApplication,
+    QPalette,
+    QShowEvent,
+    QSyntaxHighlighter,
+    QTextDocument,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -53,6 +61,7 @@ from yulon.support import sources as support_sources
 from yulon.support.redact import Redactor
 from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, threaded_job_runner
+from yulon.ui.widgets.log_panel import line_format
 
 logger = get_logger(__name__)
 
@@ -209,6 +218,52 @@ def _logged(error: object) -> str:
     return type(error).__name__
 
 
+_RECORD = re.compile(
+    r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:,\d+)? (DEBUG|INFO|WARNING|ERROR|CRITICAL) "
+)
+"""The head of one `yulon.log` record: `log.py`'s `%(asctime)s %(levelname)s ...`."""
+
+_LEVEL_KINDS = ("", "marker", "warning", "failure", "failure")
+"""Block states, by index: plain, DEBUG, WARNING, ERROR/CRITICAL, inside a bare traceback."""
+
+_STATE_OF_LEVEL = {"DEBUG": 1, "INFO": 0, "WARNING": 2, "ERROR": 3, "CRITICAL": 3}
+_TRACEBACK = 4
+
+
+class LevelHighlighter(QSyntaxHighlighter):
+    """Paints the viewer's WARNING, ERROR and DEBUG records the install log's way (T195 C33).
+
+    Through `log_panel.line_format`, so a warning is the same amber on both
+    tabs. A record's later lines (a multi-line message, a logged traceback) keep
+    its colour until the next record starts. A bare `Traceback` with no record
+    around it is red through its indented lines and the exception line after
+    them, and no further: a log without records must not turn red to the end.
+    """
+
+    def __init__(self, document: QTextDocument, palette_of: Callable[[], QPalette]) -> None:
+        super().__init__(document)
+        self._palette_of = palette_of
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt's name
+        previous = self.previousBlockState()
+        record = _RECORD.match(text)
+        if record is not None:
+            state = _STATE_OF_LEVEL[record.group(1)]
+            kind = _LEVEL_KINDS[state]
+        elif text.startswith("Traceback"):
+            state, kind = _TRACEBACK, "failure"
+        elif previous == _TRACEBACK:
+            # Indented frames carry on; the unindented exception line is the last.
+            state = _TRACEBACK if text[:1].isspace() else 0
+            kind = "failure"
+        else:
+            state = max(previous, 0)
+            kind = _LEVEL_KINDS[state]
+        self.setCurrentBlockState(state)
+        if kind:
+            self.setFormat(0, len(text), line_format(kind, self._palette_of()))
+
+
 LOGS_NOT_LISTED = "The logs could not be listed. Yu'lon's own log has the details."
 """The viewer's text when the list of logs could not be made (T194 C8: no class name)."""
 
@@ -278,6 +333,7 @@ class LogsView(QWidget):
         self.viewer.setReadOnly(True)
         self.viewer.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.viewer.setPlaceholderText(NOTHING_LOGGED)
+        self.highlighter = LevelHighlighter(self.viewer.document(), self.viewer.palette)
         self.save_button = QPushButton("Save logs for support…", self)
         self.save_button.setToolTip(
             "One zip of every log and settings file, passwords taken out, to send to support "

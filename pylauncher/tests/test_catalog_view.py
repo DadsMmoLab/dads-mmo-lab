@@ -2533,7 +2533,7 @@ def test_the_modal_guard_covers_a_dialog_built_as_an_instance(qapp: object) -> N
     """The guard has to cover `box.exec()`, not only `QMessageBox.question(...)`.
 
     `_qt_suggestion_asker` is built as a `QMessageBox` instance so its buttons
-    can read "Yes, default location" / "No, custom location", and an instance
+    can read "Use this folder" / "Choose another folder…", and an instance
     plus `exec()` never goes through the static `question` the `_no_modal_dialogs`
     fixture used to patch. When that happened,
     `test_install_asks_for_folders_then_streams_the_installer` stopped failing
@@ -2646,3 +2646,84 @@ def test_the_wotlk_tile_does_not_describe_itself_in_developer_words(qapp: object
 
     assert description is not None and description.text()
     assert "manifest" not in description.text().lower(), description.text()
+
+
+# -- T195 C23/C24/C30: the first-run tiles and the folders they suggest --------------
+
+
+def _tile_labels(view: CatalogView, game_id: str) -> list[str]:
+    from PySide6.QtWidgets import QLabel
+
+    tile = view.findChild(QWidget, f"catalog-tile-{game_id}")
+    assert tile is not None, game_id
+    return [label.text() for label in tile.findChildren(QLabel) if label.isVisibleTo(tile)]
+
+
+def test_only_the_wotlk_tile_says_recommended(qapp: object) -> None:
+    """C23 (T195): a first-time player is told where to start, on one tile only."""
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    marked = [game.id for game in CATALOG.games if "Recommended" in _tile_labels(view, game.id)]
+    assert marked == ["wow-wotlk"]
+
+
+def test_the_emulator_is_named_on_hover_not_on_the_tile(qapp: object) -> None:
+    """C23 (T195): the emulator line is for the curious; the tile keeps to what a player picks."""
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    for game in CATALOG.games:
+        tile = view.findChild(QWidget, f"catalog-tile-{game.id}")
+        assert tile is not None
+        assert game.emulator.name in tile.toolTip(), (game.id, tile.toolTip())
+        assert game.emulator.name not in _tile_labels(view, game.id), game.id
+
+
+def test_a_short_description_does_not_stretch_its_box(qapp: object) -> None:
+    """C24 (T195): the description box took every spare pixel of a tall tile."""
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+    tile = view.findChild(QWidget, "catalog-tile-wow-wotlk")
+    assert tile is not None
+    layout = tile.layout()
+    stretched = [
+        layout.itemAt(index).widget().objectName()
+        for index in range(layout.count())
+        if layout.stretch(index) and layout.itemAt(index).widget() is not None
+    ]
+    assert stretched == []
+
+
+def test_every_default_folder_is_named_yulon_and_the_game(qapp: object) -> None:
+    """C30 (T195): five developer names (`wow-server-playerbots`, `tortoise-wow-server`…)
+    become one pattern, for NEW installs only; each is a compose project name as it
+    stands, so `docker.pin_project_name` pins it unchanged, and no two collide.
+    """
+    import re
+
+    folders = {game.id: game.install.default_server_dir for game in CATALOG.games}
+    assert all(re.fullmatch(r"yulon-[a-z]+", name) for name in folders.values()), folders
+    assert len(set(folders.values())) == len(folders), folders
+    assert folders["wow-wotlk"] == "yulon-wotlk"
+
+
+def test_use_existing_still_opens_in_a_server_under_the_old_folder_name(
+    qapp: object, tmp_path: Path
+) -> None:
+    """C30 (T195): the rename is for new installs; "Use existing…" finds an old one where it was."""
+    starts: list[Path | None] = []
+
+    def pick(_parent: object, _title: str, start: Path | None) -> Path | None:
+        starts.append(start)
+        return None
+
+    view = CatalogView(
+        CATALOG, lambda e: _FakeInstaller(e, []), LogPanel(), pick_dir=pick, home=tmp_path
+    )
+    wotlk = CATALOG.get("wow-wotlk")
+    assert view.attach_existing(wotlk) is False
+    (tmp_path / "wow-server-playerbots").mkdir()
+    assert view.attach_existing(wotlk) is False
+    (tmp_path / "yulon-wotlk").mkdir()
+    assert view.attach_existing(wotlk) is False
+    assert starts == [
+        tmp_path / "yulon-wotlk",
+        tmp_path / "wow-server-playerbots",
+        tmp_path / "yulon-wotlk",
+    ]

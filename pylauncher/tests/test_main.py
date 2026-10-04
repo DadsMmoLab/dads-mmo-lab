@@ -5497,3 +5497,119 @@ def test_the_tortoise_set_level_sentence_is_short_and_plain(one_of_each_game: An
     assert said.text(), "the sentence is gone, not shortened"
     assert len(said.text()) < 200, len(said.text())
     assert "`" not in said.text(), said.text()
+
+
+# -- T195 C23/C24/C31: the first run, the tiles, the strip --------------------------
+
+
+def _catalog_console(window: Any) -> tuple[Any, Any, Any]:
+    """The Catalog's install-log tabs, its toggle, and the splitter between them."""
+    from PySide6.QtWidgets import QSplitter, QTabWidget
+
+    console = window.findChild(QTabWidget, "catalog-console-tabs")
+    splitter = window.findChild(QSplitter, "catalog-splitter")
+    assert console is not None and splitter is not None
+    return console, _catalog_view(window).toggle_console_button, splitter
+
+
+def test_the_first_run_catalog_says_what_to_do_and_hides_the_empty_log(
+    shown_window: Any,
+) -> None:
+    """C23 (T195): a heading that asks, a line that promises, and no empty console.
+
+    The console was open at start with nothing in it, its tab text clipped to
+    "and Ins", and it took the room the Install buttons needed at 960.
+    Mutation: leave the console visible at start and `isHidden()` is False.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    view = _catalog_view(shown_window)
+    heading = view.findChild(QLabel, "section-title")
+    welcome = view.findChild(QLabel, "catalog-welcome")
+    assert heading is not None and heading.text() == "Choose a game to install"
+    assert welcome is not None and welcome.isVisibleTo(shown_window)
+    assert welcome.text() == (
+        "Yu'lon downloads and builds the server for you. Nothing changes on this "
+        "computer until you press Install."
+    )
+    console, toggle, _splitter = _catalog_console(shown_window)
+    assert console.isHidden() and toggle.isHidden()
+
+
+def test_an_install_start_opens_the_log_at_a_readable_height(shown_window: Any) -> None:
+    """C23/C31 (T195): the first `run_started` shows the log and its toggle, 55/45.
+
+    The console used to open 170 px tall whatever the window, under a strip that
+    then had no room to say anything.
+    Mutation: the old `setSizes([h - 170, 170])` leaves it under 40% at 1280x800.
+    """
+    console, toggle, splitter = _catalog_console(shown_window)
+    panel = shown_window.yulon_log_panels[0]
+    _at_width(shown_window, (1280, 800))
+    try:
+        panel.run_started.emit()
+        process_events(30)
+        assert not console.isHidden() and not toggle.isHidden()
+        assert console.tabText(0) == "Install log"
+        top, bottom = splitter.sizes()
+        assert bottom >= 0.4 * (top + bottom), splitter.sizes()
+        assert toggle.text() == "▼ Hide install log"
+    finally:
+        console.setVisible(False)
+        toggle.setVisible(False)
+        process_events(10)
+
+
+def test_at_960_the_first_rows_install_buttons_are_in_view(shown_window: Any) -> None:
+    """C23 (T195): at the smallest window, Install is on the first frame, not below it."""
+    from PySide6.QtWidgets import QScrollArea
+
+    view = _catalog_view(shown_window)
+    _at_width(shown_window, (960, 640))
+    viewport = view.findChild(QScrollArea, "catalog-shelf-scroll").viewport()
+    below = []
+    for game in ("wow-wotlk", "wow-tbc"):
+        button = view.button_for(game)
+        bottom = button.mapTo(viewport, button.rect().bottomLeft()).y()
+        if bottom > viewport.height():
+            below.append(f"{game}: bottom {bottom} of {viewport.height()}")
+    assert below == []
+
+
+def test_at_1920_no_tile_is_taller_than_it_asks_to_be(shown_window: Any) -> None:
+    """C24 (T195): a one-line description made a ~370 px tile (its box had stretch 1)."""
+    from PySide6.QtWidgets import QWidget
+
+    from yulon.catalog.catalog import load_catalog
+
+    view = _catalog_view(shown_window)
+    _at_width(shown_window, (1920, 1080))
+    tall = []
+    for entry in load_catalog().games:
+        tile = view.findChild(QWidget, f"catalog-tile-{entry.id}")
+        assert tile is not None, entry.id
+        if tile.height() > tile.sizeHint().height() + 1:
+            tall.append(f"{entry.id}: {tile.height()} > {tile.sizeHint().height()}")
+    assert tall == []
+
+
+def test_at_1920_the_strip_says_the_whole_step(shown_window: Any) -> None:
+    """C31 (T195): the step field was capped at 200 px and cut "Compiling the wor…"."""
+    from PySide6.QtWidgets import QLabel
+
+    console, toggle, _splitter = _catalog_console(shown_window)
+    panel = shown_window.yulon_log_panels[0]
+    said = "Step 7 of 9 · Compiling the world server"
+    try:
+        console.setVisible(True)
+        _at_width(shown_window, (1920, 1080))
+        panel.append("Step 7 of 9 (77%): Compiling the world server")
+        process_events(20)
+        (label,) = [w for w in panel.findChildren(QLabel) if w.toolTip() == said]
+        assert label.text() == said, label.text()
+    finally:
+        panel.clear()
+        panel._clear_strip()
+        console.setVisible(False)
+        toggle.setVisible(False)
+        process_events(10)

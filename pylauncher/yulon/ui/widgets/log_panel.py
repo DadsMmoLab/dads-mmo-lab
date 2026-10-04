@@ -163,11 +163,14 @@ def tone_colour(tone: Tone, palette: QPalette) -> QColor | None:
     return QColor(hue) if hue else None
 
 
-def _line_format(kind: str, palette: QPalette) -> QTextCharFormat:
+def line_format(kind: str, palette: QPalette) -> QTextCharFormat:
     """The character format for one kind of line, built fresh on every append.
 
     Every kind gets one, `sentence` included, and its format is the default —
     which is how the panel says "no colour" without a second code path.
+
+    Public because the Logs tab paints its WARNING and ERROR lines through it
+    (T195 C33): one spelling of what a warning looks like, in both places.
     """
     fmt = QTextCharFormat()
     tone = PALETTE.get(kind, PALETTE["sentence"])  # an unknown kind is an ordinary sentence
@@ -205,6 +208,14 @@ def _bar_style(palette: QPalette) -> str:
 _BAR_WIDTH_PX = 120
 _STEP_WIDTH_PX = 200
 _PROGRESS_WIDTH_PX = 230
+_SHARES_FROM_PX = 1280
+"""From this window width up, the step and progress fields drop their caps and
+take their stretch shares of the row (T195 C31).
+
+At 1920 the 200 px cap cut "Step 7 of 9 · Compiling the world server" with half
+the row empty. Below it the caps stay, so the status field keeps the room its
+refusals need on a narrow window.
+"""
 _STATUS_WIDTH_PX = 16777215
 """And the status field's, which is `QWIDGETSIZE_MAX`: no cap at all.
 
@@ -703,6 +714,13 @@ class LogPanel(QWidget):
         # `_on_finished()` -- because `RunLog` has no lock.
         self._record: runlog.RunLog | None = None
 
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        # `_STATUS_WIDTH_PX` is QWIDGETSIZE_MAX: no cap, only the stretch share.
+        wide = self.window().width() >= _SHARES_FROM_PX
+        self._step_label.setMaximumWidth(_STATUS_WIDTH_PX if wide else _STEP_WIDTH_PX)
+        self._progress_label.setMaximumWidth(_STATUS_WIDTH_PX if wide else _PROGRESS_WIDTH_PX)
+
     # -- public ---------------------------------------------------------
 
     @property
@@ -882,7 +900,7 @@ class LogPanel(QWidget):
         cursor = QTextCursor(block)
         cursor.setPosition(block.position())
         cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
-        cursor.setCharFormat(_line_format(kind, self._text.palette()))
+        cursor.setCharFormat(line_format(kind, self._text.palette()))
 
     def _show_step(self, line: str) -> None:
         """Put this stage line's own three fields on the strip.

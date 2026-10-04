@@ -1164,6 +1164,16 @@ def _play_size_text(plan: play_client.BuildPlan, free: int | None) -> str:
     )
 
 
+REPLAN_AFTER_TYPING_MS = 800
+"""How long `PlayClientDialog` waits after the last key before it checks a typed folder.
+
+A Steam Deck has no Enter key, and the dialog used to wait for one (T195 C32).
+Every key restarts the wait, so a path typed slowly is checked once, not per letter.
+"""
+
+CHECK_WHEN_TYPING_STOPS = "Checking this folder when you stop typing\u2026"
+
+
 class PlayClientDialog(QDialog):
     """The creation dialog (T181a §1, §3): where, how big, and the original's module files.
 
@@ -1265,6 +1275,10 @@ class PlayClientDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         box.addWidget(buttons)
+        self.replan_timer = QTimer(self)
+        self.replan_timer.setSingleShot(True)
+        self.replan_timer.setInterval(REPLAN_AFTER_TYPING_MS)
+        self.replan_timer.timeout.connect(self._path_edited)
         self.path_edit.editingFinished.connect(self._path_edited)
         self.path_edit.textChanged.connect(self._path_typed)
         self.change_button.clicked.connect(self._change)
@@ -1275,14 +1289,24 @@ class PlayClientDialog(QDialog):
         return Path(self.path_edit.text().strip())
 
     def _path_edited(self) -> None:
+        self.replan_timer.stop()
+        if not self.path_edit.text().strip():
+            return  # an empty field names no folder; OK stays dead (`_update_ok`)
         target = self._shown_path()
         if target != self._planned or self._plan is None:
             self._retarget(target)
 
-    def _path_typed(self, _text: str) -> None:
-        if self._shown_path() != self._planned:
-            self.size_label.setText("Press Enter to check this folder.")
-        elif self._plan is not None:
+    def _path_typed(self, text: str) -> None:
+        if not text.strip():
+            self.replan_timer.stop()
+            self.size_label.setText("Type where to put it, or press Change\u2026")
+        elif self._shown_path() != self._planned or self._plan is None:
+            # The same test `_path_edited` makes, so a folder typed back to one
+            # that was refused is checked again rather than left waiting.
+            self.size_label.setText(CHECK_WHEN_TYPING_STOPS)
+            self.replan_timer.start()  # restarted by every key
+        else:
+            self.replan_timer.stop()
             self.size_label.setText(_play_size_text(self._plan, self._free))
         self._update_ok()
 
@@ -1300,6 +1324,7 @@ class PlayClientDialog(QDialog):
 
     def _retarget(self, target: Path) -> None:
         """Plan `target` off the GUI thread; OK stays dead until its answer is in."""
+        self.replan_timer.stop()  # this IS the plan the typing was waiting for
         self._plan = None
         self._planned = target
         self.full_copy_check.setChecked(False)

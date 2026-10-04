@@ -33,7 +33,7 @@
           "macos",
           "windows"
         ],
-        "default_server_dir": "wow-server-playerbots",
+        "default_server_dir": "yulon-wotlk",
         "password": {
           "mode": "fixed",
           "value": "password"
@@ -181,7 +181,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "wow-tbc-server",
+        "default_server_dir": "yulon-tbc",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",
@@ -608,7 +608,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "wow-vanilla-server",
+        "default_server_dir": "yulon-vanilla",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",
@@ -1032,7 +1032,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "tortoise-wow-server",
+        "default_server_dir": "yulon-tortoise",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",
@@ -1406,7 +1406,7 @@
           "linux",
           "windows"
         ],
-        "default_server_dir": "wow-centurion-server",
+        "default_server_dir": "yulon-centurion",
         "requires_client_dir": true,
         "password": {
           "mode": "generated",

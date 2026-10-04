@@ -22932,6 +22932,50 @@ def test_the_dialog_makes_only_the_folder_its_numbers_are_for(qapp: object, tmp_
     assert dialog.ok_button.isEnabled()
 
 
+def test_typing_a_folder_checks_it_once_when_the_typing_stops(qapp: object, tmp_path: Path) -> None:
+    """C32 (T195): a Steam Deck has no Enter key, and the dialog asked for one.
+
+    One re-plan, 800 ms after the LAST key: every key restarts the wait, so a
+    path typed slowly is not planned once per letter, and nothing waits on Enter.
+    Mutation: plan on every `textChanged` and the queue holds one job per key;
+    keep the old label and "Press Enter" is back on screen.
+    """
+    import time
+
+    from PySide6.QtTest import QTest
+
+    planned: list[Path] = []
+
+    def replan(target: Path) -> play_client.BuildPlan:
+        planned.append(target)
+        return play_client.BuildPlan(
+            linked=(), copied=(), shared_bytes=1, own_bytes=1, same_volume=True
+        )
+
+    jobs = _Deferred()
+    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan), jobs=jobs)
+    dialog.path_edit.clear()
+    typed = str(tmp_path / "Games" / "WoW")
+    QTest.keyClicks(dialog.path_edit, typed[:-2])
+    process_events(500)
+    QTest.keyClicks(dialog.path_edit, typed[-2:])
+    last_key = time.monotonic()
+    assert jobs.queue == [], "a key started a plan before the typing stopped"
+    assert "Press Enter" not in dialog.size_label.text()
+    assert dialog.size_label.text() == "Checking this folder when you stop typing\u2026"
+    assert not dialog.ok_button.isEnabled()
+
+    pump_until(lambda: bool(jobs.queue), "the re-plan after the typing stopped")
+    waited = time.monotonic() - last_key
+    assert waited >= 0.75, f"planned {waited:.2f}s after the last key"
+    process_events(1000)
+    assert len(jobs.queue) == 1, "more than one plan for one stretch of typing"
+    jobs.run(0)
+    assert planned == [Path(typed)]
+    choice = dialog.choice()
+    assert choice is not None and choice.target == Path(typed)
+
+
 def test_the_play_refusal_names_the_menu_entry_it_sends_you_to(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
 ) -> None:

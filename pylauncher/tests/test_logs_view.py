@@ -565,3 +565,75 @@ def test_an_os_error_is_logged_with_what_the_system_said(
     with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
         view.refresh()
     assert any("Permission denied" in r.getMessage() for r in caplog.records)
+
+
+# -- T195 C33: the viewer colours a line by its level ----------------------------
+
+
+def _near(image: Any, top: int, bottom: int, width: int, colour: Any) -> int:
+    """How many pixels in rows top..bottom are within 24 per channel of `colour`."""
+    count = 0
+    for y in range(max(top, 0), min(bottom, image.height())):
+        for x in range(min(width, image.width())):
+            pixel = image.pixelColor(x, y)
+            count += (
+                abs(pixel.red() - colour.red()) <= 24
+                and abs(pixel.green() - colour.green()) <= 24
+                and abs(pixel.blue() - colour.blue()) <= 24
+            )
+    return count
+
+
+def test_warnings_and_errors_are_drawn_in_the_install_logs_colours(qapp: object) -> None:
+    """C33 (T195): the app log was one grey wall; a WARNING or ERROR now stands out.
+
+    The same `line_format` the install log paints with, so the two tabs agree
+    about what a warning looks like. Sampled off the drawn viewer, not read
+    back from the highlighter. Mutation: no highlighter and neither colour is
+    anywhere on screen.
+    """
+    from yulon.ui.widgets.log_panel import line_format
+
+    platform.config_dir().mkdir(parents=True, exist_ok=True)
+    (platform.config_dir() / "yulon.log").write_text(
+        "2026-10-04 10:00:00 INFO [yulon.main] the window opened\n"
+        "2026-10-04 10:00:01 WARNING [yulon.docker] Docker answered slowly\n"
+        "2026-10-04 10:00:02 ERROR [yulon.docker] Docker did not answer\n"
+        "2026-10-04 10:00:03 INFO [yulon.main] the window closed\n",
+        encoding="utf-8",
+    )
+    view = _view()
+    view.resize(900, 400)
+    view.show()
+    try:
+        pump_until(lambda: "did not answer" in view.viewer.toPlainText(), "the app log read")
+        process_events(50)
+        viewer = view.viewer
+        palette = viewer.palette()
+        warning = line_format("warning", palette).foreground().color()
+        failure = line_format("failure", palette).foreground().color()
+        image = viewer.viewport().grab().toImage()
+        rows: dict[str, list[tuple[int, int]]] = {}
+        block = viewer.document().begin()
+        while block.isValid():
+            rect = viewer.blockBoundingGeometry(block).translated(viewer.contentOffset())
+            words = block.text().split(" ")
+            if len(words) > 2:
+                rows.setdefault(words[2], []).append((int(rect.top()), int(rect.bottom())))
+            block = block.next()
+        width = viewer.viewport().width()
+        ((warn_top, warn_bottom),) = rows["WARNING"]
+        ((err_top, err_bottom),) = rows["ERROR"]
+        # Counted, and against the INFO lines: plain black text drawn with
+        # subpixel antialiasing has amber fringes (about 20 pixels a line here),
+        # so "any pixel near amber" is true of every line. A painted line has
+        # its whole text in the colour, several times what a fringe gives.
+        info = rows["INFO"]
+        warned = _near(image, warn_top, warn_bottom, width, warning)
+        failed = _near(image, err_top, err_bottom, width, failure)
+        info_warned = max(_near(image, top, bottom, width, warning) for top, bottom in info)
+        info_failed = max(_near(image, top, bottom, width, failure) for top, bottom in info)
+        assert warned > 3 * max(info_warned, 10), (warned, info_warned)
+        assert failed > 3 * max(info_failed, 10), (failed, info_failed)
+    finally:
+        view.hide()

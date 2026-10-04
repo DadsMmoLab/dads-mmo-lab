@@ -54,6 +54,9 @@ from yulon.ui.widgets.prompt import InputPrompter
 
 logger = get_logger(__name__)
 
+QWIDGETSIZE_MAX = 16777215
+"""Qt's "no maximum" for a widget dimension (`QWIDGETSIZE_MAX` in C++)."""
+
 InstallerFactory = Callable[[CatalogEntry], InstallEngine]
 """What builds the engine for one entry.
 
@@ -73,7 +76,7 @@ def _existing_ancestor(start: Path | None) -> Path | None:
     found. Please verify the correct directory name was given."
 
     That is a dead end on the first install, and it is the one every new user
-    meets: the suggestion is `~/wow-server-playerbots`, which by definition does
+    meets: the suggestion (then `~/wow-server-playerbots`) by definition did
     not exist yet. The app proposed a folder and then refused its own proposal;
     the only way forward was the New Folder button, which nothing pointed at.
     Measured on a clean Arch box, 2026-08-24.
@@ -137,18 +140,18 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
         QMessageBox.Icon.Question,
         f"Install {game}",
         f"Install {game} into this new folder?\n\n{suggested}\n\n"
-        "It will be created when the install starts. Choose another folder if "
-        "you would rather put it somewhere else.",
+        "Yu'lon makes the folder when the install starts. Choose another folder "
+        "if you would rather put it somewhere else.",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         parent,
     )
     box.setDefaultButton(QMessageBox.StandardButton.Yes)
     yes_btn = box.button(QMessageBox.StandardButton.Yes)
     if yes_btn is not None:
-        yes_btn.setText("Yes, default location")
+        yes_btn.setText("Use this folder")
     no_btn = box.button(QMessageBox.StandardButton.No)
     if no_btn is not None:
-        no_btn.setText("No, custom location")
+        no_btn.setText("Choose another folder…")
     answer = box.exec()
     return said_yes(answer)
 
@@ -305,6 +308,29 @@ _CAMPAIGN_SUBTITLES = {
 Typed here, the Tortoise tile said 1.17.2 for a server whose client must be 1.18.1.
 """
 
+FORMER_DEFAULT_DIRS = {
+    "wow-wotlk": "wow-server-playerbots",
+    "wow-tbc": "wow-tbc-server",
+    "wow-vanilla": "wow-vanilla-server",
+    "wow-tortoise": "tortoise-wow-server",
+    "wow-centurion": "wow-centurion-server",
+}
+"""The default folder names before `yulon-<game>` (T195 C30), for "Use existing…" only.
+
+Only new installs take the new name. A server installed under the old one stays
+there, and "Use existing…" still opens its picker in that folder when it is the
+one that exists.
+"""
+
+RECOMMENDED = "wow-wotlk"
+"""The one tile marked "Recommended" (T195 C23): where a first-time player should start."""
+
+WELCOME = (
+    "Yu'lon downloads and builds the server for you. Nothing changes on this "
+    "computer until you press Install."
+)
+"""The line under the Catalog heading (T195 C23)."""
+
 
 class CatalogView(QWidget):
     """One tile per catalog entry; Install streams the Phase 3a installer into `log_panel`."""
@@ -365,15 +391,22 @@ class CatalogView(QWidget):
         self._prompter: InputPrompter | None = None
 
         header_row = QHBoxLayout()
-        header_label = QLabel("Select a Server Emulator", self)
+        header_label = QLabel("Choose a game to install", self)
         header_label.setObjectName("section-title")
         header_row.addWidget(header_label)
         header_row.addStretch(1)
 
-        self.toggle_console_button = QPushButton("▼ Hide Console", self)
+        # Hidden until the window shows the install log for the first time
+        # (`main.build_catalog_tab`): before any install there is no log to show.
+        self.toggle_console_button = QPushButton("▼ Hide install log", self)
         self.toggle_console_button.setObjectName("toggle-console-btn")
         self.toggle_console_button.setIcon(dadcraft_icon("console", COLOR_TEXT_GOLD, 14))
+        self.toggle_console_button.setVisible(False)
         header_row.addWidget(self.toggle_console_button)
+
+        welcome = QLabel(WELCOME, self)
+        welcome.setObjectName("catalog-welcome")
+        welcome.setWordWrap(True)
 
         grid = QGridLayout()
         grid.setSpacing(12)
@@ -385,10 +418,16 @@ class CatalogView(QWidget):
         # enough for its buttons, and lets the grid grow downward, where the
         # vertical scrollbar belongs.
         columns = 2
+        # Top-aligned, with the spare height in an empty row under the last
+        # one: a tile is as tall as its own text at any width, never stretched
+        # to its row neighbour or to the shelf (T195 C24).
         for index, entry in enumerate(catalog.games):
-            grid.addWidget(self._tile(entry), index // columns, index % columns)
+            grid.addWidget(
+                self._tile(entry), index // columns, index % columns, Qt.AlignmentFlag.AlignTop
+            )
         for col in range(columns):
             grid.setColumnStretch(col, 1)
+        grid.setRowStretch((len(catalog.games) + columns - 1) // columns, 1)
 
         inner = QWidget()
         inner.setLayout(grid)
@@ -401,6 +440,7 @@ class CatalogView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addLayout(header_row)
+        layout.addWidget(welcome)
         layout.addWidget(scroll, 1)
         self._log.run_finished.connect(self._on_run_finished)
 
@@ -441,6 +481,12 @@ class CatalogView(QWidget):
         frame.customContextMenuRequested.connect(
             lambda pos, e=entry, f=frame: self._show_tile_context_menu(pos, e, f)
         )
+        # As tall as its own text (T195 C24). The card fixes itself at 370 px,
+        # which made a one-line description a tall, mostly empty tile.
+        frame.setMinimumHeight(0)
+        frame.setMaximumHeight(QWIDGETSIZE_MAX)
+        # The emulator is for the curious, so it is on hover (T195 C23).
+        frame.setToolTip(f"Server software: {entry.emulator.name}")
         box = QVBoxLayout(frame)
         box.setSpacing(6)
         box.setContentsMargins(14, 14, 14, 14)
@@ -473,7 +519,8 @@ class CatalogView(QWidget):
         desc_scroll.setFrameShape(QFrame.Shape.NoFrame)
         desc_label = self._tile_text(entry.description, desc_scroll, role="tile-desc")
         desc_scroll.setWidget(desc_label)
-        box.addWidget(desc_scroll, 1)
+        # No stretch: a one-line description made a ~370 px tile (T195 C24).
+        box.addWidget(desc_scroll)
 
         meta_box = QHBoxLayout()
         meta_box.setSpacing(6)
@@ -484,7 +531,8 @@ class CatalogView(QWidget):
                 role="tile-meta",
             )
         )
-        meta_box.addWidget(self._tile_text(f"{entry.emulator.name}", frame, role="tile-meta"))
+        if entry.id == RECOMMENDED:
+            meta_box.addWidget(self._tile_text("Recommended", frame, role="tile-meta"))
         meta_box.addStretch(1)
         box.addLayout(meta_box)
 
@@ -665,10 +713,12 @@ class CatalogView(QWidget):
         WSL (2026-08-26): the rule existed and simply was not wired to the
         button they pressed.
         """
+        start = self._home / entry.install.default_server_dir
+        former = FORMER_DEFAULT_DIRS.get(entry.id)
+        if not start.is_dir() and former is not None and (self._home / former).is_dir():
+            start = self._home / former
         server_dir = self._pick_dir(
-            self,
-            f"Select the folder where {entry.name} is installed",
-            self._home / entry.install.default_server_dir,
+            self, f"Select the folder where {entry.name} is installed", start
         )
         if server_dir is None:
             return False

@@ -1275,6 +1275,35 @@ def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
     )
 
 
+def _shown_step(panel: LogPanel) -> str:
+    """What the strip's step field DRAWS (its tooltip carries the whole of it)."""
+    from PySide6.QtWidgets import QLabel
+
+    (label,) = [w for w in panel.findChildren(QLabel) if w.toolTip() == panel.step_text()]
+    return label.text()
+
+
+def test_a_wide_strip_shares_the_row_instead_of_capping_the_step(qapp: object) -> None:
+    """C31 (T195): at 1920 the step was cut at 200 px with half the row empty.
+
+    Below 1280 the caps stay, so the status field keeps the room its refusals
+    need on a narrow window. Mutation: keep the caps at every width and the
+    1920 step is elided.
+    """
+    panel = LogPanel()
+    panel.append("Step 7 of 9 (77%): Compiling the world server")
+    try:
+        panel.resize(1920, 300)
+        panel.show()
+        process_events(20)
+        assert _shown_step(panel) == "Step 7 of 9 · Compiling the world server"
+        panel.resize(900, 300)
+        process_events(20)
+        assert _shown_step(panel).endswith("…"), _shown_step(panel)
+    finally:
+        panel.hide()
+
+
 # -- Stop must not destroy a cancellable source mid-cleanup (T64 round 2) -----
 
 

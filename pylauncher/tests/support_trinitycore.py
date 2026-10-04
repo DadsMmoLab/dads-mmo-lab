@@ -312,7 +312,7 @@ def centurion_like(
         },
         "must_not_listen": [3443],
     }
-    entry["install"]["default_server_dir"] = "wow-centurion-server"
+    entry["install"]["default_server_dir"] = "yulon-centurion"
     entry["install"]["password"] = {"mode": "generated", "file": ".db_password", "prefix": "tc-"}
     entry["install"]["native"] = {
         "family": "trinitycore",
