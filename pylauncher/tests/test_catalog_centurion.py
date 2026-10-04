@@ -30,6 +30,7 @@ from tests.support_trinitycore import centurion_like
 from yulon import client_exe
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, ClientPack, load_catalog
+from yulon.catalog.families import conf as conf_files
 
 ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
@@ -130,6 +131,42 @@ def test_the_world_conf_keeps_the_updater_off_and_plays_like_the_live_realm() ->
     assert keys["Centurion.Bots.SkipClientPackets"] == "1"
     assert keys["Centurion.Bots.GridActivationRange"] == "90"
     assert keys["Centurion.Bounty.Enable"] == "1"
+
+
+def test_the_freeze_detector_waits_out_the_first_bot_rebalance() -> None:
+    """T205: the .dist's `MaxCoreStuckTime = 60` (worldserver.conf.dist:459-464 at
+    5e732762) killed fresh boots while the world thread built the first 150 bots; the
+    one boot that lived spent 59.1 s in that step. 300 s, not 0: 0 switches the detector
+    off (Main.cpp:438), and a realm that really hangs would then never come back."""
+    keys = TC.conf.files["worldserver.conf"].keys
+    assert keys["MaxCoreStuckTime"] == "300"
+
+
+def _centurion_etc(tmp_path: Path, world_conf: str) -> Path:
+    """An `etc/` with Centurion's three table files, the world one as given."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "worldserver.conf").write_text(world_conf, encoding="utf-8")
+    (etc / "authserver.conf").write_text('LogsDir = ""\n', encoding="utf-8")
+    (etc / "playerbots.conf").write_text("Playerbot.Enable = 0\n", encoding="utf-8")
+    return etc
+
+
+def test_install_and_install_again_write_the_freeze_detectors_wait(tmp_path: Path) -> None:
+    """A first install patches the .dist's 60; Install again over a conf an earlier
+    install wrote with 60 rewrites it too, because the conf stage patches every
+    table key on every press."""
+    tokens = {**composegen.entry_tokens(ENTRY), "DB_PASSWORD": "tc-secret", "WORLD_PORT": "8085"}
+    etc = _centurion_etc(tmp_path, "[worldserver]\nMaxCoreStuckTime = 60\n")
+    conf_files.apply_table(TC.conf, etc, tokens)
+    world = (etc / "worldserver.conf").read_text(encoding="utf-8")
+    assert "\nMaxCoreStuckTime = 300\n" in world
+    assert "MaxCoreStuckTime = 60" not in world
+    (etc / "worldserver.conf").write_text(
+        world.replace("MaxCoreStuckTime = 300", "MaxCoreStuckTime = 60"), encoding="utf-8"
+    )
+    assert conf_files.apply_table(TC.conf, etc, tokens) == (etc / "worldserver.conf",)
+    assert "\nMaxCoreStuckTime = 300\n" in (etc / "worldserver.conf").read_text(encoding="utf-8")
 
 
 def test_the_bots_conf_is_the_live_realms_over_the_dist() -> None:

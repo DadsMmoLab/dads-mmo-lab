@@ -1547,7 +1547,8 @@
                     "Centurion.Tournament.Enable": "1",
                     "Centurion.Bounty.Enable": "1",
                     "Centurion.Bots.SkipClientPackets": "1",
-                    "Centurion.Bots.GridActivationRange": "90"
+                    "Centurion.Bots.GridActivationRange": "90",
+                    "MaxCoreStuckTime": "300"
                   }
                 },
                 "authserver.conf": {

@@ -1410,6 +1410,7 @@ def test_the_changelog_line_for_this_fix_names_its_ticket() -> None:
     """The T204 bullet ends with its ticket, as the bullets around it do."""
     changelog = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
     lines = changelog.read_text(encoding="utf-8").splitlines()
-    bullet = [line for line in lines if line.startswith("- A fresh Centurion server no longer")]
+    start = "- A fresh Centurion server no longer restarts"
+    bullet = [line for line in lines if line.startswith(start)]
     assert len(bullet) == 1, bullet
     assert bullet[0].endswith("(T204)"), bullet[0][-80:]
