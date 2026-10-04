@@ -11388,12 +11388,20 @@ class ControllerView(QWidget):
         first read after an action can legitimately show the old state; a
         second and a third cost nothing and cover a machine slower than the one
         this was measured on.
+
+        T213: a self-re-arming timer like the Modules version walk, with the
+        same two guards. A tab removed between two reads (`shutdown()`, then
+        `deleteLater()`) ends the sequence here, and the timer names `self` as
+        its context object so a read queued before the delete is dropped by
+        Qt instead of clearing a deleted list.
         """
+        if getattr(self, "_closed", False):
+            return
         self.refresh_characters()
         if self._character_rows() != before or attempt >= _ROW_SETTLE_TRIES:
             return
         QTimer.singleShot(
-            _ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(before, attempt + 1)
+            _ROW_SETTLE_MS, self, lambda: self._refresh_until_it_changes(before, attempt + 1)
         )
 
     def _character_rows(self) -> tuple[str, ...]:
@@ -11463,7 +11471,7 @@ class ControllerView(QWidget):
             # done -- "You change the level of Aevret to 60" above a row still
             # reading 55, which reads as the action having failed.
             rows = self._character_rows()
-            QTimer.singleShot(_ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(rows))
+            QTimer.singleShot(_ROW_SETTLE_MS, self, lambda: self._refresh_until_it_changes(rows))
 
     @Slot()
     def teleport_character(self) -> None:
@@ -13998,7 +14006,7 @@ class ControllerView(QWidget):
         if self._filling_versions or self.services.module_version is None:
             return
         self._filling_versions = True
-        QTimer.singleShot(0, self._fill_next_version)
+        QTimer.singleShot(0, self, self._fill_next_version)
 
     @Slot()
     def _fill_next_version(self) -> None:
@@ -14009,7 +14017,17 @@ class ControllerView(QWidget):
         `.git`, a git that refused and a git that is not there), so there is
         nothing to catch here and nothing that can turn a reload into a
         failure.
+
+        T213: a closed tab ends the walk here. `drop_controller()` in main.py
+        runs `shutdown()` and then `deleteLater()`, and a tick already queued
+        used to come back after both and call `set_version` on a deleted
+        label -- a `RuntimeError` traceback inside a Qt slot. The re-arm
+        names `self` as the timer's context object as well, so a tick queued
+        before the delete is dropped by Qt rather than delivered.
         """
+        if getattr(self, "_closed", False):
+            self._filling_versions = False
+            return
         if self._waits_for_the_distro("modules", self.reload_modules):
             # Stopped mid-walk: the reload that runs once it is up walks again.
             self._filling_versions = False
@@ -14022,7 +14040,7 @@ class ControllerView(QWidget):
             self.modules_panel.set_version(
                 row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
             )
-            QTimer.singleShot(0, self._fill_next_version)
+            QTimer.singleShot(0, self, self._fill_next_version)
             return
         self._filling_versions = False
 

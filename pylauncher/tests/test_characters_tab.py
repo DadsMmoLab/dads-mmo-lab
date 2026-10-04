@@ -387,6 +387,53 @@ def test_the_list_refresh_after_an_action_is_bounded_rather_than_a_single_guess(
     assert view.character_list.count() == 2, "a late older refresh emptied the list"
 
 
+@pytest.mark.parametrize(
+    ("shut_down", "delete"),
+    [(True, True), (False, True), (True, False)],
+    ids=["shutdown-then-delete", "delete-only", "shutdown-only"],
+)
+def test_the_re_reads_after_an_action_stop_when_the_tab_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shut_down: bool, delete: bool
+) -> None:
+    """T213's sibling: the bounded re-read after an action re-arms itself too.
+
+    `_refresh_until_it_changes` schedules up to `_ROW_SETTLE_TRIES` reads, one
+    every `_ROW_SETTLE_MS`, through a lambda on `self` with no context object
+    and no `_closed` check. A server removed in that window (main.py's
+    `drop_controller`: `shutdown()`, then `deleteLater()`) got a read anyway,
+    whose answer then cleared a deleted list: `RuntimeError` in a Qt slot.
+
+    Mutation: drop the context object from the two arms and the delete-only
+    case raises; drop the `_closed` check and the shutdown-only case reads the
+    list again after `shutdown()`.
+    """
+    import sys
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from tests.conftest import process_events
+
+    hooked: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda _t, value, _tb: hooked.append(value))
+    monkeypatch.setattr(controller_view_module, "_ROW_SETTLE_MS", 1)
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+
+    view.revive_character()  # schedules the re-reads; the list never changes here
+    play.calls.clear()
+    if shut_down:
+        view.shutdown()
+    if delete:
+        view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    process_events(100)
+
+    assert hooked == [], f"a re-read reached a deleted tab: {hooked!r}"
+    assert [name for name, _ in play.calls if name == "listing"] == [], play.calls
+
+
 def test_the_character_list_is_written_on_the_gui_thread_by_a_real_threaded_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
