@@ -2522,7 +2522,7 @@ def write_state(server_dir: Path, state: InstallState) -> None:
 
 
 BUILD_CACHE_FILE = ".yulon-build-cache.json"
-"""How much build cache Docker held as this install's build last started (T203).
+"""How much build cache Docker held as this install's unfinished build first started (T203).
 
 Preflight credits a resumed build with the cache it ADDED since, never with the
 whole machine's: Yu'lon never prunes, so the cache on a machine with two servers
@@ -2532,33 +2532,81 @@ the floor on space the first server's database volume needs (review,
 writes the record from its own copy at every stage end and on failure
 (`_run_one()`, `_record_error()`), so a key a stage wrote mid-way would be gone
 by the next write.
+
+`finished` is what makes the figure the FIRST attempt's. A build that starts
+while the file says an earlier one never finished keeps the lower of the two
+figures (`build_cache_baseline_for()`): writing the new one over it credited a
+second failed build with nothing, because its starting figure already held the
+first one's compile (review of PR 294, 2026-10-04). What starts a figure anew:
+a build that finished (`finished: true`), and an uninstall, which deletes the
+folder. A fresh install never meets an earlier figure: with no install record
+the guard lets through only an empty folder -- this file is deliberately NOT
+one of `OUR_OWN_FILES`, so a folder holding it is not empty -- or a git
+checkout, which the clone stage then refuses.
 """
 
 
-def write_build_cache_baseline(server_dir: Path, cache_bytes: int | None) -> None:
+BUILD_CACHE_ASKING = (
+    "Asking Docker how much build cache it already holds, so that if this build fails, the "
+    "next press is not asked again for the space it took. This can take up to two minutes."
+)
+"""Said before `stage_build` asks (T203): `buildx du`, then `system df`, get 60 s each."""
+
+
+def write_build_cache_baseline(
+    server_dir: Path, cache_bytes: int | None, *, finished: bool = False
+) -> None:
     """Record the build cache this build starts on; `None` (Docker would not say) credits nothing.
 
-    Written over on every build start. Best-effort: a file that cannot be
-    written is logged, and a missing or torn one credits nothing.
+    `finished=True` once the build has ended well, so the next build starts its
+    own figure. Best-effort: a file that cannot be written is logged, and a
+    missing or torn one credits nothing.
     """
     try:
         (server_dir / BUILD_CACHE_FILE).write_text(
-            json.dumps({"baseline_bytes": cache_bytes}) + "\n", encoding="utf-8"
+            json.dumps({"baseline_bytes": cache_bytes, "finished": finished}) + "\n",
+            encoding="utf-8",
         )
     except OSError as exc:
         logger.warning(f"could not record the build cache this build starts on: {exc}")
 
 
-def read_build_cache_baseline(server_dir: Path) -> int | None:
-    """The recorded starting figure, or `None` for a missing, unreadable or garbled file."""
+def _build_cache_record(server_dir: Path) -> dict[str, object] | None:
     try:
         parsed = json.loads((server_dir / BUILD_CACHE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    value = parsed.get("baseline_bytes") if isinstance(parsed, dict) else None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def read_build_cache_baseline(server_dir: Path) -> int | None:
+    """The recorded starting figure, or `None` for a missing, unreadable or garbled file."""
+    record = _build_cache_record(server_dir)
+    value = record.get("baseline_bytes") if record is not None else None
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def build_cache_baseline_for(server_dir: Path, measured: int | None) -> int | None:
+    """The figure a build starting now on `measured` bytes of cache records (`BUILD_CACHE_FILE`).
+
+    After a build that did not finish, the lower of its figure and `measured`:
+    the cache has only grown by what that build compiled, which this one reuses,
+    or it was pruned, and then only what is there now can be reused. `None` on
+    either side is "not known", so the other figure stands.
+    """
+    record = _build_cache_record(server_dir)
+    earlier = (
+        read_build_cache_baseline(server_dir)
+        if record is not None and record.get("finished") is not True
+        else None
+    )
+    if earlier is None:
+        return measured
+    if measured is None:
+        return earlier
+    return min(earlier, measured)
 
 
 @dataclass(frozen=True)
@@ -9082,8 +9130,11 @@ class StagedInstaller:
                     "Docker would not say whether this install is built, so it is being rebuilt."
                 )
         # T203: what the cache holds as this build starts, so the next press's
-        # preflight can credit only what THIS build added to it.
-        write_build_cache_baseline(ctx.server_dir, self._seams.build_cache_bytes())
+        # preflight can credit only what THIS build added to it -- or, after an
+        # attempt that did not finish, what that one added (`BUILD_CACHE_FILE`).
+        yield BUILD_CACHE_ASKING
+        baseline = build_cache_baseline_for(ctx.server_dir, self._seams.build_cache_bytes())
+        write_build_cache_baseline(ctx.server_dir, baseline)
         # Two sentences for one action, because "on a first install" is the
         # wrong half of the truth for the press that is deliberately rebuilding
         # a finished one, and this feature is about not telling a user something
@@ -9110,6 +9161,7 @@ class StagedInstaller:
             ),
         )
         self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE, from_build=True)
+        write_build_cache_baseline(ctx.server_dir, baseline, finished=True)
         yield "The build finished."
 
     def stage_start_db(self, ctx: StageContext) -> Iterator[str]:

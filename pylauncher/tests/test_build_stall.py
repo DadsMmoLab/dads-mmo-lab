@@ -98,15 +98,24 @@ def test_the_quiet_thresholds_are_generous_against_what_was_measured() -> None:
     assert native.BUILD_STALLED_SECONDS == 30 * 60
 
 
-def test_a_35_minute_silent_build_gets_both_notices_and_is_never_ended(
+def _first(said: list[str], text: str) -> int:
+    """Where the first line holding `text` is; relayed tool lines carry a prefix of their own."""
+    return next(n for n, line in enumerate(said) if text in line)
+
+
+def test_a_35_minute_silent_build_gets_both_notices_and_runs_to_its_own_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Scaled: notice at 0.2 s, stalled at 0.5 s, silence for 0.7 s (35 of 30 minutes)."""
+    """Scaled: notice at 0.2 s, stalled at 0.5 s, silence for 0.7 s (35 of 30 minutes).
+
+    The build's line after the silence still arrives, after both notices, and
+    the build's own ending follows it: being told did not end or swallow anything.
+    """
     monkeypatch.setattr(native, "BUILD_QUIET_NOTICE_SECONDS", 0.2)
     monkeypatch.setattr(native, "BUILD_STALLED_SECONDS", 0.5)
-    ended: list[int] = []
-    monkeypatch.setattr(native.runner, "end_streams_started_on", ended.append)
     cancel = threading.Event()
+    after = "#13 [stage-1 3/5] COPY --from=builder /opt/trinitycore /opt/trinitycore"
+    returned: list[bool] = []
 
     def silent(
         server_dir: Path, files: object, *, sink: object = None, cancel: object = None
@@ -115,20 +124,53 @@ def test_a_35_minute_silent_build_gets_both_notices_and_is_never_ended(
             sink("#12 DONE 2113.4s")
         time.sleep(0.7)
         if callable(sink):
-            sink("#13 [stage-1 3/5] COPY --from=builder /opt/trinitycore /opt/trinitycore")
+            sink(after)
+        returned.append(True)
         return docker.AttachedRun(0, ("built",))
 
     rec = Recorder(images=False)
     said = list(
         engine(rec, build=silent).run(InstallOptions(server_dir=tmp_path / "wow"), cancel=cancel)
     )
-    assert ended == [], "nothing was terminated"
+    assert returned == [True], "the build call ran to its own return"
     assert not cancel.is_set(), "the user's Stop was not pulled on their behalf"
     quiet = [line for line in said if line == native.build_quiet_notice()]
     stalled = [line for line in said if line == native.build_stalled_notice()]
     assert len(quiet) == 1 and len(stalled) == 1, said
-    assert said.index(quiet[0]) < said.index(stalled[0])
-    assert "The build finished." in said, "the build ran to its own end"
+    order = [
+        _first(said, "#12 DONE 2113.4s"),
+        said.index(quiet[0]),
+        said.index(stalled[0]),
+        _first(said, after),
+        said.index("The build finished."),
+    ]
+    assert order == sorted(order), (order, said)
+
+
+def test_the_notices_are_said_again_for_a_second_silence_after_output_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each unbroken silence is its own: a line re-arms the watch, so a later quiet is told too."""
+    monkeypatch.setattr(native, "BUILD_QUIET_NOTICE_SECONDS", 0.2)
+    monkeypatch.setattr(native, "BUILD_STALLED_SECONDS", 60)
+
+    def twice_quiet(
+        server_dir: Path, files: object, *, sink: object = None, cancel: object = None
+    ) -> docker.AttachedRun:
+        for step in ("#11 DONE 1.0s", "#12 DONE 2.0s", "#13 DONE 3.0s"):
+            if callable(sink):
+                sink(step)
+            if step != "#13 DONE 3.0s":
+                time.sleep(0.45)
+        return docker.AttachedRun(0, ("built",))
+
+    rec = Recorder(images=False)
+    said = install(rec, tmp_path / "wow", build=twice_quiet)
+    notices = [n for n, line in enumerate(said) if line == native.build_quiet_notice()]
+    assert len(notices) == 2, said
+    first, second = notices
+    assert _first(said, "#11 DONE") < first < _first(said, "#12 DONE") < second, said
+    assert second < _first(said, "#13 DONE"), said
 
 
 def test_the_stalled_notice_says_how_to_check_and_what_to_do_and_stops_nothing() -> None:

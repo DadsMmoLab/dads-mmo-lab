@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_native import ENTRY, TBC, Recorder
+from tests.support_native import ENTRY, TBC, Recorder, install
 from yulon import docker, platform, resources
 from yulon.catalog import native, preflight
 from yulon.catalog.families.cmangos import CmangosInstaller
@@ -471,24 +471,161 @@ def test_the_build_stage_records_the_baseline_as_it_starts(tmp_path: Path) -> No
     assert "Docker counts it as 11.16 GB" in rows[0], rows[0]
 
 
-def test_a_build_that_could_not_measure_the_cache_leaves_a_baseline_that_credits_nothing(
-    tmp_path: Path,
-) -> None:
-    """An older baseline must not survive a build that started on an unknown cache."""
-    rec = Recorder(images=False, build_cache=None)
-    installer = _engine(rec, 25)
-    server_dir = tmp_path / "tbc-server"
-    server_dir.mkdir()
-    _lay_baseline(server_dir, 0)
-    ctx = native.StageContext(
+def _build_ctx(installer: native.StagedInstaller, server_dir: Path) -> native.StageContext:
+    return native.StageContext(
         server_dir=server_dir,
         client_dir=None,
         state=native.InstallState(TBC.id, installer._install_id(server_dir)),
         cancel=None,
         secrets=native.Secrets("unused"),
     )
-    list(installer.stage_build(ctx))
+
+
+EOF_RUN = docker.AttachedRun(
+    1,
+    (
+        "failed to receive status: rpc error: code = "
+        "Unavailable desc = error reading from server: EOF",
+    ),
+)
+"""How A7's and A10's builds ended."""
+
+
+def test_the_build_says_it_is_asking_docker_about_its_cache_before_it_asks(
+    tmp_path: Path,
+) -> None:
+    """Asking can take two minutes (`buildx du`, then `system df`): it is said first."""
+    said: list[str] = []
+    seen_when_asked: list[str] = []
+
+    def ask() -> int | None:
+        seen_when_asked.extend(said)
+        return 0
+
+    rec = Recorder(images=False)
+    installer = CmangosInstaller(
+        TBC,
+        installers_root=resources.installers_dir(),
+        import_probe=rec.probe,
+        reset_unfinished=rec.reset,
+        seams=rec.seams(build_cache_bytes=ask),
+    )
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    for line in installer.stage_build(_build_ctx(installer, server_dir)):
+        said.append(line)
+    assert seen_when_asked, said
+    assert seen_when_asked[-1] == native.BUILD_CACHE_ASKING, seen_when_asked
+    assert said.count(native.BUILD_CACHE_ASKING) == 1
+
+
+def test_a_second_failed_build_keeps_the_credit_for_the_cache_the_first_one_added(
+    tmp_path: Path,
+) -> None:
+    """Two failed builds in a row, then a press: the first build's 11.16 GB is still credited.
+
+    Review of PR 294 (2026-10-04): the second build used to record ITS starting
+    cache -- the first build's 12.91 GB included -- as the baseline, so after it
+    failed too the third press credited 12.91 - 12.91 = 0 and was refused "30 GB
+    free, and the install needs 40 GB", with this install's cache still on disk.
+    """
+    rec = Recorder(images=False, build_cache=1_754_000_000, build_result=EOF_RUN)
+    installer = _engine(rec, 30)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = A7_CACHE  # what the first build compiled is in the cache now
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "Docker counts it as 11.16 GB" in rows[0], rows[0]
+
+
+def test_a_cache_pruned_between_two_failed_builds_lowers_the_kept_baseline(
+    tmp_path: Path,
+) -> None:
+    """The lower figure wins: after a prune, only what is there now can be this build's to reuse."""
+    rec = Recorder(images=False, build_cache=10 * GIB, build_result=EOF_RUN)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = 2 * GIB
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    assert native.read_build_cache_baseline(server_dir) == 2 * GIB
+
+
+def test_an_unmeasurable_second_start_keeps_the_first_build_s_baseline(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=3 * GIB, build_result=EOF_RUN)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = None
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    assert native.read_build_cache_baseline(server_dir) == 3 * GIB
+
+
+def test_a_finished_build_lets_the_next_build_start_from_the_cache_it_finds(
+    tmp_path: Path,
+) -> None:
+    """A finished build's cache is not the NEXT build's growth: that one starts a baseline anew."""
+    rec = Recorder(images=False, build_cache=1 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    assert "The build finished." in list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = 13 * GIB
+    rec.build_result = EOF_RUN
+    with pytest.raises(InstallerError):
+        list(installer.stage_build(_build_ctx(installer, server_dir)))
+    assert native.read_build_cache_baseline(server_dir) == 13 * GIB
+
+
+def test_a_build_that_could_not_measure_the_cache_leaves_a_baseline_that_credits_nothing(
+    tmp_path: Path,
+) -> None:
+    """A finished build's baseline must not survive a build that started on an unknown cache."""
+    rec = Recorder(images=False, build_cache=0)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    list(installer.stage_build(_build_ctx(installer, server_dir)))
+    rec.build_cache = None
+    list(installer.stage_build(_build_ctx(installer, server_dir)))
     assert native.read_build_cache_baseline(server_dir) is None
+
+
+@pytest.mark.parametrize("checkout", [False, True], ids=["plain-folder", "git-checkout"])
+def test_a_baseline_left_in_a_folder_with_no_install_record_never_reaches_a_build(
+    checkout: bool, tmp_path: Path
+) -> None:
+    """Why a fresh install needs no reset of its own: it cannot inherit an earlier figure.
+
+    A run with no install record is a fresh install, and the only folders that
+    lets through are empty ones (a leftover `BUILD_CACHE_FILE` is not one of
+    `OUR_OWN_FILES`, so the guard refuses it) and git checkouts (the clone stage
+    refuses one with no record). Either way the build never starts on it.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    if checkout:
+        (server_dir / ".git").mkdir()
+    _lay_baseline(server_dir, 0)  # an unfinished build of an install whose record is gone
+    rec = Recorder(images=False, build_cache=5 * GIB)
+    rec.remotes[server_dir] = ENTRY.emulator.sources[0].url
+    with pytest.raises(InstallerError):
+        install(rec, server_dir)
+    assert "build" not in rec.calls, rec.calls
 
 
 @pytest.mark.parametrize("cache", [None, 0], ids=["could-not-ask", "no-cache"])
