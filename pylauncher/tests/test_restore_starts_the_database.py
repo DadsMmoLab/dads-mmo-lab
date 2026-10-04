@@ -1088,6 +1088,9 @@ def test_a_restore_cannot_begin_between_the_bot_rebuild_s_stop_and_start(tmp_pat
     class Lifecycle:
         server_dir = tmp_path
 
+        def refuse_start(self) -> None:
+            """No start is refused here: the hold is what is under test (T197)."""
+
         def stop(self) -> bool:
             return True
 
@@ -1104,6 +1107,9 @@ def test_a_held_server_refuses_a_bot_restart_as_a_failed_stop(tmp_path: Path) ->
 
     class Lifecycle:
         server_dir = tmp_path
+
+        def refuse_start(self) -> None:
+            """No start is refused here: the hold is what is under test (T197)."""
 
         def stop(self) -> bool:
             raise AssertionError("stopped a held server")

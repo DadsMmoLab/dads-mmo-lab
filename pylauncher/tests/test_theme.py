@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
@@ -235,6 +236,23 @@ def test_the_generated_sheet_contains_no_negation_selector() -> None:
         assert "not(" not in qss
 
 
+@pytest.fixture
+def _application_theme_is_restored(qapp: QApplication) -> Iterator[QApplication]:
+    """The app's style sheet and palette, put back after a test that themes the app (T212).
+
+    `apply_dadcraft_theme(qapp)` changes the one `QApplication` every later test
+    shares. Left in place, the theme's touch-target floor grew the fixed-size
+    buttons of `test_gamepad_keyboard.py`'s `placed` fixture from 60x20 to
+    98x50, and four navigation tests failed whenever this file ran first.
+    `conftest.py`'s `_no_test_leaves_the_application_restyled` fails any test
+    that forgets this.
+    """
+    sheet, palette = qapp.styleSheet(), QPalette(qapp.palette())
+    yield qapp
+    qapp.setStyleSheet(sheet)
+    qapp.setPalette(palette)
+
+
 LIVE_WIDGETS_A_RESTYLE_MAY_REPOLISH = 2000
 """How many live widgets the app-wide restyles below may find. T109.
 
@@ -258,7 +276,9 @@ def test_no_earlier_module_left_widgets_for_the_restyle_to_repolish(qapp: QAppli
     )
 
 
-def test_qt_actually_parses_the_generated_stylesheet(qapp: QApplication) -> None:
+def test_qt_actually_parses_the_generated_stylesheet(
+    _application_theme_is_restored: QApplication,
+) -> None:
     # The only test that proves the sheet is VALID, not merely present. Qt emits
     # `Could not parse application stylesheet` (via qWarning) when the parser
     # rejects input; this installs a message handler, forces widget polish, and
@@ -268,6 +288,7 @@ def test_qt_actually_parses_the_generated_stylesheet(qapp: QApplication) -> None
 
     from yulon.ui.theme import apply_dadcraft_theme
 
+    qapp = _application_theme_is_restored
     messages: list[str] = []
     previous = qInstallMessageHandler(lambda _t, _c, msg: messages.append(msg))
     try:
@@ -300,7 +321,8 @@ def test_apply_dadcraft_theme_on_widget(qapp: QApplication) -> None:
     assert widget.styleSheet() == DADCRAFT_THEME_QSS
 
 
-def test_apply_dadcraft_theme_on_qapp(qapp: QApplication) -> None:
+def test_apply_dadcraft_theme_on_qapp(_application_theme_is_restored: QApplication) -> None:
+    qapp = _application_theme_is_restored
     apply_dadcraft_theme(qapp)
     assert qapp.styleSheet() == DADCRAFT_THEME_QSS
 

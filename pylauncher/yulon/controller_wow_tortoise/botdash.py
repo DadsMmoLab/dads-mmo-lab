@@ -56,7 +56,7 @@ from yulon.catalog import bot_dashboard as files
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.native import LatestRoute, stop_abandoned_worker
-from yulon.controller import Controller
+from yulon.controller import Controller, StartRefused
 from yulon.controller_wow_tortoise import botpool
 from yulon.log import get_logger
 from yulon.ui import lines
@@ -445,6 +445,13 @@ class Dashboard:
     def _restart(self) -> Iterator[str]:
         try:
             botpool.restart_world(self.controller)
+        except StartRefused as exc:
+            # T197: Restart is refused too; the refusal names its own repair.
+            yield (
+                f"{botpool.RESTART_REFUSED} {exc} The bots module reads its settings at the "
+                "next start."
+            )
+            return
         except Exception as exc:  # noqa: BLE001 - the switch is done; this is one press left
             logger.warning(f"the restart after the dashboard switch failed: {exc}")
             yield (
