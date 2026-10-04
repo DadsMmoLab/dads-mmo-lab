@@ -4412,7 +4412,8 @@ MAINTENANCE_FORGET_FAILED = (
 DASHBOARD_UNREADABLE = "Yu'lon could not read the dashboard's files; the line above says why."
 DASHBOARD_LAN_FIXED = "The network choice is fixed while the dashboard is on; switch it off first."
 DASHBOARD_OFF = "Switch the dashboard on first."
-DASHBOARD_OWED = "Rebuild the dashboard first; the line above says why."
+DASHBOARD_OWED = f'Press "{tortoise_botdash.REBUILD_PRESS}" first; the line above says why.'
+"""Built from the press's own label, so a rename moves the sentence with it (T155 rule)."""
 DASHBOARD_NOTHING_OWED = "Nothing has changed that needs the dashboard rebuilt."
 
 

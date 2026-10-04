@@ -183,6 +183,12 @@ MODULE_SURFACE_AFTER_7_2 = {
     # upstream commit, which the update route remembers so the tab stops
     # offering it. An exception type, not machinery.
     "UpdateRefused",
+    # Added deliberately with T195's final fix (F1): where an install goes when
+    # nobody picked a folder, asked by the Catalog's suggestion and by the
+    # engine's own default alike, and the old default names it must not build a
+    # second server beside. A rule and its table, not machinery.
+    "FORMER_DEFAULT_DIRS",
+    "default_server_dir",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",
