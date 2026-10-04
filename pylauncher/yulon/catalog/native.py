@@ -2511,6 +2511,41 @@ def forget_parked_build(server_dir: Path) -> str:
     return ""
 
 
+REMOVE_KEPT_BUILD_LABEL = "Remove kept build…"
+"""The Server tab's press that removes a kept build now (T224, owner D3)."""
+
+REMOVE_KEPT_BUILD_QUESTION = (
+    "Remove the kept build? It frees the disk space it takes. The server you have now is not "
+    "touched, and Start never used the kept build. The next rebuild then compiles the server "
+    "instead of using it."
+)
+
+
+def parked_build_note(server_dir: Path) -> str | None:
+    """The Server tab's line while a build is kept (T224, D3), from the record alone; else None."""
+    record = read_parked_build(server_dir)
+    if record is None:
+        return None
+    return (
+        f"A finished build from {record.when()} is kept for the next rebuild. Start does not use "
+        f"it. A rebuild uses it if the server folder has not changed since, and removes it "
+        f"otherwise. {REMOVE_KEPT_BUILD_LABEL} removes it now."
+    )
+
+
+@dataclass(frozen=True)
+class KeptBuildRoute:
+    """The two halves of the Server tab's kept-build banner (T224, D3), wired for one install.
+
+    `check` reads only `PARKED_BUILD_FILE` and never raises: the note, or None.
+    `remove` lets the `-parked` names go and forgets the record, and returns the
+    sentence that says what it did.
+    """
+
+    check: Callable[[], str | None]
+    remove: Callable[[], str]
+
+
 def read_head_file(dest: Path) -> str | None:
     """The commit a checkout is on, read off `.git/HEAD` with no git run; None = cannot say.
 
@@ -6747,6 +6782,30 @@ class StagedInstaller:
         yield from self.after_ready(server_dir)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
+
+    def remove_kept_build(self, options: InstallOptions | None = None) -> str:
+        """Remove the kept build now: "Remove kept build…" on the Server tab (T224, D3).
+
+        Every `<ref>-parked` name still on the daemon is let go (`_let_go()`, whose
+        `-f` covers a stopped container), then the record is forgotten. A name Docker
+        keeps is named in the sentence; the next rebuild removes it before compiling,
+        as it does any kept name without a record. Returns the sentence; never raises
+        for Docker's refusals.
+        """
+        server_dir = self.server_dir(options or InstallOptions())
+        names = [ref + PARKED_TAG_SUFFIX for ref in self.image_refs_at(server_dir)]
+        present = [name for name in names if self._seams.image_id(name) is not None]
+        left = self._let_go(present)
+        forgot = forget_parked_build(server_dir)
+        said = (
+            "The kept build was removed."
+            if not left
+            else (
+                f"The kept build was removed except for {', '.join(left)}, which Docker would not "
+                f"remove (the log says why); the next rebuild removes them before it compiles."
+            )
+        )
+        return f"{said} {forgot[0].upper()}{forgot[1:]}." if forgot else said
 
     # ------------------------------------------------------- update to latest (T64)
 

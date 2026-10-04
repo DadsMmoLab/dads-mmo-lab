@@ -44,7 +44,7 @@ from tests.test_rebuild_waits_for_docker import SILENT_FOR_THE_WAIT, _Clock, _Pr
 from tests.test_stop_as_the_build_finishes import _StopAfterTagging
 from yulon import docker, server_build_presses
 from yulon.catalog import build_context, composegen, native
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 
 RECIPE = "apps/docker/Dockerfile"
 SOURCE = "src/server/game/World.cpp"
@@ -557,3 +557,72 @@ def test_start_restart_recreate_and_install_never_reach_a_kept_build(tmp_path: P
     assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
     assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
     assert native.read_parked_build(server_dir) is not None
+
+
+# -- D3 and the confirmation: what the player is shown -----------------------
+
+
+def test_the_confirmation_mentions_a_kept_build_with_its_date_only_when_recorded(
+    tmp_path: Path,
+) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    made = native.read_parked_build(server_dir)
+    assert made is not None
+    asked = rebuild_confirmation(ENTRY, server_dir)
+    assert f"A finished build from {made.when()} is kept from an earlier rebuild" in asked, asked
+    assert "uses it instead of compiling" in asked, asked
+    assert "it is removed first and the server is compiled as usual" in asked, asked
+    # A server inside WSL keeps none (D4), and its tab does not read the record.
+    assert "is kept from an earlier rebuild" not in rebuild_confirmation(
+        ENTRY, server_dir, kept_build=False
+    )
+    list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "is kept from an earlier rebuild" not in rebuild_confirmation(ENTRY, server_dir)
+
+
+def test_the_server_tab_note_reads_the_record_and_nothing_else(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    made = native.read_parked_build(server_dir)
+    assert made is not None
+    note = native.parked_build_note(server_dir)
+    assert note is not None and made.when() in note, note
+    assert "Start does not use it" in note and native.REMOVE_KEPT_BUILD_LABEL in note, note
+    (server_dir / native.PARKED_BUILD_FILE).write_text("{not json", encoding="utf-8")
+    assert native.parked_build_note(server_dir) is None
+
+
+def test_remove_kept_build_releases_the_names_and_forgets_the_record(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    said = engine(rec, **_seams_of(rec, daemon)).remove_kept_build(
+        InstallOptions(server_dir=server_dir)
+    )
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert "after" not in daemon.names.values(), daemon.names
+    assert native.read_parked_build(server_dir) is None
+    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert said.startswith("The kept build was removed"), said
+
+
+def test_remove_kept_build_says_which_names_docker_kept(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    stuck = _parked(server_dir)[0]
+
+    def remove_image(ref: str, force: bool = False) -> str:
+        if ref == stuck:
+            return "Error response from daemon: read-only file system"
+        return daemon.remove_image(ref, force)
+
+    said = engine(rec, **_seams_of(rec, daemon, remove_image=remove_image)).remove_kept_build(
+        InstallOptions(server_dir=server_dir)
+    )
+    assert stuck in said and "read-only" not in said, said
+    assert native.read_parked_build(server_dir) is None, "names it keeps are swept by a rebuild"
+
+
+def test_the_kept_build_route_is_offered_except_inside_wsl(tmp_path: Path) -> None:
+    from yulon import install_wiring
+
+    route = install_wiring.kept_build_for_app(ENTRY, tmp_path)
+    assert route is not None
+    assert route.check() is None, "no record, no note"
+    assert install_wiring.kept_build_for_app(ENTRY, tmp_path, wsl_distro="Ubuntu") is None

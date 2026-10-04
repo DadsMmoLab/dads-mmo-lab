@@ -52,12 +52,14 @@ from yulon.catalog.native import (
     ConfCheck,
     ConfRepairRoute,
     CorrectionRoute,
+    KeptBuildRoute,
     LatestRoute,
     RewrittenHistory,
     Seams,
     SourceVersion,
     StagedInstaller,
     correction_phases,
+    parked_build_note,
     read_state,
     return_to_pin_confirmation,
     rewritten_line,
@@ -667,6 +669,26 @@ def repair_compose_for_app(
     return ComposeRepairRoute(
         check=lambda: installer_for_app(entry).base_compose_check(options),
         repair=lambda: installer_for_app(entry).repair_base_compose(options),
+    )
+
+
+def kept_build_for_app(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> KeptBuildRoute | None:
+    """The Server tab's kept-build banner and "Remove kept build…" (T224, D3), or None.
+
+    Every native install, since every rebuild can keep its build; None for a
+    server inside a WSL distro, which keeps none in v1 (owner, D4) -- and whose
+    record would be read through `\\wsl.localhost`, starting a stopped distro
+    (T133). The check reads one file; the engine is built per press, for
+    `rebuild_for_app()`'s reason.
+    """
+    if wsl_distro is not None or entry.install.native is None:
+        return None
+    options = InstallOptions(server_dir=server_dir)
+    return KeptBuildRoute(
+        check=lambda: parked_build_note(server_dir),
+        remove=lambda: installer_for_app(entry).remove_kept_build(options),
     )
 
 
