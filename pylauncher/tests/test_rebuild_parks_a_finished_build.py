@@ -746,8 +746,8 @@ def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
 UPSTREAM_DOCKERIGNORE = (
     Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-7f12e89e" / "dockerignore"
 )
-"""The root `.dockerignore` of mod-playerbots/azerothcore-wotlk at 7f12e89ee5f467a50e62eba1d525eac7dc953d03
-(the catalog's pin for wow-wotlk, read 2026-10-05), byte for byte. WotLK renders none of
+"""The root `.dockerignore` of mod-playerbots/azerothcore-wotlk, byte for byte, at commit
+7f12e89ee5f467a50e62eba1d525eac7dc953d03 (the catalog's pin for wow-wotlk, read 2026-10-05). WotLK renders none of
 its own, so this is what Docker filters the server folder with."""
 
 
