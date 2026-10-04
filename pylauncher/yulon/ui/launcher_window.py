@@ -116,6 +116,38 @@ PASSWORD_NOTE = "The password is never stored: you type it in the game."
 SAVING = "Saving your choice…"
 STOPPED_BANNER = "Play starts the server first (about 1 minute)"
 STARTING_BANNER = "The server is starting…"
+STOPPING_BANNER = "The server is stopping…"
+PARTIAL_BANNER = "The server is partly up: PLAY starts the rest"
+UNKNOWN_BANNER = "Yu'lon cannot ask Docker about this server right now"
+STOPPED_REASON = "The server is stopped: PLAY starts it, waits for the realm, then starts the game."
+STOPPING_REASON = (
+    "The server is stopping. Once it has stopped, PLAY starts it again, waits for the "
+    "realm, then starts the game."
+)
+STARTING_REASON = "The server is starting. Once the realm is up, PLAY starts the game."
+RESTARTING_REASON = "The server is restarting. Once the realm is back up, PLAY starts the game."
+PARTIAL_REASON = (
+    "The server is partly up: PLAY starts the rest, waits for the realm, then starts the game."
+)
+UNKNOWN_REASON = (
+    "Yu'lon can't ask Docker about this server right now, so it cannot tell whether the "
+    "server is up."
+)
+"""The line under PLAY for each realm badge word but REALM ONLINE (T188).
+
+Pressed while a Stop, Start or Restart of the Server tab runs, PLAY refuses
+("busy with another action"), so the in-between words say when it works.
+A Start that PLAY asked for itself goes on to the game once it is done."""
+_REASONS = {
+    "stopping": STOPPING_REASON,
+    "starting": STARTING_REASON,
+    "importing": STARTING_REASON,
+    "working": STARTING_REASON,
+    "building": STARTING_REASON,
+    "restarting": RESTARTING_REASON,
+    "partial": PARTIAL_REASON,
+    "unknown": UNKNOWN_REASON,
+}
 VIEW_GONE = (
     "This server's tab was closed, so nothing can be started from here. Open the launcher "
     "again from the server."
@@ -1206,10 +1238,9 @@ class LauncherWindow(QWidget):
                 "Starts World of Warcraft from this server's ready-to-play client."
             )
         else:
-            self.play_reason_label.setText(
-                "The server is stopped: PLAY starts it, waits for the realm, then starts "
-                "the game."
-            )
+            # T188: "The server is stopped" was every other word's line too, under
+            # a banner saying STOPPING, STARTING or RESTARTING.
+            self.play_reason_label.setText(_REASONS.get(self.realm_badge.status, STOPPED_REASON))
 
     def _render_banner(self) -> None:
         status = self.realm_badge.status
@@ -1224,6 +1255,14 @@ class LauncherWindow(QWidget):
                 text = f"{bots} and {players} online"
                 if online.uptime is not None:
                     text += f" · {dashboard.uptime_text(online.uptime)}"
+        elif status == "stopping":
+            # T188 C5: the tab's Stop holds the badge here; "Play starts the
+            # server first" under a stop in progress was a promise to undo it.
+            text = STOPPING_BANNER
+        elif status == "partial":
+            text = PARTIAL_BANNER
+        elif status == "unknown":
+            text = UNKNOWN_BANNER
         elif status in ("starting", "importing", "working", "building", "restarting"):
             text = STARTING_BANNER
         else:

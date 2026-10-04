@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMainWindow, QTabWidget, QWidget
@@ -313,6 +314,66 @@ def test_dadcraft_realm_badge(qapp: QApplication) -> None:
     assert "RESTARTING" in badge._label.text()
     badge.set_status("stopped")
     assert "OFFLINE" in badge._label.text()
+
+
+@pytest.mark.parametrize(
+    ("status", "says"),
+    [("stopping", "STOPPING"), ("partial", "PARTLY UP"), ("unknown", "STATUS UNKNOWN")],
+)
+def test_the_realm_badge_names_stopping_and_partly_up(
+    qapp: QApplication, status: str, says: str
+) -> None:
+    """T188 C4/C5: both fell through to "REALM OFFLINE" while the realm was up."""
+    badge = DadcraftRealmBadge("running")
+    badge.set_status(status)
+    text = badge._label.text()
+    assert says in text, text
+    assert "OFFLINE" not in text and "STARTING" not in text, text
+
+
+def test_the_header_badge_follows_the_badge_it_is_given(qapp: QApplication) -> None:
+    """T188 C6: the header said REALM OFFLINE whatever the server was doing."""
+    header = DadcraftHeader("TEST REALM", "Subtitle")
+    first, second = DadcraftRealmBadge("running"), DadcraftRealmBadge("stopped")
+
+    header.follow(first)
+    assert header._badge.status == "running"
+    assert header._badge.isHidden() is False
+
+    header.follow(second)
+    assert header._badge.status == "stopped"
+    first.set_status("starting")
+    assert header._badge.status == "stopped", "it still listens to the badge it left"
+    second.set_status("stopping")
+    assert header._badge.status == "stopping"
+
+
+def test_the_header_badge_hides_when_there_is_nothing_to_follow(qapp: QApplication) -> None:
+    header = DadcraftHeader("TEST REALM", "Subtitle")
+    badge = DadcraftRealmBadge("running")
+    header.follow(badge)
+
+    header.follow(None)
+
+    assert header._badge.isHidden() is True
+    badge.set_status("stopped")
+    assert header._badge.status == "running", "a hidden badge kept following"
+
+
+def test_the_header_lets_go_of_a_badge_that_was_destroyed(qapp: QApplication) -> None:
+    """A closed tab's badge is deleted while the header still holds it."""
+    import shiboken6
+
+    header = DadcraftHeader("TEST REALM", "Subtitle")
+    gone = DadcraftRealmBadge("running")
+    header.follow(gone)
+    shiboken6.delete(gone)
+
+    after = DadcraftRealmBadge("stopping")
+    header.follow(after)
+
+    assert header._badge.status == "stopping"
+    assert header._badge.isHidden() is False
 
 
 def test_dadcraft_header(qapp: QApplication) -> None:

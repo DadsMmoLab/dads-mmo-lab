@@ -5690,6 +5690,133 @@ def test_the_soap_trees_keep_their_button(qapp: object, ps: _Ps, tmp_path: Path)
     assert view.enable_channel_button.isVisibleTo(view) is True
 
 
+# -- T188 A4: the enable button is offered only while there is something to turn on
+
+
+_CHANNEL_STATES = {
+    "verified": (channel_setup.Verified(account="YULON_AB", password="pw", at="x"), True),
+    "pending": (channel_setup.Pending(account="YULON_AB", password="pw"), True),
+    "refused": (channel_setup.Refused(account="YULON_AB", password="pw", reason="no"), True),
+    "idle": (channel_setup.Idle(), False),
+    "gave-up": (channel_setup.GaveUp(account="YULON_AB", reason="three tries"), False),
+}
+
+
+@pytest.mark.parametrize("name", list(_CHANNEL_STATES))
+def test_the_enable_button_shows_only_while_the_channel_is_not_set_up(
+    qapp: object, ps: _Ps, tmp_path: Path, name: str
+) -> None:
+    """Audit A4: "Turn on the command channel" sat under "verified as YULON_…"."""
+    state, hidden = _CHANNEL_STATES[name]
+    view = ControllerView(
+        WOTLK,
+        _with_channel(ps, tmp_path, _StubSetup(state=state)),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
+
+    assert view.enable_channel_button.isHidden() is hidden, view.channel_label.text()
+
+
+def test_a_later_verdict_does_not_bring_the_enable_button_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A stopped verdict is the one that ENABLES the press: it must not also show it."""
+    services = _with_channel(
+        ps, tmp_path, _StubSetup(state=channel_setup.Verified(account="YULON_AB", password="pw"))
+    )
+    services.dashboard = lambda: dashboard.Verdict("stopped")
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is True, "the verdict did run"
+    assert view.enable_channel_button.isHidden() is True
+
+
+def test_a_successful_press_hides_the_enable_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The state stays Idle until the next Start proves it, so the state alone cannot hide it."""
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+
+    assert stub.presses == 1
+    assert isinstance(stub.setup_state(), channel_setup.Idle)
+    assert view.enable_channel_button.isHidden() is True
+
+
+def test_a_refused_press_leaves_the_enable_button_where_it_was(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(state=channel_setup.Idle(), refuse="stop the server first")
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+
+    assert stub.presses == 1
+    assert view.enable_channel_button.isHidden() is False
+
+
+def test_a_channel_rolled_back_off_a_taken_port_offers_the_enable_button_again(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The rollback sentence says "turn the channel on again": the button has to be there."""
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+    assert view.enable_channel_button.isHidden() is True
+
+    view._start_failed(
+        docker.DockerCommandError(
+            "driver failed programming external connectivity on endpoint ac-worldserver: "
+            "Bind for 127.0.0.1:7878 failed: port is already allocated"
+        )
+    )
+
+    assert stub.rollbacks == 1
+    assert view.enable_channel_button.isHidden() is False
+
+
+class _UnprovedSetup(_StubSetup):
+    """Each settle creates the account once, then fails its round trip: GaveUp on the third."""
+
+    def settle(self) -> object:
+        self.settles += 1
+        if isinstance(self.state, channel_setup.Idle):
+            self.state = self.state.created("YULON_AB", "pw")
+        self.state = self.state.verify_failed()
+        return self.state
+
+
+def test_a_channel_that_gave_up_after_a_press_offers_the_button_again(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 fix round 1 (M1): GaveUp means the press did not take, so it is offered again."""
+    stub = _UnprovedSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.enable_channel_button.click()
+    assert view.enable_channel_button.isHidden() is True
+
+    for settle in (1, 2, 3):
+        ps.names = ""
+        view.refresh_status()
+        view.start_button.click()
+        assert stub.settles == settle
+        if settle < 3:
+            assert isinstance(stub.state, channel_setup.Pending)
+            assert view.enable_channel_button.isHidden() is True, settle
+
+    assert isinstance(stub.state, channel_setup.GaveUp)
+    assert view.enable_channel_button.isHidden() is False
+
+
 class _Probe:
     """Stands in for the console channel the tab is handed."""
 
@@ -6073,6 +6200,106 @@ def test_keep_my_characters_is_unticked_by_default_and_is_what_reaches_run(
     view.show_uninstall_plan()
     view.run_uninstall()
     assert fake.runs == [False, True]
+
+
+# -- T188 A14: Keep my characters sits with the plan it changes ---------------
+
+
+UNINSTALL_KEEP = "Uninstall this server and keep my characters"
+UNINSTALL_DELETE = "Uninstall this server and delete my characters"
+
+
+def _server_box_index(view: ControllerView, widget: Any) -> int:
+    return view.uninstall_label.parentWidget().layout().indexOf(widget)
+
+
+def test_keep_my_characters_is_hidden_until_a_plan_is_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.keep_characters_check.isHidden() is True
+
+    view.uninstall_button.click()
+
+    assert view.keep_characters_check.isHidden() is False
+
+
+def test_a_refused_plan_offers_no_keep_my_characters(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    fake = _FakeUninstall(tmp_path, refusal="ac-worldserver: still running. Stop the server first.")
+    view = _uninstall_view(ps, tmp_path, fake)
+
+    view.uninstall_button.click()
+
+    assert view.keep_characters_check.isHidden() is True
+
+
+def test_keep_my_characters_sits_between_the_plan_and_the_confirm_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Audit A14: it sat above the plan, read before the thing it changes."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.uninstall_button.click()
+
+    keep = _server_box_index(view, view.keep_characters_check)
+    assert _server_box_index(view, view.uninstall_label) < keep
+    assert keep < _server_box_index(view, view.uninstall_confirm_button)
+
+
+def test_the_confirm_button_names_what_happens_to_the_characters(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.uninstall_button.click()
+    assert view.uninstall_confirm_button.text() == (
+        "Uninstall this server and delete my characters"
+    )
+
+    view.keep_characters_check.click()
+    assert view.uninstall_confirm_button.text() == "Uninstall this server and keep my characters"
+
+    view.keep_characters_check.click()
+    assert view.uninstall_confirm_button.text() == (
+        "Uninstall this server and delete my characters"
+    )
+
+    view.keep_characters_check.click()
+    view.uninstall_confirm_button.click()
+    assert fake.runs == [True]
+
+
+class _VolumeGoesAway(_FakeUninstall):
+    """A plan that finds the database volume, then one that does not (removed by hand)."""
+
+    def __init__(self, server_dir: Path) -> None:
+        super().__init__(server_dir)
+        self.volume = True
+
+    def plan(self) -> purge.PurgePlan:
+        found = super().plan()
+        return found if self.volume else replace(found, character_volume=None, client_volume=None)
+
+
+def test_a_plan_with_no_character_volume_offers_no_keep_and_says_delete(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T188 fix round 1 (M3): there is nothing to keep, so a tick from before cannot promise it."""
+    fake = _VolumeGoesAway(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.uninstall_button.click()
+    view.keep_characters_check.click()
+    assert view.uninstall_confirm_button.text() == UNINSTALL_KEEP
+
+    fake.volume = False
+    view.uninstall_button.click()
+
+    assert view.keep_characters_check.isHidden() is True
+    assert view.keep_characters_check.isChecked() is False
+    assert view.uninstall_confirm_button.text() == UNINSTALL_DELETE
+    view.uninstall_confirm_button.click()
+    assert fake.runs == [False]
 
 
 def test_a_ticked_uninstall_says_where_the_kept_database_password_went(
@@ -23109,3 +23336,348 @@ def test_an_account_never_picked_leaves_a_typed_in_account_name_alone(
     after = (play / "WTF" / "Config.wtf").read_bytes()
     assert b'SET accountName "TYPEDINGAME"' in after
     assert after.startswith(before), "only keys added after the player's lines"
+
+
+# -- T188 C4/C5: the badge holds still while our own Start/Stop/Restart runs --
+
+ALL_UP = "ac-database\nac-authserver\nac-worldserver\n"
+
+
+def _held_view(ps: _Ps, tmp_path: Path) -> tuple[ControllerView, _Deferred]:
+    """A tab over a running server whose jobs wait, with a verdict line showing."""
+    jobs = _Deferred()
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("up", players=3, bots=497)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=jobs)
+    jobs.queue.clear()  # whatever opening the tab asked; this test asks its own
+    ps.names = ALL_UP
+    _poll(view, jobs)
+    view.refresh_verdict()
+    _finish(jobs, view._verdict_ready)
+    assert view.realm_badge.status == "running"
+    assert view.verdict_label.isHidden() is False
+    return view, jobs
+
+
+def _finish(jobs: _Deferred, on_done: Any) -> None:
+    """Run the one queued job that answers to `on_done`, as the worker would."""
+    [index] = [i for i, (_w, done, _e) in enumerate(jobs.queue) if done == on_done]
+    jobs.run(index)
+
+
+def _fail(jobs: _Deferred, on_done: Any, exc: Exception) -> None:
+    """Deliver the queued job's failure, as the worker would on a raise."""
+    [index] = [i for i, (_w, done, _e) in enumerate(jobs.queue) if done == on_done]
+    _work, _done, on_error = jobs.queue.pop(index)
+    on_error(exc)
+
+
+def _poll(view: ControllerView, jobs: _Deferred) -> None:
+    """One five-second status poll, answered."""
+    view._tick()
+    _finish(jobs, view._status_ready)
+
+
+def test_a_poll_while_a_stop_runs_leaves_the_badge_saying_stopping(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Audit C4/C5: Stop set "starting", and a poll mid-stop flipped it to OFFLINE and back."""
+    view, jobs = _held_view(ps, tmp_path)
+
+    view.stop_button.click()
+    assert view.realm_badge.status == "stopping"
+    assert view.verdict_label.isHidden() is True, "an 'up' verdict under a stop"
+
+    ps.names = "ac-database\n"
+    _poll(view, jobs)
+    assert view.realm_badge.status == "stopping"
+
+    view.refresh_verdict()
+    _finish(jobs, view._verdict_ready)
+    assert view.verdict_label.isHidden() is True, "a verdict landing mid-stop showed again"
+
+    _finish(jobs, view._stop_done)
+    _drain_polls(view, jobs)
+    assert view.realm_badge.status == "stopped"
+
+
+def test_a_poll_while_a_start_runs_leaves_the_badge_saying_starting(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, jobs = _held_view(ps, tmp_path)
+    ps.names = ""
+    _poll(view, jobs)
+    assert view.realm_badge.status == "stopped"
+
+    view.start_button.click()
+    _poll(view, jobs)
+
+    assert view.realm_badge.status == "starting"
+    assert view.verdict_label.isHidden() is True
+
+
+def _press(view: ControllerView, press: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Make the press a player makes; answer the slot its job reports success to.
+
+    "remove" is the window's call when a running server is removed (T95), and
+    "restart" is the Tuning tab's "Restart server…" after its question.
+    """
+    if press == "start":
+        view.start_button.click()
+        return view._server_action_done
+    if press == "stop":
+        view.stop_button.click()
+        return view._stop_done
+    if press == "stop-other":
+        view.stop_other_button.click()
+        return view._server_action_done
+    if press == "remove":
+        view.stop_for_removal()
+        return view._stopped_for_removal
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    if press == "recreate":
+        view.recreate_containers()
+    else:
+        view.restart_server()
+    return view._tuning_job_done
+
+
+def _drain_polls(view: ControllerView, jobs: _Deferred) -> None:
+    """Answer every status read the tab has asked for, including the ones it asks again."""
+    while any(d == view._status_ready for _w, d, _e in jobs.queue):
+        _finish(jobs, view._status_ready)
+
+
+_HELD = {
+    "start": "starting",
+    "stop": "stopping",
+    "stop-other": "starting",
+    "remove": "stopping",
+    "restart": "restarting",
+    "recreate": "restarting",
+}
+_FROM = {"start": "stopped", "stop-other": "stopped"}
+_AFTER = {"start": ALL_UP, "stop-other": ALL_UP, "restart": ALL_UP, "recreate": ALL_UP}
+"""What `docker ps` reads once each job has done its work; a stop leaves nothing up."""
+"""What the server reads before the press: Start is only live on a stopped one."""
+
+
+def _pressable(view: ControllerView, jobs: _Deferred, ps: _Ps, press: str) -> str:
+    """Put the server where the press is offered; return what the badge reads there."""
+    if _FROM.get(press) == "stopped":
+        ps.names = ""
+        _poll(view, jobs)
+    if press == "stop-other":
+        view.stop_other_button.setVisible(True)
+        view.stop_other_button.setEnabled(True)
+    return view.realm_badge.status
+
+
+@pytest.mark.parametrize("press", list(_HELD))
+def test_every_hold_shows_its_word_and_lets_go_when_the_job_fails(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: str
+) -> None:
+    """Review focus 1: a hold that never releases is a badge stuck on a word."""
+    view, jobs = _held_view(ps, tmp_path)
+    reading = _pressable(view, jobs, ps, press)
+
+    done = _press(view, press, monkeypatch)
+    assert view.realm_badge.status == _HELD[press]
+
+    _fail(jobs, done, RuntimeError("no"))
+    assert view.realm_badge.status == _HELD[press], "let go before the follow-up poll answered"
+    _drain_polls(view, jobs)
+
+    assert view.realm_badge.status == reading, "the hold outlived the failed job"
+    assert view._badge_held is None
+
+
+@pytest.mark.parametrize("press", list(_HELD))
+def test_every_hold_lets_go_when_the_job_is_done(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, press: str
+) -> None:
+    view, jobs = _held_view(ps, tmp_path)
+    _pressable(view, jobs, ps, press)
+    done = _press(view, press, monkeypatch)
+    assert view.realm_badge.status == _HELD[press]
+
+    [index] = [i for i, (_w, d, _e) in enumerate(jobs.queue) if d == done]
+    _work, on_done, _on_error = jobs.queue.pop(index)
+    ps.names = _AFTER.get(press, "")  # what the job's work left behind
+    on_done((press, True) if press in ("restart", "recreate") else True)
+
+    assert view.realm_badge.status == _HELD[press], "let go before the follow-up poll answered"
+    _drain_polls(view, jobs)
+
+    assert view._badge_held is None
+    assert view.realm_badge.status == ("running" if press in _AFTER else "stopped")
+
+
+def test_a_stop_goes_from_stopping_to_stopped_and_never_through_running(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 1 (I1): the hold fell back to the reading from before the press,
+    so REALM ONLINE flashed between STOPPING and OFFLINE, and the launcher
+    reloaded against a stopped server."""
+    view, jobs = _held_view(ps, tmp_path)
+    seen: list[str] = []
+    view.realm_badge.status_changed.connect(seen.append)
+
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)  # the real stop: compose stop empties `docker ps`
+    _drain_polls(view, jobs)
+
+    assert seen == ["stopping", "stopped"]
+
+
+def test_a_failed_poll_during_a_stop_leaves_the_hold_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 1 (I2): one failed `docker ps` mid-stop is not the stop finishing."""
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+
+    view._tick()
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+    assert view.realm_badge.status == "stopping"
+
+    ps.names = "ac-database\nac-authserver\n"
+    _poll(view, jobs)
+    assert view.realm_badge.status == "stopping"
+
+    _finish(jobs, view._stop_done)
+    _drain_polls(view, jobs)
+    assert view.realm_badge.status == "stopped"
+
+
+def test_a_failed_poll_with_nothing_of_ours_running_says_unknown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Final fix round: Docker not answering is not the server being stopped."""
+    view, jobs = _held_view(ps, tmp_path)
+
+    view._tick()
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+
+    assert view.realm_badge.status == "unknown"
+
+
+def test_a_press_whose_follow_up_read_fails_says_unknown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)
+
+    # Every read the stop asked for fails: Docker went away as the stop ended.
+    while any(d == view._status_ready for _w, d, _e in jobs.queue):
+        _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+
+    assert view.realm_badge.status == "unknown"
+    assert view._badge_held is None
+
+
+def test_a_poll_from_before_the_press_that_fails_after_it_keeps_the_hold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Final fix round: only the action's own follow-up read ends the hold.
+
+    A poll asked before Stop, answering (with a failure) after the stop ended,
+    is older than the stop; the read the stop asked for is still to come.
+    """
+    view, jobs = _held_view(ps, tmp_path)
+    view._tick()  # out before the press
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)  # asks again; the old poll is still out
+    assert view._status_superseded is True
+
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+    assert view.realm_badge.status == "stopping", "an older read than the stop ended its hold"
+
+    _drain_polls(view, jobs)
+    assert view.realm_badge.status == "stopped"
+
+
+def test_a_stops_follow_up_read_lets_go_even_when_a_rebuild_has_started(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Final review (minor): a Rebuild pressed between the stop ending and its
+    follow-up read answering made that read stale (`_busy`), so STOPPING stayed
+    on the badge for the whole rebuild. The read belongs to the stop."""
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)  # the stop is over; its follow-up read is out
+
+    view.rebuild_log.run_started.emit()  # what a rebuild starting tells the tab
+    assert view._busy is True
+
+    _drain_polls(view, jobs)
+
+    assert view.realm_badge.status == "stopped"
+    assert view._badge_held is None
+    assert view._busy is True, "the rebuild is still running"
+    assert view.start_button.isEnabled() is False, "the rebuild still locks Start"
+
+
+def test_a_stops_follow_up_read_that_fails_during_a_rebuild_says_unknown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The same read failing ends the hold too: STATUS UNKNOWN, not STOPPING for the rebuild."""
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    _finish(jobs, view._stop_done)
+    view.rebuild_log.run_started.emit()
+
+    _fail(jobs, view._status_ready, docker.DockerCommandError("Cannot connect to the daemon"))
+
+    assert view.realm_badge.status == "unknown"
+    assert view._badge_held is None
+    assert view._busy is True, "the rebuild is still running"
+
+
+def test_a_read_asked_during_the_stop_does_not_end_its_hold_under_a_rebuild(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Only reads asked by the press that holds the badge, or after it, end the hold."""
+    view, jobs = _held_view(ps, tmp_path)
+    view.stop_button.click()
+    view._tick()  # asked while the stop runs
+    _finish(jobs, view._stop_done)  # its own read is dropped behind that one
+    view.rebuild_log.run_started.emit()
+
+    _finish(jobs, view._status_ready)  # the read asked mid-stop answers
+    assert view.realm_badge.status == "stopping", "a read from during the stop ended the hold"
+
+    _drain_polls(view, jobs)  # the stop's own read, asked again
+    assert view.realm_badge.status == "stopped"
+
+
+def test_a_partly_up_server_with_nothing_of_ours_running_says_partly_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """It used to read "starting" for a database left up on its own."""
+    view, jobs = _held_view(ps, tmp_path)
+
+    ps.names = "ac-database\n"
+    _poll(view, jobs)
+
+    assert view.realm_badge.status == "partial"
+    assert view.start_button.isEnabled() and view.stop_button.isEnabled()
+
+
+# -- T188 A15: a followed log that ends says why --------------------------------
+
+
+def test_a_followed_log_that_ends_says_the_world_is_not_running(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Audit A15: `docker logs -f` returns when the world stops; it said "finished: done"."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.follow_button.click()
+    wait_for_panel(view.console_log)
+
+    said = view.console_log.status_text()
+    assert not said.startswith("finished"), said
+    assert "not running" in said, said
+    assert "world log line" in view.console_log.text()

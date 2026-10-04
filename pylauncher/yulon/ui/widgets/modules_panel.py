@@ -74,7 +74,7 @@ FAMILY_TITLES: dict[ManifestType, str] = {
     "module": "C++ modules",
     "ale": "ALE Lua scripts",
     "keg": "Kegs",
-    "mod": "SQL & config mods",
+    "mod": "SQL and config mods",
 }
 """What each family's card is called, beside the `FAMILY_FILES` it is keyed by.
 

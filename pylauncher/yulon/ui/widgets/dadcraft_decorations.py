@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import random
 
+import shiboken6
 from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
@@ -133,16 +134,35 @@ class DadcraftRealmBadge(QWidget):
             border_color = COLOR_UNCOMMON
             text_color = "#E8F8F5"
             display_text = "● REALM ONLINE"
-        elif self._status in ("starting", "importing", "working", "building"):
+        elif self._status in (
+            "starting",
+            "importing",
+            "working",
+            "building",
+            "stopping",
+            "partial",
+        ):
+            # T188 C4/C5: "stopping" and "partial" used to fall through to OFFLINE
+            # while the realm was still up. Same amber as starting: in between.
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B7950B, stop:1 #7D6608)"
             border_color = COLOR_GOLD_BRIGHT
             text_color = COLOR_GOLD_LIGHT
-            display_text = "◈ STARTING / BUSY"
+            display_text = {
+                "stopping": "◈ STOPPING",
+                "partial": "◐ PARTLY UP",
+            }.get(self._status, "◈ STARTING / BUSY")
         elif self._status in ("restarting", "loop"):
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1B4F72, stop:1 #154360)"
             border_color = COLOR_RARE
             text_color = "#EBF5FB"
             display_text = "◆ RESTARTING"
+        elif self._status == "unknown":
+            # T188: Docker did not answer, so nothing is known about the realm.
+            # The offline sheet's neutral colours, with words that do not claim it.
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
+            border_color = "#555560"
+            text_color = "#A0A0AA"
+            display_text = "? STATUS UNKNOWN"
         else:
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
             border_color = "#555560"
@@ -217,6 +237,7 @@ class DadcraftHeader(QFrame):
 
         self._badge = DadcraftRealmBadge("stopped", self)
         layout.addWidget(self._badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._followed: DadcraftRealmBadge | None = None
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -225,6 +246,27 @@ class DadcraftHeader(QFrame):
     def set_realm_status(self, status: str) -> None:
         """Forward realm status to the embedded badge."""
         self._badge.set_status(status)
+
+    def follow(self, badge: DadcraftRealmBadge | None) -> None:
+        """Show what `badge` shows from now on, or hide the header's badge (T188 C6).
+
+        The window hands over the Server tab badge of the tab on screen, and
+        None on the Catalog and Logs, where there is no one realm to name.
+        The badge left behind is let go of first, unless it is already gone:
+        a closed tab's badge is deleted while this still holds it, and Qt drops
+        a deleted sender's connections by itself.
+        """
+        old = self._followed
+        if old is not None and shiboken6.isValid(old):
+            try:
+                old.status_changed.disconnect(self._badge.set_status)
+            except (RuntimeError, TypeError):  # pragma: no cover - never connected
+                pass
+        self._followed = badge
+        if badge is not None:
+            badge.status_changed.connect(self._badge.set_status)
+            self._badge.set_status(badge.status)
+        self._badge.setVisible(badge is not None)
 
     def add_action(self, widget: QWidget) -> None:
         """Place a small control left of the realm badge (the update check's home, T90).
@@ -366,7 +408,12 @@ class DadcraftCampaignCard(QFrame):
         # rather than the card being an invisible gap in the D-pad chain. The
         # card itself has no action; Confirm falls through to its children.
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        self.setStyleSheet("background: transparent; border: none;")
+        # Scoped to the card itself (T188 C1). A selector-less sheet here
+        # cascaded to every child and beat the app sheet, so the Install button
+        # lost its amber fill and kept its near-black text on the dark card.
+        self.setStyleSheet(
+            f"QFrame#catalog-tile-{game_id} {{ background: transparent; border: none; }}"
+        )
         self._time = 0.0
         self._hovered = False
         self._hover_progress = 0.0

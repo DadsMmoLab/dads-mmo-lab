@@ -2512,3 +2512,55 @@ def test_an_install_keeps_its_output_in_a_run_log(
     records = list(runlog.runs_dir().glob("install-wow-wotlk-*.log"))
     assert len(records) == 1, records
     assert "cloning" in records[0].read_text(encoding="utf-8")
+
+
+# -- T188 C1: the tile's Install button keeps the theme's amber fill -----------
+
+
+def test_the_install_button_on_a_tile_is_drawn_amber(qapp: object) -> None:
+    """Audit C1: the card's own selector-less sheet beat the app sheet, so Install
+    lost its amber fill and kept its near-black text on a dark card."""
+    from PySide6.QtGui import QColor
+
+    from yulon.ui.theme import COLOR_GOLD_BORDER, apply_dadcraft_theme
+
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    apply_dadcraft_theme(view)
+    view.resize(*DEFAULT_WINDOW_SIZE)
+    view.show()
+    process_events(50)
+    button = view.button_for("wow-wotlk")
+    assert button.isEnabled(), "this platform cannot install WotLK; the probe needs a live button"
+    tile = button.parentWidget()
+    shot = tile.grab().toImage()
+    gold = QColor(COLOR_GOLD_BORDER)
+    rect = button.geometry()
+    # The two ends of the button, away from the centred icon and label.
+    points = [
+        (x, y)
+        for y in range(rect.top() + 6, rect.bottom() - 5, 2)
+        for x in (
+            *range(rect.left() + 4, rect.left() + 14),
+            *range(rect.right() - 13, rect.right() - 3),
+        )
+    ]
+    near = sum(
+        1
+        for x, y in points
+        if all(
+            abs(a - b) <= 24
+            for a, b in zip(
+                (
+                    shot.pixelColor(x, y).red(),
+                    shot.pixelColor(x, y).green(),
+                    shot.pixelColor(x, y).blue(),
+                ),
+                (gold.red(), gold.green(), gold.blue()),
+                strict=True,
+            )
+        )
+    )
+    view.hide()
+
+    assert near >= 0.8 * len(points), f"{near} of {len(points)} sampled pixels are the amber fill"
