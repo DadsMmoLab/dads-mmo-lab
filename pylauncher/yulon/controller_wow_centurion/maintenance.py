@@ -78,7 +78,7 @@ def plan_restore(
 ) -> RestorePlan:
     """What restoring `backup_file` would do, censused against THIS entry's containers.
 
-    `can_start_database` is the shared planner's (T205): passed on unchanged.
+    `can_start_database` is the shared planner's (T216): passed on unchanged.
     """
     return _shared.plan_restore(
         backup_file,

@@ -477,7 +477,7 @@ class DatabaseAlone:
     """Start the database alone and wait for it to be healthy. True if it had to.
 
     The argument is `because`: what was NOT done if the start fails, completing
-    `docker.start_database()`'s timeout sentence. A parameter since T205, when
+    `docker.start_database()`'s timeout sentence. A parameter since T216, when
     Restore became the second caller: bound once in the factory, a restore
     whose database never came up told the player *"…so no backup was taken"*.
 
@@ -491,7 +491,7 @@ class DatabaseAlone:
 class PlanRestore(Protocol):
     """`maintenance.plan_restore()` bound to one install: the Maintenance tab's planner.
 
-    A Protocol and not `Callable[[Path], RestorePlan]` for T205's keyword. Only
+    A Protocol and not `Callable[[Path], RestorePlan]` for T216's keyword. Only
     a tab that holds a `DatabaseAlone` passes `can_start_database=True`, which
     turns "the database is not running" from a refusal into a plan that starts
     it; every other caller, and every call that omits it, gets the planner as it
@@ -2330,13 +2330,13 @@ def _database_alone(
 ) -> DatabaseAlone:
     """The two halves of "bring the database up for a backup or a restore, then put it back".
 
-    T76 for the backup, T205 for the restore. One factory and four call sites,
+    T76 for the backup, T216 for the restore. One factory and four call sites,
     because the four games must not disagree about this: the reason both need
     it is identical in all four (a `mysqldump` or `mysql` through `docker exec`
     needs the container to exist and be running), and so is the reason it is
     stopped again.
 
-    `because` is the caller's, since T205: it completes `docker.start_database()`'s
+    `because` is the caller's, since T216: it completes `docker.start_database()`'s
     timeout sentence and says what was not done rather than what was attempted
     -- a user reading *"…did not report healthy within 180s, so no backup was
     taken"* knows the state their server is in, which is the whole job of that
@@ -2348,7 +2348,7 @@ def _database_alone(
     and a backup that stopped a server somebody was playing on would be a far
     worse press than one that failed.
 
-    **A start that fails puts back what it started** (T205). `start_database()`
+    **A start that fails puts back what it started** (T216). `start_database()`
     raises when the container does not report healthy in time, and by then
     `compose up -d` has already started it: the press failed, and left a
     database up that nobody asked to run -- after a restore that said "nothing
@@ -10449,7 +10449,7 @@ class ControllerView(QWidget):
     def _disarm_actions(self) -> None:
         """Any other server action means the user moved on from all of them.
 
-        The restore plan included (T205 review round 1): a plan is a census of
+        The restore plan included (T216 review round 1): a plan is a census of
         what ran when it was shown, and a Start, Stop or Remove changes exactly
         that. The press re-plans anyway; a plan on screen that the server has
         since moved away from is still one the player would be agreeing to.
@@ -12824,7 +12824,7 @@ class ControllerView(QWidget):
         """
         from yulon import forgetting
 
-        # T205 review round 3: the databases are leased for the WHOLE backup,
+        # T216 review round 3: the databases are leased for the WHOLE backup,
         # a hot copy included -- one Backup or Restore of a server at a time.
         with contextlib.ExitStack() as leased:
             try:
@@ -12844,7 +12844,7 @@ class ControllerView(QWidget):
         alone = self.services.database_alone
         if alone is None:
             return self.services.backup()
-        # T205 review round 1: held while the database this press started is
+        # T216 review round 1: held while the database this press started is
         # up, because the `finally` below stops it -- and a Start pressed in
         # between (still enabled: only the database runs) would have had its
         # database stopped under it. A database that was already up is not
@@ -12920,7 +12920,7 @@ class ControllerView(QWidget):
     def _plan_with_the_bot_request(self, path: Path) -> object:
         """The plan, plus T144's `always` warning where this game has the bot request (worker).
 
-        T205: a tab that can start its database alone asks for a plan that
+        T216: a tab that can start its database alone asks for a plan that
         allows a stopped one, and the press (`_restore_with_the_database()`)
         does the starting. Planning itself starts nothing -- a plan is read,
         often several times, and a press of "Show restore plan" that brought a
@@ -12936,7 +12936,7 @@ class ControllerView(QWidget):
         return _PlanWithWarning(plan, seam.restore_warning())
 
     def _restore_with_the_database(self, plan: wotlk_maintenance.RestorePlan) -> object:
-        """Restore, starting the database alone first if it is down (T205; worker thread).
+        """Restore, starting the database alone first if it is down (T216; worker thread).
 
         `_backup_with_the_database()`'s handling, given to the restore it was
         never given to. Reported from a Steam Deck on WotLK (2026-10-03): the
@@ -13127,7 +13127,7 @@ class ControllerView(QWidget):
             named = ", ".join(result.databases) if result.databases else "nothing"
             lines.append(f"This overwrites: {named}.")
             if result.starts_database:
-                # T205: said before the press, because it is something the press
+                # T216: said before the press, because it is something the press
                 # does to the server that the player did not do themselves.
                 lines.append(
                     "The database will be started on its own for this restore and stopped again "
@@ -16182,7 +16182,7 @@ class ControllerView(QWidget):
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
         start by hand is a server left down by a control that promised a restart.
 
-        And one lifecycle command (`docker.lifecycle()`, T205 review round 3), so a
+        And one lifecycle command (`docker.lifecycle()`, T216 review round 3), so a
         restore cannot take its hold between the two and leave the server stopped."""
         controller = self.services.controller
         controller.refuse_start()  # T179: before the stop, so a refusal leaves it running

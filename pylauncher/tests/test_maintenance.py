@@ -412,15 +412,15 @@ def test_restore_refuses_when_the_database_container_is_down(tmp_path: Path) -> 
     assert any("nothing to restore into" in reason for reason in plan.refusals)
 
 
-# -- T205: a stopped server is a plan that starts the database, when it can be ---------------
+# -- T216: a stopped server is a plan that starts the database, when it can be ---------------
 
 
 def test_a_stopped_server_is_an_allowed_plan_when_the_database_can_be_started(
     tmp_path: Path,
 ) -> None:
-    """T205: with the whole server stopped the plan goes ahead, and says it will start the db.
+    """T216: with the whole server stopped the plan goes ahead, and says it will start the db.
 
-    Before T205 the census refused a stopped database outright, and the app's
+    Before T216 the census refused a stopped database outright, and the app's
     one Stop takes the database down with the world and the login server, so no
     press on the Maintenance tab reached a state the restore accepted. The plan
     itself starts nothing: it records that the restore will.
@@ -458,7 +458,7 @@ def test_without_a_way_to_start_it_a_stopped_database_is_still_refused(tmp_path:
 def test_a_running_game_server_still_refuses_when_the_database_could_be_started(
     tmp_path: Path, game_server: str
 ) -> None:
-    """The world-and-login rule is untouched by T205, and is the ONLY rule broken here.
+    """The world-and-login rule is untouched by T216, and is the ONLY rule broken here.
 
     The database is down and the caller can start it, so the database rule
     cannot refuse: the one refusal left is the running game server's, in the
@@ -497,7 +497,7 @@ def test_a_census_that_fails_still_refuses_when_the_database_could_be_started(
 def test_a_plan_made_with_the_database_down_confirms_the_restore_made_with_it_up(
     tmp_path: Path,
 ) -> None:
-    """T205: the press plans with the database down and re-plans after starting it.
+    """T216: the press plans with the database down and re-plans after starting it.
 
     The token is the file's identity, its length and the schemas it names -- not
     the census -- so the two plans agree, and the restore runs against the

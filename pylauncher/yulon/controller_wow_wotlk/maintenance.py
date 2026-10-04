@@ -758,7 +758,7 @@ class RestorePlan:
     other database: `restore()` still dumps everything it is about to overwrite
     that this marker does not already hold a usable copy of."""
     starts_database: bool = False
-    """The database container was down and the caller can start it alone (T205).
+    """The database container was down and the caller can start it alone (T216).
 
     Not a refusal and not a promise kept here: `plan_restore()` starts nothing.
     It records that the press will -- `ControllerView._restore_with_the_database()`
@@ -892,7 +892,7 @@ def plan_restore(
       using these names. That is the conservative direction here.
     * the database container is not running. There is nothing to restore into
       -- unless `can_start_database`, when the plan records `starts_database`
-      instead (T205). The app's one Stop takes the database down with the world
+      instead (T216). The app's one Stop takes the database down with the world
       and the login server, so without this the refusal above ("Stop the server
       and try again") and this one between them left no press that reached a
       restorable state; a player on a Steam Deck got there with `docker compose

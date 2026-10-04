@@ -12844,7 +12844,7 @@ def test_the_plain_backup_button_starts_the_database_the_same_way(
     pump_until(lambda: made.backups == 1, "the backup ran")
     assert db.starts == 1 and db.stops == 1
     assert db.running is False
-    # Since T205 the caller says what was not done; the backup's sentence is its own.
+    # Since T216 the caller says what was not done; the backup's sentence is its own.
     assert db.because == ["no backup was taken"]
     assert "Backed up to backups" in view.maintenance_report.toPlainText()
 
@@ -12906,7 +12906,7 @@ def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(
         "stop_containers",
         lambda names, wsl_distro=None: stopped.append((list(names), wsl_distro)),
     )
-    # T205: the factory takes its own census first, so it can tell a database it
+    # T216: the factory takes its own census first, so it can tell a database it
     # started from one that was already up. Asked of the same daemon.
     asked: list[object] = []
     monkeypatch.setattr(
@@ -12928,7 +12928,7 @@ def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(
         # with, and it must say what was NOT done: a user reading "…did not
         # report healthy within 180s, so no backup was taken" knows the state
         # their server is in, which is the whole job of that sentence. Since
-        # T205 the caller supplies it (backup and restore say different things),
+        # T216 the caller supplies it (backup and restore say different things),
         # so what is asserted is that the factory hands it on unchanged.
         assert reasons[-1] == f"nothing was done for {game}", game
 

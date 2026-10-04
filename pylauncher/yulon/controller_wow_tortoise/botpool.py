@@ -315,7 +315,7 @@ def restart_world(controller: Controller) -> None:
     Raises:
         StopFailed: the stop raised; nothing was started.
     """
-    # One lifecycle command from the stop to the start (T205 review round 3), so a
+    # One lifecycle command from the stop to the start (T216 review round 3), so a
     # restore cannot take its hold in between and leave the world stopped. A
     # server already held refuses before the stop: nothing was stopped or
     # started, which is what `StopFailed` tells the caller.

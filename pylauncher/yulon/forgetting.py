@@ -67,7 +67,7 @@ RESTORE_RUNNING = (
     "try again. Nothing was removed."
 )
 # Why a Start, Stop, Restart or recreate is refused while the Maintenance tab holds the
-# server (`docker.hold_the_server()`, T205). Siblings of the two above: the same jobs, asked
+# server (`docker.hold_the_server()`, T216). Siblings of the two above: the same jobs, asked
 # about by a different press, so they say "nothing was started or stopped" instead.
 RESTORE_HOLDS_THE_SERVER = (
     "A restore is writing into this server's databases on its Maintenance tab. Starting "
@@ -81,7 +81,7 @@ BACKUP_HOLDS_THE_SERVER = (
     "backup to finish, then try again. Nothing was started or stopped."
 )
 # What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
-# own sentence, to which the refused one adds what it did not do (T205 review round 3).
+# own sentence, to which the refused one adds what it did not do (T216 review round 3).
 BACKUP_HOLDS_THE_DATABASES = (
     "A backup of this server is running on its Maintenance tab. Wait for it to finish, "
     "then try again."

@@ -359,7 +359,7 @@ def daemon_ready(*, wsl_distro: str | None = None, timeout: float = 30.0) -> boo
 
 
 class ServerHeldError(DockerCommandError):
-    """A start, stop or recreate refused because a maintenance job holds this server (T205).
+    """A start, stop or recreate refused because a maintenance job holds this server (T216).
 
     The message is the holder's own sentence (`hold_the_server()`'s `reason`),
     so the press that was refused says which job to wait for. Nothing was run.
@@ -391,7 +391,7 @@ def _server_key(server_dir: Path | str) -> str:
 
 @contextmanager
 def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
-    """Keep every start, stop and recreate of this server away while the block runs (T205).
+    """Keep every start, stop and recreate of this server away while the block runs (T216).
 
     For the Maintenance tab's restore, and for a backup that started the
     database alone. Both write or read the databases with the game servers
@@ -465,7 +465,7 @@ def _in_flight(server_dir: Path | str) -> Iterator[None]:
 
 
 def lifecycle(server_dir: Path | str) -> contextlib.AbstractContextManager[None]:
-    """One lifecycle command made of several: a restart, a recreate, a bot restart (T205).
+    """One lifecycle command made of several: a restart, a recreate, a bot restart (T216).
 
     `@_a_lifecycle_command` marks each primitive while it runs, so between a
     restart's stop and its start nothing is marked, and a restore could take
@@ -481,7 +481,7 @@ def lifecycle(server_dir: Path | str) -> contextlib.AbstractContextManager[None]
 
 
 class MaintenanceLeaseTaken(RuntimeError):
-    """A Backup or Restore refused because another one of this server is running (T205).
+    """A Backup or Restore refused because another one of this server is running (T216).
 
     The message is the holder's own sentence (`maintenance_lease()`'s
     `reason`); the refused job adds what it did not do.
@@ -493,7 +493,7 @@ _LEASED: dict[str, str] = {}
 
 @contextmanager
 def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
-    """One Backup or Restore of this server at a time, for the whole of it (T205 round 3).
+    """One Backup or Restore of this server at a time, for the whole of it (T216 round 3).
 
     Separate from `hold_the_server()`, which is about the containers: a hot
     backup of a running server takes no hold, so Start stays free during it,
@@ -524,7 +524,7 @@ def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
 
 
 def _a_lifecycle_command(command: Callable[_P, _R]) -> Callable[_P, _R]:
-    """Run `command` only while its server is not held, and mark it running meanwhile (T205).
+    """Run `command` only while its server is not held, and mark it running meanwhile (T216).
 
     The server is read off the call's own `server_dir` argument, so every
     caller -- and every alias a game's `docker_ctl` binds -- goes through it.

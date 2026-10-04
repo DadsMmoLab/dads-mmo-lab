@@ -1,4 +1,4 @@
-"""T205: Restore works with the server stopped, by starting the database alone for it.
+"""T216: Restore works with the server stopped, by starting the database alone for it.
 
 Reported from a Steam Deck (WoW WotLK, 2026-10-03): the Maintenance tab's
 restore refused while the world and login servers ran ("Stop the server and try
@@ -56,7 +56,7 @@ PLANNED_START = (
 
 
 class _Stack:
-    """This install's containers: what is running, and the two T76/T205 halves that change it."""
+    """This install's containers: what is running, and the two T76/T216 halves that change it."""
 
     def __init__(self, *running: str, refuses: str = "") -> None:
         self.running = set(running)
@@ -239,7 +239,7 @@ def test_a_running_world_still_refuses_and_starts_nothing(qapp: object, tmp_path
     """The game servers' rule is unchanged, and "Stop the server and try again" now works.
 
     Only the world-and-login rule is broken here: the database is up, so the
-    database rule could not refuse whatever T205 did to it.
+    database rule could not refuse whatever T216 did to it.
     """
     stack = _Stack(*EVERYTHING)
     mysql = _Mysql(stack)
@@ -269,7 +269,7 @@ def test_a_server_started_after_the_plan_refuses_the_restore_and_is_left_running
 
     Planned with everything stopped; the player then pressed Start. The press
     finds the database already up (so starts and stops nothing) and the re-plan
-    refuses for the running world, exactly as it did before T205.
+    refuses for the running world, exactly as it did before T216.
     """
     stack = _Stack()
     mysql = _Mysql(stack)
