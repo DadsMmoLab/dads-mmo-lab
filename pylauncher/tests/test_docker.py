@@ -7205,3 +7205,65 @@ def test_project_container_images_says_none_rather_than_guess(
 ) -> None:
     _answer_with(monkeypatch, {"ps": _volume_proc(0, stdout="tbc-mangosd\n"), "inspect": inspect})
     assert docker.project_container_images("yulon-wow-tbc-1") is None
+
+
+# -- T203: how much build cache Docker holds -------------------------------------
+
+_SYSTEM_DF = (
+    '{"Active":"9","Reclaimable":"1.404GB (23%)","Size":"6.08GB","TotalCount":"14",'
+    '"Type":"Images"}\n'
+    '{"Active":"0","Reclaimable":"1.393MB (100%)","Size":"1.393MB","TotalCount":"13",'
+    '"Type":"Containers"}\n'
+    '{"Active":"5","Reclaimable":"467.6MB (5%)","Size":"7.875GB","TotalCount":"7",'
+    '"Type":"Local Volumes"}\n'
+    '{"Active":"0","Reclaimable":"294.1MB","Size":"4.79GB","TotalCount":"20",'
+    '"Type":"Build Cache"}\n'
+)
+"""`docker system df --format '{{json .}}'`, verbatim from a Linux test box.
+
+Docker 29.7.2, 2026-10-04 (T203).
+"""
+
+
+def test_build_cache_bytes_reads_the_build_cache_row_of_system_df(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **_kwargs: object) -> object:
+        seen.append(argv)
+        return _completed(stdout=_SYSTEM_DF)
+
+    monkeypatch.setattr(docker.runner, "run", record)
+    assert docker.build_cache_bytes() == 4_790_000_000
+    assert [argv[1:] for argv in seen] == [["system", "df", "--format", "{{json .}}"]]
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [("0B", 0), ("12.91GB", 12_910_000_000), ("441.6kB", 441_600), ("1.2TB", 1_200_000_000_000)],
+)
+def test_build_cache_bytes_reads_docker_s_decimal_units(
+    size: str, expected: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = f'{{"Size":"{size}","Type":"Build Cache"}}'
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(stdout=row))
+    assert docker.build_cache_bytes() == expected
+
+
+@pytest.mark.parametrize(
+    "proc",
+    [
+        _completed(returncode=1, stderr="Cannot connect to the Docker daemon"),
+        _completed(stdout='{"Size":"6.08GB","Type":"Images"}'),
+        _completed(stdout='{"Size":"lots","Type":"Build Cache"}'),
+        _completed(stdout="not json"),
+    ],
+    ids=["daemon-down", "no-build-cache-row", "unreadable-size", "not-json"],
+)
+def test_build_cache_bytes_says_unknown_rather_than_zero(
+    proc: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None`, never 0: "could not ask" must not read as "nothing to reuse", nor the reverse."""
+    monkeypatch.setattr(docker.runner, "run", lambda *a, **k: proc)
+    assert docker.build_cache_bytes() is None

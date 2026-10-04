@@ -294,3 +294,131 @@ def test_an_unmeasured_drive_stays_unchecked_whatever_was_spent() -> None:
     spent = preflight.Spent(build=True)
     report = preflight.evaluate(ENTRY, Path("/srv/wow"), facts, spent)
     assert _row(report, "free space on Docker's disk").verdict == "unchecked"
+
+
+# -- T203: a resumed build is not asked for the space its own cache already takes --
+#
+# Found by the T179 live check on a Windows test VM (2026-10-03, phase A7): a
+# Centurion install whose compile had finished failed after it, and pressing
+# Install again was refused, "free space on Docker's disk: 30 GB free, and the
+# install needs 40 GB" -- with 12.91 GB of build cache from that compile on the
+# same disk, which the resumed build reuses instead of writing again. The way
+# through was pruning the cache and compiling again (~35 minutes).
+#
+# The rule: when the press will run the build again (every stage before it is
+# recorded, and the build is not spent), Docker's build cache counts toward the
+# build's share of the floor, and the floor never drops below what a FINISHED
+# build is asked for -- a cached build is never asked for less than a done one.
+
+A7_CACHE = 12_910_000_000
+"""`docker system df` on the VM after the failed press: Build Cache 8 / 12.91GB (decimal)."""
+
+
+def test_the_a7_refusal_passes_once_the_reused_cache_is_counted() -> None:
+    """WotLK's Docker-disk pair is Centurion's (40/60): 30 GB free, 12.91 GB of it cache."""
+    spent = preflight.Spent(build_cache_bytes=A7_CACHE)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(30, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert row.verdict == "warn", row
+    # In this module's GB (GiB, as every free-space figure here): 12.91e9 bytes is 12.0.
+    assert "build cache" in row.detail and f"{A7_CACHE / GIB:.1f} GB" in row.detail, row.detail
+
+
+def test_without_a_cache_the_a7_numbers_are_still_refused() -> None:
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(30, 200), preflight.Spent())
+    assert _row(report, "free space on Docker's disk").verdict == "refuse"
+
+
+def test_a_huge_cache_never_lowers_the_floor_below_a_finished_build_s() -> None:
+    spent = preflight.Spent(build_cache_bytes=500 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(3, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert row.verdict == "refuse", row
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in row.detail, row.detail
+
+
+def test_the_cache_leaves_the_server_folder_s_own_row_alone_on_two_drives() -> None:
+    spent = preflight.Spent(build_cache_bytes=A7_CACHE)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(200, 5), spent)
+    row = _row(report, "free space on the server folder")
+    assert row.verdict == "refuse", row
+    assert "build cache" not in row.detail
+
+
+def test_the_cache_counts_against_the_added_floor_on_one_drive() -> None:
+    """TBC on one drive asks 40 (20 + 20); 16 GB of cache brings that to 24, never below 20."""
+    facts = replace(_one_drive(0), data_root_free=int(25 * GIB), server_dir_free=int(25 * GIB))
+    fresh = preflight.evaluate(TBC, Path("/srv/tbc"), facts)
+    cached = preflight.evaluate(
+        TBC, Path("/srv/tbc"), facts, preflight.Spent(build_cache_bytes=16 * GIB)
+    )
+    assert not fresh.ok()
+    assert cached.ok(), cached.message()
+    floor = preflight.evaluate(
+        TBC,
+        Path("/srv/tbc"),
+        replace(facts, data_root_free=int(19 * GIB), server_dir_free=int(19 * GIB)),
+        preflight.Spent(build_cache_bytes=500 * GIB),
+    )
+    assert f"needs {NATIVE.min_server_dir_gb:.0f} GB" in floor.message(), floor.message()
+
+
+def test_a_spent_build_ignores_the_cache() -> None:
+    """Already judged against the server-folder pair; the cache cannot lower it further."""
+    spent = preflight.Spent(build=True, build_cache_bytes=500 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(3, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in row.detail, row.detail
+    assert "build cache" not in row.detail
+
+
+def test_a_resume_at_the_build_counts_docker_s_build_cache(tmp_path: Path) -> None:
+    """The engine: every stage before `build` recorded, no build yet, 16 GB of cache."""
+    rec = Recorder(images=False, build_cache=16 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert rec.build_cache_asked == 1
+
+
+def test_a_recorded_build_whose_images_are_gone_counts_the_cache_too(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=16 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    _lay_record(installer, server_dir, _recorded(installer))
+
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+
+
+@pytest.mark.parametrize("cache", [None, 0], ids=["could-not-ask", "no-cache"])
+def test_a_resume_at_the_build_with_no_cache_to_count_is_asked_for_the_whole_floor(
+    cache: int | None, tmp_path: Path
+) -> None:
+    rec = Recorder(images=False, build_cache=cache)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+def test_an_earlier_resume_and_a_fresh_install_do_not_ask_about_the_cache(tmp_path: Path) -> None:
+    """Another install's cache must not lower the floor of a build this folder never reached."""
+    rec = Recorder(images=False, build_cache=500 * GIB)
+    installer = _engine(rec, 25)
+    early = tmp_path / "early"
+    recorded = _recorded(installer)
+    _lay_record(installer, early, recorded[: recorded.index("build") - 1])
+
+    with pytest.raises(InstallerError, match="needs 40 GB"):
+        _preflight(installer, early)
+    with pytest.raises(InstallerError, match="needs 40 GB"):
+        _preflight(installer, tmp_path / "fresh")
+    assert rec.build_cache_asked == 0

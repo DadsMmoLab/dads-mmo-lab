@@ -4380,6 +4380,28 @@ CE on Linux and stated as a guarantee.
 
 _EXIT_CODE = re.compile(r"exit(?:ed with)? code:? (\d+)")
 
+_BUILDER_GONE = re.compile(r"rpc error: code = Unavailable\b")
+"""The build's client losing BuildKit: gRPC's `Unavailable`, the transport gone (T202).
+
+Measured twice on one Windows test VM (Docker Desktop 29.7.2, 2026-10-03, the
+T179 live check): `failed to receive status: rpc error: code = Unavailable
+desc = error reading from server: EOF`, once after 53 silent minutes that
+followed a finished compile, once mid-compile at 99% on a VM whose memory was
+then raised and whose next build passed. The `desc` after the code is the
+transport's to word (`error reading from server: EOF`, `closing transport due
+to: ...`), so the code is what is matched. No build step prints this, so a
+compiler's line cannot be read as it.
+"""
+
+
+def builder_connection_lost(tail: Sequence[str]) -> bool:
+    """Did this build end because its client lost Docker's builder? (T202)
+
+    The whole tail is read: the line is the last one Docker prints, but blank
+    lines may follow it.
+    """
+    return any(_BUILDER_GONE.search(line) for line in tail)
+
 
 def _build_log_elsewhere(said: list[str]) -> str:
     """The URL Docker Desktop printed instead of the build's output, or `""`.
@@ -4798,6 +4820,50 @@ def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool 
     # compare against `len(refs)` could only ever equal it here, which read as
     # if a partial count could reach this line (review, 2026-08-24).
     return True
+
+
+BUILD_CACHE_TIMEOUT_SECONDS = 60.0
+"""How long `docker system df` gets. It sizes every image, volume and cache record."""
+
+_DECIMAL_SIZE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kMGTP]?)B$")
+_DECIMAL_UNITS = {"": 1, "k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
+
+
+def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
+    """How much build cache Docker holds, in bytes; `None` when it would not say (T203).
+
+    `docker system df --format '{{json .}}'` prints one JSON object per kind,
+    and the `Build Cache` row's `Size` is Docker's own decimal spelling
+    (`12.91GB`, `441.6kB`, `0B`) -- measured on a Linux test box, Docker 29.7.2,
+    2026-10-04. `Size`, not `Reclaimable`: what the resumed build reuses is in
+    the cache whether or not an image also holds it.
+
+    `None` is not 0, in either direction: a daemon that would not answer, a
+    missing row or a size this cannot read leaves the free-space floor where it
+    was, and a real 0 is the answer "nothing to reuse".
+    """
+    proc = _docker(
+        ["system", "df", "--format", "{{json .}}"],
+        timeout=BUILD_CACHE_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not ask Docker how much build cache it holds: {proc.stderr.strip()}")
+        return None
+    for line in proc.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("Type") != "Build Cache":
+            continue
+        found = _DECIMAL_SIZE.match(str(row.get("Size", "")).strip())
+        if found is None:
+            logger.info(f"could not read Docker's build cache size: {row.get('Size')!r}")
+            return None
+        return round(float(found.group(1)) * _DECIMAL_UNITS[found.group(2)])
+    logger.info("`docker system df` printed no Build Cache row")
+    return None
 
 
 def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[str]:
