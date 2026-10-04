@@ -87,6 +87,7 @@ from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     CORRECTIONS_BUTTON_LABEL,
     CORRECTIONS_CANCEL_NOTE,
+    ERROR_RUN_INSTALL,
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
     RERUN_CANCEL_NOTE,
@@ -375,11 +376,18 @@ class CmangosInstaller(StagedInstaller):
         the three and the slowest to copy, so a rollback puts back login and
         characters and says that the world database is not put back.
         """
-        switched_on = any(
+        return ("auth", "characters") if self._updates_at_start() else ()
+
+    def databases_changed_but_not_copied(self) -> tuple[Db, ...]:
+        """World, on a tree whose updater migrates it at start but whose copy leaves it out."""
+        return ("world",) if self._updates_at_start() else ()
+
+    def _updates_at_start(self) -> bool:
+        """Whether this tree's conf table switches the world server's AutoUpdater on."""
+        return any(
             table.keys.get(self.AUTO_UPDATE_KEY) == "1"
             for table in self._data().conf.files.values()
         )
-        return ("auth", "characters") if switched_on else ()
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
         """Which files in which checkout this app patches itself, for the dirty-tree guard.
@@ -1491,7 +1499,9 @@ class CmangosInstaller(StagedInstaller):
         for every install of the game, so a container without that label, or
         with another project's, is refused, never stopped (T206 review).
         """
-        if not ctx.state.last_error:
+        if not ctx.state.last_error or ctx.state.error_run != ERROR_RUN_INSTALL:
+            # T207: only a failed INSTALL's own world; a remembered server whose
+            # Rebuild or update failed is somebody's server, refused below.
             return
         container = self.entry.container_spec().world
         try:

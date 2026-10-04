@@ -508,10 +508,19 @@ class Recorder:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
         return self.diff_lines.get((dest, old, new, path))
 
+    restore_errors: dict[Path, Exception] = field(default_factory=dict)
+    """`restore_error` for ONE checkout (T217): the module will not go back, the core does.
+
+    The state a player was left in on 2026-10-04: a new module on an old core,
+    which no single `restore_error` for every source can produce.
+    """
+
     def restore_rev(self, dest: Path, rev: str) -> None:
         self.calls.append(f"restore:{dest.name}->{rev[:7]}")
         if self.restore_error is not None:
             raise self.restore_error
+        if dest in self.restore_errors:
+            raise self.restore_errors[dest]
         self.heads[dest] = rev
 
     def probe(self) -> docker.ImportState:
@@ -870,9 +879,17 @@ class Recorder:
         control: docker.StopControl | None = None,
         before_signal: Callable[[], None] | None = None,
     ) -> None:
-        """`docker.stop_servers_staged()`: recorded, with whether the stop was forced (T158)."""
+        """`docker.stop_servers_staged()`: recorded, with whether the stop was forced (T158).
+
+        `before_signal` is called after the wait and before the stop, as the real
+        one does (T217): the update route's stop is where `rebuild()` learns the
+        servers were touched, and a double that dropped it read a stop followed by
+        a failed copy as "no container was replaced".
+        """
         if self.on_stop_servers is not None:
             self.on_stop_servers(control)
+        if before_signal is not None:
+            before_signal()
         forced = control is not None and control.forced()
         self.calls.append("stop_servers:forced" if forced else "stop_servers")
 

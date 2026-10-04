@@ -22,6 +22,7 @@ import inspect
 import json
 import subprocess
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -564,6 +565,20 @@ def test_a_rebuild_runs_every_command_in_the_distro(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     distro, server_dir = _through_the_distro(monkeypatch, tmp_path)
+    # T217: a plain Rebuild refuses sources off the commit the running build came
+    # from; the record says `OLD`, which is what the distro's git answers.
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    native.write_state(
+        server_dir,
+        replace(
+            state,
+            source_revs=tuple(
+                native.SourceRev(repo=source.repo, built=f"{OLD[:7]} · 2026-09-16")
+                for source in ENTRY.emulator.sources
+            ),
+        ),
+    )
     with pytest.raises(InstallerError):
         list(install_wiring.rebuild_for_app(ENTRY, server_dir, wsl_distro=DISTRO)(None))
     _only_the_distro(distro)
