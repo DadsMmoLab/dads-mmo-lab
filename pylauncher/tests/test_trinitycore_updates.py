@@ -51,7 +51,14 @@ from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import extract, mmaps, trinitycore
 from yulon.catalog.families.trinitycore import needs_reextract
-from yulon.catalog.installer import InstallerError, InstallOptions, WorldStoppedAfterReadyError
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    RollbackNotDone,
+    WorldStoppedAfterReadyError,
+)
+from yulon.controller import StartRefused
+from yulon.controller_wow_centurion.controller import CenturionController
 from yulon.install_wiring import (
     reextract_for_app,
     update_to_latest_for_app,
@@ -151,6 +158,8 @@ class Box:
     world_output: native.WorldOutput | None = None
     """What the world printed, when a test needs it to have stopped after its banner."""
     distro: str | None = None
+    seams: dict[str, object] = field(default_factory=dict)
+    """Further seam overrides (T197: `tag_image`, `docker_ready`), by name."""
 
     @property
     def server_dir(self) -> Path:
@@ -196,6 +205,7 @@ class Box:
             exec_stdin=exec_stdin,
             distro=self.distro,
             **({"world_output": lambda spec: self.world_output} if self.world_output else {}),
+            **self.seams,
         )
 
     def moves_to(self, files: Mapping[str, str]) -> None:
@@ -571,18 +581,30 @@ def test_a_return_that_fails_says_nothing_of_a_backup_it_never_offered(box: Box)
     assert "backup" not in said
 
 
-def test_servers_that_cannot_be_stopped_import_nothing_and_leave_the_record_as_it_was(
+def test_servers_that_cannot_be_stopped_import_nothing_and_the_record_waits_for_the_new_build(
     box: Box,
 ) -> None:
-    """Fix round 2: nothing went in, so nothing more is waiting than before the press."""
+    """Fix round 2, as T197 left it: nothing went in, and the new build is what stays.
+
+    The rollback's own stop failed too, so the old build was never put back: the
+    tags name the new build and its sources stay. The record then names what that
+    build still needs -- the file this update changed and the one waiting from
+    before -- and no start is allowed until "Finish the world update" imports them.
+    """
     box.leave_pending([f"{WORLD_SQL}/version.sql"])
-    before = box.pending()
     box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
     box.world.refuse_stop = "daemon not answering"
-    with pytest.raises(InstallerError, match="could not be stopped"):
+    with pytest.raises(RollbackNotDone, match="could not be stopped") as failed:
         box.press()
     assert box.streamed() == []
-    assert box.pending() == before
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql", f"{WORLD_SQL}/version.sql"],
+        "parts": [],
+    }
+    assert box.head() == NEW
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    assert str(failed.value).endswith(native.SOURCES_LEFT_NOTE)
 
 
 def test_a_stop_given_up_during_the_load_wait_leaves_no_record(box: Box) -> None:
@@ -1203,6 +1225,54 @@ def test_finish_is_the_one_start_allowed_and_it_starts_once_the_record_is_gone(b
     assert box.world.running is True
 
 
+# T197 fix round 8: both records at once. It cannot happen today -- the mixed-tags record
+# (`native.START_REFUSED_FILE`) needs a rollback that moved one image tag of several, and
+# a TrinityCore server builds ONE image, so its rollback is never part-way -- but nothing
+# keeps a TrinityCore server single-image, so each record's way out is bound against the
+# other: the Rebuild first (any start on mixed tags, the finish's included, runs two
+# builds side by side), then "Finish the world update".
+
+
+def _both_records(box: Box) -> None:
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    assert native.owe_start(box.server_dir) == ""
+
+
+def test_with_mixed_tags_the_finish_imports_nothing_and_names_the_rebuild(box: Box) -> None:
+    _both_records(box)
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value) == f"{native.REBUILD_OWED_REFUSAL} Nothing was changed."
+    assert box.streamed() == [] and box.world.running is True
+    assert box.pending() is not None, "the world update still waits"
+
+
+def test_with_mixed_tags_the_finishs_own_start_starts_nothing(box: Box) -> None:
+    """The belt under the refusal above: the start the finish ends in asks again."""
+    _both_records(box)
+    box.world.running = False
+    with pytest.raises(InstallerError) as refused:
+        list(box.engine()._start_after_finish(context(box.m)))
+    assert str(refused.value) == (
+        f"The world update is finished, but {native.REBUILD_OWED_REFUSAL} The server was not "
+        "started."
+    )
+    assert "recreate" not in box.m.rec.calls and box.world.running is False
+
+
+def test_with_both_records_the_rebuild_goes_first_and_then_the_finish(box: Box) -> None:
+    _both_records(box)
+    said = list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    assert said[-1].endswith(f"was rebuilt and is running in {box.server_dir}")
+    assert not (box.server_dir / native.START_REFUSED_FILE).exists()
+    assert box.pending() is not None, "the Rebuild finishes no world update"
+    with pytest.raises(InstallerError, match=UNFINISHED):
+        list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    box.finish()
+    assert box.pending() is None and box.world.running is True
+
+
 def test_inside_a_wsl_distro_the_engine_names_the_update_press(box: Box) -> None:
     box.leave_pending([f"{WORLD_SQL}/creature.sql"])
     box.distro = "Ubuntu"
@@ -1363,3 +1433,614 @@ def test_a_rollback_that_leaves_the_servers_stopped_never_says_they_run(box: Box
     )
     assert "running" not in str(failed.value)
     assert box.world.running is False
+
+
+# -- T197: a rollback that stops early keeps the new build, its sources and its tables ----
+
+
+def _refuse_the_failed_name(box: Box) -> None:
+    """The rollback cannot give the new build its `-failed` name: it stops before any tag moves."""
+
+    def tag_image(src: str, dst: str) -> str:
+        box.m.rec.calls.append(f"tag:{src}->{dst}")
+        return "read-only layer store" if dst.endswith(native.FAILED_TAG_SUFFIX) else ""
+
+    box.seams["tag_image"] = tag_image
+
+
+def test_a_rollback_that_stops_early_after_the_import_keeps_the_new_tables_and_sources(
+    box: Box,
+) -> None:
+    """T197: the new tables are in, the new build stays on its tags, so its sources stay too.
+
+    Putting the old checkout back here left the old sources under the new build
+    and the new tables, with a sentence saying they agree again.
+    """
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    box.old_files = {"creature.sql": "DROP TABLE IF EXISTS creature; -- old\n"}
+    box.ready = [False]
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    said = str(failed.value)
+    assert "could not be given a name to undo onto" in said
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature; -- new"], "no old tables"
+    assert box.pending() is None, "every table the new build needs is in"
+    assert box.head() == NEW
+    assert not [call for call in box.m.rec.calls if call.startswith("restore:")]
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the new build's map data"
+    state = native.read_state(box.server_dir, valid=())
+    assert state is not None and {rev.built[:7] for rev in state.source_revs} == {NEW[:7]}
+    assert said.endswith(native.SOURCES_LEFT_NOTE)
+    assert native.SOURCES_PUT_BACK_NOTE not in said and "agree again" not in said
+    assert failed.value.sources_kept is True
+
+
+def test_a_rollback_that_stops_early_after_a_failed_import_keeps_what_was_not_imported(
+    box: Box,
+) -> None:
+    """Fix round 7: `forward()` failed on its first table, then the rollback stopped early.
+
+    `back()` never ran, so the new build stays on the old table: the record keeps the
+    name it did not import and every start refuses -- `keep()` must not clear it.
+    """
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    box.m.db.fail_on = "creature"
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    assert "could not be given a name to undo onto" in str(failed.value)
+    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    assert box.head() == NEW
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def _docker_gone_after_the_compile(box: Box) -> None:
+    """Docker answers until the compile is done, then not: the recreate replaces nothing."""
+    box.seams["docker_ready"] = lambda: "build" not in box.m.rec.calls
+
+
+def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_tables_waiting(
+    box: Box,
+) -> None:
+    """T197: nothing was imported, and the new build stays, so its tables are what waits.
+
+    The recreate refused before `prepare()` ran, so `keep()` writes the record and
+    flags the map data itself: the new build must not start on the old tables.
+    """
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    assert "stop_servers" not in box.m.rec.calls, "the ground: the servers were never stopped"
+    assert box.streamed() == []
+    assert box.pending() == {"version": 1, "reimport": [f"{WORLD_SQL}/creature.sql"], "parts": []}
+    assert needs_reextract(box.server_dir, ENTRY) is not None
+    assert box.head() == NEW
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    assert box.world.running is True, "the build from before still runs in its containers"
+    assert str(failed.value) == (
+        "Docker is not answering, so the containers were not replaced -- the server you have "
+        "is still the one that was running before this rebuild. Nothing was touched. Check the "
+        "docker daemon is up, then press the same entry under “Server build ▾” on the Modules "
+        "tab again. Putting the build from before this rebuild back was not attempted, because "
+        "the new build could not be given a name to undo onto (read-only layer store); the tags "
+        "still name the new build, all of them. The old images are on the daemon under their "
+        "-rollback tags. The source folders were left on the new commits, because the image "
+        "tags name the new build made from them. None of your server's containers was "
+        "replaced, so it is still running the build from before this update if it is up, and "
+        f"Start is refused until this is done: {UNFINISHED}"
+    )
+    assert "next Start runs" not in str(failed.value)
+    assert failed.value.touched is False
+
+
+def test_a_record_the_kept_build_cannot_write_is_said_and_the_sources_still_stay(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T197: a folder that takes no record at all: said, never in place of the sentence.
+
+    Both the plan's own write and the fallback from the names fail, so nothing can
+    refuse a start; the sentence says so rather than claiming a refusal that is not there.
+    """
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"), ("M", "centurion/dbc/Spell.dbc"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    real_write = Path.write_text
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name.startswith(trinitycore.WORLD_REIMPORT_FILE):
+            raise PermissionError(13, "Permission denied")
+        return real_write(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    said = str(failed.value)
+    assert "could not be given a name to undo onto" in said
+    assert "Permission denied" in said
+    assert "so nothing stops this server starting its new build on the old world tables." in said
+    assert said.endswith(
+        native.SOURCES_LEFT_UNTOUCHED_NOTE
+    ), "nothing refuses, so it says Start runs it"
+    assert box.head() == NEW
+    assert box.pending() is None, "the ground: no world record could be written"
+    assert needs_reextract(box.server_dir, ENTRY) is not None, "the flag went first"
+
+
+def _plan_fails_once(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """`_reimport_runs()` refuses the FIRST time it is asked (keep's `prepare()`), then works.
+
+    The record cannot come from the plan then, so `keep()` writes it from the names the
+    move read; a later "Finish the world update" expands the plan as it always does.
+    """
+    asked: list[int] = []
+    real = trinitycore.TrinityCoreInstaller._reimport_runs
+
+    def runs(self: trinitycore.TrinityCoreInstaller, *args: object, **kwargs: object) -> object:
+        asked.append(1)
+        if len(asked) == 1:
+            raise InstallerError("the plan could not be expanded")
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(trinitycore.TrinityCoreInstaller, "_reimport_runs", runs)
+    return asked
+
+
+def _kept_without_its_tables(box: Box, monkeypatch: pytest.MonkeyPatch) -> str:
+    """An update whose rollback stopped early, untouched, and whose `prepare()` then failed."""
+    box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- new\n"})
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    box.seams.clear()  # Docker answers again, and tags as it should
+    return str(failed.value)
+
+
+def test_a_kept_build_whose_plan_fails_still_records_its_tables_and_refuses_start(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3: T179's own record names what the kept build needs, from the move's names.
+
+    A controller made fresh over the folder -- the app restarted -- refuses, naming the
+    press that finishes it, and the press's sentence says the same.
+    """
+    said = _kept_without_its_tables(box, monkeypatch)
+    assert "the plan could not be expanded" in said
+    assert box.streamed() == []
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql"],
+        "parts": [],
+        "required": [f"{WORLD_SQL}/creature.sql"],
+    }
+    assert said.endswith(f"Start is refused until this is done: {UNFINISHED}")
+    with pytest.raises(StartRefused) as refused:
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+    assert str(refused.value) == UNFINISHED
+
+
+def test_finishing_the_kept_builds_world_update_imports_its_tables_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_without_its_tables(box, monkeypatch)
+    box.finish()
+    assert first_lines(box) == ["DROP TABLE IF EXISTS creature; -- new"], "from the kept checkout"
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_finish_that_fails_keeps_the_kept_builds_record(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_without_its_tables(box, monkeypatch)
+    box.m.db.fail_on = "creature"
+    with pytest.raises(InstallerError):
+        box.finish()
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [f"{WORLD_SQL}/creature.sql"],
+        "parts": [],
+        "required": [f"{WORLD_SQL}/creature.sql"],
+    }
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_an_unrelated_update_folds_the_kept_builds_tables_in_and_clears_only_once_in(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 3: a later update that changes another table imports the owed one too.
+
+    The record goes only once every file it names went in; the update first fails on the
+    owed table, and the record survives that, then the next one lands.
+    """
+    _kept_without_its_tables(box, monkeypatch)
+    box.m.rec.heads[box.checkout] = NEW
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+    box.m.db.fail_on = "creature"
+    box.ready = [True]
+    with pytest.raises(InstallerError):
+        box.press()
+    assert f"{WORLD_SQL}/creature.sql" in cast(list[str], (box.pending() or {})["reimport"])
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+    box.m.db.fail_on = ""
+    box.m.db.streams.clear()
+    box.m.rec.heads[box.checkout] = NEW
+    said = box.press()
+    assert said[-1] == "Centurion is running on the newest upstream code."
+    assert set(first_lines(box)) >= {
+        "DROP TABLE IF EXISTS creature; -- new",
+        "DROP TABLE IF EXISTS version;",
+    }, "the owed table went in with the update's own"
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+ARENA = f"{WORLD_SQL}/arena_season.sql"
+NEEDED_AND_MISSING = (
+    f"{ARENA} is not among the world table files Centurion's import reads from its sources, "
+    "and the build this server was left on needs that table, so the world update was not "
+    "finished and the server is still refused a start. Nothing was imported. Put it back in "
+    "the sources and press “Finish the world update” again, or press “Update the server to "
+    "latest…” or “Return to the tested pin…” under “Server build ▾” on the Modules tab, "
+    "which builds a new version in place of the one this server was left on."
+)
+
+
+def _kept_with_a_table_missing(box: Box) -> None:
+    """A kept build whose update added a world table file the checkout does not have."""
+    box.changes(("A", f"{REPO_SQL}/world/arena_season.sql"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    with pytest.raises(RollbackNotDone) as failed:
+        box.press()
+    assert "are not all in the server's sources" in str(failed.value)
+    box.seams.clear()
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+
+
+def test_finish_will_not_leave_out_a_table_the_kept_build_needs(box: Box) -> None:
+    """Fix rounds 4-5: a missing file the kept build needs is never "left": the record stays."""
+    _kept_with_a_table_missing(box)
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value) == NEEDED_AND_MISSING
+    assert box.streamed() == []
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_finish_will_not_leave_out_a_needed_file_the_import_plan_does_not_read(box: Box) -> None:
+    """Fix round 5: on disk is not enough; the plan `_expand` returns must read it too."""
+    on_the_built_commit(box)
+    outside = f"{SQL_DIR}/characters/not_a_world_table.sql"
+    (box.server_dir / outside).parent.mkdir(parents=True, exist_ok=True)
+    (box.server_dir / outside).write_text("SELECT 1;\n", encoding="utf-8")
+    (box.server_dir / trinitycore.WORLD_REIMPORT_FILE).write_text(
+        json.dumps({"version": 1, "reimport": [outside], "parts": [], "required": [outside]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(InstallerError, match="not_a_world_table.sql is not among"):
+        box.finish()
+    assert box.streamed() == []
+    assert box.pending() is not None, "the record stays"
+
+
+def _kept_with_a_new_table(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build B added `arena_season.sql` (on disk) and was kept without its tables imported."""
+    box.changes(("A", f"{REPO_SQL}/world/arena_season.sql"))
+    box.moves_to({"arena_season.sql": "DROP TABLE IF EXISTS arena_season;\n"})
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
+        box.press()
+    box.seams.clear()
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+
+    def gone(dest: Path) -> None:
+        (dest / REPO_SQL / "world" / "arena_season.sql").unlink(missing_ok=True)
+
+    box.m.rec.on_clone = gone  # the next move's commit has no such file
+
+
+def test_an_update_whose_commit_deleted_the_kept_builds_table_lands_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 5: no dead end -- the new build replaces the kept one, so its file is excused."""
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new="c" * 40)
+    said = box.press()
+    assert said[-1] == "Centurion is running on the newest upstream code."
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_return_to_a_pin_without_the_kept_builds_table_lands_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_new_table(box, monkeypatch)
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new=REV)
+    said = box.press(to_pin=True)
+    assert said[-1] == "Centurion is running on the commit this app was tested against."
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_failed_update_after_an_excused_move_puts_the_kept_builds_record_back(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: C excuses B's owed table, then fails its ready wait and B is put back.
+
+    The record is not removed until C is up, and the rollback puts it back as it was:
+    B still needs its table, so every start refuses and the sentence says why.
+    """
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new="c" * 40)
+    box.ready = [False, True]
+    with pytest.raises(InstallerError) as failed:
+        box.press()
+    said = str(failed.value)
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    assert box.head() == NEW, "the kept build's sources are back"
+    assert f"its servers were left STOPPED: {UNFINISHED}" in said
+    assert box.world.running is False
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_failed_update_after_a_partly_excused_move_keeps_what_the_old_build_still_owes(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B owes two tables; C deletes one, keeps the other. C fails; the rollback imports the
+    one C kept from B's checkout and the excused one stays owed."""
+    box.changes(
+        ("A", f"{REPO_SQL}/world/arena_season.sql"), ("M", f"{REPO_SQL}/world/creature.sql")
+    )
+    box.moves_to(
+        {
+            "arena_season.sql": "DROP TABLE IF EXISTS arena_season;\n",
+            "creature.sql": "DROP TABLE IF EXISTS creature; -- b\n",
+        }
+    )
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
+        box.press()
+    box.seams.clear()
+    owed = sorted([ARENA, f"{WORLD_SQL}/creature.sql"])
+    assert box.pending() == {"version": 1, "reimport": owed, "parts": [], "required": owed}
+
+    def gone(dest: Path) -> None:
+        (dest / REPO_SQL / "world" / "arena_season.sql").unlink(missing_ok=True)
+
+    box.m.rec.on_clone = gone
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("D", f"{REPO_SQL}/world/arena_season.sql"), old=NEW, new="c" * 40)
+    box.ready = [False, True]
+    with pytest.raises(InstallerError):
+        box.press()
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_needed_file_the_new_commit_still_has_is_not_excused_by_a_missing_disk_copy(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: excused only when the move's commit deleted it, never by the disk alone."""
+    _kept_with_a_new_table(box, monkeypatch)  # the next move's checkout lacks the file
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+    with pytest.raises(InstallerError) as refused:
+        box.press()
+    assert f"are not all in the server's sources ({ARENA})" in str(refused.value)
+    assert box.pending() == {"version": 1, "reimport": [ARENA], "parts": [], "required": [ARENA]}
+    assert box.head() == NEW
+
+
+def test_a_rebuild_is_refused_while_a_kept_builds_tables_are_owed(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: a plain Rebuild ends in a start and imports no table: refused first."""
+    _kept_with_a_new_table(box, monkeypatch)
+    builds = box.m.rec.calls.count("build")
+    with pytest.raises(InstallerError) as refused:
+        list(box.engine().rebuild(InstallOptions(server_dir=box.server_dir)))
+    assert str(refused.value) == f"{UNFINISHED} Nothing was changed."
+    assert box.m.rec.calls.count("build") == builds
+
+
+LOCALE = f"{WORLD_SQL}/broadcast_text_locale"
+LOCALE_PARTS = ("broadcast_text_locale.1.sql", "broadcast_text_locale.2.sql")
+
+
+def _kept_with_a_split_table(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build B changed a split table and was kept without its tables imported (fix round 7)."""
+    second = box.checkout / REPO_SQL / "world" / LOCALE_PARTS[1]
+    second.write_text("INSERT INTO broadcast_text_locale VALUES (2);\n", encoding="utf-8")
+    box.changes(("M", f"{REPO_SQL}/world/broadcast_text_locale.2.sql"))
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
+        box.press()
+    box.seams.clear()
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+
+
+def _without_the_parts(folder: Path) -> None:
+    for name in LOCALE_PARTS:
+        (folder / REPO_SQL / "world" / name).unlink(missing_ok=True)
+
+
+def test_a_needed_split_table_the_new_commit_still_has_is_not_excused_by_the_disk(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 7: round 6's rule for split tables -- missing on disk alone excuses nothing."""
+    _kept_with_a_split_table(box, monkeypatch)
+    box.m.rec.on_clone = _without_the_parts  # the checkout lacks them; the commit kept them
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+    with pytest.raises(InstallerError) as refused:
+        box.press()
+    assert f"are not all in the server's sources ({LOCALE}.*.sql)" in str(refused.value)
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+    assert box.head() == NEW
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_an_update_whose_commit_deleted_the_kept_builds_split_table_lands_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_split_table(box, monkeypatch)
+    box.m.rec.on_clone = _without_the_parts
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(
+        *(("D", f"{REPO_SQL}/world/{name}") for name in LOCALE_PARTS), old=NEW, new="c" * 40
+    )
+    said = box.press()
+    assert said[-1] == "Centurion is running on the newest upstream code."
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_finish_will_not_leave_out_a_split_table_the_kept_build_needs(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_split_table(box, monkeypatch)
+    _without_the_parts(box.checkout)
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value).startswith(
+        f"{LOCALE}.*.sql is not among the world table files Centurion's import reads"
+    )
+    assert box.streamed() == []
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+
+
+def test_finishing_the_kept_builds_split_table_imports_it_whole_and_clears_it(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kept_with_a_split_table(box, monkeypatch)
+    box.finish()
+    assert first_lines(box) == [
+        "DROP TABLE IF EXISTS broadcast_text_locale;",
+        "INSERT INTO broadcast_text_locale VALUES (2);",
+    ]
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_failed_update_that_excused_a_split_table_keeps_it_owed_after_the_rollback(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 7: B owes a split table and a table; C deletes the split table and fails.
+
+    The rollback imports the table from B's checkout and takes it off the record; the
+    split table stays owed, still marked as one B needs.
+    """
+    second = box.checkout / REPO_SQL / "world" / LOCALE_PARTS[1]
+    second.write_text("INSERT INTO broadcast_text_locale VALUES (2);\n", encoding="utf-8")
+    box.changes(
+        ("M", f"{REPO_SQL}/world/creature.sql"),
+        ("M", f"{REPO_SQL}/world/broadcast_text_locale.2.sql"),
+    )
+    box.moves_to({"creature.sql": "DROP TABLE IF EXISTS creature; -- b\n"})
+    _docker_gone_after_the_compile(box)
+    _refuse_the_failed_name(box)
+    _plan_fails_once(monkeypatch)
+    with pytest.raises(RollbackNotDone):
+        box.press()
+    box.seams.clear()
+    creature = f"{WORLD_SQL}/creature.sql"
+    assert box.pending() == {
+        "version": 1,
+        "reimport": [creature],
+        "parts": [LOCALE],
+        "required": [LOCALE, creature],
+    }
+
+    box.m.rec.on_clone = _without_the_parts
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(
+        *(("D", f"{REPO_SQL}/world/{name}") for name in LOCALE_PARTS), old=NEW, new="c" * 40
+    )
+    box.ready = [False, True]
+    with pytest.raises(InstallerError):
+        box.press()
+    assert box.pending() == {"version": 1, "reimport": [], "parts": [LOCALE], "required": [LOCALE]}
+    with pytest.raises(StartRefused):
+        CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_new_table_the_old_build_never_had_is_not_owed_after_the_rollback(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: the rollback puts back the record as it was BEFORE the press.
+
+    C adds a table B never had and fails; the rollback must not leave B owing it (it
+    would refuse every start for a file B's checkout does not have). What B owed went in
+    from B's own checkout during the rollback, so nothing is owed at all.
+    """
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.on_clone = None
+    team = f"{REPO_SQL}/world/arena_team.sql"
+    box.moves_to({"arena_team.sql": "DROP TABLE IF EXISTS arena_team;\n"})
+    real_restore = box.m.rec.restore_rev
+
+    def restore(dest: Path, rev: str) -> None:
+        real_restore(dest, rev)
+        (dest / team.removeprefix(f"{CHECKOUT}/")).unlink(missing_ok=True)
+        (box.server_dir / team).unlink(missing_ok=True)
+
+    monkeypatch.setattr(box.m.rec, "restore_rev", restore)
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("A", team), old=NEW, new="c" * 40)
+    box.ready = [False, True]
+    with pytest.raises(InstallerError) as failed:
+        box.press()
+    assert first_lines(box)[-1] == "DROP TABLE IF EXISTS arena_season;", "B's own, from B"
+    assert box.pending() is None, f"{team} is not owed by the build put back"
+    assert "put back and is running again" in str(failed.value)
+
+
+def test_the_record_stays_until_the_new_build_is_up_even_when_the_press_dies(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 6: `forward()` imported everything, then the press died before any ready
+    wait. Nothing confirmed the new build up, so what was owed is still recorded."""
+    _kept_with_a_new_table(box, monkeypatch)
+    box.m.rec.on_clone = None
+    box.m.rec.upstream[box.checkout] = "c" * 40
+    box.changes(("M", f"{REPO_SQL}/world/version.sql"), old=NEW, new="c" * 40)
+
+    def boom(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("a bug in the recreate")
+
+    box.world.recreate = boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="a bug in the recreate"):
+        box.press()
+    assert first_lines(box)[-2:] == [
+        "DROP TABLE IF EXISTS arena_season;",
+        "DROP TABLE IF EXISTS version;",
+    ], "the ground: forward() imported every table"
+    pending = box.pending()
+    assert pending is not None and ARENA in cast(list[str], pending["reimport"])

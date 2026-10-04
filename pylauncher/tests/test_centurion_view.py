@@ -179,10 +179,15 @@ def centurion_maintenance_argv() -> list[str]:
     return maintenance.mysql_for(ENTRY, "pw")._dump_argv(ENTRY.databases.world)
 
 
-def test_no_verb_is_drawn_before_task_9_watched_it_work(tmp_path: Path) -> None:
+T208_WORKED = frozenset({"set_level", "teleport", "mail_gold", "send_gear", "rename"})
+"""The verbs T208's live check (yulon-win11, 2026-10-04) pressed and watched work."""
+
+
+def test_the_verbs_t208_watched_work_are_confirmed_and_revive_is_not(tmp_path: Path) -> None:
     services = ControllerServices.for_entry(ENTRY, _server(tmp_path))
-    assert centurion_characters.CONFIRMED_LIVE == frozenset()
-    assert set(services.characters_withheld) == set(play_module.VERBS)
+    assert centurion_characters.CONFIRMED_LIVE == T208_WORKED
+    assert T208_WORKED < set(play_module.VERBS), "a name that is not a play.VERBS key"
+    assert dict(services.characters_withheld) == {"revive": centurion_characters.REVIVE_CRASHED}
     assert isinstance(services.play, play_module.InstallPlay)
     assert services.play.withheld == services.characters_withheld
 
@@ -490,15 +495,58 @@ def test_every_trinitycore_reason_a_tab_says_is_the_registrys_note(
             assert view.services.bot_dashboard is None
 
 
-def test_the_characters_tab_draws_no_unconfirmed_verb_and_says_why(
+def test_the_characters_tab_draws_the_five_confirmed_verbs_and_not_revive(
     qapp: object, tmp_path: Path
 ) -> None:
     view = _view(tmp_path)
-    assert view.character_buttons() == ()
+    assert view.character_buttons() == (
+        view.teleport_button,
+        view.set_level_button,
+        view.rename_button,
+        view.mail_gold_button,
+        view.send_gear_button,
+    )
+    assert view.revive_button not in view.character_buttons()
+    assert not view.revive_button.isVisibleTo(view)
+
+
+def test_revives_line_says_it_crashed_the_server_and_names_nothing_else(
+    qapp: object, tmp_path: Path
+) -> None:
+    view = _view(tmp_path)
     said = view.characters_withheld_label.text()
-    assert "Teleport" in said and "Send everything worn by" in said
-    assert "checked against a live Centurion server" in said
     assert not view.characters_withheld_label.isHidden()
+    assert said == (
+        "Not offered on this server yet: Revive — it crashed the world server when it was "
+        "tried, so it stays off until that is fixed."
+    )
+    assert "checked against a live" not in said, "Revive was checked: it is the crash that holds it"
+    for drawn in ("Teleport", "Set level", "Rename", "Send gold", "Send everything"):
+        assert drawn not in said, drawn
+
+
+def test_the_shipped_centurion_entry_withholds_only_revive(tmp_path: Path) -> None:
+    from yulon.catalog.catalog import load_catalog
+
+    entry = load_catalog().get("wow-centurion")
+    services = ControllerServices.for_entry(entry, _server(tmp_path))
+    assert set(services.characters_withheld) == {"revive"}
+
+
+def test_the_other_games_characters_tabs_withhold_nothing(qapp: object, tmp_path: Path) -> None:
+    from yulon.catalog.catalog import load_catalog
+
+    others = [entry for entry in load_catalog().games if entry.id != "wow-centurion"]
+    assert {entry.id for entry in others} >= {"wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"}
+    for entry in others:
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert dict(services.characters_withheld) == {}, entry.id
+        view = ControllerView(entry, services, status_poll_ms=0, job_runner=run_inline)
+        assert view.characters_withheld_label.text() == "", entry.id
+        assert view.characters_withheld_label.isHidden(), entry.id
+        if entry.play is not None:
+            assert view.revive_button in view.character_buttons(), entry.id
+            assert view.teleport_button in view.character_buttons(), entry.id
 
 
 def test_a_confirmed_verb_is_drawn_and_the_rest_stay_out(
