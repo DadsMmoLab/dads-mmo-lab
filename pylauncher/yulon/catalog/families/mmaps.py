@@ -52,8 +52,9 @@ checked against that hash: map data changed while it ran makes it a failure
 with every tile removed, never a set switched on. Update to latest, Return to the
 tested pin (`stop_for_route(clear=True)`: the generator's code may change while
 `MMAP_VERSION` does not) and Re-extract map data (`discard()`) still throw every
-tile away. After the generator CRASHED on a set, its later runs use the entry's
-`retry_threads` (Centurion: 1, the owner's stopgap for the crash at 16 %).
+tile away. After the generator CRASHED on a set (a fault signal, `CRASH_EXITS`; not
+Docker taking the container away), its later runs use the entry's `retry_threads`
+(Centurion: 1, the owner's stopgap for the crash at 16 %).
 
 **Never during a rebuild.** Rebuild, Update to latest, Return to the tested pin
 and Uninstall stop a job first (`stop_for_route()`, `remove_for_uninstall()`),
@@ -100,6 +101,13 @@ WORK_MOUNT = "/out"
 
 LOG_TAIL_LINES = 200
 """How much of the generator's log a status reads: bounded, the progress is in its last line."""
+
+CRASH_EXITS = frozenset({132, 134, 135, 136, 139})
+"""Exit statuses that are the generator's OWN fault: 128 + SIGILL, SIGABRT, SIGBUS, SIGFPE,
+SIGSEGV (T209: the crash at 16 % was 139). Only these move a set to `retry_threads`. A
+container Docker took away -- Docker Desktop quitting or the daemon restarting leaves it
+`exited` with 255, 137 (SIGKILL) or 143 (SIGTERM), not missing, because it runs without
+`--rm` -- is a lost run, like a missing one: tiles kept, the usual threads (cold review)."""
 
 TILE_SUFFIX = ".mmtile"
 """`mmaps/MMMYYXX.mmtile`, one finished navmesh tile (MapBuilder.cpp:963 at faac5fc9); the
@@ -234,8 +242,8 @@ class Record:
     kept: int = 0
     """T209: how many whole tiles it left (`_keep_finished()`), or a resume started from."""
     crashed: bool = False
-    """T209: the generator crashed on this set (an exit outside `success_codes`); its later
-    runs use `retry_threads`. Carried while the set is continued."""
+    """T209: the generator crashed on this set (an exit in `CRASH_EXITS`); its later runs use
+    `retry_threads`. Carried while the set is continued."""
     unreadable: bool = False
     """Read off a file that could not be read or parsed: says nothing about the container.
     Never written."""
@@ -910,7 +918,7 @@ def _finished(
         words = docker.last_words(tuple((tail or "").splitlines()[-20:]))
         return _fail(
             job,
-            replace(record, crashed=True),
+            replace(record, crashed=record.crashed or facts.exit_code in CRASH_EXITS),
             f"the generator stopped with exit {facts.exit_code}. {words}",
             run,
             now,

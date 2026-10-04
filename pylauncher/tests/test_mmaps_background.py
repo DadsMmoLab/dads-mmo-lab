@@ -1453,3 +1453,46 @@ def test_map_data_reached_through_a_link_is_never_continued(server: Path, linked
     status(server, fake)
     start(server, fake)
     assert fake.mmaps_at_run[-1] == []
+
+
+@pytest.mark.parametrize(
+    ("code", "crashed"),
+    [
+        (139, True),
+        (134, True),
+        (135, True),
+        (136, True),
+        (132, True),
+        (255, False),
+        (137, False),
+        (143, False),
+        (1, False),
+    ],
+    ids=(
+        "sigsegv",
+        "sigabrt",
+        "sigbus",
+        "sigfpe",
+        "sigill",
+        "docker-daemon-went-away",
+        "sigkill",
+        "sigterm",
+        "plain-error",
+    ),
+)
+def test_only_a_signal_of_the_generators_own_is_a_crash(
+    server: Path, code: int, crashed: bool
+) -> None:
+    """Cold review: Docker Desktop quitting leaves the container `exited` with 255, 137 or 143,
+    not missing. That is a lost run, which keeps its tiles and the usual threads; only a
+    fault of the generator's own (SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL) moves to one."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(code)
+    now = status(server, fake)
+    assert now.state == "failed" and now.kept == 3
+    assert record(server)["crashed"] is crashed
+    start(server, fake)
+    assert len(fake.mmaps_at_run[-1]) == 3, "the tiles are kept either way"
+    assert fake.started[-1].argv[-2:] == ("--threads", "1" if crashed else "4")
