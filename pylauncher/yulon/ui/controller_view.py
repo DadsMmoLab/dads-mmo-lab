@@ -3377,8 +3377,7 @@ def _for_centurion(
     bots ride on `observability`; Accounts on `accounts.level`; Characters on
     `play`. What is not offered is said where it would be: My Party (the
     registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
-    verb not yet watched to work on a live Centurion server
-    (`centurion_characters.withheld`).
+    verb Centurion withholds (`centurion_characters.withheld`).
 
     No `import_probe`: the import is the install engine's marker-gated SQL plan,
     and the Repair button's only action, `docker.repair_import()`, refuses an

@@ -29,9 +29,9 @@ What is this core's own, and where each fact comes from:
   Centurion's auth schema carries six triggers and two views, its characters and
   world schemas carry procedures (facts §2), and a dump without them restores a
   server whose realm-list updates no longer audit and whose tournament kit is gone.
-* **Characters.** `characters.withheld()`: the verbs a live Centurion server has
-  been watched to run (T179 Task 9) are offered, the rest are not drawn, each
-  with the sentence that says why.
+* **Characters.** `characters.withheld()`: the verbs T208's live check watched a
+  Centurion server run are offered; the rest are not drawn, each with the
+  sentence that says why.
 
 What it does not have, said rather than stubbed: no one-shot import service (the
 import is the install engine's marker-gated SQL plan, as on CMaNGOS, so there is

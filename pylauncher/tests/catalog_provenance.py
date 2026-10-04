@@ -326,9 +326,9 @@ PROVENANCE: dict[str, Provenance] = {
         note="asked: `... SHAPROBE 4` accepted, `5` answered `Incorrect values.`",
     ),
     # -- wow-centurion (TrinityCore 3.3.5 fork) — read at CENTURION @ faac5fc9, T179 Task 7 --
-    # Nothing here is measured yet: the live proof is T179 Task 9, which confirms the
-    # Characters verbs (`controller_wow_centurion.characters.CONFIRMED_LIVE`) and the
-    # account columns before they are moved to `measured-on`.
+    # Read from source, not measured. T208's live check (2026-10-04) confirmed five of
+    # the Characters verbs (`controller_wow_centurion.characters.CONFIRMED_LIVE`); the
+    # rows below were not moved to `measured-on` by it.
     "wow-centurion:play.equipped.template_column": Provenance(
         "read-from-source",
         "centurion/sql/characters/characters_schema.sql:1365",
