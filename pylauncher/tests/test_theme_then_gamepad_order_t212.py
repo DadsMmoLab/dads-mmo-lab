@@ -19,6 +19,7 @@ the defect this ticket was.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -63,4 +64,11 @@ def test_the_navigation_tests_pass_after_test_theme_in_one_process() -> None:
     )
     tail = "\n".join(run.stdout.splitlines()[-40:])
     assert run.returncode == 0, f"test_theme.py then test_gamepad_keyboard.py:\n{tail}"
-    assert " passed" in tail and "failed" not in tail and "error" not in tail, tail
+    # The SUMMARY line only: a warning further up may well say "error" or
+    # "failed" in its own text. Failures and errors are counted on this line
+    # ("1 failed, 73 passed", "74 passed, 2 errors"), and the return code above
+    # covers the rest.
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    summary = lines[-1] if lines else ""
+    assert re.match(r"\d+ passed\b", summary), tail
+    assert not re.search(r"\b\d+ (failed|errors?)\b", summary), tail
