@@ -10311,6 +10311,31 @@ def test_a_verdict_that_fails_first_on_docker_says_nothing_even_under_the_hold(
     assert "pipe" not in said and "exited" not in said, said
 
 
+def test_a_verdict_already_on_screen_goes_when_the_docker_box_goes_up(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C7: a world reading from before Docker went away is not left under the box.
+
+    The next dashboard read clears it as well, but a status poll that fails
+    first left "up — 3 players, 497 bots" beside "Status unknown (see above)"
+    until then. Found by the Task 6 mutation pass: dropping the clear from
+    `_put_the_docker_banner_up` failed no test.
+    """
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("up", players=3, bots=497)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view.refresh_verdict()
+    assert view.verdict_label.text() == "up — 3 players, 497 bots"
+    assert not view.verdict_label.isHidden()
+
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+
+    assert _shown(view, view.docker_banner)
+    assert view.verdict_label.isHidden(), "an old world reading stands under the Docker box"
+    assert view.verdict_label.text() == ""
+
+
 def test_a_missing_docker_cli_in_a_verdict_that_lands_first_is_the_banners_to_say(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

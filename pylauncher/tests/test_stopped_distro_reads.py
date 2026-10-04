@@ -310,6 +310,30 @@ def test_the_tab_says_the_distro_is_stopped_and_fills_in_once_it_is_up(
         view.shutdown()
 
 
+def test_a_greyed_restore_says_why_while_the_backups_wait_for_the_distro(
+    qapp: object, disk: _DistroDisk
+) -> None:
+    """A10 (T195): Restore is greyed with a reason on its tab before the backups are listed.
+
+    The listing waits for the distro, so the reason Restore is built with is
+    the one on screen. Found by the Task 6 mutation pass: building Restore
+    greyed with no reason failed no test, because every other test lists the
+    backups first and that gives Restore its reason again.
+    """
+    view = _open_the_tab(_entry("wow-wotlk"), Path(disk.root))
+    try:
+        assert view.backup_list.count() == 0, "the backups folder was listed while stopped"
+        assert not view.restore_button.isEnabled()
+        said = view.restore_reasons.text()
+        assert said and view.restore_button.toolTip() in said.splitlines(), (
+            said,
+            view.restore_button.toolTip(),
+        )
+    finally:
+        disk.stopped = False
+        view.shutdown()
+
+
 def test_a_reading_asked_twice_while_stopped_runs_once_when_the_distro_is_up(
     qapp: object, disk: _DistroDisk, monkeypatch: pytest.MonkeyPatch
 ) -> None:
