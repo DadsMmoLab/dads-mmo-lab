@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 
 import pytest
+from PySide6.QtCore import QObject, Signal
 
 from tests import test_stop_waits_for_the_world as stop_world
 from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
@@ -22932,18 +22933,59 @@ def test_the_dialog_makes_only_the_folder_its_numbers_are_for(qapp: object, tmp_
     assert dialog.ok_button.isEnabled()
 
 
-def test_typing_a_folder_checks_it_once_when_the_typing_stops(qapp: object, tmp_path: Path) -> None:
-    """C32 (T195): a Steam Deck has no Enter key, and the dialog asked for one.
+class _Clock:
+    """A clock the test moves by hand, and the timers that run on it (no wall time)."""
 
-    One re-plan, 800 ms after the LAST key: every key restarts the wait, so a
-    path typed slowly is not planned once per letter, and nothing waits on Enter.
-    Mutation: plan on every `textChanged` and the queue holds one job per key;
-    keep the old label and "Press Enter" is back on screen.
-    """
-    import time
+    def __init__(self) -> None:
+        self.now = 0
+        self.timers: list[Any] = []
 
-    from PySide6.QtTest import QTest
+    def timer(self, parent: Any) -> Any:
+        made = _ClockTimer(self, parent)
+        self.timers.append(made)
+        return made
 
+    def advance(self, ms: int) -> None:
+        self.now += ms
+        for timer in self.timers:
+            if timer.due is not None and timer.due <= self.now:
+                timer.due = None
+                timer.timeout.emit()
+
+
+class _ClockTimer(QObject):
+    """The part of `QTimer` the Make dialog uses, timed by `_Clock`."""
+
+    timeout = Signal()
+
+    def __init__(self, clock: _Clock, parent: Any) -> None:
+        super().__init__(parent)
+        self._clock = clock
+        self._interval = 0
+        self.single_shot = False
+        self.due: int | None = None
+
+    def setSingleShot(self, single: bool) -> None:  # noqa: N802 - QTimer's name
+        self.single_shot = single
+
+    def setInterval(self, ms: int) -> None:  # noqa: N802 - QTimer's name
+        self._interval = ms
+
+    def interval(self) -> int:
+        return self._interval
+
+    def start(self) -> None:
+        self.due = self._clock.now + self._interval
+
+    def stop(self) -> None:
+        self.due = None
+
+    def isActive(self) -> bool:  # noqa: N802 - QTimer's name
+        return self.due is not None
+
+
+def _typing_dialog(tmp_path: Path, **kwargs: Any) -> tuple[Any, _Deferred, _Clock, list[Path]]:
+    """A Make dialog on a held job runner and a hand-moved clock; `planned` lists each plan run."""
     planned: list[Path] = []
 
     def replan(target: Path) -> play_client.BuildPlan:
@@ -22953,27 +22995,122 @@ def test_typing_a_folder_checks_it_once_when_the_typing_stops(qapp: object, tmp_
         )
 
     jobs = _Deferred()
-    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan), jobs=jobs)
+    clock = _Clock()
+    dialog = controller_view_module.PlayClientDialog(
+        _offer(tmp_path, replan), jobs=jobs, timer=clock.timer, **kwargs
+    )
+    return dialog, jobs, clock, planned
+
+
+def test_typing_a_folder_checks_it_once_when_the_typing_stops(qapp: object, tmp_path: Path) -> None:
+    """C32 (T195): a Steam Deck has no Enter key, and the dialog asked for one.
+
+    One re-plan, 800 ms after the LAST key: every key restarts the wait, so a
+    path typed slowly is not planned once per letter, and nothing waits on Enter.
+    On a hand-moved clock, so no wall time decides it. Mutation: plan on every
+    `textChanged` and the queue holds one job per key; drop the restart and the
+    plan runs 800 ms after the FIRST key; keep the old label and "Press Enter"
+    is back on screen.
+    """
+    from PySide6.QtTest import QTest
+
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path)
+    (timer,) = clock.timers
+    assert timer.single_shot and timer.interval() == 800
     dialog.path_edit.clear()
     typed = str(tmp_path / "Games" / "WoW")
     QTest.keyClicks(dialog.path_edit, typed[:-2])
-    process_events(500)
+    clock.advance(500)
     QTest.keyClicks(dialog.path_edit, typed[-2:])
-    last_key = time.monotonic()
     assert jobs.queue == [], "a key started a plan before the typing stopped"
     assert "Press Enter" not in dialog.size_label.text()
     assert dialog.size_label.text() == "Checking this folder when you stop typing\u2026"
     assert not dialog.ok_button.isEnabled()
 
-    pump_until(lambda: bool(jobs.queue), "the re-plan after the typing stopped")
-    waited = time.monotonic() - last_key
-    assert waited >= 0.75, f"planned {waited:.2f}s after the last key"
-    process_events(1000)
+    clock.advance(799)
+    assert jobs.queue == [], "planned before 800 ms had passed since the last key"
+    clock.advance(1)
+    assert len(jobs.queue) == 1, "not planned 800 ms after the last key"
+    clock.advance(10_000)
     assert len(jobs.queue) == 1, "more than one plan for one stretch of typing"
     jobs.run(0)
     assert planned == [Path(typed)]
     choice = dialog.choice()
     assert choice is not None and choice.target == Path(typed)
+
+
+def test_change_plans_the_picked_folder_once(qapp: object, tmp_path: Path) -> None:
+    """C32 (T195): Change… writes the field, which starts the typing wait too.
+
+    The pick plans at once; the wait it started is over with it, so nothing is
+    left to run out and plan the same folder again. Mutation: leave the timer
+    running in `_retarget` and it is still due after the click.
+    """
+    picked = tmp_path / "Elsewhere"
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path, pick_dir=lambda *_: picked)
+    (timer,) = clock.timers
+
+    dialog.change_button.click()
+    assert len(jobs.queue) == 1
+    assert not timer.isActive(), "the typing wait outlived the pick"
+    clock.advance(10_000)
+    assert len(jobs.queue) == 1, "Change… planned the folder twice"
+    jobs.run(0)
+    assert planned == [picked / "WoW (Yu'lon)"]
+
+
+def test_leaving_the_field_while_its_folder_is_checked_plans_it_once(
+    qapp: object, tmp_path: Path
+) -> None:
+    """M1 (T195): focus leaving the field fires `editingFinished` with a plan already out.
+
+    On a Deck that is how the field is left now that Enter is gone. Mutation:
+    drop the pending check in `_path_edited` and a second job is queued.
+    """
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path)
+    typed = tmp_path / "Games" / "WoW"
+    dialog.path_edit.setText(str(typed))
+    clock.advance(800)
+    assert len(jobs.queue) == 1
+    dialog.path_edit.editingFinished.emit()
+    clock.advance(10_000)
+    assert len(jobs.queue) == 1, "the folder being checked was planned again"
+    assert dialog.size_label.text() == f"Checking {typed}\u2026"
+    jobs.run(0)
+    assert planned == [typed]
+    assert dialog.ok_button.isEnabled()
+
+
+def test_typing_back_to_the_folder_being_checked_plans_it_once(
+    qapp: object, tmp_path: Path
+) -> None:
+    """M1 (T195): away and back while its plan runs, the folder is not planned twice.
+
+    Mutation: drop the pending check in `_path_edited` and a second plan is
+    queued; drop the pending branch in `_path_typed` and the label says it will
+    check when the typing stops, about a folder already being checked.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path)
+    typed = tmp_path / "Games" / "WoW"
+    dialog.path_edit.setText(str(typed))
+    clock.advance(800)
+    assert len(jobs.queue) == 1
+    QTest.keyClick(dialog.path_edit, "x")
+    QTest.keyClick(dialog.path_edit, Qt.Key.Key_Backspace)
+    assert dialog.path_edit.text() == str(typed)
+    # Back on the folder already being checked: it says so, it does not wait.
+    assert dialog.size_label.text() == f"Checking {typed}\u2026"
+    clock.advance(10_000)
+    dialog.path_edit.editingFinished.emit()
+    assert len(jobs.queue) == 1, "the folder being checked was planned again"
+    assert dialog.size_label.text() == f"Checking {typed}\u2026"
+    jobs.run(0)
+    assert planned == [typed]
+    choice = dialog.choice()
+    assert choice is not None and choice.target == typed
 
 
 def test_the_play_refusal_names_the_menu_entry_it_sends_you_to(

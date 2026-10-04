@@ -1194,6 +1194,7 @@ class PlayClientDialog(QDialog):
         *,
         pick_dir: DirPicker = _qt_dir_picker,
         jobs: JobRunner | None = None,
+        timer: Callable[[QObject], QTimer] = QTimer,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1203,6 +1204,8 @@ class PlayClientDialog(QDialog):
         self._jobs: JobRunner = jobs or threaded_job_runner(self)
         self._plan: play_client.BuildPlan | None = offer.plan
         self._planned: Path = offer.target
+        self._pending = False
+        """A plan for `_planned` is on the runner and has not answered yet."""
         self._free = offer.free_bytes
         box = QVBoxLayout(self)
         intro = QLabel(
@@ -1275,7 +1278,8 @@ class PlayClientDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         box.addWidget(buttons)
-        self.replan_timer = QTimer(self)
+        # `timer` is a seam: a test drives the wait on its own clock.
+        self.replan_timer = timer(self)
         self.replan_timer.setSingleShot(True)
         self.replan_timer.setInterval(REPLAN_AFTER_TYPING_MS)
         self.replan_timer.timeout.connect(self._path_edited)
@@ -1293,6 +1297,11 @@ class PlayClientDialog(QDialog):
         if not self.path_edit.text().strip():
             return  # an empty field names no folder; OK stays dead (`_update_ok`)
         target = self._shown_path()
+        if target == self._planned and self._pending:
+            # Already being checked: a field left (focus loss, the Deck's way
+            # out now Enter is gone) or retyped back must not plan it twice.
+            self.size_label.setText(f"Checking {target}\u2026")
+            return
         if target != self._planned or self._plan is None:
             self._retarget(target)
 
@@ -1300,6 +1309,9 @@ class PlayClientDialog(QDialog):
         if not text.strip():
             self.replan_timer.stop()
             self.size_label.setText("Type where to put it, or press Change\u2026")
+        elif self._shown_path() == self._planned and self._pending:
+            self.replan_timer.stop()
+            self.size_label.setText(f"Checking {self._planned}\u2026")
         elif self._shown_path() != self._planned or self._plan is None:
             # The same test `_path_edited` makes, so a folder typed back to one
             # that was refused is checked again rather than left waiting.
@@ -1327,6 +1339,7 @@ class PlayClientDialog(QDialog):
         self.replan_timer.stop()  # this IS the plan the typing was waiting for
         self._plan = None
         self._planned = target
+        self._pending = True
         self.full_copy_check.setChecked(False)
         self.full_copy_check.setVisible(False)
         self.size_label.setText(f"Checking {target}\u2026")
@@ -1347,6 +1360,7 @@ class PlayClientDialog(QDialog):
     def _replanned(self, answer: object) -> None:
         if not isinstance(answer, tuple) or answer[0] != self._planned:
             return  # an older folder's answer, overtaken by another edit
+        self._pending = False
         _target, plan, free = answer
         if isinstance(plan, play_client.BuildPlan):
             self._plan = plan
@@ -1361,6 +1375,7 @@ class PlayClientDialog(QDialog):
     def _replan_failed(self, exc: object) -> None:
         """Something `work()` did not expect; the folder stays unplanned and OK dead."""
         logger.warning(f"ready-to-play client: planning {self._planned} failed: {exc!r}")
+        self._pending = False
         self._plan = None
         self.size_label.setText(f"{self._planned} could not be checked: {exc}")
         self._update_ok()

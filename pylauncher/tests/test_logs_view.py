@@ -637,3 +637,75 @@ def test_warnings_and_errors_are_drawn_in_the_install_logs_colours(qapp: object)
         assert failed > 3 * max(info_failed, 10), (failed, info_failed)
     finally:
         view.hide()
+
+
+def _drawn_lines(text: str, last: str) -> tuple[Any, Any, list[tuple[int, int]], int]:
+    """Show `text` as the app log; return the viewer, its grabbed image, each line's rows, width."""
+    platform.config_dir().mkdir(parents=True, exist_ok=True)
+    (platform.config_dir() / "yulon.log").write_text(text, encoding="utf-8")
+    view = _view()
+    view.resize(900, 600)
+    view.show()
+    pump_until(lambda: last in view.viewer.toPlainText(), "the app log read")
+    process_events(50)
+    viewer = view.viewer
+    rows: list[tuple[int, int]] = []
+    block = viewer.document().begin()
+    while block.isValid():
+        rect = viewer.blockBoundingGeometry(block).translated(viewer.contentOffset())
+        rows.append((int(rect.top()), int(rect.bottom())))
+        block = block.next()
+    return view, viewer.viewport().grab().toImage(), rows, viewer.viewport().width()
+
+
+def test_debug_is_dimmed_and_critical_continuations_and_a_bare_traceback_are_red(
+    qapp: object,
+) -> None:
+    """C33 (T195): the rest of the highlighter's promise, sampled off the drawn viewer.
+
+    DEBUG in the dimmed `marker` tone (none of its text as dark as plain text);
+    CRITICAL red; a record's later lines red with it until the next record; a
+    bare Traceback red through its frames and its exception line, and the
+    line after that plain again. Mutation: drop the continuation rule and the
+    ERROR record's second line is plain; let a bare traceback run on and the
+    line after its exception is red.
+    """
+    from yulon.ui.widgets.log_panel import line_format
+
+    lines = [
+        "2026-10-04 10:00:00 INFO [yulon.main] the window opened",  # 0
+        "2026-10-04 10:00:01 DEBUG [yulon.runner] argv: docker compose ps",  # 1
+        "2026-10-04 10:00:02 CRITICAL [yulon.main] the window could not be built",  # 2
+        "2026-10-04 10:00:03 ERROR [yulon.docker] Docker did not answer:",  # 3
+        "the pipe it was asked on was not there",  # 4: the same record
+        "  and nothing else answered either",  # 5: the same record
+        "2026-10-04 10:00:04 INFO [yulon.main] carrying on without Docker",  # 6
+        "Traceback (most recent call last):",  # 7
+        '  File "yulon/main.py", line 1, in <module>',  # 8
+        "    build()",  # 9
+        "ValueError: the window could not be built",  # 10
+        "a plain line someone printed after it",  # 11
+    ]
+    view, image, rows, width = _drawn_lines("\n".join(lines) + "\n", lines[-1])
+    try:
+        palette = view.viewer.palette()
+        failure = line_format("failure", palette).foreground().color()
+        marker = line_format("marker", palette).foreground().color()
+        text = palette.color(palette.ColorRole.Text)
+
+        def near(index: int, colour: Any) -> int:
+            top, bottom = rows[index]
+            return _near(image, top, bottom, width, colour)
+
+        # A line is red when more of it is drawn in the failure colour than in
+        # plain text's: a short frame line has few pixels of either, so a
+        # count against other lines would miss it, but the two never tie --
+        # red text has no plain-text pixels, plain text only stray red fringes.
+        red = [index for index in range(len(lines)) if near(index, failure) > near(index, text)]
+        assert red == [2, 3, 4, 5, 7, 8, 9, 10], red
+        assert near(11, text) > 20, "the line after the traceback is not plain text"
+
+        assert near(1, text) == 0, "DEBUG drew text as dark as a plain line's"
+        assert near(1, marker) > 20, near(1, marker)
+    finally:
+        view.hide()

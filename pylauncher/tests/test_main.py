@@ -5545,6 +5545,7 @@ def test_an_install_start_opens_the_log_at_a_readable_height(shown_window: Any) 
     """
     console, toggle, splitter = _catalog_console(shown_window)
     panel = shown_window.yulon_log_panels[0]
+    was_hidden = console.isHidden(), toggle.isHidden()
     _at_width(shown_window, (1280, 800))
     try:
         panel.run_started.emit()
@@ -5555,17 +5556,25 @@ def test_an_install_start_opens_the_log_at_a_readable_height(shown_window: Any) 
         assert bottom >= 0.4 * (top + bottom), splitter.sizes()
         assert toggle.text() == "▼ Hide install log"
     finally:
-        console.setVisible(False)
-        toggle.setVisible(False)
+        # Put back as the app had them, not forced hidden: a forced hide would
+        # give the next test the first-run state whatever the app does.
+        console.setHidden(was_hidden[0])
+        toggle.setHidden(was_hidden[1])
         process_events(10)
 
 
 def test_at_960_the_first_rows_install_buttons_are_in_view(shown_window: Any) -> None:
-    """C23 (T195): at the smallest window, Install is on the first frame, not below it."""
+    """C23 (T195): at the smallest window, Install is on the first frame, not below it.
+
+    The window as the app leaves it with no install run yet: with the empty
+    console open under the shelf (the old layout), WotLK's Install sat below
+    the fold at 960x640. Mutation: show the console at start and this fails.
+    """
     from PySide6.QtWidgets import QScrollArea
 
     view = _catalog_view(shown_window)
     _at_width(shown_window, (960, 640))
+    assert (shown_window.width(), shown_window.height()) == (960, 640)
     viewport = view.findChild(QScrollArea, "catalog-shelf-scroll").viewport()
     below = []
     for game in ("wow-wotlk", "wow-tbc"):
@@ -5600,6 +5609,7 @@ def test_at_1920_the_strip_says_the_whole_step(shown_window: Any) -> None:
     console, toggle, _splitter = _catalog_console(shown_window)
     panel = shown_window.yulon_log_panels[0]
     said = "Step 7 of 9 · Compiling the world server"
+    was_hidden = console.isHidden(), toggle.isHidden()
     try:
         console.setVisible(True)
         _at_width(shown_window, (1920, 1080))
@@ -5610,6 +5620,6 @@ def test_at_1920_the_strip_says_the_whole_step(shown_window: Any) -> None:
     finally:
         panel.clear()
         panel._clear_strip()
-        console.setVisible(False)
-        toggle.setVisible(False)
+        console.setHidden(was_hidden[0])
+        toggle.setHidden(was_hidden[1])
         process_events(10)

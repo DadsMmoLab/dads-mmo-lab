@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from PySide6.QtCore import Qt
@@ -1275,12 +1276,17 @@ def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
     )
 
 
-def _shown_step(panel: LogPanel) -> str:
-    """What the strip's step field DRAWS (its tooltip carries the whole of it)."""
+def _strip_label(panel: LogPanel, said: str) -> Any:
+    """The strip field whose tooltip (the whole of what it was told) is `said`."""
     from PySide6.QtWidgets import QLabel
 
-    (label,) = [w for w in panel.findChildren(QLabel) if w.toolTip() == panel.step_text()]
-    return label.text()
+    (label,) = [w for w in panel.findChildren(QLabel) if w.toolTip() == said]
+    return label
+
+
+def _shown_step(panel: LogPanel) -> str:
+    """What the strip's step field DRAWS (its tooltip carries the whole of it)."""
+    return str(_strip_label(panel, panel.step_text()).text())
 
 
 def test_a_wide_strip_shares_the_row_instead_of_capping_the_step(qapp: object) -> None:
@@ -1300,6 +1306,16 @@ def test_a_wide_strip_shares_the_row_instead_of_capping_the_step(qapp: object) -
         panel.resize(900, 300)
         process_events(20)
         assert _shown_step(panel).endswith("…"), _shown_step(panel)
+        # The cap itself, not only its effect: the step field is held to 200 px
+        # and the progress field to 230 px, whatever share the row would give.
+        step = _strip_label(panel, panel.step_text())
+        assert step.maximumWidth() == 200 and step.width() <= 200, step.width()
+        panel.append(lines.PROGRESS + "build 42 Compiling the world server's many sources")
+        progress = _strip_label(panel, panel.progress_text())
+        assert progress.maximumWidth() == 230 and progress.width() <= 230, progress.width()
+        panel.resize(1920, 300)
+        process_events(20)
+        assert step.width() > 200 and progress.width() > 230, (step.width(), progress.width())
     finally:
         panel.hide()
 
