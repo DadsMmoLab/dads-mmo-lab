@@ -40,6 +40,7 @@ from yulon.catalog.native import (
     _listing,
 )
 from yulon.log import get_logger
+from yulon.manifest import Db
 
 logger = get_logger(__name__)
 
@@ -271,6 +272,21 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("up", self._up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
         )
+
+    def databases_a_new_build_changes(self) -> tuple[Db, ...]:
+        """The playerbots database, which the new build's world server migrates at start (T217).
+
+        `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES=1` is structural
+        (`composegen.DEFAULT_WORLD_ENV`), so the playerbots updater runs on every
+        start whatever `Updates.EnableDatabases` says, and it reads the module's
+        `data/sql` from the HOST folder the worldserver bind-mounts
+        (`override.yml.tmpl`), not from the image. A player's update of 2026-10-03
+        applied mod-playerbots' "remove obsolete tables" update on the new build's
+        first start, and the old build then crash-looped on the missing table. The
+        core's own updater is off at start (`Updates.EnableDatabases` 0), so auth,
+        characters and world are not changed by the start itself.
+        """
+        return ("playerbots",)
 
     def _clone_core(self, ctx: StageContext) -> Iterator[str]:
         """Clone the emulator itself INTO the server dir — it is the checkout.

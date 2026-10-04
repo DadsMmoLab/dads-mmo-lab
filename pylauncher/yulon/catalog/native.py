@@ -112,6 +112,7 @@ from yulon.catalog.installer import (
 )
 from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
+from yulon.manifest import Db
 from yulon.ownership import Ownership as Ownership
 from yulon.ui import lines
 
@@ -4362,6 +4363,23 @@ class StagedInstaller:
         rebuild's recreate is the single compose call it always was.
         """
         return None
+
+    def databases_a_new_build_changes(self) -> tuple[Db, ...]:
+        """The databases this family's new build can change at its first start, by role (T217).
+
+        What the update route copies with the servers stopped, right before the new
+        build first starts, and puts back if that build is rolled back
+        (`snapshot.DatabaseSnapshot`). Empty on the spine: a family whose servers apply
+        no update of their own at start has nothing a rollback must undo. Each family
+        that has one says so with its evidence; `snapshot_databases()` resolves the
+        roles to this entry's schema names.
+        """
+        return ()
+
+    def snapshot_databases(self) -> tuple[str, ...]:
+        """`databases_a_new_build_changes()` in this entry's own schema names (T217)."""
+        named = self.entry.schema_map()
+        return tuple(named[role] for role in self.databases_a_new_build_changes() if role in named)
 
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
         """Why the server must not be started now, or None (T179).

@@ -107,6 +107,7 @@ from yulon.catalog.native import (
     stop_abandoned_worker,
 )
 from yulon.log import get_logger
+from yulon.manifest import Db
 
 logger = get_logger(__name__)
 
@@ -354,6 +355,31 @@ class CmangosInstaller(StagedInstaller):
         yield "Source patches are in place."
 
     # -- what T64's update route needs from this family ------------------
+
+    AUTO_UPDATE_KEY: ClassVar[str] = "Database.AutoUpdate.Enabled"
+    """The conf key that switches a CMaNGOS-lineage world server's own start-time updater on."""
+
+    def databases_a_new_build_changes(self) -> tuple[Db, ...]:
+        """Login and characters when this tree's world server migrates them at start (T217).
+
+        Read off the entry's own conf table, never off its id: a tree whose
+        `mangosd.conf` sets `Database.AutoUpdate.Enabled` to 1 runs its AutoUpdater
+        on every start, and that applies the new core's (and TortoiseBots') login,
+        characters and world migrations (`controller_wow_tortoise/autoupdate.py`;
+        Tortoise's conf table, "5 character and 3 world module migrations applied at
+        first start", measured on yulon-arch 2026-09-11). TBC and Vanilla set no such
+        key and their `*-db` repositories stay on their pin, so their new build
+        changes nothing at its first start and nothing is copied.
+
+        World is left out on the owner's word of 2026-10-04: it is the biggest of
+        the three and the slowest to copy, so a rollback puts back login and
+        characters and says that the world database is not put back.
+        """
+        switched_on = any(
+            table.keys.get(self.AUTO_UPDATE_KEY) == "1"
+            for table in self._data().conf.files.values()
+        )
+        return ("auth", "characters") if switched_on else ()
 
     def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
         """Which files in which checkout this app patches itself, for the dirty-tree guard.

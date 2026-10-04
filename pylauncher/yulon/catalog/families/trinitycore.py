@@ -87,6 +87,7 @@ from yulon.catalog.native import (
     read_state,
 )
 from yulon.log import get_logger
+from yulon.manifest import Db
 
 logger = get_logger(__name__)
 
@@ -1073,6 +1074,18 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"{name} changed what its {what} database starts with ({rel}); Yu'lon can't merge "
             f"that into {whose} safely yet. Nothing was changed."
         )
+
+    def databases_a_new_build_changes(self) -> tuple[Db, ...]:
+        """Nothing: this tree's world server applies no update of its own at start (T217).
+
+        `Updates.EnableDatabases` is 0 in its conf table, and the catalog refuses
+        any other value for this family
+        (`catalog.TrinityCoreConf._the_database_updater_stays_off`). The world
+        tables an update changes are imported with the servers stopped by
+        `servers_down_work()`, whose own `back()` imports them again from the old
+        checkout; the characters and accounts layouts are refused outright.
+        """
+        return ()
 
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
         """The spine's refusal, then a world update left unfinished (T179).
