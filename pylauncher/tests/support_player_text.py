@@ -1,10 +1,10 @@
 """What a player can read on screen, checked for developer notes (T194).
 
-`player_text_faults(root)` walks every widget a player could see under `root`
-and reports each piece of text that reads like a note to ourselves rather than
-something meant for them: a ticket number, an owner decision, the word
-"manifest", "headless", a Python exception class, a traceback, a Docker pipe
-path. Each fault names the widget (its objectName, or its class when it has
+`player_text_faults(root)` walks the widgets a player could see under `root`,
+reads the kinds of text listed below, and reports each one that reads like a
+note to ourselves rather than something meant for them: a ticket number, an
+owner decision, the word "manifest", "headless", a Python exception class, a
+traceback, a Docker pipe path. Each fault names the widget (its objectName, or its class when it has
 none), where the text was found, the rule it broke and the text itself.
 
 What is read: `QLabel.text()`, `QAbstractButton.text()`, `QGroupBox.title()`,
@@ -12,6 +12,11 @@ every `QTabBar` tab's text and tooltip, every widget's `toolTip()`, and a
 read-only `QPlainTextEdit`'s text and placeholder. Only widgets visible to
 `root` count (`isVisibleTo`), so a page behind another tab is not read until
 the test makes it current.
+
+Not read: a `QComboBox`'s items, a `QLineEdit`'s text and placeholder, the rows
+of a list, table or tree view, a `QTextEdit`, and a window's status bar. A
+section that is folded or a panel that is built later is read only in the state
+a test puts it in.
 
 Skipped: the install console (`LogPanel`, and everything inside it) and the
 Logs tab's file viewer. Both show what a program wrote, a log line naming an
@@ -100,7 +105,7 @@ def visible_texts(root: Any) -> list[tuple[str, str, str]]:
 
 
 def player_text_faults(root: Any) -> list[str]:
-    """Every developer note a player could read under `root`; `[]` when there is none."""
+    """Every developer note in the texts `visible_texts` reads under `root`; `[]` when none."""
     return [
         f"{name} {where} [{rule}]: {text!r}"
         for name, where, text in visible_texts(root)

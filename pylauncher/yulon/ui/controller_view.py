@@ -4371,6 +4371,9 @@ NETWORK_HINT = (
 RESTORE_PICK = "Pick a backup in the list, then press Show restore plan."
 RESTORE_NO_BACKUPS = "There are no backups yet. Press Back up now to make one."
 RESTORE_REFUSED = "This backup cannot be restored right now; the plan in the Restore box says why."
+RESTORE_WAITS_FOR_DISTRO = (
+    "Restore waits for this server's WSL distro: the backups are listed once it is running."
+)
 
 ACCOUNT_NEEDS_CHOICE = "Choose an account first."
 CHARACTER_NEEDS_CHOICE = "Choose a character in the list first."
@@ -13715,13 +13718,20 @@ class ControllerView(QWidget):
         set_enabled_why(self.restore_button, self._restore_waits_for())
 
     def _restore_waits_for(self) -> str:
-        """Why Restore is greyed while no plan allows it: no backups, or none planned yet."""
+        """Why Restore is greyed while no plan allows it: no backups, or none planned yet.
+
+        Or the backups not listed yet, because they wait for a stopped WSL
+        distro (T194 F9): "Pick a backup" over a list nobody has read is untrue.
+        """
+        if "backups" in self._waiting_on_distro:
+            return RESTORE_WAITS_FOR_DISTRO
         return RESTORE_PICK if self.backup_list.count() else RESTORE_NO_BACKUPS
 
     @Slot()
     def refresh_backups(self) -> None:
         """Re-list the backups directory. Reading a directory, not doing any work."""
         if self._waits_for_the_distro("backups", self.refresh_backups):
+            set_enabled_why(self.restore_button, self._restore_waits_for())
             return
         self._restore_plan = None
         self.backup_list.clear()

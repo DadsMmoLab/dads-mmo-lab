@@ -329,6 +329,22 @@ def test_a_greyed_restore_says_why_while_the_backups_wait_for_the_distro(
             said,
             view.restore_button.toolTip(),
         )
+        # F9 (T194 final fix): it said "Pick a backup in the list" over an empty list.
+        waits = (
+            "Restore waits for this server's WSL distro: the backups are listed once it is "
+            "running."
+        )
+        assert view.restore_button.toolTip() == waits
+        assert waits in said.splitlines(), said
+
+        disk.stopped = False
+        _poll(view)
+
+        assert view.backup_list.count() == 1
+        assert view.restore_button.toolTip() == (
+            "Pick a backup in the list, then press Show restore plan."
+        )
+        assert waits not in view.restore_reasons.text()
     finally:
         disk.stopped = False
         view.shutdown()

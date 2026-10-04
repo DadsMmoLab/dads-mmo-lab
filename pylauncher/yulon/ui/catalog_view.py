@@ -10,6 +10,7 @@ into the `LogPanel`. No Docker, no subprocess, no business logic here
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable, Mapping
 from enum import Enum
@@ -310,6 +311,25 @@ _CAMPAIGN_SUBTITLES = {
 Typed here, the Tortoise tile said 1.17.2 for a server whose client must be 1.18.1.
 """
 
+_SERVER_SOFTWARE = {
+    "wow-wotlk": "AzerothCore with mod-playerbots",
+    "wow-tbc": "CMaNGOS TBC with playerbots",
+    "wow-vanilla": "CMaNGOS Classic with playerbots",
+    "wow-tortoise": "the Tortoise WoW core with TortoiseBots",
+    "wow-centurion": "Centurion, a TrinityCore with its own playerbots",
+}
+"""What a tile's tooltip names as its server software (T194 F8).
+
+In words, not the entry's emulator name: that carries repositories and a
+branch ("tortoise-wow/tortoise-wow @ 1181dev"), which a player has no use for.
+"""
+
+
+def _server_software(entry: CatalogEntry) -> str:
+    """The tile's "Server software:" words; an entry not listed gets its name without a branch."""
+    return _SERVER_SOFTWARE.get(entry.id) or re.sub(r"\s*@\s*\S+", "", entry.emulator.name)
+
+
 RECOMMENDED = "wow-wotlk"
 """The one tile marked "Recommended" (T195 C23): where a first-time player should start."""
 
@@ -474,7 +494,7 @@ class CatalogView(QWidget):
         frame.setMinimumHeight(0)
         frame.setMaximumHeight(QWIDGETSIZE_MAX)
         # The emulator is for the curious, so it is on hover (T195 C23).
-        frame.setToolTip(f"Server software: {entry.emulator.name}")
+        frame.setToolTip(f"Server software: {_server_software(entry)}")
         box = QVBoxLayout(frame)
         box.setSpacing(6)
         box.setContentsMargins(14, 14, 14, 14)

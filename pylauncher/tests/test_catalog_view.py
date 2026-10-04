@@ -2667,13 +2667,27 @@ def test_only_the_wotlk_tile_says_recommended(qapp: object) -> None:
 
 
 def test_the_emulator_is_named_on_hover_not_on_the_tile(qapp: object) -> None:
-    """C23 (T195): the emulator line is for the curious; the tile keeps to what a player picks."""
+    """C23 (T195): the emulator line is for the curious; the tile keeps to what a player picks.
+
+    F8 (T194 final fix): in words -- the Tortoise tile said "Server software:
+    tortoise-wow/tortoise-wow @ 1181dev ...", a repository and a branch.
+    """
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
     for game in CATALOG.games:
         tile = view.findChild(QWidget, f"catalog-tile-{game.id}")
         assert tile is not None
-        assert game.emulator.name in tile.toolTip(), (game.id, tile.toolTip())
-        assert game.emulator.name not in _tile_labels(view, game.id), game.id
+        tip = tile.toolTip()
+        assert tip.startswith("Server software: "), (game.id, tip)
+        named = tip.removeprefix("Server software: ")
+        assert named.strip(), (game.id, tip)
+        assert "@" not in tip and "/" not in tip, (game.id, tip)
+        for source in game.emulator.sources:
+            if source.branch:
+                assert source.branch not in tip, (game.id, source.branch, tip)
+        assert named not in _tile_labels(view, game.id), game.id
+    tortoise = view.findChild(QWidget, "catalog-tile-wow-tortoise")
+    assert tortoise is not None
+    assert tortoise.toolTip() == "Server software: the Tortoise WoW core with TortoiseBots"
 
 
 def test_a_short_description_does_not_stretch_its_box(qapp: object) -> None:
