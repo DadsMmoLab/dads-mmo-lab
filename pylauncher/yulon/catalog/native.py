@@ -2068,6 +2068,14 @@ class _LeftStopped(str):
     """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
 
 
+class _DockerSilentForRestart(InstallerError):
+    """A restore's recreate refused because Docker did not answer its wait (T223).
+
+    Its servers were stopped before the tags moved back, so `_restore_rollback()`
+    reports them left stopped rather than "did not report ready".
+    """
+
+
 class LeaveStopped(InstallerError):
     """Raised by a `ServersDownWork.back()`: the old build must NOT be started (T217).
 
@@ -6077,7 +6085,7 @@ class StagedInstaller:
         if waited is not None and rollback:
             # Its servers were stopped by the restore before the tags moved back
             # (`ROLLBACK_STOPPING`), so they are left stopped, on the old build.
-            raise InstallerError(
+            raise _DockerSilentForRestart(
                 f"Docker did not answer for {_spell_seconds(waited)}, so the build from before "
                 f"this rebuild is back on its tags but was not started: its servers are "
                 f"stopped. Once Docker answers, press Start."
@@ -7981,6 +7989,10 @@ class StagedInstaller:
             # already reporting a failure.
             yield from self._release(named)
             yield from self._release(kept)
+            if isinstance(second, _DockerSilentForRestart):
+                # T223 (cold review): never started, so not "did not report ready",
+                # and nothing of it runs on the database yet.
+                return _LeftStopped(f"{failure} {second}{said}{stopped_database}{back_failed}")
             return (
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"

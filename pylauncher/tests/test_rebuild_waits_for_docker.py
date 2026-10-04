@@ -466,6 +466,9 @@ def test_a_restore_docker_never_answers_says_its_servers_are_left_stopped(tmp_pa
     message = str(raised.value)
     assert "its servers are stopped" in message, message
     assert "press Start" in message, message
+    # Left stopped is the existing exit for it, and nothing says the old build runs.
+    assert isinstance(raised.value, native.ServersLeftStopped), type(raised.value)
+    assert "is running" not in message and "did not report ready" not in message, message
 
 
 def test_a_stop_that_started_the_restore_does_not_cut_the_restores_wait_short(
