@@ -50,12 +50,16 @@ from yulon.docker import AttachedRun
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
 TBC = load_catalog().get("wow-tbc")
+
+WOTLK_COPY = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+"""What a WotLK update copies: the playerbots database (T217) and the core's three (T220)."""
+WOTLK_LISTED = "acore_auth, acore_characters, acore_world and acore_playerbots"
 VANILLA = load_catalog().get("wow-vanilla")
 
 # -- Task 1: which databases a new build changes at its first start ----------
 
 NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
-    "wow-wotlk": ("playerbots",),
+    "wow-wotlk": ("auth", "characters", "world", "playerbots"),
     "wow-tbc": (),
     "wow-vanilla": (),
     "wow-tortoise": ("auth", "characters"),
@@ -65,7 +69,9 @@ NEW_BUILD_CHANGES: dict[str, tuple[str, ...]] = {
 
 * WotLK: the worldserver's playerbots updater runs whatever the image says
   (`AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES=1` is structural, `composegen.py`),
-  and it reads the module's SQL from the HOST folder it bind-mounts.
+  and it reads the module's SQL from the HOST folder it bind-mounts. And since
+  T220 the update itself applies the new core's own auth, characters and world
+  updates before the first start, so those three are copied first too.
 * Tortoise: the worldserver's own AutoUpdater (`Database.AutoUpdate.Enabled`
   in its conf table) migrates the login, characters and world databases at
   start. World is left out on the owner's word of 2026-10-04: it is the biggest
@@ -92,7 +98,7 @@ def test_every_shipped_entry_names_the_databases_its_new_build_changes() -> None
 @pytest.mark.parametrize(
     ("game", "names"),
     [
-        ("wow-wotlk", ("acore_playerbots",)),
+        ("wow-wotlk", WOTLK_COPY),
         ("wow-tortoise", ("tw_logon", "tw_char")),
         ("wow-tbc", ()),
         ("wow-vanilla", ()),
@@ -194,14 +200,14 @@ def test_a_rolled_back_update_puts_tags_then_sources_then_the_copy_back_before_t
     calls = rec.calls
     # The new build: stopped, copied with its servers down, then started.
     stop_new = _at(calls, "stop_servers")
-    copied = _at(calls, "snapshot:acore_playerbots", stop_new)
+    copied = _at(calls, f"snapshot:{','.join(WOTLK_COPY)}", stop_new)
     start_new = _at(calls, "recreate", copied)
     # The rollback: stopped, tags back, module then core back, the copy back, old build.
     stop_failed = _at(calls, "stop_servers", start_new)
     tags_back = _at(calls, "tag:", stop_failed)
     module_back = _at(calls, "restore:mod-playerbots->", tags_back)
     core_back = _at(calls, "restore:server->", module_back)
-    copy_back = _at(calls, "put-back:acore_playerbots", core_back)
+    copy_back = _at(calls, f"put-back:{','.join(WOTLK_COPY)}", core_back)
     _at(calls, "recreate", copy_back)
     assert calls.count("recreate") == 2, calls
     assert fake.put_back_calls == fake.taken, "the copy taken is the copy put back"
@@ -216,7 +222,7 @@ def test_the_rollback_says_the_database_went_back_and_where_the_new_builds_copy_
     )
     text = str(raised)
     assert "put back and is running again" in text
-    assert "acore_playerbots as it was just before the new build started" in text
+    assert f"{WOTLK_LISTED} as they were just before the new build started" in text
     # The copy's own file is named when it is taken, so the player can find it.
     assert any(fake.taken[0].files[0].name in line for line in said), said
     assert "pre-restore_acore_playerbots.sql" in text, "the database as the new build left it"
@@ -252,7 +258,7 @@ def test_a_copy_that_cannot_be_taken_never_starts_the_new_build(tmp_path: Path) 
     )
     assert raised is not None and not isinstance(raised, native.ServersLeftStopped)
     text = str(raised)
-    assert "could not copy acore_playerbots before starting the new build" in text
+    assert f"could not copy {WOTLK_LISTED} before starting the new build" in text
     assert "disk full" in text and "did not start it" in text
     # One recreate, and it is the old build's: the new one never started.
     assert rec.calls.count("recreate") == 1, rec.calls
@@ -300,7 +306,7 @@ def test_an_update_that_comes_up_keeps_its_copy_and_forgets_the_older_ones(
 ) -> None:
     rec, server_dir, made, fake, said, raised = _press(tmp_path, WOTLK)
     assert raised is None, raised
-    assert [copy.databases for copy in fake.taken] == [("acore_playerbots",)]
+    assert [copy.databases for copy in fake.taken] == [WOTLK_COPY]
     assert fake.put_back_calls == []
     assert "prune" in rec.calls and _at(rec.calls, "prune") > _at(rec.calls, "recreate")
     assert _moving_heads(rec, server_dir, made) == {NEW}
@@ -334,7 +340,7 @@ def test_a_kept_build_keeps_the_database_it_changed_and_names_the_copy_as_not_ne
     assert isinstance(raised, WorldStoppedAfterReadyError), raised
     assert len(fake.taken) == 1 and fake.put_back_calls == []
     text = str(raised)
-    assert "The copy of acore_playerbots taken before it started is kept in" in text
+    assert f"The copy of {WOTLK_LISTED} taken before it started is kept in" in text
     assert fake.taken[0].files[0].name in text and "it was not needed" in text
     assert _moving_heads(rec, server_dir, made) == {NEW}
     assert "prune" in rec.calls, "the kept build's copy is the last one; older ones go"
@@ -372,7 +378,7 @@ def test_mixed_tags_put_the_sources_back_then_the_copy_and_still_refuse_every_st
         list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert raised.value.mixed is True
     core_back = _at(rec.calls, "restore:server->")
-    _at(rec.calls, "put-back:acore_playerbots", core_back)
+    _at(rec.calls, f"put-back:{','.join(WOTLK_COPY)}", core_back)
     assert rec.calls.count("recreate") == 1, "nothing started after the rollback"
     assert _moving_heads(rec, server_dir, made) == {OLD}
     assert native.owed_start_refusal(server_dir) == native.REBUILD_OWED_REFUSAL
@@ -414,7 +420,7 @@ def test_a_reader_that_goes_away_after_the_copy_puts_nothing_back_and_yields_not
     made._snapshot = fake
     press = made.update_to_latest(InstallOptions(server_dir=server_dir))
     for line in press:
-        if line.startswith("Copied acore_playerbots"):
+        if line.startswith(f"Copied {WOTLK_LISTED}"):
             break
     press.close()
     assert len(fake.taken) == 1 and fake.put_back_calls == []
@@ -609,13 +615,13 @@ def test_the_press_says_what_it_copies_before_it_says_anything_else_happens(
 ) -> None:
     """The opening line's clauses are in the order the rollback runs them (Task 3)."""
     rec, _dir, _made, _fake, said, _raised = _press(tmp_path, WOTLK)
-    opening = native.copy_opening_line(("acore_playerbots",))
+    opening = native.copy_opening_line(WOTLK_COPY)
     assert opening in said
     assert said.index(opening) == said.index(native.UPDATE_TO_LATEST_OPENING_NOTE) + 1
     # Sources, then the copy, then the build you have: the order `back()` runs.
     assert (
         opening.index("the source folders go back first")
-        < opening.index("then that copy")
+        < opening.index("then those copies")
         < opening.index("then does the build you have start again")
     )
 
@@ -623,3 +629,66 @@ def test_the_press_says_what_it_copies_before_it_says_anything_else_happens(
 def test_a_tbc_press_says_nothing_about_a_copy(tmp_path: Path) -> None:
     _rec, _dir, _made, _fake, said, _raised = _press(tmp_path, TBC)
     assert not [line for line in said if "copies" in line or "Copying" in line]
+
+
+# -- T220: a WotLK update applies the new core's own database updates ---------
+#
+# Upstream as the player met it (T217's evidence): 7f12e89 -> f19a187 renames the
+# DBC override table to `emotestextsound_dbc` and creates it only in
+# `data/sql/updates/db_world/2026_09_21_05.sql`; mod-playerbots 7bae1b5 -> 037c014
+# adds `2026_09_13_00_ai_playerbot_target_requester_text.sql` and
+# `2026_09_21_00_playerbots_speech.sql`. The world server runs with its own updater
+# off and a start never runs the import, so the new world aborted on the missing
+# table. The Recorder holds no database; what is asserted is that the import
+# one-shot runs on the new build, with the servers down, after the copy and
+# before the first start, and what happens when it fails.
+
+
+def test_a_wotlk_update_applies_the_new_cores_updates_after_the_copy_before_the_first_start(
+    tmp_path: Path,
+) -> None:
+    rec, _dir, _made, _fake, said, raised = _press(tmp_path, WOTLK)
+    assert raised is None, raised
+    stop = _at(rec.calls, "stop_servers")
+    copied = _at(rec.calls, "snapshot:", stop)
+    imported = _at(rec.calls, "one-shot:ac-db-import", copied)
+    _at(rec.calls, "recreate", imported)
+    assert _at(rec.calls, "build") < imported, "on the new build's image"
+    assert any("database updates are in" in line for line in said)
+
+
+def test_core_updates_that_fail_never_start_the_new_build_and_the_copy_goes_back(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    rec.one_shot_result = AttachedRun(1, ("ERROR 1050 (42S01): Table already exists",))
+    made = make(wait_ready=_old_build_comes_back())
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(InstallerError) as failed:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(failed.value)
+    assert "Applying the new build's database updates failed (exit 1)" in text
+    assert rec.calls.count("recreate") == 1, "only the old build's: the new one never started"
+    assert fake.put_back_calls == fake.taken, "what the updates applied is undone"
+    assert _moving_heads(rec, server_dir, made) == {OLD}
+
+
+def test_a_plain_rebuild_and_a_tbc_update_run_no_import(tmp_path: Path) -> None:
+    rec, server_dir, make = _spine(tmp_path / "wotlk", WOTLK)
+    for source in WOTLK.emulator.sources:
+        assert source.rev is not None
+        rec.heads[server_dir / source.dest] = source.rev
+    list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert not [call for call in rec.calls if call.startswith("one-shot:")]
+    rec, _dir, _made, _fake, _said, _raised = _press(tmp_path / "tbc", TBC)
+    assert not [call for call in rec.calls if call.startswith("one-shot:")]
+
+
+def test_the_way_back_to_the_pin_runs_the_import_too(tmp_path: Path) -> None:
+    """Harmless on the way back (nothing newer to apply), and the same route."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make()
+    made._snapshot = FakeSnapshot(rec)
+    list(made.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+    assert "one-shot:ac-db-import" in rec.calls

@@ -34,6 +34,7 @@ from yulon.catalog.native import (
     CallableGate,
     ConfCheck,
     ConfRepaired,
+    ServersDownWork,
     Stage,
     StageContext,
     StagedInstaller,
@@ -43,6 +44,12 @@ from yulon.log import get_logger
 from yulon.manifest import Db
 
 logger = get_logger(__name__)
+
+CORE_UPDATES_NOTE = (
+    "The new build was not started, so the build you have is put back, with the copy of its "
+    "databases taken before the updates ran."
+)
+"""What a Stop during an update's core database updates costs (T220)."""
 
 DIST_SUFFIX = ".dist"
 
@@ -274,19 +281,72 @@ class AzerothCoreInstaller(StagedInstaller):
         )
 
     def databases_a_new_build_changes(self) -> tuple[Db, ...]:
-        """The playerbots database, which the new build's world server migrates at start (T217).
+        """Every database the update changes before and at the new build's first start (T217, T220).
 
-        `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES=1` is structural
-        (`composegen.DEFAULT_WORLD_ENV`), so the playerbots updater runs on every
-        start whatever `Updates.EnableDatabases` says, and it reads the module's
-        `data/sql` from the HOST folder the worldserver bind-mounts
-        (`override.yml.tmpl`), not from the image. A player's update of 2026-10-03
-        applied mod-playerbots' "remove obsolete tables" update on the new build's
-        first start, and the old build then crash-looped on the missing table. The
-        core's own updater is off at start (`Updates.EnableDatabases` 0), so auth,
-        characters and world are not changed by the start itself.
+        * playerbots (T217): `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES=1` is
+          structural (`composegen.DEFAULT_WORLD_ENV`), so the playerbots updater
+          runs on every start whatever `Updates.EnableDatabases` says, and it reads
+          the module's `data/sql` from the HOST folder the worldserver bind-mounts
+          (`override.yml.tmpl`), not from the image. A player's update of
+          2026-10-03 applied mod-playerbots' "remove obsolete tables" update on the
+          new build's first start, and the old build then crash-looped on the
+          missing table.
+        * auth, characters and world (T220): the worldserver's own updater is off
+          (`Updates.EnableDatabases` 0), so the update applies the new core's
+          `data/sql/updates/db_*` itself, through the import one-shot, with the
+          servers stopped (`servers_down_work()`). A rollback must undo those too,
+          so the copy is taken before they run.
         """
-        return ("playerbots",)
+        return ("auth", "characters", "world", "playerbots")
+
+    def servers_down_work(
+        self, server_dir: Path, changes: object, *, press: str
+    ) -> ServersDownWork | None:
+        """The new core's own database updates, applied before its first start (T220).
+
+        AzerothCore's world server runs here with `Updates.EnableDatabases` 0, and
+        a start never runs the import one-shot (`docker.start_staged()` names the
+        long-running services), so until T220 an update to a core that adds a table
+        it reads at boot never came up: f19a187 renames the DBC override table to
+        `emotestextsound_dbc` and creates it only in
+        `data/sql/updates/db_world/2026_09_21_05.sql`, and the new world server
+        aborted on `ER_NO_SUCH_TABLE` -- after the playerbots updater had already
+        migrated its database (T217's player).
+
+        So `forward()` runs the same one-shot the install's `import` stage runs, on
+        the NEW image (the tags name it by then), with the servers stopped and the
+        database up, AFTER the update's copy of the databases (the route takes it
+        first): upstream's updater applies only what its `updates` table does not
+        hold yet, and a rollback puts the copy back over whatever it applied. A
+        rollback needs nothing of its own here, so `back()` does nothing. Not
+        cancellable part-way: a Stop is honoured once the updates are in, so the
+        copy is never put back under an import that is still writing.
+        """
+        service = self.entry.containers.db_import
+        if not service:
+            return None
+
+        def forward(ctx: StageContext) -> Iterator[str]:
+            yield (
+                f"Applying the new build's own database updates ({service}) with the servers "
+                "stopped, before it first starts."
+            )
+            run = yield from self._pump(
+                lambda sink: self._seams.one_shot(service, ctx.server_dir, sink=sink, cancel=None),
+                cancel=None,
+                stage="import",
+            )
+            self._check_run(
+                run, "Applying the new build's database updates", ctx.cancel, CORE_UPDATES_NOTE
+            )
+            yield "The new build's database updates are in."
+
+        return ServersDownWork(
+            prepare=lambda: iter(()),
+            forward=forward,
+            back=lambda ctx: iter(()),
+            finishes_start_refusal=False,
+        )
 
     def _clone_core(self, ctx: StageContext) -> Iterator[str]:
         """Clone the emulator itself INTO the server dir — it is the checkout.
