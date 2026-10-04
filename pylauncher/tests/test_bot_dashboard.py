@@ -1693,3 +1693,31 @@ def test_every_greyed_press_on_a_tortoise_tab_says_why(
     faults = _greys_without_a_reason(view, T191_SIZES[0])
 
     assert faults == [], "\n".join(faults)
+
+
+class _FailingOnSeam(_Seam):
+    """Switching on fails with a sentence of its own."""
+
+    def switch_on(self, *, lan: bool, cancel: threading.Event | None = None) -> Iterator[str]:
+        self._note(f"switch_on lan={lan}")
+        raise RuntimeError("The dashboard could not start: port 8095 is taken.")
+        yield "never"  # pragma: no cover - makes this a generator
+
+
+def test_a_failed_dashboard_job_says_its_reason_once(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6 (T194 final fix): the report line and the log's failure line said it twice."""
+    seam = _FailingOnSeam()
+    view = _view(qapp, tmp_path, seam)
+    view.refresh_bot_dashboard()
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a: QMessageBox.StandardButton.Yes)
+
+    view.dashboard_switch.click()
+    _wait(view, qapp)
+
+    log = view.dashboard_log
+    assert log is not None
+    assert "port 8095 is taken" in view.dashboard_report.text()
+    assert log.failure_label.isHidden(), "the reason is under the log as well as the report"
+    assert log.failure_label.text() == ""

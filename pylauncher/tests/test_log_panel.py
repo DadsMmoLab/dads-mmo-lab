@@ -1778,3 +1778,26 @@ def test_a_failure_during_a_busy_progress_reading_stops_the_bar_moving(qapp: obj
 
     bar = panel._bar
     assert bar.maximum() != 0 or not bar.isVisibleTo(panel), "the busy bar is still moving"
+
+
+def test_a_panel_whose_owner_reports_the_failure_leaves_its_failure_line_down(
+    qapp: object,
+) -> None:
+    """F6 (T194 final fix): a tab that writes the reason on its own report line asks the
+    panel not to say it a second time underneath; the header keeps its one-line glance."""
+    panel = LogPanel(shows_failure=False)
+    panel.resize(500, 300)
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+
+    def source() -> Iterator[str]:
+        yield "working"
+        raise RuntimeError("the reason, said once")
+
+    panel.run(source)
+    wait_for_panel(panel)
+
+    assert finished == [(False, "the reason, said once")]
+    assert panel.failure_label.isHidden()
+    assert panel.failure_label.text() == ""
+    assert panel.status_text() == "FAILED: the reason, said once"

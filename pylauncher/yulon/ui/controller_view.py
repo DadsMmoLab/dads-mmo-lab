@@ -204,20 +204,32 @@ class _DockerSilent(NamedTuple):
     exc: Exception
 
 
-def _quiet(work: Callable[[], object]) -> Callable[[], object]:
+def _docker_is_away(exc: object) -> bool:
+    """No Docker CLI, or Docker not answering in a wording `docker_advice` knows (T194 F2)."""
+    return isinstance(exc, docker.DockerCliMissingError) or docker_advice.unreachable(exc)
+
+
+def _quiet(work: Callable[[], object], *, every_docker_error: bool = False) -> Callable[[], object]:
     """`work`, with a Docker failure returned as `_DockerSilent` rather than raised.
 
     The job runner logs every job that raises, so a status poll and a verdict
     read that raised put Docker's own words in the log every five seconds,
-    twice. Returned, the slot logs them once per change. Anything that is not
-    Docker's still raises, and is logged by the runner as before.
+    twice. Returned, the slot logs them once per change.
+
+    Only Docker being away (`_docker_is_away`) is kept back from the status poll:
+    any other error Docker answered still raises, so the runner logs it and the
+    banner says Yu'lon doesn't recognise it rather than "Docker isn't running"
+    (T194 F2). `every_docker_error` keeps back every `DockerCommandError` too,
+    for the verdict read, whose own line says it failed and logs it once per change.
     """
 
     def run() -> object:
         try:
             return work()
         except Exception as exc:  # noqa: BLE001 - only Docker's own failures are kept
-            if isinstance(exc, docker.DockerCommandError) or docker_advice.unreachable(exc):
+            if _docker_is_away(exc) or (
+                every_docker_error and isinstance(exc, docker.DockerCommandError)
+            ):
                 return _DockerSilent(exc)
             raise
 
@@ -1173,6 +1185,21 @@ Every key restarts the wait, so a path typed slowly is checked once, not per let
 
 CHECK_WHEN_TYPING_STOPS = "Checking this folder when you stop typing\u2026"
 
+REPLAN_BROKE = (
+    "Yu'lon couldn't check {target}. Pick another folder, or try again; the Logs tab has "
+    "the reason."
+)
+"""The Make dialog's line when checking a folder broke unexpectedly (T194 F7)."""
+
+
+class _ReplanBroke(RuntimeError):
+    """A Make dialog folder check that raised, carried back with the folder it was for."""
+
+    def __init__(self, target: Path, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.target = target
+        self.cause = cause
+
 
 class PlayClientDialog(QDialog):
     """The creation dialog (T181a §1, §3): where, how big, and the original's module files.
@@ -1353,6 +1380,9 @@ class PlayClientDialog(QDialog):
                 return target, offer.replan(target), offer.free_space(target)
             except (play_client.PlayClientError, OSError) as exc:
                 return target, exc, None
+            except Exception as exc:
+                # And with its failure, for the same reason (T194 F3).
+                raise _ReplanBroke(target, exc) from exc
 
         self._jobs(work, self._replanned, self._replan_failed)
 
@@ -1373,11 +1403,20 @@ class PlayClientDialog(QDialog):
 
     @Slot(object)
     def _replan_failed(self, exc: object) -> None:
-        """Something `work()` did not expect; the folder stays unplanned and OK dead."""
-        logger.warning(f"ready-to-play client: planning {self._planned} failed: {exc!r}")
+        """Something `work()` did not expect; the folder stays unplanned and OK dead.
+
+        Only for the folder now asked about: an older folder's failure, overtaken
+        by another edit, is logged and dropped as `_replanned` drops its answer
+        (T194 F3). What broke goes to the log; the line says what to do (F7).
+        """
+        target = exc.target if isinstance(exc, _ReplanBroke) else self._planned
+        cause = exc.cause if isinstance(exc, _ReplanBroke) else exc
+        logger.warning(f"ready-to-play client: planning {target} failed: {cause!r}")
+        if target != self._planned:
+            return  # an older folder's failure, overtaken by another edit
         self._pending = False
         self._plan = None
-        self.size_label.setText(f"{self._planned} could not be checked: {exc}")
+        self.size_label.setText(REPLAN_BROKE.format(target=target))
         self._update_ok()
 
     def _show_plan(self) -> None:
@@ -4358,7 +4397,19 @@ DASHBOARD_WAITS = (
 DASHBOARD_OPEN_WAITS = "The dashboard opens once it is switched on and its files say it is up."
 REINSTALL_STOPPING = "Wait: the Docker reinstall is stopping."
 REINSTALL_ELSEWHERE = "Wait: another server's Docker reinstall is running."
-DOCKER_UNKNOWN = "Yu'lon can't ask Docker about this server; see the box above."
+DOCKER_UNKNOWN = "Start and Stop come back when Docker answers."
+
+VERDICT_UNREADABLE = (
+    "Yu'lon couldn't read this server's dashboard just now; the Logs tab has the reason."
+)
+"""The verdict line when the dashboard read broke with Docker answering (T194 F7)."""
+APPLY_DID_NOT_FINISH = "Apply did not finish. Details below says why."
+MAINTENANCE_BACKUP_FAILED = "The backup did not finish. Details below says why."
+MAINTENANCE_RESTORE_FAILED = "The restore did not finish. Details below says why."
+MAINTENANCE_PLAN_FAILED = "Yu'lon could not check this backup. Details below says why."
+MAINTENANCE_FORGET_FAILED = (
+    "Yu'lon could not forget the interrupted restore. Details below says why."
+)
 DASHBOARD_UNREADABLE = "Yu'lon could not read the dashboard's files; the line above says why."
 DASHBOARD_LAN_FIXED = "The network choice is fixed while the dashboard is on; switch it off first."
 DASHBOARD_OFF = "Switch the dashboard on first."
@@ -5491,8 +5542,8 @@ class _IdleLogPanel(LogPanel):
     wants_changed = Signal(bool)
     """`_ReportStrip.wants_changed`'s twin, and it carries the same `bool`."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self, parent: QWidget | None = None, *, shows_failure: bool = True) -> None:
+        super().__init__(parent, shows_failure=shows_failure)
         self._watching: QWidget | None = None
         # What was last ASKED for, and whether the tab has the height for it.
         # The fold on screen is derived from the pair -- see `_apply()`.
@@ -7635,7 +7686,7 @@ class ControllerView(QWidget):
             return
         self._verdict_pending = True
         self._run(
-            _quiet(self._world_reading(self.services.dashboard)),
+            _quiet(self._world_reading(self.services.dashboard), every_docker_error=True),
             self._verdict_ready,
             self._verdict_failed,
         )
@@ -7927,7 +7978,8 @@ class ControllerView(QWidget):
         if said != self._verdict_said:
             self._verdict_said = said
             logger.warning(f"{self.entry.name}: could not read the dashboard: {said}")
-        self.verdict_label.setText(f"could not read this server's dashboard: {exc}")
+        # What broke is logged above; the line says it in words (T194 F7).
+        self.verdict_label.setText(VERDICT_UNREADABLE)
         self.verdict_label.setVisible(True)
 
     @Slot()
@@ -8101,7 +8153,7 @@ class ControllerView(QWidget):
         # Unknown is what makes a removal stop first.
         stale = superseded or self._status_asked_busy or self._busy
         self._last_status = None if stale else status
-        if not self._busy:
+        if not self._busy or self.status_label.text() == STATUS_SEE_THE_BANNER:
             # Only while nothing of ours is running. The five-second poll used to
             # overwrite the label unconditionally, which was invisible at a
             # ten-second stop and is not at a five-minute one: the user pressed
@@ -8109,6 +8161,8 @@ class ControllerView(QWidget):
             # for the next minute and a half with both buttons dead and no
             # explanation. The buttons below are still updated — it is the
             # sentence that has to hold still, not the state (review, 2026-08-23).
+            # "See above" is the exception: the banner it points at goes below,
+            # busy or not (T194 F4).
             self.status_label.setText(_status_words(status))
         # T195: each greyed one says why, on the Server tab's reason line.
         waiting = wait_for(self._busy_job) if self._busy else None
@@ -8424,9 +8478,10 @@ class ControllerView(QWidget):
         # after this method has returned.
         self._ask_again_if_superseded(self._status_superseded)
         said = str(exc)
-        if said != self._docker_said:
+        if _docker_is_away(exc) and said != self._docker_said:
             # What Docker said goes to the log, once per change; the screen
-            # gets the banner's words (T194 C7).
+            # gets the banner's words (T194 C7). Any other failure was raised
+            # past `_quiet`, and the job runner has logged it (T194 F2).
             self._docker_said = said
             logger.warning(f"{self.entry.name}: Docker did not answer the status poll: {said}")
         # "unknown", not "stopped": Docker not answering says nothing about the
@@ -12551,7 +12606,8 @@ class ControllerView(QWidget):
         self.bot_rebuild_report.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        log = _IdleLogPanel(group)
+        # The report line above says a refusal; the panel does not say it twice (T194 F6).
+        log = _IdleLogPanel(group, shows_failure=False)
         log.run_started.connect(self._bot_rebuild_started)
         log.run_finished.connect(self._bot_rebuild_finished)
         self.bot_rebuild_log = log
@@ -13315,7 +13371,8 @@ class ControllerView(QWidget):
         stale_row.addWidget(self.rebuild_dashboard_button)
         self.dashboard_stale.setVisible(False)
         self.rebuild_dashboard_button.setVisible(False)
-        log = _IdleLogPanel(group)
+        # The report line says a refusal; the panel does not say it twice (T194 F6).
+        log = _IdleLogPanel(group, shows_failure=False)
         log.run_started.connect(self._dashboard_started)
         log.run_finished.connect(self._dashboard_finished)
         self.dashboard_log = log
@@ -13628,6 +13685,11 @@ class ControllerView(QWidget):
         self.maintenance_report.setParent(restore)
         restore_box = QVBoxLayout(restore)
         restore_box.addWidget(self.maintenance_report, 1)
+        # T194 F7: what broke, folded, under a failure's plain sentence. Any new
+        # report takes it down, so an old reason never sits under a new result.
+        self.maintenance_details = Details(restore)
+        self.maintenance_report.textChanged.connect(lambda: self.maintenance_details.set_text(""))
+        restore_box.addWidget(self.maintenance_details)
 
         box.addWidget(self.interrupted_label)
         box.addWidget(self.forget_button)
@@ -13705,7 +13767,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def forget_interrupted(self) -> None:
-        self._run(self.services.forget_interrupted, self._forget_done, self._maintenance_failed)
+        self._run(self.services.forget_interrupted, self._forget_done, self._forget_failed)
 
     @Slot(object)
     def _forget_done(self, _result: object) -> None:
@@ -13804,7 +13866,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _backup_failed(self, exc: object) -> None:
         self._backup_running = False
-        self._maintenance_failed(exc)
+        self._maintenance_failed(exc, MAINTENANCE_BACKUP_FAILED)
 
     @Slot(object)
     def _backup_done(self, result: object) -> None:
@@ -13838,7 +13900,7 @@ class ControllerView(QWidget):
         self._run(
             lambda: self._plan_with_the_bot_request(path),
             self._restore_plan_ready,
-            self._maintenance_failed,
+            self._restore_plan_failed,
         )
 
     def _plan_with_the_bot_request(self, path: Path) -> object:
@@ -14098,7 +14160,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _restore_failed(self, exc: object) -> None:
         self._restore_running = False
-        self._maintenance_failed(exc)
+        self._maintenance_failed(exc, MAINTENANCE_RESTORE_FAILED)
 
     @Slot(object)
     def _restore_done(self, result: object) -> None:
@@ -14121,12 +14183,32 @@ class ControllerView(QWidget):
         )
 
     @Slot(object)
-    def _maintenance_failed(self, exc: object) -> None:
+    def _restore_plan_failed(self, exc: object) -> None:
+        self._maintenance_failed(exc, MAINTENANCE_PLAN_FAILED)
+
+    @Slot(object)
+    def _forget_failed(self, exc: object) -> None:
+        self._maintenance_failed(exc, MAINTENANCE_FORGET_FAILED)
+
+    def _maintenance_failed(self, exc: object, said: str) -> None:
+        """A refusal of ours as it is; anything else as `said`, with what broke folded (T194 F7).
+
+        `MaintenanceError` and `PoolResetError` are sentences Yu'lon wrote for the
+        player ("Nothing was restored; look at it again"), so they are the report.
+        Any other failure is not: the Restore box says `said`, and the raw text goes
+        in Details, folded, and to the app log through `action_failed`.
+        """
         self.backup_button.setEnabled(True)
         if not self.restore_button.isEnabled():
             # A plan or a restore that failed: a fresh plan is what Restore waits for.
             set_enabled_why(self.restore_button, self._restore_waits_for())
-        self.maintenance_report.setPlainText(f"FAILED: {exc}")
+        ours = isinstance(
+            exc, (wotlk_maintenance.MaintenanceError, tortoise_poolreset.PoolResetError)
+        )
+        # Either write takes the last Details down (`maintenance_report.textChanged`).
+        self.maintenance_report.setPlainText(str(exc) if ours else said)
+        if not ours:
+            self.maintenance_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
         self._show_interrupted()
 
@@ -17840,8 +17922,12 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _apply_failed(self, exc: object) -> None:
+        """Said in words; what broke goes in Details, folded, and to the app log (T194 F7)."""
         self._network_applying = False
-        self.network_text.appendPlainText(f"\nApply did not finish: {exc}")
+        self.network_text.appendPlainText("\n" + APPLY_DID_NOT_FINISH)
+        plan = self._plan
+        held = [_plan_details(plan) if plan is not None else "", f"What went wrong: {exc}"]
+        self.network_details.set_text("\n\n".join(part for part in held if part))
         self.action_failed.emit(str(exc))
         self.apply_button.setEnabled(True)
 

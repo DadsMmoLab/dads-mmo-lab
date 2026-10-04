@@ -1928,3 +1928,21 @@ def test_a_rebuild_pressed_from_another_tab_opens_the_bots_page(
     _wait(view)
     assert view._tabs.tabText(view._tabs.currentIndex()) == "Bots"
     assert view._tabs.currentWidget().isAncestorOf(view.bot_rebuild_log)
+
+
+def test_a_refusal_is_said_once_on_the_report_not_again_under_the_log(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6 (T194 final fix): the report line and the log's failure line said it twice."""
+    _answer(monkeypatch, QMessageBox.StandardButton.Save)
+    _conf(tmp_path)
+    world = World(tmp_path, log_after_restart=[REFUSALS["guild"]])
+    view = _view(tmp_path, world.rebuild())
+    view.rebuild_random_bots()
+    _wait(view)
+
+    log = view.bot_rebuild_log
+    assert log is not None
+    assert "Bot Friends" in view.bot_rebuild_report.text()  # type: ignore[union-attr]
+    assert log.failure_label.isHidden(), "the reason is under the log as well as the report"
+    assert log.failure_label.text() == ""

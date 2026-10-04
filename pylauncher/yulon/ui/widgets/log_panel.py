@@ -576,11 +576,20 @@ class LogPanel(QWidget):
     collapse_toggled = Signal(bool)
     """Emitted with True when the text pane has just been folded away (T80)."""
 
-    def __init__(self, parent: QWidget | None = None, *, seams: Seams | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        seams: Seams | None = None,
+        shows_failure: bool = True,
+    ) -> None:
         super().__init__(parent)
         # Keyword-only and defaulted, because every caller in the app builds a
         # panel with the real clock and only a test ever hands one over.
         self._seams = seams if seams is not None else Seams()
+        # False where the owning tab writes a failed run's reason on its own
+        # report line, so it is not said again under the strip (T194 F6).
+        self._shows_failure = shows_failure
         self._text = QPlainTextEdit(self)
         self._text.setReadOnly(True)
         # Non-focusable on purpose: a read-only log is a D-pad dead-end (arrow
@@ -1155,8 +1164,9 @@ class LogPanel(QWidget):
                 step = self._step
                 self._step_label.say(f"Stopped at step {step.number} of {step.total} · {step.name}")
             self._progress_label.say("")
-            self.failure_label.setText(message)
-            self.failure_label.setVisible(True)
+            if self._shows_failure:
+                self.failure_label.setText(message)
+                self.failure_label.setVisible(True)
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
 

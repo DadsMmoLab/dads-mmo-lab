@@ -4322,7 +4322,8 @@ def test_a_verdict_that_raises_leaves_the_tab_working(
 
     view.refresh_verdict()
 
-    assert "could not" in view.verdict_label.text()
+    assert "couldn't read this server's dashboard" in view.verdict_label.text()
+    assert "daemon went away" not in view.verdict_label.text()  # T194 F7: the log has it
     ps.names = "ac-database\n"
     view.refresh_status()
     assert "Database running" in view.status_label.text()
@@ -10126,6 +10127,73 @@ def test_the_raw_docker_error_goes_to_the_log_once_per_change(
     assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
 
 
+UNRECOGNISED_DOCKER = (
+    "docker ps --format {{.Names}} exited 1: tls: failed to verify certificate: x509: "
+    "certificate signed by unknown authority"
+)
+"""A `docker ps` failure Docker answered, which `docker_advice.unreachable()` does not know."""
+
+
+def _docker_says_something_else() -> NoReturn:
+    raise docker.DockerCommandError(UNRECOGNISED_DOCKER)
+
+
+@pytest.mark.parametrize("host", ["windows", "linux"])
+def test_a_docker_error_yulon_does_not_recognise_is_not_told_as_docker_down(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """F2 (T194 final fix): a bad context or TLS error said "Docker Desktop isn't running"."""
+    from tests.support_player_text import visible_texts
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: host)
+    monkeypatch.setattr(yulon_platform, "is_steamos", lambda: False)
+    view.services.controller.status = _docker_says_something_else  # type: ignore[method-assign]
+
+    view.refresh_status()
+
+    banner = view.docker_banner
+    assert _shown(view, banner)
+    assert banner.body_label.text() == (
+        "Docker answered with an error Yu'lon doesn't recognise. The Logs tab has what it "
+        "said; press Try again once it's sorted."
+    )
+    assert not _shown(view, banner.open_button), "a press for a Docker Desktop that is running"
+    assert _shown(view, banner.retry_button)
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    assert "isn't running" not in said and "not running" not in said.replace(
+        "server isn't", ""
+    ), said
+    assert "x509" not in said and "docker ps" not in said, said
+
+
+def test_a_docker_error_yulon_does_not_recognise_reaches_the_log(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """F2: not silenced -- the job runner logs it like any job that raised."""
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "windows")
+    monkeypatch.setattr(yulon_platform, "is_steamos", lambda: False)
+    view.services.controller.status = _docker_says_something_else  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.DEBUG):
+        view.refresh_status()
+        pump_until(lambda: not view._status_pending, "the poll's answer")
+
+    logged = [r.getMessage() for r in caplog.records if "x509" in r.getMessage()]
+    assert logged, "Docker's own words never reached the log"
+    assert not any("did not answer" in line for line in logged), logged
+    assert _shown(view, view.docker_banner)
+    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+
+
 def test_try_again_asks_docker_again(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10410,6 +10478,21 @@ def test_a_new_failure_drops_the_last_presss_answer_and_a_repeat_keeps_it(
     assert banner.note_label.isHidden()
 
 
+def _near_duplicates(texts: Sequence[str]) -> list[tuple[str, str]]:
+    """Each pair of lines that say nearly the same thing (F5): mostly the same words."""
+    import difflib
+
+    pairs: list[tuple[str, str]] = []
+    for i, first in enumerate(texts):
+        for second in texts[i + 1 :]:
+            a, b = set(first.lower().split()), set(second.lower().split())
+            shared = len(a & b) / max(1, min(len(a), len(b)))
+            ratio = difflib.SequenceMatcher(None, first.lower(), second.lower()).ratio()
+            if ratio > 0.6 or shared > 0.6:
+                pairs.append((first, second))
+    return pairs
+
+
 def test_a_start_docker_could_not_hear_says_so_once_and_leaves_the_advice_to_the_banner(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10431,6 +10514,20 @@ def test_a_start_docker_could_not_hear_says_so_once_and_leaves_the_advice_to_the
     assert said.count(body) == 1, "the advice is on screen twice"
     assert not any("pipe" in text or "exited" in text for text in said), said
     assert view.realm_badge.status == "unknown"
+    # F5 (T194 final fix): title, "see above", a reason repeating the title and
+    # pointing again, and the Start's line -- one sentence per job, no echoes.
+    assert view.server_reasons.text() == "Start and Stop come back when Docker answers."
+    title = view.docker_banner.title_label.text()
+    assert [text for text in said if "can't ask Docker" in text] == [title], said
+    assert len([text for text in said if "above" in text]) == 1, said
+    docker_lines = [
+        title,
+        body,
+        view.status_label.text(),
+        view.server_reasons.text(),
+        view.problem_label.text(),
+    ]
+    assert _near_duplicates(docker_lines) == [], docker_lines
 
 
 def test_a_start_that_failed_for_another_reason_keeps_its_own_words(
@@ -22958,6 +23055,70 @@ def test_the_dialog_makes_only_the_folder_its_numbers_are_for(qapp: object, tmp_
     assert dialog.ok_button.isEnabled()
 
 
+RAW_DOCKERISH = "docker exec ac-database mysql exited 1: ERROR 2002 (HY000): Can't connect"
+"""A raw text that must reach the log and never the screen (T194 F7)."""
+
+
+def test_an_older_folders_failure_does_not_undo_a_newer_folders_plan(
+    qapp: object, tmp_path: Path
+) -> None:
+    """F3 (T194 final fix): a stale failure cleared the newer plan and named the wrong folder."""
+    older = tmp_path / "older" / "WoW (Yu'lon)"
+    newer = tmp_path / "newer" / "WoW (Yu'lon)"
+
+    def replan(target: Path) -> play_client.BuildPlan:
+        if target == older:
+            raise RuntimeError(RAW_DOCKERISH)
+        return play_client.BuildPlan(
+            linked=(), copied=(), shared_bytes=1, own_bytes=1, same_volume=True
+        )
+
+    jobs = _Deferred()
+    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan), jobs=jobs)
+    dialog.path_edit.setText(str(older))
+    dialog.path_edit.editingFinished.emit()
+    dialog.path_edit.setText(str(newer))
+    dialog.path_edit.editingFinished.emit()
+    assert len(jobs.queue) == 2
+
+    jobs.run(1)  # the newer folder answers first
+    shown = dialog.size_label.text()
+    assert dialog.ok_button.isEnabled()
+    jobs.run(0)  # then the older one fails
+
+    choice = dialog.choice()
+    assert choice is not None and choice.target == newer
+    assert dialog.ok_button.isEnabled(), "a stale failure greyed Make it"
+    assert dialog.size_label.text() == shown
+    assert str(older) not in dialog.size_label.text()
+
+
+def test_a_folder_check_that_breaks_shows_a_sentence_and_logs_the_reason(
+    qapp: object, tmp_path: Path, caplog: Any
+) -> None:
+    """F7 (T194 final fix): the raw text of an unexpected failure was the dialog's line."""
+    target = tmp_path / "broken" / "WoW (Yu'lon)"
+
+    def replan(_target: Path) -> play_client.BuildPlan:
+        raise RuntimeError(RAW_DOCKERISH)
+
+    jobs = _Deferred()
+    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan), jobs=jobs)
+    dialog.path_edit.setText(str(target))
+    dialog.path_edit.editingFinished.emit()
+    with caplog.at_level(logging.DEBUG):
+        jobs.run(0)
+
+    said = dialog.size_label.text()
+    assert said == (
+        f"Yu'lon couldn't check {target}. Pick another folder, or try again; the Logs tab "
+        "has the reason."
+    )
+    assert "exited" not in said and "ERROR" not in said
+    assert any(RAW_DOCKERISH in r.getMessage() for r in caplog.records)
+    assert not dialog.ok_button.isEnabled()
+
+
 class _Clock:
     """A clock the test moves by hand, and the timers that run on it (no wall time)."""
 
@@ -26011,8 +26172,117 @@ def test_a_plan_or_apply_that_fails_says_so_in_a_sentence(
     view.show_network_plan()
     view.apply_network_plan()
     shown = view.network_text.toPlainText()
-    assert shown.endswith("\nApply did not finish: netsh needs an administrator"), shown
+    # F7 (T194 final fix): the reason is Details', folded; the box says it in words.
+    assert shown.endswith("\nApply did not finish. Details below says why."), shown
+    assert "netsh needs an administrator" not in shown
     assert "APPLY FAILED" not in shown
+    assert "netsh needs an administrator" in view.network_details.text()
+    assert view.network_details.collapsed and not view.network_details.isHidden()
+
+
+def test_an_apply_that_breaks_in_docker_keeps_dockers_words_off_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F7 (T194 final fix): `_apply_failed` showed the raw text of whatever it caught."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+
+    def apply_breaks(plan: NetworkPlan) -> NetworkReport:
+        raise docker.DockerCommandError(RAW_DOCKERISH)
+
+    services.network_apply = apply_breaks
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.show_network_plan()
+    view.apply_network_plan()
+
+    shown = view.network_text.toPlainText()
+    assert "exited 1" not in shown and "ERROR 2002" not in shown, shown
+    assert shown.endswith("\nApply did not finish. Details below says why."), shown
+    assert RAW_DOCKERISH in view.network_details.text()
+    assert view.network_details.collapsed
+    assert failures == [RAW_DOCKERISH], "the raw text no longer reaches the app log"
+
+
+def test_a_backup_that_breaks_in_docker_says_so_in_words_and_folds_the_reason(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F7 (T194 final fix): the Restore box said "FAILED: docker exec ... exited 1: ..."."""
+    made = _FakeMaintenance()
+    healthy = made.back_up
+    broken = [True]
+
+    def breaks() -> BackupReport:
+        if broken[0]:
+            raise docker.DockerCommandError(RAW_DOCKERISH)
+        return healthy()
+
+    made.back_up = breaks  # type: ignore[method-assign]
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.back_up()
+
+    shown = view.maintenance_report.toPlainText()
+    assert shown == "The backup did not finish. Details below says why."
+    assert "FAILED" not in shown and "exited" not in shown
+    assert RAW_DOCKERISH in view.maintenance_details.text()
+    assert view.maintenance_details.collapsed and not view.maintenance_details.isHidden()
+    assert failures == [RAW_DOCKERISH], "the raw text no longer reaches the app log"
+
+    broken[0] = False
+    view.back_up()
+    assert "Backed up to" in view.maintenance_report.toPlainText()
+    assert view.maintenance_details.isHidden(), "an old failure's reason under a new success"
+
+
+def test_a_backup_refusal_yulon_wrote_is_the_report_itself(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F7: a `MaintenanceError` is a sentence for the player, so it is not folded away."""
+    made = _FakeMaintenance()
+    refusal = (
+        "ac-database is not running, so there is no database to back up. Start the server first."
+    )
+
+    def refuses() -> BackupReport:
+        raise MaintenanceError(refusal)
+
+    made.back_up = refuses  # type: ignore[method-assign]
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+
+    view.back_up()
+
+    assert view.maintenance_report.toPlainText() == refusal
+    assert view.maintenance_details.isHidden()
+
+
+def test_a_dashboard_read_that_breaks_says_so_in_words_and_logs_the_reason(
+    qapp: object, ps: _Ps, tmp_path: Path, caplog: Any
+) -> None:
+    """F7 (T194 final fix): the verdict line said "could not read ...: docker exec ...".
+
+    Docker answering with an error is not Docker being away, so the banner stays
+    down and the verdict line itself says the read failed.
+    """
+
+    def dashboard_read() -> dashboard.Verdict:
+        raise docker.DockerCommandError(RAW_DOCKERISH)
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = dashboard_read
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    with caplog.at_level(logging.DEBUG):
+        view.refresh_verdict()
+
+    shown = view.verdict_label.text()
+    assert shown == (
+        "Yu'lon couldn't read this server's dashboard just now; the Logs tab has the reason."
+    )
+    assert not view.verdict_label.isHidden()
+    assert any(RAW_DOCKERISH in r.getMessage() for r in caplog.records)
 
 
 def test_the_status_line_names_the_three_servers_in_words(
@@ -26447,6 +26717,31 @@ def test_every_greyed_press_says_why_after_the_tabs_have_read_the_server(
     assert faults == [], "\n".join(faults)
 
 
+def test_a_good_reading_during_a_busy_job_replaces_the_see_above_line(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F4 (T194 final fix): busy, a failed poll, a good poll -- "see above" with no box."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    real_status = view.services.controller.status
+
+    def no_docker() -> NoReturn:
+        raise docker.DockerCommandError(f"docker ps exited 1: {NPIPE_DOWN}")
+
+    view._set_busy(True, "the bot rebuild")
+    view.services.controller.status = no_docker  # type: ignore[method-assign]
+    view.refresh_status()
+    assert view.status_label.text() == "Status unknown (see above)"
+    assert view.docker_banner.isVisibleTo(view)
+
+    view.services.controller.status = real_status  # type: ignore[method-assign]
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert view.status_label.text() == controller_view_module._status_words(real_status())
+    assert "above" not in view.status_label.text()
+    view._set_busy(False)
+
+
 def test_cancel_leaves_a_pointer_at_the_docker_box_alone(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -26472,7 +26767,7 @@ def test_a_start_docker_could_not_hear_leaves_start_and_stop_saying_why(
     """Fix round 1, F1: both stayed greyed with an empty tooltip and no line."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     down = _windows_with_docker_desktop_down(monkeypatch)
-    said = controller_view_module.DOCKER_UNKNOWN
+    said = "Start and Stop come back when Docker answers."
 
     view.start_server()
 

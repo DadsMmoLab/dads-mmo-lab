@@ -12,7 +12,7 @@ from yulon import docker, docker_advice, wsl
 from yulon import platform as yulon_platform
 
 HOSTS = ("windows", "macos", "linux", "deck")
-PROBLEMS = ("missing", "not-running", "permission", "removed", "wsl")
+PROBLEMS = ("missing", "not-running", "permission", "removed", "wsl", "unknown")
 
 ACTIONS = {
     ("windows", "missing"): "open-desktop",
@@ -20,21 +20,25 @@ ACTIONS = {
     ("windows", "permission"): None,
     ("windows", "removed"): "open-desktop",
     ("windows", "wsl"): None,
+    ("windows", "unknown"): None,
     ("macos", "missing"): "open-desktop",
     ("macos", "not-running"): "open-desktop",
     ("macos", "permission"): None,
     ("macos", "removed"): "open-desktop",
     ("macos", "wsl"): None,
+    ("macos", "unknown"): None,
     ("linux", "missing"): None,
     ("linux", "not-running"): None,
     ("linux", "permission"): None,
     ("linux", "removed"): None,
     ("linux", "wsl"): None,
+    ("linux", "unknown"): None,
     ("deck", "missing"): "reinstall-deck",
     ("deck", "not-running"): None,
     ("deck", "permission"): None,
     ("deck", "removed"): "reinstall-deck",
     ("deck", "wsl"): None,
+    ("deck", "unknown"): None,
 }
 """The press each machine gets for each failure: written out, never derived."""
 
@@ -192,6 +196,44 @@ def test_no_cli_is_missing_and_on_a_deck_that_lost_it_removed() -> None:
 def test_a_refused_socket_is_permission(said: str) -> None:
     exc = docker.DockerCommandError(f"docker ps exited 1: {said}")
     assert docker_advice.problem_of(exc, distro=None, deck_docker_removed=False) == "permission"
+
+
+UNRECOGNISED = (
+    'docker ps --format {{.Names}} exited 1: context "remote": context not found: open '
+    "meta.json: The system cannot find the path specified.",
+    "docker ps exited 1: tls: failed to verify certificate: x509: certificate signed by "
+    "unknown authority",
+)
+
+
+@pytest.mark.parametrize("said", UNRECOGNISED)
+def test_an_error_docker_answered_that_yulon_does_not_recognise_is_unknown(said: str) -> None:
+    """F2 (T194 final fix): never "isn't running" for something Docker answered."""
+    exc = docker.DockerCommandError(said)
+    assert not docker_advice.unreachable(exc)
+    assert docker_advice.problem_of(exc, distro=None, deck_docker_removed=False) == "unknown"
+
+
+def test_a_failure_that_is_not_dockers_at_all_is_unknown() -> None:
+    exc = RuntimeError("boom")
+    assert docker_advice.problem_of(exc, distro=None, deck_docker_removed=False) == "unknown"
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_unknown_says_docker_answered_and_where_its_words_are(host: docker_advice.Host) -> None:
+    advice = docker_advice.advice_for(
+        docker.DockerCommandError(UNRECOGNISED[0]),
+        distro=None,
+        host=host,
+        deck_docker_removed=False,
+    )
+
+    assert advice.body == (
+        "Docker answered with an error Yu'lon doesn't recognise. The Logs tab has what it "
+        "said; press Try again once it's sorted."
+    )
+    assert advice.action is None
+    assert "running" not in advice.body
 
 
 def test_a_server_in_a_distro_is_the_distros_docker() -> None:

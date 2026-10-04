@@ -19,7 +19,7 @@ from typing import Literal
 from yulon import docker, platform
 
 Host = Literal["windows", "macos", "linux", "deck"]
-Problem = Literal["missing", "not-running", "permission", "removed", "wsl"]
+Problem = Literal["missing", "not-running", "permission", "removed", "wsl", "unknown"]
 Action = Literal["open-desktop", "reinstall-deck"]
 
 UNKNOWN_TITLE = "Yu'lon can't ask Docker about this server right now"
@@ -57,6 +57,10 @@ _WSL_NOT_RUNNING = (
     "This server runs inside the WSL distro {distro}, and the Docker in that distro isn't "
     'answering. Open a terminal in {distro} and run "sudo systemctl start docker" (or restart '
     "the computer), then press Try again."
+)
+_UNKNOWN = (
+    "Docker answered with an error Yu'lon doesn't recognise. The Logs tab has what it "
+    "said; press Try again once it's sorted."
 )
 _WSL_UNNAMED = (
     "This server runs inside a WSL distro, and the Docker in that distro isn't answering. Open "
@@ -108,8 +112,9 @@ def problem_of(exc: object, *, distro: str | None, deck_docker_removed: bool) ->
 
     A server in a WSL distro is that distro's Docker whatever it said; no CLI at
     all is `missing` (`removed` on a Deck an update took it from); a socket or
-    pipe that refused us is `permission`; anything else Docker said back is a
-    daemon that is not answering.
+    pipe that refused us is `permission`; Docker not answering in a wording
+    `unreachable()` knows is `not-running`; anything else is `unknown`, which
+    never says Docker is down (T194 F2).
     """
     if distro is not None:
         return "wsl"
@@ -118,7 +123,9 @@ def problem_of(exc: object, *, distro: str | None, deck_docker_removed: bool) ->
     said = str(exc).lower()
     if "permission denied" in said or "access is denied" in said:
         return "permission"
-    return "not-running"
+    if unreachable(exc):
+        return "not-running"
+    return "unknown"
 
 
 def advise(problem: Problem, host: Host, *, distro: str | None = None) -> Advice:
@@ -133,6 +140,8 @@ def advise(problem: Problem, host: Host, *, distro: str | None = None) -> Advice
         if desktop:
             return Advice(UNKNOWN_TITLE, platform.DOCKER_MISSING_ON_DESKTOP, "open-desktop")
         return Advice(UNKNOWN_TITLE, platform.DOCKER_MISSING_ON_LINUX, None)
+    if problem == "unknown":
+        return Advice(UNKNOWN_TITLE, _UNKNOWN, None)
     if problem == "permission":
         if host == "windows":
             return Advice(UNKNOWN_TITLE, _WINDOWS_PERMISSION, None)
