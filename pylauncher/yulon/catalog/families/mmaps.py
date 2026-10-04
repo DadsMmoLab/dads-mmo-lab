@@ -752,11 +752,16 @@ def stop_for_route(
 
 
 def _drop_kept(job: Job, record: Record, route: str) -> str | None:
-    """A failed run's kept tiles removed and its record forgotten before `route` (`clear`)."""
-    if not record.resumable:
-        return None
+    """A failed run's kept tiles removed and its record forgotten before `route` (`clear`).
+
+    Forgotten even when it kept nothing: `route` begins a new set, which must not
+    inherit the old one's `crashed` (and so its `retry_threads`). The sentence only
+    when there were tiles to remove.
+    """
     _clear_output(job)
     _forget_record(job.server_dir)
+    if not record.resumable:
+        return None
     return (
         f"The {record.kept} pathfinding tiles kept from an earlier run were removed "
         f"before {route}, which can change how they are made. It starts again from the "
@@ -1099,9 +1104,10 @@ def _switch_off(job: Job) -> None:
             ) from exc
 
 
-INPUT_DIRS = ("dbc", "maps", "vmaps")
-"""What the generator reads under `data/` (PathGenerator.cpp:44-77 at faac5fc9), and so what a
-kept tile was made from."""
+def _input_dirs(job: Job) -> tuple[str, ...]:
+    """What the generator reads under `data/` (PathGenerator.cpp:44-77 at faac5fc9), and so
+    what a kept tile was made from: the DBCs (the entry's `dbc_overlay_to`), maps and vmaps."""
+    return (job.block.extract.dbc_overlay_to, extract.MAPS_DIR, extract.VMAPS_DIR)
 
 
 def _evidence(job: Job) -> str:
@@ -1111,7 +1117,7 @@ def _evidence(job: Job) -> str:
     extraction makes the map data, and Re-extract map data removes it first. That
     alone does not prove the files are the same (Codex adversarial review, T209): a
     map put back or changed by hand leaves it as it was. So the hash also covers
-    each file under `INPUT_DIRS` -- its path, size and modification time, from one
+    each file under `_input_dirs()` -- its path, size and modification time, from one
     `os.scandir` walk (the directory listing carries them on Windows), never its
     bytes. Empty when the evidence file is missing or a folder cannot be read: a
     run whose map data cannot be told apart is never continued.
@@ -1119,7 +1125,7 @@ def _evidence(job: Job) -> str:
     digest = hashlib.sha256()
     try:
         digest.update((job.data_dir / extract.EVIDENCE_FILE).read_bytes())
-        for folder in INPUT_DIRS:
+        for folder in _input_dirs(job):
             for line in sorted(_file_facts(job.data_dir / folder, folder)):
                 digest.update(line.encode("utf-8", "surrogateescape"))
     except OSError:
@@ -1128,11 +1134,18 @@ def _evidence(job: Job) -> str:
 
 
 def _file_facts(folder: Path, prefix: str) -> list[str]:
-    """`<path>\0<size>\0<mtime ns>\n` for every file under `folder`; links are not followed."""
+    """`<path>\0<size>\0<mtime ns>\n` for every file under `folder`.
+
+    A link raises `OSError`, so the hash is empty and nothing is continued: its own
+    size and time say nothing about the file or folder it points at, which is what
+    the generator reads (Codex adversarial review). An extraction makes no links.
+    """
     facts: list[str] = []
     with os.scandir(folder) as entries:
         for entry in entries:
             name = f"{prefix}/{entry.name}"
+            if entry.is_symlink():
+                raise OSError(f"{entry.path} is a link")
             if entry.is_dir(follow_symlinks=False):
                 facts.extend(_file_facts(Path(entry.path), name))
                 continue

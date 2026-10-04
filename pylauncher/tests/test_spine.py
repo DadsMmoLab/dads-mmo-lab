@@ -2814,9 +2814,9 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "fails reads as the maps missing, which refuses -- never as there"
     ),
     ("catalog/families/mmaps.py", "_file_facts"): (
-        "T209. Walks `data/dbc`, `data/maps` and `data/vmaps` -- read-only, links not "
-        "followed -- for each file's path, size and modification time, hashed into what a "
-        "pathfinding run's map data was. It decides only whether kept tiles may be "
+        "T209. Walks `data/dbc`, `data/maps` and `data/vmaps` -- read-only; a link anywhere "
+        "answers an empty hash -- for each file's path, size and modification time, hashed "
+        "into what a pathfinding run's map data was. It decides only whether kept tiles may be "
         "continued: a walk that fails answers an empty hash, which never matches, so the "
         "tiles are removed and the run starts from the beginning -- never a resume over "
         "map data nobody could read"

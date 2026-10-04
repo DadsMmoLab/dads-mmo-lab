@@ -1383,3 +1383,45 @@ def test_a_record_written_before_t209_is_never_continued(server: Path) -> None:
     fake = FakeMmapsDocker()
     start(server, fake)
     assert fake.mmaps_at_run[-1] == []
+
+
+def test_an_update_route_forgets_a_crashed_run_that_kept_no_tile(server: Path) -> None:
+    """Codex review: a crash before any whole tile still marks the set `crashed`; an update
+    starts a new set, which runs on the usual threads."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_cut_tile()
+    fake.finish(139)
+    assert status(server, fake).state == "failed"
+    said = mmaps.stop_for_route(
+        server,
+        ENTRY,
+        "the update to the newest code",
+        clear=True,
+        runner=fake,
+        install_id=INSTALL_ID,
+    )
+    assert said is None, "nothing kept, so nothing to say"
+    assert not (server / mmaps.RECORD_FILE).exists()
+    start(server, fake)
+    assert fake.started[-1].argv[-2:] == ("--threads", "4")
+
+
+@pytest.mark.parametrize("linked", ["file", "folder"])
+def test_map_data_reached_through_a_link_is_never_continued(server: Path, linked: str) -> None:
+    """Codex adversarial review: a link's own size and time say nothing about what it points
+    at, which the generator reads. Unchanged otherwise, the run still starts from 0."""
+    elsewhere = server.parent / "elsewhere"
+    elsewhere.mkdir()
+    if linked == "file":
+        (elsewhere / "0004331.map").write_bytes(b"MAPS")
+        (server / "data" / "maps" / "0004331.map").symlink_to(elsewhere / "0004331.map")
+    else:
+        (server / "data" / "vmaps" / "extra").symlink_to(elsewhere, target_is_directory=True)
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
