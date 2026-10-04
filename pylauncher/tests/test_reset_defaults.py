@@ -955,7 +955,9 @@ def test_an_installed_modules_key_survives_the_reset_while_a_core_key_goes_back(
     )
     text = (server / "etc/mangosd.conf").read_text(encoding="utf-8")
     assert "Rate.XP.Kill    = 5\n" in text, "the module's line was not kept byte for byte"
-    assert "WorldServerPort = 8085\n" in text and "9999" not in text
+    # The tuned LINE, not the bare number: the generated DB password is random
+    # hex and can contain "9999" (a CI run minted one with "9999" in it, T222).
+    assert "WorldServerPort = 8085\n" in text and "WorldServerPort = 9999" not in text
     assert {r.file: r.outcome for r in report.results}["etc/mangosd.conf"] == "reset"
 
 
@@ -1046,7 +1048,9 @@ def test_a_key_the_install_table_writes_is_never_carried_even_if_a_module_declar
     )
     assert not report.refused
     text = (server / "etc/mangosd.conf").read_text(encoding="utf-8")
-    assert "WorldServerPort = 8085\n" in text and "9999" not in text
+    # The tuned LINE, not the bare number: the generated DB password is random
+    # hex and can contain "9999" (a CI run minted one with "9999" in it, T222).
+    assert "WorldServerPort = 8085\n" in text and "WorldServerPort = 9999" not in text
     assert "Rate.XP.Kill    = 5\n" in text, "control: the module key itself was still carried"
 
 
