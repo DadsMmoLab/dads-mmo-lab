@@ -184,6 +184,10 @@ class Controller:
         # starts, since `start()` is the one door every Start, Restart and
         # recreate goes through.
         self.zone_problem: str | None = None
+        # What the last `start()` found off its commit among the server's source
+        # folders (T217, `native.SOURCES_OFF_FILE`): `None` when nothing. A warning,
+        # never a refusal -- the owner's word: Start warns and runs the image it has.
+        self.sources_problem: str | None = None
         # The catalog entry this install is, where the subclass knows it (T179).
         # `None` reads it off the shipped catalog by container names
         # (`_entry_for`), which every game but one in the making can answer.
@@ -309,6 +313,7 @@ class Controller:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         self.zone_problem = self._put_back_the_zone_file()
+        self.sources_problem = native.sources_off_warning(self.server_dir)
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting

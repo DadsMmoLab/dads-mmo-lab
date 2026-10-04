@@ -508,10 +508,19 @@ class Recorder:
         self.calls.append(f"changed-lines:{dest.name}:{path}")
         return self.diff_lines.get((dest, old, new, path))
 
+    restore_errors: dict[Path, Exception] = field(default_factory=dict)
+    """`restore_error` for ONE checkout (T217): the module will not go back, the core does.
+
+    The state a player was left in on 2026-10-04: a new module on an old core,
+    which no single `restore_error` for every source can produce.
+    """
+
     def restore_rev(self, dest: Path, rev: str) -> None:
         self.calls.append(f"restore:{dest.name}->{rev[:7]}")
         if self.restore_error is not None:
             raise self.restore_error
+        if dest in self.restore_errors:
+            raise self.restore_errors[dest]
         self.heads[dest] = rev
 
     def probe(self) -> docker.ImportState:

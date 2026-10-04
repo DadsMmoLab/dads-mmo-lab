@@ -8228,8 +8228,11 @@ class ControllerView(QWidget):
         on UTC, and this line says so and names the presses that fix it.
         """
         said = getattr(self.services.controller, "zone_problem", None)
-        if isinstance(said, str) and said:
-            text = f"The server started, but {said}"
+        # T217: a source folder a failed update left off its commit, said the same way.
+        off = getattr(self.services.controller, "sources_problem", None)
+        parts = [part for part in (said, off) if isinstance(part, str) and part]
+        if parts:
+            text = f"The server started, but {' Also: '.join(parts)}"
             self.problem_label.setText(text)
             return text
         return None

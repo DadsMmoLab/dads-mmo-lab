@@ -2235,11 +2235,28 @@ def _start_is_refused_for_a_rebuild(server_dir: Path) -> None:
     assert (server_dir / native.START_REFUSED_FILE).is_file()
 
 
+def _built_on_old(server_dir: Path) -> None:
+    """The record says the running build was made from `OLD`, where `_ready()` left the heads.
+
+    A plain Rebuild refuses a folder whose sources are not on the commit the
+    running build came from (T217), and an install's record says nothing, which
+    means "on the pins"; the Recorder's heads sit on `OLD` instead.
+    """
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    revs = tuple(
+        native.SourceRev(repo=source.repo, built=f"{OLD[:7]} · 2026-09-16")
+        for source in ENTRY.emulator.sources
+    )
+    native.write_state(server_dir, replace(state, source_revs=revs))
+
+
 def test_a_plain_rebuild_that_leaves_the_tags_mixed_refuses_every_start_too(
     tmp_path: Path,
 ) -> None:
     """Fix round 2: the geometry is the Rebuild press's as much as the update's."""
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     rec.ready = False
     with pytest.raises(RollbackNotDone) as raised:
         list(engine(rec, **_mixed(rec)).rebuild(InstallOptions(server_dir=server_dir)))
@@ -2252,6 +2269,7 @@ def test_a_rebuild_that_succeeds_clears_the_refusal_and_one_that_fails_keeps_it(
 ) -> None:
     """Fix round 2: Rebuild is the repair, so it is not refused, and only its success clears."""
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     assert native.owe_start(server_dir) == ""
     rec.build_result = AttachedRun(2, ("error: no",))
     with pytest.raises(InstallerError):
@@ -2277,6 +2295,7 @@ def test_the_repair_rebuild_after_mixed_tags_runs_to_the_end_and_starts_the_serv
     before the start. Bound here so a stage tuple that grows an `up` fails this.
     """
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     rec.ready = False
     with pytest.raises(RollbackNotDone):
         list(engine(rec, **_mixed(rec)).rebuild(InstallOptions(server_dir=server_dir)))
@@ -2299,6 +2318,7 @@ def test_a_repair_rebuild_whose_build_does_not_come_up_leaves_the_mixed_build_st
     restart, so a failed repair recreated the very images the record refuses to start.
     """
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     assert native.owe_start(server_dir) == ""
     rec.ready = False
     with pytest.raises(native.ServersLeftStopped) as raised:
@@ -2337,6 +2357,7 @@ def test_a_rollback_that_stops_early_on_a_plain_rebuild_adds_nothing_about_sourc
 ) -> None:
     """Rebuild moves no source: its sentence is the rollback's own, and nothing is kept."""
     rec, server_dir = _ready(tmp_path)
+    _built_on_old(server_dir)
     rec.ready = False
     with pytest.raises(RollbackNotDone) as raised:
         list(engine(rec, **_name_refused(rec)).rebuild(InstallOptions(server_dir=server_dir)))

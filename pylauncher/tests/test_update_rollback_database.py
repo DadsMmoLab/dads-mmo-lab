@@ -19,6 +19,7 @@ the fix.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ from tests.test_update_to_latest import (  # noqa: F401 - `_gated` is an autouse
     _recreate_given_up,
     _spine,
 )
+from yulon import git
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import (
@@ -43,6 +45,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     installer_for,
 )
+from yulon.docker import AttachedRun
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -416,3 +419,141 @@ def test_a_reader_that_goes_away_after_the_copy_puts_nothing_back_and_yields_not
     press.close()
     assert len(fake.taken) == 1 and fake.put_back_calls == []
     assert "prune" not in rec.calls
+
+
+# -- Task 5: a source that will not go back ----------------------------------
+
+MODULE = "modules/mod-playerbots"
+
+
+def _module_will_not_go_back(rec: Recorder, server_dir: Path) -> None:
+    rec.restore_errors[server_dir / MODULE] = git.GitError("index.lock exists")
+
+
+def test_a_module_that_will_not_go_back_leaves_the_servers_stopped_and_names_the_command(
+    tmp_path: Path,
+) -> None:
+    """The player's state, prevented: the old core is not started under the new module.
+
+    Until T217 the route said "agree again" after a source that did not go back,
+    and started the old build on the folder that still held the new module's SQL.
+    """
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    _module_will_not_go_back(rec, server_dir)
+    made = make(wait_ready=_old_build_comes_back())
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    assert rec.heads[server_dir] == OLD and rec.heads[server_dir / MODULE] == NEW
+    assert rec.calls.count("recreate") == 1, "the old build was not started"
+    assert f"git -C {server_dir / MODULE} checkout --detach --force {OLD}" in text
+    assert "agree again" not in text and "is running again" not in text
+    # The copy still goes back: the database is ready for the folder once it is fixed.
+    assert fake.put_back_calls == fake.taken
+    assert native.sources_off_warning(server_dir) is not None, "Start will warn"
+
+
+def test_a_module_that_will_not_go_back_after_a_failed_compile_never_says_agree_again(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    _module_will_not_go_back(rec, server_dir)
+    rec.build_result = AttachedRun(2, ("error: no",))
+    with pytest.raises(InstallerError) as raised:
+        list(make().update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    assert "agree again" not in text
+    assert text.endswith(native.SOURCES_NOT_ALL_BACK_NOTE)
+
+
+def _built_from(server_dir: Path, rec: Recorder, heads: dict[str, str]) -> None:
+    """The install record says the running build was made from `heads` (by repo)."""
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    revs = tuple(
+        native.SourceRev(repo=repo, built=f"{sha[:7]} · 2026-10-03") for repo, sha in heads.items()
+    )
+    native.write_state(server_dir, replace(state, source_revs=revs))
+
+
+def test_rebuild_refuses_a_module_that_is_not_on_the_commit_the_server_was_built_from(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    _built_from(
+        server_dir,
+        rec,
+        {"mod-playerbots/azerothcore-wotlk": OLD, "mod-playerbots/mod-playerbots": OLD},
+    )
+    rec.heads[server_dir / MODULE] = NEW
+    with pytest.raises(InstallerError) as raised:
+        list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    assert f"is on {NEW[:7]}" in text and f"built from {OLD[:7]}" in text
+    assert f"git -C {server_dir / MODULE} checkout --detach --force {OLD[:7]}" in text
+    assert "Nothing was changed" in text
+    assert "build" not in rec.calls and not [c for c in rec.calls if c.startswith("tag:")]
+
+
+def test_rebuild_goes_on_and_says_so_when_git_cannot_say_where_a_source_is(
+    tmp_path: Path,
+) -> None:
+    """Rebuild is the repair press; an unreadable checkout must not lock it out (Q4)."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    rec.git_reads = False
+    said = list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls
+    assert any("could not check" in line for line in said), said
+
+
+def test_rebuild_with_no_record_compares_against_the_pin(tmp_path: Path) -> None:
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    for source in WOTLK.emulator.sources:
+        assert source.rev is not None
+        rec.heads[server_dir / source.dest] = source.rev
+    list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls
+    rec.calls.clear()
+    rec.heads[server_dir / MODULE] = NEW
+    with pytest.raises(InstallerError, match="built from"):
+        list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls
+
+
+def test_start_warns_while_a_source_is_off_its_commit_and_stops_once_it_is_back(
+    tmp_path: Path,
+) -> None:
+    """Owner: Start warns and still starts the image it has. Read off `.git/HEAD`, no git run."""
+    module = tmp_path / MODULE
+    (module / ".git").mkdir(parents=True)
+    (module / ".git" / "HEAD").write_text(f"{NEW}\n", encoding="utf-8")
+    native.remember_sources_off(tmp_path, [("mod-playerbots/mod-playerbots", module, OLD)])
+    said = native.sources_off_warning(tmp_path)
+    assert said is not None
+    assert f"git -C {module} checkout --detach --force {OLD}" in said
+    (module / ".git" / "HEAD").write_text(f"{OLD}\n", encoding="utf-8")
+    assert native.sources_off_warning(tmp_path) is None
+    assert not (tmp_path / native.SOURCES_OFF_FILE).exists(), "forgotten once it is back"
+
+
+def test_the_controllers_start_carries_the_warning_and_still_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import docker
+    from yulon.controller import Controller
+
+    module = tmp_path / MODULE
+    (module / ".git").mkdir(parents=True)
+    (module / ".git" / "HEAD").write_text(f"{NEW}\n", encoding="utf-8")
+    native.remember_sources_off(tmp_path, [("mod-playerbots/mod-playerbots", module, OLD)])
+    started: list[Path] = []
+    monkeypatch.setattr(
+        docker, "start_staged", lambda spec, where, **_kw: started.append(where) or True
+    )
+    controller = Controller(WOTLK.container_spec(), tmp_path)
+    monkeypatch.setattr(controller, "port_conflicts", lambda: [])
+    controller.start()
+    assert started == [tmp_path]
+    assert controller.sources_problem is not None and OLD in controller.sources_problem

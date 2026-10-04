@@ -2162,6 +2162,136 @@ def copy_kept_note(copy: snapshot.Snapshot) -> str:
     )
 
 
+SOURCES_NOT_ALL_BACK_NOTE = (
+    "Not every source folder went back to the commit it was on -- the line above names it and "
+    "the `git` command that puts it back -- so what is on disk and the build your server has do "
+    "NOT agree until that command is run."
+)
+"""`SOURCES_PUT_BACK_NOTE` when a source would not go back (T217): never "agree again"."""
+
+
+def _sources_note(failed: Sequence[object]) -> str:
+    """The closing note once the sources were asked back: "agree again" only if all went."""
+    return SOURCES_NOT_ALL_BACK_NOTE if failed else SOURCES_PUT_BACK_NOTE
+
+
+def source_not_back(repo: str, dest: Path, old: str, reason: str) -> str:
+    """Why the old build was left stopped: a source folder would not go back (T217).
+
+    The old WotLK worldserver reads its module's database updates from the
+    folder, not from its image, so starting it on a folder that still holds the
+    new module migrates the database again.
+    """
+    return (
+        f"{repo} in {dest} could not be put back on {old[:7]} ({reason}); that folder still "
+        "holds the new code, and the old build reads its database updates from it. Put it back "
+        f"with `git -C {dest} checkout --detach --force {old}`, then press Start."
+    )
+
+
+SOURCES_OFF_FILE = ".yulon-sources-off.json"
+"""A rollback could not put a source folder back on the commit the running build came from.
+
+Written by the update route beside the install record (T217), read by every
+Start (`Controller.start()`), which warns and still starts the image it has
+(the owner's word, 2026-10-04: Start warns, Rebuild refuses). Forgotten once
+every folder it names is back on its commit, or by a Rebuild or update that
+succeeds. `{"version": 1, "sources": [{"repo", "dest", "commit"}]}`.
+"""
+
+
+def remember_sources_off(server_dir: Path, rows: Sequence[tuple[str, Path, str]]) -> str:
+    """Write `SOURCES_OFF_FILE` for `(repo, folder, commit)` rows. "" once written, else why not."""
+    path = server_dir / SOURCES_OFF_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    record = {
+        "version": 1,
+        "sources": [
+            {"repo": repo, "dest": str(dest), "commit": commit} for repo, dest, commit in rows
+        ],
+    }
+    try:
+        staged.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not remove {staged}: {also}")
+        return f"warning: {path} could not be written ({exc}), so Start will not warn about it."
+    return ""
+
+
+def forget_sources_off(server_dir: Path) -> None:
+    """Remove `SOURCES_OFF_FILE`; a failure is logged, never raised."""
+    path = server_dir / SOURCES_OFF_FILE
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not remove {path}: {exc}")
+
+
+def read_head_file(dest: Path) -> str | None:
+    """The commit a checkout is on, read off `.git/HEAD` with no git run; None = cannot say.
+
+    For a Start, which must not wait on a containerised git: a detached HEAD
+    (what `checkout --detach` leaves) holds the sha itself, and a branch is
+    resolved through its loose ref or `packed-refs`.
+    """
+    gitdir = dest / ".git"
+    try:
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref: "):
+            return head or None
+        ref = head[len("ref: ") :]
+        loose = gitdir.joinpath(*ref.split("/"))
+        if loose.is_file():
+            return loose.read_text(encoding="utf-8").strip() or None
+        for line in (gitdir / "packed-refs").read_text(encoding="utf-8").splitlines():
+            sha, _, name = line.partition(" ")
+            if name == ref:
+                return sha
+    except OSError:
+        return None
+    return None
+
+
+def sources_off_warning(server_dir: Path) -> str | None:
+    """What a Start says while `SOURCES_OFF_FILE` names a folder still off its commit; else None.
+
+    Never raises and never refuses. A folder back on its commit is not named,
+    and once none is left the record is forgotten.
+    """
+    path = server_dir / SOURCES_OFF_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); not warning from it")
+        return None
+    rows = raw.get("sources") if isinstance(raw, dict) else None
+    off: list[str] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        dest, commit = Path(str(row.get("dest", ""))), str(row.get("commit", ""))
+        if not commit or read_head_file(dest) == commit:
+            continue
+        off.append(
+            f"{row.get('repo', dest.name)} in {dest} is not on {commit[:7]}, the commit this "
+            f"server was built from; put it back with "
+            f"`git -C {dest} checkout --detach --force {commit}`"
+        )
+    if not off:
+        forget_sources_off(server_dir)
+        return None
+    return (
+        f"{'; '.join(off)}. The server runs the image it has, but its world server reads its "
+        "database updates from that folder."
+    )
+
+
 @dataclass
 class _UpdateCopy:
     """One update press's copy of the databases its new build can change (T217)."""
@@ -5921,6 +6051,12 @@ class StagedInstaller:
             refused = self.start_refusal(server_dir, rebuilding=True)
             if refused is not None:
                 raise InstallerError(f"{refused} Nothing was changed.")
+        # T217 (B): a plain Rebuild compiles the folder as it is, so a source that is
+        # not on the commit the running build was made from would compile a mix of
+        # two versions. The update route moves them together and passes its work.
+        unchecked = (
+            self._refuse_sources_off_their_build(server_dir, state) if servers_down is None else ()
+        )
         planned = self.rebuild_stages()
         renders = any(stage.name == DOCKERFILE_STAGE for stage in planned)
         # Read BEFORE the first stage and only for the families that have one,
@@ -5931,6 +6067,7 @@ class StagedInstaller:
         ground = self._recipe_ground(server_dir) if renders else {}
         yield f"Rebuilding {self.entry.name} in {server_dir}"
         yield rebuild_opening_note(renders_dockerfile=renders)
+        yield from unchecked
         self._check_cancel(cancel)
         ctx = StageContext(
             server_dir=server_dir,
@@ -6134,6 +6271,8 @@ class StagedInstaller:
         left = forget_owed_start(server_dir)
         if left:
             yield left
+        # T217: the build now running was made from the folders as they are.
+        forget_sources_off(server_dir)
         yield from self.after_ready(server_dir)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
@@ -6558,8 +6697,8 @@ class StagedInstaller:
                 # restore on it would leave the folder ahead of the image for the
                 # one failure most likely to happen twice in a row (cold review
                 # round 2, 2026-09-16).
-                yield from self._restore_the_folder(moved, server_dir, opts, state, press)
-                raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+                failed = yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                raise InstallerError(f"{exc} {_sources_note(failed)}") from exc
             # T179: what the family does while the rebuild's servers are down. Its
             # rollback half needs the OLD checkout, so the sources go back first,
             # inside the rollback, and the handler below does not do it twice.
@@ -6571,6 +6710,7 @@ class StagedInstaller:
             # copy is taken with the servers down, right before the new build first
             # starts.
             sources_back = False
+            sources_failed: list[tuple[EmulatorSource, Path, str, str]] = []
             copy = _UpdateCopy(
                 names=self.snapshot_databases() if self._snapshot is not None else (),
                 not_copied=self._schema_names(self.databases_changed_but_not_copied()),
@@ -6585,9 +6725,23 @@ class StagedInstaller:
 
             def back(stage_ctx: StageContext) -> Iterator[str]:
                 nonlocal sources_back
-                yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                failed = yield from self._restore_the_folder(moved, server_dir, opts, state, press)
                 sources_back = True
-                yield from self._put_copy_back(server_dir, copy)
+                sources_failed.extend(failed)
+                # The copy goes back even when a folder did not: with the servers
+                # stopped it is harmless, and it leaves one fix to make, not two.
+                copy_problem = ""
+                try:
+                    yield from self._put_copy_back(server_dir, copy)
+                except LeaveStopped as exc:
+                    copy_problem = str(exc)
+                if failed:
+                    # T217 (B3): the old build would read the new module's SQL from
+                    # the folder that did not go back. It is not started.
+                    said = [source_not_back(s.repo, dest, old, why) for s, dest, old, why in failed]
+                    raise LeaveStopped(" ".join([*said, copy_problem]).strip())
+                if copy_problem:
+                    raise LeaveStopped(copy_problem)
                 if family is not None:
                     yield from family.back(stage_ctx)
 
@@ -6637,7 +6791,9 @@ class StagedInstaller:
                     # the commits the record still names, and the sentence says the
                     # server needs a Rebuild before it can start.
                     work.settle()
-                    yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                    failed = yield from self._restore_the_folder(
+                        moved, server_dir, opts, state, press
+                    )
                     # T217: the sources went back, so the database goes back with them
                     # (servers stopped; every start stays refused until a Rebuild).
                     database = ""
@@ -6647,8 +6803,13 @@ class StagedInstaller:
                         database = f" {not_back}"
                     if copy.put is not None:
                         database = f" {copy_back_with_the_sources(copy.put)}"
+                    sources = (
+                        mixed_note(exc.touched)
+                        if not failed
+                        else f"{SOURCES_NOT_ALL_BACK_NOTE} {SOURCES_MIXED_REBUILD}"
+                    )
                     raise RollbackNotDone(
-                        f"{exc} {mixed_note(exc.touched)}{database}",
+                        f"{exc} {sources}{database}",
                         touched=exc.touched,
                         mixed=True,
                     ) from exc
@@ -6689,17 +6850,21 @@ class StagedInstaller:
                 # pair that makes the folder and the running container agree again.
                 work.settle()
                 if not sources_back:
-                    yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                    sources_failed.extend(
+                        (yield from self._restore_the_folder(moved, server_dir, opts, state, press))
+                    )
                 if isinstance(exc, ServersLeftStopped):
                     # T179: nothing runs, so the note must not say it does. T217: and
-                    # when it is the database that did not go back, the note says so.
-                    note = (
-                        SOURCES_PUT_BACK_DATABASE_NOT_NOTE
-                        if copy.put_failed
-                        else SOURCES_PUT_BACK_STOPPED_NOTE
-                    )
+                    # when it is a folder or the database that did not go back, the
+                    # note says that instead.
+                    if sources_failed:
+                        note = SOURCES_NOT_ALL_BACK_NOTE
+                    elif copy.put_failed:
+                        note = SOURCES_PUT_BACK_DATABASE_NOT_NOTE
+                    else:
+                        note = SOURCES_PUT_BACK_STOPPED_NOTE
                     raise ServersLeftStopped(f"{exc} {note}") from exc
-                raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+                raise InstallerError(f"{exc} {_sources_note(sources_failed)}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
                 # record of tables to import is put back if nothing was imported
@@ -6938,7 +7103,7 @@ class StagedInstaller:
         opts: InstallOptions,
         state: InstallState,
         press: str,
-    ) -> Iterator[str]:
+    ) -> Generator[str, None, list[tuple[EmulatorSource, Path, str, str]]]:
         """Put the sources back AND write this app's own files into them again.
 
         `press` is the label of the press being put back (T163): the carried
@@ -6959,10 +7124,19 @@ class StagedInstaller:
         that is already failing. A second half that could not run is reported
         rather than thrown, because the sentence in front of it is the one that
         says what actually went wrong.
+
+        Returns the sources that would not go back (T217), and remembers them in
+        `SOURCES_OFF_FILE` so every Start warns until they are back.
         """
-        yield from self._put_sources_back(moved)
+        failed = yield from self._put_sources_back(moved)
+        if failed:
+            warned = remember_sources_off(
+                server_dir, [(source.repo, dest, old) for source, dest, old, _why in failed]
+            )
+            if warned:
+                yield warned
         if not moved:
-            return
+            return failed
         # T163: each half names the press that mends IT, and neither is
         # Rebuild. Upstream's compose file in the folder is one Rebuild refuses
         # (`_refuse_unless_rebuildable()`) and so does this same press, which
@@ -6990,7 +7164,7 @@ class StagedInstaller:
                 f"{composegen.BASE_FILE} is the repository's own. "
                 f"{compose_back_advice(server_dir)}"
             )
-            return
+            return failed
         try:
             yield from self.apply_carried_patches(server_dir)
         except (InstallerError, OSError) as exc:
@@ -7001,8 +7175,11 @@ class StagedInstaller:
                 f"reason is fixed, press {server_build_presses.under_server_build(press)} "
                 "again: it writes the patch before it compiles."
             )
+        return failed
 
-    def _put_sources_back(self, moved: Sequence[tuple[EmulatorSource, Path, str]]) -> Iterator[str]:
+    def _put_sources_back(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> Generator[str, None, list[tuple[EmulatorSource, Path, str, str]]]:
         """Return every source this press moved to the commit it was on. Never raises.
 
         Never raises because it runs on a path that is ALREADY failing, and a
@@ -7012,7 +7189,11 @@ class StagedInstaller:
         is the one state this route can end in where the folder and the running
         image disagree, and a person who is told which folder and which commit
         can run two words of git themselves.
+
+        Returns the sources that would not go back, with why (T217): every caller
+        picks its closing note from that, and never "agree again" after one.
         """
+        failed: list[tuple[EmulatorSource, Path, str, str]] = []
         for source, dest, old in reversed(moved):
             try:
                 self._seams.restore_rev(dest, old)
@@ -7023,8 +7204,10 @@ class StagedInstaller:
                     f"folder is now ahead of the server that is running: put it back with "
                     f"`git -C {dest} checkout --detach --force {old}`."
                 )
+                failed.append((source, dest, old, str(exc)))
                 continue
             yield f"{source.repo} was put back on {old[:7]}."
+        return failed
 
     def _take_copy(self, server_dir: Path, copy: _UpdateCopy) -> Iterator[str]:
         """Copy the databases the new build can change; servers down, before it starts (T217).
@@ -7784,6 +7967,47 @@ class StagedInstaller:
                 f"launcher has to be rebuilt by that launcher."
             )
         return state
+
+    def _refuse_sources_off_their_build(
+        self, server_dir: Path, state: InstallState
+    ) -> tuple[str, ...]:
+        """Refuse a Rebuild whose source folders are not where the running build came from (T217).
+
+        "Where it came from" is the install record's `source_revs[].built` when an
+        update wrote one, else the catalog's pin, which is what an install checks
+        out. A folder git will not read is not refused -- Rebuild is the repair
+        press, and an unreadable checkout must not lock it out (the owner's answer
+        of 2026-10-04) -- and the lines returned say it could not be checked. One
+        `rev-parse` per moving source.
+
+        Raises:
+            InstallerError: a source's HEAD is another commit; names the folder,
+                both commits and the command that puts it back.
+        """
+        unchecked: list[str] = []
+        for source in self.sources_that_move():
+            dest = server_dir / source.dest
+            recorded = state.rev_for(source.repo)
+            expected = recorded.built.split()[0] if recorded is not None and recorded.built else ""
+            expected = expected or (source.rev or "")
+            if not expected:
+                continue
+            head = self._seams.head_sha(dest)
+            if head is None:
+                unchecked.append(
+                    f"Yu'lon could not check which commit {dest} is on, so it is rebuilt as it "
+                    f"stands; it should be on {expected[:7]}."
+                )
+                continue
+            if not head.startswith(expected):
+                raise InstallerError(
+                    f"{dest} is on {head[:7]}, but this server was built from {expected[:7]}, "
+                    "so rebuilding it now would compile a mix of the two. Put it back with "
+                    f"`git -C {dest} checkout --detach --force {expected}`, or press "
+                    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}"
+                    " to move every source together. Nothing was changed."
+                )
+        return tuple(unchecked)
 
     def _claim_before_writing(
         self, server_dir: Path, state: InstallState, started_empty: bool
