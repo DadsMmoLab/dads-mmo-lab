@@ -183,6 +183,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     # upstream commit, which the update route remembers so the tab stops
     # offering it. An exception type, not machinery.
     "UpdateRefused",
+    # Added deliberately with T197: a rollback that stopped before the old build
+    # was back, so the update route leaves its sources with the new one. An
+    # exception type, not machinery.
+    "RollbackNotDone",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",

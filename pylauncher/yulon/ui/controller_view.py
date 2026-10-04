@@ -115,6 +115,7 @@ from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, tri
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    RollbackNotDone,
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
@@ -2035,7 +2036,7 @@ class ControllerServices:
 
     The tab draws none of them and says the reasons instead; `play.InstallPlay`
     refuses a press of one as well. Empty everywhere but a tree whose verbs have
-    not all been watched to work (Centurion, until T179 Task 9).
+    not all been watched to work (Centurion: Revive, held back after T208's live check).
     """
 
     no_modules_note: str = ""
@@ -3389,8 +3390,7 @@ def _for_centurion(
     bots ride on `observability`; Accounts on `accounts.level`; Characters on
     `play`. What is not offered is said where it would be: My Party (the
     registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
-    verb not yet watched to work on a live Centurion server
-    (`centurion_characters.withheld`).
+    verb Centurion withholds (`centurion_characters.withheld`).
 
     No `import_probe`: the import is the install engine's marker-gated SQL plan,
     and the Repair button's only action, `docker.repair_import()`, refuses an
@@ -5775,6 +5775,10 @@ TUNING_NO_FILE_BACKUP = (
     "first save on this tab is what creates it."
 )
 
+TUNING_NAMED_BACKUP_GONE = (
+    "The backup Revert file names, {backup}, is no longer beside {file}, so nothing was written."
+)
+
 TUNING_CORE_FILE = (
     "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
     "this version: who owns core configuration is a bigger question than one module's conf."
@@ -6567,7 +6571,7 @@ class ControllerView(QWidget):
             )
             self._check_the_channel()
             if found_pending:
-                QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
+                QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
 
     # ------------------------------------------------------------- sub-tabs
 
@@ -8290,12 +8294,14 @@ class ControllerView(QWidget):
         on it re-verifies rather than re-creates.
         """
         self._settle_the_channel()
-        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
 
     def _resettle_if_pending(self) -> None:
         # A minute is long enough for the tab to have been torn down (install,
         # then uninstall): `shutdown()` sets `_closed`, and a job started after
-        # it would connect its `done` to a slot of a deleted widget. `settle()`
+        # it would connect its `done` to a slot of a deleted widget. Both arms
+        # name `self` as the timer's context object (T213), so a tab deleted
+        # without `shutdown()` never gets here at all. `settle()`
         # on `Pending` re-verifies and never creates, which is why the tab-open
         # path may schedule this too (T138).
         if getattr(self, "_closed", False):
@@ -11398,12 +11404,20 @@ class ControllerView(QWidget):
         first read after an action can legitimately show the old state; a
         second and a third cost nothing and cover a machine slower than the one
         this was measured on.
+
+        T213: a self-re-arming timer like the Modules version walk, with the
+        same two guards. A tab removed between two reads (`shutdown()`, then
+        `deleteLater()`) ends the sequence here, and the timer names `self` as
+        its context object so a read queued before the delete is dropped by
+        Qt instead of clearing a deleted list.
         """
+        if getattr(self, "_closed", False):
+            return
         self.refresh_characters()
         if self._character_rows() != before or attempt >= _ROW_SETTLE_TRIES:
             return
         QTimer.singleShot(
-            _ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(before, attempt + 1)
+            _ROW_SETTLE_MS, self, lambda: self._refresh_until_it_changes(before, attempt + 1)
         )
 
     def _character_rows(self) -> tuple[str, ...]:
@@ -11473,7 +11487,7 @@ class ControllerView(QWidget):
             # done -- "You change the level of Aevret to 60" above a row still
             # reading 55, which reads as the action having failed.
             rows = self._character_rows()
-            QTimer.singleShot(_ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(rows))
+            QTimer.singleShot(_ROW_SETTLE_MS, self, lambda: self._refresh_until_it_changes(rows))
 
     @Slot()
     def teleport_character(self) -> None:
@@ -12184,7 +12198,10 @@ class ControllerView(QWidget):
         grid = QGridLayout(self.time_zone_group)
         self.time_zone_where = QComboBox(self.time_zone_group)
         self.time_zone_place = QComboBox(self.time_zone_group)
-        for box, chars in ((self.time_zone_where, 22), (self.time_zone_place, 16)):
+        for box, chars in (
+            (self.time_zone_where, len(TIME_ZONE_HOST.format(zone=time_zone.host_zone()))),
+            (self.time_zone_place, 16),
+        ):
             box.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
@@ -14008,7 +14025,7 @@ class ControllerView(QWidget):
         if self._filling_versions or self.services.module_version is None:
             return
         self._filling_versions = True
-        QTimer.singleShot(0, self._fill_next_version)
+        QTimer.singleShot(0, self, self._fill_next_version)
 
     @Slot()
     def _fill_next_version(self) -> None:
@@ -14019,7 +14036,17 @@ class ControllerView(QWidget):
         `.git`, a git that refused and a git that is not there), so there is
         nothing to catch here and nothing that can turn a reload into a
         failure.
+
+        T213: a closed tab ends the walk here. `drop_controller()` in main.py
+        runs `shutdown()` and then `deleteLater()`, and a tick already queued
+        used to come back after both and call `set_version` on a deleted
+        label -- a `RuntimeError` traceback inside a Qt slot. The re-arm
+        names `self` as the timer's context object as well, so a tick queued
+        before the delete is dropped by Qt rather than delivered.
         """
+        if getattr(self, "_closed", False):
+            self._filling_versions = False
+            return
         if self._waits_for_the_distro("modules", self.reload_modules):
             # Stopped mid-walk: the reload that runs once it is up walks again.
             self._filling_versions = False
@@ -14032,7 +14059,7 @@ class ControllerView(QWidget):
             self.modules_panel.set_version(
                 row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
             )
-            QTimer.singleShot(0, self._fill_next_version)
+            QTimer.singleShot(0, self, self._fill_next_version)
             return
         self._filling_versions = False
 
@@ -15561,12 +15588,13 @@ class ControllerView(QWidget):
         T179 Task 6 fix round 3: a failure that KEPT the new build
         (`WorldStoppedAfterReadyError.sources_kept`) left the sources on their new
         commits, so `_rebuild_finished()` drops the counts the move made stale, as
-        after a finished press. Runs on the panel's worker; the flag is read on the
-        GUI thread once the job has ended.
+        after a finished press. So did a rollback that stopped before the old build
+        was back (`RollbackNotDone.sources_kept`, T197). Runs on the panel's worker;
+        the flag is read on the GUI thread once the job has ended.
         """
         try:
             yield from lines
-        except WorldStoppedAfterReadyError as exc:
+        except (WorldStoppedAfterReadyError, RollbackNotDone) as exc:
             self._update_sources_kept = exc.sources_kept
             raise
 
@@ -15737,7 +15765,7 @@ class ControllerView(QWidget):
         self.tuning_reload_button.clicked.connect(self.reload_tuning)
         self.tuning_reload_button.setToolTip(
             "Read this install's conf files again. Cheap: the files themselves, no network. "
-            "Anything you have typed here and not saved is dropped."
+            "Anything you have typed here and not saved is kept."
         )
         # The undo for the FORM, and the one control on this bar that cannot
         # destroy anything: the cards are rebuilt from the rows already read,
@@ -15830,10 +15858,12 @@ class ControllerView(QWidget):
         box.addWidget(self.tuning_panel, 1)
         box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)
-        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
-        # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a
-        # floor of 100 under it could never be the number that applied. A guard
-        # that cannot fire is a guard nobody can test (measured 2026-09-16).
+        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately. Measured 2026-09-16 the
+        # panel asked for 288px of its own, so a floor of 100 could never apply.
+        # Measured again at T190's fix round, when the file side got its scroll
+        # area: 70 side by side and 125 narrow, and side by side it was given
+        # 523 at 1280x800 -- a floor still never the number that applied, and a
+        # guard that cannot fire is a guard nobody can test.
         # "modules", because `icons.py` is a file T43 must not edit and it has
         # no `tuning` key: the fallback is the SERVER icon, which would collide
         # with the Server tab. Sharing the Modules puzzle is the smaller
@@ -15869,6 +15899,8 @@ class ControllerView(QWidget):
         is cheap enough to run after every install and every save.
         """
         if self._waits_for_the_distro("tuning", self.reload_tuning):
+            # A card's Save or Revert that led here still redraws as that card's (T190).
+            self.tuning_panel.defer_pressed_card()
             return
         manifests, _broken = self._load_manifests()
         rows = tuning.rows_for(
@@ -15921,7 +15953,7 @@ class ControllerView(QWidget):
         made, and that is not what a person pressing "revert my changes"
         asked for.
         """
-        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()), keep_edits=False)
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
@@ -16918,9 +16950,13 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         path = self.services.controller.server_dir / file
-        backups = tuning.backups_of(path)
+        # The backup the tab names, not merely the newest (T190): a card's Save
+        # may have taken a newer one since, and the label still names this one.
+        named = self.tuning_panel.backup_name()
+        backups = tuple(b for b in tuning.backups_of(path) if named is None or b.name == named)
         if not backups:
-            self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
+            gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
+            self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
         try:
             note = self._put_back(backups[-1], path)

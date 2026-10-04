@@ -309,7 +309,12 @@ def test_the_file_save_hands_up_the_text_that_is_in_the_box(qapp: object) -> Non
     assert sent == ["A = 2\n"]
 
 
-def test_a_narrow_window_stacks_the_two_halves(qapp: object) -> None:
+def test_a_narrow_window_shows_the_switch_and_never_stacks_the_two_halves(qapp: object) -> None:
+    """T190: stacked, the cards got a 72px strip at 960x640; now a switch picks one half.
+
+    The split stays side by side at every width -- a vertical split's sizes
+    were what came back as a 20/80 column of widths in a wide window.
+    """
     from PySide6.QtCore import Qt
 
     panel = tp.TuningPanel()
@@ -318,8 +323,12 @@ def test_a_narrow_window_stacks_the_two_halves(qapp: object) -> None:
     panel.show()
     panel.resize(1200, 600)
     assert panel.split.orientation() == Qt.Orientation.Horizontal
+    assert not panel.side_buttons.isVisible()
     panel.resize(500, 600)
-    assert panel.split.orientation() == Qt.Orientation.Vertical
+    assert panel.split.orientation() == Qt.Orientation.Horizontal
+    assert panel.side_buttons.isVisible()
+    panel.resize(1200, 600)
+    assert not panel.side_buttons.isVisible(), "the switch outlived the narrow window"
     panel.close()
 
 
@@ -536,15 +545,20 @@ def test_a_card_hint_comes_from_the_backends_its_rows_really_use() -> None:
 
 
 def test_a_card_says_how_many_settings_it_carries(qapp: object) -> None:
-    """Item 12's count, beside the module's name.
+    """Item 12's count, beside the module's name -- which is now the card's title (T190 I9).
 
     Mutation: count the FILES instead and Beastmaster's five settings across
-    two files read as `Settings 2`.
+    two files read as `2 settings`.
     """
     card = tp.build_tuning_cards((_row(key="A"), _row(key="B"), _row(key="C")))[0]
     widget = tp.CardWidget(card)
 
-    assert widget.count_label.text() == "Settings 3"
+    assert widget.title_label.text() == "NPC Beastmaster"
+    assert widget.count_label.text() == "3 settings"
+    assert widget.title() == "", "the name is drawn once, as the heading, not in the frame too"
+    assert widget.accessibleName() == "NPC Beastmaster"
+    one = tp.CardWidget(tp.build_tuning_cards((_row(key="A"),))[0])
+    assert one.count_label.text() == "1 setting"
 
 
 def test_a_changed_row_names_its_key_and_the_value_it_had(qapp: object) -> None:
@@ -747,14 +761,26 @@ def test_the_backup_name_is_shown_after_a_save_and_cleared_on_the_next_file(
     backup sits under another file's text.
     """
     panel = tp.TuningPanel()
+    opened: list[str] = []
+    panel.file_selected.connect(opened.append)
+    panel.set_files(["a/mod.conf", "a/other.conf"])
     panel.set_file_text("A = 1\n", read_only=False, note=None)
     assert panel.backup_label.text() == ""
 
     panel.set_backup("mod.conf.2026-09-13T01-02-03.bak")
     assert "mod.conf.2026-09-13T01-02-03.bak" in panel.backup_label.text()
 
+    # T190: the same file read again -- what Reload and every save now do --
+    # keeps the backup it was saved with, and Revert stays armed.
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+    assert "mod.conf.2026-09-13T01-02-03.bak" in panel.backup_label.text()
+    assert panel.file_revert_button.isEnabled()
+
+    panel.file_buttons()[1].click()
+    assert opened[-1] == "a/other.conf"
     panel.set_file_text("B = 2\n", read_only=False, note=None)
     assert panel.backup_label.text() == ""
+    assert not panel.file_revert_button.isEnabled()
 
 
 def test_the_raw_editor_offers_a_revert_beside_save_file(qapp: object) -> None:
@@ -775,3 +801,590 @@ def test_the_raw_editor_offers_a_revert_beside_save_file(qapp: object) -> None:
     panel.file_revert_button.click()
 
     assert pressed == [True]
+
+
+# -- T190 B3: the row shows its value, and a number box takes numbers --------
+
+
+def test_the_key_line_is_drawn_only_when_the_label_says_something_else() -> None:
+    assert tp.shows_key_line(_row(key="BeastMaster.Enable", label="Enable the NPC")) is True
+    assert tp.shows_key_line(_row(key="BeastMaster.Enable", label="BeastMaster.Enable")) is False
+
+
+def test_a_row_with_no_label_of_its_own_names_its_key_once(qapp: object) -> None:
+    """45 of 157 keys have no `label`, so the label IS the key -- and was printed twice."""
+    from PySide6.QtWidgets import QLabel
+
+    editor = tp.RowEditor(_row(key="Transmog.Enable", label="Transmog.Enable", current="1"))
+    named = [label for label in editor.findChildren(QLabel) if label.text() == "Transmog.Enable"]
+    assert named == [editor.label], [label.objectName() or label.text() for label in named]
+    assert editor.key_label is None
+    assert editor.label.toolTip() == "Transmog.Enable"
+
+
+def test_a_labelled_row_keeps_its_key_line_under_the_label(qapp: object) -> None:
+    editor = tp.RowEditor(_row(key="BeastMaster.Enable", label="Enable the Beastmaster NPC"))
+    assert editor.key_label is not None and editor.key_label.text() == "BeastMaster.Enable"
+    assert editor.label.toolTip() == "BeastMaster.Enable"
+
+
+def test_in_a_440px_card_the_value_box_keeps_room_for_its_value(qapp: object) -> None:
+    """B3: a long label beside the box took the whole row and left the value 28px.
+
+    Laid out at the narrowest the card's own layout will go, where every widget
+    sits at its minimum -- so it is the box's floor that is measured, not
+    whatever room a wide card happened to leave -- and that narrowest card
+    still fits the 440px column, so the floor was not bought by widening it.
+    """
+    from tests.conftest import process_events
+
+    card = tp.CardWidget(
+        tp.build_tuning_cards(
+            (
+                _row(
+                    # A short path, so the card's monospace file line is not
+                    # what sets its narrowest width: the value box's own floor
+                    # is what is measured, not the room a long path leaves.
+                    file="env/dist/etc/modules/b.conf",
+                    key="BeastMaster.Enable",
+                    label="Enable the Beastmaster NPC for every class of character on this realm",
+                    current="anything at all",
+                ),
+            )
+        )[0]
+    )
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    # Styled as the app styles a 960px window, whatever an earlier test left on
+    # the application: a widget's own sheet is the one that applies.
+    apply_dadcraft_theme(card, width=960)
+    card.show()
+    try:
+        process_events()
+        narrowest = card.minimumSizeHint().width()
+        assert narrowest <= tp.CARDS_MIN_WIDTH, f"the card needs {narrowest}px"
+        card.resize(narrowest, 600)
+        process_events()
+        field = card.editors["BeastMaster.Enable"].control
+        assert isinstance(field, QLineEdit)
+        need = tp.VALUE_MIN_CHARS * field.fontMetrics().averageCharWidth()
+        assert field.width() >= need, f"the value has {field.width()}px, needs {need}"
+
+        # Again after the app restyles it for a wide window, as `_at` does: the
+        # font grows, and a floor counted in the old font's characters is short.
+        before = field.fontMetrics().averageCharWidth()
+        apply_dadcraft_theme(card, width=1920)
+        process_events()
+        assert field.fontMetrics().averageCharWidth() > before, "control: the font grew"
+        card.resize(card.minimumSizeHint().width(), 600)
+        process_events()
+        need = tp.VALUE_MIN_CHARS * field.fontMetrics().averageCharWidth()
+        assert field.width() >= need, f"restyled, the value has {field.width()}px, needs {need}"
+    finally:
+        card.close()
+
+
+def test_an_int_with_one_bound_takes_digits_and_a_sign_and_nothing_else(qapp: object) -> None:
+    """Typed, the way a player types: letters do not go in, `-5` does. No range is invented."""
+    from PySide6.QtTest import QTest
+
+    editor = tp.RowEditor(_row(type="int", min=0, current="10"))
+    field = editor.control
+    assert isinstance(field, QLineEdit)
+    field.clear()
+    QTest.keyClicks(field, "a5b")
+    assert field.text() == "5"
+    field.clear()
+    QTest.keyClicks(field, "-5")
+    assert field.text() == "-5", "a bound is tuning.check()'s to apply at Save, not the box's"
+    assert editor.changed
+
+
+def test_a_key_with_no_type_takes_anything_and_keeps_its_free_text_chip(qapp: object) -> None:
+    from PySide6.QtTest import QTest
+
+    editor = tp.RowEditor(_row(type=None, current=""))
+    field = editor.control
+    assert isinstance(field, QLineEdit)
+    assert field.validator() is None
+    QTest.keyClicks(field, "abc")
+    assert field.text() == "abc"
+    assert tp.CHIP_FREE_TEXT in editor.chips.text()
+
+
+def test_a_file_value_the_box_would_refuse_is_shown_as_written(qapp: object) -> None:
+    """Never clamped, never blanked: the file said `abc`, so the box says `abc`."""
+    editor = tp.RowEditor(_row(type="int", min=0, current="abc"))
+    assert isinstance(editor.control, QLineEdit)
+    assert editor.control.text() == "abc"
+    assert editor.value() == "abc" and not editor.changed
+
+
+# -- T190 A28/I9/B15: card titles, the restart note once, one Reload ----------
+
+
+def _restart_card(module_id: str) -> tuple[tuning.TuningRow, ...]:
+    return (_row(module_id=module_id, module_name=f"Module {module_id}", key=f"{module_id}.A"),)
+
+
+RECREATE_FILE = "conf/mod_outside_every_bind.conf"
+"""A conf no compose bind reaches, so a change to it owes a recreate, not a restart."""
+
+
+def test_a_card_heading_is_the_module_name_and_its_count() -> None:
+    three = tp.build_tuning_cards((_row(key="A"), _row(key="B"), _row(key="C")))[0]
+    one = tp.build_tuning_cards((_row(key="A"),))[0]
+    assert tp.card_heading(three) == ("NPC Beastmaster", "3 settings")
+    assert tp.card_heading(one) == ("NPC Beastmaster", "1 setting")
+
+
+def test_the_restart_rule_is_lifted_only_when_a_card_owes_exactly_a_restart() -> None:
+    restart = tp.build_tuning_cards(_restart_card("a"))
+    recreate = tp.build_tuning_cards((_row(file=RECREATE_FILE),))
+    assert tuning.file_rule(RECREATE_FILE) == "recreate", "control: the file owes a recreate"
+    assert tp.lifted_rule(restart + recreate) == ("restart",)
+    assert tp.lifted_rule(recreate) is None
+
+
+def test_the_restart_sentence_is_said_once_and_a_dearer_one_stays_on_its_card(
+    qapp: object,
+) -> None:
+    """B15: three conf cards said the same restart sentence three times, under three hints.
+
+    Set twice: the second set has no restart card, so a note that was only
+    ever put up, never taken down, fails.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    restart = tuning.apply_sentence("restart")
+    rows = _restart_card("a") + _restart_card("b") + _restart_card("c")
+    rows += (_row(module_id="d", module_name="Module d", key="d.A", file=RECREATE_FILE),)
+    panel = tp.TuningPanel()
+    panel.set_cards(tp.build_tuning_cards(rows))
+    panel.show()
+    try:
+        said = [w for w in panel.findChildren(QLabel) if w.isVisible() and restart in w.text()]
+        assert said == [panel.rule_note], [w.text()[:40] for w in said]
+        recreate = panel.card("d")
+        assert recreate.rule_label.isVisible()
+        assert tuning.apply_sentence("recreate") in recreate.rule_label.text()
+        for key in ("a", "b", "c"):
+            assert not panel.card(key).hint_label.isVisible(), f"card {key} still says its hint"
+            assert not panel.card(key).rule_label.isVisible()
+
+        panel.set_cards(tp.build_tuning_cards(rows[3:]))
+        assert not panel.rule_note.isVisible(), "the note outlived the last restart card"
+    finally:
+        panel.close()
+
+
+def test_the_panel_has_no_reload_of_its_own(qapp: object) -> None:
+    """A28: the tab's bar has the one Reload; the editor's second one is gone."""
+    from PySide6.QtWidgets import QPushButton
+
+    panel = tp.TuningPanel()
+    panel.resize(1200, 600)
+    panel.show()
+    try:
+        panel.set_files(["a/mod.conf"])
+        shown = [b.text() for b in panel.findChildren(QPushButton) if b.isVisible()]
+        assert "Reload from disk" not in shown, shown
+        assert "Save file" in shown and "Revert file" in shown, shown
+    finally:
+        panel.close()
+
+
+def test_the_same_files_again_reads_the_open_file_again_and_keeps_typing_in_it(
+    qapp: object,
+) -> None:
+    """The tab's Reload, and every save, hand the same list back: the open file is read again.
+
+    Before, the editor kept its old text, so after a card's save a later Save
+    file wrote the old value back. When the player has typed into it, the text
+    read is not put over their typing: somebody else's reload keeps it.
+    """
+    from PySide6.QtTest import QTest
+
+    panel = tp.TuningPanel()
+    opened: list[str] = []
+    panel.file_selected.connect(opened.append)
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    panel.file_buttons()[1].click()
+    panel.set_file_text("B = 1\n", read_only=False, note=None)
+    opened.clear()
+
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    assert opened == ["a/other.conf"]
+    panel.set_file_text("B = 1\n", read_only=False, note=None)
+
+    QTest.keyClicks(panel.editor, "# mine")
+    opened.clear()
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    # Read again even then, so a file changed on disk is noticed -- but the
+    # text that comes back does not replace the typing.
+    assert opened == ["a/other.conf"]
+    panel.set_file_text("B = 1\n", read_only=False, note=None)
+    assert "# mine" in panel.editor.toPlainText(), "a reload threw the typing away"
+    assert panel.current_file() == "a/other.conf"
+
+
+def test_the_editor_names_the_file_it_shows_and_says_when_it_is_the_servers_own(
+    qapp: object,
+) -> None:
+    panel = tp.TuningPanel()
+    core = "env/dist/etc/worldserver.conf"
+    mine = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    panel.set_files([mine, core], read_only=[core])
+    panel.set_file_text("BeastMaster.Enable = 1\n", read_only=False, note=None)
+    title = panel.file_title.text()
+    assert "mod_npc_beastmaster.conf" in title and mine in title
+    assert tp.FILE_READ_ONLY not in title
+
+    panel.file_buttons()[1].click()
+    panel.set_file_text("# conf\n", read_only=True, note=None)
+    title = panel.file_title.text()
+    assert "worldserver.conf" in title and core in title
+    assert tp.FILE_READ_ONLY in title
+
+
+# -- T190 final round: the panel never loses or quietly overrides typing -------
+
+
+class _Answers:
+    """The panel's question (`TuningPanel.choose`), answered as the test says, each one kept."""
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.asked: list[tuple[str, ...]] = []
+
+    def __call__(self, title: str, question: str, choices: tuple[str, ...]) -> str:
+        self.asked.append(tuple(choices))
+        return self.answer
+
+
+def _typed_into_mod_conf(qapp: object) -> tuple[tp.TuningPanel, list[str], list[str]]:
+    """A shown panel with two files, `a/mod.conf` open and `# mine` typed into it."""
+    from PySide6.QtTest import QTest
+
+    panel = tp.TuningPanel()
+    panel.resize(1200, 600)
+    panel.show()
+    opened: list[str] = []
+    saved: list[str] = []
+    panel.file_selected.connect(opened.append)
+    panel.file_save_pressed.connect(saved.append)
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+    panel.editor.moveCursor(panel.editor.textCursor().MoveOperation.End)
+    QTest.keyClicks(panel.editor, "# mine")
+    opened.clear()
+    return panel, opened, saved
+
+
+UNSAVED_CHOICES = (tp.CHOICE_SAVE, tp.CHOICE_DISCARD, tp.CHOICE_CANCEL)
+STALE_CHOICES = (tp.CHOICE_OVERWRITE, tp.CHOICE_RELOAD, tp.CHOICE_CANCEL)
+
+
+def _click(button: Any) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+
+def test_cancel_on_a_file_button_over_unsaved_typing_leaves_everything_as_it_was(
+    qapp: object,
+) -> None:
+    """A file button threw the editor's typing away without a word (Codex adversarial)."""
+    panel, opened, saved = _typed_into_mod_conf(qapp)
+    try:
+        ask = _Answers(tp.CHOICE_CANCEL)
+        panel.choose = ask
+        _click(panel.file_buttons()[1])
+        assert ask.asked == [UNSAVED_CHOICES]
+        assert opened == [] and saved == []
+        assert panel.current_file() == "a/mod.conf"
+        assert panel.editor.toPlainText() == "A = 1\n# mine"
+        first, second = panel.file_buttons()
+        assert first.isChecked() and not second.isChecked(), "the click's check was left on"
+    finally:
+        panel.close()
+
+
+def test_discard_on_a_file_button_over_unsaved_typing_opens_the_other_file(qapp: object) -> None:
+    panel, opened, saved = _typed_into_mod_conf(qapp)
+    try:
+        panel.choose = _Answers(tp.CHOICE_DISCARD)
+        _click(panel.file_buttons()[1])
+        assert opened == ["a/other.conf"] and saved == []
+        assert panel.current_file() == "a/other.conf"
+        panel.set_file_text("B = 2\n", read_only=False, note=None)
+        assert panel.editor.toPlainText() == "B = 2\n"
+    finally:
+        panel.close()
+
+
+def test_save_on_a_file_button_over_unsaved_typing_saves_then_opens_the_other_file(
+    qapp: object,
+) -> None:
+    """Save hands the typing up, and the switch follows only once the view says it saved."""
+    panel, opened, saved = _typed_into_mod_conf(qapp)
+    # What the view does with a save that worked: it names the backup it took.
+    panel.file_save_pressed.connect(lambda _text: panel.set_backup("mod.conf.1.bak"))
+    try:
+        panel.choose = _Answers(tp.CHOICE_SAVE)
+        _click(panel.file_buttons()[1])
+        assert saved == ["A = 1\n# mine"]
+        assert opened == ["a/other.conf"]
+        assert panel.current_file() == "a/other.conf"
+    finally:
+        panel.close()
+
+
+def test_save_on_a_file_button_that_does_not_save_stays_on_the_file(qapp: object) -> None:
+    """A save the view refused (a lint No, a disk error) names no backup: nothing switches."""
+    panel, opened, saved = _typed_into_mod_conf(qapp)
+    try:
+        panel.choose = _Answers(tp.CHOICE_SAVE)
+        _click(panel.file_buttons()[1])
+        assert saved == ["A = 1\n# mine"], "control: Save was pressed through"
+        assert opened == []
+        assert panel.current_file() == "a/mod.conf"
+        assert panel.editor.toPlainText() == "A = 1\n# mine"
+    finally:
+        panel.close()
+
+
+def test_a_reload_that_finds_the_file_changed_keeps_the_typing_and_says_so(qapp: object) -> None:
+    """The editor kept typing over a card's save and said nothing (cold review)."""
+    panel, opened, _saved = _typed_into_mod_conf(qapp)
+    try:
+        panel.set_files(["a/mod.conf", "a/other.conf"])
+        assert opened == ["a/mod.conf"], "a reload reads the open file again"
+        panel.set_file_text("A = 1\n", read_only=False, note=None)
+        assert panel.editor.toPlainText() == "A = 1\n# mine"
+        assert tp.EDITOR_STALE not in panel.file_note.text(), "the file had not changed"
+
+        panel.set_file_text("A = 0\n", read_only=False, note=None)
+        assert panel.editor.toPlainText() == "A = 1\n# mine", "the reload threw the typing away"
+        assert panel.file_note.isVisible() and tp.EDITOR_STALE in panel.file_note.text()
+    finally:
+        panel.close()
+
+
+def _stale(qapp: object) -> tuple[tp.TuningPanel, list[str], list[str]]:
+    panel, opened, saved = _typed_into_mod_conf(qapp)
+    panel.set_files(["a/mod.conf", "a/other.conf"])
+    panel.set_file_text("A = 0\n", read_only=False, note=None)
+    opened.clear()
+    return panel, opened, saved
+
+
+def test_save_file_over_a_file_changed_on_disk_asks_and_cancel_writes_nothing(
+    qapp: object,
+) -> None:
+    panel, opened, saved = _stale(qapp)
+    try:
+        ask = _Answers(tp.CHOICE_CANCEL)
+        panel.choose = ask
+        _click(panel.file_save_button)
+        assert ask.asked == [STALE_CHOICES]
+        assert saved == [] and opened == []
+        assert panel.editor.toPlainText() == "A = 1\n# mine"
+    finally:
+        panel.close()
+
+
+def test_overwrite_saves_the_typing_over_the_changed_file(qapp: object) -> None:
+    panel, _opened, saved = _stale(qapp)
+    try:
+        panel.choose = _Answers(tp.CHOICE_OVERWRITE)
+        _click(panel.file_save_button)
+        assert saved == ["A = 1\n# mine"]
+    finally:
+        panel.close()
+
+
+def test_reload_instead_reads_the_file_again_and_saves_nothing(qapp: object) -> None:
+    panel, opened, saved = _stale(qapp)
+    try:
+        panel.choose = _Answers(tp.CHOICE_RELOAD)
+        _click(panel.file_save_button)
+        assert saved == []
+        assert opened == ["a/mod.conf"]
+        panel.set_file_text("A = 0\n", read_only=False, note=None)
+        assert panel.editor.toPlainText() == "A = 0\n"
+        assert tp.EDITOR_STALE not in panel.file_note.text()
+    finally:
+        panel.close()
+
+
+def test_a_cards_revert_shows_what_the_file_says_and_other_cards_keep_their_typing(
+    qapp: object,
+) -> None:
+    """A card's Revert is the one press that drops that card's typing; the rest is kept."""
+
+    def rows(a: str) -> tuple[tuning.TuningRow, ...]:
+        return (
+            _row(module_id="a", module_name="A", key="a.K", current=a),
+            _row(module_id="b", module_name="B", key="b.K", current="1"),
+        )
+
+    panel = tp.TuningPanel()
+    panel.resize(1200, 600)
+    panel.show()
+    try:
+        panel.set_cards(tp.build_tuning_cards(rows("1")))
+        for key, typed in (("a", "5"), ("b", "7")):
+            field = panel.card(key).editors[f"{key}.K"].control
+            assert isinstance(field, QLineEdit)
+            field.setText(typed)
+        # What the view does on a Revert: the file goes back, the cards are drawn again.
+        panel.revert_pressed.connect(
+            lambda _f, _m: panel.set_cards(tp.build_tuning_cards(rows("2")))
+        )
+        button = panel.card("a").revert_button
+        assert button is not None
+        _click(button)
+        reverted = panel.card("a").editors["a.K"].control
+        assert isinstance(reverted, QLineEdit) and reverted.text() == "2"
+        assert panel.edits("a") == {}
+        assert panel.edits("b") == {"b.K": "7"}
+    finally:
+        panel.close()
+
+
+def test_the_editors_note_shows_when_the_note_over_the_cards_is_scrolled_away(
+    qapp: object,
+) -> None:
+    """The restart sentence was hidden in the editor while its twin was scrolled out of view."""
+    from tests.conftest import process_events
+
+    restart = tuning.apply_sentence("restart")
+    rows: tuple[tuning.TuningRow, ...] = ()
+    for module in "abcdefghijkl":
+        rows += _restart_card(module)
+    panel = tp.TuningPanel()
+    panel.resize(1200, 400)
+    panel.show()
+    try:
+        panel.set_cards(tp.build_tuning_cards(rows))
+        panel.set_files([CONF])
+        panel.set_file_text("BeastMaster.Enable = 1\n", read_only=False, note=restart)
+        process_events()
+        assert not panel.file_note.isVisible(), "control: the note over the cards is on screen"
+        bar = panel._area.verticalScrollBar()
+        assert bar.maximum() > 0, "control: the cards scroll"
+        bar.setValue(bar.maximum())
+        process_events()
+        assert panel.rule_note.visibleRegion().isEmpty(), "control: scrolled out of view"
+        assert panel.file_note.isVisible() and restart in panel.file_note.text()
+        bar.setValue(0)
+        process_events()
+        assert not panel.file_note.isVisible(), "said twice again once scrolled back"
+    finally:
+        panel.close()
+
+
+def test_an_int_box_holding_a_value_it_would_refuse_can_still_be_edited(qapp: object) -> None:
+    """`1.5` in the file: Backspace did nothing, because every shorter text was refused too."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    editor = tp.RowEditor(_row(type="int", min=0, current="1.5"))
+    field = editor.control
+    assert isinstance(field, QLineEdit)
+    assert editor.value() == "1.5" and not editor.changed, "control: shown as written"
+    QTest.keyClick(field, Qt.Key.Key_End)
+    QTest.keyClick(field, Qt.Key.Key_Backspace)
+    assert field.text() == "1."
+    QTest.keyClick(field, Qt.Key.Key_Backspace)
+    assert field.text() == "1"
+    QTest.keyClicks(field, "x5")
+    assert field.text() == "15", "once the text is a number again, letters stay out"
+
+
+def test_reading_the_same_file_again_keeps_the_editors_scroll_and_cursor(qapp: object) -> None:
+    """Every save and Reload re-reads the open file; it jumped back to line one each time."""
+    from tests.conftest import process_events
+
+    text = "".join(f"Key{i} = {i}\n" for i in range(300))
+    panel = tp.TuningPanel()
+    panel.resize(1200, 400)
+    panel.show()
+    try:
+        panel.set_files(["a/mod.conf"])
+        panel.set_file_text(text, read_only=False, note=None)
+        process_events()
+        cursor = panel.editor.textCursor()
+        cursor.setPosition(text.index("Key150"))
+        panel.editor.setTextCursor(cursor)
+        bar = panel.editor.verticalScrollBar()
+        assert bar.maximum() > 120, "control: the file scrolls"
+        bar.setValue(120)
+        panel.set_files(["a/mod.conf"])
+        panel.set_file_text(text.replace("Key5 = 5", "Key5 = 6"), read_only=False, note=None)
+        process_events()
+        assert bar.value() == 120
+        assert panel.editor.textCursor().position() == text.index("Key150")
+    finally:
+        panel.close()
+
+
+def test_revert_file_replaces_the_typing_with_the_file_it_put_back(qapp: object) -> None:
+    """The one re-read that is meant to drop the typing: the player asked for the backup."""
+    from PySide6.QtTest import QTest
+
+    panel, _opened, _saved = _typed_into_mod_conf(qapp)
+    try:
+        panel.set_backup("mod.conf.1.bak")
+        panel.editor.moveCursor(panel.editor.textCursor().MoveOperation.End)
+        QTest.keyClicks(panel.editor, " again")
+        # What the view does on Revert file: the backup is copied back and read in.
+        panel.file_revert_pressed.connect(
+            lambda: panel.set_file_text("A = 0\n", read_only=False, note=None)
+        )
+        _click(panel.file_revert_button)
+        assert panel.editor.toPlainText() == "A = 0\n"
+        assert tp.EDITOR_STALE not in panel.file_note.text()
+    finally:
+        panel.close()
+
+
+def test_the_question_box_makes_cancel_the_default_and_the_escape_answer(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Return or Escape on the question must never overwrite or discard anything."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+
+    seen: dict[str, str] = {}
+
+    def escape(box: QMessageBox) -> int:
+        default, escape_button = box.defaultButton(), box.escapeButton()
+        seen["default"] = default.text() if default is not None else ""
+        seen["escape"] = escape_button.text() if escape_button is not None else ""
+        box.show()
+        QTest.keyClick(box, Qt.Key.Key_Escape)
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", escape)
+    panel = tp.TuningPanel()
+    try:
+        answer = panel._ask("t", "q", STALE_CHOICES)
+        assert seen == {"default": tp.CHOICE_CANCEL, "escape": tp.CHOICE_CANCEL}
+        assert answer == tp.CHOICE_CANCEL
+    finally:
+        panel.close()
+
+
+def test_a_reload_that_cannot_read_the_file_blanks_only_a_clean_editor(qapp: object) -> None:
+    """The view hands a failed read as empty, read-only text; with no typing that is shown."""
+    panel = tp.TuningPanel()
+    panel.set_files(["a/mod.conf"])
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+    panel.set_files(["a/mod.conf"])
+    panel.set_file_text("", read_only=True, note="a/mod.conf: gone")
+    assert panel.editor.toPlainText() == "" and panel.editor.isReadOnly()
+    assert tp.EDITOR_UNREAD not in panel.file_note.text()

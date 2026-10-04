@@ -20,18 +20,22 @@ colours come from the `COLOR_*` constants `theme.py` exports.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import html
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QResizeEvent
+from PySide6.QtCore import QEvent, QObject, QRegularExpression, Qt, Signal, SignalInstance
+from PySide6.QtGui import QFont, QRegularExpressionValidator, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -44,14 +48,18 @@ from PySide6.QtWidgets import (
 from yulon import tuning
 from yulon.manifest_store import FAMILY_FILES
 from yulon.tuning import ApplyRule, TuningRow
+from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import (
     COLOR_BG_PANEL,
+    COLOR_BG_PARCHMENT_LIGHT,
     COLOR_GOLD_BORDER,
+    COLOR_GOLD_BRIGHT,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_PRIMARY,
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
 )
+from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.panel_style import panel_qss
 
 ControlKind = Literal["switch", "spinner", "box", "none"]
@@ -178,11 +186,129 @@ NOTHING_TO_TUNE = (
 )
 
 NARROW_WIDTH = 900
-"""Below this, the cards and the file editor stack instead of sitting side by side.
+"""Below this, the cards and the file editor take turns instead of sitting side by side.
 
 A number and not a stylesheet query, because a `QSplitter` cannot be told to
-wrap: it is one orientation or the other, and the resize is where the app finds
-out which.
+wrap, and the resize is where the app finds out which shape it is in.
+
+Turns and not a stack (T190). Stacked, the 960x640 tab gave the cards a 72px
+strip over the editor -- and the vertical split's 20/80 heights came back as
+20/80 WIDTHS the moment the window grew, because nothing reset them: every
+session passes a narrow layout first, so every wide window had a 219px column
+of cards that scrolled sideways.
+"""
+
+CARDS_MIN_WIDTH = 440
+"""The narrowest the card column may be side by side (T190): a card, its rows and
+their values still read across. Raised by `TuningPanel.set_header` when the
+header above the cards asks for more."""
+
+CARDS_MAX_WIDTH = 760
+"""The widest a fresh split makes the card column: past it the rows only spread out."""
+
+EDITOR_MIN_WIDTH = 360
+"""The narrowest the file editor may be side by side (T190)."""
+
+FILE_AREA_NAME = "tuning-file-scroll"
+"""The file side's scroll area, named so its own sheet reaches it and nothing else."""
+
+SIDE_SETTINGS = "Settings"
+SIDE_EDIT_FILE = "Edit file"
+"""The narrow window's two-button switch (T190).
+
+Two checkable buttons and not a `QTabWidget`: the gamepad's RB/LB go to the
+nearest tab widget (`gamepad._nearest_tab_widget`), and an inner one would take
+them from the app's own tabs whenever the focus was on this panel.
+"""
+
+
+CHECKED_QSS = (
+    f"QPushButton:checked {{ background-color: {COLOR_BG_PARCHMENT_LIGHT}; "
+    f"color: {COLOR_GOLD_BRIGHT}; border-bottom: 2px solid {COLOR_GOLD_BRIGHT}; }}"
+)
+"""How a chosen button looks: the switch's open side, the open file's button (T190).
+
+The theme has no `:checked` rule for a push button, so a chosen one read the
+same as the rest and only what lay below said which was chosen. The theme's
+own hover sheet and accent; no colour of this panel's.
+"""
+
+FILE_READ_ONLY = "read-only — the server's own file"
+"""What the editor's title adds for a file this tab will not write (T190)."""
+
+CHOICE_SAVE = "Save"
+CHOICE_DISCARD = "Discard"
+CHOICE_CANCEL = "Cancel"
+CHOICE_OVERWRITE = "Overwrite"
+CHOICE_RELOAD = "Reload instead"
+"""The answers to the panel's two questions (T190): typing in the editor and another
+file picked; typing in the editor and Save file over a file changed on disk."""
+
+UNSAVED_ANSWERS = (CHOICE_SAVE, CHOICE_DISCARD, CHOICE_CANCEL)
+UNSAVED_TITLE = "Unsaved typing"
+UNSAVED_QUESTION = (
+    "{name} has typing you have not saved. Save it before opening {other}, or discard it?"
+)
+UNSAVED_GONE_QUESTION = (
+    "{name} is no longer offered on this tab, so your typing in it cannot be saved here. "
+    "Discard it and open {other}?"
+)
+STALE_TITLE = "File changed on disk"
+STALE_QUESTION = (
+    "{name} changed on disk after the editor read it, or could not be read again, so the "
+    "editor may not show what the file holds now. Overwrite it with your typing, or reload "
+    "the file and lose your typing?"
+)
+
+EDITOR_STALE = (
+    "This file changed on disk after the editor read it, and the editor kept your typing, "
+    "so it does not show that change. Save file asks before writing over it."
+)
+EDITOR_UNREAD = (
+    "The editor kept your typing: the file could not be read again, so the editor cannot "
+    "tell whether it changed. Save file asks before writing over it."
+)
+"""Under a re-read that FAILED with typing in the editor (T190 fix round 2): the read's
+error says what went wrong, this says the typing was not blanked with it."""
+
+EDITOR_GONE = (
+    "This file is no longer offered on this tab, so Save file is off. The editor kept your "
+    "typing so you can copy it; pick another file to leave it."
+)
+"""Under typing whose file a reload no longer lists (T190 fix round 2)."""
+
+"""What the editor's note says when a re-read found the file changed under typing (T190).
+
+A card's Save, Revert or Reset, or Reload from disk, read the open file again;
+the typing is kept rather than replaced, and without this the editor showed a
+file that was no longer the one on disk with nothing to say so.
+"""
+
+
+def split_sizes(total: int, cards_min: int = CARDS_MIN_WIDTH) -> tuple[int, int]:
+    """`(cards, editor)` for a side-by-side split `total` pixels wide (T190).
+
+    Half each, the cards held between `cards_min` and `CARDS_MAX_WIDTH` -- and
+    `cards_min` wins over the cap, because a header the column has to hold is
+    not something a maximum can shrink.
+    """
+    cards = min(max(total // 2, cards_min), max(CARDS_MAX_WIDTH, cards_min))
+    return cards, total - cards
+
+
+def is_narrow(width: int, cards_min: int = CARDS_MIN_WIDTH) -> bool:
+    """Whether a panel `width` wide shows one half at a time (T190).
+
+    Under `NARROW_WIDTH`, or under what both halves need side by side.
+    """
+    return width < max(NARROW_WIDTH, cards_min + EDITOR_MIN_WIDTH)
+
+
+VALUE_MIN_CHARS = 12
+"""The fewest characters a value box keeps beside its label (T190 B3).
+
+In a narrow card a long label took the whole row and squeezed the box until
+its value was gone; the label wraps instead, and the box keeps this much.
 """
 
 BOOL_WORDS: dict[str, tuple[str, str]] = {
@@ -353,6 +479,28 @@ def bounds_note(row: TuningRow) -> str | None:
     return f"{row.min}–{row.max}"
 
 
+def card_heading(card: TuningCard) -> tuple[str, str]:
+    """`(title, count)` for a card's first line (T190 I9): the module, then how many.
+
+    The module's name is the title. Before, the bold primary line said
+    "Settings 3" and the name sat in the frame, muted and small, so the eye
+    found three cards called "Settings".
+    """
+    count = len(card.rows)
+    return card.module_name, f"{count} setting" if count == 1 else f"{count} settings"
+
+
+def lifted_rule(cards: Sequence[TuningCard]) -> tuple[ApplyRule, ...] | None:
+    """The rule said once above the cards instead of on each of them, or `None` (T190 B15).
+
+    Only a bare restart, the cheap and common case: it is the same sentence on
+    every conf card. A card that owes anything dearer, or two jobs, keeps its own
+    sentence on the card, where it is read beside the Save it prices.
+    """
+    restart: tuple[ApplyRule, ...] = ("restart",)
+    return restart if any(card.rules == restart for card in cards) else None
+
+
 def card_hint(card: TuningCard) -> str:
     """What KIND of thing this card's settings are, from its rows' own backends.
 
@@ -383,6 +531,25 @@ def starting_value(row: TuningRow) -> str:
 def value_note(row: TuningRow) -> str | None:
     """`NOT_IN_THE_FILE` when the deployed conf does not carry this key, else `None`."""
     return None if row.current is not None else NOT_IN_THE_FILE
+
+
+def shows_key_line(row: TuningRow) -> bool:
+    """Whether the key gets a line of its own under the label (T190 B3).
+
+    Only when the label says something else. A key with no `label` in the
+    catalog -- 45 of 157 -- is labelled with the key itself (`tuning.rows_for`),
+    and a second line saying the same words is a line a value could have had.
+    """
+    return row.label != row.key
+
+
+INT_TEXT = r"-?\d*"
+"""What a box for an `int` with fewer than two bounds lets a player type (T190).
+
+Digits and a leading minus, and NO range: the range is the catalog's to state,
+and `tuning.check()` applies the one bound it has at Save. `*` and not `+`, so
+the box can be emptied on the way to a new number.
+"""
 
 
 def bool_words(row: TuningRow) -> tuple[str, str]:
@@ -433,7 +600,10 @@ class RowEditor(QWidget):
         self.label = QLabel(row.label, self)
         self.label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
         self.label.setToolTip(row.key)
-        top.addWidget(self.label)
+        # Wraps, so a long label gives up width to the value rather than the
+        # value giving up all of its own (T190 B3).
+        self.label.setWordWrap(True)
+        top.addWidget(self.label, 1)
         # The chips, between the name and the control. Rebuilt on every edit
         # rather than toggled, because the `pending` one comes and goes with
         # the value and the other two never change -- one code path for both
@@ -441,7 +611,8 @@ class RowEditor(QWidget):
         self.chips = QLabel("", self)
         self.chips.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         top.addWidget(self.chips)
-        top.addStretch(1)
+        # No spacer here: the label's stretch takes the spare width, so it
+        # wraps only when the row really is too narrow for it on one line.
         bounds = bounds_note(row)
         self.bounds_label: QLabel | None = None
         if bounds is not None:
@@ -460,13 +631,16 @@ class RowEditor(QWidget):
             top.addWidget(self.value_label)
         box.addLayout(top)
 
-        # The key itself, always, under whatever the label says: `label` may be
-        # the catalog's own words, and the key is what the user will search the
-        # module's documentation for.
-        self.key_label = QLabel(row.key, self)
-        self.key_label.setFont(QFont("monospace"))
-        self.key_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
-        box.addWidget(self.key_label)
+        # The key itself under the label whenever the label is the catalog's own
+        # words: the key is what the user will search the module's documentation
+        # for. Not when the label already IS the key (`shows_key_line`); the
+        # label's tooltip names it either way.
+        self.key_label: QLabel | None = None
+        if shows_key_line(row):
+            self.key_label = QLabel(row.key, self)
+            self.key_label.setFont(QFont("monospace"))
+            self.key_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+            box.addWidget(self.key_label)
 
         self.explain_label: QLabel | None = None
         if row.explain:
@@ -521,11 +695,80 @@ class RowEditor(QWidget):
                 # control that silently reports a value nobody wrote.
                 spinner.setValue(self.row.min)
             spinner.valueChanged.connect(lambda _value: self._touched())
+            self._keep_room(spinner)
             return spinner
         field = QLineEdit(self)
+        # The file's value as written, BEFORE the validator: `setText` does not
+        # validate, so a value the box would refuse to have typed is still shown
+        # rather than blanked -- the T43 rule that nothing here invents a value.
         field.setText(self._start)
+        if self.row.type == "int":
+            numbers = QRegularExpressionValidator(QRegularExpression(INT_TEXT), field)
+            self._guard_int(field, numbers)
+            field.textChanged.connect(lambda _text: self._guard_int(field, numbers))
         field.textChanged.connect(lambda _text: self._touched())
+        self._keep_room(field)
         return field
+
+    @staticmethod
+    def _guard_int(field: QLineEdit, numbers: QRegularExpressionValidator) -> None:
+        """The number rule on the box only while its text keeps it (T190 final review).
+
+        A file can hold `1.5` under an `int` key. With the rule on, every edit of
+        it -- Backspace included -- made another text the rule refuses, so Qt
+        refused the edit and the value could not be changed at all. Off while the
+        text breaks it, on again the moment the text is a number.
+        """
+        fits = re.fullmatch(INT_TEXT, field.text()) is not None
+        # `None` is Qt's own "no validator"; the stubs type the argument as required.
+        field.setValidator(numbers if fits else None)  # type: ignore[arg-type]
+
+    def control_state(self) -> bool | int | str | None:
+        """What the control is set to, in its own terms: checked, a number, the text."""
+        if isinstance(self.control, QCheckBox):
+            return self.control.isChecked()
+        if isinstance(self.control, QSpinBox):
+            return self.control.value()
+        if isinstance(self.control, QLineEdit):
+            return self.control.text()
+        return None
+
+    def set_control_state(self, state: bool | int | str | None) -> None:
+        """Put the control back to `control_state()`'s answer, if it is still that kind of control.
+
+        Through the control's own setter, so its change signal marks the row as
+        moved exactly as a press would -- and a state that matches what the
+        file now says moves nothing, so it is not counted as typing.
+        """
+        if isinstance(self.control, QCheckBox) and isinstance(state, bool):
+            self.control.setChecked(state)
+        elif isinstance(self.control, QSpinBox) and type(state) is int:
+            self.control.setValue(state)
+        elif isinstance(self.control, QLineEdit) and isinstance(state, str):
+            self.control.setText(state)
+
+    def _keep_room(self, control: QWidget) -> None:
+        """`VALUE_MIN_CHARS` of this control's own font, so a value is never squeezed out.
+
+        Counted again whenever that font changes (`eventFilter`): the app
+        restyles every font with the window's width, and a floor counted in the
+        font the box was built with fell 2px short once it grew.
+        """
+        control.setMinimumWidth(VALUE_MIN_CHARS * control.fontMetrics().averageCharWidth())
+        if not getattr(self, "_watching_font", False):
+            self._watching_font = True
+            control.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802  (Qt's own name)
+        # By identity with the control, read with `getattr`: a font can change
+        # before `__init__` has stored the control it built.
+        if (
+            event.type() == QEvent.Type.FontChange
+            and isinstance(watched, QWidget)
+            and watched is getattr(self, "control", None)
+        ):
+            self._keep_room(watched)
+        return False
 
     def value(self) -> str:
         """What this row would be written as, in the file's own spelling."""
@@ -593,25 +836,32 @@ class CardWidget(QGroupBox):
     """
 
     def __init__(self, card: TuningCard, parent: QWidget | None = None) -> None:
-        super().__init__(card.module_name, parent)
+        # No frame title (T190 I9): the module's name is the card's heading,
+        # drawn once, bold and primary, and still its accessible name.
+        super().__init__("", parent)
         self.card = card
         # What `panel_style.panel_qss()` selects to notch the title centre-top.
         self.setObjectName("tuningCard")
+        self.setAccessibleName(card.module_name)
         box = QVBoxLayout(self)
         box.setSpacing(4)
 
+        title, count = card_heading(card)
         heading = QHBoxLayout()
-        self.count_label = QLabel(f"Settings {len(card.rows)}", self)
-        self.count_label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
+        self.title_label = QLabel(title, self)
+        self.title_label.setWordWrap(True)
+        self.title_label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
+        heading.addWidget(self.title_label, 1)
+        self.count_label = QLabel(count, self)
+        self.count_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         heading.addWidget(self.count_label)
+        box.addLayout(heading)
         # What KIND of thing these settings are, derived from the rows' own
         # backends (`card_hint`) rather than from the module's family.
         self.hint_label = QLabel(card_hint(card), self)
         self.hint_label.setWordWrap(True)
         self.hint_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-style: italic;")
-        heading.addWidget(self.hint_label)
-        heading.addStretch(1)
-        box.addLayout(heading)
+        box.addWidget(self.hint_label)
 
         self.files_label = QLabel("\n".join(card.files), self)
         self.files_label.setFont(QFont("monospace"))
@@ -660,6 +910,11 @@ class CardWidget(QGroupBox):
             actions.addWidget(self.save_button)
             box.addLayout(actions)
 
+    def set_rule_lifted(self, lifted: bool) -> None:
+        """Hide this card's own rule sentence and hint while the panel says them once (B15)."""
+        self.rule_label.setVisible(not lifted)
+        self.hint_label.setVisible(not lifted)
+
     def edits(self) -> dict[str, str]:
         """The keys the user moved, and nothing else.
 
@@ -699,16 +954,70 @@ class TuningPanel(QWidget):
         self._cards: dict[tuple[str, str], CardWidget] = {}
         self._order: list[tuple[str, str]] = []
         self._actions_enabled = True
+        self._header: QWidget | None = None
+        self._pressed_card: tuple[str, str] | None = None
+        """The card whose Save or Revert is being handled: its redraw shows the
+        file, not the typing that press just wrote or put back (T190)."""
+        self._owed_cards: set[tuple[str, str]] = set()
+        """Pressed cards whose redraw the view put off (`defer_pressed_card`)."""
+        self.choose: Callable[[str, str, tuple[str, ...]], str | None] = self._ask
+        """`(title, question, answers) -> the answer pressed`, `None` for none.
+
+        An attribute so a test answers it; the app asks in a message box."""
+        self._narrow: bool | None = None
+        """The shape last laid out: `None` until the first resize, so the first
+        one -- wide or narrow -- is a change and sets the split up (T190)."""
         self.setStyleSheet(panel_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        # The narrow window's switch (T190): which half has the whole panel.
+        # Hidden until a resize finds the panel narrow; starts on the settings,
+        # and the choice is kept across a trip through a wide window.
+        self.side_buttons = QWidget(self)
+        side_box = QHBoxLayout(self.side_buttons)
+        side_box.setContentsMargins(0, 0, 0, 0)
+        side_box.setSpacing(4)
+        self.settings_button = QPushButton(SIDE_SETTINGS, self.side_buttons)
+        self.edit_file_button = QPushButton(SIDE_EDIT_FILE, self.side_buttons)
+        # Exclusive by hand and not through an exclusive `QButtonGroup`: Qt
+        # takes Tab focus off a group's unchecked buttons, and the pad stops
+        # only where Tab focus is -- Right from Settings went past "Edit file"
+        # up to the tab's bar, and the unchosen side could not be reached.
+        for button in (self.settings_button, self.edit_file_button):
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, chosen=button: self._side_picked(chosen))
+            side_box.addWidget(button)
+        side_box.addStretch(1)
+        self.settings_button.setChecked(True)
+        # The chosen side says so: the theme has no `:checked` rule for a
+        # button, so both read alike and only the content below told them apart.
+        # The theme's own hover sheet and accent, no colour of this panel's.
+        self.side_buttons.setStyleSheet(CHECKED_QSS)
+        self.side_buttons.setVisible(False)
+        outer.addWidget(self.side_buttons)
+        # Always side by side (T190). A vertical split's sizes came back as
+        # widths when the window grew; one half is hidden instead when narrow.
         self.split = QSplitter(Qt.Orientation.Horizontal, self)
+        self.split.setChildrenCollapsible(False)
 
         self._area = QScrollArea(self.split)
         self._area.setWidgetResizable(True)
+        # The column has a floor (`CARDS_MIN_WIDTH`, or the header's) that the
+        # cards fit in, so no sideways scroll bar appears; one is left possible
+        # rather than turned off, because off would cut a card that somehow did
+        # not fit instead of letting it be scrolled to (cold review round 1).
+        self._area.setMinimumWidth(CARDS_MIN_WIDTH)
         self._content = QWidget(self._area)
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setSpacing(8)
+        # The restart sentence, once, over every card that owes only a restart
+        # (T190 B15, `lifted_rule`). Under the header: `set_header` inserts
+        # above it.
+        self.rule_note = QLabel("", self._content)
+        self.rule_note.setWordWrap(True)
+        self.rule_note.setStyleSheet(f"color: {COLOR_UNCOMMON};")
+        self.rule_note.setVisible(False)
+        self._content_layout.addWidget(self.rule_note)
         self.empty_label = QLabel(NOTHING_TO_TUNE, self._content)
         self.empty_label.setWordWrap(True)
         self.empty_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
@@ -717,19 +1026,72 @@ class TuningPanel(QWidget):
         self._area.setWidget(self._content)
         self.split.addWidget(self._area)
 
-        right = QWidget(self.split)
+        self._file_side = QWidget(self.split)
+        self._file_side.setMinimumWidth(EDITOR_MIN_WIDTH)
+        # The file side scrolls, as the cards' side does (T190, the Linux live
+        # test). Its rows -- two lines of file buttons at 960x640, the file's
+        # name, its note, the editor's floor, the backup line, the presses --
+        # can ask for more height than the tab has left under the restart
+        # banner and an open "Last action"; laid out straight into the
+        # splitter, Qt cut every row at once and drew them over one another.
+        # In a scroll area the rows keep their heights and the side scrolls.
+        file_side_box = QVBoxLayout(self._file_side)
+        file_side_box.setContentsMargins(0, 0, 0, 0)
+        self._file_area = QScrollArea(self._file_side)
+        self._file_area.setObjectName(FILE_AREA_NAME)
+        self._file_area.setWidgetResizable(True)
+        self._file_area.setFrameShape(QFrame.Shape.NoFrame)
+        # Not a stop of its own for the pad or Tab: the file buttons, the editor
+        # and the presses are, and the pad scrolls to whichever it lands on.
+        # Focusable, the area took Down from the switch before the conf
+        # buttons under it (T175's press, `test_controller_view`).
+        self._file_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._file_area.setStyleSheet(
+            f"QScrollArea#{FILE_AREA_NAME} {{ background-color: transparent; border: none; }}"
+            f"QScrollArea#{FILE_AREA_NAME} > QWidget > QWidget {{ background-color: transparent; }}"
+        )
+        file_side_box.addWidget(self._file_area)
+        right = QWidget(self._file_area)
         right_box = QVBoxLayout(right)
         right_box.setContentsMargins(4, 0, 0, 0)
         # The picker as BUTTONS (T44 item 13). A combo box shows one file and
         # hides the rest behind a press; this install offers a handful, and
         # which ones they are is half the answer to "what can I tune here?".
-        self.files = QWidget(right)
-        self._files_layout = QHBoxLayout(self.files)
-        self._files_layout.setContentsMargins(0, 0, 0, 0)
-        self._files_layout.setSpacing(4)
+        # A `FlowBar` (T190), so the buttons wrap to a second line rather than
+        # each being cut to fit one -- T83's defect, on this row of five.
+        self.files = flow_bar(right)
+        self.files.setStyleSheet(CHECKED_QSS)
         self._file_buttons: list[QPushButton] = []
         self._current_file = ""
+        self._read_only_files: frozenset[str] = frozenset()
+        self._backup_file: str | None = None
+        """Which file the backup named on the tab is of, so reading that same
+        file again keeps it (T190) and opening another drops it."""
+        self._backup_name: str | None = None
+        """The backup named on the tab; Revert file restores exactly it (`backup_name`)."""
+        self._text_file: str | None = None
+        """Which file the editor's text was read from, `None` before any."""
+        self._loaded_text = ""
+        """The text last put in the editor from disk: what any typing started from."""
+        self._stale = False
+        """Whether a re-read under typing found the file changed since `_loaded_text`,
+        or could not read it at all: Save file asks before writing over it."""
+        self._kept = ""
+        """Why the editor still holds typing a re-read did not replace: `EDITOR_STALE`,
+        `EDITOR_UNREAD`, `EDITOR_GONE`, or `""`. Said in `file_note`."""
+        self._gone = False
+        """Whether the open file's typing outlived the file's place in the list."""
+        self._note = ""
+        """The note `set_file_text` was handed; `file_note` adds `EDITOR_STALE` to it."""
+        self._reverting = False
+        """Set while Revert file is handled: the file it puts back replaces the typing."""
         right_box.addWidget(self.files)
+        # Which file this is, said rather than left to the checked button
+        # (T190): its name, its path, and whether it is the server's own.
+        self.file_title = QLabel("", right)
+        self.file_title.setWordWrap(True)
+        self.file_title.setTextFormat(Qt.TextFormat.RichText)
+        right_box.addWidget(self.file_title)
         self.file_note = QLabel("", right)
         self.file_note.setWordWrap(True)
         self.file_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
@@ -744,50 +1106,88 @@ class TuningPanel(QWidget):
         right_box.addWidget(self.shadow_warning)
         self.editor = QPlainTextEdit(right)
         self.editor.setFont(QFont("monospace"))
+        # Four lines at least, in place of the theme's 90px floor for every
+        # multi-line box: at 960x640 the file side also holds two lines of file
+        # buttons, the file's name and its note, and the height the editor did
+        # not need was height the panel was drawn short of (T190).
+        lines = 4 * self.editor.fontMetrics().lineSpacing()
         self.editor.setStyleSheet(
             f"background-color: {COLOR_BG_PANEL}; border: 1px solid {COLOR_GOLD_BORDER}; "
-            f"color: {COLOR_TEXT_PRIMARY};"
+            f"color: {COLOR_TEXT_PRIMARY}; min-height: {lines}px;"
         )
         self.editor.textChanged.connect(self._relint)
+        self._editor_dirty = False
+        """Typing in the editor that no `set_file_text` has replaced since.
+
+        `set_file_text` puts its text in with the signals blocked, so only a
+        player's typing sets it. A window going narrow with this set shows the
+        editor, so the typing is not hidden behind the Settings side."""
+        self.editor.textChanged.connect(self._typed)
         right_box.addWidget(self.editor, 1)
         self.lint_label = QLabel("", right)
         self.lint_label.setWordWrap(True)
         self.lint_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
-        right_box.addWidget(self.lint_label)
         # The backup's name, said rather than implied (T44 item 15). It is the
         # only record of what the file said before, and the one thing a user
         # needs in order to look at it by hand.
         self.backup_label = QLabel("", right)
         self.backup_label.setWordWrap(True)
         self.backup_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        # Shown only while it names a backup: an empty line still cost the
+        # file side its height at 960x640 (T190).
+        self.backup_label.setVisible(False)
         right_box.addWidget(self.backup_label)
+        # No Reload here (T190 A28): the tab's bar has the one, and it re-reads
+        # this file too (`set_files`). `file_reload_pressed` stays for the view.
+        # The guard's verdict on the row of the two presses it is about, not
+        # on a line of its own above them (T190, the height at 960x640).
         file_actions = QHBoxLayout()
-        self.file_reload_button = QPushButton("Reload from disk", right)
-        self.file_reload_button.clicked.connect(self.file_reload_pressed.emit)
-        file_actions.addWidget(self.file_reload_button)
-        file_actions.addStretch(1)
+        file_actions.addWidget(self.lint_label, 1)
         # Dead until there is a backup to restore FROM. A Revert with nothing
         # behind it is a press that can only explain itself, and the card's own
         # Revert already answers that case with a sentence.
-        self.file_revert_button = QPushButton("Revert", right)
+        self.file_revert_button = QPushButton("Revert file", right)
         self.file_revert_button.setToolTip(
             "Put this file back from the backup Yu'lon took at the last save on this tab."
         )
         self.file_revert_button.setEnabled(False)
-        self.file_revert_button.clicked.connect(self.file_revert_pressed.emit)
+        self.file_revert_button.clicked.connect(self._revert_file_pressed)
         file_actions.addWidget(self.file_revert_button)
         self.file_save_button = QPushButton("Save file", right)
-        self.file_save_button.clicked.connect(
-            lambda: self.file_save_pressed.emit(self.editor.toPlainText())
-        )
+        self.file_save_button.clicked.connect(lambda: self._save_file_pressed())
         file_actions.addWidget(self.file_save_button)
         right_box.addLayout(file_actions)
-        self.split.addWidget(right)
-        outer.addWidget(self.split)
+        self._file_area.setWidget(right)
+        self.split.addWidget(self._file_side)
+        outer.addWidget(self.split, 1)
+        # Whether the note over the cards is on screen changes as the column
+        # scrolls, resizes or lays out, and the editor's note follows it.
+        for watched in (self._content, self.rule_note, self._area.viewport()):
+            watched.installEventFilter(self)
+        self._area.verticalScrollBar().valueChanged.connect(self._draw_file_note)
 
     # ------------------------------------------------------------ the cards
 
-    def set_cards(self, cards: Sequence[TuningCard]) -> None:
+    def set_cards(self, cards: Sequence[TuningCard], *, keep_edits: bool = True) -> None:
+        """Draw one card per module, keeping what was typed on them unless `keep_edits` is off.
+
+        Kept by `(family, module, key)` (T190 final review): every save and
+        every Reload draws all the cards again, and one card's Save took every
+        other card's typing with it. The card whose own Save or Revert caused
+        this redraw shows the file, and "Revert all changes" passes
+        `keep_edits=False`, which is the one press meant to drop them.
+        """
+        typed: dict[tuple[str, str, str], bool | int | str | None] = {}
+        if keep_edits:
+            for (family, module_id), widget in self._cards.items():
+                if (family, module_id) == self._pressed_card or (
+                    (family, module_id) in self._owed_cards
+                ):
+                    continue
+                for key, editor in widget.editors.items():
+                    if editor.changed:
+                        typed[(family, module_id, key)] = editor.control_state()
+        self._owed_cards.clear()
         for widget in self._cards.values():
             widget.setParent(None)
             widget.deleteLater()
@@ -795,14 +1195,48 @@ class TuningPanel(QWidget):
         self._order.clear()
         for card in cards:
             widget = CardWidget(card, self._content)
-            widget.save_pressed.connect(self.save_pressed.emit)
-            widget.revert_pressed.connect(self.revert_pressed.emit)
+            for key, editor in widget.editors.items():
+                if (card.family, card.module_id, key) in typed:
+                    editor.set_control_state(typed[(card.family, card.module_id, key)])
+            widget.save_pressed.connect(
+                lambda family, module_id: self._card_pressed(self.save_pressed, family, module_id)
+            )
+            widget.revert_pressed.connect(
+                lambda family, module_id: self._card_pressed(self.revert_pressed, family, module_id)
+            )
             widget.edited.connect(self.edited.emit)
             widget.set_enabled_actions(self._actions_enabled)
             self._cards[(card.family, card.module_id)] = widget
             self._order.append((card.family, card.module_id))
             self._content_layout.insertWidget(self._content_layout.count() - 1, widget)
         self.empty_label.setVisible(not self._cards)
+        lifted = lifted_rule(cards)
+        self.rule_note.setText(tuning.owed_sentence(lifted) if lifted else "")
+        self.rule_note.setVisible(lifted is not None)
+        for widget in self._cards.values():
+            widget.set_rule_lifted(widget.card.rules == lifted)
+        self._draw_file_note()
+
+    def _card_pressed(self, signal: SignalInstance, family: str, module_id: str) -> None:
+        """Hand a card's Save or Revert up, naming the card for the redraw it causes."""
+        self._pressed_card = (family, module_id)
+        try:
+            signal.emit(family, module_id)
+        finally:
+            self._pressed_card = None
+
+    def defer_pressed_card(self) -> None:
+        """The redraw a card's Save or Revert caused is put off; it still shows that card's file.
+
+        The view calls this when it keeps its reload for later (WSL's distro
+        not running yet, `_waits_for_the_distro`): by the time the reload runs
+        the press is over, and the card's typing was carried across as if no
+        press had been made -- a Revert that looked like it did nothing (T190
+        fix round 2). Kept until the next `set_cards`, so a second put-off
+        reload replacing the first cannot drop it.
+        """
+        if self._pressed_card is not None:
+            self._owed_cards.add(self._pressed_card)
 
     def set_header(self, widget: QWidget) -> None:
         """Put `widget` above the cards, in the same scrolling column (T171).
@@ -815,6 +1249,10 @@ class TuningPanel(QWidget):
         """
         widget.setParent(self._content)
         self._content_layout.insertWidget(0, widget)
+        # The header is a floor for the column under it (T190): asked at every
+        # resize (`_cards_min`), because its width follows the font, and the
+        # app restyles the font with the window's width.
+        self._header = widget
 
     def cards(self) -> tuple[CardWidget, ...]:
         return tuple(self._cards[key] for key in self._order)
@@ -853,11 +1291,9 @@ class TuningPanel(QWidget):
         for widget in self._cards.values():
             widget.set_enabled_actions(enabled)
         self.files.setEnabled(enabled)
-        self.file_reload_button.setEnabled(enabled)
-        self.file_save_button.setEnabled(enabled and not self.editor.isReadOnly())
-        self.file_revert_button.setEnabled(
-            enabled and bool(self.backup_label.text()) and not self.editor.isReadOnly()
-        )
+        writable = not self.editor.isReadOnly() and not self._gone
+        self.file_save_button.setEnabled(enabled and writable)
+        self.file_revert_button.setEnabled(enabled and bool(self.backup_label.text()) and writable)
 
     # ------------------------------------------------------------- the file
 
@@ -870,6 +1306,7 @@ class TuningPanel(QWidget):
         second copy of that list.
         """
         keep = self._current_file
+        self._read_only_files = frozenset(read_only)
         for button in self._file_buttons:
             button.setParent(None)
             button.deleteLater()
@@ -889,11 +1326,26 @@ class TuningPanel(QWidget):
             )
             button.setCheckable(True)
             button.setToolTip(file)
-            button.clicked.connect(lambda _checked=False, name=file: self._file_picked(name))
+            button.clicked.connect(lambda _checked=False, name=file: self._file_clicked(name))
             self._file_buttons.append(button)
-            self._files_layout.insertWidget(self._files_layout.count(), button)
+            self.files.flow().addWidget(button)
         if keep in files:
+            # Read again (T190 A28): the tab's Reload and every save hand the
+            # same list back, and an editor kept as it was went stale under a
+            # card's save -- a later Save file then wrote the old value back.
+            # Under typing too: `set_file_text` keeps the typing and says when
+            # the file changed (`EDITOR_STALE`).
+            self._file_picked(keep)
+        elif keep and self._editor_dirty:
+            # The open file is no longer offered, and the player typed into
+            # it: the typing stays on screen and nothing switches until they
+            # pick another file (which asks first). It cannot be saved here.
             self._mark_current(keep)
+            self._gone = True
+            self._kept = EDITOR_GONE
+            self.file_save_button.setEnabled(False)
+            self.file_revert_button.setEnabled(False)
+            self._draw_file_note()
         elif files:
             self._file_picked(files[0])
         else:
@@ -909,16 +1361,54 @@ class TuningPanel(QWidget):
         return self._current_file
 
     def set_backup(self, name: str | None) -> None:
-        """Name the backup the last save took, and arm Revert (T44 item 15)."""
+        """Name the backup the last save took, and arm Revert (T44 item 15).
+
+        Only a save that wrote the open file names one, so a name here also
+        says the editor's text is on disk: the editor counts as clean again,
+        and the next reload reads it in (T190).
+        """
+        self._backup_file = self._current_file if name else None
+        self._backup_name = name or None
+        if name:
+            self._editor_dirty = False
         self.backup_label.setText(f"Backup of this file as it was: {name}" if name else "")
+        self.backup_label.setVisible(bool(name))
         self.file_revert_button.setEnabled(
             self._actions_enabled and bool(name) and not self.editor.isReadOnly()
         )
+
+    def backup_name(self) -> str | None:
+        """The backup the tab names for the open file, `None` when it names none.
+
+        Revert file restores exactly this one (T190): a card's Save on the open
+        file takes a newer backup, and Revert restoring the newest put back a
+        file the label never named.
+        """
+        return self._backup_name
 
     def _mark_current(self, file: str) -> None:
         self._current_file = file
         for button in self._file_buttons:
             button.setChecked(button.toolTip() == file)
+        self._draw_file_title()
+
+    def _draw_file_title(self) -> None:
+        """The open file's name in bold, its path muted, and whether it is the server's own."""
+        file = self._current_file
+        if not file:
+            self.file_title.setText("")
+            return
+        name = html.escape(file.rsplit("/", 1)[-1], quote=False)
+        path = html.escape(file, quote=False)
+        said = (
+            f" · {html.escape(FILE_READ_ONLY, quote=False)}"
+            if file in self._read_only_files
+            else ""
+        )
+        self.file_title.setText(
+            f'<span style="color: {COLOR_TEXT_PRIMARY}; font-weight: bold;">{name}</span> '
+            f'<span style="color: {COLOR_TEXT_MUTED};">{path}{said}</span>'
+        )
 
     def set_file_text(
         self,
@@ -935,12 +1425,28 @@ class TuningPanel(QWidget):
         that imported the compose generator to find out would be a second place
         for that question to be asked.
         """
-        blocked = self.editor.blockSignals(True)
-        self.editor.setPlainText(text)
-        self.editor.blockSignals(blocked)
+        same = self._text_file == self._current_file
+        if same and self._editor_dirty and not self._reverting:
+            # The same file read again under typing (a card's Save, Revert or
+            # Reset, or Reload): the typing stays, and the editor says when the
+            # file it started from is no longer what is on disk (T190).
+            self._gone = False
+            if read_only:
+                # A read that failed (the view hands its error as the note): the
+                # file was writable when the typing began, and the typing is
+                # not blanked with the read (T190 fix round 2).
+                read_only = self.editor.isReadOnly()
+                self._stale = True
+                self._kept = EDITOR_UNREAD
+            else:
+                self._stale = text != self._loaded_text
+                self._kept = EDITOR_STALE if self._stale else ""
+        else:
+            self._put_text(text, keep_place=same)
+        self._text_file = self._current_file
         self.editor.setReadOnly(read_only)
-        self.file_note.setText(note or "")
-        self.file_note.setVisible(bool(note))
+        self._note = note or ""
+        self._draw_file_note()
         # Only where a key really IS shadowed, and only on a file this tab will
         # write: nothing can be typed into a read-only one, so no edit of it
         # can silently fail to apply (item 16, round 2).
@@ -948,14 +1454,119 @@ class TuningPanel(QWidget):
         self.shadow_warning.setVisible(bool(shadowed) and not read_only)
         self.file_save_button.setEnabled(self._actions_enabled and not read_only)
         # A backup of the file you were looking at a moment ago is not a
-        # backup of this one, so the name goes with the text it described.
-        self.set_backup(None)
+        # backup of this one, so the name goes with the text it described --
+        # but the same file read again keeps it (T190): every save re-reads.
+        if self._current_file != self._backup_file:
+            self.set_backup(None)
+        else:
+            self.file_revert_button.setEnabled(
+                self._actions_enabled and bool(self.backup_label.text()) and not read_only
+            )
+        self._draw_file_title()
         self._relint()
+
+    def _put_text(self, text: str, *, keep_place: bool) -> None:
+        """Replace the editor's text with the file's, where the player was if it is the same file.
+
+        The scroll and the cursor are kept on a re-read of the same file
+        (T190): every save and Reload re-reads it, and it jumped to line one.
+        """
+        bar = self.editor.verticalScrollBar()
+        across = self.editor.horizontalScrollBar()
+        place = (bar.value(), across.value(), self.editor.textCursor().position())
+        blocked = self.editor.blockSignals(True)
+        self.editor.setPlainText(text)
+        self.editor.blockSignals(blocked)
+        self._editor_dirty = False
+        self._loaded_text = text
+        self._stale = False
+        self._kept = ""
+        self._gone = False
+        if keep_place:
+            cursor = self.editor.textCursor()
+            cursor.setPosition(min(place[2], len(text)))
+            self.editor.setTextCursor(cursor)
+            bar.setValue(place[0])
+            across.setValue(place[1])
 
     def _file_picked(self, name: str) -> None:
         self._mark_current(name)
         if name:
             self.file_selected.emit(name)
+
+    def _file_clicked(self, name: str) -> None:
+        """A file button's press: ask first when the editor holds typing (T190 final review).
+
+        Save hands the typing up and opens `name` only once it was saved;
+        Discard opens it; Cancel, or no answer, leaves the editor as it was.
+        """
+        if self._editor_dirty:
+            # No Save for a file the list no longer offers: it cannot be written here.
+            answers = (CHOICE_DISCARD, CHOICE_CANCEL) if self._gone else UNSAVED_ANSWERS
+            asked = UNSAVED_GONE_QUESTION if self._gone else UNSAVED_QUESTION
+            answer = self.choose(
+                UNSAVED_TITLE,
+                asked.format(
+                    name=self._current_file.rsplit("/", 1)[-1], other=name.rsplit("/", 1)[-1]
+                ),
+                answers,
+            )
+            if answer == CHOICE_DISCARD:
+                self._editor_dirty = False
+            elif answer != CHOICE_SAVE or not self._save_file_pressed():
+                # The click checked its button; the open file's is the checked one.
+                self._mark_current(self._current_file)
+                return
+        self._file_picked(name)
+
+    def _save_file_pressed(self) -> bool:
+        """Save file's press: hand the text up, asking first over a file changed on disk.
+
+        True when the view saved it, which it says by naming a backup
+        (`set_backup` counts the editor clean again).
+        """
+        if self._stale and self._editor_dirty:
+            answer = self.choose(
+                STALE_TITLE,
+                STALE_QUESTION.format(name=self._current_file.rsplit("/", 1)[-1]),
+                (CHOICE_OVERWRITE, CHOICE_RELOAD, CHOICE_CANCEL),
+            )
+            if answer == CHOICE_RELOAD:
+                self._editor_dirty = False
+                self._file_picked(self._current_file)
+                return False
+            if answer != CHOICE_OVERWRITE:
+                return False
+        self.file_save_pressed.emit(self.editor.toPlainText())
+        return not self._editor_dirty
+
+    def _revert_file_pressed(self) -> None:
+        """Revert file's press: the file it puts back replaces any typing, as asked."""
+        self._reverting = True
+        try:
+            self.file_revert_pressed.emit()
+        finally:
+            self._reverting = False
+
+    def _ask(self, title: str, question: str, choices: tuple[str, ...]) -> str | None:
+        """`choose` in the app: a message box with one button per answer; Cancel is Escape."""
+        # Fitted (T157): a plain box squeezes "Reload instead" below its label.
+        box = FittedMessageBox(QMessageBox.Icon.Question, title, question, parent=self)
+        buttons: dict[QPushButton, str] = {}
+        for answer in choices:
+            role = (
+                QMessageBox.ButtonRole.RejectRole
+                if answer == CHOICE_CANCEL
+                else QMessageBox.ButtonRole.AcceptRole
+            )
+            buttons[box.addButton(answer, role)] = answer
+        cancel = next((b for b, a in buttons.items() if a == CHOICE_CANCEL), None)
+        if cancel is not None:
+            box.setEscapeButton(cancel)
+            box.setDefaultButton(cancel)
+        box.exec()
+        pressed = box.clickedButton()
+        return buttons.get(pressed) if isinstance(pressed, QPushButton) else None
 
     def _relint(self) -> None:
         """The live guard, on an editable `.conf` only.
@@ -981,16 +1592,97 @@ class TuningPanel(QWidget):
 
     # ------------------------------------------------------------ the shape
 
+    def _cards_min(self) -> int:
+        """The card column's floor: `CARDS_MIN_WIDTH`, or the header plus the column's chrome.
+
+        The chrome is the column's own -- its frame, its scroll bar, the
+        margins of the box the cards sit in -- read off the widgets, not typed.
+        """
+        if self._header is None:
+            return CARDS_MIN_WIDTH
+        margins = self._content_layout.contentsMargins()
+        chrome = (
+            2 * self._area.frameWidth()
+            + self._area.verticalScrollBar().sizeHint().width()
+            + margins.left()
+            + margins.right()
+        )
+        return max(CARDS_MIN_WIDTH, self._header.sizeHint().width() + chrome)
+
+    def _draw_file_note(self) -> None:
+        """The editor's note, unless the note over the cards says the same and shows.
+
+        Side by side both said the restart sentence (T190 B15). Only while the
+        cards' note is on screen, though: at 960x640 on the Edit file side the
+        cards are hidden, and the file being edited still needs its sentence.
+        """
+        said = self._note
+        # On screen, not merely shown: scrolled out of the column's view it says
+        # nothing to anybody (T190 final review).
+        echoed = said == self.rule_note.text() and not self.rule_note.visibleRegion().isEmpty()
+        if self._kept:
+            said = self._kept if echoed or not said else f"{said}\n{self._kept}"
+            echoed = False
+        self.file_note.setText(said)
+        self.file_note.setVisible(bool(said) and not echoed)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802  (Qt's own name)
+        if event.type() in (
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+        ):
+            self._draw_file_note()
+        return False
+
+    def _side_picked(self, chosen: QPushButton) -> None:
+        """One side checked, always: pressing the checked one again keeps it."""
+        self.settings_button.setChecked(chosen is self.settings_button)
+        self.edit_file_button.setChecked(chosen is self.edit_file_button)
+        self._show_sides()
+
+    def _typed(self) -> None:
+        self._editor_dirty = True
+
+    def _show_sides(self) -> None:
+        """Both halves when wide; when narrow, the one the switch names."""
+        narrow = bool(self._narrow)
+        editing = self.edit_file_button.isChecked()
+        self.side_buttons.setVisible(narrow)
+        self._area.setVisible(not narrow or not editing)
+        self._file_side.setVisible(not narrow or editing)
+        self._draw_file_note()
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
-        """Side by side while there is room, stacked when there is not."""
-        wide = self.width() >= NARROW_WIDTH
-        self.split.setOrientation(Qt.Orientation.Horizontal if wide else Qt.Orientation.Vertical)
+        """Side by side while there is room, one half at a time when there is not (T190).
+
+        On every switch to side by side -- and the first layout -- the split
+        is set to `split_sizes()`; between switches a drag of the handle is the
+        user's and is kept.
+        """
+        cards_min = self._cards_min()
+        self._area.setMinimumWidth(cards_min)
+        narrow = is_narrow(self.width(), cards_min)
+        if narrow != self._narrow:
+            self._narrow = narrow
+            if narrow and self._editor_dirty:
+                self.settings_button.setChecked(False)
+                self.edit_file_button.setChecked(True)
+            self._show_sides()
+            if not narrow:
+                total = self.width() - self.split.handleWidth()
+                self.split.setSizes(list(split_sizes(total, cards_min)))
         super().resizeEvent(event)
 
 
 __all__ = [
+    "CARDS_MAX_WIDTH",
+    "CARDS_MIN_WIDTH",
     "CHANGED_FROM",
     "CardWidget",
+    "EDITOR_MIN_WIDTH",
+    "VALUE_MIN_CHARS",
     "NOTHING",
     "NOTHING_TO_TUNE",
     "NOT_IN_THE_FILE",
@@ -999,7 +1691,12 @@ __all__ = [
     "TuningPanel",
     "bool_words",
     "build_tuning_cards",
+    "card_heading",
     "control_kind",
+    "is_narrow",
+    "lifted_rule",
+    "shows_key_line",
+    "split_sizes",
     "starting_value",
     "value_note",
 ]
