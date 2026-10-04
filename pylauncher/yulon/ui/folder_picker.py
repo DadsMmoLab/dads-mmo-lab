@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import getpass
 import os
-import sys
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
@@ -78,17 +77,30 @@ SHARED_ROOT = Path("/run/media")
 """The one root that also holds each user's own mount root, `/run/media/<user>`."""
 
 
-def _is_login_name(name: str) -> bool:
-    """Is `name` an account on this machine? Then `/run/media/<name>` is its mount root."""
-    if not sys.platform.startswith("linux"):
-        return False
-    import pwd
+PASSWD_FILE = Path("/etc/passwd")
+"""Seam: the local account list `_is_login_name()` reads."""
 
+
+def _is_login_name(name: str) -> bool:
+    """Is `name` a local account? Then `/run/media/<name>` is its mount root, not a drive.
+
+    Reads the local `/etc/passwd` itself and never asks `pwd`/NSS: on a desktop
+    whose accounts come from sssd or LDAP, a lookup while that server is
+    unreachable blocks, and this runs on the GUI thread as a picker opens.
+    Such accounts are not in the file, so their `/run/media/<them>` folder is
+    listed; it is a folder this user cannot open, which is the lesser harm. An
+    unreadable or missing file gives no names, so nothing is left out.
+    """
     try:
-        pwd.getpwnam(name)
-    except KeyError:
+        text = PASSWD_FILE.read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return False
-    return True
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        if line.split(":", 1)[0] == name:
+            return True
+    return False
 
 
 def removable_volumes(roots: Iterable[Path]) -> list[Path]:

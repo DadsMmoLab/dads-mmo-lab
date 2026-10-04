@@ -72,6 +72,7 @@ class _Shown:
         self.directories: list[str] = []
         self.modes: list[QFileDialog.AcceptMode] = []
         self.filters: list[list[str]] = []
+        self.prefilled: list[list[str]] = []
 
     def __call__(self, dialog: QFileDialog) -> bool:
         self.dialogs.append(dialog)
@@ -79,6 +80,7 @@ class _Shown:
         self.directories.append(dialog.directory().absolutePath())
         self.modes.append(dialog.acceptMode())
         self.filters.append(list(dialog.nameFilters()))
+        self.prefilled.append(list(dialog.selectedFiles()))
         if self.accept_with is None:
             return False
         if dialog.acceptMode() == QFileDialog.AcceptMode.AcceptSave:
@@ -185,6 +187,57 @@ def test_another_users_folder_under_run_media_is_not_a_volume(
     monkeypatch.setattr(folder_picker, "_is_login_name", lambda name: name == "alice")
 
     assert folder_picker.removable_volumes([run_media]) == [old_layout]
+
+
+PASSWD = """root:x:0:0:root:/root:/bin/bash
+# a comment line
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
+
++@netgroup
+broken-line-without-fields
+"""
+
+
+def test_account_names_come_from_the_local_passwd_file_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never NSS: on an sssd/LDAP desktop with its server gone, a lookup blocks the GUI thread."""
+    passwd = tmp_path / "passwd"
+    passwd.write_text(PASSWD)
+    monkeypatch.setattr(folder_picker, "PASSWD_FILE", passwd)
+    if sys.platform != "win32":
+        import pwd
+
+        def nss(*args: object) -> object:
+            raise AssertionError("asked NSS for an account")
+
+        monkeypatch.setattr(pwd, "getpwnam", nss)
+        monkeypatch.setattr(pwd, "getpwall", nss)
+    run_media = tmp_path / "run-media"
+    (run_media / "alice").mkdir(parents=True)
+    old_layout = run_media / "mmcblk0p1"
+    old_layout.mkdir()
+    monkeypatch.setattr(folder_picker, "SHARED_ROOT", run_media)
+
+    assert folder_picker._is_login_name("alice")
+    assert folder_picker._is_login_name("root")
+    assert not folder_picker._is_login_name("mmcblk0p1")
+    assert not folder_picker._is_login_name("+@netgroup")
+    assert not folder_picker._is_login_name("# a comment line")
+    assert folder_picker.removable_volumes([run_media]) == [old_layout]
+
+
+def test_a_missing_passwd_file_filters_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(folder_picker, "PASSWD_FILE", tmp_path / "no-passwd")
+    run_media = tmp_path / "run-media"
+    alice = run_media / "alice"
+    alice.mkdir(parents=True)
+    monkeypatch.setattr(folder_picker, "SHARED_ROOT", run_media)
+
+    assert not folder_picker._is_login_name("alice")
+    assert folder_picker.removable_volumes([run_media]) == [alice]
 
 
 def test_a_drive_named_like_an_account_under_the_users_own_root_is_listed(
@@ -505,6 +558,8 @@ def test_the_support_file_save_picker_lists_the_card_and_saves_a_zip_on_it(
     assert shown.filters == [["Zip files (*.zip)"]]
     assert shown.directories == [tmp_path.as_posix()]
     assert shown.dialogs[0].windowTitle() == "Save logs for support"
+    # The suggested name is typed in when the dialog opens, as the static picker did.
+    assert shown.prefilled == [[str(tmp_path / "yulon-support-2026.zip")]]
 
 
 @linux_only
