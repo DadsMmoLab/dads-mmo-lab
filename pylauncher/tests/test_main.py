@@ -5053,6 +5053,51 @@ def test_the_next_tab_bumper_from_the_last_server_lands_on_the_catalog(
     assert pins.buttons[0].isChecked()
 
 
+# -- T221: R and L in a list are letters, on every game's server page ----------------
+
+
+@pytest.mark.parametrize(
+    "game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"]
+)
+def test_r_and_l_in_every_list_of_a_server_page_stay_in_the_list(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str
+) -> None:
+    """T221: R in Centurion's Characters list switched the server page to Bots.
+
+    Through the window's own keyboard filter, with each list of each sub-tab as
+    the focus: the filter must hand R and L to the list (False) and leave the
+    sub-tab where it is. The focus is answered by patch for the reason the
+    bumper test above gives: offscreen, the shared window is never active again.
+    """
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QAbstractItemView
+
+    from yulon.ui import gamepad
+
+    server_dir = tmp_path / f"t221-{game}"
+    _catalog_view(window).installed.emit(game, server_dir, None)
+    view = _tab_for(window, server_dir)
+    sub = view._tabs
+    keyboard = window.yulon_keyboard
+    asked: list[str] = []
+    for index in range(sub.count()):
+        sub.setCurrentIndex(index)
+        page = sub.widget(index)
+        for rows in page.findChildren(QAbstractItemView):
+            monkeypatch.setattr(gamepad.QApplication, "focusWidget", staticmethod(lambda r=rows: r))
+            for key, letter in ((Qt.Key.Key_R, "r"), (Qt.Key.Key_L, "l")):
+                press = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, letter)
+                where = f"{sub.tabText(index)}: {type(rows).__name__} {rows.objectName()!r}"
+                assert keyboard.eventFilter(rows, press) is False, f"{letter} was taken in {where}"
+                assert sub.currentIndex() == index, f"{letter} switched sub-tab from {where}"
+            if rows.isVisibleTo(page):
+                asked.append(sub.tabText(index))
+    if game == "wow-centurion":
+        assert "Characters" in asked, "the Characters list was not asked"
+    assert asked, "no list on any sub-tab was asked"
+
+
 # -- T192: a status dot on each server tab; the server's name in the header -----------
 
 

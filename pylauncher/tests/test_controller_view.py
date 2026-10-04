@@ -19388,7 +19388,8 @@ def test_after_a_bumper_the_first_down_or_right_goes_into_the_new_page(
                 process_events()
                 # A start the bumper key is not typed into (T139).
                 start = next(
-                    (w for w in _in_page(sub.widget(index)) if not accepts_typing(w)), None
+                    (w for w in _in_page(sub.widget(index)) if not accepts_typing(w, int(key))),
+                    None,
                 )
                 if start is None:
                     continue
