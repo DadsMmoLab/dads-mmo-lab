@@ -981,7 +981,8 @@ class FakeSnapshot:
         if self.put_back_error is not None:
             raise self.put_back_error
         safety = tuple(
-            copy.directory / f"{SNAPSHOT_STAMP}_pre-restore_{name}.sql" for name in copy.databases
+            copy.directory / f"{SNAPSHOT_STAMP}_{snapshot.ROLLBACK_SAFETY_LABEL}_{name}.sql"
+            for name in copy.databases
         )
         return snapshot.PutBack(restored=copy.databases, safety=safety)
 

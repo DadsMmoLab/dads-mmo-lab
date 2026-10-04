@@ -56,7 +56,7 @@ _PATH_METHODS = {
     "symlink_to",
     "chmod",
 }
-_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker", "record_phases"}
+_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker", "record_phases", "execute"}
 _WINDOWS_ACL_WRITES = {"SetNamedSecurityInfoW"}
 """A `ctypes` call that changes who may read a path: Windows' `chmod` (T151, `winacl`)."""
 _QUALIFIED = {

@@ -1091,7 +1091,9 @@ def update_to_latest_confirmation(
         database = (
             f" If the new server starts and does not come up, Yu'lon also puts {names} back "
             f"{_as_it_was(copied)} just before the new server started: it copies "
-            f"{'it' if len(copied) == 1 else 'them'} then, with your server stopped."
+            f"{'it' if len(copied) == 1 else 'them'} then, with your server stopped. The copy "
+            "adds a few minutes to the time your server is down and takes some hundreds of MB "
+            "in the server's backups folder; Yu'lon keeps only the newest."
         )
         if not_copied:
             database += (
@@ -2272,9 +2274,12 @@ COPY_NOT_TAKEN_DATABASE = (
 
 
 def copy_putting_back_line(copy: snapshot.Snapshot) -> str:
+    """Said as the copy goes back: a replacement, which is what the put-back does (cold review)."""
     return (
         f"Putting {_listed(copy.databases)} back {_as_it_was(copy.databases)} just before the "
-        "new build started, before the build from before this update starts again."
+        "new build started: the copy is checked, the tables the new build added are dropped, "
+        "and the copy is loaded over the rest, before the build from before this update starts "
+        "again."
     )
 
 
@@ -2301,9 +2306,10 @@ def copy_put_back_database(put: snapshot.PutBack, *, not_copied: Sequence[str] =
         else ""
     )
     said = (
-        f"Its source folders were put back first, then {_listed(names)} {_as_it_was(names)} "
-        "just before the new build started, so the old build starts on the database it knows. "
-        f"The new build never reported ready, so nobody played on it{kept}."
+        f"Its source folders were put back first, then {_listed(names)} were replaced with the "
+        "copy taken just before the new build started: the tables the new build added were "
+        "dropped and the copy was loaded over the rest, so the old build starts on the "
+        f"databases it knows. The new build never reported ready, so nobody played on it{kept}."
     )
     if not_copied:
         said += (
@@ -2332,6 +2338,19 @@ def copy_not_put_back(copy: snapshot.Snapshot, reason: str) -> str:
         f"started ({reason}), so the old build was not started on the database the new one "
         f"changed. Open Maintenance, choose {_in_backups(copy.files)} and press Restore (it "
         "works with the server stopped), then press Start."
+    )
+
+
+def copy_not_usable(copy: snapshot.Snapshot, reason: str) -> str:
+    """The old build was left stopped: the copy failed its check, and nothing was touched."""
+    names = copy.databases
+    return (
+        f"{_listed(names)} could not be put back {_as_it_was(names)} just before the new build "
+        f"started: {reason}. So the old build was not started, and "
+        f"{'that database is' if len(names) == 1 else 'those databases are'} as the new build "
+        f"left {'it' if len(names) == 1 else 'them'}. The copy ({_in_backups(copy.files)}) "
+        "cannot be restored either. If you have a backup of your own from before this update, "
+        "restore it on Maintenance (it works with the server stopped), then press Start."
     )
 
 
@@ -7781,6 +7800,9 @@ class StagedInstaller:
         yield copy_putting_back_line(copy.taken)
         try:
             copy.put = self._snapshot.put_back(server_dir, copy.taken)
+        except snapshot.CopyNotUsable as exc:
+            copy.put_failed = True
+            raise LeaveStopped(copy_not_usable(copy.taken, str(exc))) from exc
         except (InstallerError, OSError) as exc:
             copy.put_failed = True
             raise LeaveStopped(copy_not_put_back(copy.taken, str(exc))) from exc
@@ -8752,23 +8774,32 @@ class StagedInstaller:
     ) -> tuple[str, ...]:
         """Refuse a Rebuild whose source folders are not where the running build came from (T217).
 
-        "Where it came from" is the install record's `source_revs[].built` when an
-        update wrote one, else the catalog's pin, which is what an install checks
-        out. A folder git will not read is not refused -- Rebuild is the repair
+        "Where it came from" is the install record's `source_revs[].built`, which
+        only an update writes. With no record the folder is compared with this
+        Yu'lon's pin, and a difference is NOT refused: an install records nothing
+        and pins move between releases, so it is a server installed on an older
+        pin. The line returned says so and names Update to latest, which moves
+        the sources and the databases together. It never advises checking out the
+        pin, which would compile the new core over the old databases (the T220
+        crash; cold review of 23361ca3).
+
+        A folder git will not read is not refused either -- Rebuild is the repair
         press, and an unreadable checkout must not lock it out (the owner's answer
         of 2026-10-04) -- and the lines returned say it could not be checked. One
         `rev-parse` per moving source.
 
         Raises:
-            InstallerError: a source's HEAD is another commit; names the folder,
-                both commits and the command that puts it back.
+            InstallerError: a source's HEAD is not the commit the record says its
+                build came from; names the folder, both commits and the command
+                that puts it back.
         """
         unchecked: list[str] = []
+        update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
         for source in self.sources_that_move():
             dest = server_dir / source.dest
             recorded = state.rev_for(source.repo)
-            expected = recorded.built.split()[0] if recorded is not None and recorded.built else ""
-            expected = expected or (source.rev or "")
+            built = recorded.built.split()[0] if recorded is not None and recorded.built else ""
+            expected = built or (source.rev or "")
             if not expected:
                 continue
             head = self._seams.head_sha(dest)
@@ -8777,6 +8808,14 @@ class StagedInstaller:
                     f"Yu'lon could not check which commit {dest} is on, so it is rebuilt as it "
                     f"stands; it should be on {expected[:7]}."
                 )
+                continue
+            if not built:
+                if not head.startswith(expected):
+                    unchecked.append(
+                        f"{dest} is on {head[:7]}, an older pin than the {expected[:7]} this "
+                        f"version of Yu'lon ships. It is compiled as it stands. {update} "
+                        "moves every source to the new pin safely, the databases included."
+                    )
                 continue
             if not head.startswith(expected):
                 raise InstallerError(

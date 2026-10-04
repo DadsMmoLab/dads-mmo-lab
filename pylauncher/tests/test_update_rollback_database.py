@@ -18,6 +18,7 @@ the fix.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -222,10 +223,13 @@ def test_the_rollback_says_the_database_went_back_and_where_the_new_builds_copy_
     )
     text = str(raised)
     assert "put back and is running again" in text
-    assert f"{WOTLK_LISTED} as they were just before the new build started" in text
+    assert (
+        f"{WOTLK_LISTED} were replaced with the copy taken just before the new build started"
+        in text
+    )
     # The copy's own file is named when it is taken, so the player can find it.
     assert any(fake.taken[0].files[0].name in line for line in said), said
-    assert "pre-restore_acore_playerbots.sql" in text, "the database as the new build left it"
+    assert "after-new-build_acore_playerbots.sql" in text, "the database as the new build left it"
     assert "is NOT put back" not in text
 
 
@@ -247,6 +251,93 @@ def test_a_copy_that_cannot_go_back_leaves_the_servers_stopped_and_names_the_fil
     assert "mysql exited 1" in text
     assert "agree again" not in text and "is running" not in text
     assert _moving_heads(rec, server_dir, made) == {OLD}, "the sources went back first"
+
+
+def test_a_copy_that_fails_its_check_drops_nothing_and_never_sends_to_a_restore_of_it(
+    tmp_path: Path,
+) -> None:
+    """Cold review: an incomplete copy drops nothing; the servers stay stopped; it is named.
+
+    Maintenance's Restore refuses an incomplete copy, so the sentence must not send
+    the player there with it.
+    """
+    from yulon.catalog.snapshot import CopyNotUsable
+
+    rec, server_dir, made, fake, _said, raised = _press(
+        tmp_path,
+        WOTLK,
+        copy=lambda rec: FakeSnapshot(
+            rec,
+            put_back_error=CopyNotUsable(
+                "the copy x.sql is not complete (cut short), so nothing was dropped or put back"
+            ),
+        ),
+        wait_ready=_old_build_comes_back(),
+    )
+    assert isinstance(raised, native.ServersLeftStopped), raised
+    text = str(raised)
+    assert rec.calls.count("recreate") == 1, "the old build was not started"
+    assert "nothing was dropped or put back" in text
+    assert fake.taken[0].files[0].name in text
+    assert "as the new build left them" in text
+    assert "choose" not in text, "no Restore of a copy Maintenance would refuse"
+    assert "prune" not in rec.calls
+
+
+def test_the_rollback_says_the_tables_the_new_build_added_were_dropped(tmp_path: Path) -> None:
+    _rec, _dir, _made, _fake, said, raised = _press(
+        tmp_path, WOTLK, wait_ready=_old_build_comes_back()
+    )
+    assert raised is not None
+    putting = [line for line in said if line.startswith("Putting ")]
+    assert len(putting) == 1 and "tables the new build added are dropped" in putting[0], said
+    assert "the tables the new build added were dropped" in str(raised)
+
+
+def test_an_update_with_the_images_gone_compiles_nothing_and_takes_no_copy(
+    tmp_path: Path,
+) -> None:
+    """Cold review item 5: T170's no-rollback path is the Rebuild press's alone.
+
+    `update_to_latest()` never passes `missing_images_ok`, so with the images gone
+    it is refused before the compile and before any copy, and a new build that
+    ran with no build to roll back to and a copy left unput is not reachable here.
+    """
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    rec.images = False
+    made = make(wait_ready=lambda spec, ready: False)
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(InstallerError) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert "this press does not compile without one" in str(raised.value)
+    assert "build" not in rec.calls and "recreate" not in rec.calls
+    assert fake.taken == [] and fake.put_back_calls == []
+
+
+def test_a_stop_during_the_core_updates_names_the_press_not_the_install(tmp_path: Path) -> None:
+    """Cold review: the Stop arrived during an update, and "the install was stopped" is untrue."""
+    from yulon.catalog.families import azerothcore
+
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make(wait_ready=_old_build_comes_back())
+    made._snapshot = FakeSnapshot(rec)
+    stop = threading.Event()
+    inner = made._seams.one_shot
+
+    def one_shot(
+        service: str, where: Path, *, sink: object = None, cancel: object = None
+    ) -> AttachedRun:
+        stop.set()
+        return inner(service, where, sink=sink, cancel=cancel)
+
+    made._seams = replace(made._seams, one_shot=one_shot)
+    with pytest.raises(InstallerError) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir), cancel=stop))
+    text = str(raised.value)
+    assert f"{server_build_presses.UPDATE_TO_LATEST} was stopped" in text, text
+    assert "the install was stopped" not in text
+    assert azerothcore.CORE_UPDATES_NOTE in text
 
 
 def test_a_copy_that_cannot_be_taken_never_starts_the_new_build(tmp_path: Path) -> None:
@@ -514,18 +605,33 @@ def test_rebuild_goes_on_and_says_so_when_git_cannot_say_where_a_source_is(
     assert any("could not check" in line for line in said), said
 
 
-def test_rebuild_with_no_record_compares_against_the_pin(tmp_path: Path) -> None:
+def test_rebuild_with_no_record_goes_on_and_says_the_sources_are_on_an_older_pin(
+    tmp_path: Path,
+) -> None:
+    """An install writes no `source_revs`; only an update does. Pins move between releases.
+
+    So with no record, a HEAD that is not this Yu'lon's pin is a server installed
+    on an older pin, not a folder half put back. It is never refused, and it is
+    never told to check out the pin: that would compile the new core over the old
+    database (the T220 crash). It is told "Update to latest" moves it safely.
+    """
     rec, server_dir, make = _spine(tmp_path, WOTLK)
     for source in WOTLK.emulator.sources:
         assert source.rev is not None
         rec.heads[server_dir / source.dest] = source.rev
-    list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    said = list(make().rebuild(InstallOptions(server_dir=server_dir)))
     assert "build" in rec.calls
+    assert not any("older pin" in line for line in said), said
     rec.calls.clear()
     rec.heads[server_dir / MODULE] = NEW
-    with pytest.raises(InstallerError, match="built from"):
-        list(make().rebuild(InstallOptions(server_dir=server_dir)))
-    assert "build" not in rec.calls
+    said = list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls, "never refused without a record"
+    told = [line for line in said if "older pin" in line]
+    assert len(told) == 1, said
+    assert str(server_dir / MODULE) in told[0] and NEW[:7] in told[0]
+    assert server_build_presses.UPDATE_TO_LATEST in told[0]
+    assert "database" in told[0]
+    assert not any("checkout" in line for line in said), said
 
 
 def test_start_warns_while_a_source_is_off_its_commit_and_stops_once_it_is_back(
@@ -580,6 +686,15 @@ def test_the_wotlk_question_says_its_playerbots_database_goes_back_and_what_the_
     # The backup still has a job: a later return, which no rollback covers.
     assert server_build_presses.RETURN_TO_PIN in text
     assert "backup" in text
+
+
+def test_the_wotlk_question_names_all_four_databases_and_what_copying_them_costs() -> None:
+    """Cold review: since T220 WotLK copies its core's three too, which takes time and disk."""
+    text = native.update_to_latest_confirmation(WOTLK, Path("/srv"), "x/y", copied=WOTLK_COPY)
+    for name in WOTLK_COPY:
+        assert name in text
+    assert "a few minutes" in text and "some hundreds of MB" in text
+    assert "only the newest" in text
 
 
 def test_the_tortoise_question_says_its_world_database_is_not_copied() -> None:
