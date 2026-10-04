@@ -1912,7 +1912,11 @@ said, because "what is on disk is what the new build was made from" alone reads 
 new build were what runs now. `untouched_note()` says what the next Start does."""
 
 SOURCES_LEFT_UNTOUCHED_NOTE = f"{SOURCES_LEFT_UNTOUCHED}, and its next Start runs the new build."
-"""`SOURCES_LEFT_NOTE` when no container was replaced and nothing refuses a start (fix round 1)."""
+"""`SOURCES_LEFT_NOTE` when no container was replaced and nothing refuses a start (fix round 1).
+
+Since T223 (the lead's ruling under owner answer D1) every untouched exit writes the
+`untested` start refusal, so this is said only when that record could not be written --
+`owe_start()`'s warning is then in the same message, and the sentence is true."""
 
 
 def untouched_note(refused: str | None) -> str:
@@ -1986,30 +1990,52 @@ REBUILD_OWED_REFUSAL = (
 """Why no start is allowed while `START_REFUSED_FILE` is there."""
 
 
+UNTESTED_BUILD = "untested"
+"""`START_REFUSED_FILE`'s `why` when the tags name a new build that never started (T223)."""
+
+UNTESTED_BUILD_REFUSAL = (
+    "This server's image tags name a new build that has never started: an update or rebuild "
+    "finished compiling it, and the build from before it could not be put back on its tags. "
+    "A Start would run that untested build, so it must be rebuilt first: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+)
+"""Why no start is allowed while `START_REFUSED_FILE` says `untested` (T223, owner answer D1).
+
+The record and the clearing are the mixed tags' own: only a Rebuild that succeeds removes
+it, and the Rebuild press is not refused by it. Only the sentence differs, because "the
+tags are mixed" is false here -- every one names the new build."""
+
+
 def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | None:
     """Why no start may run here (`START_REFUSED_FILE`), or None. Never raises.
 
     `rebuilding` is the Rebuild press's own question: the rebuild it is about to run is
-    the repair, so the record does not refuse it.
+    the repair, so the record does not refuse it. A record that says `untested` refuses
+    with `UNTESTED_BUILD_REFUSAL`; any other, or one nobody can read, as mixed tags.
     """
     if rebuilding:
         return None
     path = server_dir / START_REFUSED_FILE
     try:
-        path.stat()
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         logger.warning(f"{path} could not be read ({exc}); it refuses as mixed tags")
-    return REBUILD_OWED_REFUSAL
+        return REBUILD_OWED_REFUSAL
+    try:
+        why = json.loads(text).get("why")
+    except (ValueError, AttributeError):
+        why = None
+    return UNTESTED_BUILD_REFUSAL if why == UNTESTED_BUILD else REBUILD_OWED_REFUSAL
 
 
-def owe_start(server_dir: Path) -> str:
+def owe_start(server_dir: Path, *, why: str = "rebuild") -> str:
     """Write `START_REFUSED_FILE`. Returns a warning sentence, or "" once written."""
     path = server_dir / START_REFUSED_FILE
     staged = path.with_name(path.name + ".yulon-new")
     try:
-        staged.write_text(json.dumps({"version": 1, "why": "rebuild"}) + "\n", encoding="utf-8")
+        staged.write_text(json.dumps({"version": 1, "why": why}) + "\n", encoding="utf-8")
         os.replace(staged, path)
     except OSError as exc:
         try:
@@ -2046,6 +2072,14 @@ class _LeftStopped(str):
     """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
 
 
+class _DockerSilentForRestart(InstallerError):
+    """A restore's recreate refused because Docker did not answer its wait (T223).
+
+    Its servers were stopped before the tags moved back, so `_restore_rollback()`
+    reports them left stopped rather than "did not report ready".
+    """
+
+
 class LeaveStopped(InstallerError):
     """Raised by a `ServersDownWork.back()`: the old build must NOT be started (T217).
 
@@ -2066,11 +2100,17 @@ class _NotPutBack(str):
 
     touched: bool
     mixed: bool
+    untested: bool
+    """T223: every live tag names the new build, which has never started, because Docker
+    did not answer for the restore. A start would run it, so `rebuild()` refuses one."""
 
-    def __new__(cls, text: str, *, touched: bool, mixed: bool = False) -> _NotPutBack:
+    def __new__(
+        cls, text: str, *, touched: bool, mixed: bool = False, untested: bool = False
+    ) -> _NotPutBack:
         made = super().__new__(cls, text)
         made.touched = touched
         made.mixed = mixed
+        made.untested = untested
         return made
 
 
@@ -5920,14 +5960,15 @@ class StagedInstaller:
         )
 
     def _wait_for_docker(
-        self, ctx: StageContext, *, rollback: bool
+        self, ctx: StageContext, *, saying: str, stoppable: bool
     ) -> Generator[str, None, float | None]:
         """Ask Docker until it answers, for up to `DOCKER_PATIENCE_S` (T223).
 
         Returns None when Docker answered, else the seconds spent asking -- which is
         what the refusal says, because a duration a user reads is one that was
-        measured (`_spell_seconds()`). Says one sentence when the first ask goes
-        unanswered and one when Docker answers late; silent when it answers at once.
+        measured (`_spell_seconds()`). Says `saying` when the first ask goes
+        unanswered and one sentence when Docker answers late; silent when it
+        answers at once.
 
         **Bounded twice, by the clock and by the number of asks.** The clock is the
         bound that holds in use, where each ask can take its own 10 seconds; the
@@ -5938,42 +5979,35 @@ class StagedInstaller:
         bound, so the wait can end up to that much past three minutes, and the
         refusal says the time it measured.
 
-        **A Stop ends the wait before the replace, and does not end it in a
-        restore.** Before the replace a Stop gives up the new build, which is
-        `_stop_control()`'s `abandon`; in a restore (`rollback`) the Stop is what
-        may have STARTED it, and `_stop_control()` makes a Cancel there force the
-        failed build's stop rather than give up, because a restore abandoned
-        half-way leaves nothing running. Reading the Stop here would end the
-        restore's wait on its first ask.
+        **`stoppable`: a Stop ends the wait before the replace, and does not end it
+        in a restore.** Before the replace a Stop gives up the new build, which is
+        `_stop_control()`'s `abandon`. In a restore the Stop is what may have
+        STARTED it, and `_stop_control()` makes a Cancel there force the failed
+        build's stop rather than give up, because a restore abandoned half-way
+        leaves the tags or the servers half-way; reading the Stop would end the
+        restore's wait on its first ask, so `saying` tells the player Stop waits.
+        A Stop is read between pauses of a second (`_pause()`) and around each ask,
+        so it lands within a second -- or, during an ask, when the ask returns,
+        which is at most its own 10 seconds.
         """
+        stop = ctx.cancel if stoppable else None
         started = self._seams.monotonic()
         if self._seams.docker_ready():
             return None
-        yield (
-            "Docker did not answer. Waiting up to 3 minutes for Docker before starting the build "
-            "from before this rebuild again."
-            if rollback
-            else "Docker did not answer. The new build is finished; waiting up to 3 minutes for "
-            "Docker before replacing the containers. Stop gives up the new build and leaves the "
-            "server as it is."
-        )
+        yield saying
         for _ in range(int(DOCKER_PATIENCE_S // DOCKER_PATIENCE_POLL_S)):
             left = DOCKER_PATIENCE_S - (self._seams.monotonic() - started)
             if left <= 0:
                 break
-            if not rollback:
-                self._stopped_waiting_for_docker(ctx.cancel)
-            self._seams.sleep(min(DOCKER_PATIENCE_POLL_S, left))
+            self._pause(min(DOCKER_PATIENCE_POLL_S, left), stop)
             # Both read again after the pause and BEFORE the ask, which can take its
             # own 10 seconds: a Stop pressed during the pause, and a pause that used
             # up the last of the three minutes (Codex review, both passes).
+            self._stopped_waiting_for_docker(stop)
             if self._seams.monotonic() - started >= DOCKER_PATIENCE_S:
                 break
-            if not rollback:
-                self._stopped_waiting_for_docker(ctx.cancel)
             answered = self._seams.docker_ready()
-            if not rollback:
-                self._stopped_waiting_for_docker(ctx.cancel)
+            self._stopped_waiting_for_docker(stop)
             if answered:
                 yield (
                     f"Docker answered after "
@@ -5982,12 +6016,19 @@ class StagedInstaller:
                 return None
         return self._seams.monotonic() - started
 
+    def _pause(self, seconds: float, stop: threading.Event | None) -> None:
+        """Sleep `seconds` a second at a time, ending early once `stop` is set (T223)."""
+        left = seconds
+        while left > 0 and not (stop is not None and stop.is_set()):
+            step = min(1.0, left)
+            self._seams.sleep(step)
+            left -= step
+
     def _stopped_waiting_for_docker(self, cancel: threading.Event | None) -> None:
         if cancel is not None and cancel.is_set():
-            raise InstallerError(
-                "The rebuild was stopped while it waited for Docker, so the containers were "
-                "not replaced."
-            )
+            # Only the Stop: the restore that follows says what was and was not
+            # replaced, and saying it here too said it twice (cold review).
+            raise InstallerError("The rebuild was stopped while it waited for Docker.")
 
     def stage_recreate(
         self,
@@ -6032,22 +6073,34 @@ class StagedInstaller:
         the call.)
         """
         # T223: a wait, not one ask -- see `_wait_for_docker()`.
-        waited = yield from self._wait_for_docker(ctx, rollback=rollback)
+        waited = yield from self._wait_for_docker(
+            ctx,
+            saying=(
+                "Docker did not answer. Waiting up to 3 minutes for Docker before starting the "
+                "build from before this rebuild again. Stop does not end this wait: the build "
+                "from before is being put back, and it is waited for either way."
+                if rollback
+                else "Docker did not answer. The new build is finished; waiting up to 3 minutes "
+                "for Docker before replacing the containers. Stop gives up the new build and "
+                "leaves the server as it is."
+            ),
+            stoppable=not rollback,
+        )
         if waited is not None and rollback:
-            raise InstallerError(
-                f"Docker did not answer for {_spell_seconds(waited)}, so the containers of the "
-                f"build from before this rebuild were not started."
+            # Its servers were stopped by the restore before the tags moved back
+            # (`ROLLBACK_STOPPING`), so they are left stopped, on the old build.
+            raise _DockerSilentForRestart(
+                f"Docker did not answer for {_spell_seconds(waited)}, so the build from before "
+                f"this rebuild is back on its tags but was not started: its servers are "
+                f"stopped. Once Docker answers, press Start."
             )
         if waited is not None:
+            # What was and was not replaced, and the press, are the restore's to say
+            # (`_restore_rollback()`), or T170's when nothing was kept: said here too,
+            # they were said twice (cold review).
             raise InstallerError(
-                f"Docker did not answer for {_spell_seconds(waited)}, so the containers were not "
-                f"replaced. Check that Docker is running, then press the same entry under "
-                # T155: not "Rebuild" -- Update to latest and Return to the tested
-                # pin reach this too, through `rebuild()`, and all three are
-                # entries of the one menu. An install does not: its tuple ends
-                # in `up`, and this stage is only ever `rebuild_stages()`'s
-                # (`test_only_a_server_build_press_runs_the_recreate_stage`).
-                f"\u201c{server_build_presses.SERVER_BUILD}\u201d on the Modules tab again."
+                f"Docker did not answer for {_spell_seconds(waited)} after the build finished. "
+                f"Check that Docker is running."
             )
         yield (
             "Replacing the containers so the build from before this rebuild is what starts."
@@ -6082,7 +6135,7 @@ class StagedInstaller:
                 raise InstallerError(
                     "The rebuild was cancelled while the world was still loading, so its "
                     "containers were not replaced -- the server you have is still the one that "
-                    "was running before this rebuild. Nothing was touched."
+                    "was running before this rebuild."
                 ) from exc
             except docker.DockerCommandError as exc:
                 raise InstallerError(
@@ -6108,7 +6161,7 @@ class StagedInstaller:
             raise InstallerError(
                 "The rebuild was cancelled while the world was still loading, so its "
                 "containers were not replaced -- the server you have is still the one that was "
-                "running before this rebuild. Nothing was touched."
+                "running before this rebuild."
             ) from exc
         except docker.DockerCommandError as exc:
             raise InstallerError(
@@ -6124,8 +6177,12 @@ class StagedInstaller:
         cancel: threading.Event | None = None,
         missing_images_ok: bool = False,
         servers_down: ServersDownWork | None = None,
+        press: str = server_build_presses.REBUILD,
     ) -> Iterator[str]:
         """Recompile this install and restart it on what was compiled. Yields output live.
+
+        `press` is the "Server build ▾" entry that started this, named where a sentence
+        says what pressing it again does (T223); the update route passes its own.
 
         `servers_down` is the update route's (T179): what the family does between
         the recreate's stop and its start, and again in a rollback's window before
@@ -6391,11 +6448,13 @@ class StagedInstaller:
             if not kept:
                 # T170: the compile finished with no build from before to go
                 # back to. `touched` says whether the containers run it yet.
+                # No start refusal here (owner, 2026-09-28; lead, T223): a first
+                # build has no old one to go back to, so one would leave nothing runnable.
                 message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 raise InstallerError(message) from exc
             message = yield from self._restore_rollback(
-                ctx, refs, kept, touched, str(exc), servers_down=servers_down
+                ctx, refs, kept, touched, str(exc), servers_down=servers_down, press=press
             )
             self._record_error(server_dir, ctx.state, message)
             if isinstance(message, _LeftStopped):
@@ -6407,6 +6466,21 @@ class StagedInstaller:
                 # Rebuild succeeds -- in this geometry `compose up -d` would run
                 # the new import image beside the old world server.
                 warned = owe_start(server_dir) if message.mixed else ""
+                # T223 (lead ruling, option 1): exempt where the family's own work
+                # refuses Start -- T179's "Finish the world update" imports the kept
+                # build's tables and then starts it, the owner-approved exit.
+                family_refuses = servers_down is not None and servers_down.finishes_start_refusal
+                if message.untested and not family_refuses:
+                    # T223 (cold review, then the lead): owner answer D1 -- a new build
+                    # that never started is never what the next Start runs, whether
+                    # Docker went silent or refused a tag. The update route says the
+                    # refusal in its own note (`untouched_note()`); a Rebuild press here.
+                    warned = owe_start(server_dir, why=UNTESTED_BUILD)
+                    if not warned and servers_down is None:
+                        warned = (
+                            "Start is refused until this server is rebuilt: press "
+                            f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+                        )
                 raise RollbackNotDone(
                     f"{message} {warned}" if warned else str(message),
                     touched=message.touched,
@@ -6937,7 +7011,7 @@ class StagedInstaller:
                 finishes_start_refusal=family is not None and family.finishes_start_refusal,
             )
             try:
-                yield from self.rebuild(opts, cancel=cancel, servers_down=work)
+                yield from self.rebuild(opts, cancel=cancel, servers_down=work, press=press)
                 yield from work.done()
                 self._forget_older_copies(server_dir, copy)
             except WorldStoppedAfterReadyError as exc:
@@ -7704,8 +7778,12 @@ class StagedInstaller:
         failure: str,
         *,
         servers_down: ServersDownWork | None = None,
+        press: str = server_build_presses.REBUILD,
     ) -> Generator[str, None, str]:
         """Put the old build back after a compile that finished and a server that did not.
+
+        `press` is the entry the player pressed, named in the sentence that says what
+        pressing it again does (T223).
 
         `servers_down.back()` (T179's update route) runs once the tags are back and
         before the old build starts, with no Cancel -- a rollback is finished, not
@@ -7755,6 +7833,31 @@ class StagedInstaller:
                 )
         else:
             yield "Putting the build from before this rebuild back."
+            # T223 (cold review): the same bounded wait as the recreate's, because the
+            # usual reason to be here is that Docker did not answer it, and a tag asked
+            # of a silent Docker fails and leaves the live tags on the new build. Not
+            # stoppable, like every restore. In the touched arm the servers' stop
+            # above has just had its answer.
+            waited = yield from self._wait_for_docker(
+                ctx,
+                saying=(
+                    "Docker did not answer. Waiting up to 3 minutes for Docker before putting "
+                    "the build from before this rebuild back on its tags. Stop does not end "
+                    "this wait: until the tags are back, a Start would run the new build."
+                ),
+                stoppable=False,
+            )
+            if waited is not None:
+                return _NotPutBack(
+                    f"{failure} Putting the build from before this rebuild back on its tags was "
+                    f"not possible either: Docker did not answer for another "
+                    f"{_spell_seconds(waited)}. No container was replaced, so the server is "
+                    f"still running the build it had if it is up, but the image tags name the "
+                    f"new build, which has never started; the old images are on the daemon "
+                    f"under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    touched=False,
+                    untested=True,
+                )
         # The new build gets its own name FIRST, so a retag that fails part-way
         # can be undone onto it (`FAILED_TAG_SUFFIX`). If even that fails,
         # nothing has moved yet and the sentence below is already true.
@@ -7770,6 +7873,9 @@ class StagedInstaller:
                     f"onto ({problem}); the tags still name the new build, all of them. The "
                     f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
                     touched=touched,
+                    # T223 (lead, under owner answer D1): untouched, the new build never
+                    # started, so no Start may run it.
+                    untested=not touched,
                 )
             named.append(name)
         moved: list[str] = []
@@ -7795,6 +7901,7 @@ class StagedInstaller:
                     f"so the tags still name the new build, all of them. The old images are "
                     f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
                     touched=touched,
+                    untested=not touched,
                 )
             moved.append(ref)
         held = yield from self._release(named)
@@ -7807,7 +7914,8 @@ class StagedInstaller:
             return (
                 f"{failure} The build that had just finished {gone}, and no container was "
                 f"replaced: the server is still on the build it had before this rebuild, and "
-                f"the next rebuild compiles again."
+                f"pressing {server_build_presses.under_server_build(press)} again compiles it "
+                f"again."
             )
         said = (
             f" Before it was replaced, {spec.world} had printed:\n{last_words}"
@@ -7895,6 +8003,10 @@ class StagedInstaller:
             # already reporting a failure.
             yield from self._release(named)
             yield from self._release(kept)
+            if isinstance(second, _DockerSilentForRestart):
+                # T223 (cold review): never started, so not "did not report ready",
+                # and nothing of it runs on the database yet.
+                return _LeftStopped(f"{failure} {second}{said}{stopped_database}{back_failed}")
             return (
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
@@ -9940,10 +10052,7 @@ class StagedInstaller:
                 f"Docker Hub could not be reached to look up the base image {unreachable}, so "
                 f"nothing was compiled. Trying the build again in {_spell_seconds(HUB_RETRY_S)}."
             )
-            for _ in range(int(HUB_RETRY_S // DOCKER_PATIENCE_POLL_S)):
-                if ctx.cancel is not None and ctx.cancel.is_set():
-                    break
-                self._seams.sleep(DOCKER_PATIENCE_POLL_S)
+            self._pause(HUB_RETRY_S, ctx.cancel)
             if ctx.cancel is not None and ctx.cancel.is_set():
                 raise InstallerError(_cancelled_message("the build"))
         if unreachable:

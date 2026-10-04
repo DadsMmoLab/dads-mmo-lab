@@ -4426,9 +4426,17 @@ _RESOLVE_FAILED = re.compile(r"failed to resolve source metadata for (\S+): ")
 
 _REGISTRY_UNREACHABLE = re.compile(
     r"TLS handshake timeout|i/o timeout|no such host|connection reset by peer"
-    r"|connection refused|network is unreachable|context deadline exceeded"
+    r"|connection refused|connection timed out|no route to host|network is unreachable"
+    r"|context deadline exceeded|server misbehaving|Temporary failure in name resolution"
+    r"|(?::|\bunexpected) EOF$"
 )
 """The network's words, as Go's HTTP client and BuildKit's resolver print them.
+
+`EOF` only at the end of the line, after Go's `: ` or as `unexpected EOF` -- a
+connection the registry's side closed mid-answer -- so the three letters inside
+an image name or a URL are not read as one. Every word here counts only on the
+metadata step's lines (`base_image_unreachable()`), which is what keeps a `RUN`
+step's own failure out.
 
 Transport errors only. "failed to fetch anonymous token" is NOT one: it is
 BuildKit's wrapper around whatever the token request met, which was a TLS

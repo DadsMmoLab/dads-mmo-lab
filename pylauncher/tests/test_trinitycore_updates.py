@@ -610,7 +610,7 @@ def test_servers_that_cannot_be_stopped_import_nothing_and_the_record_waits_for_
 def test_a_stop_given_up_during_the_load_wait_leaves_no_record(box: Box) -> None:
     box.changes(("M", f"{REPO_SQL}/world/creature.sql"))
     box.world.abandon = True
-    with pytest.raises(InstallerError, match="Nothing was touched"):
+    with pytest.raises(InstallerError, match="cancelled while the world was still loading"):
         box.press()
     assert box.streamed() == []
     assert box.pending() is None
@@ -1511,12 +1511,22 @@ def test_a_rollback_that_stops_early_after_a_failed_import_keeps_what_was_not_im
 
 
 def _docker_gone_after_the_compile(box: Box) -> None:
-    """Docker answers until the compile is done, then not: the recreate replaces nothing.
+    """Docker answers until the compile is done, then not for 3 minutes: no recreate.
 
     T223: the recreate now waits 3 minutes for it, on a clock that moves only when
     the engine sleeps, so the refusal's measured duration is the same on every box.
     """
-    box.seams["docker_ready"] = lambda: "build" not in box.m.rec.calls
+    asked_after = [0]
+
+    def docker_ready() -> bool:
+        # Silent for the recreate's whole wait (36 asks), back for the restore after
+        # it (T223 cold review): these tests are about what the restore does next.
+        if "build" not in box.m.rec.calls:
+            return True
+        asked_after[0] += 1
+        return asked_after[0] > 36
+
+    box.seams["docker_ready"] = docker_ready
     now = [0.0]
 
     def sleep(seconds: float) -> None:
@@ -1547,9 +1557,8 @@ def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_table
     assert box.engine().start_refusal(box.server_dir) == UNFINISHED
     assert box.world.running is True, "the build from before still runs in its containers"
     assert str(failed.value) == (
-        "Docker did not answer for 3 minutes, so the containers were not replaced. Check that "
-        "Docker is running, then press the same entry under “Server build ▾” on the Modules "
-        "tab again. Putting the build from before this rebuild back was not attempted, because "
+        "Docker did not answer for 3 minutes after the build finished. Check that Docker is "
+        "running. Putting the build from before this rebuild back was not attempted, because "
         "the new build could not be given a name to undo onto (read-only layer store); the tags "
         "still name the new build, all of them. The old images are on the daemon under their "
         "-rollback tags. The source folders were left on the new commits, because the image "
@@ -1655,6 +1664,26 @@ def test_finishing_the_kept_builds_world_update_imports_its_tables_and_clears_it
     _kept_without_its_tables(box, monkeypatch)
     box.finish()
     assert first_lines(box) == ["DROP TABLE IF EXISTS creature; -- new"], "from the kept checkout"
+    assert box.pending() is None
+    CenturionController(ENTRY, box.server_dir).refuse_start()
+
+
+def test_a_kept_build_is_left_to_the_finish_and_not_given_the_untested_refusal(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T223 (lead ruling, option 1): the exemption, pinned.
+
+    The rollback stopped untouched (a tag refused after Docker answered), so the
+    new build never started -- which everywhere else writes the untested start
+    refusal. Here the family's own record refuses Start instead, and T179's
+    "Finish the world update" imports the tables and then starts the build.
+    """
+    said = _kept_without_its_tables(box, monkeypatch)
+    assert "could not be given a name to undo onto" in said, "the ground: the untouched exit"
+    assert native.owed_start_refusal(box.server_dir) is None
+    assert native.UNTESTED_BUILD_REFUSAL not in said, said
+    assert box.engine().start_refusal(box.server_dir) == UNFINISHED
+    box.finish()
     assert box.pending() is None
     CenturionController(ENTRY, box.server_dir).refuse_start()
 
