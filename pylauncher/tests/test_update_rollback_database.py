@@ -25,10 +25,13 @@ import pytest
 
 from tests.support_native import FakeSnapshot, Recorder
 from tests.test_update_to_latest import (  # noqa: F401 - `_gated` is an autouse fixture
+    ABORTED_AFTER_READY,
+    EARLY_RETURNS,
     NEW,
     OLD,
     _gated,
     _moving_heads,
+    _recreate_given_up,
     _spine,
 )
 from yulon.catalog import native
@@ -36,6 +39,8 @@ from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    RollbackNotDone,
+    WorldStoppedAfterReadyError,
     installer_for,
 )
 
@@ -311,3 +316,103 @@ def test_a_mixed_tags_record_refuses_the_update_before_anything_is_fetched(
         list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
     assert native.REBUILD_OWED_REFUSAL in str(raised.value)
     assert rec.clones == [] and "snapshot:" not in " ".join(rec.calls)
+
+
+# -- Task 4: the database follows the sources on T197's exits too ------------
+
+
+def test_a_kept_build_keeps_the_database_it_changed_and_names_the_copy_as_not_needed(
+    tmp_path: Path,
+) -> None:
+    """T71's keep: the new build came up and stopped on its data, so it is what runs."""
+    rec, server_dir, made, fake, _said, raised = _press(
+        tmp_path, WOTLK, world_output=lambda spec: ABORTED_AFTER_READY
+    )
+    assert isinstance(raised, WorldStoppedAfterReadyError), raised
+    assert len(fake.taken) == 1 and fake.put_back_calls == []
+    text = str(raised)
+    assert "The copy of acore_playerbots taken before it started is kept in" in text
+    assert fake.taken[0].files[0].name in text and "it was not needed" in text
+    assert _moving_heads(rec, server_dir, made) == {NEW}
+    assert "prune" in rec.calls, "the kept build's copy is the last one; older ones go"
+
+
+@pytest.mark.parametrize("how", ["stop-refused", "name-refused", "retag-refused"])
+def test_a_rollback_that_stops_early_keeps_the_database_with_the_new_build(
+    tmp_path: Path, how: str
+) -> None:
+    """`RollbackNotDone`: the tags still name the new build, so its sources and database stay."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    rec.ready = False
+    made = make(**EARLY_RETURNS[how](rec))
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert len(fake.taken) == 1 and fake.put_back_calls == []
+    assert _moving_heads(rec, server_dir, made) == {NEW}
+    text = str(raised.value)
+    assert "it was not needed" in text and fake.taken[0].files[0].name in text
+    assert text.endswith(native.SOURCES_LEFT_NOTE)
+
+
+def test_mixed_tags_put_the_sources_back_then_the_copy_and_still_refuse_every_start(
+    tmp_path: Path,
+) -> None:
+    """Mixed: no one build on the tags, so the sources go back -- and the database with them."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    rec.ready = False
+    made = make(**EARLY_RETURNS["mixed"](rec))
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert raised.value.mixed is True
+    core_back = _at(rec.calls, "restore:server->")
+    _at(rec.calls, "put-back:acore_playerbots", core_back)
+    assert rec.calls.count("recreate") == 1, "nothing started after the rollback"
+    assert _moving_heads(rec, server_dir, made) == {OLD}
+    assert native.owed_start_refusal(server_dir) == native.REBUILD_OWED_REFUSAL
+    assert "acore_playerbots" in str(raised.value)
+
+
+def test_mixed_tags_whose_copy_will_not_go_back_name_the_file_to_restore(tmp_path: Path) -> None:
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    rec.ready = False
+    made = make(**EARLY_RETURNS["mixed"](rec))
+    fake = FakeSnapshot(rec, put_back_error=InstallerError("mysql exited 1"))
+    made._snapshot = fake
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    assert fake.taken[0].files[0].name in text and "Maintenance" in text
+    assert "prune" not in rec.calls, "the copy named as the one to restore is not removed"
+
+
+def test_a_press_given_up_before_any_server_stopped_takes_no_copy(tmp_path: Path) -> None:
+    """`touched=False`: the stop was given up in the load wait, so `forward()` never ran."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    _recreate_given_up(rec)
+    made = make()
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(InstallerError):
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert fake.taken == [] and fake.put_back_calls == []
+
+
+def test_a_reader_that_goes_away_after_the_copy_puts_nothing_back_and_yields_nothing(
+    tmp_path: Path,
+) -> None:
+    """`GeneratorExit` after `take`: no restore (it would need a yield), and no traceback."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make()
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    press = made.update_to_latest(InstallOptions(server_dir=server_dir))
+    for line in press:
+        if line.startswith("Copied acore_playerbots"):
+            break
+    press.close()
+    assert len(fake.taken) == 1 and fake.put_back_calls == []
+    assert "prune" not in rec.calls

@@ -2132,6 +2132,16 @@ def copy_put_back_database(put: snapshot.PutBack, *, not_copied: Sequence[str] =
     return said
 
 
+def copy_back_with_the_sources(put: snapshot.PutBack) -> str:
+    """Mixed tags (T197): the sources went back, and the copy followed them (T217)."""
+    names = put.restored
+    verb = "was" if len(names) == 1 else "were"
+    return (
+        f"{_listed(names)} {verb} put back {_as_it_was(names)} just before the new build "
+        "started, after the source folders."
+    )
+
+
 def copy_not_put_back(copy: snapshot.Snapshot, reason: str) -> str:
     """Why the old build was left stopped: its database copy would not go back (T217)."""
     names = copy.databases
@@ -2148,7 +2158,7 @@ def copy_kept_note(copy: snapshot.Snapshot) -> str:
     names = copy.databases
     return (
         f"The copy of {_listed(names)} taken before it started is kept in "
-        f"{_in_backups(copy.files)}; it was not put back, because the new build is what runs."
+        f"{_in_backups(copy.files)}; it was not needed, because the new build is what runs."
     )
 
 
@@ -6602,6 +6612,8 @@ class StagedInstaller:
                 # Putting the old commits back here would be this route's own
                 # invariant broken by its own recovery.
                 yield from work.done()
+                # T217: the database stays with the build that runs, as the sources do.
+                self._forget_older_copies(server_dir, copy)
                 self._record_source_revs(
                     server_dir,
                     state,
@@ -6610,7 +6622,7 @@ class StagedInstaller:
                 )
                 # Guarded: the kept build is the sentence this press ends on, and
                 # a failure of the after-work is added to it, never in its place.
-                also = ""
+                also = self._copy_kept(copy)
                 try:
                     yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
                 except InstallerError as after:
@@ -6626,8 +6638,19 @@ class StagedInstaller:
                     # server needs a Rebuild before it can start.
                     work.settle()
                     yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                    # T217: the sources went back, so the database goes back with them
+                    # (servers stopped; every start stays refused until a Rebuild).
+                    database = ""
+                    try:
+                        yield from self._put_copy_back(server_dir, copy)
+                    except LeaveStopped as not_back:
+                        database = f" {not_back}"
+                    if copy.put is not None:
+                        database = f" {copy_back_with_the_sources(copy.put)}"
                     raise RollbackNotDone(
-                        f"{exc} {mixed_note(exc.touched)}", touched=exc.touched, mixed=True
+                        f"{exc} {mixed_note(exc.touched)}{database}",
+                        touched=exc.touched,
+                        mixed=True,
                     ) from exc
                 # T197: the rollback stopped before the old build was back on its
                 # tags, which still name the NEW build, and a start runs them. Its
@@ -6639,6 +6662,9 @@ class StagedInstaller:
                     yield from work.keep()
                 except (InstallerError, OSError) as kept_failed:
                     also = f" {kept_failed}"
+                # T217: the database stays with the new build too; its copy is kept.
+                self._forget_older_copies(server_dir, copy)
+                also += self._copy_kept(copy)
                 self._record_source_revs(
                     server_dir,
                     state,
@@ -7033,6 +7059,11 @@ class StagedInstaller:
             raise LeaveStopped(copy_not_put_back(copy.taken, str(exc))) from exc
         yield copy_put_back_line(copy.put)
         self._forget_older_copies(server_dir, copy)
+
+    @staticmethod
+    def _copy_kept(copy: _UpdateCopy) -> str:
+        """ " " + `copy_kept_note()` when a copy was taken and the new build stays; else ""."""
+        return f" {copy_kept_note(copy.taken)}" if copy.taken is not None else ""
 
     def _copy_database_sentence(self, copy: _UpdateCopy) -> str | None:
         """What the rollback says about the database, or None for its own sentence (T217)."""
