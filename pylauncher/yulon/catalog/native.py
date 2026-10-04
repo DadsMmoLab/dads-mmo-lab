@@ -441,7 +441,7 @@ minute later.
 """
 
 
-def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
+def rebuild_opening_note(*, renders_dockerfile: bool, parked: bool = False) -> str:
     """What a rebuild costs and what it leaves alone, said before the first stage.
 
     `OPENING_NOTE`'s counterpart, and a separate sentence rather than a reuse
@@ -484,7 +484,16 @@ def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
     gone downloads its packages again. A Rebuild on yulon-win11 (2026-10-04)
     failed in seconds on a Docker Hub TLS timeout under a note promising it
     would fetch nothing. What stays true is narrower: no new source code.
+
+    `parked` (T224): a kept build is recorded, and the compile clause says it may
+    be used instead -- one clause still, so the count stays what it was.
     """
+    compiles = (
+        "compiles the server again from the source and modules in the folder below, or, if the "
+        "folder has not changed since the kept build was made, uses that build instead"
+        if parked
+        else "compiles the server again from the source and modules in the folder below"
+    )
     recipe = (
         "it writes this install's build recipe — its Dockerfile and .dockerignore — again "
         "from the templates this app ships, so a fix made to them since you installed is in "
@@ -496,7 +505,7 @@ def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
         "You can stop this at any time; stopping before the containers are replaced leaves the "
         f"server you have now exactly as it is. This does {'four' if recipe else 'three'} things "
         f"and nothing else: {recipe}it "
-        "compiles the server again from the source and modules in the folder below, it replaces "
+        f"{compiles}, it replaces "
         "the running containers so the new build is what starts, and it waits for the server to "
         "come back up. It fetches no new source code, though Docker may go online while it "
         "builds: to ask Docker Hub about the base image the build starts from, and to download "
@@ -2159,6 +2168,9 @@ class _Parking:
 
     fingerprint: str | None = None
     made_unix: int = 0
+    still_kept: bool = False
+    """A kept build was being used and Docker refused a tag part-way: its names and
+    record were not touched, so it is still kept and nothing new is."""
 
 
 ROLLBACK_LEFT_STOPPED_DATABASE = (
@@ -6481,7 +6493,9 @@ class StagedInstaller:
         # next build would compile something the user never confirmed.
         ground = self._recipe_ground(server_dir) if renders else {}
         yield f"Rebuilding {self.entry.name} in {server_dir}"
-        yield rebuild_opening_note(renders_dockerfile=renders)
+        yield rebuild_opening_note(
+            renders_dockerfile=renders, parked=read_parked_build(server_dir) is not None
+        )
         yield from unchecked
         self._check_cancel(cancel)
         ctx = StageContext(
@@ -6529,8 +6543,10 @@ class StagedInstaller:
             nonlocal built
             # T224: F0, after `write-dockerfile` rendered the recipe this compiles.
             parking.fingerprint = self._seams.context_fingerprint(server_dir, refs=refs)
-            yield from self.stage_build(stage_ctx)
-            parking.made_unix = int(time.time())
+            used = yield from self._use_or_clear_the_kept_build(server_dir, refs, kept, parking)
+            if not used:
+                yield from self.stage_build(stage_ctx)
+                parking.made_unix = int(time.time())
             built = True
 
         def recreate(stage_ctx: StageContext) -> Iterator[str]:
@@ -8126,11 +8142,18 @@ class StagedInstaller:
         # T224 (owner D1): with no container replaced, the build that finished is
         # kept under `-parked` names BEFORE the `-failed` names go, because those are
         # its only names until then and letting them go deletes it.
-        not_kept = self._park(ctx, refs, kept, parking) if not touched else ""
+        still_kept = parking is not None and parking.still_kept
+        not_kept = self._park(ctx, refs, kept, parking) if not touched and not still_kept else ""
         held = yield from self._release(named)
         if not touched:
             yield from self._release(kept)
             again = server_build_presses.under_server_build(press)
+            if still_kept:
+                # The failure says the kept build was not used and is still kept.
+                return (
+                    f"{failure} No container was replaced: the server is still on the build it "
+                    f"had before this rebuild."
+                )
             if not not_kept:
                 return (
                     f"{failure} The build that had just finished is kept, and no container was "
@@ -8245,6 +8268,78 @@ class StagedInstaller:
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+
+    def _use_or_clear_the_kept_build(
+        self,
+        server_dir: Path,
+        refs: Sequence[str],
+        kept: Sequence[str],
+        parking: _Parking,
+    ) -> Generator[str, None, bool]:
+        """Use the kept build instead of compiling, or remove it first (T224). True when used.
+
+        Used only on an exact match (owner, D2): a record, F0 (`parking.fingerprint`,
+        taken just now) equal to the one it records, and every `<ref>-parked` name
+        holding the image id it records. Then the live tags move onto it, the record
+        goes and the `-parked` names with it, and the press goes on exactly as after a
+        compile: recreate, wait for ready, and the rollback kept above if it fails.
+        A tag Docker refuses part-way raises with the kept build untouched, and the
+        restore puts back the tags that moved.
+
+        Anything else removes the kept build BEFORE the compile, which needs the disk
+        it holds: its `-parked` names that are still there, and the record. That is
+        also the sweep of names a crash left without a record.
+        """
+        record = read_parked_build(server_dir)
+        names = [ref + PARKED_TAG_SUFFIX for ref in refs]
+        why = ""
+        if record is not None:
+            if parking.fingerprint is None:
+                why = "Yu'lon could not read every file in this folder to compare"
+            elif parking.fingerprint != record.fingerprint or set(record.images) != set(refs):
+                why = "the files in this folder have changed since it was made"
+            elif any(
+                self._seams.image_id(name) != record.images[ref]
+                for ref, name in zip(refs, names, strict=True)
+            ):
+                why = "its images are no longer on Docker under the names it was kept as"
+        if record is not None and not why:
+            parking.still_kept = True
+            for ref, name in zip(refs, names, strict=True):
+                problem = self._seams.tag_image(name, ref)
+                if problem:
+                    raise InstallerError(
+                        f"The build kept from {record.when()} could not be put on this "
+                        f"server's tags ({problem}), so it was not used. The kept build is still "
+                        f"kept."
+                    )
+            parking.still_kept = False
+            parking.made_unix = record.made_unix
+            forget_parked_build(server_dir)
+            yield from self._release(names)
+            back = (
+                "the build you have now is kept to put back if it does not come up"
+                if kept
+                else "there is no build from before to put back if it does not come up"
+            )
+            yield (
+                f"The build kept from {record.when()} was made from exactly the files in this "
+                f"folder now (source, modules, patches and build recipe), so it is used instead "
+                f"of compiling again. It has never been started: it is started now and waited "
+                f"for like any new build, and {back}."
+            )
+            return True
+        if record is not None:
+            yield (
+                f"A finished build from {record.when()} was kept, but {why}, so it was removed "
+                f"and the server is compiled again."
+            )
+        present = [name for name in names if self._seams.image_id(name) is not None]
+        if present:
+            logger.info(f"rebuild of {self.entry.id}: removing kept build names {present}")
+        yield from self._release(present)
+        forget_parked_build(server_dir)
+        return False
 
     def _park(
         self,

@@ -29,13 +29,21 @@ import threading
 from pathlib import Path
 
 import pytest
+import yaml
 
-from tests.support_native import Recorder, engine
-from tests.test_rebuild import _Daemon, _daemon_for, _refs, _seams_of, a_finished_install
+from tests.support_native import ENTRY, Recorder, engine
+from tests.test_rebuild import (
+    _answers,
+    _Daemon,
+    _daemon_for,
+    _refs,
+    _seams_of,
+    a_finished_install,
+)
 from tests.test_rebuild_waits_for_docker import SILENT_FOR_THE_WAIT, _Clock, _Probe
 from tests.test_stop_as_the_build_finishes import _StopAfterTagging
 from yulon import docker, server_build_presses
-from yulon.catalog import build_context, native
+from yulon.catalog import build_context, composegen, native
 from yulon.catalog.installer import InstallerError, InstallOptions
 
 RECIPE = "apps/docker/Dockerfile"
@@ -262,3 +270,290 @@ def test_parking_again_replaces_the_old_record_before_any_tag_moves(tmp_path: Pa
     assert record_at_first_park == [False], "the old record was still there as a tag moved"
     record = native.read_parked_build(server_dir)
     assert record is not None and set(record.images.values()) == {"after"}, record
+
+
+# -- Task 5: the next press uses it, or removes it before compiling -----------
+
+REUSED = "so it is used instead of compiling again"
+CHANGED = "the files in this folder have changed since it was made"
+
+
+def _parked_once(tmp_path: Path) -> tuple[Recorder, _Daemon, Path]:
+    """One press that kept its build (Docker silent through the recreate)."""
+    rec = Recorder(images=True)
+    server_dir = a_parkable_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    _refused(rec, server_dir, _silent_recreate(rec, daemon))
+    assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
+    assert native.read_parked_build(server_dir) is not None
+    rec.calls.clear()
+    rec.ready_specs.clear()
+    return rec, daemon, server_dir
+
+
+def test_the_next_rebuild_on_an_unchanged_folder_uses_the_parked_build_and_compiles_nothing(
+    tmp_path: Path,
+) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    made = native.read_parked_build(server_dir)
+    assert made is not None
+    said = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert "build" not in rec.calls, rec.calls
+    assert daemon.builds == 1, "one compile across both presses"
+    assert all(daemon.names[ref] == "after" for ref in _refs(server_dir)), daemon.names
+    recreated = [ref for ref in _refs(server_dir) if ref not in daemon.pinned]
+    assert recreated and {daemon.containers[ref] for ref in recreated} == {"after"}
+    assert rec.ready_specs, "the ready wait ran, as after a compile"
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert daemon.transient() == [], daemon.transient()
+    assert native.read_parked_build(server_dir) is None
+    told = [line for line in said if REUSED in line]
+    assert len(told) == 1 and made.when() in told[0], said
+    assert "the build you have now is kept to put back" in told[0], told
+    assert said[-1].endswith(f"was rebuilt and is running in {server_dir}"), said
+
+
+def test_the_opening_note_mentions_the_kept_build_only_when_one_is_recorded(
+    tmp_path: Path,
+) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    first = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    second = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    notes = [
+        next(line for line in run if line.startswith("You can stop this at any time"))
+        for run in (first, second)
+    ]
+    kept = "if the folder has not changed since the kept build was made, uses that build"
+    assert kept in notes[0], notes[0]
+    assert kept not in notes[1], notes[1]
+    assert "three things" in notes[0] and "three things" in notes[1], notes
+
+
+def test_the_next_rebuild_after_an_edit_removes_the_parked_build_before_compiling(
+    tmp_path: Path,
+) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    (server_dir / SOURCE).write_text("void World::Update() { tick(); }\n", encoding="utf-8")
+    log: list[str] = []
+    seams = _seams_of(rec, daemon)
+    inner_build = seams["build"]
+    assert callable(inner_build)
+
+    def build(*args: object, **kw: object) -> object:
+        log.append("build")
+        return inner_build(*args, **kw)
+
+    def remove_image(ref: str, force: bool = False) -> str:
+        log.append(f"rmi:{ref}")
+        return daemon.remove_image(ref, force)
+
+    said = list(
+        engine(rec, **{**seams, "build": build, "remove_image": remove_image}).rebuild(
+            InstallOptions(server_dir=server_dir)
+        )
+    )
+    first_parked = min(i for i, entry in enumerate(log) if entry.endswith(native.PARKED_TAG_SUFFIX))
+    assert first_parked < log.index("build"), log
+    assert all(daemon.names[ref] == "after-2" for ref in _refs(server_dir)), daemon.names
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert native.read_parked_build(server_dir) is None
+    told = [line for line in said if CHANGED in line]
+    assert len(told) == 1 and "it was removed and the server is compiled again" in told[0], said
+
+
+def test_a_parked_name_moved_by_someone_else_is_not_used(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    daemon.names[_parked(server_dir)[0]] = "somebody-elses"
+    said = list(
+        engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert "build" in rec.calls, rec.calls
+    assert all(daemon.names[ref] == "after-2" for ref in _refs(server_dir)), daemon.names
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert native.read_parked_build(server_dir) is None
+    assert not [line for line in said if REUSED in line], said
+    assert [line for line in said if "no longer on Docker under the names" in line], said
+
+
+def test_parked_names_without_a_record_are_swept_and_the_server_compiled(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    (server_dir / native.PARKED_BUILD_FILE).unlink()
+    list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls, rec.calls
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert all(daemon.names[ref] == "after-2" for ref in _refs(server_dir)), daemon.names
+
+
+def test_a_reused_build_that_does_not_come_up_is_rolled_back_and_not_parked_again(
+    tmp_path: Path,
+) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, **_seams_of(rec, daemon, wait_ready=_answers(False, True))).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    assert "build" not in rec.calls, rec.calls
+    assert "put back and is running again" in str(raised.value), raised.value
+    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert native.read_parked_build(server_dir) is None
+    assert daemon.transient() == [], daemon.transient()
+
+
+def test_a_reused_build_whose_recreate_docker_never_answers_is_parked_again(
+    tmp_path: Path,
+) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    made = native.read_parked_build(server_dir)
+    assert made is not None
+    _said, failed = _refused(rec, server_dir, _silent_recreate(rec, daemon))
+    assert "build" not in rec.calls, rec.calls
+    _on_the_old_build(daemon, server_dir)
+    assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
+    again = native.read_parked_build(server_dir)
+    assert again is not None and again.made_unix == made.made_unix, (made, again)
+    assert again.fingerprint == made.fingerprint
+    assert KEPT in str(failed), failed
+
+
+def test_a_kept_build_that_cannot_be_put_on_the_tags_stays_kept(tmp_path: Path) -> None:
+    """Docker refuses the second of four tags: the first goes back, and the kept build stays."""
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    moved: list[str] = []
+
+    def tag_image(src: str, dst: str) -> str:
+        if src.endswith(native.PARKED_TAG_SUFFIX):
+            moved.append(dst)
+            if len(moved) == 2:
+                return "Error response from daemon: read-only file system"
+        return daemon.tag_image(src, dst)
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, **_seams_of(rec, daemon, tag_image=tag_image)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    assert "build" not in rec.calls, rec.calls
+    _on_the_old_build(daemon, server_dir)
+    assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
+    assert native.read_parked_build(server_dir) is not None
+    message = str(raised.value)
+    assert "The kept build is still kept" in message, message
+    assert REMOVED not in message, message
+
+
+# -- D2: Update and Return reach `rebuild()`'s build stage too ----------------
+
+OLD = "a" * 40
+NEW = "b" * 40
+
+
+def _on_old_with_somewhere_to_go(rec: Recorder, server_dir: Path) -> None:
+    for source in ENTRY.emulator.sources:
+        rec.heads[server_dir / source.dest] = OLD
+        rec.upstream[server_dir / source.dest] = NEW
+    rec.clones.clear()
+    rec.calls.clear()
+
+
+def test_update_to_latest_onto_the_same_files_reuses_the_parked_build(tmp_path: Path) -> None:
+    """The fake's update moves the commit and no file: the folder fingerprints the same."""
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    _on_old_with_somewhere_to_go(rec, server_dir)
+    said = list(
+        engine(rec, **_seams_of(rec, daemon)).update_to_latest(
+            InstallOptions(server_dir=server_dir)
+        )
+    )
+    assert rec.clones, "the update moved its sources"
+    assert "build" not in rec.calls, rec.calls
+    assert [line for line in said if REUSED in line], said
+    assert all(daemon.names[ref] == "after" for ref in _refs(server_dir)), daemon.names
+    assert native.read_parked_build(server_dir) is None
+
+
+def test_update_to_latest_onto_new_sources_removes_it(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    _on_old_with_somewhere_to_go(rec, server_dir)
+
+    def new_code(dest: Path) -> None:
+        (dest / "NEWS.md").write_text("upstream moved on\n", encoding="utf-8")
+
+    rec.on_clone = new_code
+    said = list(
+        engine(rec, **_seams_of(rec, daemon)).update_to_latest(
+            InstallOptions(server_dir=server_dir)
+        )
+    )
+    assert "build" in rec.calls, rec.calls
+    assert [line for line in said if CHANGED in line], said
+    assert all(daemon.names[ref] == "after-2" for ref in _refs(server_dir)), daemon.names
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert native.read_parked_build(server_dir) is None
+
+
+# -- Start, Restart, Recreate and Install never reach a kept build ------------
+
+
+def _compose_up(daemon: _Daemon, server_dir: Path) -> None:
+    """`docker compose up` as compose does it: each service's `image:` from the files on disk.
+
+    Base plus override, the two compose loads on its own (the build overlay is
+    passed only by `build_staged()`). Start, Restart and Recreate are all this
+    command (`docker.start_staged()`; Recreate is stop, remove, start).
+    """
+    images: dict[str, str] = {}
+    for name in (composegen.BASE_FILE, composegen.OVERRIDE_FILE):
+        loaded = yaml.safe_load((server_dir / name).read_text(encoding="utf-8")) or {}
+        for service, body in (loaded.get("services") or {}).items():
+            if isinstance(body, dict) and "image" in body:
+                images[service] = body["image"]
+    for image in images.values():
+        if image in daemon.names and image in daemon.live:
+            daemon.containers[image] = daemon.names[image]
+
+
+def test_start_restart_recreate_and_install_never_reach_a_kept_build(tmp_path: Path) -> None:
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    for name in (composegen.BASE_FILE, composegen.OVERRIDE_FILE, composegen.BUILD_FILE):
+        text = (server_dir / name).read_text(encoding="utf-8")
+        assert native.PARKED_TAG_SUFFIX not in text, name
+    daemon.containers = {}
+    _compose_up(daemon, server_dir)
+    assert daemon.containers and set(daemon.containers.values()) == {"before"}, daemon.containers
+    assert set(daemon.containers) <= set(_refs(server_dir)), daemon.containers
+    # The argv those presses issue name services, never an image.
+    spec = ENTRY.container_spec()
+    for argv in (docker.staged_up_argv(spec), docker.recreate_argv(spec)):
+        assert not [word for word in argv if native.PARKED_TAG_SUFFIX in word], argv
+    # Install (a resume of a finished install): no question about a kept name,
+    # no tag moved, no compile.
+    asked: list[str] = []
+
+    def image_id(ref: str) -> str | None:
+        asked.append(ref)
+        return daemon.image_id(ref)
+
+    def tag_image(src: str, dst: str) -> str:
+        asked.append(f"{src}->{dst}")
+        return daemon.tag_image(src, dst)
+
+    list(
+        engine(rec, **_seams_of(rec, daemon, image_id=image_id, tag_image=tag_image)).run(
+            InstallOptions(server_dir=server_dir)
+        )
+    )
+    assert "build" not in rec.calls, rec.calls
+    assert not [entry for entry in asked if native.PARKED_TAG_SUFFIX in entry], asked
+    assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
+    assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
+    assert native.read_parked_build(server_dir) is not None
