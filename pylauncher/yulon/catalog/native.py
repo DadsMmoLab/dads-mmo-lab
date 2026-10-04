@@ -87,7 +87,7 @@ from yulon import (
     server_build_presses,
     serverlock,
 )
-from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
+from yulon.catalog import bot_count, composegen, preflight, snapshot, time_zone, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -4250,6 +4250,7 @@ class StagedInstaller:
         import_probe: docker.ImportProbe | None = None,
         reset_unfinished: docker.ResetUnfinished | None = None,
         seams: Seams | None = None,
+        database_snapshot: snapshot.DatabaseSnapshot | None = None,
     ) -> None:
         self.entry = entry
         self.installers_root = (
@@ -4258,6 +4259,9 @@ class StagedInstaller:
         self._probe = import_probe
         self._reset = reset_unfinished
         self._seams = seams if seams is not None else Seams()
+        # T217: the update route's copy of the databases its new build can change,
+        # supplied by the caller for `import_probe`'s reason (`install_wiring`).
+        self._snapshot = database_snapshot
         self._check_stage_tuple()
 
     # -- the family's contract -------------------------------------------

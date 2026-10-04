@@ -2410,6 +2410,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/gamepad.py", "walk"): (
         "the same generator calling itself on each child widget, for the reason above"
     ),
+    ("catalog/snapshot.py", "prune_older"): (
+        "T217. Lists this server's own `sql_scripts/backups/` to find the older copies "
+        '"Update the server to latest…" took of the databases its new build can change, '
+        "and removes those. It decides a DELETE, bounded twice: only files whose names carry "
+        "the update's own `_before-new-build_` label, and never the copy just taken, so a "
+        "backup the player took and a restore's safety copy are never touched. An OSError "
+        "listing it removes nothing and is logged; the copies stay, which costs disk and "
+        "nothing else"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "

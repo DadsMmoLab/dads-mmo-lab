@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from yulon import docker, git, platform, resources
-from yulon.catalog import composegen, native, preflight
+from yulon.catalog import composegen, native, preflight, snapshot
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families import extract, patch
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
@@ -904,6 +904,57 @@ class Recorder:
             before_signal()
         self.calls.append("recreate")
         return True
+
+
+SNAPSHOT_STAMP = "20261004_120000"
+"""The timestamp `FakeSnapshot` names its files with: a constant, so a test can name the file."""
+
+
+@dataclass
+class FakeSnapshot:
+    """`snapshot.DatabaseSnapshot` on a `Recorder`'s machine (T217): what was copied, and when.
+
+    Stands in for `install_wiring._MaintenanceSnapshot`, whose dump and restore
+    are the Maintenance tab's own and are driven in `test_install_wiring.py`.
+    Each call is appended to `rec.calls` -- `snapshot:<dbs>`, `put-back:<dbs>`,
+    `prune` -- so a test asserts WHERE in the press it happened against the
+    stops, tags, restores and recreates around it. It can refuse each way the
+    real one can (`take_error`, `put_back_error`), as this module's rule says a
+    double must.
+    """
+
+    rec: Recorder
+    take_error: Exception | None = None
+    put_back_error: Exception | None = None
+    taken: list[snapshot.Snapshot] = field(default_factory=list)
+    put_back_calls: list[snapshot.Snapshot] = field(default_factory=list)
+
+    def take(self, server_dir: Path, databases: Sequence[str]) -> snapshot.Snapshot:
+        self.rec.calls.append(f"snapshot:{','.join(databases)}")
+        if self.take_error is not None:
+            raise self.take_error
+        directory = server_dir / "sql_scripts" / "backups"
+        files = tuple(
+            directory / f"{SNAPSHOT_STAMP}_{snapshot.SNAPSHOT_LABEL}_{name}.sql"
+            for name in databases
+        )
+        made = snapshot.Snapshot(directory, files, tuple(databases), 2048 * len(files))
+        self.taken.append(made)
+        return made
+
+    def put_back(self, server_dir: Path, copy: snapshot.Snapshot) -> snapshot.PutBack:
+        self.rec.calls.append(f"put-back:{','.join(copy.databases)}")
+        self.put_back_calls.append(copy)
+        if self.put_back_error is not None:
+            raise self.put_back_error
+        safety = tuple(
+            copy.directory / f"{SNAPSHOT_STAMP}_pre-restore_{name}.sql" for name in copy.databases
+        )
+        return snapshot.PutBack(restored=copy.databases, safety=safety)
+
+    def prune(self, server_dir: Path, copy: snapshot.Snapshot) -> tuple[Path, ...]:
+        self.rec.calls.append("prune")
+        return ()
 
 
 def _never_provisions(**_kwargs: object) -> platform.ProvisionReport:

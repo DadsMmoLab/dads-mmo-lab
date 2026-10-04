@@ -1087,3 +1087,191 @@ def test_the_harness_writes_the_display_text_so_a_gate_transcript_keeps_its_shap
         "--- clone-core",
         "[Map 000] Building tile [22,52] (01 / 741)",
     ]
+
+
+# -- T217: the update route's database copy, on the Maintenance tab's own dump --------
+
+
+class _Census:
+    """`docker.status()` and `docker.start_database()`: a database that is up or comes up."""
+
+    def __init__(self, *, up: bool) -> None:
+        self.up = up
+        self.started: list[str] = []
+        self.stopped: list[str] = []
+
+    def status(self, *, wsl_distro: str | None = None) -> list[str]:
+        return [WOTLK.container_spec().db] if self.up else []
+
+    def start_database(self, spec: object, server_dir: Path, **_kwargs: object) -> bool:
+        self.started.append(str(server_dir))
+        self.up = True
+        return True
+
+
+def _census(monkeypatch: pytest.MonkeyPatch, *, up: bool) -> _Census:
+    census = _Census(up=up)
+    monkeypatch.setattr(install_wiring.docker, "status", census.status)
+    monkeypatch.setattr(install_wiring.docker, "start_database", census.start_database)
+    return census
+
+
+def test_the_wotlk_engine_carries_a_copy_that_dumps_only_playerbots_under_its_label(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`installer_for_app()` hands the engine the copy, and the copy is `backup(only=, label=)`."""
+    from yulon.catalog import native
+    from yulon.catalog.snapshot import SNAPSHOT_LABEL
+    from yulon.controller_wow_wotlk import maintenance
+
+    _census(monkeypatch, up=True)
+    asked: list[dict[str, object]] = []
+
+    def backup(server_dir: Path, mysql: object, **kwargs: object) -> maintenance.BackupReport:
+        asked.append({"server_dir": server_dir, "mysql": mysql, **kwargs})
+        # Held for the whole dump: a Backup or Restore pressed now is refused.
+        with pytest.raises(docker.MaintenanceLeaseTaken):
+            with docker.maintenance_lease(server_dir, "a Backup press"):
+                pass
+        path = server_dir / "sql_scripts" / "backups" / "x_before-new-build_acore_playerbots.sql"
+        return maintenance.BackupReport(
+            directory=path.parent, dumps=(maintenance.Dump("acore_playerbots", path, 2048),)
+        )
+
+    monkeypatch.setattr(maintenance, "backup", backup)
+    engine = install_wiring.installer_for_app(WOTLK, platform_id=lambda: "linux")
+    assert isinstance(engine, native.StagedInstaller)
+    copy = engine._snapshot
+    assert copy is not None
+    taken = copy.take(tmp_path, engine.snapshot_databases())
+
+    assert asked[0]["only"] == ("acore_playerbots",)
+    assert asked[0]["label"] == SNAPSHOT_LABEL
+    assert asked[0]["spec"] == WOTLK.container_spec()
+    assert isinstance(asked[0]["mysql"], DockerMysql)
+    assert taken.databases == ("acore_playerbots",) and taken.size_bytes == 2048
+    # Let go afterwards: the next Backup press is not refused.
+    with docker.maintenance_lease(tmp_path, "a Backup press"):
+        pass
+
+
+def test_the_copy_starts_a_stopped_database_alone_and_leaves_it_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A server stopped before the press has its database down; the recreate after needs it up."""
+    from yulon.controller_wow_wotlk import maintenance
+
+    census = _census(monkeypatch, up=False)
+    order: list[str] = []
+
+    def backup(server_dir: Path, mysql: object, **kwargs: object) -> maintenance.BackupReport:
+        order.append("backup" if census.up else "backup-with-the-database-down")
+        return maintenance.BackupReport(directory=tmp_path, dumps=())
+
+    monkeypatch.setattr(maintenance, "backup", backup)
+    copy = install_wiring.database_snapshot_for(WOTLK)
+    assert copy is not None
+    copy.take(tmp_path, ("acore_playerbots",))
+    assert census.started == [str(tmp_path)] and order == ["backup"]
+    assert census.up, "left running: nothing here stops the database again"
+
+
+def test_put_back_plans_and_restores_each_file_with_its_own_token_under_the_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every file the copy holds is planned, then restored with that plan's token."""
+    from yulon.catalog.snapshot import Snapshot
+    from yulon.controller_wow_wotlk import maintenance
+
+    _census(monkeypatch, up=True)
+    files = (tmp_path / "a_before-new-build_acore_playerbots.sql",)
+    restored: list[tuple[Path, str]] = []
+
+    def plan_restore(path: Path, server_dir: Path, **_kwargs: object) -> maintenance.RestorePlan:
+        return maintenance.RestorePlan(path, server_dir, ("acore_playerbots",), 10)
+
+    def restore(
+        plan: maintenance.RestorePlan, mysql: object, *, confirm: str, **_kwargs: object
+    ) -> maintenance.RestoreReport:
+        with pytest.raises(docker.MaintenanceLeaseTaken):
+            with docker.maintenance_lease(plan.server_dir, "a Restore press"):
+                pass
+        restored.append((plan.backup, confirm))
+        safety = (tmp_path / "b_pre-restore_acore_playerbots.sql",)
+        return maintenance.RestoreReport(plan.backup, plan.databases, safety)
+
+    monkeypatch.setattr(maintenance, "plan_restore", plan_restore)
+    monkeypatch.setattr(maintenance, "restore", restore)
+    copy = install_wiring.database_snapshot_for(WOTLK)
+    assert copy is not None
+    put = copy.put_back(tmp_path, Snapshot(tmp_path, files, ("acore_playerbots",)))
+    token = maintenance.RestorePlan(files[0], tmp_path, ("acore_playerbots",), 10).token
+    assert restored == [(files[0], token)]
+    assert put.restored == ("acore_playerbots",)
+    assert put.safety == (tmp_path / "b_pre-restore_acore_playerbots.sql",)
+
+
+def test_a_restore_the_plan_refuses_is_an_installer_error_naming_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yulon.catalog.snapshot import Snapshot
+    from yulon.controller_wow_wotlk import maintenance
+
+    _census(monkeypatch, up=True)
+
+    def plan_restore(path: Path, server_dir: Path, **_kwargs: object) -> maintenance.RestorePlan:
+        return maintenance.RestorePlan(path, server_dir, (), 0, refusals=("ac-worldserver is up",))
+
+    def restore(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a refused plan was restored")
+
+    monkeypatch.setattr(maintenance, "plan_restore", plan_restore)
+    monkeypatch.setattr(maintenance, "restore", restore)
+    copy = install_wiring.database_snapshot_for(WOTLK)
+    assert copy is not None
+    with pytest.raises(InstallerError, match="ac-worldserver is up"):
+        copy.put_back(tmp_path, Snapshot(tmp_path, (tmp_path / "f.sql",), ("acore_playerbots",)))
+
+
+def test_a_dump_that_fails_is_an_installer_error_and_lets_the_lease_go(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yulon.controller_wow_wotlk import maintenance
+
+    _census(monkeypatch, up=True)
+
+    def backup(*_args: object, **_kwargs: object) -> object:
+        raise maintenance.MaintenanceError("mysqldump exited 2")
+
+    monkeypatch.setattr(maintenance, "backup", backup)
+    copy = install_wiring.database_snapshot_for(WOTLK)
+    assert copy is not None
+    with pytest.raises(InstallerError, match="mysqldump exited 2"):
+        copy.take(tmp_path, ("acore_playerbots",))
+    with docker.maintenance_lease(tmp_path, "a Backup press"):
+        pass
+
+
+def test_pruning_keeps_the_last_copy_and_every_backup_the_player_took(tmp_path: Path) -> None:
+    """The owner's rule: the last copy per server is kept; nothing else of `backups/` is touched."""
+    from yulon.catalog.snapshot import prune_older
+
+    older = tmp_path / "20261003_204100_before-new-build_acore_playerbots.sql"
+    newest = tmp_path / "20261004_101500_before-new-build_acore_playerbots.sql"
+    players = tmp_path / "20261002_090000_acore_characters.sql"
+    safety = tmp_path / "20261003_204310_pre-restore_acore_playerbots.sql"
+    for path in (older, newest, players, safety):
+        path.write_text("-- dump\n", encoding="utf-8")
+
+    assert prune_older(tmp_path, (newest,)) == (older,)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        p.name for p in (newest, players, safety)
+    )
+
+
+def test_pruning_a_folder_that_cannot_be_listed_removes_nothing_and_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    from yulon.catalog.snapshot import prune_older
+
+    assert prune_older(tmp_path / "missing", ()) == ()

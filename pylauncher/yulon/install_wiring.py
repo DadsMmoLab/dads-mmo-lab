@@ -25,8 +25,9 @@ import getpass
 import logging
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from yulon import docker, platform, wsl
 from yulon.catalog import upstream
@@ -62,8 +63,18 @@ from yulon.catalog.native import (
     source_version,
     update_to_latest_confirmation,
 )
+from yulon.catalog.snapshot import (
+    SNAPSHOT_LABEL,
+    DatabaseSnapshot,
+    PutBack,
+    Snapshot,
+    prune_older,
+)
 from yulon.log import configure, get_logger, use_utf8_streams
 from yulon.ui import lines
+
+if TYPE_CHECKING:
+    from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 
 logger = get_logger(__name__)
 
@@ -156,6 +167,133 @@ def import_gate_for(
     return probe, reset
 
 
+SNAPSHOT_LEASE_REASON = (
+    "Yu'lon is copying or putting back this server's databases for an update to latest"
+)
+"""What a Backup or Restore of the same server is refused with while the update's copy runs."""
+
+
+class _MaintenanceSnapshot:
+    """`snapshot.DatabaseSnapshot` on the Maintenance tab's own dump and restore (T217).
+
+    `catalog/` must not import a controller package, so the binding is made here,
+    like the import probe's. Every call holds `docker.maintenance_lease()` for its
+    whole length, so a Backup or Restore pressed on the same server meanwhile is
+    refused instead of interleaving with it. `take()` and `put_back()` start the
+    database alone when it is down (the update's stop leaves it up; a server that
+    was stopped before the press has it down) and leave it running, since the
+    recreate that follows needs it. The world and login servers are never started
+    here, and `restore()` refuses while either runs.
+    """
+
+    def __init__(self, entry: CatalogEntry, *, wsl_distro: str | None) -> None:
+        self.entry = entry
+        self.wsl_distro = wsl_distro
+
+    def _mysql(self, server_dir: Path) -> wotlk_maintenance.DockerMysql:
+        from yulon.controller_wow_wotlk import maintenance
+
+        password = self.entry.install.db_password(server_dir) or fixed_db_password(self.entry)
+        client = native.db.client if (native := self.entry.install.native) is not None else None
+        return maintenance.DockerMysql(
+            self.entry.container_spec().db, password, wsl_distro=self.wsl_distro, client=client
+        )
+
+    def _database_up(self, server_dir: Path) -> None:
+        spec = self.entry.container_spec()
+        if spec.db in set(docker.status(wsl_distro=self.wsl_distro)):
+            return
+        docker.start_database(
+            spec,
+            server_dir,
+            because="nothing was copied or put back",
+            wsl_distro=self.wsl_distro,
+        )
+
+    def take(self, server_dir: Path, databases: Sequence[str]) -> Snapshot:
+        from yulon.controller_wow_wotlk import maintenance
+
+        spec = self.entry.container_spec()
+        try:
+            with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
+                self._database_up(server_dir)
+                report = maintenance.backup(
+                    server_dir,
+                    self._mysql(server_dir),
+                    only=tuple(databases),
+                    label=SNAPSHOT_LABEL,
+                    spec=spec,
+                    core_databases=self.entry.core_databases(),
+                    wsl_distro=self.wsl_distro,
+                )
+        except (
+            maintenance.MaintenanceError,
+            docker.DockerCommandError,
+            docker.MaintenanceLeaseTaken,
+            OSError,
+        ) as exc:
+            raise InstallerError(str(exc)) from exc
+        return Snapshot(
+            directory=report.directory,
+            files=tuple(dump.path for dump in report.dumps),
+            databases=report.databases,
+            size_bytes=report.total_bytes,
+        )
+
+    def put_back(self, server_dir: Path, snapshot: Snapshot) -> PutBack:
+        from yulon.controller_wow_wotlk import maintenance
+
+        spec = self.entry.container_spec()
+        restored: list[str] = []
+        safety: list[Path] = []
+        try:
+            with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
+                self._database_up(server_dir)
+                mysql = self._mysql(server_dir)
+                for path in snapshot.files:
+                    plan = maintenance.plan_restore(
+                        path, server_dir, spec=spec, wsl_distro=self.wsl_distro
+                    )
+                    if plan.refusals:
+                        raise maintenance.MaintenanceError(" ".join(plan.refusals))
+                    report = maintenance.restore(
+                        plan,
+                        mysql,
+                        confirm=plan.token,
+                        spec=spec,
+                        core_databases=self.entry.core_databases(),
+                        wsl_distro=self.wsl_distro,
+                    )
+                    restored.extend(report.databases)
+                    safety.extend(report.safety_backup)
+        except (
+            maintenance.MaintenanceError,
+            docker.DockerCommandError,
+            docker.MaintenanceLeaseTaken,
+            OSError,
+        ) as exc:
+            done = f" ({', '.join(restored)} went back before that)" if restored else ""
+            raise InstallerError(f"{exc}{done}") from exc
+        return PutBack(restored=tuple(restored), safety=tuple(safety))
+
+    def prune(self, server_dir: Path, snapshot: Snapshot) -> tuple[Path, ...]:
+        return prune_older(snapshot.directory, snapshot.files)
+
+
+def database_snapshot_for(
+    entry: CatalogEntry, *, wsl_distro: str | None = None
+) -> DatabaseSnapshot | None:
+    """The update route's database copy for `entry` (T217), or None for an entry with no engine.
+
+    Built for every entry with a native block: whether a copy is taken is the
+    family's answer (`databases_a_new_build_changes()`), asked by the engine, so an
+    entry whose new build changes nothing never calls it.
+    """
+    if entry.install.native is None:
+        return None
+    return _MaintenanceSnapshot(entry, wsl_distro=wsl_distro)
+
+
 def installer_for_app(
     entry: CatalogEntry,
     *,
@@ -173,6 +311,7 @@ def installer_for_app(
     (`pyplan/wsl-resident-servers.md` §7).
     """
     probe, reset = import_gate_for(entry, wsl_distro=wsl_distro)
+    copy = database_snapshot_for(entry, wsl_distro=wsl_distro)
     if wsl_distro is None:
         return installer_for(
             entry,
@@ -180,6 +319,7 @@ def installer_for_app(
             installers_root=installers_root,
             import_probe=probe,
             reset_unfinished=reset,
+            database_snapshot=copy,
         )
     return installer_for(
         entry,
@@ -187,6 +327,7 @@ def installer_for_app(
         import_probe=probe,
         reset_unfinished=reset,
         seams=Seams.in_wsl(wsl_distro),
+        database_snapshot=copy,
     )
 
 
