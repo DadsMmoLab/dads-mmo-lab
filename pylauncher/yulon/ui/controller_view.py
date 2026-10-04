@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -157,6 +156,7 @@ from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
+from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.theme import (
@@ -776,13 +776,11 @@ def ask_module_link(parent: QWidget, title: str) -> str | None:
 def ask_module_folder(parent: QWidget, title: str) -> Path | None:
     """The real `FolderAsker`: a directory, or `None` if the user cancelled.
 
-    `getExistingDirectory` answers `""` for cancel, which as a `Path` would be
-    `Path(".")` — the process's working directory, which on a packaged build is
-    wherever the user launched it from. So the empty string is turned back into
-    a cancel here rather than handed on as a folder nobody chose.
+    `pick_folder` (T215) turns Qt's `""` for cancel back into `None`: as a
+    `Path` it would be `Path(".")`, the process's working directory, which on a
+    packaged build is wherever the user launched it from.
     """
-    chosen = QFileDialog.getExistingDirectory(parent, title)
-    return Path(chosen) if chosen else None
+    return pick_folder(parent, title)
 
 
 SET_CLIENT_DIR_LABEL = "Set client folder…"
@@ -2148,7 +2146,7 @@ class ControllerServices:
 
     The tab draws none of them and says the reasons instead; `play.InstallPlay`
     refuses a press of one as well. Empty everywhere but a tree whose verbs have
-    not all been watched to work (Centurion, until T179 Task 9).
+    not all been watched to work (Centurion: Revive, held back after T208's live check).
     """
 
     no_modules_note: str = ""
@@ -3502,8 +3500,7 @@ def _for_centurion(
     bots ride on `observability`; Accounts on `accounts.level`; Characters on
     `play`. What is not offered is said where it would be: My Party (the
     registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
-    verb not yet watched to work on a live Centurion server
-    (`centurion_characters.withheld`).
+    verb Centurion withholds (`centurion_characters.withheld`).
 
     No `import_probe`: the import is the install engine's marker-gated SQL plan,
     and the Repair button's only action, `docker.repair_import()`, refuses an

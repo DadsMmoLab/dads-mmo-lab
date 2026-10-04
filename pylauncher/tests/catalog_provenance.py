@@ -326,9 +326,9 @@ PROVENANCE: dict[str, Provenance] = {
         note="asked: `... SHAPROBE 4` accepted, `5` answered `Incorrect values.`",
     ),
     # -- wow-centurion (TrinityCore 3.3.5 fork) — read at CENTURION @ faac5fc9, T179 Task 7 --
-    # Nothing here is measured yet: the live proof is T179 Task 9, which confirms the
-    # Characters verbs (`controller_wow_centurion.characters.CONFIRMED_LIVE`) and the
-    # account columns before they are moved to `measured-on`.
+    # Read from source, not measured. T208's live check (2026-10-04) confirmed five of
+    # the Characters verbs (`controller_wow_centurion.characters.CONFIRMED_LIVE`); the
+    # rows below were not moved to `measured-on` by it.
     "wow-centurion:play.equipped.template_column": Provenance(
         "read-from-source",
         "centurion/sql/characters/characters_schema.sql:1365",
@@ -370,16 +370,16 @@ PROVENANCE: dict[str, Provenance] = {
         "read-from-source",
         "src/server/scripts/Commands/cs_character.cpp:73",
         note=(
-            "`character rename`, `Console::Yes`; @ faac5fc9; confirmed on a live Centurion in "
-            "T179 Task 9 before the verb is offered"
+            "`character rename`, `Console::Yes`; @ faac5fc9; watched work on a live Centurion "
+            "in T208 (2026-10-04) before the verb was offered"
         ),
     ),
     "wow-centurion:play.set_level_command": Provenance(
         "read-from-source",
         "src/server/scripts/Commands/cs_character.cpp:72",
         note=(
-            "`character level`, `Console::Yes`; @ faac5fc9; confirmed on a live Centurion in T179"
-            " Task 9 before the verb is offered"
+            "`character level`, `Console::Yes`; @ faac5fc9; watched work on a live Centurion in "
+            "T208 (2026-10-04) before the verb was offered"
         ),
     ),
     "wow-centurion:accounts.level.table": Provenance(
