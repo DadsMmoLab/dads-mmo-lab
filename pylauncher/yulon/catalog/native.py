@@ -119,6 +119,12 @@ from yulon.ui import lines
 logger = get_logger(__name__)
 
 STATE_FILE = ".yulon-install.json"
+
+ERROR_RUN_INSTALL = "install"
+"""`InstallState.error_run` for a failure of `run()`, the install (T207)."""
+
+ERROR_RUN_REBUILD = "rebuild"
+"""`InstallState.error_run` for a failure of any press on a remembered server (T207)."""
 STATE_VERSION = 1
 
 OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE, module_answers.ANSWERS_FILE)
@@ -2566,6 +2572,15 @@ class InstallState:
     family: str = ""
     completed: tuple[str, ...] = ()
     last_error: str = ""
+    error_run: str = ""
+    """Which kind of run wrote `last_error` (T207): `ERROR_RUN_INSTALL` or `ERROR_RUN_REBUILD`.
+
+    T206's import stage stops a world the previous run left running only after a
+    failed INSTALL: a remembered server whose Rebuild, update or repair press
+    failed records `last_error` too, and its running world is somebody's server.
+    Empty in files written before T207, which is read as "not provably an
+    install" -- refused, never stopped. ADDITIVE, for `source_revs`' reason.
+    """
     updated_unix: int = 0
     version: int = STATE_VERSION
     unknown: tuple[str, ...] = ()
@@ -2632,7 +2647,9 @@ class InstallState:
         done = set(self.completed) | {stage}
         # `unknown` rides along untouched: `replace()` keeps it, and it is not in
         # `order`, so the comprehension below could not carry it even by accident.
-        return replace(self, completed=tuple(s for s in order if s in done), last_error="")
+        return replace(
+            self, completed=tuple(s for s in order if s in done), last_error="", error_run=""
+        )
 
     def has(self, stage: str) -> bool:
         """Did a previous run finish `stage`? Never a reason to skip on its own."""
@@ -2777,6 +2794,7 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
     # only family that existed then.
     family = parsed.get("family")
     error = parsed.get("last_error")
+    run = parsed.get("error_run")
     updated = parsed.get("updated_unix")
     version = parsed.get("version")
     return InstallState(
@@ -2785,6 +2803,7 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         family=family if isinstance(family, str) else "",
         completed=stages,
         last_error=error if isinstance(error, str) else "",
+        error_run=run if isinstance(run, str) and isinstance(error, str) and error else "",
         updated_unix=updated if isinstance(updated, int) else 0,
         version=version if isinstance(version, int) else STATE_VERSION,
         unknown=unknown,
@@ -2899,6 +2918,9 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         payload["source_revs"] = {rev.repo: _rev_record(rev) for rev in state.source_revs}
     if state.refused_updates:
         payload["refused_updates"] = dict(state.refused_updates)
+    if state.last_error and state.error_run:
+        # T207: only beside a failure, so a file with none is byte for byte as before.
+        payload["error_run"] = state.error_run
     tmp = path.with_name(path.name + ".new")
     try:
         server_dir.mkdir(parents=True, exist_ok=True)
@@ -4836,7 +4858,7 @@ class StagedInstaller:
         # Each stage first locks the folder to this account on Windows (T174),
         # so no secret lands in a folder anyone else can read.
         state = yield from self._staged(
-            self._locking(self.stages(), server_dir, started_empty), ctx
+            self._locking(self.stages(), server_dir, started_empty), ctx, run=ERROR_RUN_INSTALL
         )
         # OUTSIDE the staged loop, and after the last stage, on purpose. Outside,
         # because everything in there is a reason to fail the install and this
@@ -4860,7 +4882,7 @@ class StagedInstaller:
         yield f"{self.entry.name} is installed and running in {server_dir}"
 
     def _staged(
-        self, stages: Sequence[Stage], ctx: StageContext
+        self, stages: Sequence[Stage], ctx: StageContext, *, run: str = ""
     ) -> Generator[str, None, InstallState]:
         """Run `stages` in order, saying where the user is. The ONE progress reporter.
 
@@ -4929,7 +4951,7 @@ class StagedInstaller:
             # on the floor. Pinned in
             # `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`;
             # closing it means changing the clone, not this line.
-            self._record_error(ctx.server_dir, state, str(exc))
+            self._record_error(ctx.server_dir, state, str(exc), run=run)
             raise
         return state
 
@@ -8240,7 +8262,7 @@ class StagedInstaller:
         # No try/except: `write_state` catches its own `OSError` and logs
         # "could not record install progress in ...". A handler here was dead
         # code that made this function look more careful than it is.
-        write_state(server_dir, replace(state, last_error=""))
+        write_state(server_dir, replace(state, last_error="", error_run=""))
 
     def _run_one(self, stage: Stage, ctx: StageContext) -> Generator[str, None, InstallState]:
         """Run one stage and, if the family says so, write it down."""
@@ -10609,10 +10631,21 @@ class StagedInstaller:
                 )
             yield note
 
-    def _record_error(self, server_dir: Path, state: InstallState, message: str) -> None:
+    def _record_error(
+        self, server_dir: Path, state: InstallState, message: str, *, run: str = ""
+    ) -> None:
+        """Record a failure and which kind of run it was (T207); a repair press by default.
+
+        The default is the safe side of T206's question: only `run()`, the install,
+        says `ERROR_RUN_INSTALL`, and only that kind lets the next install stop the
+        world the failed run left.
+        """
         if not (server_dir / STATE_FILE).is_file():
             return
-        write_state(server_dir, replace(state, last_error=message))
+        write_state(
+            server_dir,
+            replace(state, last_error=message, error_run=run or ERROR_RUN_REBUILD),
+        )
 
 
 def _without(said: str, secret: str) -> str:

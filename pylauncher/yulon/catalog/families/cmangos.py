@@ -87,6 +87,7 @@ from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     CORRECTIONS_BUTTON_LABEL,
     CORRECTIONS_CANCEL_NOTE,
+    ERROR_RUN_INSTALL,
     IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
     RERUN_CANCEL_NOTE,
@@ -1498,7 +1499,9 @@ class CmangosInstaller(StagedInstaller):
         for every install of the game, so a container without that label, or
         with another project's, is refused, never stopped (T206 review).
         """
-        if not ctx.state.last_error:
+        if not ctx.state.last_error or ctx.state.error_run != ERROR_RUN_INSTALL:
+            # T207: only a failed INSTALL's own world; a remembered server whose
+            # Rebuild or update failed is somebody's server, refused below.
             return
         container = self.entry.container_spec().world
         try:
