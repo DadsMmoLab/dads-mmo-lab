@@ -231,6 +231,7 @@ descriptions are written by hand.
 | `apply.py::_copy_unshared::unlink` | **new (T181, Task 4)** that same `<name>.yulon-new` after a failed copy or rename; only the temporary name this call made | yes |
 | `apply.py::_client::shutil.copytree` | a directory into the user's WoW client folder, at `Interface/AddOns/<name>`. Reached by `wow-wotlk`'s BMAH keg and, since T30, by `wow-tortoise`'s two Turtle addons -- that game's tab passes no client dir at all until T30, and passes one only for a folder that already has an `Interface/` (`controller_view._client_dir_for_addons`) | yes |
 | `apply.py::_conf::shutil.copy2` | a module's conf template into the server's etc | yes |
+| `apply.py::_comment_unreadable_lines::open(w)` | **new (T204)** the module conf `_conf` just activated, rewritten once in place with each line the server's reader refuses (not blank, not a `#` comment, no `=`, or an unclosed `[`) prefixed `# `, every other byte kept; written only when such a line exists, and only right after the `shutil.copy2` above created the file | yes — the file is new and the world reads it at its next start |
 | `apply.py::_deploy::replace` | a deployed file renamed onto its final name | yes |
 | `apply.py::_deploy::shutil.copy2` | one deployed module file into the server dir | yes |
 | `apply.py::_deploy::shutil.copytree` | a deployed module directory into the server dir | yes |
