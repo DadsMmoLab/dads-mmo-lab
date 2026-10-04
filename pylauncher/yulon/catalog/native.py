@@ -76,6 +76,7 @@ from secrets import token_hex
 from typing import Any, ClassVar, Literal, Protocol
 
 from yulon import (
+    __version__,
     dbsecret,
     docker,
     git,
@@ -87,7 +88,15 @@ from yulon import (
     server_build_presses,
     serverlock,
 )
-from yulon.catalog import bot_count, composegen, preflight, snapshot, time_zone, upstream
+from yulon.catalog import (
+    bot_count,
+    build_context,
+    composegen,
+    preflight,
+    snapshot,
+    time_zone,
+    upstream,
+)
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -2138,6 +2147,20 @@ class _NotPutBack(str):
         return made
 
 
+@dataclass
+class _Parking:
+    """What `rebuild()` knows about the build it may keep, for `_restore_rollback()` (T224).
+
+    `fingerprint` is F0: taken at the start of the build stage, after the recipe
+    was rendered and before anything compiled, so it names the files the compile
+    read. `made_unix` is when that build was made (a kept build that is used and
+    kept again keeps its own date).
+    """
+
+    fingerprint: str | None = None
+    made_unix: int = 0
+
+
 ROLLBACK_LEFT_STOPPED_DATABASE = (
     "\nWhat the new build wrote into the database on its first start, if anything, is NOT put "
     "back by this -- the lines above say whether its updater ran -- so the old build will start "
@@ -2376,6 +2399,104 @@ def forget_sources_off(server_dir: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning(f"could not remove {path}: {exc}")
+
+
+PARKED_BUILD_FILE = ".yulon-parked-build.json"
+"""The record of a kept build (T224): its image ids and the fingerprint of what it was made from.
+
+Written beside the install record by a rebuild that keeps its finished build
+(`PARKED_TAG_SUFFIX`), and only after the `-parked` names are on the daemon, so
+a crash part-way leaves names without a record -- never a record naming a build
+that is not there. `{"version": 1, "fingerprint": "<64 hex>", "images": {"<ref>":
+"<id>"}, "made_unix": <int>, "app": "<version>"}`. Read by the next rebuild's
+build stage, which uses the build only when the fingerprint taken then and every
+image id match; by the Rebuild confirmation and the Server tab, which read only
+this file. Forgotten when the build is used, when it no longer matches, and by
+"Remove kept build…". Its name starts `.yulon`, which `build_context` leaves out
+of the fingerprint, so writing it changes nothing it records.
+"""
+
+_FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class ParkedBuild:
+    """One `PARKED_BUILD_FILE` record (T224)."""
+
+    fingerprint: str
+    images: Mapping[str, str]
+    made_unix: int
+    app: str
+
+    def when(self) -> str:
+        """When the kept build was made, in this computer's time, for a sentence."""
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(self.made_unix))
+
+
+def read_parked_build(server_dir: Path) -> ParkedBuild | None:
+    """The record of a kept build in `server_dir`, or None: absent, unreadable or not one.
+
+    Strict: anything this version would not have written is no record, and a
+    build with no record is never used (the next rebuild removes its names).
+    """
+    path = server_dir / PARKED_BUILD_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} is not a kept build's record: {exc}")
+        return None
+    images = raw.get("images") if isinstance(raw, dict) else None
+    if (
+        not isinstance(raw, dict)
+        or raw.get("version") != 1
+        or not isinstance(raw.get("fingerprint"), str)
+        or not _FINGERPRINT.match(raw["fingerprint"])
+        or not isinstance(images, dict)
+        or not images
+        or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in images.items())
+        or not isinstance(raw.get("made_unix"), int)
+        or isinstance(raw.get("made_unix"), bool)
+        or not isinstance(raw.get("app"), str)
+    ):
+        logger.warning(f"{path} is not a kept build's record this version reads")
+        return None
+    return ParkedBuild(raw["fingerprint"], dict(images), raw["made_unix"], raw["app"])
+
+
+def remember_parked_build(server_dir: Path, record: ParkedBuild) -> str:
+    """Write `PARKED_BUILD_FILE`, whole or not at all. "" once written, else why not."""
+    path = server_dir / PARKED_BUILD_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    body = {
+        "version": 1,
+        "fingerprint": record.fingerprint,
+        "images": dict(record.images),
+        "made_unix": record.made_unix,
+        "app": record.app,
+    }
+    try:
+        staged.write_text(json.dumps(body, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not remove {staged}: {also}")
+        return f"its record {path} could not be written ({exc})"
+    return ""
+
+
+def forget_parked_build(server_dir: Path) -> str:
+    """Remove `PARKED_BUILD_FILE`. "" once it is gone (or was never there), else why not."""
+    path = server_dir / PARKED_BUILD_FILE
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"could not remove {path}: {exc}")
+        return f"the record {path} could not be removed ({exc})"
+    return ""
 
 
 def read_head_file(dest: Path) -> str | None:
@@ -4281,6 +4402,12 @@ class Seams:
     """T224/T225: the image a ref names, or None. A rebuild reads whether its live tags moved
     (against their `-rollback` names) and whether a kept build's names still hold it."""
     build: Callable[..., docker.AttachedRun] = docker.build_staged
+    context_fingerprint: Callable[..., str | None] = build_context.fingerprint
+    """T224: the fingerprint of what a build of the server folder is made from, or None.
+
+    Read on the host, where the files are. A server inside a WSL distro answers
+    None (`in_wsl()`): walking `\\\\wsl.localhost` would boot the distro (T133) and
+    cross 9p for every file, so its finished builds are not kept (owner, D4)."""
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
     container_exists: Callable[[str], bool] = docker.container_exists
@@ -4634,6 +4761,7 @@ class Seams:
             images_built=on(docker.images_built, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
+            context_fingerprint=_no_fingerprint,
             one_shot=on(docker.run_one_shot, wsl_distro=distro),
             verify_import=refused("Checking a database import"),
             container_exists=on(docker.container_exists, wsl_distro=distro),
@@ -4667,6 +4795,11 @@ class Seams:
             install_id=recorded_install_id,
             distro=distro,
         )
+
+
+def _no_fingerprint(*_args: object, **_kwargs: object) -> None:
+    """`Seams.context_fingerprint` for a server inside a WSL distro: no answer (T224, D4)."""
+    return None
 
 
 _INSTALL_ID = re.compile(rf"^[0-9a-f]{{{composegen.INSTALL_ID_LENGTH}}}$")
@@ -6017,7 +6150,8 @@ class StagedInstaller:
         refusal says the time it measured.
 
         **`stoppable`: a Stop ends the wait before the replace, and does not end it
-        in a restore.** Before the replace a Stop gives up the new build, which is
+        in a restore.** Before the replace a Stop ends the press with no container
+        replaced, and the restore keeps the finished build (T224), which is
         `_stop_control()`'s `abandon`. In a restore the Stop is what may have
         STARTED it, and `_stop_control()` makes a Cancel there force the failed
         build's stop rather than give up, because a restore abandoned half-way
@@ -6052,6 +6186,15 @@ class StagedInstaller:
                 )
                 return None
         return self._seams.monotonic() - started
+
+    def _stop_before_replace(self) -> str:
+        """What a Stop costs in the recreate's wait for Docker (T223, T224 D1 and D4)."""
+        if self._seams.distro is not None:
+            return "Stop gives up the new build and leaves the server as it is."
+        return (
+            "Stop leaves the server as it is and keeps the finished build: a later rebuild uses "
+            "it instead of compiling, if the server folder has not changed since."
+        )
 
     def _pause(self, seconds: float, stop: threading.Event | None) -> None:
         """Sleep `seconds` a second at a time, ending early once `stop` is set (T223)."""
@@ -6118,8 +6261,7 @@ class StagedInstaller:
                 "from before is being put back, and it is waited for either way."
                 if rollback
                 else "Docker did not answer. The new build is finished; waiting up to 3 minutes "
-                "for Docker before replacing the containers. Stop gives up the new build and "
-                "leaves the server as it is."
+                f"for Docker before replacing the containers. {self._stop_before_replace()}"
             ),
             stoppable=not rollback,
         )
@@ -6381,10 +6523,14 @@ class StagedInstaller:
         # to observe that point from here.
         built = False
         touched = False
+        parking = _Parking()
 
         def build(stage_ctx: StageContext) -> Iterator[str]:
             nonlocal built
+            # T224: F0, after `write-dockerfile` rendered the recipe this compiles.
+            parking.fingerprint = self._seams.context_fingerprint(server_dir, refs=refs)
             yield from self.stage_build(stage_ctx)
+            parking.made_unix = int(time.time())
             built = True
 
         def recreate(stage_ctx: StageContext) -> Iterator[str]:
@@ -6502,7 +6648,14 @@ class StagedInstaller:
                 self._record_error(server_dir, ctx.state, message)
                 raise InstallerError(message) from exc
             message = yield from self._restore_rollback(
-                ctx, refs, kept, touched, failure, servers_down=servers_down, press=press
+                ctx,
+                refs,
+                kept,
+                touched,
+                failure,
+                servers_down=servers_down,
+                press=press,
+                parking=parking,
             )
             self._record_error(server_dir, ctx.state, message)
             if isinstance(message, _LeftStopped):
@@ -7840,8 +7993,13 @@ class StagedInstaller:
         *,
         servers_down: ServersDownWork | None = None,
         press: str = server_build_presses.REBUILD,
+        parking: _Parking | None = None,
     ) -> Generator[str, None, str]:
         """Put the old build back after a compile that finished and a server that did not.
+
+        `parking` (T224): with no container replaced, the build that finished is
+        kept as `<ref>-parked` when it is whole and the folder still fingerprints
+        as it did before the compile (`_park()`); None keeps nothing.
 
         `press` is the entry the player pressed, named in the sentence that says what
         pressing it again does (T223).
@@ -7965,18 +8123,28 @@ class StagedInstaller:
                     untested=not touched,
                 )
             moved.append(ref)
+        # T224 (owner D1): with no container replaced, the build that finished is
+        # kept under `-parked` names BEFORE the `-failed` names go, because those are
+        # its only names until then and letting them go deletes it.
+        not_kept = self._park(ctx, refs, kept, parking) if not touched else ""
         held = yield from self._release(named)
         if not touched:
             yield from self._release(kept)
+            again = server_build_presses.under_server_build(press)
+            if not not_kept:
+                return (
+                    f"{failure} The build that had just finished is kept, and no container was "
+                    f"replaced: the server is still on the build it had before this rebuild. "
+                    f"Start does not use the kept build; pressing {again} again uses it "
+                    f"instead of compiling, if the files it was made from have not changed."
+                )
             # T223 (owner D1): said, because it is what the press cost. The `-failed`
             # names were the new build's only names, so letting them go deleted it.
-            # Keeping it for the next press is T224.
             gone = "could not be used" if held else "was removed"
             return (
-                f"{failure} The build that had just finished {gone}, and no container was "
-                f"replaced: the server is still on the build it had before this rebuild, and "
-                f"pressing {server_build_presses.under_server_build(press)} again compiles it "
-                f"again."
+                f"{failure} The build that had just finished {gone}, {not_kept}, and no "
+                f"container was replaced: the server is still on the build it had before this "
+                f"rebuild, and pressing {again} again compiles it again."
             )
         said = (
             f" Before it was replaced, {spec.world} had printed:\n{last_words}"
@@ -8077,6 +8245,75 @@ class StagedInstaller:
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+
+    def _park(
+        self,
+        ctx: StageContext,
+        refs: Sequence[str],
+        kept: Sequence[str],
+        parking: _Parking | None,
+    ) -> str:
+        """Keep the build that just finished as `<ref>-parked` (T224). "" if kept, else why not.
+
+        Called in a restore's untouched arm once every live tag is back on the
+        build from before, while the new build still has its `-failed` names.
+        Kept only when every one of these holds, and the reason is the first that
+        does not:
+
+        * the server is not inside a WSL distro (owner, D4);
+        * F0, taken before the compile, has an answer;
+        * the build is whole: every ref's `-failed` name holds an image that is not
+          its `-rollback` image (a Stop part-way tags some refs only);
+        * the folder still fingerprints as F0, so nothing changed while it compiled;
+        * the old record goes, then every `-parked` name is made and holds the
+          image its `-failed` name does, then the new record is written. A crash
+          part-way leaves names with no record, which the next rebuild removes,
+          and never a record naming another build. A failure past the first tag
+          lets the `-parked` names go again.
+
+        Yields nothing: the caller's restore says what happened, once.
+        """
+        if self._seams.distro is not None:
+            return "because a server inside WSL is not kept that way yet"
+        if parking is None or parking.fingerprint is None:
+            return "because Yu'lon could not read every file it was made from"
+        made: dict[str, str] = {}
+        for ref, back in zip(refs, kept, strict=True):
+            new = self._seams.image_id(ref + FAILED_TAG_SUFFIX)
+            if new is None or new == self._seams.image_id(back):
+                return "because Docker had not named every image of it yet"
+            made[ref] = new
+        now = self._seams.context_fingerprint(ctx.server_dir, refs=refs)
+        if now != parking.fingerprint:
+            return "because files in the server folder changed while it compiled"
+        forgot = forget_parked_build(ctx.server_dir)
+        if forgot:
+            return f"because {forgot}"
+        names: list[str] = []
+        for ref in refs:
+            name = ref + PARKED_TAG_SUFFIX
+            problem = self._seams.tag_image(ref + FAILED_TAG_SUFFIX, name)
+            if problem:
+                self._let_go(names)
+                return f"because Docker would not name it to keep it ({problem})"
+            names.append(name)
+        if any(self._seams.image_id(ref + PARKED_TAG_SUFFIX) != made[ref] for ref in refs):
+            self._let_go(names)
+            return "because its kept names did not hold it when Docker was asked"
+        wrote = remember_parked_build(
+            ctx.server_dir,
+            ParkedBuild(
+                fingerprint=parking.fingerprint,
+                images=made,
+                made_unix=parking.made_unix,
+                app=__version__,
+            ),
+        )
+        if wrote:
+            self._let_go(names)
+            return f"because {wrote}"
+        logger.info(f"rebuild of {self.entry.id}: the finished build is kept as {names}")
+        return ""
 
     def _compose_tagged(self, refs: Sequence[str], kept: Sequence[str]) -> bool:
         """Whether this press's build moved a live tag, read off the daemon (T225).
