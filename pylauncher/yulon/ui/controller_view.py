@@ -103,7 +103,6 @@ from yulon import play as play_module
 from yulon import steam as steam_module
 from yulon.apply import (
     Applier,
-    ApplyError,
     ApplyReport,
     DockerSql,
     PendingSql,
@@ -121,7 +120,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
-from yulon.controller import Controller, InstallStatus, PortConflictError, StartRefused
+from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
@@ -155,6 +154,7 @@ from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
+from yulon.said import SaidByYulon
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
@@ -210,22 +210,17 @@ class _DockerSilent(NamedTuple):
     exc: Exception
 
 
-_A_PROGRAM_EXITED = re.compile(r"\bexited -?\d+:")
-"""How `docker._run` and `git` word a command that failed: `<argv> exited <code>: <stderr>`."""
-
-
 def _said_by_yulon(exc: object) -> bool:
     """Whether a failure's text is a sentence Yu'lon wrote for the player (T214).
 
     Shown as written when it is. Otherwise something broke -- a command's own
     output, a timeout's, a bug's -- and the line says so in words while the text
     goes under Details and to the log, as T194 did for Apply, Make and Restore.
-    One of Yu'lon's refusal types, then, carrying no `… exited <code>:` output:
-    `DockerCommandError` holds both kinds (a compose failure and "the world
-    service has no image: build it first"), so the type alone cannot tell them.
+    Only what the raising code marked as Yu'lon's counts (`yulon.said`): the
+    text alone cannot tell, since a refusal type also carries mysql's and
+    Docker's own words in shapes no rule here could list.
     """
-    ours = (StartRefused, docker.DockerCommandError, docker.MaintenanceLeaseTaken, ApplyError)
-    return isinstance(exc, ours) and _A_PROGRAM_EXITED.search(str(exc)) is None
+    return isinstance(exc, SaidByYulon)
 
 
 def _docker_is_away(exc: object) -> bool:

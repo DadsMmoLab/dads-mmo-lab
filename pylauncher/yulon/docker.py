@@ -35,6 +35,7 @@ from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
+from yulon.said import SaidByYulon
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -50,7 +51,15 @@ class DockerCommandError(RuntimeError):
     """Raised when a `docker` CLI command exits with a non-zero status."""
 
 
-class DockerCliMissingError(DockerCommandError):
+class DockerRefusal(DockerCommandError, SaidByYulon):
+    """A `DockerCommandError` whose message is Yu'lon's own sentence, not Docker's (T214).
+
+    Shown on the line as written. A plain `DockerCommandError` carries what
+    Docker or compose said, and goes under Details.
+    """
+
+
+class DockerCliMissingError(DockerCommandError, SaidByYulon):
     """Raised when there is no docker CLI to run at all — nothing was asked of Docker.
 
     A subclass, so every `except DockerCommandError` already written keeps
@@ -336,7 +345,7 @@ def _run(
         # this seam only asks (see `wsl.missing_distro_problem`).
         problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
         if problem is not None:
-            raise DockerCommandError(problem)
+            raise DockerRefusal(problem)
         raise DockerCommandError(
             f"docker {' '.join(argv)} exited {proc.returncode}: {proc.stderr.strip()}"
         )
@@ -358,7 +367,7 @@ def daemon_ready(*, wsl_distro: str | None = None, timeout: float = 30.0) -> boo
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
-class ServerHeldError(DockerCommandError):
+class ServerHeldError(DockerCommandError, SaidByYulon):
     """A start, stop or recreate refused because a maintenance job holds this server (T216).
 
     The message is the holder's own sentence (`hold_the_server()`'s `reason`),
@@ -480,7 +489,7 @@ def lifecycle(server_dir: Path | str) -> contextlib.AbstractContextManager[None]
     return _in_flight(server_dir)
 
 
-class MaintenanceLeaseTaken(RuntimeError):
+class MaintenanceLeaseTaken(RuntimeError, SaidByYulon):
     """A Backup or Restore refused because another one of this server is running (T216).
 
     The message is the holder's own sentence (`maintenance_lease()`'s
@@ -931,9 +940,7 @@ def _running(spec: ContainerSpec, project: str, *, wsl_distro: str | None = None
     """
     listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
-        raise DockerCommandError(
-            "could not ask Docker what is running, so the stop cannot be confirmed"
-        )
+        raise DockerRefusal("could not ask Docker what is running, so the stop cannot be confirmed")
     running = {line.strip() for line in listed}
     ours: list[str] = []
     strangers: list[tuple[str, str | None]] = []
@@ -1050,7 +1057,7 @@ def volume_exists(name: str, *, wsl_distro: str | None = None) -> bool:
     # codes rather than going through `_run()`, so it inherited none of that.
     problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
     if problem is not None:
-        raise DockerCommandError(problem)
+        raise DockerRefusal(problem)
     raise DockerCommandError(f"docker volume inspect {name} exited {proc.returncode}: {said}")
 
 
@@ -1242,7 +1249,7 @@ def start_staged(
     running = {line.strip() for line in listed}
     missing = [name for name in (spec.db, spec.auth, spec.world) if name not in running]
     if missing:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"compose reported success but {', '.join(missing)} are not running. "
             f"`docker compose logs {spec.service_for(missing[0])}` in {server_dir} "
             f"will say why."
@@ -1368,7 +1375,7 @@ def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
             return
         raise DockerCommandError(f"{name} could not be removed: {said}")
     if volume_exists(name, wsl_distro=wsl_distro):
-        raise DockerCommandError(f"{name} is still there after being removed")
+        raise DockerRefusal(f"{name} is still there after being removed")
     logger.info(f"removed volume {name}")
 
 
@@ -1632,17 +1639,17 @@ def remove_staged(
     # reason: a refusal has to happen before the command, not after it.
     running = _running(spec, project, wsl_distro=wsl_distro)
     if running.unreadable:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
             f"install in {server_dir} cannot prove those containers are its own. Nothing was "
             "removed."
         )
     if running.strangers:
-        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+        raise DockerRefusal(_stranger_message(running.strangers, project, server_dir))
 
     before = _project_containers(project, wsl_distro=wsl_distro)
     if before is None:
-        raise DockerCommandError(
+        raise DockerRefusal(
             "could not ask Docker which containers this install has, so nothing was removed"
         )
     if not before:
@@ -1675,7 +1682,7 @@ def remove_staged(
 
     after = _project_containers(project, wsl_distro=wsl_distro)
     if after is None:
-        raise DockerCommandError(
+        raise DockerRefusal(
             "the containers were asked to go, but Docker will no longer say what this install "
             "has, so the removal cannot be confirmed. Check with `docker ps -a`."
         )
@@ -2001,7 +2008,7 @@ def repair_import(
     logger.debug(f"repair_import() called: server_dir={server_dir}")
     service = spec.import_service
     if not service:
-        raise DockerCommandError(
+        raise DockerRefusal(
             "this game does not say which compose service imports its databases, so there is "
             "nothing to re-run. Nothing was changed."
         )
@@ -2011,7 +2018,7 @@ def repair_import(
         _refuse_without_an_identity(
             spec, server_dir, "The import was not re-run.", wsl_distro=wsl_distro
         )
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"the install in {server_dir} cannot say which compose project it is — its compose "
             f"files are unreadable and no {PROJECT_NAME_VAR} is pinned — so the import was not "
             "re-run. Running it against the wrong project would overwrite the wrong database."
@@ -2019,17 +2026,17 @@ def repair_import(
 
     running = _running(spec, project, wsl_distro=wsl_distro)
     if running.unreadable:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
             f"install in {server_dir} cannot prove those containers are its own. The import was "
             "not re-run."
         )
     if running.strangers:
-        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+        raise DockerRefusal(_stranger_message(running.strangers, project, server_dir))
     servers = [name for name in (spec.world, spec.auth) if name in running.ours]
     if servers:
         verb = "is" if len(servers) == 1 else "are"
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{', '.join(servers)} {verb} running. The import rewrites the databases underneath "
             "them, and a running worldserver holds characters in memory and saves them back over "
             "whatever it finds. Press Stop first, then try again."
@@ -2042,13 +2049,13 @@ def repair_import(
     before = probe()
     logger.info(f"repair_import(): the databases read as {before.state} — {before.detail}")
     if before.state == "populated":
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"this install's databases hold player data ({before.detail}). Re-running the import "
             "would overwrite it, so it was not run. If the database is damaged, restore the last "
             "backup from the Maintenance tab instead — that is the path that keeps characters."
         )
     if before.state == "imported":
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"the import has already completed ({before.detail}), so there is nothing to repair. "
             "If the server still will not start, its logs are where the reason is."
         )
@@ -2059,7 +2066,7 @@ def repair_import(
         # which is what `reset` does; without one this refuses rather than
         # leaving the install permanently unimportable.
         if reset is None:
-            raise DockerCommandError(
+            raise DockerRefusal(
                 f"this install's import stopped part-way ({before.detail}), and re-running it "
                 "cannot finish the job: AzerothCore skips the base data for a database that "
                 "already exists, so the import would record every remaining file as applied and "
@@ -2079,13 +2086,13 @@ def repair_import(
                 f"and nothing else was changed: {exc}"
             ) from exc
         if not dropped:
-            raise DockerCommandError(
+            raise DockerRefusal(
                 f"the databases read as unfinished ({before.detail}), but nothing was found to "
                 "clear, so the import was not re-run. Nothing was changed."
             )
         logger.warning(f"repair_import(): dropped {', '.join(dropped)}; re-running the import")
     if not before.repairable:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"the databases could not be asked what state they are in ({before.detail}), so the "
             "import was not re-run. Nothing can be established about them either way."
         )
@@ -2152,7 +2159,7 @@ def start_database(
         wsl_distro=wsl_distro,
     )
     if not wait_db_healthy(spec.db, timeout=timeout, wsl_distro=wsl_distro):
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{spec.db} did not report healthy within {timeout:.0f}s, so {because}. "
             f"`docker compose logs {spec.service_for(spec.db)}` in {server_dir} will say why."
         )
@@ -2475,14 +2482,14 @@ def verify_import(
         # module's `db-auth` updates and then died. Reading the state alone
         # called this a finished repair, hid the button, and left the user a
         # broken server with a success message (review, 2026-08-23).
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{service} ran and wrote some rows, but did not finish: {after.detail}. The "
             f"databases are in a half-imported state. Its last words were: "
             f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
             "rest of what it printed."
         )
     else:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
             f"Nothing is imported that was not imported before. Its last words were: "
             f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
@@ -2556,7 +2563,7 @@ def apply_module_sql(
     logger.debug(f"apply_module_sql() called: server_dir={server_dir}")
     service = spec.import_service
     if not service:
-        raise DockerCommandError(
+        raise DockerRefusal(
             "this game does not say which compose service imports its databases, so there is "
             "nothing to run its modules' SQL with. Nothing was changed."
         )
@@ -2566,7 +2573,7 @@ def apply_module_sql(
         _refuse_without_an_identity(
             spec, server_dir, "No module SQL was applied.", wsl_distro=wsl_distro
         )
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"the install in {server_dir} cannot say which compose project it is — its compose "
             f"files are unreadable and no {PROJECT_NAME_VAR} is pinned — so no module SQL was "
             "applied. Running the importer against the wrong project would write to the wrong "
@@ -2575,17 +2582,17 @@ def apply_module_sql(
 
     running = _running(spec, project, wsl_distro=wsl_distro)
     if running.unreadable:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
             f"install in {server_dir} cannot prove those containers are its own. No module SQL "
             "was applied."
         )
     if running.strangers:
-        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+        raise DockerRefusal(_stranger_message(running.strangers, project, server_dir))
     servers = [name for name in (spec.world, spec.auth) if name in running.ours]
     if servers:
         verb = "is" if len(servers) == 1 else "are"
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{', '.join(servers)} {verb} running. The importer writes to the databases "
             "underneath them, and a running worldserver holds characters in memory and saves "
             "them back over whatever it finds. Press Stop first, then try again."
@@ -2597,7 +2604,7 @@ def apply_module_sql(
     # to reach a refusal is a cost for nothing.
     sees = importer_sees_modules(service, server_dir, wsl_distro=wsl_distro)
     if sees is False:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{service} in {server_dir} has no {MODULES_DIR_NAME} folder mounted into it, so it "
             "cannot see the modules that are installed here and nothing it applied would be "
             "theirs. This is what a server built by the DML bash installer looks like — its "
@@ -2629,7 +2636,7 @@ def apply_module_sql(
         service, server_dir, allowed_modules=allowed, wsl_distro=wsl_distro, sink=output
     )
     if run.returncode != 0:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{service} exited {run.returncode}, so its modules' SQL may be part-applied. Its "
             f"last words were: {last_words(run.tail)}. The container was removed when it exited "
             "(`--rm`), so those lines are all there is — `docker compose logs` has nothing to add."
@@ -2691,7 +2698,7 @@ def _run_docker_stop(
     if proc.returncode == 0:
         return
     if deadline is not None and proc.returncode == _TIMEOUT_RETURNCODE:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"docker stop {container} did not return within {deadline:.0f} seconds, so whether "
             f"{container} stopped is not known"
         )
@@ -2730,7 +2737,7 @@ def _refuse_without_an_identity(
         # the server had stopped while it was still serving. Socket permissions,
         # a wrong DOCKER_HOST and an API timeout under load all land here
         # (review, 2026-08-22).
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"could not ask Docker what is running, and the install in {server_dir} has no "
             f"{PROJECT_NAME_VAR} pinned either, so nothing about it can be established. "
             f"{nothing_was}"
@@ -2740,7 +2747,7 @@ def _refuse_without_an_identity(
     if not up:
         logger.info("stop_staged(): no project name, and nothing running under our names")
         return
-    raise DockerCommandError(
+    raise DockerRefusal(
         f"cannot tell which containers belong to the install in {server_dir}: its compose files "
         "are unreadable and no COMPOSE_PROJECT_NAME is pinned, while "
         f"{', '.join(up)} are running. {nothing_was}"
@@ -2889,7 +2896,7 @@ on. So a look takes at most a minute, and the events are read between looks and 
 pause, which wakes for them within a quarter of a second."""
 
 
-class StopAbandoned(DockerCommandError):
+class StopAbandoned(DockerCommandError, SaidByYulon):
     """The stop was given up while it waited for a loading world; NOTHING was sent (T158).
 
     Raised when the caller's `abandon` event is set -- the app closing, a
@@ -3237,14 +3244,14 @@ def stop_staged(
     # "compose had nothing to complain about" (review, 2026-08-22).
     before = _running(spec, project, wsl_distro=wsl_distro)
     if before.unreadable:
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"Docker would not say which project owns {', '.join(before.unreadable)}, so this "
             f"install in {server_dir} cannot prove those containers are its own. Nothing was "
             "stopped. This is usually Docker being unwell rather than a second install — try "
             "again in a moment."
         )
     if before.strangers:
-        raise DockerCommandError(_stranger_message(before.strangers, project, server_dir))
+        raise DockerRefusal(_stranger_message(before.strangers, project, server_dir))
 
     # No pin is written here, though the census has just proved the basename and
     # the labels agree. Writing it down was tried and reverted the same day: a
@@ -3319,7 +3326,7 @@ def stop_staged(
         # reported as stopped, because `docker inspect` had started failing and
         # dropped it into `unreadable` — the same condition that is a hard
         # refusal three lines above, silently discarded (review, 2026-08-22).
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"{', '.join(after.unreadable)} are still running and Docker will no longer say "
             "which project owns them, so this stop cannot be confirmed. Check with "
             "`docker ps` before assuming the server is down."
@@ -3991,7 +3998,7 @@ def follow_logs(container: str, tail: int = 200, *, wsl_distro: str | None = Non
         # which names neither the distro nor anything to do about it.
         problem = wsl.missing_distro_problem(wsl_distro, exc.returncode, "\n".join(recent))
         if problem is not None:
-            raise DockerCommandError(problem) from exc
+            raise DockerRefusal(problem) from exc
         raise
     except OSError as exc:
         # The same uninstalled-mid-run case `_docker()` handles, arriving from
@@ -5649,12 +5656,12 @@ def compose_run_stdin(
             # `_docker()` would run compose in the distro's home directory here,
             # which is some OTHER project or none. A copy into a volume must not
             # guess which install it is writing to.
-            raise DockerCommandError(
+            raise DockerRefusal(
                 f"{server_dir} is not a path inside the {wsl_distro} distro, so there is no "
                 "folder there to run this install's compose project in. Nothing was copied."
             )
     elif _cwd_is_missing(server_dir):
-        raise DockerCommandError(
+        raise DockerRefusal(
             f"The server folder {server_dir} no longer exists, so Docker was not asked."
         )
     prefix = platform.docker_prefix(wsl_distro, inside=inside)

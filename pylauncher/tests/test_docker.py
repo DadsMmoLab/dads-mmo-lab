@@ -24,6 +24,7 @@ import pytest
 
 from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
+from yulon.said import SaidByYulon
 from yulon.ui import lines
 
 SPEC = docker_ctl.SPEC
@@ -2511,9 +2512,10 @@ def test_repair_import_refuses_while_this_installs_servers_are_running(
     """A live worldserver holds characters in memory and writes them back over the import."""
     calls: list[list[str]] = []
     _repair_doubles(monkeypatch, calls, running={SPEC.db, SPEC.world})
-    with pytest.raises(docker.DockerCommandError, match="Press Stop first"):
+    with pytest.raises(docker.DockerCommandError, match="Press Stop first") as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED, IMPORTED))
     assert not any(c[:3] == ["docker", "compose", "up"] for c in calls)
+    assert isinstance(raised.value, SaidByYulon), "Yu'lon's refusal is shown as written (T214)"
 
 
 def test_repair_import_will_not_run_against_containers_it_cannot_prove_are_its_own(
@@ -4042,6 +4044,7 @@ def test_a_deleted_distro_is_explained_rather_than_reported_as_a_bare_exit_code(
     said = str(raised.value)
     assert "dml-arch" in said and "no longer exists" in said, said
     assert "4294967295" not in said, "the raw exit code is still what the user reads"
+    assert isinstance(raised.value, SaidByYulon), "Yu'lon's sentence is shown as written (T214)"
 
 
 def test_an_ordinary_docker_failure_still_reports_the_command_and_the_code(
@@ -4060,6 +4063,7 @@ def test_an_ordinary_docker_failure_still_reports_the_command_and_the_code(
         docker._run(["inspect", "nope"], wsl_distro="dml-arch")
     said = str(raised.value)
     assert "docker inspect nope exited 1" in said and "no such container" in said, said
+    assert not isinstance(raised.value, SaidByYulon), "Docker's own words go under Details (T214)"
 
 
 # wsl.exe writes UTF-16LE, and `runner.stream()` decodes as UTF-8, so each ASCII

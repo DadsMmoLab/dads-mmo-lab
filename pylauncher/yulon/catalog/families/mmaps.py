@@ -155,7 +155,7 @@ class DockerRunner:
 
     def run_detached(self, spec: docker.ContainerRun, name: str, *, timeout: float) -> str:
         if self.wsl_distro is not None:
-            raise docker.DockerCommandError(
+            raise docker.DockerRefusal(
                 f"the pathfinding job cannot be started from here for a server inside the WSL "
                 f"distro {self.wsl_distro}; open Yu'lon inside that distro and start it on the "
                 "server's Server tab there"

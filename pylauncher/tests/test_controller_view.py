@@ -53,7 +53,14 @@ from yulon import (
     useraccounts,
 )
 from yulon import platform as yulon_platform
-from yulon.apply import Applier, ApplyError, ApplyReport, DockerSql, required_prompts
+from yulon.apply import (
+    Applier,
+    ApplyError,
+    ApplyRefusal,
+    ApplyReport,
+    DockerSql,
+    required_prompts,
+)
 from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -1003,9 +1010,106 @@ def test_a_module_job_yulon_refused_says_its_own_words(
     view._module_pending = "install mod-ah-bot-plus"
     refusal = "conf AuctionHouseBot.GUIDs needs a value, and none was given. Nothing was changed."
 
-    view._module_failed(ApplyError(refusal))
+    view._module_failed(ApplyRefusal(refusal))
 
     assert view.module_report.toPlainText() == f"Install mod-ah-bot-plus did not finish: {refusal}"
+    assert view.module_details.isHidden()
+
+
+def _sql_said_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """`_check_sql` on mysql's own refusal, as a module's SQL file gets it at Install."""
+    proc = subprocess.CompletedProcess(
+        ["mysql"], 1, "", "ERROR 1146 (42S02) at line 3: Table 'acore_world.x' doesn't exist"
+    )
+    try:
+        apply_module._check_sql(proc, "x.sql → acore_world")
+    except Exception as exc:
+        return exc
+    raise AssertionError("_check_sql passed a failed run")
+
+
+def _dbc_copy_said_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """`ComposeDbc.copy_dbc_dir` when `docker exec` itself failed, which says so on stdout."""
+
+    def refused(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        said = 'OCI runtime exec failed: exec failed: unable to start container process: "sh"'
+        return subprocess.CompletedProcess(["docker"], 126, said, "")
+
+    monkeypatch.setattr(docker, "compose_run_stdin", refused)
+    src = tmp_path / "dbc"
+    src.mkdir()
+    (src / "CharBaseInfo.dbc").write_bytes(b"x")
+    try:
+        apply_module.ComposeDbc(tmp_path, "ac-worldserver", "/data").copy_dbc_dir(src)
+    except Exception as exc:
+        return exc
+    raise AssertionError("the copy passed a failed docker exec")
+
+
+def _inline_sql_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """An Install whose inline SQL failed part-way: "the SQL failed (<mysql's words>), …"."""
+    from tests.test_mob_multiplier_rerun import _all, _Db, _mob
+
+    server = tmp_path / "srv"
+    server.mkdir()
+    try:
+        Applier(server, sql=_Db(fail=True)).install(_mob(), _all("3"))
+    except Exception as exc:
+        assert "the SQL failed" in str(exc), exc
+        return exc
+    raise AssertionError("the install passed a failed SQL run")
+
+
+@pytest.mark.parametrize(
+    "make",
+    [_sql_said_an_error, _dbc_copy_said_an_error, _inline_sql_failed],
+    ids=lambda f: f.__name__,
+)
+def test_a_module_job_whose_tool_refused_says_so_in_words_with_its_words_under_details(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make: Callable[[Path, pytest.MonkeyPatch], Exception],
+) -> None:
+    """T214 review: an `ApplyError` carrying mysql's or Docker's own words is not Yu'lon's.
+
+    Shown as written while the rule was "no `… exited N:` in it", so a module
+    whose SQL failed at Install put `ERROR 1146 (42S02) …` on the Modules line.
+    """
+    exc = make(tmp_path, monkeypatch)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-x"
+
+    view._module_failed(exc)
+
+    assert (
+        view.module_report.toPlainText() == "Install mod-x did not finish. Details below says why."
+    )
+    assert view.module_details.text() == str(exc)
+
+
+def test_yulons_git_advice_stays_on_the_modules_line(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """T214 review: the sentence that says to install Git is the player's, not Details'."""
+    from tests.test_apply import OWNED_ITEM, OWNED_URL, _Origins
+
+    class _NoGitAtAll:
+        def clone(self, spec: object) -> None:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    server = tmp_path / "srv"
+    server.mkdir()
+    applier = Applier(server, git=_NoGitAtAll(), remote_url=_Origins(OWNED_URL))
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(OWNED_ITEM))
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-ah-bot"
+
+    view._module_failed(caught.value)
+
+    said = view.module_report.toPlainText()
+    assert said == f"Install mod-ah-bot did not finish: {caught.value}"
+    assert "Install Git" in said
     assert view.module_details.isHidden()
 
 
@@ -1032,7 +1136,9 @@ def test_a_module_sql_run_that_failed_keeps_what_it_printed_and_says_why_in_word
     )
     raw = "docker compose run --rm ac-db-import exited 1: Error response from daemon: no such image"
 
-    view._module_sql_failed(docker.DockerCommandError(refusal if ours else raw))
+    view._module_sql_failed(
+        docker.DockerRefusal(refusal) if ours else docker.DockerCommandError(raw)
+    )
 
     lines = view.module_report.toPlainText().splitlines()
     assert lines[0] == "ac-db-import: applying mod-ah-bot…", "what it printed was lost"
@@ -1721,7 +1827,7 @@ def test_the_refusal_that_makes_this_not_a_button_that_always_works(
     second copy of it. What the tab owes is that the refusal arrives on screen
     intact and that nothing is claimed to have been applied.
     """
-    refusal = docker.DockerCommandError(
+    refusal = docker.DockerRefusal(
         "ac-worldserver is running. The importer writes to the databases underneath them, and "
         "a running worldserver holds characters in memory and saves them back over whatever it "
         "finds. Press Stop first, then try again."
@@ -5026,10 +5132,31 @@ def test_a_start_that_fails_for_another_reason_leaves_the_channel_alone(
         WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
     )
 
-    view._start_failed(docker.DockerCommandError("ac-database exited with code 1"))
+    view._start_failed(
+        _compose_up_said("dependency failed to start: container ac-database exited (1)")
+    )
 
     assert stub.rollbacks == 0
-    assert "exited with code 1" in view.problem_label.text()
+    assert view.problem_label.text() == controller_view_module.START_FAILED_BROKE
+    assert "container ac-database exited (1)" in view.problem_details.text()
+
+
+def _compose_up_said(stderr: str) -> Exception:
+    """What a failed `docker compose up` raises at Start: `docker._run`'s own wording (T214)."""
+    import yulon.docker as docker_module
+
+    def failed(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", stderr)
+
+    real = docker_module._docker
+    docker_module._docker = failed  # type: ignore[assignment]
+    try:
+        docker_module._run(["compose", "up", "-d", "--no-deps", "ac-database"])
+    except docker.DockerCommandError as exc:
+        return exc
+    finally:
+        docker_module._docker = real  # type: ignore[assignment]
+    raise AssertionError("a failed compose up passed")
 
 
 def test_a_channel_that_gave_up_shows_the_reason_rather_than_a_spinner(
@@ -10684,19 +10811,22 @@ def test_a_start_docker_could_not_hear_says_so_once_and_leaves_the_advice_to_the
     assert _near_duplicates(docker_lines) == [], docker_lines
 
 
-def test_a_start_that_failed_for_another_reason_keeps_its_own_words(
+def test_a_start_that_failed_for_another_reason_is_the_starts_to_say(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Only Docker not answering is the banner's; a compose refusal is the Start's to say."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
+    said = _compose_up_said("no such service: ac-worldserver")
+
     def refused() -> NoReturn:
-        raise docker.DockerCommandError("the world service has no image: build it first")
+        raise said
 
     view.services.controller.start = refused  # type: ignore[method-assign]
     view.start_server()
 
-    assert view.problem_label.text() == "the world service has no image: build it first"
+    assert view.problem_label.text() == controller_view_module.START_FAILED_BROKE
+    assert view.problem_details.text() == str(said)
     assert view.docker_banner.isHidden()
 
 
@@ -26179,7 +26309,7 @@ def test_a_start_that_broke_says_so_in_words_with_dockers_under_details(
             "This server's last update did not finish importing its world. Press Update again."
         ),
         docker.ServerHeldError(docker.SERVER_IN_MOTION),
-        docker.DockerCommandError(
+        docker.DockerRefusal(
             "The WSL distro dml-arch no longer exists - it was deleted, or renamed. Everything "
             "on this tab runs docker inside dml-arch, so nothing here can start."
         ),
