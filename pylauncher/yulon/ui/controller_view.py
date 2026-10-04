@@ -15826,10 +15826,12 @@ class ControllerView(QWidget):
         box.addWidget(self.tuning_panel, 1)
         box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)
-        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
-        # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a
-        # floor of 100 under it could never be the number that applied. A guard
-        # that cannot fire is a guard nobody can test (measured 2026-09-16).
+        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately. Measured 2026-09-16 the
+        # panel asked for 288px of its own, so a floor of 100 could never apply.
+        # Measured again at T190's fix round, when the file side got its scroll
+        # area: 70 side by side and 125 narrow, and side by side it was given
+        # 523 at 1280x800 -- a floor still never the number that applied, and a
+        # guard that cannot fire is a guard nobody can test.
         # "modules", because `icons.py` is a file T43 must not edit and it has
         # no `tuning` key: the fallback is the SERVER icon, which would collide
         # with the Server tab. Sharing the Modules puzzle is the smaller

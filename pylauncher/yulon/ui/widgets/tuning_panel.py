@@ -30,6 +30,7 @@ from PySide6.QtCore import QEvent, QObject, QRegularExpression, Qt, Signal, Sign
 from PySide6.QtGui import QFont, QRegularExpressionValidator, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -207,6 +208,9 @@ CARDS_MAX_WIDTH = 760
 
 EDITOR_MIN_WIDTH = 360
 """The narrowest the file editor may be side by side (T190)."""
+
+FILE_AREA_NAME = "tuning-file-scroll"
+"""The file side's scroll area, named so its own sheet reaches it and nothing else."""
 
 SIDE_SETTINGS = "Settings"
 SIDE_EDIT_FILE = "Edit file"
@@ -1022,9 +1026,32 @@ class TuningPanel(QWidget):
         self._area.setWidget(self._content)
         self.split.addWidget(self._area)
 
-        right = QWidget(self.split)
-        right.setMinimumWidth(EDITOR_MIN_WIDTH)
-        self._file_side = right
+        self._file_side = QWidget(self.split)
+        self._file_side.setMinimumWidth(EDITOR_MIN_WIDTH)
+        # The file side scrolls, as the cards' side does (T190, the Linux live
+        # test). Its rows -- two lines of file buttons at 960x640, the file's
+        # name, its note, the editor's floor, the backup line, the presses --
+        # can ask for more height than the tab has left under the restart
+        # banner and an open "Last action"; laid out straight into the
+        # splitter, Qt cut every row at once and drew them over one another.
+        # In a scroll area the rows keep their heights and the side scrolls.
+        file_side_box = QVBoxLayout(self._file_side)
+        file_side_box.setContentsMargins(0, 0, 0, 0)
+        self._file_area = QScrollArea(self._file_side)
+        self._file_area.setObjectName(FILE_AREA_NAME)
+        self._file_area.setWidgetResizable(True)
+        self._file_area.setFrameShape(QFrame.Shape.NoFrame)
+        # Not a stop of its own for the pad or Tab: the file buttons, the editor
+        # and the presses are, and the pad scrolls to whichever it lands on.
+        # Focusable, the area took Down from the switch before the conf
+        # buttons under it (T175's press, `test_controller_view`).
+        self._file_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._file_area.setStyleSheet(
+            f"QScrollArea#{FILE_AREA_NAME} {{ background-color: transparent; border: none; }}"
+            f"QScrollArea#{FILE_AREA_NAME} > QWidget > QWidget {{ background-color: transparent; }}"
+        )
+        file_side_box.addWidget(self._file_area)
+        right = QWidget(self._file_area)
         right_box = QVBoxLayout(right)
         right_box.setContentsMargins(4, 0, 0, 0)
         # The picker as BUTTONS (T44 item 13). A combo box shows one file and
@@ -1130,7 +1157,8 @@ class TuningPanel(QWidget):
         self.file_save_button.clicked.connect(lambda: self._save_file_pressed())
         file_actions.addWidget(self.file_save_button)
         right_box.addLayout(file_actions)
-        self.split.addWidget(right)
+        self._file_area.setWidget(right)
+        self.split.addWidget(self._file_side)
         outer.addWidget(self.split, 1)
         # Whether the note over the cards is on screen changes as the column
         # scrolls, resizes or lays out, and the editor's note follows it.

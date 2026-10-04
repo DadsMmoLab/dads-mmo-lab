@@ -503,6 +503,110 @@ def test_at_960_every_file_button_is_as_wide_as_its_label_needs(
     assert all(b.isVisible() for b in buttons)
 
 
+def _overlaps_on_the_file_side(panel: tp.TuningPanel) -> list[str]:
+    """Every pair of shown widgets on the file side drawn over one another.
+
+    The file side's own rows -- the file buttons, the file's name, its notes,
+    the editor, the backup line, the guard's verdict and the two presses --
+    each in the file side's coordinates, so a row a squeezed layout pushed onto
+    the next one is caught whichever widget it lands on.
+    """
+    from PySide6.QtCore import QRect
+
+    side = _file_side(panel)
+    rows: list[tuple[str, QRect]] = []
+    for name in (
+        "files",
+        "file_title",
+        "file_note",
+        "shadow_warning",
+        "editor",
+        "backup_label",
+        "lint_label",
+        "file_revert_button",
+        "file_save_button",
+    ):
+        widget = getattr(panel, name)
+        if widget.isVisible():
+            rows.append((name, QRect(widget.mapTo(side, widget.rect().topLeft()), widget.size())))
+    return [
+        f"{a} {ra.getRect()} overlaps {b} {rb.getRect()}"
+        for i, (a, ra) in enumerate(rows)
+        for b, rb in rows[i + 1 :]
+        if ra.intersects(rb)
+    ]
+
+
+def _file_side_faults(panel: tp.TuningPanel) -> list[str]:
+    """What is wrong with the file side as drawn: overlaps, lost buttons, a squeezed editor."""
+    found = _overlaps_on_the_file_side(panel)
+    bar = panel.files
+    for button in panel.file_buttons():
+        inside = bar.rect().contains(button.geometry())
+        if not (button.isVisible() and inside and button.height() > 0):
+            found.append(
+                f"file button {button.text()!r} at {button.geometry().getRect()} "
+                f"outside its {bar.width()}x{bar.height()} bar"
+            )
+    if bar.height() < bar.flow().heightForWidth(bar.width()):
+        found.append(f"the file buttons have {bar.height()}px of the {bar.minimumHeight()} needed")
+    lines = panel.editor.viewport().height() // panel.editor.fontMetrics().lineSpacing()
+    if lines < 4:
+        found.append(f"the editor shows {lines} lines")
+    for name in ("file_title", "backup_label"):
+        label = getattr(panel, name)
+        if label.isVisible() and label.height() < label.minimumSizeHint().height():
+            found.append(f"{name}: {label.height()} < {label.minimumSizeHint().height()}")
+    return found
+
+
+def test_the_banner_and_a_named_backup_leave_the_file_side_drawn_without_overlap(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Linux live test at 960x640: the restart banner over the tab and a backup named.
+
+    The file side asked for more height than the tab had left, and Qt cut every
+    row of it at once: the backup line drawn across the editor, the second row of
+    file buttons gone, Revert file and Save file over the editor's bottom edge --
+    with "Last action" open and with it folded. At every size of the drag.
+    """
+    from PySide6.QtTest import QTest
+
+    view, window, tab = _tuning_window(ps, tmp_path, monkeypatch)
+    panel = view.tuning_panel
+    _at(window, MEDIUM)
+    assert panel.current_file() == BEAST_CONF, "control: the beastmaster conf is open"
+    panel.editor.moveCursor(panel.editor.textCursor().MoveOperation.End)
+    QTest.keyClicks(panel.editor, "BeastMaster.HunterOnly = 1")
+    QTest.mouseClick(panel.file_save_button, Qt.MouseButton.LeftButton)
+    process_events()
+    assert panel.backup_label.isVisible(), "control: the save named a backup"
+    assert view.tuning_banner.isVisible(), "control: the banner says a restart is owed"
+    assert not view.tuning_report_strip.collapsed, "control: the save's report is open"
+
+    found: list[str] = []
+    for size in DRAG:
+        _at(window, size)
+        if size == SMALL:
+            panel.edit_file_button.click()
+            process_events()
+        assert panel.editor.isVisible(), f"control: the editor is shown at {size}"
+        assert len(panel.file_buttons()) == 5, "control: five files"
+        where = f"{size[0]}x{size[1]}"
+        found.extend(f"{where}: {fault}" for fault in _file_side_faults(panel))
+        found.extend(f"{where}: {cut}" for cut in _drawn_under_their_minimum(tab))
+        if size == SMALL:
+            # And again with the report folded away, wframe-79's half.
+            QTest.mouseClick(view.tuning_report_strip, Qt.MouseButton.LeftButton)
+            process_events()
+            assert view.tuning_report_strip.collapsed, "control: the strip folded"
+            found.extend(f"{where} folded: {fault}" for fault in _file_side_faults(panel))
+            found.extend(f"{where} folded: {cut}" for cut in _drawn_under_their_minimum(tab))
+            QTest.mouseClick(view.tuning_report_strip, Qt.MouseButton.LeftButton)
+            process_events()
+    assert found == [], found
+
+
 def _uncheck_and_save(view: ControllerView, key: str) -> None:
     """Switch `key` off on its card and press the card's Save, with the mouse."""
     from PySide6.QtTest import QTest
