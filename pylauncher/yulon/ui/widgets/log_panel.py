@@ -730,6 +730,11 @@ class LogPanel(QWidget):
         return self._stop_requested
 
     @property
+    def stop_button(self) -> QPushButton:
+        """The panel's Stop, greyed while nothing runs: a tab may say why beside it (T195)."""
+        return self._stop_button
+
+    @property
     def collapsed(self) -> bool:
         """True while the text pane is folded away and only the strip is drawn."""
         return self._collapse.collapsed

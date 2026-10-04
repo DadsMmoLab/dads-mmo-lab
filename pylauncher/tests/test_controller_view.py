@@ -2532,7 +2532,7 @@ def test_the_armed_warning_says_the_characters_are_kept(
     said = view.danger_label.text()
     assert "NOT" in said and "characters" in said
     assert "volume" in said
-    assert "Refresh" in said, "no way out was offered"
+    assert "Cancel" in said, "no way out was offered"
 
 
 def test_refresh_cancels_an_armed_remove(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -2807,7 +2807,7 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
     said = view.danger_label.text()
     assert "OVERWRITTEN" in said, said
     assert "restore a backup" in said, "no way out was offered"
-    assert "Refresh" in said, "no way to cancel was offered"
+    assert "Cancel" in said, "no way to cancel was offered"
 
     view.repair_import()
     assert len(calls) == 1
@@ -25917,3 +25917,289 @@ def test_the_modes_are_named_as_their_radio_buttons_say_them(
         radio.setChecked(True)
         view.show_network_plan()
         assert f"Playing: {radio.text()}" in view.network_text.toPlainText()
+
+
+# -- T195: a greyed press says why; empty panels say what to do (I3/A10/A23/I4, C35, A26)
+
+
+def test_networking_before_a_plan_says_to_press_show_plan(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I3: Apply sat greyed with nothing to say, over an empty box.
+
+    Mutation: build Apply with a bare `setEnabled(False)` and its tooltip is empty.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert not view.apply_button.isEnabled()
+    reason = view.apply_button.toolTip()
+    assert reason.startswith("Press Show plan first"), reason
+    assert not view.network_reasons.isHidden()
+    assert view.network_reasons.text() == reason
+    assert view.network_text.placeholderText().startswith("Choose who plays with you")
+    assert view.network_text.toPlainText() == ""
+
+    view.show_network_plan()
+
+    assert view.apply_button.isEnabled()
+    assert view.apply_button.toolTip() == ""
+    assert view.network_reasons.isHidden()
+
+
+def test_maintenance_with_backups_says_to_pick_one_and_show_its_plan(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A10: two backups listed, Restore greyed and the report empty, and nothing said why.
+
+    Mutation: drop the placeholder and the report box is blank again.
+    """
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    directory = tmp_path / "sql_scripts" / "backups"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("acore_characters-1.sql", "acore_characters-2.sql"):
+        (directory / name).write_bytes(b"-- dump\n")
+
+    view.refresh_backups()
+
+    assert view.backup_list.count() == 2
+    assert view.maintenance_report.toPlainText() == ""
+    hint = view.maintenance_report.placeholderText()
+    assert hint.startswith("Pick a backup") and "Show restore plan" in hint, hint
+    assert not view.restore_button.isEnabled()
+    assert view.restore_button.toolTip() == hint
+    assert not view.restore_reasons.isHidden()
+    assert view.restore_reasons.text() == hint
+
+    view.backup_list.setCurrentRow(0)
+    view.show_restore_plan()
+
+    assert view.restore_button.isEnabled()
+    assert view.restore_button.toolTip() == ""
+    assert view.restore_reasons.isHidden()
+
+
+def test_maintenance_with_no_backups_says_to_make_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.backup_list.count() == 0
+    reason = view.restore_button.toolTip()
+    assert "Back up now" in reason, reason
+    assert view.restore_reasons.text() == reason
+
+
+def test_a_refused_restore_plan_says_why_restore_stays_greyed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    made = _FakeMaintenance()
+    made.refusals = ("the server is running",)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path)
+
+    view.show_restore_plan()
+
+    assert not view.restore_button.isEnabled()
+    reason = view.restore_button.toolTip()
+    assert "cannot be restored" in reason, reason
+    assert view.restore_reasons.text() == reason
+
+
+def test_accounts_with_nothing_chosen_say_to_choose_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A23: Set password and Set GM level greyed under a list, with no word why."""
+    view = ControllerView(
+        WOTLK,
+        _with_accounts(ps, tmp_path, _StubAccounts()),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
+    view.refresh_accounts()
+
+    for button in (view.set_password_button, view.set_gm_button):
+        assert not button.isEnabled()
+        assert button.toolTip() == "Choose an account first."
+    assert not view.account_reasons.isHidden()
+    assert view.account_reasons.text() == "Choose an account first."
+
+    view.account_list.setCurrentRow(0)
+
+    for button in (view.set_password_button, view.set_gm_button):
+        assert button.isEnabled() and button.toolTip() == ""
+    assert view.account_reasons.isHidden()
+
+
+def test_a_running_start_greys_the_server_presses_with_a_wait(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I4: during a Start every Server press was grey, and nothing said it was waiting.
+
+    The Start never answers here, so the tab stays busy for the asserts.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    base = view.forget_install_button.toolTip()
+    view._run = lambda *_a, **_k: None  # type: ignore[method-assign]
+
+    view.start_button.click()
+
+    line = view.server_reasons
+    assert not line.isHidden()
+    assert line.text() == "Wait: Start is running.", line.text()
+    for button in (
+        view.start_button,
+        view.stop_button,
+        view.refresh_button,
+        view.remove_button,
+        view.forget_install_button,
+    ):
+        assert not button.isEnabled(), button.text()
+        assert button.toolTip() == "Wait: Start is running.", button.text()
+
+    view._set_busy(False)
+
+    assert "Wait:" not in line.text()
+    assert view.forget_install_button.toolTip() == base
+
+
+def test_the_server_line_says_why_start_or_stop_is_greyed_after_a_reading(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.refresh_status()
+
+    assert view.start_button.isEnabled()
+    assert not view.stop_button.isEnabled()
+    assert view.stop_button.toolTip() == "The server is not running."
+    assert view.server_reasons.text() == "The server is not running."
+
+
+def _shown_in_row(press: Any) -> list[Any]:
+    """The presses in `press`'s flow row that are not hidden, in the row's order."""
+    flow = press.parentWidget().flow()
+    widgets = [flow.itemAt(i).widget() for i in range(flow.count())]
+    return [w for w in widgets if w is not None and not w.isHidden()]
+
+
+def test_an_armed_remove_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """C35: the way out of an armed press was "Press Refresh to cancel.", a press elsewhere.
+
+    Mutation: leave Cancel's click unconnected and the remove stays armed.
+    """
+    from PySide6.QtWidgets import QGroupBox
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_remove(view)
+    cancel = view.arm_cancel_button
+    assert cancel.isHidden() and cancel.text() == "Cancel"
+
+    view.remove_button.click()
+
+    assert not cancel.isHidden()
+    danger = view.findChild(QGroupBox, "danger-zone")
+    assert danger is not None and danger.isAncestorOf(cancel)
+    row = _shown_in_row(view.remove_button)
+    assert abs(row.index(cancel) - row.index(view.remove_button)) == 1, [b.text() for b in row]
+    said = view.danger_label.text()
+    assert said.endswith("Press it again to go ahead, or Cancel."), said
+    assert "Press Refresh to cancel" not in said
+
+    view.problem_label.setText("An older line")
+    cancel.click()
+
+    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    assert cancel.isHidden()
+    assert view.problem_label.text() == ""
+    assert view.danger_label.isHidden()
+    view.remove_button.click()
+    assert calls == [], "the press after Cancel removed something"
+
+
+def test_an_armed_repair_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_repair(view)
+    _db_up(view, ps)
+    cancel = view.arm_cancel_button
+    assert not view.repair_button.isHidden(), "the repair is not offered"
+
+    view.repair_button.click()
+
+    assert not cancel.isHidden()
+    row = _shown_in_row(view.repair_button)
+    assert abs(row.index(cancel) - row.index(view.repair_button)) == 1, [b.text() for b in row]
+    said = view.danger_label.text()
+    assert said.endswith("Press it again to go ahead, or Cancel."), said
+    assert "Refresh" not in said
+
+    cancel.click()
+
+    assert view.repair_button.text() == controller_view_module.REPAIR_IDLE
+    assert cancel.isHidden()
+    assert view.problem_label.text() == ""
+    view.repair_button.click()
+    assert calls == [], "the press after Cancel imported something"
+
+
+def test_the_bot_pages_say_which_page_of_how_many(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """A26: "Page 3, 50 shown." while the total was known."""
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Guglu", level=14, online=True, source="registry")],
+            total=372,
+            by_registry=372,
+            next_after=("Guglu", 4),
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+    assert "Page 1 of 8" in view.bot_summary.text(), view.bot_summary.text()
+
+    view.next_bot_page()
+    view.next_bot_page()
+
+    said = view.bot_summary.text()
+    assert "Page 3 of 8" in said, said
+    assert "shown" not in said
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_greyed_press_says_why_on_its_own_sub_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """I3/A10/A23/I4: a Deck has no hover, so the reason is on the tab, not only in a tooltip.
+
+    Tuning and Modules are left out: their greyed presses explain themselves in
+    their own tooltips and strips, and both tabs are other tickets' to fit.
+    """
+    from PySide6.QtWidgets import QAbstractButton
+
+    from yulon.ui.widgets.reasons import ReasonLine
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    faults: list[str] = []
+    for index in range(view._tabs.count()):
+        title = view._tabs.tabText(index)
+        if title in ("Tuning", "Modules"):
+            continue
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        page = view._tabs.widget(index)
+        lines = [line for line in page.findChildren(ReasonLine) if line.isVisible()]
+        for button in page.findChildren(QAbstractButton):
+            if not button.isVisible() or button.isEnabled():
+                continue
+            reason = button.toolTip()
+            if not reason:
+                faults.append(f"{title}: {button.text()!r} has no reason")
+            elif not any(reason in line.text().splitlines() for line in lines):
+                faults.append(f"{title}: {button.text()!r}'s reason is not on the tab")
+        if found := _page_faults(page):
+            faults.append(f"{title}: {found}")
+    window.close()
+    assert faults == [], "\n".join(faults)

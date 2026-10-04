@@ -39,6 +39,7 @@ import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -191,6 +192,7 @@ from yulon.ui.widgets.page import (
 )
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
+from yulon.ui.widgets.reasons import ReasonLine, drop_reason, reason_of, set_enabled_why
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
 logger = get_logger(__name__)
@@ -4269,6 +4271,44 @@ START_FAILED_DOCKER_MISSING = (
 STATUS_SEE_THE_BANNER = "Status unknown (see above)"
 """The status line while the Docker banner above it says why (T194 C7)."""
 
+# T195 (I3/A10/A23/I4): why a press is greyed, on its tab's `ReasonLine` and its
+# tooltip, and what an empty panel is waiting for.
+ARM_CANCEL = "Cancel"
+"""The one press beside an armed Remove or Repair that puts it down (C35)."""
+
+ARMED_LAST_LINE = "Press it again to go ahead, or Cancel."
+"""How both armed paragraphs end."""
+
+SERVER_NOT_RUNNING = "The server is not running."
+SERVER_ALL_RUNNING = "The server is already running."
+
+NETWORK_NEEDS_PLAN = "Press Show plan first, so you can read what Apply will change."
+NETWORK_PLAN_NOT_READY = "Apply needs an address this plan could not find; the plan says which."
+NETWORK_HINT = (
+    "Choose who plays with you, then press Show plan to see what Yu'lon would change. "
+    "Nothing changes until you press Apply."
+)
+
+RESTORE_PICK = "Pick a backup in the list, then press Show restore plan."
+RESTORE_NO_BACKUPS = "There are no backups yet. Press Back up now to make one."
+RESTORE_REFUSED = "This backup cannot be restored right now; the plan in the Restore box says why."
+
+ACCOUNT_NEEDS_CHOICE = "Choose an account first."
+CHARACTER_NEEDS_CHOICE = "Choose a character in the list first."
+CHARACTERS_EMPTY = (
+    "There are no characters on this server yet. Make one in the game, logged in with an "
+    "account from the Accounts tab, then press Refresh the list."
+)
+
+CONSOLE_STOP_IDLE = "Nothing to stop yet: Follow worldserver log starts the log, and Stop ends it."
+CONSOLE_NO_TTY = "This computer can't type at this server's console; the note below says why."
+
+
+def wait_for(job: str) -> str:
+    """The reason a press is greyed while `job` runs: "Wait: Start is running."."""
+    return f"Wait: {job} is running." if job else "Wait: another job on this server is running."
+
+
 _POINTERS_AT_THE_BANNER = frozenset(
     {START_FAILED_NO_DOCKER, START_FAILED_DOCKER_GONE, START_FAILED_DOCKER_MISSING}
 )
@@ -6505,6 +6545,8 @@ class ControllerView(QWidget):
         # freeze for the length of a `docker compose up`).
         self._jobs: JobRunner = job_runner or threaded_job_runner(self)
         self._busy = False
+        # T195: what `_set_busy()` was last told is running, for "Wait: Start is running.".
+        self._busy_job = ""
         # T188 C4/C5: the word the realm badge holds while a Start, Stop or
         # Restart of ours runs. A poll mid-stop used to flip the badge between
         # OFFLINE and "starting".
@@ -6938,6 +6980,9 @@ class ControllerView(QWidget):
         # exists to prevent (review, 2026-08-22).
         self.problem_label = _SaidLine("", tab)
         self.problem_label.setVisible(False)
+        # T195 (I4): why a Server press is greyed -- a job of ours running, or
+        # the server already up or down -- for a Deck, which has no hover.
+        self.server_reasons = ReasonLine(tab)
         self.problem_label.setWordWrap(True)
         self.problem_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse  # so the remedy can be copied
@@ -6962,6 +7007,10 @@ class ControllerView(QWidget):
         # install — the installer imports on every healthy path.
         self.repair_button = QPushButton(REPAIR_IDLE, tab)
         self.repair_button.setVisible(False)
+        # C35 (T195): the way out of an armed Remove or Repair, beside it in the
+        # Danger zone. Shown only while one of them is armed.
+        self.arm_cancel_button = QPushButton(ARM_CANCEL, tab)
+        self.arm_cancel_button.setVisible(False)
         # Hidden until a Start is actually refused for the ports. Every v1
         # server publishes the same ones, so only one can be live at a time -
         # and refusing while leaving the user to go and find the other install
@@ -7078,6 +7127,7 @@ class ControllerView(QWidget):
         self.refresh_button.clicked.connect(self.recheck)
         self.remove_button.clicked.connect(self.remove_containers)
         self.repair_button.clicked.connect(self.repair_import)
+        self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
@@ -7123,6 +7173,7 @@ class ControllerView(QWidget):
         realm_column.addWidget(
             _bar(realm, self.start_button, self.stop_button, self.refresh_button)
         )
+        realm_column.addWidget(self.server_reasons)
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
         realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
@@ -7179,6 +7230,7 @@ class ControllerView(QWidget):
             b
             for b in (
                 self.remove_button,
+                self.arm_cancel_button,
                 self.repair_button,
                 self.forget_install_button,
                 self.uninstall_button,
@@ -7206,7 +7258,33 @@ class ControllerView(QWidget):
             danger_column.addWidget(self.uninstall_confirm_button)
         box.addWidget(danger)
         box.addStretch(1)
+        for press in self._server_presses():
+            self.server_reasons.watch(press)
         self._add_panel_tab(tab, "server", "Server")
+
+    def _server_presses(self) -> tuple[QAbstractButton, ...]:
+        """The Server tab's presses a job of ours greys, in the order the tab draws them."""
+        return tuple(
+            press
+            for press in (
+                self.start_button,
+                self.stop_button,
+                self.refresh_button,
+                self.reinstall_docker_button,
+                self.play_button,
+                self.play_menu_button,
+                self.set_client_dir_button,
+                self.forget_client_dir_button,
+                self.remove_button,
+                self.repair_button,
+                self.forget_install_button,
+                self.uninstall_button,
+                self.keep_characters_check,
+                self.delete_play_client_check,
+                self.uninstall_confirm_button,
+            )
+            if press is not None
+        )
 
     def _build_server_banners(self, tab: QWidget) -> None:
         """The Server tab's two amber banners, hidden until a check raises one."""
@@ -7970,8 +8048,14 @@ class ControllerView(QWidget):
             # explanation. The buttons below are still updated — it is the
             # sentence that has to hold still, not the state (review, 2026-08-23).
             self.status_label.setText(_status_words(status))
-        self.start_button.setEnabled(not status.all_running and not self._busy)
-        self.stop_button.setEnabled(status.any_running and not self._busy)
+        # T195: each greyed one says why, on the Server tab's reason line.
+        waiting = wait_for(self._busy_job) if self._busy else None
+        set_enabled_why(
+            self.start_button, waiting or (SERVER_ALL_RUNNING if status.all_running else None)
+        )
+        set_enabled_why(
+            self.stop_button, waiting or (None if status.any_running else SERVER_NOT_RUNNING)
+        )
         if self._badge_held is not None and ends_the_hold:
             # Asked after our job ended, so this is the job's own follow-up
             # reading: the hold ends HERE and not when the job does. Falling back
@@ -8328,8 +8412,11 @@ class ControllerView(QWidget):
         self.realm_badge.set_status(status)
         self._clear_the_verdict()
 
-    def _set_busy(self, busy: bool) -> None:
+    def _set_busy(self, busy: bool, job: str = "") -> None:
         """Lock the Server buttons while an action of ours is running.
+
+        `job` names it for the Server tab's reason line (T195): "Wait: Start is
+        running." on every press it greys there.
 
         All four, not two. Remove and Repair were left live while their own
         action ran, so a second arm-and-press during a multi-minute import or
@@ -8353,7 +8440,9 @@ class ControllerView(QWidget):
         Unlocking honours the standing gate: a game with no rebuild wiring must
         not have its greyed button handed back by a job ending.
         """
+        waited = wait_for(self._busy_job) if self._busy else None
         self._busy = busy
+        self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
         self._show_pathfinding()
         # T179 Task 6: so are Re-extract map data and Finish the world update.
@@ -8416,9 +8505,9 @@ class ControllerView(QWidget):
             # `problem_label` — which during an import is the live output the
             # user is watching — and then fires `Controller.import_state()`,
             # three `docker exec ... mysql` probes, at the database the import
-            # is writing schemas into. Worse, the armed paragraph teaches
-            # "press Refresh now", so it is the button a hesitating user
-            # reaches for (review, 2026-08-23).
+            # is writing schemas into. Worse, the armed paragraph taught
+            # "press Refresh now" until T195 gave it a Cancel, so it was the
+            # button a hesitating user reached for (review, 2026-08-23).
             self.refresh_button.setEnabled(False)
             # The Modules tab's importer too, and for the reason above rather
             # than for symmetry: `repair_import()` and `apply_module_sql()` run
@@ -8465,7 +8554,16 @@ class ControllerView(QWidget):
             # T162: the dashboard's rebuild restarts the world like the rest.
             if self.dashboard_log is not None:
                 self.rebuild_dashboard_button.setEnabled(False)
+            # T195 (I4): every Server press greyed above says what it waits for.
+            for press in self._server_presses():
+                set_enabled_why(press, wait_for(job))
         else:
+            # Start and Stop stay greyed until the next reading says which one
+            # the server's state allows; the job they waited for is over. A
+            # reason a reading gave them is kept.
+            for press in (self.start_button, self.stop_button):
+                if waited is not None and reason_of(press) == waited:
+                    drop_reason(press)
             self.compose_banner_button.setEnabled(True)
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -8560,7 +8658,7 @@ class ControllerView(QWidget):
         self._nothing_to_remove = False
         self._update_forget_visibility()
         self.problem_label.setText("")
-        self._set_busy(True)
+        self._set_busy(True, "Start")
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
@@ -8570,7 +8668,7 @@ class ControllerView(QWidget):
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
-        self._set_busy(True)
+        self._set_busy(True, "Stop")
         self.status_label.setText("Stopping…")
         self._hold_badge("stopping")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
@@ -8958,7 +9056,7 @@ class ControllerView(QWidget):
         cancel = threading.Event()
         self._docker_repair_cancel = cancel
         self._disarm_actions()
-        self._set_busy(True)
+        self._set_busy(True, "the Docker reinstall")
         self.reinstall_docker_button.setText(STOP_DOCKER_REINSTALL)
         self.reinstall_docker_button.setEnabled(True)
         self.problem_label.setText(
@@ -9022,7 +9120,7 @@ class ControllerView(QWidget):
         self._disarm_actions()
         self._hide_stop_other()
         self.problem_label.setText("")
-        self._set_busy(True)
+        self._set_busy(True, "Start")
         self.status_label.setText("Stopping the other server…")
         self._hold_badge("starting")
         self._run(
@@ -9056,7 +9154,7 @@ class ControllerView(QWidget):
         what happens next (forget, or ask again) and may drop this tab.
         """
         self._disarm_actions()
-        self._set_busy(True)
+        self._set_busy(True, "Stop")
         self.status_label.setText(STOPPING_FOR_REMOVAL)
         self.problem_label.setText(STOPPING_FOR_REMOVAL_WAIT)
         self._hold_badge("stopping")
@@ -9248,7 +9346,7 @@ class ControllerView(QWidget):
             return _UninstallOutcome(report, said)
 
         self._uninstall_running = True
-        self._set_busy(True)
+        self._set_busy(True, "Uninstall")
         self.uninstall_label.setText("Uninstalling\u2026")
         self._run(work, self._uninstall_done, self._uninstall_failed)
 
@@ -10976,15 +11074,16 @@ class ControllerView(QWidget):
             self._disarm_repair()
             self._remove_armed = True
             self.remove_button.setText(REMOVE_ARMED)
+            self.arm_cancel_button.setVisible(True)
             self._say_under_the_presses(
                 "This stops the server and deletes its containers. Your characters are NOT "
                 "affected — the database lives in a Docker volume, which is kept. The next "
                 "Start recreates the containers, which takes longer than a normal start. "
-                "Press Refresh to cancel."
+                + ARMED_LAST_LINE
             )
             return
         self._disarm_remove()
-        self._set_busy(True)
+        self._set_busy(True, "Remove containers")
         self._stop_forced = ""
         self.problem_label.setText("")
         self._say_under_the_presses("Removing containers…")
@@ -11028,6 +11127,7 @@ class ControllerView(QWidget):
         was = self._remove_armed
         self._remove_armed = False
         self.remove_button.setText(REMOVE_IDLE)
+        self.arm_cancel_button.setVisible(self._repair_armed)
         if was:
             self._clear_danger_label()
 
@@ -11036,6 +11136,7 @@ class ControllerView(QWidget):
         was = self._repair_armed
         self._repair_armed = False
         self.repair_button.setText(REPAIR_IDLE)
+        self.arm_cancel_button.setVisible(self._remove_armed)
         if was:
             self._clear_danger_label()
 
@@ -11057,6 +11158,12 @@ class ControllerView(QWidget):
         self.restore_button.setEnabled(False)
         if not self._import_running:
             self._clear_danger_label()
+
+    @Slot()
+    def cancel_armed(self) -> None:
+        """Put the armed Remove or Repair down, and the warning with it (C35, T195)."""
+        self._disarm_actions()
+        self.problem_label.setText("")
 
     @Slot(object)
     def _remove_done(self, result: object) -> None:
@@ -11101,20 +11208,20 @@ class ControllerView(QWidget):
             self._disarm_remove()
             self._repair_armed = True
             self.repair_button.setText(REPAIR_ARMED)
+            self.arm_cancel_button.setVisible(True)
             self._say_under_the_presses(
                 "This re-runs the database import that never finished. Everything in the auth, "
                 "characters and world databases is OVERWRITTEN. It is offered because those "
                 "databases hold no accounts and no characters — if that is wrong, press "
-                "Refresh now, while nothing has happened yet, and restore a backup from the "
+                "Cancel now, while nothing has happened yet, and restore a backup from the "
                 "Maintenance tab instead. The server must be stopped; the database is started "
-                "if it is not running and is left running afterwards.\n\n"
-                "Press the button again to start. A full import takes 10-30 minutes, and once "
-                "it starts it cannot be stopped and the window cannot be closed until it "
-                "finishes."
+                "if it is not running and is left running afterwards. A full import takes "
+                "10-30 minutes, and once it starts it cannot be stopped and the window cannot "
+                "be closed until it finishes.\n\n" + ARMED_LAST_LINE
             )
             return
         self._disarm_repair()
-        self._set_busy(True)
+        self._set_busy(True, "the database import")
         self._import_running = True
         self._import_tail.clear()
         # The offer described the state this run is in the middle of ending.
@@ -11206,6 +11313,11 @@ class ControllerView(QWidget):
         self.console_note.setWordWrap(True)
         self.console_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.console_note.setVisible(False)
+        # T195: the log panel greys its own Stop while nothing is followed, and
+        # Send is greyed where this computer cannot type at the console.
+        self.console_reasons = ReasonLine(tab)
+        self.console_reasons.watch(self.console_log.stop_button, standing=CONSOLE_STOP_IDLE)
+        self.console_reasons.watch(self.send_button)
         if not self._console_available():
             # Checklist 6.5 asks for this gap to be re-scoped, "not left silently
             # broken". Refusing on click and printing the error afterwards is not
@@ -11213,7 +11325,7 @@ class ControllerView(QWidget):
             # Install with the reason on the tile (6.1), so the console says it
             # the same way. Following the worldserver log needs no pty and stays
             # enabled, which is most of what this tab is for.
-            self.send_button.setEnabled(False)
+            set_enabled_why(self.send_button, CONSOLE_NO_TTY)
             self.command_edit.setEnabled(False)
             self.console_note.setText(
                 wotlk_console.NO_TTY_HELP.format(container=self.entry.container_spec().world)
@@ -11223,6 +11335,7 @@ class ControllerView(QWidget):
         box.addWidget(self.follow_button)
         box.addWidget(self.console_log, 1)
         box.addLayout(cmd_row)
+        box.addWidget(self.console_reasons)
         box.addWidget(self.console_note)
         self._add_panel_tab(tab, "console", "Console")
 
@@ -11260,7 +11373,7 @@ class ControllerView(QWidget):
         shown = command if not command.startswith("account create") else "account create ****"
         self.console_log.append(f"> {shown}")
         self._console_pending = True
-        self.send_button.setEnabled(False)
+        set_enabled_why(self.send_button, wait_for("the last command"))
         self._run(
             lambda: self.services.send_console(command),
             self._console_reply,
@@ -11282,7 +11395,7 @@ class ControllerView(QWidget):
     def _console_idle(self) -> None:
         """Re-arm Send — never where it cannot send (see `_build_console_tab()`)."""
         self._console_pending = False
-        self.send_button.setEnabled(self._console_available())
+        set_enabled_why(self.send_button, None if self._console_available() else CONSOLE_NO_TTY)
 
     @Slot(object)
     def _console_reply(self, result: object) -> None:
@@ -11388,6 +11501,10 @@ class ControllerView(QWidget):
             self.set_gm_button,
         ):
             control.setVisible(wired)
+        # T195 (A23): why a press here is greyed, under both panels.
+        self.account_reasons = ReasonLine(tab)
+        for press in (self.create_account_button, self.set_password_button, self.set_gm_button):
+            self.account_reasons.watch(press)
         # Nothing is chosen yet, and a button that acts on "whichever row
         # happens to be first" is a trap rather than a convenience.
         self._account_chosen(-1)
@@ -11398,7 +11515,11 @@ class ControllerView(QWidget):
         # every press ends in a SQL error, or worse in a row that inserts
         # cleanly and can never log in. See `catalog.Accounts`.
         if self.entry.accounts.scheme is None:
-            self.create_account_button.setEnabled(False)
+            set_enabled_why(
+                self.create_account_button,
+                f"Yu'lon can't make accounts on {self.entry.name} yet; "
+                "the line below says how to make one.",
+            )
             for widget in (self.account_name, self.account_password, self.account_gm):
                 widget.setEnabled(False)
             self.account_report.setText(
@@ -11422,6 +11543,7 @@ class ControllerView(QWidget):
         # under them used to: at 1080p it left the list 192 px over 700 of
         # nothing.
         box.addLayout(columns, 1)
+        box.addWidget(self.account_reasons)
         box.addWidget(self.account_report)
         self._add_panel_tab(tab, "accounts", "Accounts")
 
@@ -11535,6 +11657,9 @@ class ControllerView(QWidget):
             form.addRow(self.send_gear_button)
         if withheld:
             form.addRow(self.characters_withheld_label)
+        # T195 (I3): why an action is greyed, under the actions.
+        self.character_reasons = ReasonLine(actions)
+        form.addRow(self.character_reasons)
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
@@ -11561,6 +11686,8 @@ class ControllerView(QWidget):
         actions.setVisible(wired)
         for control in (self.character_list, self.refresh_characters_button):
             control.setVisible(wired)
+        for press, _label in self._character_actions():
+            self.character_reasons.watch(press)
         self._character_chosen(-1)
 
         # Two panels side by side: the roster on the left, the actions that
@@ -11630,7 +11757,7 @@ class ControllerView(QWidget):
             self._gear_waiting = None
             for button, label in self._character_actions():
                 button.setText(label)
-                button.setEnabled(False)
+                set_enabled_why(button, CHARACTER_NEEDS_CHOICE)
             return
         name = str(item.data(Qt.ItemDataRole.UserRole) or "")
         online = bool(item.data(Qt.ItemDataRole.UserRole + 1))
@@ -11641,7 +11768,7 @@ class ControllerView(QWidget):
             self.new_level.setValue(level)
         for button, label in self._character_actions():
             button.setText(f"{label} {name}")
-            button.setEnabled(True)
+            set_enabled_why(button, None)
             # Cleared on every selection, not only set on the branches below: a
             # tooltip left behind from the previous row explains a refusal that
             # is no longer being made.
@@ -11668,9 +11795,8 @@ class ControllerView(QWidget):
             # the shape the revive refusal beside it already takes. The measured
             # half, what THIS server would have done instead, stays the entry's
             # and is what a person gets when they ask.
-            self.rename_button.setEnabled(False)
             self.rename_button.setText(f"{name} {_RENAME_OFFLINE_LABEL}")
-            self.rename_button.setToolTip(offline_rename)
+            set_enabled_why(self.rename_button, offline_rename)
         if not online and not self._revive_works_offline():
             # Whether an offline revive does anything is a PER-TREE fact and the
             # entry carries it. It was a constant here, on the strength of a
@@ -11681,8 +11807,8 @@ class ControllerView(QWidget):
             # `ConvertCorpseForPlayer`, which resurrects at the next login and
             # touches no health. Every other action here works offline; the
             # teleport's own help says so in as many words.
-            self.revive_button.setEnabled(False)
             self.revive_button.setText(f"{name} has to be logged in to be revived")
+            set_enabled_why(self.revive_button, f"{name} has to be logged in to be revived.")
         # The gear read is two `docker exec ... mysql` calls, so it runs through
         # the job runner and the button waits for it (T96). It ran right here
         # until then, on the GUI thread: ~240 ms per call on Docker Desktop
@@ -11692,7 +11818,7 @@ class ControllerView(QWidget):
         if "send_gear" in self.services.characters_withheld:
             return  # T179: not drawn, so nothing to read for it
         self.send_gear_button.setText(f"Reading what {name} is wearing…")
-        self.send_gear_button.setEnabled(False)
+        set_enabled_why(self.send_gear_button, f"Wait: Yu'lon is reading what {name} is wearing.")
         self._ask_for_gear(self._gear_generation, name)
 
     def _ask_for_gear(self, generation: int, name: str) -> None:
@@ -11745,8 +11871,8 @@ class ControllerView(QWidget):
         self._next_gear_read()
         if generation != self._gear_generation:
             return
-        self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
-        self.send_gear_button.setEnabled(True)
+        set_enabled_why(self.send_gear_button, None)
+        self.send_gear_button.setToolTip("")
         if refusal is not None:
             # The read did not answer, and WHY is the only useful thing to draw.
             # Measured on the live Vanilla server, 2026-09-07 (8.4c): two
@@ -11755,7 +11881,7 @@ class ControllerView(QWidget):
             # about the character that was false, in place of a sentence about
             # the server that was true.
             self.send_gear_button.setText(refusal[0])
-            self.send_gear_button.setEnabled(False)
+            set_enabled_why(self.send_gear_button, refusal[1])
         elif pieces:
             plural = "mail" if mails == 1 else "mails"
             self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} {plural})")
@@ -11763,7 +11889,9 @@ class ControllerView(QWidget):
             # Nothing worn is not a failure and not a thing to press: the
             # server would refuse an empty mail with a sentence about item ids.
             self.send_gear_button.setText(f"{name} is wearing nothing")
-            self.send_gear_button.setEnabled(False)
+            set_enabled_why(
+                self.send_gear_button, f"{name} is wearing nothing, so there is nothing to send."
+            )
 
     @Slot(object)
     def _gear_read_failed(self, exc: object) -> None:
@@ -11779,8 +11907,7 @@ class ControllerView(QWidget):
         if not isinstance(exc, _GearReadBroke) or exc.generation != self._gear_generation:
             return
         self.send_gear_button.setText(f"Could not read what {exc.name} is wearing")
-        self.send_gear_button.setToolTip(str(exc.cause))
-        self.send_gear_button.setEnabled(False)
+        set_enabled_why(self.send_gear_button, str(exc.cause))
 
     def _revive_works_offline(self) -> bool:
         """Only where this tree's own box measured that it does.
@@ -11905,6 +12032,12 @@ class ControllerView(QWidget):
                 self.character_list.setCurrentItem(item)
         if self.character_list.currentRow() < 0:
             self._character_chosen(-1)
+        # A23 (T195): an empty roster says how to get a character into it; the
+        # hint goes again with the first character, and only the hint does.
+        if self.character_list.count() == 0:
+            self.character_report.setText(CHARACTERS_EMPTY)
+        elif self.character_report.text() == CHARACTERS_EMPTY:
+            self.character_report.setText("")
 
     @Slot(object)
     def _characters_failed(self, exc: object) -> None:
@@ -12033,8 +12166,8 @@ class ControllerView(QWidget):
     def _account_chosen(self, row: int) -> None:
         """Both changes act on the chosen account, so both wait for one."""
         chosen = row >= 0 and self.account_list.item(row) is not None
-        self.set_password_button.setEnabled(chosen)
-        self.set_gm_button.setEnabled(chosen)
+        for press in (self.set_password_button, self.set_gm_button):
+            set_enabled_why(press, None if chosen else ACCOUNT_NEEDS_CHOICE)
         if chosen:
             item = self.account_list.item(row)
             self.selected_gm.setValue(int(item.data(Qt.ItemDataRole.UserRole + 1) or 0))
@@ -12420,7 +12553,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def _bot_rebuild_started(self) -> None:
-        self._set_busy(True)
+        self._set_busy(True, "the bot rebuild")
         self._set_bot_rebuild_button()
 
     @Slot(bool, str)
@@ -13013,9 +13146,14 @@ class ControllerView(QWidget):
         total = self._bot_total
         # A page number and not a row range: the rows are read by cursor, so
         # "51-100" would be a count this tab does not have and cannot get
-        # without paying for it on every press.
+        # without paying for it on every press. Of how many (A26, T195) when the
+        # total is known: every page but the last holds `botlist.PAGE_SIZE`.
         page_number = len(self._bot_cursors)
-        shown = f"Page {page_number}, {self.bot_list.count()} shown."
+        if isinstance(total, int) and total > 0:
+            pages = max(page_number, -(-total // botlist.PAGE_SIZE))
+            shown = f"Page {page_number} of {pages}."
+        else:
+            shown = f"Page {page_number}."
         warning = getattr(page, "warning", "")
         if warning:
             # 8.5b. The clause is "warns, NEITHER reporting zero", and the first
@@ -13228,7 +13366,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def _dashboard_started(self) -> None:
-        self._set_busy(True)
+        self._set_busy(True, "the dashboard rebuild")
         self.rebuild_dashboard_button.setEnabled(False)
         self.dashboard_switch.setEnabled(False)
         self.dashboard_lan.setEnabled(False)
@@ -13342,8 +13480,11 @@ class ControllerView(QWidget):
         self.plan_restore_button.clicked.connect(self.show_restore_plan)
         self.restore_button.clicked.connect(self.run_restore)
         # Never enabled by selecting a file: only a plan that came back allowed
-        # turns this on, and changing the selection turns it off again.
-        self.restore_button.setEnabled(False)
+        # turns this on, and changing the selection turns it off again. Greyed
+        # with its reason on the line under the presses (T195, A10).
+        self.restore_reasons = ReasonLine(tab)
+        set_enabled_why(self.restore_button, RESTORE_PICK, self.restore_reasons)
+        self.restore_reasons.watch(self.backup_button)
         actions.addWidget(self.plan_restore_button)
         actions.addWidget(self.restore_button)
         actions.addStretch(1)
@@ -13360,10 +13501,12 @@ class ControllerView(QWidget):
         self.backup_list.setParent(backups)
         self.plan_restore_button.setParent(backups)
         self.restore_button.setParent(backups)
+        self.restore_reasons.setParent(backups)
         backups_box = QVBoxLayout(backups)
         backups_box.addLayout(top)
         backups_box.addWidget(self.backup_list, 2)
         backups_box.addLayout(actions)
+        backups_box.addWidget(self.restore_reasons)
 
         restore = QGroupBox("Restore", tab)
         self.maintenance_report.setParent(restore)
@@ -13391,7 +13534,11 @@ class ControllerView(QWidget):
     def _backup_selection_changed(self, _current: object, _previous: object) -> None:
         """A plan belongs to one file. Selecting another must not carry it over."""
         self._restore_plan = None
-        self.restore_button.setEnabled(False)
+        set_enabled_why(self.restore_button, self._restore_waits_for())
+
+    def _restore_waits_for(self) -> str:
+        """Why Restore is greyed while no plan allows it: no backups, or none planned yet."""
+        return RESTORE_PICK if self.backup_list.count() else RESTORE_NO_BACKUPS
 
     @Slot()
     def refresh_backups(self) -> None:
@@ -13399,7 +13546,6 @@ class ControllerView(QWidget):
         if self._waits_for_the_distro("backups", self.refresh_backups):
             return
         self._restore_plan = None
-        self.restore_button.setEnabled(False)
         self.backup_list.clear()
         directory = self.services.backups_dir()
         for path in sorted(directory.glob("*.sql"), reverse=True):
@@ -13407,8 +13553,15 @@ class ControllerView(QWidget):
             item = QListWidgetItem(f"{path.name}  ({size:.1f} MB)")
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             self.backup_list.addItem(item)
+        set_enabled_why(self.restore_button, self._restore_waits_for())
+        # A10 (T195): an empty report beside a list of backups says what to do.
+        self.maintenance_report.setPlaceholderText(RESTORE_PICK if self.backup_list.count() else "")
+        none_yet = f"No backups yet in {directory}."
         if self.backup_list.count() == 0:
-            self.maintenance_report.setPlainText(f"No backups yet in {directory}.")
+            self.maintenance_report.setPlainText(none_yet)
+        elif self.maintenance_report.toPlainText() == none_yet:
+            # Backups arrived since: the hint above is what the empty box says now.
+            self.maintenance_report.setPlainText("")
         self._show_interrupted()
 
     def _show_interrupted(self) -> None:
@@ -13527,7 +13680,7 @@ class ControllerView(QWidget):
     def back_up(self) -> None:
         if self._refused_during_bot_rebuild():
             return
-        self.backup_button.setEnabled(False)
+        set_enabled_why(self.backup_button, wait_for("the backup"))
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
         self._backup_running = True  # T95: `forget_refusal()` reads it
         self._run(self._backup_with_the_database, self._backup_done, self._backup_failed)
@@ -13565,7 +13718,7 @@ class ControllerView(QWidget):
             self.maintenance_report.setPlainText("Select a backup first.")
             return
         self._restore_plan = None
-        self.restore_button.setEnabled(False)
+        set_enabled_why(self.restore_button, wait_for("Show restore plan"))
         self._run(
             lambda: self._plan_with_the_bot_request(path),
             self._restore_plan_ready,
@@ -13799,7 +13952,7 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText("\n".join(lines))
         # Only a plan that is allowed arms the button, and only for this file.
         self._restore_plan = result if result.allowed else None
-        self.restore_button.setEnabled(result.allowed)
+        set_enabled_why(self.restore_button, None if result.allowed else RESTORE_REFUSED)
 
     @Slot()
     def run_restore(self) -> None:
@@ -13817,7 +13970,7 @@ class ControllerView(QWidget):
             # restore's take-back writes (`_put_back_refused`, the other order).
             self.maintenance_report.setPlainText(RESTORE_DURING_PUT_BACK)
             return
-        self.restore_button.setEnabled(False)
+        set_enabled_why(self.restore_button, wait_for("the restore"))
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
         self._run(
@@ -13854,6 +14007,9 @@ class ControllerView(QWidget):
     @Slot(object)
     def _maintenance_failed(self, exc: object) -> None:
         self.backup_button.setEnabled(True)
+        if not self.restore_button.isEnabled():
+            # A plan or a restore that failed: a fresh plan is what Restore waits for.
+            set_enabled_why(self.restore_button, self._restore_waits_for())
         self.maintenance_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
         self._show_interrupted()
@@ -15189,7 +15345,7 @@ class ControllerView(QWidget):
         route = self.services.module_updates
         if route is None:
             return
-        self._set_busy(True)
+        self._set_busy(True, "Check for updates")
         self._module_pending = "check for module updates"
         self.module_report.setPlainText(MODULE_UPDATES_RUNNING)
         self._run(route, self._module_updates_done, self._module_updates_failed)
@@ -15263,7 +15419,7 @@ class ControllerView(QWidget):
         # One call, not a second copy: `_set_busy(True)` is what locks this
         # button as well as the Server tab's, so the two cannot drift into
         # disagreeing about whether an importer is running.
-        self._set_busy(True)
+        self._set_busy(True, "Apply module SQL")
         self._module_sql_running = True
         self._module_pending = "apply module SQL"
         self.module_report.setPlainText(MODULE_SQL_RUNNING)
@@ -16027,7 +16183,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def _rebuild_started(self) -> None:
-        self._set_busy(True)
+        self._set_busy(True, "the server build")
 
     def _rebuild_cancel(self) -> docker.CancelWithForce:
         """The Cancel a rebuild-panel job gets, with the panel's "Stop now anyway" riding on it."""
@@ -16680,7 +16836,7 @@ class ControllerView(QWidget):
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
-        self._set_busy(True)
+        self._set_busy(True, "Repair files")
         self._run(route.repair, self._server_files_repaired, self._server_files_repair_failed)
 
     @Slot(object)
@@ -16719,7 +16875,7 @@ class ControllerView(QWidget):
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
-        self._set_busy(True)
+        self._set_busy(True, "Repair files")
         self._run(route.repair, self._server_confs_repaired, self._server_confs_repair_failed)
 
     @Slot(object)
@@ -16758,7 +16914,7 @@ class ControllerView(QWidget):
         if not self._confirm(REPAIR_FILES_LABEL, lock_folder_question(route.folder, last)):
             return
         self.problem_label.setText("")
-        self._set_busy(True)
+        self._set_busy(True, "Repair files")
         self._run(route.lock, self._server_folder_locked, self._server_folder_lock_failed)
 
     @Slot(object)
@@ -16801,7 +16957,7 @@ class ControllerView(QWidget):
             TUNING_RESTART_LABEL, TUNING_RESTART_CONFIRM.format(files="\n".join(owed))
         ):
             return
-        self._set_busy(True)
+        self._set_busy(True, "Restart")
         self._hold_badge("restarting")
         self.tuning_report.setPlainText("restarting the server…")
         self._run(
@@ -16824,7 +16980,7 @@ class ControllerView(QWidget):
             TUNING_RECREATE_LABEL, TUNING_RECREATE_CONFIRM.format(files="\n".join(owed))
         ):
             return
-        self._set_busy(True)
+        self._set_busy(True, "Recreate containers")
         self._hold_badge("restarting")
         self.tuning_report.setPlainText("recreating the containers…")
         self._run(
@@ -17481,11 +17637,14 @@ class ControllerView(QWidget):
         group.addButton(self.loopback_radio)
         self.plan_button = QPushButton("Show plan", tab)
         self.apply_button = QPushButton("Apply", tab)
-        self.apply_button.setEnabled(False)
+        # T195 (I3): why Apply is greyed, under the presses and on its tooltip.
+        self.network_reasons = ReasonLine(tab)
+        set_enabled_why(self.apply_button, NETWORK_NEEDS_PLAN, self.network_reasons)
         self.plan_button.clicked.connect(self.show_network_plan)
         self.apply_button.clicked.connect(self.apply_network_plan)
         self.network_text = QPlainTextEdit(tab)
         self.network_text.setReadOnly(True)
+        self.network_text.setPlaceholderText(NETWORK_HINT)
         # A24/I5 (T194): the commands and the SQL Apply runs, folded under the
         # plan a player reads.
         self.network_details = Details(tab)
@@ -17500,6 +17659,7 @@ class ControllerView(QWidget):
         row.flow().addWidget(self.plan_button)
         row.flow().addWidget(self.apply_button)
         box.addWidget(row)
+        box.addWidget(self.network_reasons)
         box.addWidget(self.network_text, 1)
         box.addWidget(self.network_details)
         self._add_panel_tab(tab, "networking", "Networking")
@@ -17533,7 +17693,7 @@ class ControllerView(QWidget):
         self._plan = result
         self.network_text.setPlainText(_format_plan(result))
         self.network_details.set_text(_plan_details(result))
-        self.apply_button.setEnabled(result.ready)
+        set_enabled_why(self.apply_button, None if result.ready else NETWORK_PLAN_NOT_READY)
 
     @Slot(object)
     def _plan_failed(self, exc: object) -> None:
@@ -17546,7 +17706,7 @@ class ControllerView(QWidget):
         plan = self._plan
         if plan is None:
             return
-        self.apply_button.setEnabled(False)
+        set_enabled_why(self.apply_button, wait_for("Apply"))
         self._network_applying = True  # T95: `forget_refusal()` reads it
         self._run(lambda: self.services.network_apply(plan), self._apply_done, self._apply_failed)
 

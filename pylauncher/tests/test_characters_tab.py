@@ -1299,3 +1299,61 @@ def test_the_character_roster_takes_the_height_a_1080p_window_has(tmp_path: Path
     assert (
         view.character_list.height() >= page.viewport().height() // 2
     ), f"the roster is {view.character_list.height()}px of a {page.viewport().height()}px page"
+
+
+# -- T195: a greyed press says why (I3) and an empty list says what to do ----------------
+
+
+CHOOSE_ONE = "Choose a character in the list first."
+
+
+def test_with_no_character_chosen_every_action_says_to_choose_one(tmp_path: Path) -> None:
+    """I3: six greyed presses beside a list, and nothing on the tab said why.
+
+    Mutation: grey them with a bare `setEnabled(False)` and every tooltip is empty.
+    """
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    view.refresh_characters()
+    assert view.character_list.count() == 2
+    assert view.character_list.currentRow() < 0
+
+    for button in view.character_buttons():
+        assert not button.isEnabled(), button.text()
+        assert button.toolTip() == CHOOSE_ONE, button.text()
+    assert not view.character_reasons.isHidden()
+    assert view.character_reasons.text() == CHOOSE_ONE
+
+    view.character_list.setCurrentRow(0)  # Guglu, online
+
+    for button in view.character_buttons():
+        assert button.isEnabled(), button.text()
+        assert button.toolTip() == "", button.text()
+    assert view.character_reasons.isHidden(), view.character_reasons.text()
+
+
+def test_an_offline_character_s_revive_says_why_on_the_tab(tmp_path: Path) -> None:
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(1)  # Ganaar, offline
+
+    assert not view.revive_button.isEnabled()
+    reason = view.revive_button.toolTip()
+    assert reason == "Ganaar has to be logged in to be revived.", reason
+    assert reason in view.character_reasons.text().splitlines()
+
+
+def test_an_empty_character_list_says_to_make_one_in_the_game(tmp_path: Path) -> None:
+    """A23: an empty list read the same as a list that failed to load."""
+    view = _view(tmp_path, play=_Play(characters=()))
+
+    view.refresh_characters()
+
+    said = view.character_report.text()
+    assert "no characters" in said and "in the game" in said, said
+    assert "Refresh the list" in said, said
+
+    view.services.play.characters = _people()
+    view.refresh_characters()
+
+    assert view.character_report.text() == ""
