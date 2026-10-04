@@ -32,13 +32,18 @@ import pytest
 import yaml
 
 from tests.support_native import ENTRY, Recorder, engine
-from tests.test_rebuild import (
+from tests.test_rebuild import (  # noqa: F401 - `cmangos_gate` is a fixture
+    CM_ENTRY,
     _answers,
     _Daemon,
     _daemon_for,
     _refs,
     _seams_of,
+    _stale,
+    a_finished_cmangos_install,
     a_finished_install,
+    cm_engine,
+    cmangos_gate,
 )
 from tests.test_rebuild_waits_for_docker import SILENT_FOR_THE_WAIT, _Clock, _Probe
 from tests.test_stop_as_the_build_finishes import _StopAfterTagging
@@ -616,7 +621,8 @@ def test_remove_kept_build_says_which_names_docker_kept(tmp_path: Path) -> None:
         InstallOptions(server_dir=server_dir)
     )
     assert stuck in said and "read-only" not in said, said
-    assert native.read_parked_build(server_dir) is None, "names it keeps are swept by a rebuild"
+    assert "was not removed" in said, said
+    assert native.read_parked_build(server_dir) is not None, "the record went, the name stayed"
 
 
 def test_the_kept_build_route_is_offered_except_inside_wsl(tmp_path: Path) -> None:
@@ -652,3 +658,83 @@ def test_kept_names_that_do_not_hold_the_build_once_tagged_are_not_recorded(
     assert native.read_parked_build(server_dir) is None
     assert _parked_on(daemon, server_dir) == {None}, daemon.names
     assert REMOVED in str(failed) and "did not hold it" in str(failed), failed
+
+
+@pytest.mark.usefixtures("cmangos_gate")
+def test_a_rebuild_that_rewrote_its_recipe_keeps_what_it_compiled_and_the_next_one_uses_it(
+    tmp_path: Path,
+) -> None:
+    """F1 is of the folder the compile read, not of the one the failure path put back.
+
+    The CMaNGOS family writes its recipe again before compiling, and a press that
+    replaced no container puts the recipe it found back (T8). The kept build was
+    compiled from the NEW recipe, which the next press renders again, so that is
+    what its record must name -- and the folder did not change while it compiled.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    _stale(server_dir)
+    refs = composegen.built_image_refs(CM_ENTRY, server_dir, platform_id=lambda: "linux")
+    daemon = _Daemon(refs, frozenset())
+    clock = _Clock()
+    seams = {
+        **_seams_of(rec, daemon),
+        "docker_ready": _Probe(clock, *SILENT_FOR_THE_WAIT, then=True),
+        "monotonic": clock.monotonic,
+        "sleep": clock.sleep,
+    }
+    with pytest.raises(InstallerError) as raised:
+        list(cm_engine(rec, **seams).rebuild(InstallOptions(server_dir=server_dir)))
+    assert KEPT in str(raised.value), raised.value
+    assert {daemon.names.get(ref + native.PARKED_TAG_SUFFIX) for ref in refs} == {"after"}
+    assert all(daemon.names[ref] == "before" for ref in refs), daemon.names
+    rec.calls.clear()
+    said = list(
+        cm_engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert "build" not in rec.calls, rec.calls
+    assert [line for line in said if REUSED in line], said
+    assert all(daemon.names[ref] == "after" for ref in refs), daemon.names
+
+
+DOCKER_DOWN = (
+    'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/images/'
+    'json": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.'
+)
+
+
+def test_remove_kept_build_keeps_the_record_when_docker_does_not_answer(tmp_path: Path) -> None:
+    """Codex adversarial review: an unanswered Docker is not "no names left"."""
+    rec, daemon, server_dir = _parked_once(tmp_path)
+
+    def silent(ref: str, force: bool = False) -> str:
+        return DOCKER_DOWN
+
+    said = engine(
+        rec, **_seams_of(rec, daemon, image_id=lambda ref: None, remove_image=silent)
+    ).remove_kept_build(InstallOptions(server_dir=server_dir))
+    assert native.read_parked_build(server_dir) is not None, "the record went with the names kept"
+    assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
+    assert "was not removed" in said, said
+    assert not said.startswith("The kept build was removed"), said
+
+
+def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
+    tmp_path: Path,
+) -> None:
+    """The sweep before a compile: names Docker would not remove keep the record that names them."""
+    rec, daemon, server_dir = _parked_once(tmp_path)
+    (server_dir / SOURCE).write_text("void World::Update() { tick(); }\n", encoding="utf-8")
+
+    def remove_image(ref: str, force: bool = False) -> str:
+        if ref.endswith(native.PARKED_TAG_SUFFIX):
+            return DOCKER_DOWN
+        return daemon.remove_image(ref, force)
+
+    list(
+        engine(rec, **_seams_of(rec, daemon, remove_image=remove_image)).rebuild(
+            InstallOptions(server_dir=server_dir)
+        )
+    )
+    assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
+    assert native.read_parked_build(server_dir) is not None

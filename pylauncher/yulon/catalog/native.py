@@ -2169,6 +2169,10 @@ class _Parking:
     """
 
     fingerprint: str | None = None
+    after: str | None = None
+    """F1: taken as the build stage ends, compose having tagged, so an edit made while
+    it compiled shows -- and before a failure puts the recipe this press rendered back
+    (T8), which would read as a change the compile never saw."""
     made_unix: int = 0
     still_kept: bool = False
     """A kept build was being used and Docker refused a tag part-way: its names and
@@ -6598,8 +6602,18 @@ class StagedInstaller:
             # T224: F0, after `write-dockerfile` rendered the recipe this compiles.
             parking.fingerprint = self._seams.context_fingerprint(server_dir, refs=refs)
             used = yield from self._use_or_clear_the_kept_build(server_dir, refs, kept, parking)
-            if not used:
-                yield from self.stage_build(stage_ctx)
+            if used:
+                parking.after = parking.fingerprint
+            else:
+                try:
+                    yield from self.stage_build(stage_ctx)
+                except InstallerError:
+                    # T225: a Stop or a failure after compose tagged can still keep it.
+                    if self._compose_tagged(refs, kept):
+                        parking.after = self._seams.context_fingerprint(server_dir, refs=refs)
+                        parking.made_unix = int(time.time())
+                    raise
+                parking.after = self._seams.context_fingerprint(server_dir, refs=refs)
                 parking.made_unix = int(time.time())
             built = True
 
@@ -6805,26 +6819,28 @@ class StagedInstaller:
     def remove_kept_build(self, options: InstallOptions | None = None) -> str:
         """Remove the kept build now: "Remove kept build…" on the Server tab (T224, D3).
 
-        Every `<ref>-parked` name still on the daemon is let go (`_let_go()`, whose
-        `-f` covers a stopped container), then the record is forgotten. A name Docker
-        keeps is named in the sentence; the next rebuild removes it before compiling,
-        as it does any kept name without a record. Returns the sentence; never raises
-        for Docker's refusals.
+        Every `<ref>-parked` name is let go (`_let_go()`, whose `-f` covers a stopped
+        container), and only when none is left is the record forgotten: a name Docker
+        kept, or a Docker that did not answer, leaves the build recorded and the
+        banner up (Codex adversarial review). `remove_image()` reads "no such image"
+        as done. Returns the sentence; never raises for Docker's refusals.
         """
         server_dir = self.server_dir(options or InstallOptions())
         names = [ref + PARKED_TAG_SUFFIX for ref in self.image_refs_at(server_dir)]
-        present = [name for name in names if self._seams.image_id(name) is not None]
-        left = self._let_go(present)
-        forgot = forget_parked_build(server_dir)
-        said = (
-            "The kept build was removed."
-            if not left
-            else (
-                f"The kept build was removed except for {', '.join(left)}, which Docker would not "
-                f"remove (the log says why); the next rebuild removes them before it compiles."
+        left = self._let_go(names)
+        if left:
+            return (
+                f"The kept build was not removed: Docker would not remove {', '.join(left)} (the "
+                f"log says why). It is still kept; press {REMOVE_KEPT_BUILD_LABEL} again once "
+                f"Docker answers."
             )
-        )
-        return f"{said} {forgot[0].upper()}{forgot[1:]}." if forgot else said
+        forgot = forget_parked_build(server_dir)
+        if forgot:
+            return (
+                f"The kept build was removed from Docker, but {forgot}; the next rebuild "
+                f"forgets it."
+            )
+        return "The kept build was removed."
 
     # ------------------------------------------------------- update to latest (T64)
 
@@ -8410,16 +8426,31 @@ class StagedInstaller:
                 f"for like any new build, and {back}."
             )
             return True
-        if record is not None:
+        if record is None:
+            # Names a crash left without a record: asked first, so a server with
+            # none (every rebuild's case) issues no removal at all.
+            present = [name for name in names if self._seams.image_id(name) is not None]
+            if present:
+                logger.info(f"rebuild of {self.entry.id}: removing unrecorded kept names {present}")
+            yield from self._release(present)
+            forget_parked_build(server_dir)
+            return False
+        # Every name, not only those an id answered for: an unanswered Docker is not
+        # "gone" (Codex adversarial review), and the record goes only once none is
+        # left, so a name Docker kept is still one the next press can find.
+        left = yield from self._release(names)
+        if left:
             yield (
-                f"A finished build from {record.when()} was kept, but {why}, so it was removed "
-                f"and the server is compiled again."
+                f"A finished build from {record.when()} was kept, but {why}, so it is not used. "
+                f"Docker would not remove it yet, so it stays recorded and the next rebuild tries "
+                f"again. The server is compiled again."
             )
-        present = [name for name in names if self._seams.image_id(name) is not None]
-        if present:
-            logger.info(f"rebuild of {self.entry.id}: removing kept build names {present}")
-        yield from self._release(present)
+            return False
         forget_parked_build(server_dir)
+        yield (
+            f"A finished build from {record.when()} was kept, but {why}, so it was removed "
+            f"and the server is compiled again."
+        )
         return False
 
     def _park(
@@ -8440,7 +8471,8 @@ class StagedInstaller:
         * F0, taken before the compile, has an answer;
         * the build is whole: every ref's `-failed` name holds an image that is not
           its `-rollback` image (a Stop part-way tags some refs only);
-        * the folder still fingerprints as F0, so nothing changed while it compiled;
+        * the folder fingerprinted as F0 again when the build stage ended
+          (`_Parking.after`), so nothing changed while it compiled;
         * the old record goes, then every `-parked` name is made and holds the
           image its `-failed` name does, then the new record is written. A crash
           part-way leaves names with no record, which the next rebuild removes,
@@ -8459,8 +8491,7 @@ class StagedInstaller:
             if new is None or new == self._seams.image_id(back):
                 return "because Docker had not named every image of it yet"
             made[ref] = new
-        now = self._seams.context_fingerprint(ctx.server_dir, refs=refs)
-        if now != parking.fingerprint:
+        if parking.after != parking.fingerprint:
             return "because files in the server folder changed while it compiled"
         forgot = forget_parked_build(ctx.server_dir)
         if forgot:
