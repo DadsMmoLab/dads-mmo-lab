@@ -370,6 +370,7 @@ def test_the_snapshot_is_first_and_the_record_is_forgotten_last(tmp_path: Path) 
         f"remove_volume:{project}_db-data",
         f"remove_volume:{project}_client-data",
         *[f"remove_image:{ref}" for ref in _images(rec.server_dir)],
+        *[f"remove_image:{ref}{native.PARKED_TAG_SUFFIX}" for ref in _images(rec.server_dir)],
         f"remove_folder:{rec.server_dir}",
         "forget",
     ], rec.order
@@ -467,9 +468,23 @@ def test_only_this_installs_own_four_image_refs_are_removed(tmp_path: Path) -> N
     """`--rmi all` would take `mysql:8.4` with it; `--rmi local` would take nothing."""
     rec = _recorder(tmp_path)
     rec.uninstaller().run(keep_characters=False)
-    assert rec.removed_images == list(_images(rec.server_dir))
+    own = list(_images(rec.server_dir))
+    assert rec.removed_images == own + [ref + native.PARKED_TAG_SUFFIX for ref in own]
     assert not any("mysql" in ref for ref in rec.removed_images)
     assert not any("alpine" in ref for ref in rec.removed_images)
+
+
+def test_uninstall_removes_the_parked_names_too(tmp_path: Path) -> None:
+    """T224: a kept build outlives its press on purpose, so Uninstall takes it with the rest.
+
+    Each of the four refs' `-parked` name; a name that is not there is "no such
+    image", which `docker.remove_image()` reads as done, so no warning is said.
+    """
+    rec = _recorder(tmp_path)
+    report = rec.uninstaller().run(keep_characters=False)
+    parked = [ref + native.PARKED_TAG_SUFFIX for ref in _images(rec.server_dir)]
+    assert len(parked) == 4 and set(parked) <= set(rec.removed_images), rec.removed_images
+    assert not [line for line in report.warnings if native.PARKED_TAG_SUFFIX in line], report
 
 
 def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_images(
