@@ -6934,7 +6934,7 @@ class StagedInstaller:
                 keep=family.keep if family is not None else lambda: iter(()),
                 done=family.done if family is not None else lambda: iter(()),
                 database=lambda: self._copy_database_sentence(copy),
-                finishes_start_refusal=family is not None,
+                finishes_start_refusal=family is not None and family.finishes_start_refusal,
             )
             try:
                 yield from self.rebuild(opts, cancel=cancel, servers_down=work)

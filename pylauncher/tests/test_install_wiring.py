@@ -1116,7 +1116,7 @@ def _census(monkeypatch: pytest.MonkeyPatch, *, up: bool) -> _Census:
     return census
 
 
-def test_the_wotlk_engine_carries_a_copy_that_dumps_only_playerbots_under_its_label(
+def test_the_wotlk_engine_carries_a_copy_that_dumps_only_its_four_databases_under_its_label(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """`installer_for_app()` hands the engine the copy, and the copy is `backup(only=, label=)`."""
@@ -1145,7 +1145,13 @@ def test_the_wotlk_engine_carries_a_copy_that_dumps_only_playerbots_under_its_la
     assert copy is not None
     taken = copy.take(tmp_path, engine.snapshot_databases())
 
-    assert asked[0]["only"] == ("acore_playerbots",)
+    # T217's playerbots database, and the core's three since T220 applies their updates.
+    assert asked[0]["only"] == (
+        "acore_auth",
+        "acore_characters",
+        "acore_world",
+        "acore_playerbots",
+    )
     assert asked[0]["label"] == SNAPSHOT_LABEL
     assert asked[0]["spec"] == WOTLK.container_spec()
     assert isinstance(asked[0]["mysql"], DockerMysql)
