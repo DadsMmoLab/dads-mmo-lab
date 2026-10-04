@@ -1145,6 +1145,34 @@ def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
         "map data" in rec.getMessage() and "changed" in rec.getMessage() for rec in caplog.records
     )
     assert record(server)["kept"] == 0
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "a new set: the usual threads"
+    assert record(server)["crashed"] is False, "the crash belonged to the old map data"
+
+
+def test_the_retry_after_a_crash_that_kept_no_tile_still_uses_one_thread(server: Path) -> None:
+    """Owner, 2026-10-04: the retry after a crash runs on `retry_threads`, tiles or not."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_cut_tile()
+    fake.finish(139)
+    assert status(server, fake).kept == 0
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+    assert fake.started[-1].argv[-2:] == ("--threads", "1")
+
+
+def test_map_data_changed_during_a_run_is_never_switched_on(server: Path) -> None:
+    """Codex adversarial review: a run that ends well over map data that changed under it
+    is a set made from two map datas; its tiles go and pathfinding stays off."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    _change_size_only(next(iter(sorted((server / "data" / "maps").iterdir()))))
+    fake.finish(0, tiles=MIN_FILES)
+    now = status(server, fake)
+    assert now.state == "failed" and not now.pathfinding_on and now.kept == 0
+    assert "map data changed while" in now.error
+    assert output(server) == []
+    assert "mmap.enablePathFinding = 0" in conf_text(server)
 
 
 def _change_size_only(path: Path) -> None:

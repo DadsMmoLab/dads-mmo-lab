@@ -47,7 +47,9 @@ next start continues from them -- but only while the map data is the one the run
 began with (`evidence`, taken at its start: a hash of `data/.yulon-extract.json`
 and of the size and modification time of every file in `dbc/`, `maps/`, `vmaps/`);
 otherwise, and for a record that cannot be read or a folder of tiles with no
-record, it empties `data/mmaps` first as before. Update to latest, Return to the
+record, it empties `data/mmaps` first as before. A run that ends well is also
+checked against that hash: map data changed while it ran makes it a failure
+with every tile removed, never a set switched on. Update to latest, Return to the
 tested pin (`stop_for_route(clear=True)`: the generator's code may change while
 `MMAP_VERSION` does not) and Re-extract map data (`discard()`) still throw every
 tile away. After the generator CRASHED on a set, its later runs use the entry's
@@ -566,8 +568,16 @@ def start_mmaps(
             else tuple(platform.container_user_args(platform_id=_platform_id(ask)))
         )
         before = read_record(server_dir)
-        crashed = before is not None and not before.unreadable and before.crashed
         evidence = _evidence(job)
+        # The crash belongs to the set made from THIS map data: new map data is a
+        # new set, on the usual threads (Codex review).
+        crashed = (
+            before is not None
+            and not before.unreadable
+            and before.crashed
+            and bool(evidence)
+            and before.evidence == evidence
+        )
         argv = _filled_argv(job, run, retry=crashed)
         _remove_container(run, job.container)
         kept = _resume_or_clear(job, before, evidence)
@@ -905,6 +915,27 @@ def _finished(
             run,
             now,
         )
+    if record.evidence and _evidence(job) != record.evidence:
+        # Codex adversarial review: tiles made before and after the change describe two
+        # different map datas, which no later run can tell apart. All of them go.
+        why = (
+            "the map data changed while it was being made, so what it made was removed. "
+            "It starts again from the beginning."
+        )
+        try:
+            run.remove(job.container, timeout=CHANGE_TIMEOUT)
+        except docker.DockerCommandError as exc:
+            logger.warning(f"could not remove the finished {job.container}: {exc}")
+        try:
+            _clear_output(job)
+        except MmapsError as exc:
+            why = f"{why} {exc}"
+        failed = replace(
+            record, state="failed", finished=_stamp(now()), error=why, resumable=False, kept=0
+        )
+        _write_record(job.server_dir, failed)
+        logger.warning(f"{job.container} failed: {why}")
+        return _status_of(failed, pathfinding_on=_pathfinding_on(job))
     have = _set_size(job)
     if have < plan.min_files:
         return _fail(
