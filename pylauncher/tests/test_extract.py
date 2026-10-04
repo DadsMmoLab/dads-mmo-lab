@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import shutil
 import threading
@@ -3655,6 +3656,11 @@ def test_a_second_overlay_copies_nothing_that_is_already_there(tmp_path: Path) -
     assert extract.overlay_files(source, target) == 1
     assert extract.overlay_files(source, target) == 0
     (target / "Spell.dbc").write_bytes(b"edited")
+    # T200: same size, so only the time tells it changed. On a coarse clock (one timer
+    # tick, e.g. ext4 on Linux 6.8) this write can land in the source's tick and look
+    # unchanged, which made the test flaky; the edit is stamped a fixed minute later.
+    later = (source / "Spell.dbc").stat().st_mtime_ns + 60 * 10**9
+    os.utime(target / "Spell.dbc", ns=(later, later))
     assert extract.overlay_files(source, target) == 1, "a file that changed is laid again"
     assert (target / "Spell.dbc").read_bytes() == b"server"
 
