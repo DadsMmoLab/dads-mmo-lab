@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,8 @@ def test_the_shipped_set_is_the_four_families_that_render_one() -> None:
         ("foo", "a/foo", False),
         # A leading "/" is stripped (ignorefile.ReadAll), so it means the same thing.
         ("/foo", "foo/x", True),
+        # ReadAll cleans BEFORE it strips the one leading "/", so "//foo" is "foo".
+        ("//foo", "foo/x", True),
         # "*" and "?" never cross a "/".
         ("*.log", "x.log", True),
         ("*.log", "d/x.log", False),
@@ -172,6 +175,13 @@ def test_the_last_matching_pattern_wins() -> None:
     assert rules.excludes("keep/tmp/x") is True
 
 
+def test_an_exception_is_cleaned_like_any_other_pattern() -> None:
+    rules = parse_dockerignore("*\n!./keep\n")
+    assert rules is not None
+    assert rules.excludes("keep/src.c") is False
+    assert rules.excludes("other") is True
+
+
 def test_an_exception_reaches_into_an_excluded_folder() -> None:
     rules = parse_dockerignore("docs\n!docs/keep.md\n")
     assert rules is not None
@@ -200,6 +210,7 @@ def test_a_byte_order_mark_and_crlf_line_ends_are_read_as_docker_reads_them() ->
         "src/[abc].c\n",  # a character class: Go's regexp and filepath.Match disagree on it
         "src/a\\*b\n",  # a backslash: an escape on Linux, a separator on Windows
         "!\n",  # Docker refuses a bare "!" (illegal exclusion pattern)
+        "src/a^b\n",  # moby puts "^" into its regexp unescaped, as an anchor
     ],
 )
 def test_an_unsupported_or_illegal_pattern_answers_none(text: str) -> None:
@@ -252,6 +263,49 @@ def test_a_mode_change_changes_it(tmp_path: Path) -> None:
     before = _fp(root)
     spell.chmod(spell.stat().st_mode | stat.S_IXUSR)
     assert _fp(root) != before
+
+
+@POSIX_MODES
+def test_a_folder_mode_change_changes_it(tmp_path: Path) -> None:
+    root = _centurion_server(tmp_path)
+    game = root / CHECKOUT / "src/server/game"
+    before = _fp(root)
+    game.chmod(0o700)
+    assert _fp(root) != before
+
+
+def test_the_order_is_the_sorted_names_not_the_order_a_folder_lists_them_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ext4 lists by name hash and NTFS by name; the fingerprint must not care which.
+
+    Only the listing ORDER is arranged: the real `os.scandir` runs and its real
+    entries come back reversed.
+    """
+    root = _plain_server(tmp_path, "*\n!src\n")
+    for i in range(40):
+        _write(root / "src" / f"f{i:02d}.c", str(i))
+    before = _fp(root)
+    real_scandir = os.scandir
+
+    class _Reversed:
+        def __init__(self, path: str) -> None:
+            with real_scandir(path) as listed:
+                self.entries = list(listed)[::-1]
+
+        def __enter__(self) -> Iterator[os.DirEntry[str]]:
+            return iter(self.entries)
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(os, "scandir", _Reversed)
+    with os.scandir(str(root / "src")) as listed:
+        reversed_names = [e.name for e in listed]
+    with real_scandir(root / "src") as listed:
+        forward = [e.name for e in listed]
+    assert reversed_names == forward[::-1] and reversed_names != forward
+    assert _fp(root) == before
 
 
 def test_a_rename_with_the_same_content_changes_it(tmp_path: Path) -> None:
@@ -503,6 +557,51 @@ def test_a_special_file_docker_would_send_answers_none(tmp_path: Path) -> None:
     assert fingerprint(root) is None
 
 
+def test_a_file_that_changes_while_it_is_read_answers_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real append lands between the read and the check after it; the answer is then None.
+
+    Only the moment is arranged: `os.fstat` is wrapped so that, for the one file
+    under test, the bytes on disk really change after they were hashed and before
+    the second look. Every other file goes through untouched.
+    """
+    root = _centurion_server(tmp_path)
+    spell = root / CHECKOUT / "src/server/game/Spell.cpp"
+    assert fingerprint(root) is not None
+    real_open, real_fstat = os.open, os.fstat
+    opened: dict[int, int] = {}
+
+    def open_(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+        fd = real_open(path, flags, *args)
+        if Path(path) == spell:
+            opened[fd] = 0
+        return fd
+
+    def fstat(fd: int) -> os.stat_result:
+        if fd in opened:
+            opened[fd] += 1
+            if opened[fd] == 2:
+                with spell.open("ab") as handle:
+                    handle.write(b"// appended during the read\n")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(os, "fstat", fstat)
+    assert fingerprint(root) is None
+    assert list(opened.values()) == [2], "the file under test was not read exactly once"
+
+
+def test_a_name_that_is_not_utf8_answers_none(tmp_path: Path) -> None:
+    if sys.platform != "linux":
+        pytest.skip("only Linux keeps a file name that is not UTF-8")
+    root = _centurion_server(tmp_path)
+    assert fingerprint(root) is not None
+    game = os.fsencode(root / CHECKOUT / "src/server/game")
+    os.close(os.open(game + b"/caf\xe9.cpp", os.O_CREAT | os.O_WRONLY, 0o644))
+    assert fingerprint(root) is None
+
+
 def _counted(root: Path) -> int:
     """How many entries the walk looks at, counted from the tree rather than from the code."""
     n = 0
@@ -610,8 +709,16 @@ def test_a_missing_dockerignore_sends_everything(tmp_path: Path) -> None:
 
 
 def test_the_walk_does_not_enter_a_folder_no_exception_can_reach(tmp_path: Path) -> None:
-    """A FIFO under `centurion/patches` would answer None if the walk looked at it; it does not."""
+    """`centurion/patches` (1.47 GB on a real checkout) is never listed: unreadable is fine.
+
+    The neighbour that shows the walk would notice is
+    `test_an_unreadable_folder_that_docker_sends_answers_none`.
+    """
     root = _centurion_server(tmp_path)
     before = _fp(root)
-    _fifo(root / CHECKOUT / "centurion/patches/pipe")
-    assert _fp(root) == before
+    patches = root / CHECKOUT / "centurion/patches"
+    _unreadable(patches)
+    try:
+        assert fingerprint(root) == before
+    finally:
+        patches.chmod(0o755)

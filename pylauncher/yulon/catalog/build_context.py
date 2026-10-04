@@ -26,7 +26,8 @@ moby/patternmatcher (`ignorefile.ReadAll`, `New`, `Pattern.compile`,
 tonistiigi/fsutil `filter.go` (BuildKit's walk), read on 2026-10-04, and the
 documented rules at https://docs.docker.com/build/concepts/context/#dockerignore-files:
 
-* A line runs up to `\\n`, with one trailing `\\r` dropped, and a UTF-8 byte
+* A line runs up to `\\n` (bufio's trailing `\\r` is trimmed with the other
+  whitespace below, so it is not dropped separately), and a UTF-8 byte
   order mark is dropped from the first line. A line whose FIRST character is `#`
   is a comment; only then is the line trimmed, so ` #x` is the pattern `#x`.
 * A leading `!` marks an exception. The pattern is cleaned like Go's
@@ -306,8 +307,7 @@ def _read_patterns(text: str) -> list[str]:
     if any(ch in text for ch in "\x1c\x1d\x1e\x1f"):
         raise _NoAnswer("the .dockerignore holds a character Python trims and Go does not")
     out: list[str] = []
-    for number, raw in enumerate(text.split("\n")):
-        line = raw[:-1] if raw.endswith("\r") else raw
+    for number, line in enumerate(text.split("\n")):
         if len(line.encode("utf-8")) > _MAX_LINE:
             raise _NoAnswer("a .dockerignore line is longer than Docker reads")
         if number == 0 and line.startswith("\ufeff"):
@@ -491,7 +491,6 @@ def _walk(stream: _Stream, context: Path, rules: Rules) -> None:
             continue
         parts = (*frame.parts, entry.name)
         rel = "/".join(parts)
-        _utf8(rel)
         decision = rules.decide(rel, frame.decision)
         is_junction = getattr(entry, "is_junction", None)
         if is_junction is not None and is_junction():
