@@ -626,3 +626,29 @@ def test_the_kept_build_route_is_offered_except_inside_wsl(tmp_path: Path) -> No
     assert route is not None
     assert route.check() is None, "no record, no note"
     assert install_wiring.kept_build_for_app(ENTRY, tmp_path, wsl_distro="Ubuntu") is None
+
+
+def test_kept_names_that_do_not_hold_the_build_once_tagged_are_not_recorded(
+    tmp_path: Path,
+) -> None:
+    """The ids are read back after the tags: a record must never name what its names do not hold.
+
+    Docker answers the tag and the name still holds another image (another
+    client moved it in between); the ids it would record are not the build.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_parkable_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    stale = _parked(server_dir)[0]
+
+    def tag_image(src: str, dst: str) -> str:
+        said = daemon.tag_image(src, dst)
+        if dst == stale:
+            daemon.names[dst] = "somebody-elses"
+        return said
+
+    _said, failed = _refused(rec, server_dir, _silent_recreate(rec, daemon, tag_image=tag_image))
+    _on_the_old_build(daemon, server_dir)
+    assert native.read_parked_build(server_dir) is None
+    assert _parked_on(daemon, server_dir) == {None}, daemon.names
+    assert REMOVED in str(failed) and "did not hold it" in str(failed), failed
