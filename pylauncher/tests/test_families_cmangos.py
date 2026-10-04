@@ -4744,6 +4744,90 @@ def test_a_finished_installs_rerun_refuses_naming_press_stop_then_install_again(
     assert "nothing was imported and nothing was cleared" in said, said
 
 
+class _CrashLoopingWorld:
+    """A world container the failed install left restarting: up until it is stopped (T206)."""
+
+    def __init__(self, rec: Recorder) -> None:
+        self.rec = rec
+        self.running = True
+        self.stopped: list[list[str]] = []
+
+    def world_running(self, container: str) -> bool | None:
+        return self.running
+
+    def stop_world(self, containers: list[str], **_kw: object) -> None:
+        self.stopped.append(list(containers))
+        self.rec.calls.append(f"stop-world:{','.join(containers)}")
+        self.running = False
+
+
+def test_an_unfinished_installs_own_world_is_stopped_before_the_rerun(tmp_path: Path) -> None:
+    """T206: the previous run of THIS install failed, so the world container left
+    running is that failed install's own, crash-looping; there is no Server tab
+    to press Stop on. It is stopped, said so, and the import goes on."""
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    ctx = context(server_with_sql(tmp_path))
+    ctx = replace(
+        ctx, state=replace(ctx.state, last_error="centurion-worldserver restarted 7 times")
+    )
+    said = list(
+        engine(rec, world_running=world.world_running, stop_world=world.stop_world)._import(ctx)
+    )
+    assert world.stopped == [[ENTRY.container_spec().world]]
+    assert any("left running" in line for line in said), said
+    assert any("leaving them alone" in line for line in said), said
+
+
+def test_a_world_with_no_failed_run_behind_it_is_still_refused_and_never_stopped(
+    tmp_path: Path,
+) -> None:
+    """A finished install's running world is somebody's server: refused, not stopped."""
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, world_running=world.world_running, stop_world=world.stop_world)._import(
+                context(server_with_sql(tmp_path))
+            )
+        )
+    assert "world server is running" in str(raised.value)
+    assert world.stopped == []
+
+
+def test_pressing_install_again_after_a_crash_looping_install_finishes_it(
+    tmp_path: Path,
+) -> None:
+    """The live path (T206): an install fails at ready with its world restarting;
+    the next press, through the real `run()`, stops that world and finishes."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN, IMPORTED_OLDER_PLAN)
+    world = _CrashLoopingWorld(rec)
+    world.running = False
+    rec.ready = False
+    client = client_folder(tmp_path)
+    with pytest.raises(InstallerError):
+        install(
+            rec,
+            server_dir,
+            client,
+            world_running=world.world_running,
+            stop_world=world.stop_world,
+        )
+    world.running = True  # `up` started it, and it is restarting over and over
+    rec.ready = True
+    said = install(
+        rec,
+        server_dir,
+        client,
+        world_running=world.world_running,
+        stop_world=world.stop_world,
+    )
+    assert world.stopped == [[ENTRY.container_spec().world]]
+    assert said[-1].endswith(f"is installed and running in {server_dir}"), said[-1]
+
+
 def test_a_finished_installs_rerun_names_docker_when_the_world_cannot_be_read(
     tmp_path: Path,
 ) -> None:
