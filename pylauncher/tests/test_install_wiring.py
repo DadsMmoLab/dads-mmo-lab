@@ -1143,3 +1143,44 @@ def test_the_harness_default_keeps_the_former_folder_when_the_new_one_is_empty(
     _holding_install(tmp_path / "wow-server-playerbots")
     (tmp_path / "yulon-wotlk").mkdir()
     assert _cli_default(monkeypatch, tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+# R1 follow-up (T194): the database's own refusal must reach the install and repair messages.
+ACCESS_DENIED = (
+    b"ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)"
+)
+
+
+def _mysql_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `docker exec` into the database answers rc 1 with the server's refusal."""
+
+    def fake_run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 1, b"", ACCESS_DENIED)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def test_an_install_probe_the_database_refuses_carries_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _mysql_refuses(monkeypatch)
+    probe, _reset = install_wiring.import_gate_for(WOTLK)
+    assert probe is not None
+    with caplog.at_level(logging.DEBUG):
+        state = probe()
+    assert state.state == "unreadable"
+    assert "ERROR 1045" in state.detail and "Access denied" in state.detail
+    assert any("ERROR 1045" in r.getMessage() for r in caplog.records), "never logged"
+
+
+def test_a_repair_reset_the_database_refuses_carries_the_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+
+    _mysql_refuses(monkeypatch)
+    _probe, reset = install_wiring.import_gate_for(WOTLK)
+    assert reset is not None
+    with pytest.raises(MaintenanceError) as caught:
+        reset()
+    assert "ERROR 1045" in str(caught.value)

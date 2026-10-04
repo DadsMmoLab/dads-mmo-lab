@@ -96,8 +96,16 @@ _UNREACHABLE_WORDINGS = (
 daemon (old and new wording), a refused socket. See `docker.volume_exists()`."""
 
 
-_DESKTOP_ENGINE_PIPES = ("dockerdesktoplinuxengine", "docker_engine")
-"""Docker Desktop's engine pipes, as the CLI names them (URL-encoded in its API route)."""
+_DESKTOP_ENGINE_PIPES = (
+    "dockerdesktoplinuxengine",
+    "docker_engine",
+    ".docker/run/docker.sock",
+    ".docker%2frun%2fdocker.sock",
+    "docker.raw.sock",
+)
+"""Docker Desktop's engine pipes (Windows) and sockets (macOS: `~/.docker/run/docker.sock`,
+`…/com.docker.docker/Data/docker.raw.sock`), plain and as the CLI URL-encodes them in its API
+route, lower-cased. A Linux daemon's `/var/run/docker.sock` is none of them."""
 
 
 def unreachable(exc: object) -> bool:
@@ -109,7 +117,8 @@ def unreachable(exc: object) -> bool:
     Error for API route and version http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/…"
     (older CLIs: no number, `docker_engine`). That is Desktop's proxy with no
     engine behind it, not the engine refusing, so it is told as not running
-    and keeps the Open Docker Desktop press (T194 R3).
+    and keeps the Open Docker Desktop press (T194 R3). On macOS the same answer
+    names Desktop's socket under `~/.docker/run` (or `docker.raw.sock`).
     """
     if isinstance(exc, docker.DockerCliMissingError):
         return False

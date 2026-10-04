@@ -418,7 +418,7 @@ DOCKER_ENGINE_500 = (
 
 
 @pytest.mark.parametrize("said", [DESKTOP_ENGINE_500, DOCKER_ENGINE_500])
-@pytest.mark.parametrize("host", ["windows", "macos"])
+@pytest.mark.parametrize("host", ["windows"])
 def test_docker_desktops_engine_starting_or_stopped_is_docker_not_running(
     said: str, host: docker_advice.Host
 ) -> None:
@@ -435,5 +435,42 @@ def test_a_500_from_a_linux_daemon_is_not_docker_desktop_down() -> None:
     """A real daemon that answered 500 on a socket is an answer, not Desktop's engine away."""
     exc = docker.DockerCommandError(
         "docker ps exited 1: Error response from daemon: 500 Internal Server Error: boom"
+    )
+    assert not docker_advice.unreachable(exc)
+
+
+MACOS_DESKTOP_500 = (
+    "docker ps --format {{.Names}} exited 1: request returned 500 Internal Server Error for API "
+    "route and version http://%2FUsers%2Fpat%2F.docker%2Frun%2Fdocker.sock/v1.47/containers/json, "
+    "check if the server supports the requested API version"
+)
+"""Docker Desktop on macOS in the same state: its socket under ~/.docker/run, URL-encoded."""
+
+MACOS_RAW_SOCK_500 = (
+    "docker ps exited 1: request returned Internal Server Error for API route and version "
+    "http://%2FUsers%2Fpat%2FLibrary%2FContainers%2Fcom.docker.docker%2FData%2Fdocker.raw.sock/"
+    "v1.44/containers/json, check if the server supports the requested API version"
+)
+
+MACOS_PLAIN_500 = (
+    "docker ps exited 1: Internal Server Error: Get /Users/pat/.docker/run/docker.sock/_ping"
+)
+
+
+@pytest.mark.parametrize("said", [MACOS_DESKTOP_500, MACOS_RAW_SOCK_500, MACOS_PLAIN_500])
+def test_docker_desktops_engine_on_macos_starting_or_stopped_is_not_running(said: str) -> None:
+    """R3 follow-up (T194): macOS's Desktop socket, not the Windows pipe, in a macOS message."""
+    exc = docker.DockerCommandError(said)
+    assert docker_advice.unreachable(exc)
+    advice = docker_advice.advice_for(exc, distro=None, host="macos", deck_docker_removed=False)
+    assert advice.action == "open-desktop"
+    assert advice.body.startswith("Docker Desktop isn't running.")
+
+
+def test_a_500_from_a_linux_daemons_own_socket_is_not_docker_desktop_down() -> None:
+    exc = docker.DockerCommandError(
+        "docker ps exited 1: request returned 500 Internal Server Error for API route and "
+        "version http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/json, check if the server "
+        "supports the requested API version"
     )
     assert not docker_advice.unreachable(exc)

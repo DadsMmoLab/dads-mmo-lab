@@ -16053,11 +16053,14 @@ class ControllerView(QWidget):
     def _backup_before_update_failed(self, exc: object) -> None:
         """A backup that did not happen stops the update, and says so in `dml`'s own words."""
         message = f"Backup failed — the update was not started: {exc}"
+        # What the database said rides on `detail` (T194 R1): folded, and logged.
+        detail = getattr(exc, "detail", "")
         self._backup_before_update = False
         self.backup_button.setEnabled(True)
         self._set_update_buttons()
         self.maintenance_report.setPlainText(message)
-        self.action_failed.emit(message)
+        self.maintenance_details.set_text(detail)
+        self.action_failed.emit(f"{message} ({detail})" if detail else message)
         QMessageBox.warning(self, f"{self.entry.name}", message)
         self._show_interrupted()
 

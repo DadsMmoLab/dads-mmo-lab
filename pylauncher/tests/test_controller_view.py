@@ -12837,6 +12837,40 @@ def test_a_backup_that_fails_stops_the_update_in_dmls_own_words(
     assert failures and failures[0] == warned[0]
 
 
+def test_a_backup_before_an_update_keeps_the_databases_words_in_details_and_the_log(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 follow-up (T194): the update's backup refusal dropped `MaintenanceError.detail`."""
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text, *a, **k: warned.append(text),
+    )
+    made = _FakeMaintenance()
+    denied = "ERROR 1045 (28000): Access denied for user 'root'@'localhost'"
+
+    def refuse() -> BackupReport:
+        raise MaintenanceError("Yu'lon could not list this server's databases.", detail=denied)
+
+    made.back_up = refuse  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.update_to_latest()
+    pump_until(lambda: bool(warned), "the failed backup was reported")
+
+    assert spy.presses == []
+    assert warned[0].startswith("Backup failed — the update was not started")
+    assert denied not in view.maintenance_report.toPlainText()
+    assert denied in view.maintenance_details.text()
+    assert failures and denied in failures[0], "the database's words never reached the log"
+
+
 def test_a_backup_that_answers_with_something_else_is_treated_as_a_failure(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
