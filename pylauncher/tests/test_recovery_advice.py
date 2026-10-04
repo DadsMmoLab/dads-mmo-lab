@@ -55,7 +55,6 @@ from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
 from yulon import install_wiring, platform, reset_defaults, runner, server_build_presses
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.docker import AttachedRun
@@ -118,32 +117,14 @@ class _DiskThatFills:
         return getattr(os, name)
 
 
-def _built_from_old(server_dir: Path, entry: CatalogEntry) -> None:
-    """The install record says the running build was made from OLD, where the heads sit (T217).
-
-    A real install leaves every source on its pin and records nothing; these
-    fixtures put the heads on OLD instead, which a plain Rebuild now refuses as a
-    folder off the commit its build came from. Recording OLD says what the fixture
-    means: OLD IS what the server was built from.
-    """
-    state = native.read_state(server_dir, valid=())
-    assert state is not None
-    revs = tuple(
-        native.SourceRev(repo=source.repo, built=f"{OLD[:7]} · 2026-09-16")
-        for source in entry.emulator.sources
-    )
-    native.write_state(server_dir, replace(state, source_revs=revs))
-
-
 def _wotlk_ready(tmp_path: Path) -> tuple[Recorder, Path]:
-    """A finished WotLK install, every source on OLD (its build's commit) with NEW upstream."""
+    """A finished WotLK install, every source on OLD with NEW upstream."""
     rec = Recorder()
     server_dir = tmp_path / "server"
     install(rec, server_dir)
     for source in ENTRY.emulator.sources:
         rec.heads[server_dir / source.dest] = OLD
         rec.upstream[server_dir / source.dest] = NEW
-    _built_from_old(server_dir, ENTRY)
     return rec, server_dir
 
 
@@ -529,7 +510,6 @@ def test_a_patch_that_could_not_be_written_back_names_the_same_press_and_it_reco
     for source in TBC.emulator.sources:
         rec.heads[server_dir / source.dest] = OLD
         rec.upstream[server_dir / source.dest] = NEW
-    _built_from_old(server_dir, TBC)
     rec.on_clone = None
     core = server_dir / "src/mangos-tbc"
     patched = sorted(core.rglob("*.cpp"))

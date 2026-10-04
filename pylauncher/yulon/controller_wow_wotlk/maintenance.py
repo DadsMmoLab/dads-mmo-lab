@@ -165,6 +165,15 @@ _DUMP_TRAILER = b"-- Dump completed"
 _USE_LINE = re.compile(rb"(?:\A|\n)USE\s+`([^`\n]+)`")
 _CREATE_DB_LINE = re.compile(rb"(?:\A|\n)CREATE DATABASE[^\n`]*`([^`\n]+)`")
 
+# The tables and views a dump creates, per `USE` (T217's update rollback reads
+# them to drop what its copy does not hold). mysqldump writes `CREATE TABLE` at
+# a line start; a view arrives as a versioned comment, either a placeholder
+# (`/*!50001 CREATE TABLE`/`CREATE VIEW`) or the view itself (`/*!50001 VIEW`).
+_TABLE_LINE = re.compile(
+    rb"(?:/\*!\d+\s+)?(?:CREATE\s+TABLE|CREATE\s+VIEW|VIEW)\s+`((?:[^`\n]|``)+)`"
+)
+_USE_AT_START = re.compile(rb"USE\s+`([^`\n]+)`")
+
 # Enough for mysqldump's banner and for its trailer, neither of which is long.
 _EDGE_BYTES = 8192
 # Read size for the full-file scan, with an overlap longer than any pattern above
@@ -191,6 +200,20 @@ class MysqlDocker(Protocol):
 
     def load_from(self, source: IO[bytes]) -> None:
         """Feed `source` (a mysqldump) to the client. Raises on failure."""
+
+
+class SchemaMysql(MysqlDocker, Protocol):
+    """`MysqlDocker` plus the two calls T217's replacing put-back needs.
+
+    A separate seam so the Maintenance tab's restore, which merges and never
+    drops, asks nothing more of the container than it did.
+    """
+
+    def tables(self, database: str) -> tuple[tuple[str, str], ...]:
+        """(name, TABLE_TYPE) for every table and view `database` holds now."""
+
+    def execute(self, sql: str) -> None:
+        """Run `sql` with the client. Raises on failure."""
 
 
 RunningNames = Callable[[], list[str]]
@@ -284,6 +307,36 @@ class DockerMysql:
         )
         if proc.returncode != 0:
             raise MaintenanceError(f"restore failed: {_stderr(proc)}")
+
+    def tables(self, database: str) -> tuple[tuple[str, str], ...]:
+        literal = database.replace("\\", "\\\\").replace("'", "''")
+        proc = self._exec(
+            [
+                mysql_client(self.db_container, client=self.client),
+                "-uroot",
+                "--batch",
+                "--skip-column-names",
+            ],
+            input_text=(
+                "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES "
+                f"WHERE TABLE_SCHEMA = '{literal}';\n"
+            ),
+        )
+        if proc.returncode != 0:
+            raise MaintenanceError(f"could not list the tables of {database}: {_stderr(proc)}")
+        rows: list[tuple[str, str]] = []
+        for line in (proc.stdout or b"").decode("utf-8", "replace").splitlines():
+            name, _tab, kind = line.partition("\t")
+            if name:
+                rows.append((name, kind.strip()))
+        return tuple(rows)
+
+    def execute(self, sql: str) -> None:
+        proc = self._exec(
+            [mysql_client(self.db_container, client=self.client), "-uroot"], input_text=sql
+        )
+        if proc.returncode != 0:
+            raise MaintenanceError(f"the statement failed: {_stderr(proc)}")
 
     def _dump_argv(self, database: str) -> list[str]:
         """`mysqldump` for one database, with the flags each justified.
@@ -980,6 +1033,8 @@ def restore(
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
     now: datetime | None = None,
+    safety_label: str = "pre-restore",
+    before_load: Callable[[], object] | None = None,
 ) -> RestoreReport:
     """Overwrite the databases `plan.backup` names. This destroys player data.
 
@@ -1011,11 +1066,18 @@ def restore(
     such a marker names no database and stands in for nothing. Until 2026-08-23
     the presence of any marker file suppressed the dump for every database.
 
+    `safety_label` names the safety copy's file; `before_load` runs after the
+    safety copy and the marker and before the load, and fails like the load
+    does. Both are T217's: the update rollback labels its safety copies so it
+    can prune them, and drops in `before_load` the tables its copy does not hold
+    (`drop_tables_not_in()`), which turns this merge into a replacement for that
+    one caller. The Maintenance tab passes neither.
+
     Raises:
         MaintenanceError: the confirmation does not match, the plan no longer
             holds (the server came up, the file changed), the safety dump
-            failed, or the load failed. In the last case the marker is left
-            behind on purpose and named in the message.
+            failed, or `before_load` or the load failed. In the last two cases
+            the marker is left behind on purpose and named in the message.
     """
     if confirm != plan.token:
         raise MaintenanceError(
@@ -1052,6 +1114,7 @@ def restore(
         plan,
         mysql,
         kept,
+        label=safety_label,
         spec=spec,
         core_databases=core_databases,
         running=running,
@@ -1081,6 +1144,8 @@ def restore(
     )
     logger.warning(f"restoring {', '.join(plan.databases)} from {plan.backup}")
     try:
+        if before_load is not None:
+            before_load()
         with plan.backup.open("rb") as source:
             mysql.load_from(source)
     except (MaintenanceError, OSError) as exc:
@@ -1165,6 +1230,7 @@ def _safety_backup(
     mysql: MysqlDocker,
     kept: dict[str, Path],
     *,
+    label: str,
     spec: docker.ContainerSpec,
     core_databases: Sequence[str],
     running: RunningNames | None,
@@ -1207,7 +1273,7 @@ def _safety_backup(
             plan.server_dir,
             mysql,
             only=to_dump,
-            label="pre-restore",
+            label=label,
             spec=spec,
             # THREADED, and it was not until 2026-09-04. Without it this one
             # call fell back to AzerothCore's `CORE_DATABASES` default, so a
@@ -1274,6 +1340,75 @@ def _write_marker(record: InterruptedRestore, *, consequence: str) -> None:
             # that documents `MaintenanceError` (review, 2026-08-23).
             logger.warning(f"could not remove {tmp} after failing to write {record.marker}")
         raise MaintenanceError(f"could not write {record.marker}: {exc}. {consequence}") from exc
+
+
+def tables_in_copy(path: Path) -> dict[str, tuple[str, ...]]:
+    """The tables and views a complete copy holds, by database (T217). Reads the whole file.
+
+    The check that comes before anything is dropped: a copy cut short (no
+    `-- Dump completed`), or one in which a database holds no table at all, is
+    refused, because dropping what such a copy "does not hold" would drop tables
+    it lost rather than tables that are new.
+
+    Raises:
+        MaintenanceError: the copy is not a complete dump, or a database in it
+            holds no table.
+    """
+    verify_dump(path)
+    found: dict[str, list[str]] = {}
+    current: str | None = None
+    try:
+        with path.open("rb") as fh:
+            for line in fh:
+                if line.startswith(b"USE "):
+                    use = _USE_AT_START.match(line)
+                    if use is not None:
+                        current = use.group(1).decode("utf-8", "replace")
+                        found.setdefault(current, [])
+                    continue
+                if current is None or not line.startswith((b"CREATE ", b"/*!")):
+                    continue
+                table = _TABLE_LINE.match(line)
+                if table is not None:
+                    name = table.group(1).decode("utf-8", "replace").replace("``", "`")
+                    if name not in found[current]:
+                        found[current].append(name)
+    except OSError as exc:
+        raise MaintenanceError(f"could not read {path}: {exc}") from exc
+    if not found:
+        raise MaintenanceError(f"{path.name} names no database, so it holds no table list")
+    empty = [name for name, tables in found.items() if not tables]
+    if empty:
+        raise MaintenanceError(
+            f"{path.name} holds no table for {', '.join(empty)}, so it is not a usable copy"
+        )
+    return {name: tuple(tables) for name, tables in found.items()}
+
+
+def _identifier(name: str) -> str:
+    return "`" + name.replace("`", "``") + "`"
+
+
+def drop_tables_not_in(mysql: SchemaMysql, database: str, keep: Sequence[str]) -> tuple[str, ...]:
+    """Drop every table and view in `database` that is not in `keep`; return their names (T217).
+
+    What makes T217's put-back a replacement instead of `restore()`'s merge: a
+    table the new build created would otherwise outlive the rollback while
+    `updates` went back to its old rows, and the next update would stop on
+    "already exists". Called only after `tables_in_copy()` accepted the copy.
+    """
+    wanted = set(keep)
+    extra = [(name, kind) for name, kind in mysql.tables(database) if name not in wanted]
+    if not extra:
+        return ()
+    statements = ["SET FOREIGN_KEY_CHECKS=0;"]
+    for name, kind in extra:
+        what = "VIEW" if kind.upper() == "VIEW" else "TABLE"
+        statements.append(f"DROP {what} IF EXISTS {_identifier(database)}.{_identifier(name)};")
+    mysql.execute("\n".join(statements) + "\n")
+    dropped = tuple(name for name, _kind in extra)
+    logger.warning(f"dropped from {database}, which the copy does not hold: {', '.join(dropped)}")
+    return dropped
 
 
 def _databases_named_in(path: Path) -> tuple[str, ...]:

@@ -336,9 +336,11 @@ class AzerothCoreInstaller(StagedInstaller):
                 cancel=None,
                 stage="import",
             )
-            self._check_run(
-                run, "Applying the new build's database updates", ctx.cancel, CORE_UPDATES_NOTE
-            )
+            # `cancel=None`, then the press by name: `_check_run()`'s own check
+            # says "the install was stopped", and this is an update (cold review).
+            self._check_run(run, "Applying the new build's database updates", None, "")
+            if ctx.cancel is not None and ctx.cancel.is_set():
+                raise InstallerError(f"{press} was stopped. {CORE_UPDATES_NOTE}")
             yield "The new build's database updates are in."
 
         return ServersDownWork(
