@@ -42,10 +42,13 @@ from tests.test_rebuild import (
     _seams_of,
     a_finished_install,
 )
-from yulon import docker
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon import docker, server_build_presses
+from yulon.catalog import native
+from yulon.catalog.installer import InstallerError, InstallOptions, RollbackNotDone
 
-WAITING = "waiting up to 3 minutes for Docker"
+WAITING = "up to 3 minutes for Docker"
+SILENT_FOR_THE_WAIT = (False,) * 36
+"""Every ask of the recreate's 3-minute wait unanswered (at 0, 5, ... 175 s); see below."""
 REMOVED = "The build that had just finished was removed"
 HUB = "Docker Hub could not be reached"
 
@@ -88,18 +91,44 @@ class _Probe:
         self.limit = limit
         self.on_ask = on_ask or {}
         self.asked = 0
+        self.started: list[float] = []
+        self.silent = False
 
     def __call__(self) -> bool:
         self.asked += 1
         if self.asked > self.limit:
             raise AssertionError(f"docker_ready was asked {self.asked} times: the wait never ends")
         if self.clock is not None:
+            self.started.append(self.clock.now)
             self.clock.now += self.cost
         if self.asked in self.on_ask:
             self.on_ask[self.asked].set()
-        if self.asked <= len(self.answers):
-            return self.answers[self.asked - 1]
-        return self.then
+        answer = self.answers[self.asked - 1] if self.asked <= len(self.answers) else self.then
+        self.silent = not answer
+        return answer
+
+
+def _silent_with(probe: _Probe, daemon: _Daemon) -> dict[str, object]:
+    """The daemon's tag and rmi calls, failing while the last ask went unanswered.
+
+    A Docker that does not answer `docker info` does not answer `docker tag`
+    either; the fake daemon alone would move tags for a daemon that is not there
+    (cold review of T223: the restore's tag calls ran against the silent Docker).
+    Spelled as Docker Desktop on Windows spells it.
+    """
+    down = (
+        'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/'
+        'images/json": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the '
+        "file specified."
+    )
+
+    def tag_image(src: str, dst: str) -> str:
+        return down if probe.silent else daemon.tag_image(src, dst)
+
+    def remove_image(ref: str, force: bool = False) -> str:
+        return down if probe.silent else daemon.remove_image(ref, force)
+
+    return {"tag_image": tag_image, "remove_image": remove_image}
 
 
 def _new_build_live(daemon: _Daemon, server_dir: Path) -> bool:
@@ -151,7 +180,8 @@ def test_a_docker_that_never_answers_is_asked_every_5_seconds_until_3_minutes_th
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)
     clock = _Clock()
-    probe = _Probe(clock)
+    # Silent for the whole wait, back for the restore that follows it.
+    probe = _Probe(clock, *SILENT_FOR_THE_WAIT, then=True)
     with pytest.raises(InstallerError) as raised:
         list(
             engine(
@@ -164,8 +194,9 @@ def test_a_docker_that_never_answers_is_asked_every_5_seconds_until_3_minutes_th
         )
     # Asked at 0, 5, ... 175 seconds: 36 asks. None is started at 180, when the
     # three minutes are already spent (adversarial review: one there could carry
-    # the wait to 190 s on its own 10-second bound).
-    assert probe.asked == 36, probe.asked
+    # the wait to 190 s on its own 10-second bound). The 37th is the restore's.
+    assert probe.started[:36] == [5.0 * n for n in range(36)], probe.started
+    assert probe.asked == 37, probe.asked
     assert clock.now == 180.0, clock.now
     message = str(raised.value)
     assert "Docker did not answer for 3 minutes" in message, message
@@ -181,7 +212,7 @@ def test_the_wait_ends_by_its_count_of_asks_when_the_clock_does_not_move(tmp_pat
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)
-    probe = _Probe(None, limit=100)
+    probe = _Probe(None, *(False,) * 37, then=True, limit=100)
     with pytest.raises(InstallerError):
         list(
             engine(
@@ -191,7 +222,7 @@ def test_the_wait_ends_by_its_count_of_asks_when_the_clock_does_not_move(tmp_pat
                 monotonic=lambda: 0.0,
             ).rebuild(InstallOptions(server_dir=server_dir))
         )
-    assert probe.asked == 37, probe.asked
+    assert probe.asked == 38, "37 in the wait and one by the restore after it"
     _untouched(daemon, server_dir)
 
 
@@ -205,7 +236,7 @@ def test_the_wait_ends_by_the_clock_when_every_ask_is_slow(tmp_path: Path) -> No
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)
     clock = _Clock()
-    probe = _Probe(clock, cost=8.0)
+    probe = _Probe(clock, *(False,) * 14, then=True, cost=8.0)
     with pytest.raises(InstallerError) as raised:
         list(
             engine(
@@ -216,13 +247,13 @@ def test_the_wait_ends_by_the_clock_when_every_ask_is_slow(tmp_path: Path) -> No
                 sleep=clock.sleep,
             ).rebuild(InstallOptions(server_dir=server_dir))
         )
-    assert probe.asked == 14, probe.asked
-    assert clock.now == 180.0, clock.now
+    assert probe.asked == 15, "14 in the wait and one by the restore after it"
+    assert probe.started[14] == 180.0, probe.started
     assert "Docker did not answer for 3 minutes" in str(raised.value), raised.value
     _untouched(daemon, server_dir)
 
 
-def test_a_stop_during_the_docker_wait_ends_it_at_once_and_replaces_nothing(
+def test_a_stop_during_the_docker_wait_ends_it_and_replaces_nothing(
     tmp_path: Path,
 ) -> None:
     rec = Recorder(images=True)
@@ -230,7 +261,7 @@ def test_a_stop_during_the_docker_wait_ends_it_at_once_and_replaces_nothing(
     daemon = _daemon_for(server_dir)
     clock = _Clock()
     stop = threading.Event()
-    probe = _Probe(clock, on_ask={2: stop})
+    probe = _Probe(clock, False, False, then=True, on_ask={2: stop})
     with pytest.raises(InstallerError) as raised:
         list(
             engine(
@@ -241,9 +272,11 @@ def test_a_stop_during_the_docker_wait_ends_it_at_once_and_replaces_nothing(
                 sleep=clock.sleep,
             ).rebuild(InstallOptions(server_dir=server_dir), cancel=stop)
         )
-    assert probe.asked == 2, probe.asked
+    assert probe.asked == 3, "two in the wait, and the restore's own before it moves a tag"
     message = str(raised.value)
     assert "stopped" in message, message
+    # Said once (cold review): the Stop's sentence and the restore's both said it.
+    assert message.lower().count("replaced") == 1, message
     assert "Docker did not answer for" not in message, message
     # The Stop gives up the new build, and says so: the same arm as Docker's refusal.
     assert REMOVED in message, message
@@ -258,7 +291,7 @@ def test_a_stop_during_a_pause_is_read_before_docker_is_asked_again(tmp_path: Pa
     daemon = _daemon_for(server_dir)
     clock = _Clock()
     stop = threading.Event()
-    probe = _Probe(clock)
+    probe = _Probe(clock, False, then=True)
 
     def sleep(seconds: float) -> None:
         clock.sleep(seconds)
@@ -274,7 +307,9 @@ def test_a_stop_during_a_pause_is_read_before_docker_is_asked_again(tmp_path: Pa
                 sleep=sleep,
             ).rebuild(InstallOptions(server_dir=server_dir), cancel=stop)
         )
-    assert probe.asked == 1, probe.asked
+    assert probe.asked == 2, "one in the wait, and the restore's own"
+    # The pause is taken a second at a time, so the Stop lands within one (cold review).
+    assert probe.started[1] == 1.0, probe.started
     assert "stopped while it waited for Docker" in str(raised.value), raised.value
     _untouched(daemon, server_dir)
 
@@ -294,7 +329,7 @@ def test_a_recreate_refused_after_a_finished_compile_says_the_new_build_was_remo
             engine(
                 rec,
                 **_seams_of(rec, daemon),
-                docker_ready=_Probe(clock),
+                docker_ready=_Probe(clock, *SILENT_FOR_THE_WAIT, then=True),
                 monotonic=clock.monotonic,
                 sleep=clock.sleep,
             ).rebuild(InstallOptions(server_dir=server_dir))
@@ -302,9 +337,84 @@ def test_a_recreate_refused_after_a_finished_compile_says_the_new_build_was_remo
     message = str(raised.value)
     assert REMOVED in message, message
     assert "the server is still on the build it had before this rebuild" in message, message
+    # The press that was used, named, and not "the next rebuild" (cold review).
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    assert f"pressing {rebuild} again compiles it again" in message, message
+    assert engine(rec).start_refusal(server_dir) is None
     # And it is true: no name on the daemon points at the new build any more.
     assert "after" not in daemon.names.values(), daemon.names
     _untouched(daemon, server_dir)
+
+
+def test_a_docker_silent_through_the_restore_too_leaves_start_refused(tmp_path: Path) -> None:
+    """Cold review, IMPORTANT: the tags cannot go back, so the next Start must not run them.
+
+    Docker answers nothing for the recreate's three minutes and nothing for the
+    restore's. The new build has never started, the live tags name it, and Start
+    is `compose up -d`, which would run it -- the opposite of owner answer D1.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    clock = _Clock()
+    probe = _Probe(clock)
+    said: list[str] = []
+    with pytest.raises(RollbackNotDone) as raised:
+        for line in engine(
+            rec,
+            **{**_seams_of(rec, daemon), **_silent_with(probe, daemon)},
+            docker_ready=probe,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        ).rebuild(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert probe.asked == 72, "36 asks in each of the two waits"
+    message = str(raised.value)
+    assert raised.value.touched is False
+    assert engine(rec).start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
+    assert "Start is refused" in message, message
+    assert "No container was replaced" in message, message
+    # What is on the daemon is what the sentence says: the new build on the live
+    # tags, the old one under its rollback names -- kept, being its only copy.
+    assert _new_build_live(daemon, server_dir), daemon.names
+    assert sorted(daemon.transient()) == sorted(
+        ref + native.ROLLBACK_TAG_SUFFIX for ref in _refs(server_dir)
+    )
+    assert len([line for line in said if "before putting the build from before" in line]) == 1
+
+
+def test_a_stop_during_the_wait_does_not_cut_the_restores_wait_short(tmp_path: Path) -> None:
+    """The Stop that ended the recreate's wait is still set when the restore waits; it must
+    not end that one too, or the tags stay on the new build with nothing refusing a Start."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    clock = _Clock()
+    stop = threading.Event()
+    probe = _Probe(clock, on_ask={2: stop})
+    with pytest.raises(RollbackNotDone):
+        list(
+            engine(
+                rec,
+                **{**_seams_of(rec, daemon), **_silent_with(probe, daemon)},
+                docker_ready=probe,
+                monotonic=clock.monotonic,
+                sleep=clock.sleep,
+            ).rebuild(InstallOptions(server_dir=server_dir), cancel=stop)
+        )
+    assert probe.asked == 2 + 36, "two in the stopped wait, all 36 in the restore's"
+    assert engine(rec).start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
+
+
+def test_a_rebuild_that_succeeds_lets_the_untested_build_refusal_go(tmp_path: Path) -> None:
+    """The refusal's own advice works: the Rebuild it names runs, and clears it."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    assert native.owe_start(server_dir, why="untested") == ""
+    assert engine(rec).start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
+    daemon = _daemon_for(server_dir)
+    list(engine(rec, **_seams_of(rec, daemon)).rebuild(InstallOptions(server_dir=server_dir)))
+    assert engine(rec).start_refusal(server_dir) is None
 
 
 # -- D2 in the restore: putting the old build back waits for Docker too -------
@@ -330,6 +440,32 @@ def test_putting_the_old_build_back_waits_for_a_slow_docker_too(tmp_path: Path) 
         )
     assert probe.asked == 4, probe.asked
     assert "put back and is running again" in str(raised.value), raised.value
+
+
+def test_a_restore_docker_never_answers_says_its_servers_are_left_stopped(tmp_path: Path) -> None:
+    """Cold review: Stop does not end the restore's wait; the sentences say so, and what is left."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    clock = _Clock()
+    probe = _Probe(clock, True)
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in engine(
+            rec,
+            **_seams_of(rec, daemon),
+            docker_ready=probe,
+            wait_ready=_answers(False, True),
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        ).rebuild(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert probe.asked == 37, "the replace's one, and 36 in the restore's wait"
+    waiting = [line for line in said if WAITING in line]
+    assert len(waiting) == 1 and "Stop does not end this wait" in waiting[0], said
+    message = str(raised.value)
+    assert "its servers are stopped" in message, message
+    assert "press Start" in message, message
 
 
 def test_a_stop_that_started_the_restore_does_not_cut_the_restores_wait_short(
@@ -500,11 +636,57 @@ def _rebuild_with(
     return builds, daemon, server_dir, clock, said, failed
 
 
+def _lookup_failed(error: str) -> tuple[str, ...]:
+    """The metadata step failing with `error`, in BuildKit's shape, nothing else in the tail."""
+    head = 'failed to do request: Head "https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04"'
+    return (
+        "#3 [ac-worldserver internal] load metadata for docker.io/library/ubuntu:24.04",
+        f"#3 ERROR: {head}: {error}",
+        "------",
+        " > [ac-worldserver internal] load metadata for docker.io/library/ubuntu:24.04:",
+        "------",
+        "failed to solve: ubuntu:24.04: failed to resolve source metadata for "
+        f"docker.io/library/ubuntu:24.04: {head}: {error}",
+    )
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param(HUB_UNREACHABLE, id="tls-handshake-timeout-yulon-win11"),
+        pytest.param(
+            _lookup_failed(
+                "dial tcp: lookup registry-1.docker.io: Temporary failure in name resolution"
+            ),
+            id="temporary-failure-in-name-resolution",
+        ),
+        pytest.param(
+            _lookup_failed("dial tcp 44.208.254.194:443: connect: connection timed out"),
+            id="connection-timed-out",
+        ),
+        pytest.param(
+            _lookup_failed("dial tcp 44.208.254.194:443: connect: no route to host"),
+            id="no-route-to-host",
+        ),
+        pytest.param(
+            _lookup_failed(
+                "dial tcp: lookup registry-1.docker.io on 127.0.0.11:53: server misbehaving"
+            ),
+            id="server-misbehaving",
+        ),
+        pytest.param(_lookup_failed("EOF"), id="eof"),
+        pytest.param(_lookup_failed("unexpected EOF"), id="unexpected-eof"),
+        pytest.param(
+            _lookup_failed("dial tcp 44.208.254.194:443: connect: connection refused"),
+            id="connection-refused",
+        ),
+    ],
+)
 def test_a_build_that_cannot_reach_docker_hub_is_tried_again_after_30_seconds(
-    tmp_path: Path,
+    tmp_path: Path, tail: tuple[str, ...]
 ) -> None:
     builds, daemon, server_dir, _clock, said, failed = _rebuild_with(
-        tmp_path, docker.AttachedRun(1, HUB_UNREACHABLE), docker.AttachedRun(0, ("compiled",))
+        tmp_path, docker.AttachedRun(1, tail), docker.AttachedRun(0, ("compiled",))
     )
     assert failed is None, failed
     assert len(builds.at) == 2, builds.at

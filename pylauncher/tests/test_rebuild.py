@@ -1359,8 +1359,10 @@ def test_a_rebuild_cancelled_while_the_world_loads_replaces_nothing_and_puts_the
     assert "recreate" not in rec.calls, rec.calls
     assert not [c for c in rec.calls if c.startswith("stop_servers")], rec.calls
     said = str(raised.value)
-    assert "Nothing was touched" in said and "still loading" in said, said
+    assert "still loading" in said, said
     assert "no container was replaced" in said, said
+    # T223: not "Nothing was touched" -- the build that had just finished was removed.
+    assert "Nothing was touched" not in said and "was removed" in said, said
 
 
 def test_a_restart_during_the_replaces_wait_is_waited_for_and_heard(
@@ -1531,7 +1533,7 @@ def test_a_recreate_that_cannot_even_start_puts_the_recipe_back_and_takes_no_sec
     assert after.completed == ground_state.completed, after.completed
     assert "recreate" not in rec.calls, rec.calls
     assert [line for line in said if "build recipe was put back exactly as it was" in line], said
-    assert "no container was replaced" in str(raised.value), raised.value
+    assert "no container was replaced" in str(raised.value).lower(), raised.value
     assert "Docker did not answer for" in str(raised.value), raised.value
 
 

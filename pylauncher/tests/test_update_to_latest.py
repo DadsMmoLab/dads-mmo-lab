@@ -36,7 +36,7 @@ from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install,
 from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
-from yulon import docker, git, resources, rmtree, runner
+from yulon import docker, git, resources, rmtree, runner, server_build_presses
 from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
@@ -2147,8 +2147,7 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
 
 GIVEN_UP = (
     "The rebuild was cancelled while the world was still loading, so its containers were not "
-    "replaced -- the server you have is still the one that was running before this rebuild. "
-    "Nothing was touched."
+    "replaced -- the server you have is still the one that was running before this rebuild."
 )
 """`stage_recreate()`'s sentence for a recreate given up before its signal: nothing replaced."""
 
@@ -2348,6 +2347,10 @@ def test_a_rollback_that_put_the_tags_back_before_any_container_moved_puts_the_s
     said = str(raised.value)
     assert not isinstance(raised.value, RollbackNotDone)
     assert "The build that had just finished was removed, and no container was replaced" in said
+    # T223 cold review: the press the player used, not "the next rebuild".
+    update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+    assert f"pressing {update} again compiles it again" in said, said
+    assert "next rebuild" not in said, said
     assert set(_heads(rec, server_dir).values()) == {OLD}
     assert said.endswith(native.SOURCES_PUT_BACK_NOTE)
 
