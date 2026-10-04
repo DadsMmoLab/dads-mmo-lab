@@ -103,6 +103,7 @@ from yulon import play as play_module
 from yulon import steam as steam_module
 from yulon.apply import (
     Applier,
+    ApplyError,
     ApplyReport,
     DockerSql,
     PendingSql,
@@ -120,7 +121,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
-from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller import Controller, InstallStatus, PortConflictError, StartRefused
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
@@ -207,6 +208,24 @@ class _DockerSilent(NamedTuple):
     """A poll's Docker failure, handed back as an answer instead of raised (T194 fix round 1)."""
 
     exc: Exception
+
+
+_A_PROGRAM_EXITED = re.compile(r"\bexited -?\d+:")
+"""How `docker._run` and `git` word a command that failed: `<argv> exited <code>: <stderr>`."""
+
+
+def _said_by_yulon(exc: object) -> bool:
+    """Whether a failure's text is a sentence Yu'lon wrote for the player (T214).
+
+    Shown as written when it is. Otherwise something broke -- a command's own
+    output, a timeout's, a bug's -- and the line says so in words while the text
+    goes under Details and to the log, as T194 did for Apply, Make and Restore.
+    One of Yu'lon's refusal types, then, carrying no `… exited <code>:` output:
+    `DockerCommandError` holds both kinds (a compose failure and "the world
+    service has no image: build it first"), so the type alone cannot tell them.
+    """
+    ours = (StartRefused, docker.DockerCommandError, docker.MaintenanceLeaseTaken, ApplyError)
+    return isinstance(exc, ours) and _A_PROGRAM_EXITED.search(str(exc)) is None
 
 
 def _docker_is_away(exc: object) -> bool:
@@ -4347,6 +4366,15 @@ START_FAILED_DOCKER_MISSING = (
 )
 """A failed Start off a Deck with no docker CLI; the banner says how to install it (T194)."""
 
+START_FAILED_BROKE = "The server did not start. Details below says why."
+"""A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
+
+STOP_LOG_NOT_SAVED = (
+    "The server stopped. Yu'lon couldn't save a copy of its log this time; Details below "
+    "says why."
+)
+"""A Stop whose log snapshot failed; what went wrong is in Details (T211)."""
+
 STATUS_SEE_THE_BANNER = "Status unknown (see above)"
 """The status line while the Docker banner above it says why (T194 C7)."""
 
@@ -4400,7 +4428,6 @@ DASHBOARD_WAITS = (
 DASHBOARD_OPEN_WAITS = "The dashboard opens once it is switched on and its files say it is up."
 REINSTALL_STOPPING = "Wait: the Docker reinstall is stopping."
 REINSTALL_ELSEWHERE = "Wait: another server's Docker reinstall is running."
-DOCKER_UNKNOWN = "Start and Stop come back when Docker answers."
 
 VERDICT_UNREADABLE = (
     "Yu'lon couldn't read this server's dashboard just now; the Logs tab has the reason."
@@ -6244,7 +6271,15 @@ TUNING_RESET_RUNNING = (
 )
 """The close guard's sentence while a reset or its undo runs (`busy_reason()`)."""
 
-TUNING_RESET_UNREADABLE = "FAILED: the settings files could not be read ({why})"
+TUNING_RESET_UNREADABLE = "Yu'lon couldn't read the settings files. Details below says why."
+TUNING_RESET_BROKE = "Reset to default did not finish. Details below says why."
+TUNING_JOB_BROKE = "The {job} did not finish. Details below says why."
+"""T214: a Tuning press that broke; what broke is in Details and the log."""
+TIME_ZONE_BROKE = "The time zone was not changed. Details below says why."
+MODULE_JOB_BROKE = "{what} did not finish. Details below says why."
+MODULE_UPDATES_BROKE = "Yu'lon couldn't check for module updates. Details below says why."
+MODULE_SQL_BROKE = "The SQL run did not finish. Details below says why."
+"""T214: a Modules press that broke; what broke is in Details and the log."""
 TUNING_RESET_NOTHING_TO_UNDO = (
     "Nothing to undo: every file is already as the last reset found it, or was put back since."
 )
@@ -6495,9 +6530,13 @@ class _SaidLine(QLabel):
     under their presses.
     """
 
+    said = Signal()
+    """Every `setText`, so a Details fold under the line can go with the line it explains."""
+
     def setText(self, text: str) -> None:  # noqa: N802  (Qt's own name)
         super().setText(text)
         self.setVisible(bool(text))
+        self.said.emit()
 
 
 _PAGES_THAT_FIT_THEMSELVES = frozenset({"Tuning"})
@@ -7098,6 +7137,10 @@ class ControllerView(QWidget):
         # exists to prevent (review, 2026-08-22).
         self.problem_label = _SaidLine("", tab)
         self.problem_label.setVisible(False)
+        # T214, T211: what broke behind a line that says so in words. Any new
+        # line takes the last Details down; the writer that has some sets it after.
+        self.problem_details = Details(tab)
+        self.problem_label.said.connect(lambda: self.problem_details.set_text(""))
         # T195 (I4): why a Server press is greyed -- a job of ours running, or
         # the server already up or down -- for a Deck, which has no hover.
         self.server_reasons = ReasonLine(tab)
@@ -7294,6 +7337,7 @@ class ControllerView(QWidget):
         realm_column.addWidget(self.server_reasons)
         # The refusal, then the offers it makes: read in that order.
         realm_column.addWidget(self.problem_label)
+        realm_column.addWidget(self.problem_details)
         realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
         box.addWidget(realm)
 
@@ -8518,17 +8562,17 @@ class ControllerView(QWidget):
         """
         self._badge_held = None
         self.realm_badge.set_status("unknown")
-        self.docker_banner.show_advice(
-            docker_advice.advice_for(exc, distro=self.services.controller.wsl_distro)
-        )
+        advice = docker_advice.advice_for(exc, distro=self.services.controller.wsl_distro)
+        self.docker_banner.show_advice(advice)
         self.status_label.setText(STATUS_SEE_THE_BANNER)
         self._clear_the_verdict()
-        # F1 (T195): a greyed Start or Stop says the box is why. A reading that
-        # answers replaces it (`_status_ready`); a job of ours keeps its "Wait:".
+        # F1 (T195): a greyed Start or Stop says what it waits for, in the
+        # banner's case's own words (T214). A reading that answers replaces it
+        # (`_status_ready`); a job of ours keeps its "Wait:".
         if not self._busy:
             for press in (self.start_button, self.stop_button):
                 if not press.isEnabled():
-                    set_enabled_why(press, DOCKER_UNKNOWN)
+                    set_enabled_why(press, advice.greyed)
         # The reinstall lives in the banner, so it is offered with it and
         # never switched on inside a banner the hold keeps down.
         self._offer_docker_repair()
@@ -8914,8 +8958,8 @@ class ControllerView(QWidget):
         which had happened (review, 2026-08-22).
         """
         self._set_busy(False)
-        said = (
-            "None of this install's servers were running."
+        said, why = (
+            ("None of this install's servers were running.", "")
             if result is False
             else self._where_the_log_went()
         )
@@ -8923,25 +8967,30 @@ class ControllerView(QWidget):
         # (T158) left "stopping it now" in this label, which is false once the
         # stop is over. Only the forced-stop warning is carried past it.
         self.problem_label.setText(self._after_the_stop(said))
+        self.problem_details.set_text(why)
         self.refresh_status()
         self.refresh_verdict()
 
-    def _where_the_log_went(self) -> str:
-        """Name the file the pre-stop snapshot wrote, say why there is none, or say nothing.
+    def _where_the_log_went(self) -> tuple[str, str]:
+        """The line naming the file the pre-stop snapshot wrote, or saying there is none,
+        and what went wrong for Details; ("", "") to say nothing.
 
         Read after the stop job has finished, so the value was written on the
         worker thread and is read on the GUI thread with the job's completion
-        between them. Nothing here touches a widget from the worker.
+        between them. Nothing here touches a widget from the worker. Why there is
+        none is Docker's or the disk's words, so it goes under Details (T211):
+        on the line it read "Its log was not saved: could not find …" for a world
+        server that was there and a Docker too busy to say so.
         """
         recorder = self.services.log_snapshot
         snapshot = getattr(recorder, "last", None) if recorder is not None else None
         if snapshot is None:
-            return ""
+            return "", ""
         if snapshot.path is not None:
-            return f"The server's log was saved to {snapshot.path}"
+            return f"The server's log was saved to {snapshot.path}", ""
         if snapshot.problem:
-            return f"The server stopped. Its log was not saved: {snapshot.problem}"
-        return ""
+            return STOP_LOG_NOT_SAVED, snapshot.problem
+        return "", ""
 
     @Slot(str)
     def _stop_notice(self, text: str) -> None:
@@ -8996,7 +9045,9 @@ class ControllerView(QWidget):
             self._offer_to_stop_the_other_server(exc)
             return
         self._hide_stop_other()
-        msg = str(exc)
+        raw = str(exc)
+        msg = raw
+        why = ""
         if isinstance(exc, docker.DockerCliMissingError):
             # T160, T194. The missing-CLI sentence names both Docker Desktop and
             # Docker Engine; this machine is told its own half. On a Deck after a
@@ -9018,9 +9069,16 @@ class ControllerView(QWidget):
             logger.warning(f"{self.entry.name}: Start could not reach Docker: {exc}")
             msg = START_FAILED_NO_DOCKER
             self._put_the_docker_banner_up(exc)
-        rolled = self._roll_the_channel_back_if_it_took_the_port(msg)
+        elif not _said_by_yulon(exc):
+            # T214: something broke -- Docker's or the system's own words. The
+            # line says so; the words go under Details and, through
+            # `action_failed`, to the log. Yu'lon's own refusals stay as written.
+            msg, why = START_FAILED_BROKE, raw
+        # Asked of the raw text: Docker's port-in-use words are what it reads.
+        rolled = self._roll_the_channel_back_if_it_took_the_port(raw)
         self.problem_label.setText(rolled or msg)
-        self.action_failed.emit(rolled or msg)
+        self.problem_details.set_text("" if rolled else why)
+        self.action_failed.emit(rolled or (raw if why else msg))
         self.refresh_status()
 
     def _roll_the_channel_back_if_it_took_the_port(self, message: str) -> str:
@@ -13191,7 +13249,11 @@ class ControllerView(QWidget):
     def _time_zone_failed(self, exc: object) -> None:
         """A refusal `write()` raised (it wrote nothing), or a bug: said, and read again."""
         self._time_zone_writing = False
-        self.tuning_report.setPlainText(f"The time zone was NOT changed: {exc}")
+        if isinstance(exc, server_time_zone.TimeZoneSettingError):
+            self.tuning_report.setPlainText(f"The time zone was not changed: {exc}")
+        else:  # T214: a bug's words are Details' and the log's
+            self.tuning_report.setPlainText(TIME_ZONE_BROKE)
+            self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
         self._look_up_time_zone()
 
@@ -14554,6 +14616,10 @@ class ControllerView(QWidget):
         box.addWidget(self.custom_module_line)
         box.addWidget(self.module_report_strip)
         box.addWidget(self.module_report)
+        # T214: what broke behind a report that says so in words; the next report takes it down.
+        self.module_details = Details(tab)
+        self.module_report.textChanged.connect(lambda: self.module_details.set_text(""))
+        box.addWidget(self.module_details)
         box.addWidget(self.rebuild_stop_anyway_button)
         box.addWidget(self.rebuild_log)
         self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
@@ -15506,7 +15572,12 @@ class ControllerView(QWidget):
             # the row showing a sha the clone had moved off -- a wrong sha,
             # which item 1 says is worse than none.
             self._versions.forget(acted_on.id)
-        self.module_report.setPlainText(f"{what} FAILED: {exc}")
+        what = what[:1].upper() + what[1:]
+        if _said_by_yulon(exc):
+            self.module_report.setPlainText(f"{what} did not finish: {exc}")
+        else:
+            self.module_report.setPlainText(MODULE_JOB_BROKE.format(what=what))
+            self.module_details.set_text(str(exc))
         # Re-read the disk on failure too (T55 review). The same partial states
         # the comment above names -- a clone made before the SQL step raised, a
         # deploy removed before the rmtree did -- change what is installed, and
@@ -15614,7 +15685,11 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self._module_pending = None
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
-        self.module_report.setPlainText(f"check for module updates FAILED: {exc}")
+        if _said_by_yulon(exc):
+            self.module_report.setPlainText(f"Yu'lon couldn't check for module updates: {exc}")
+        else:
+            self.module_report.setPlainText(MODULE_UPDATES_BROKE)
+            self.module_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
 
     @Slot()
@@ -15707,7 +15782,11 @@ class ControllerView(QWidget):
         # printed, because a run that got part-way is a different situation
         # from one that never started and only its own output can tell them
         # apart.
-        self.module_report.appendPlainText(f"FAILED: {exc}")
+        if _said_by_yulon(exc):
+            self.module_report.appendPlainText(f"The SQL run did not finish: {exc}")
+        else:
+            self.module_report.appendPlainText(MODULE_SQL_BROKE)
+            self.module_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
         # As above: a refusal can arrive after the database was started, and
         # Start and Stop are locked until something reads the status.
@@ -16696,6 +16775,9 @@ class ControllerView(QWidget):
         box.addWidget(self.tuning_panel, 1)
         box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)
+        self.tuning_details = Details(tab)
+        self.tuning_report.textChanged.connect(lambda: self.tuning_details.set_text(""))
+        box.addWidget(self.tuning_details)
         # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
         # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a
         # floor of 100 under it could never be the number that applied. A guard
@@ -17271,9 +17353,14 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _tuning_job_failed(self, exc: object) -> None:
+        job = "recreate" if self._busy_job.startswith("Recreate") else "restart"
         self._set_busy(False)
         self._refresh_tuning_owed()
-        self.tuning_report.setPlainText(f"FAILED: {exc}")
+        if _said_by_yulon(exc):
+            self.tuning_report.setPlainText(str(exc))  # T214: ours, as written
+        else:
+            self.tuning_report.setPlainText(TUNING_JOB_BROKE.format(job=job))
+            self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
 
     # -- T94: Reset to default
@@ -17352,7 +17439,8 @@ class ControllerView(QWidget):
         self._press_asking = None
         self._set_reset_button()
         if answer.error:
-            self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE.format(why=answer.error))
+            self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE)
+            self.tuning_details.set_text(answer.error)
             self.action_failed.emit(answer.error)
             return
         chosen, keys, modules = asking.files, asking.keys, asking.modules
@@ -17380,7 +17468,8 @@ class ControllerView(QWidget):
         and re-armed the button mid-read); a reload frees the button.
         """
         logger.warning(f"a Reset to default press's facts job raised: {exc}")
-        self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE.format(why=exc))
+        self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE)
+        self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
 
     def _set_reset_button(self) -> None:
@@ -17414,7 +17503,8 @@ class ControllerView(QWidget):
         self._reset_running = False
         self._put_back_running = False
         self._set_busy(False)
-        self.tuning_report.setPlainText(f"FAILED: {exc}")
+        self.tuning_report.setPlainText(TUNING_RESET_BROKE)
+        self.tuning_details.set_text(str(exc))
         self.action_failed.emit(str(exc))
         # A bug may have struck after some writes, so this session's record of
         # an EARLIER press is no longer the last one: dropped, so the Undo

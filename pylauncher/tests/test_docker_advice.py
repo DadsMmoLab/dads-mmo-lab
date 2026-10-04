@@ -66,6 +66,43 @@ def test_every_machine_and_failure_gets_the_one_title_a_body_and_its_press(
         assert "Docker Desktop" not in advice.body, advice.body
 
 
+GREYED = {
+    "missing": "Start and Stop come back once Docker is installed.",
+    "removed": "Start and Stop come back once Docker is installed again.",
+    "not-running": "Start and Stop come back when Docker answers.",
+    "wsl": "Start and Stop come back when the Docker in that distro answers.",
+    "permission": "Start and Stop come back once Docker lets Yu'lon in.",
+    "unknown": "Start and Stop come back once Docker stops answering with that error.",
+}
+"""Why a greyed Start or Stop waits, per failure (T214): written out, never derived."""
+
+
+@pytest.mark.parametrize("host", HOSTS)
+@pytest.mark.parametrize("problem", PROBLEMS)
+def test_each_failure_says_what_start_and_stop_wait_for(
+    host: docker_advice.Host, problem: docker_advice.Problem
+) -> None:
+    """T214: "come back when Docker answers" was said for no Docker and for an error too.
+
+    Docker that is not installed will not answer, and Docker that answered with
+    an error already has.
+    """
+    advice = docker_advice.advise(problem, host, distro="Ubuntu")
+
+    assert advice.greyed == GREYED[problem]
+    assert text_faults(advice.greyed) == [], advice.greyed
+
+
+def test_a_deleted_distro_says_start_and_stop_wait_for_it() -> None:
+    gone = docker.DockerCommandError("The WSL distro Ubuntu no longer exists - it was deleted.")
+
+    advice = docker_advice.advice_for(
+        gone, distro="Ubuntu", host="windows", deck_docker_removed=False
+    )
+
+    assert advice.greyed == "Start and Stop come back once that WSL distro is there again."
+
+
 def test_docker_desktop_down_says_open_it_and_wait_for_engine_running() -> None:
     advice = docker_advice.advise("not-running", "windows")
 
