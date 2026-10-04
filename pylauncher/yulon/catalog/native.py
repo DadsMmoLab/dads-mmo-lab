@@ -1581,11 +1581,13 @@ BUILDER_LOST = (
     "because it lost its connection to Docker's builder part-way through: Docker closed it. "
     "That happens when Docker's engine is restarted or killed under the build, and the commonest "
     "reason is Docker running out of memory while it compiles. Check how much memory Docker has "
-    "with `docker info` (Total Memory): Docker Desktop sets it in Settings → Resources (on "
-    "Windows, `memory=` in %UserProfile%\\.wslconfig), and Docker Engine on Linux uses the "
-    "machine's own. Then run it again: the steps the build had finished are kept in Docker's "
-    "build cache, so it picks up from the last of them instead of starting over. If it happens "
-    "again at the same place, restart Docker first."
+    "with `docker info` (Total Memory). On Windows, Docker Desktop's WSL 2 engine has no memory "
+    "slider: Windows sizes it, through `memory=` in %UserProfile%\\.wslconfig, then "
+    "`wsl --shutdown` and start Docker Desktop again. On a Mac, and with Docker Desktop's "
+    "Hyper-V engine, it is Settings → Resources → Memory; Docker Engine on Linux uses the "
+    "machine's own memory. Then run it again: the steps the build had finished are kept in "
+    "Docker's build cache, so it picks up from the last of them instead of starting over. If it "
+    "happens again at the same place, restart Docker first."
 )
 """T202: what a build that ended in `rpc error: code = Unavailable` is told.
 
@@ -1593,7 +1595,9 @@ The T179 live check met it twice on one Windows VM (2026-10-03): once after a
 finished compile and 53 silent minutes, once mid-compile at 99%, and the build
 passed after Docker was given more memory. Before this the player read "the
 build failed (exit 1). Its last words were:" and a raw gRPC line. "Run it
-again" rather than "press Install": the same stage serves Rebuild.
+again" rather than "press Install": the same stage serves Rebuild. Windows
+first and in full because that is where it was seen, and because the Resources
+pane there has no memory control on the WSL 2 engine (review, 2026-10-04).
 """
 
 BUILD_QUIET_NOTICE_SECONDS = 10 * 60
@@ -1604,14 +1608,29 @@ Measured, not guessed: the longest quiet stretch inside four real build logs
 rebuild) was about a minute, a CMake configure under WSL; a step that ends is
 followed by the next step's header within a second. The T179 stall that this
 exists for printed nothing for 53 minutes.
+
+**Silence is judged on output alone, on purpose.** The ticket proposed "no
+output AND no Docker CPU/disk progress". The T179 stall had both at once --
+Docker's VM at 0 % CPU and about 50 KB/s of disk writes for those 53 minutes
+(live log, phase A7) -- but output alone already separates 60 seconds from
+3,180 by a factor of fifty, and reading a VM's CPU differs on Docker Desktop
+for Windows, for Mac, under WSL and on a bare Linux engine. And because the
+watch only ever SAYS something, a false reading costs a sentence, never a build.
 """
 
-BUILD_QUIET_LIMIT_SECONDS = 30 * 60
-"""How long a build may print nothing before its client is stopped (T202).
+BUILD_STALLED_SECONDS = 30 * 60
+"""How long a build may print nothing before it is called stalled (T202).
 
-Thirty times the longest quiet stretch measured, so a slow machine's longest
-single compile or link stays far inside it, and still well short of the 53
-minutes the T179 stall sat silent before Docker ended it with an EOF.
+Thirty times the longest quiet stretch measured, and still well short of the
+53 minutes the T179 stall sat silent before Docker ended it with an EOF.
+
+**Nothing is ended here, by the lead's ruling on review (2026-10-04).** A slow
+image export can be quiet for long on a slow disk, and on Windows ending the
+client is not even possible from here: `proc.terminate()` reaches docker.exe
+only, and the docker-compose.exe and docker-buildx.exe it started run on. So
+the player is told how to check and what to do, and restarting Docker -- which
+the sentence asks for -- is what ends a hung build: the client then fails with
+the EOF that `BUILDER_LOST` explains.
 """
 
 
@@ -1620,39 +1639,41 @@ def _minutes(seconds: float) -> str:
     return f"{whole} minute{'s' if whole != 1 else ''}"
 
 
-def build_quiet_notice(seconds: float) -> str:
-    """Said once a build has printed nothing for `seconds` (T202)."""
+def build_quiet_notice() -> str:
+    """Said once a build has printed nothing for `BUILD_QUIET_NOTICE_SECONDS` (T202)."""
     return (
-        f"The build has printed nothing for {_minutes(seconds)}. A working build is rarely quiet "
-        f"for more than a minute or two; if it stays silent for "
-        f"{_minutes(BUILD_QUIET_LIMIT_SECONDS)} it is stopped and you are told why. You can also "
-        "press Stop now: the steps it finished are kept."
+        f"The build has printed nothing for {_minutes(BUILD_QUIET_NOTICE_SECONDS)}. A working "
+        "build is rarely quiet for more than a minute or two, but it is left running; if it is "
+        f"still silent at {_minutes(BUILD_STALLED_SECONDS)} you are told how to check whether it "
+        "has stalled."
     )
 
 
-def build_stalled(seconds: float) -> str:
-    """The failure a build that printed nothing for `seconds` ends with (T202)."""
+def build_stalled_notice() -> str:
+    """Said once a build has printed nothing for `BUILD_STALLED_SECONDS` (T202). Ends nothing."""
     return (
-        f"the build printed nothing for {_minutes(seconds)} and was stopped: a working build is "
-        "never that quiet, so Docker's builder had stopped answering. Restart Docker, then run "
-        "it again: the steps the build had finished are kept in Docker's build cache and are not "
-        "done a second time. If it stops answering again, check how much memory Docker has with "
-        "`docker info` (Total Memory)."
+        f"The build has printed nothing for {_minutes(BUILD_STALLED_SECONDS)} and looks stalled: "
+        "a working build is never that quiet. It is still running, and Yu'lon will not stop it. "
+        "To check: `docker info` should answer at once, and Docker's CPU use (Task Manager on "
+        "Windows, `top` on Linux or a Mac) should not sit near zero. If it has stalled, restart "
+        "Docker Desktop (on Linux, the docker service): the build then ends, and pressing Install "
+        "or Rebuild again resumes it, because the steps it finished are kept in Docker's build "
+        "cache."
     )
 
 
 @dataclass(frozen=True)
 class QuietWatch:
-    """`_pump()`'s watchdog: tell after `notice_after` silent seconds, stop after `stop_after`.
+    """`_pump()`'s silence watch: one notice after `notice_after`, one after `stalled_after`.
 
-    Silence is "no line from the subprocess", the one thing a stalled build and
-    a working one were measured to differ in (T202, see `BUILD_QUIET_*`).
+    Silence is "no line from the subprocess" (see `BUILD_QUIET_NOTICE_SECONDS`
+    for why output alone). It SAYS things and ends nothing (`BUILD_STALLED_SECONDS`).
     """
 
     notice_after: float
-    stop_after: float
+    stalled_after: float
     notice: str
-    stopped: str
+    stalled: str
 
 
 DOWNLOAD_CANCEL_NOTE = (
@@ -2497,6 +2518,46 @@ def write_state(server_dir: Path, state: InstallState) -> None:
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         logger.warning(f"could not record install progress in {path}: {exc}")
+
+
+BUILD_CACHE_FILE = ".yulon-build-cache.json"
+"""How much build cache Docker held as this install's build last started (T203).
+
+Preflight credits a resumed build with the cache it ADDED since, never with the
+whole machine's: Yu'lon never prunes, so the cache on a machine with two servers
+is mostly the other one's, and crediting it let a second server's resume pass
+the floor on space the first server's database volume needs (review,
+2026-10-04). A file of its own and not a key in `STATE_FILE`, because the spine
+writes the record from its own copy at every stage end and on failure
+(`_run_one()`, `_record_error()`), so a key a stage wrote mid-way would be gone
+by the next write.
+"""
+
+
+def write_build_cache_baseline(server_dir: Path, cache_bytes: int | None) -> None:
+    """Record the build cache this build starts on; `None` (Docker would not say) credits nothing.
+
+    Written over on every build start. Best-effort: a file that cannot be
+    written is logged, and a missing or torn one credits nothing.
+    """
+    try:
+        (server_dir / BUILD_CACHE_FILE).write_text(
+            json.dumps({"baseline_bytes": cache_bytes}) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning(f"could not record the build cache this build starts on: {exc}")
+
+
+def read_build_cache_baseline(server_dir: Path) -> int | None:
+    """The recorded starting figure, or `None` for a missing, unreadable or garbled file."""
+    try:
+        parsed = json.loads((server_dir / BUILD_CACHE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = parsed.get("baseline_bytes") if isinstance(parsed, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -7695,19 +7756,23 @@ class StagedInstaller:
         fresh install and an early resume ask nothing they did not ask before.
 
         T203: a press that will run the build AGAIN -- every recorded stage
-        before it done, and the build not spent -- also asks how much build
-        cache Docker holds, which that build reuses (`Spent.build_cache_bytes`).
-        Only then: an earlier resume or a fresh install never reached this
-        folder's build, so any cache on the machine is another install's.
+        before it done, and the build not spent -- is credited with the build
+        cache Docker GAINED since this folder's build last started
+        (`BUILD_CACHE_FILE`), which the build reuses (`Spent.build_cache_bytes`).
+        No record of that start, or a cache now smaller than it, credits
+        nothing: the rest of the machine's cache may be another server's.
         """
         if state.has("build") and self._seams.images_built(self.image_refs_at(server_dir)) is True:
             return preflight.Spent(build=True)
         if not self._resumes_at_build(state):
             return preflight.NOTHING_SPENT
-        cache = self._seams.build_cache_bytes()
-        if not cache:
+        baseline = read_build_cache_baseline(server_dir)
+        if baseline is None:
             return preflight.NOTHING_SPENT
-        return preflight.Spent(build_cache_bytes=cache)
+        cache = self._seams.build_cache_bytes()
+        if cache is None or cache <= baseline:
+            return preflight.NOTHING_SPENT
+        return preflight.Spent(build_cache_bytes=cache - baseline)
 
     def _resumes_at_build(self, state: InstallState) -> bool:
         """Is every recorded stage before `build` in this folder's record? (T203)
@@ -9015,6 +9080,9 @@ class StagedInstaller:
                 yield (
                     "Docker would not say whether this install is built, so it is being rebuilt."
                 )
+        # T203: what the cache holds as this build starts, so the next press's
+        # preflight can credit only what THIS build added to it.
+        write_build_cache_baseline(ctx.server_dir, self._seams.build_cache_bytes())
         # Two sentences for one action, because "on a first install" is the
         # wrong half of the truth for the press that is deliberately rebuilding
         # a finished one, and this feature is about not telling a user something
@@ -9035,9 +9103,9 @@ class StagedInstaller:
             stage="build",
             watch=QuietWatch(
                 notice_after=BUILD_QUIET_NOTICE_SECONDS,
-                stop_after=BUILD_QUIET_LIMIT_SECONDS,
-                notice=build_quiet_notice(BUILD_QUIET_NOTICE_SECONDS),
-                stopped=build_stalled(BUILD_QUIET_LIMIT_SECONDS),
+                stalled_after=BUILD_STALLED_SECONDS,
+                notice=build_quiet_notice(),
+                stalled=build_stalled_notice(),
             ),
         )
         self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE, from_build=True)
@@ -9761,15 +9829,10 @@ class StagedInstaller:
         `stage` names the activity for the progress line's field; see
         `lines.relayed()`.
 
-        `watch` is the build's silence watchdog (T202): after `notice_after`
-        seconds with no line its notice is said once (again after the output
-        resumes and stops again), and after `stop_after` the worker's own
-        `docker` client is ended and `stopped` is raised. Ending it is
-        `runner.end_streams_started_on()` on the WORKER's ident, the one thing
-        that can stop a read blocked on a child that sends nothing; the cancel
-        event is left alone, because setting it is the user's Stop and this is
-        not. The daemon may still hold the hung build; the sentence says to
-        restart Docker.
+        `watch` is the build's silence watch (T202): after `notice_after`
+        seconds with no line its notice is said, after `stalled_after` its
+        stalled notice, each once per silence. It ends nothing and sets
+        nothing -- see `BUILD_STALLED_SECONDS` for the ruling and why.
         """
         queued: queue.Queue[str | None] = queue.Queue()
         outcome: list[docker.AttachedRun] = []
@@ -9785,7 +9848,6 @@ class StagedInstaller:
 
         worker = threading.Thread(target=work, daemon=True, name="yulon-install-output")
         worker.start()
-        stalled = False
         try:
             if watch is None:
                 while True:
@@ -9793,11 +9855,8 @@ class StagedInstaller:
                     if item is None:
                         break
                     yield item
-            elif (yield from _watched(queued, worker, watch)):
-                # Raised OUTSIDE the `except` below: that clause is for a
-                # consumer walking away, and it sets the cancel event -- the
-                # user's Stop, which this is not.
-                stalled = True
+            else:
+                yield from _watched(queued, watch)
         except BaseException:
             # Abandonment, or an exception thrown INTO this frame — never the
             # normal path, which leaves the loop by `break` once the worker has
@@ -9810,8 +9869,6 @@ class StagedInstaller:
             # one exception type to the side of the test that closed it.
             stop_abandoned_worker(worker, cancel, what="the install output")
             raise
-        if stalled and watch is not None:
-            raise InstallerError(watch.stopped)
         worker.join()
         if failure:
             raise InstallerError(f"the command could not be run: {failure[0]}") from failure[0]
@@ -9919,53 +9976,34 @@ layer down, and `test_spine.py` pins that the two agree.
 """
 
 
-def _watched(
-    queued: queue.Queue[str | None], worker: threading.Thread, watch: QuietWatch
-) -> Generator[str, None, bool]:
-    """`_pump()`'s read loop with T202's silence watchdog. Returns True if it stopped the build.
+def _watched(queued: queue.Queue[str | None], watch: QuietWatch) -> Iterator[str]:
+    """`_pump()`'s read loop with T202's silence watch: it says, and never ends anything.
 
     The clock restarts on every line, so only an unbroken silence counts: a
-    build that prints once a minute for four hours is never touched. Lines the
-    client prints while it is being ended are still passed on.
+    build that prints once a minute for four hours is never told anything.
     """
     quiet_since = time.monotonic()
-    noticed = False
+    said = 0  # 0: nothing yet this silence; 1: the notice; 2: the stalled notice too
     while True:
-        after = watch.stop_after if noticed else min(watch.notice_after, watch.stop_after)
+        marks = (watch.notice_after, watch.stalled_after)
+        timeout = None if said >= 2 else max(0.0, quiet_since + marks[said] - time.monotonic())
         try:
-            item = queued.get(timeout=max(0.0, quiet_since + after - time.monotonic()))
+            item = queued.get(timeout=timeout)
         except queue.Empty:
             quiet = time.monotonic() - quiet_since
-            if quiet >= watch.stop_after:
-                break
-            if not noticed and quiet >= watch.notice_after:
-                noticed = True
+            if said == 0 and quiet >= watch.notice_after:
+                said = 1
                 yield watch.notice
+            elif said == 1 and quiet >= watch.stalled_after:
+                said = 2
+                logger.warning(f"the build has printed nothing for {quiet:.0f}s; told the player")
+                yield watch.stalled
             continue
         if item is None:
-            return False
+            return
         quiet_since = time.monotonic()
-        noticed = False
+        said = 0
         yield item
-    assert worker.ident is not None  # started before this generator was made
-    logger.warning(
-        f"the build printed nothing for {watch.stop_after:.0f}s; ending its docker client"
-    )
-    runner.end_streams_started_on(worker.ident)
-    give_up = time.monotonic() + ABANDONED_WORKER_SECONDS
-    while (left := give_up - time.monotonic()) > 0:
-        try:
-            item = queued.get(timeout=left)
-        except queue.Empty:
-            continue
-        if item is None:
-            return True
-        yield item
-    logger.warning(
-        f"the build's docker client did not end within {ABANDONED_WORKER_SECONDS}s; "
-        f"thread {worker.name} was left running"
-    )
-    return True
 
 
 def _put_all(queued: queue.Queue[str | None], line: str, stage: str) -> None:

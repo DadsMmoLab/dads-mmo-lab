@@ -194,9 +194,14 @@ class Spent:
     writing it again, so it counts toward the build's share of the floor --
     which never drops below what a FINISHED build is asked for (`evaluate()`).
 
-    Set by `StagedInstaller._spent()` only when every stage before `build` is
-    recorded and the build is not spent; 0 otherwise, and 0 when Docker would
-    not say. Ignored when `build` is True: that floor is already the lower one.
+    Only the cache THIS install's build added: `StagedInstaller._spent()` sets
+    it to what Docker holds now less what it held when this folder's build last
+    started (`native.BUILD_CACHE_FILE`), only when every stage before `build` is
+    recorded and the build is not spent. 0 otherwise -- no record of the start,
+    a cache now smaller than it, or Docker would not say. The whole machine's
+    cache is never credited: Yu'lon never prunes, so most of it can be another
+    server's, and the disk it would be credited against holds that server's
+    database (review, 2026-10-04). Ignored when `build` is True.
     """
 
 
@@ -209,10 +214,16 @@ BUILD_SPENT_NOTE = (
 """Said on every free-space row a spent build lowered, so the smaller number explains itself."""
 
 
-def build_cache_note(reused_gb: float) -> str:
-    """Said on every free-space row the reused build cache lowered (T203)."""
+def build_cache_note(reused_bytes: int) -> str:
+    """Said on every free-space row the reused build cache lowered (T203).
+
+    Both figures: this module's GB (GiB, like every free-space number here, so
+    the arithmetic on the line adds up) and Docker's own decimal one, so the
+    player can find it again in `docker system df` or `docker buildx du`.
+    """
     return (
-        f" (Docker already holds {reused_gb:.1f} GB of build cache, which the resumed build "
+        f" (this install's build added {reused_bytes / GIB:.1f} GB of build cache since it "
+        f"started -- Docker counts it as {reused_bytes / 10**9:.2f} GB -- which the resumed build "
         "reuses instead of writing again, so that much is not asked for twice)"
     )
 
@@ -554,7 +565,8 @@ def evaluate(
         # One pool, so each floor is not enough on its own — they add.
         refuse_root, warn_root = native.floors_gb(same_volume=True)
         refuse_dir, warn_dir = refuse_root, warn_root
-    reused = 0.0 if spent.build else spent.build_cache_bytes / GIB
+    reused_bytes = 0 if spent.build else spent.build_cache_bytes
+    reused = reused_bytes / GIB
     if reused > 0:
         # T203: the cache the resumed build reuses is part of the build's
         # share already on the disk. Never below the server-folder pair, the
@@ -564,7 +576,7 @@ def evaluate(
         if facts.same_volume:
             refuse_dir, warn_dir = refuse_root, warn_root
     if facts.same_volume and facts.platform_id != "macos":
-        checks.append(_one_volume_space_check(facts, refuse_root, warn_root, spent, reused))
+        checks.append(_one_volume_space_check(facts, refuse_root, warn_root, spent, reused_bytes))
     else:
         checks.append(
             _space_check(
@@ -574,7 +586,7 @@ def evaluate(
                 warn_root,
                 facts,
                 spent,
-                reused,
+                reused_bytes,
             )
         )
         checks.append(
@@ -585,7 +597,7 @@ def evaluate(
                 warn_dir,
                 facts,
                 spent,
-                reused if facts.same_volume else 0.0,
+                reused_bytes if facts.same_volume else 0,
             )
         )
     checks.append(_folder_check(facts, server_dir))
@@ -1067,7 +1079,7 @@ def _one_volume_space_check(
     refuse_gb: float,
     warn_gb: float,
     spent: Spent = NOTHING_SPENT,
-    reused_gb: float = 0.0,
+    reused_bytes: int = 0,
 ) -> Check:
     """The one-drive case: one pool, one measurement, one row.
 
@@ -1094,7 +1106,7 @@ def _one_volume_space_check(
     """
     readings = [free for free in (facts.data_root_free, facts.server_dir_free) if free is not None]
     free = min(readings) if readings else None
-    return _space_check(ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts, spent, reused_gb)
+    return _space_check(ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts, spent, reused_bytes)
 
 
 def _space_check(
@@ -1104,9 +1116,9 @@ def _space_check(
     warn_gb: float,
     facts: Facts,
     spent: Spent = NOTHING_SPENT,
-    reused_gb: float = 0.0,
+    reused_bytes: int = 0,
 ) -> Check:
-    """One free-space row. `reused_gb` is the build cache that lowered its floor (T203)."""
+    """One free-space row. `reused_bytes` is the build cache that lowered its floor (T203)."""
     # On macOS, "Docker's disk" is the HOST volume holding the sparse VM image,
     # and host free space is an upper bound on what the VM can still grow into —
     # the VM can fill at its own cap while the host has room to spare. So a low
@@ -1114,7 +1126,7 @@ def _space_check(
     # does), but an ample reading proves nothing about the cap and must never
     # become a pass. See `_space_check_macos_bounded()`.
     if what == "Docker's disk" and facts.platform_id == "macos":
-        return _space_check_macos_bounded(free, refuse_gb, warn_gb, facts, spent, reused_gb)
+        return _space_check_macos_bounded(free, refuse_gb, warn_gb, facts, spent, reused_bytes)
     if free is None:
         return Check(
             f"free space on {what}",
@@ -1129,8 +1141,8 @@ def _space_check(
         note = " (the server folder and Docker's disk share one drive, so both needs add up)"
     else:
         note = ""
-    if reused_gb > 0:
-        note += build_cache_note(reused_gb)
+    if reused_bytes > 0:
+        note += build_cache_note(reused_bytes)
     if gigabytes < refuse_gb:
         return Check(
             f"free space on {what}",
@@ -1230,7 +1242,7 @@ def _space_check_macos_bounded(
     warn_gb: float,
     facts: Facts,
     spent: Spent = NOTHING_SPENT,
-    reused_gb: float = 0.0,
+    reused_bytes: int = 0,
 ) -> Check:
     """The macOS-host case of `_space_check`: refuse-when-low, but never a pass.
 
@@ -1258,8 +1270,8 @@ def _space_check_macos_bounded(
         )
     gigabytes = free / GIB
     note = BUILD_SPENT_NOTE if spent.build else ""
-    if reused_gb > 0:
-        note += build_cache_note(reused_gb)
+    if reused_bytes > 0:
+        note += build_cache_note(reused_bytes)
     if gigabytes < refuse_gb:
         return Check(
             "free space on Docker's disk",

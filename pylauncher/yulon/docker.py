@@ -4823,25 +4823,47 @@ def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool 
 
 
 BUILD_CACHE_TIMEOUT_SECONDS = 60.0
-"""How long `docker system df` gets. It sizes every image, volume and cache record."""
+"""How long each build-cache question gets. `system df` sizes every image and volume."""
 
 _DECIMAL_SIZE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kMGTP]?)B$")
 _DECIMAL_UNITS = {"": 1, "k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
+_BUILDX_TOTAL = re.compile(r"^Total:\s+(\S+)\s*$")
+
+
+def _decimal_bytes(size: str) -> int | None:
+    """Docker's own size spelling (`12.91GB`, `441.6kB`, `0B`, decimal units) as bytes."""
+    found = _DECIMAL_SIZE.match(size.strip())
+    if found is None:
+        return None
+    return round(float(found.group(1)) * _DECIMAL_UNITS[found.group(2)])
 
 
 def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
     """How much build cache Docker holds, in bytes; `None` when it would not say (T203).
 
-    `docker system df --format '{{json .}}'` prints one JSON object per kind,
-    and the `Build Cache` row's `Size` is Docker's own decimal spelling
-    (`12.91GB`, `441.6kB`, `0B`) -- measured on a Linux test box, Docker 29.7.2,
-    2026-10-04. `Size`, not `Reclaimable`: what the resumed build reuses is in
-    the cache whether or not an image also holds it.
+    `docker buildx du` first: it sizes the cache and nothing else, and it asks
+    the builder a build would use. Its summary ends `Total:\t\t4.79GB`, which on
+    a Linux test box (Docker 29.7.2, buildx v0.36.1, 2026-10-04) was the same
+    figure `docker system df` gave for `Build Cache` that minute, in 0.1 s
+    against 0.34 s. A Docker without the buildx plugin answers `'buildx' is not
+    a docker command` and a non-zero exit; that, or a summary with no readable
+    `Total:`, falls back to the `Build Cache` row's `Size` in `docker system df
+    --format '{{json .}}'`, which every Docker since 1.13 has.
 
     `None` is not 0, in either direction: a daemon that would not answer, a
-    missing row or a size this cannot read leaves the free-space floor where it
-    was, and a real 0 is the answer "nothing to reuse".
+    missing row or a size this cannot read credits nothing, and a real 0 is the
+    answer "nothing to reuse".
     """
+    proc = _docker(["buildx", "du"], timeout=BUILD_CACHE_TIMEOUT_SECONDS, wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        for line in reversed(proc.stdout.splitlines()):
+            found = _BUILDX_TOTAL.match(line.strip())
+            if found is not None:
+                total = _decimal_bytes(found.group(1))
+                if total is not None:
+                    return total
+                break
+    logger.info("`docker buildx du` gave no total; asking `docker system df`")
     proc = _docker(
         ["system", "df", "--format", "{{json .}}"],
         timeout=BUILD_CACHE_TIMEOUT_SECONDS,
@@ -4857,11 +4879,10 @@ def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
             continue
         if not isinstance(row, dict) or row.get("Type") != "Build Cache":
             continue
-        found = _DECIMAL_SIZE.match(str(row.get("Size", "")).strip())
-        if found is None:
+        size = _decimal_bytes(str(row.get("Size", "")))
+        if size is None:
             logger.info(f"could not read Docker's build cache size: {row.get('Size')!r}")
-            return None
-        return round(float(found.group(1)) * _DECIMAL_UNITS[found.group(2)])
+        return size
     logger.info("`docker system df` printed no Build Cache row")
     return None
 

@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from tests.support_native import ENTRY, TBC, Recorder
-from yulon import platform, resources
+from yulon import docker, platform, resources
 from yulon.catalog import native, preflight
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions
@@ -306,9 +306,11 @@ def test_an_unmeasured_drive_stays_unchecked_whatever_was_spent() -> None:
 # through was pruning the cache and compiling again (~35 minutes).
 #
 # The rule: when the press will run the build again (every stage before it is
-# recorded, and the build is not spent), Docker's build cache counts toward the
-# build's share of the floor, and the floor never drops below what a FINISHED
-# build is asked for -- a cached build is never asked for less than a done one.
+# recorded, and the build is not spent), the build cache Docker GAINED since this
+# install's build last started -- `stage_build` records the figure it starts on
+# -- counts toward the build's share of the floor, and the floor never drops
+# below what a FINISHED build is asked for. Only the growth, because Yu'lon never
+# prunes and the whole machine's cache may be other servers' (review, 2026-10-04).
 
 A7_CACHE = 12_910_000_000
 """`docker system df` on the VM after the failed press: Build Cache 8 / 12.91GB (decimal)."""
@@ -322,6 +324,7 @@ def test_the_a7_refusal_passes_once_the_reused_cache_is_counted() -> None:
     assert row.verdict == "warn", row
     # In this module's GB (GiB, as every free-space figure here): 12.91e9 bytes is 12.0.
     assert "build cache" in row.detail and f"{A7_CACHE / GIB:.1f} GB" in row.detail, row.detail
+    assert "Docker counts it as 12.91 GB" in row.detail, "Docker's own figure, to compare"
 
 
 def test_without_a_cache_the_a7_numbers_are_still_refused() -> None:
@@ -372,27 +375,120 @@ def test_a_spent_build_ignores_the_cache() -> None:
     assert "build cache" not in row.detail
 
 
-def test_a_resume_at_the_build_counts_docker_s_build_cache(tmp_path: Path) -> None:
-    """The engine: every stage before `build` recorded, no build yet, 16 GB of cache."""
-    rec = Recorder(images=False, build_cache=16 * GIB)
+def _lay_baseline(server_dir: Path, cache: int) -> None:
+    """What `stage_build` records as it starts: Docker's build cache before this build ran."""
+    native.write_build_cache_baseline(server_dir, cache)
+
+
+def test_growth_since_this_install_s_build_started_lowers_the_floor(tmp_path: Path) -> None:
+    """The engine: every stage before `build` recorded, 16 GB of cache grown since it started."""
+    rec = Recorder(images=False, build_cache=17 * GIB)
     installer = _engine(rec, 25)
     server_dir = tmp_path / "tbc-server"
     recorded = _recorded(installer)
     _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 1 * GIB)
 
     rows = _space_rows(_preflight(installer, server_dir))
     assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "16.0 GB of build cache" in rows[0], rows[0]
     assert rec.build_cache_asked == 1
 
 
-def test_a_recorded_build_whose_images_are_gone_counts_the_cache_too(tmp_path: Path) -> None:
-    rec = Recorder(images=False, build_cache=16 * GIB)
+def test_a_big_cache_that_was_there_before_this_build_does_not_lower_the_floor(
+    tmp_path: Path,
+) -> None:
+    """Another server's cache is not this build's: 400 GB before, 400 GB now, nothing credited."""
+    rec = Recorder(images=False, build_cache=400 * GIB)
     installer = _engine(rec, 25)
     server_dir = tmp_path / "tbc-server"
-    _lay_record(installer, server_dir, _recorded(installer))
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 400 * GIB)
 
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+def test_a_cache_pruned_below_the_baseline_credits_nothing(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=2 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 10 * GIB)
+
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+@pytest.mark.parametrize(
+    "sidecar",
+    [None, "", "not json", '{"baseline_bytes": "lots"}', '{"baseline_bytes": -5}', "[]", "null"],
+    ids=["missing", "empty", "garbled", "string", "negative", "list", "null"],
+)
+def test_a_missing_or_garbled_baseline_credits_nothing(sidecar: str | None, tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=400 * GIB)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    if sidecar is not None:
+        (server_dir / native.BUILD_CACHE_FILE).write_text(sidecar, encoding="utf-8")
+
+    with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
+        _preflight(installer, server_dir)
+
+
+def test_the_build_stage_records_the_baseline_as_it_starts(tmp_path: Path) -> None:
+    """A7 end to end: the build starts on 1.75 GB of cache and fails at 12.91; the next passes."""
+    rec = Recorder(images=False, build_cache=1_754_000_000)
+    rec.build_result = docker.AttachedRun(
+        1,
+        (
+            "failed to receive status: rpc error: code = "
+            "Unavailable desc = error reading from server: EOF",
+        ),
+    )
+    installer = _engine(rec, 30)
+    server_dir = tmp_path / "tbc-server"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(TBC.id, installer._install_id(server_dir)),
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(ctx))
+    assert native.read_build_cache_baseline(server_dir) == 1_754_000_000
+
+    rec.build_cache = A7_CACHE
     rows = _space_rows(_preflight(installer, server_dir))
     assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "Docker counts it as 11.16 GB" in rows[0], rows[0]
+
+
+def test_a_build_that_could_not_measure_the_cache_leaves_a_baseline_that_credits_nothing(
+    tmp_path: Path,
+) -> None:
+    """An older baseline must not survive a build that started on an unknown cache."""
+    rec = Recorder(images=False, build_cache=None)
+    installer = _engine(rec, 25)
+    server_dir = tmp_path / "tbc-server"
+    server_dir.mkdir()
+    _lay_baseline(server_dir, 0)
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(TBC.id, installer._install_id(server_dir)),
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+    list(installer.stage_build(ctx))
+    assert native.read_build_cache_baseline(server_dir) is None
 
 
 @pytest.mark.parametrize("cache", [None, 0], ids=["could-not-ask", "no-cache"])
@@ -404,6 +500,7 @@ def test_a_resume_at_the_build_with_no_cache_to_count_is_asked_for_the_whole_flo
     server_dir = tmp_path / "tbc-server"
     recorded = _recorded(installer)
     _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    _lay_baseline(server_dir, 0)
 
     with pytest.raises(InstallerError, match="25 GB free, and the install needs 40 GB"):
         _preflight(installer, server_dir)
@@ -416,6 +513,7 @@ def test_an_earlier_resume_and_a_fresh_install_do_not_ask_about_the_cache(tmp_pa
     early = tmp_path / "early"
     recorded = _recorded(installer)
     _lay_record(installer, early, recorded[: recorded.index("build") - 1])
+    _lay_baseline(early, 0)
 
     with pytest.raises(InstallerError, match="needs 40 GB"):
         _preflight(installer, early)

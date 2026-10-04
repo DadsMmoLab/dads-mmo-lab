@@ -359,6 +359,7 @@ descriptions are written by hand.
 | `catalog/native.py::write_state::os.replace` | that record renamed into place | install time |
 | `catalog/native.py::write_state::unlink` | the temp record after a failure | install time |
 | `catalog/native.py::write_state::write_text` | the install's own stage record, to a temp name | install time |
+| `catalog/native.py::write_build_cache_baseline::write_text` | **new (T203)** `<server>/.yulon-build-cache.json`: how much build cache Docker held as this install's build stage started (`{"baseline_bytes": N}`, `null` when Docker would not say), written over on every start, so the next press's preflight credits only the cache that build added -- never another server's. A torn or garbled file credits nothing | install and rebuild time — nothing but preflight reads it |
 | `catalog/upstream.py::forget::unlink` | **new (T124)** `.yulon-upstream.json`, the day's cached count of what upstream has past each source, dropped when an update or a return moves the sources. A cache: losing it costs one more ask | **yes** — nothing the server reads |
 | `catalog/upstream.py::write_cached::os.replace` | **new (T124)** that cache renamed into place beside `.yulon-install.json`, written only in a folder that already has an install record | **yes** — nothing the server reads |
 | `catalog/upstream.py::write_cached::unlink` | the temp cache after a failure | **yes** — as above |
