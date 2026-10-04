@@ -4808,9 +4808,7 @@ def test_a_world_container_this_folder_did_not_bring_up_is_refused_not_stopped(
     rec.containers[ENTRY.container_spec().world] = owner
     with pytest.raises(InstallerError) as raised:
         list(
-            engine(rec, world_running=world.world_running, stop_world=world.stop_world)._import(
-                ctx
-            )
+            engine(rec, world_running=world.world_running, stop_world=world.stop_world)._import(ctx)
         )
     assert "world server is running" in str(raised.value)
     assert world.stopped == []
