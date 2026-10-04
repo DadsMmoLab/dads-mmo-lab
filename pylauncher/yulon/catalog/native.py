@@ -330,6 +330,14 @@ NO_ROLLBACK_UNTOUCHED = (
 )
 """T170: the compile finished and the recreate refused before it touched a container."""
 
+STOPPED_AS_THE_BUILD_FINISHED = (
+    "The rebuild was stopped as its build finished, before any container was replaced."
+)
+"""T225: the failure a restore's sentence starts with when a Stop landed after compose tagged.
+
+Not `_cancelled_message("the install")`, which `_check_cancel()` raises and which
+names the wrong press; what follows it is the restore's account of the tags."""
+
 NO_ROLLBACK_BUILT = (
     "No build was kept as a rollback, because this install's images were not all on the daemon, "
     "so there was none to put back: the containers now run the new build, and the server is "
@@ -6432,6 +6440,17 @@ class StagedInstaller:
             # `_restore_rollback` owns what happens next.
             if not touched:
                 yield from self._put_recipe_back(ctx, ground)
+            failure = str(exc)
+            if not built and self._compose_tagged(refs, kept):
+                # T225: compose moves the live tags as its build finishes, and a
+                # Stop read after that -- or one that killed compose after it
+                # tagged -- raised before `built` was set. The tags are read off
+                # the daemon instead: a restore puts them back (a tag that never
+                # moved is moved back onto the image it already names), and the
+                # `-rollback` names stay until it has.
+                built = True
+                if cancel is not None and cancel.is_set():
+                    failure = STOPPED_AS_THE_BUILD_FINISHED
             if not built:
                 # A compile that failed or was stopped leaves the live tags on
                 # the build that is running: the second name is a duplicate.
@@ -6470,11 +6489,11 @@ class StagedInstaller:
                 # back to. `touched` says whether the containers run it yet.
                 # No start refusal here (owner, 2026-09-28; lead, T223): a first
                 # build has no old one to go back to, so one would leave nothing runnable.
-                message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
+                message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 raise InstallerError(message) from exc
             message = yield from self._restore_rollback(
-                ctx, refs, kept, touched, str(exc), servers_down=servers_down, press=press
+                ctx, refs, kept, touched, failure, servers_down=servers_down, press=press
             )
             self._record_error(server_dir, ctx.state, message)
             if isinstance(message, _LeftStopped):
@@ -6525,9 +6544,11 @@ class StagedInstaller:
             # Once a compile HAS finished, those names are the only copy of the
             # old build there is, and an unknown failure is the worst moment to
             # throw it away -- they are kept, and the log says where they are.
-            if not built:
+            if not built and not self._compose_tagged(refs, kept):
                 self._let_go(kept)
             elif kept:
+                # T225: also when compose had moved the tags before `built` was set
+                # (a consumer that stopped reading at "The build finished.").
                 logger.error(
                     f"rebuild of {self.entry.id} ended unexpectedly after the compile; the "
                     f"build from before it is still on the daemon as {', '.join(kept)}"
@@ -8036,6 +8057,34 @@ class StagedInstaller:
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+
+    def _compose_tagged(self, refs: Sequence[str], kept: Sequence[str]) -> bool:
+        """Whether this press's build moved a live tag, read off the daemon (T225).
+
+        With a rollback kept, a ref moved when its image is not its `-rollback`
+        name's image, and an id Docker does not give counts as moved: putting a
+        tag back that never moved costs a retag onto the image it already names,
+        while trusting the silence lets the only copy of the old build go. With
+        none kept (T170) there is nothing to compare against, and the build moved
+        the tags when every image is now there. Never raises, and yields nothing:
+        the `BaseException` path asks it too.
+        """
+        if not kept:
+            try:
+                return self._seams.images_built(refs) is True
+            except Exception as exc:  # noqa: BLE001 - a question, never a new failure
+                logger.warning(f"could not ask whether {refs} exist: {exc}")
+                return False
+        for ref in refs:
+            try:
+                now = self._seams.image_id(ref)
+                before = self._seams.image_id(ref + ROLLBACK_TAG_SUFFIX)
+            except Exception as exc:  # noqa: BLE001 - unanswered counts as moved
+                logger.warning(f"could not read the image {ref} names: {exc}")
+                return True
+            if now is None or before is None or now != before:
+                return True
+        return False
 
     def _let_go(self, kept: Sequence[str]) -> tuple[str, ...]:
         """Take the transient names off the daemon. Returns the ones still there.
