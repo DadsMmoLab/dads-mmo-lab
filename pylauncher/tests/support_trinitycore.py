@@ -281,8 +281,8 @@ def centurion_like(
             # (cs_character.cpp:72-73); the inventory row carries the item INSTANCE
             # guid and `item_instance.itemEntry` the template, as on AzerothCore;
             # `MAX_MAIL_ITEMS` is 12 (Mail.h:33).
-            # Offered only once T179 Task 9 has watched them work
-            # (`controller_wow_centurion.characters`).
+            # Which are offered is `controller_wow_centurion.characters` (T208's live
+            # check, 2026-10-04).
             "play": {
                 "equipped": {
                     "template_column": "itemEntry",

@@ -2033,7 +2033,7 @@ class ControllerServices:
 
     The tab draws none of them and says the reasons instead; `play.InstallPlay`
     refuses a press of one as well. Empty everywhere but a tree whose verbs have
-    not all been watched to work (Centurion, until T179 Task 9).
+    not all been watched to work (Centurion: Revive, held back after T208's live check).
     """
 
     no_modules_note: str = ""
@@ -3387,8 +3387,7 @@ def _for_centurion(
     bots ride on `observability`; Accounts on `accounts.level`; Characters on
     `play`. What is not offered is said where it would be: My Party (the
     registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
-    verb not yet watched to work on a live Centurion server
-    (`centurion_characters.withheld`).
+    verb Centurion withholds (`centurion_characters.withheld`).
 
     No `import_probe`: the import is the install engine's marker-gated SQL plan,
     and the Repair button's only action, `docker.repair_import()`, refuses an
