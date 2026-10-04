@@ -22,12 +22,14 @@ engine is what decides what has been spent):
 
 from __future__ import annotations
 
+import stat
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from tests.support_native import ENTRY, TBC, Recorder, install
+from tests.support_native import ENTRY, TBC, Recorder, engine, install
 from yulon import docker, platform, resources
 from yulon.catalog import native, preflight
 from yulon.catalog.families.cmangos import CmangosInstaller
@@ -657,3 +659,222 @@ def test_an_earlier_resume_and_a_fresh_install_do_not_ask_about_the_cache(tmp_pa
     with pytest.raises(InstallerError, match="needs 40 GB"):
         _preflight(installer, tmp_path / "fresh")
     assert rec.build_cache_asked == 0
+
+
+# -- T203 fix round 3: what the finished stages already put in the server folder --
+#
+# Found by the m910q live test of PR 294 (2026-10-04, P7): a WotLK install on
+# ONE drive lost its builder mid-compile, and the next press was refused, "46 GB
+# free, and the install needs 46 GB" -- 45.58 GiB free against a floor of 48
+# (40 + 8) less 2.27 of build cache. The 8 GB server-folder share was asked for
+# in full although the 2.20 GiB checkout it sizes was already in the folder, and
+# both figures rounded to 46, so the refusal stated two equal numbers.
+
+P7_FREE = 48_939_778_048
+"""`df` on m910q's one drive just before the refused press (p7-before-resume-facts.txt)."""
+P7_CACHE = 2_434_000_000
+"""`docker buildx du` then: `Total: 2.434GB`, with the build's starting figure 0."""
+P7_CHECKOUT = int(2.20 * GIB)
+"""The `~/yulon-wotlk` checkout then: 2.20 GiB (clone-core, clone-modules, generate-compose)."""
+P7_EOF_RUN = docker.AttachedRun(
+    1,
+    (
+        "#25 1598.8 [1346/1848] Building CXX object modules/CMakeFiles/modules.dir/"
+        "mod-playerbots/src/Ai/Base/Strategy/LfgStrategy.cpp.o",
+        "target ac-worldserver: failed to receive status: rpc error: code = Unavailable "
+        "desc = error reading from server: EOF",
+        "",
+    ),
+)
+"""How P7's build ended, verbatim from its install record's `last_error`."""
+
+
+def _wotlk_on_one_drive(rec: Recorder, free_bytes: int) -> native.StagedInstaller:
+    facts = replace(_one_drive(0), data_root_free=free_bytes, server_dir_free=free_bytes)
+    return engine(
+        rec, platform_id=lambda: "linux", gather=lambda entry, server_dir, **_kwargs: facts
+    )
+
+
+def _wotlk_ctx(installer: native.StagedInstaller, server_dir: Path) -> native.StageContext:
+    return native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(ENTRY.id, installer._install_id(server_dir)),
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+
+
+def _p7_after_the_lost_builder(
+    rec: Recorder, tmp_path: Path
+) -> tuple[native.StagedInstaller, Path]:
+    """P7 up to the refused press: the stages before `build` recorded, the build lost at 1346."""
+    installer = _wotlk_on_one_drive(rec, P7_FREE)
+    server_dir = tmp_path / "yulon-wotlk"
+    recorded = _recorded(installer)
+    _lay_record(installer, server_dir, recorded[: recorded.index("build")])
+    with pytest.raises(InstallerError, match="lost its connection"):
+        list(installer.stage_build(_wotlk_ctx(installer, server_dir)))
+    rec.build_cache = P7_CACHE
+    return installer, server_dir
+
+
+def test_the_p7_resume_passes_once_the_checkout_already_in_the_folder_is_counted(
+    tmp_path: Path,
+) -> None:
+    rec = Recorder(images=False, build_cache=0, build_result=P7_EOF_RUN)
+    installer, server_dir = _p7_after_the_lost_builder(rec, tmp_path)
+    rec.folder_size = P7_CHECKOUT
+
+    rows = _space_rows(_preflight(installer, server_dir))
+    assert len(rows) == 1 and "[refuse]" not in rows[0], rows
+    assert "2.2 GB of the server folder's share is already in the folder" in rows[0], rows[0]
+    assert rec.folder_asked == [server_dir]
+
+
+def test_an_unmeasurable_folder_leaves_the_p7_press_refused(tmp_path: Path) -> None:
+    """`None` is not 0 and not a size: nothing is credited, so the press is still refused."""
+    rec = Recorder(images=False, build_cache=0, build_result=P7_EOF_RUN)
+    installer, server_dir = _p7_after_the_lost_builder(rec, tmp_path)
+    rec.folder_size = None
+
+    with pytest.raises(InstallerError, match="free, and the install needs"):
+        _preflight(installer, server_dir)
+
+
+def test_a_resume_before_the_build_does_not_measure_the_folder(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_cache=0, folder_size=8 * GIB)
+    installer = _engine(rec, 25)
+    early = tmp_path / "early"
+    recorded = _recorded(installer)
+    _lay_record(installer, early, recorded[: recorded.index("build") - 1])
+
+    with pytest.raises(InstallerError, match="needs 40 GB"):
+        _preflight(installer, early)
+    assert rec.folder_asked == []
+
+
+def test_the_folder_credit_never_exceeds_the_server_folder_share() -> None:
+    """A 50 GiB folder on WotLK's one-drive floor of 48 takes off 8, the folder's share, no more."""
+    facts = replace(_one_drive(0), data_root_free=int(30 * GIB), server_dir_free=int(30 * GIB))
+    report = preflight.evaluate(
+        ENTRY, Path("/srv/wow"), facts, preflight.Spent(server_dir_bytes=50 * GIB)
+    )
+    assert not report.ok()
+    floor = WOTLK.min_data_root_gb
+    assert f"needs {floor:.0f} GB" in report.message(), report.message()
+
+
+def test_the_folder_credit_and_the_cache_never_go_below_a_finished_build_s_floor() -> None:
+    facts = replace(_one_drive(0), data_root_free=int(5 * GIB), server_dir_free=int(5 * GIB))
+    spent = preflight.Spent(build_cache_bytes=500 * GIB, server_dir_bytes=50 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), facts, spent)
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in report.message(), report.message()
+
+
+def test_the_folder_credit_leaves_two_drives_alone() -> None:
+    """On two drives a finished build is asked the folder's own pair too; a resume no less."""
+    spent = preflight.Spent(server_dir_bytes=6 * GIB)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(200, 5), spent)
+    row = _row(report, "free space on the server folder")
+    assert row.verdict == "refuse" and "already in the folder" not in row.detail, row
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(35, 200), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert row.verdict == "refuse" and "already in the folder" not in row.detail, row
+    assert f"needs {WOTLK.min_data_root_gb:.0f} GB" in row.detail, row.detail
+
+
+def test_a_spent_build_ignores_the_folder_credit() -> None:
+    spent = preflight.Spent(build=True, server_dir_bytes=6 * GIB)
+    facts = replace(_one_drive(0), data_root_free=int(5 * GIB), server_dir_free=int(5 * GIB))
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), facts, spent)
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in report.message(), report.message()
+    assert "already in the folder" not in report.message(), report.message()
+
+
+def test_a_refusal_never_states_two_equal_numbers() -> None:
+    """P7's numbers without the folder credit: 45.58 free against 45.73 -- not "46 and 46"."""
+    facts = replace(_one_drive(0), data_root_free=P7_FREE, server_dir_free=P7_FREE)
+    report = preflight.evaluate(
+        ENTRY, Path("/srv/wow"), facts, preflight.Spent(build_cache_bytes=P7_CACHE)
+    )
+    assert not report.ok()
+    said = report.message()
+    assert "46 GB free, and the install needs 46 GB" not in said, said
+    assert "45.6 GB free, and the install needs 45.7 GB" in said, said
+
+
+def test_a_warning_never_states_two_equal_numbers() -> None:
+    """72.6 free against a comfortable 72.73 (75 less 2.27 of cache) is not "73 and 73"."""
+    free = int(72.6 * GIB)
+    facts = replace(_one_drive(0), data_root_free=free, server_dir_free=free)
+    report = preflight.evaluate(
+        ENTRY, Path("/srv/wow"), facts, preflight.Spent(build_cache_bytes=P7_CACHE)
+    )
+    row = _row(report, f"free space on {preflight.ONE_VOLUME_SPACE}")
+    assert row.verdict == "warn", row
+    assert "72.6 GB free; 72.7 GB is the comfortable figure" in row.detail, row.detail
+
+
+def test_whole_numbers_stay_whole_when_they_differ() -> None:
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(30, 200), preflight.Spent())
+    assert "30 GB free, and the install needs 40 GB" in report.message(), report.message()
+
+
+def test_folder_bytes_adds_up_every_file_under_the_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "server"
+    (folder / "src" / "deep").mkdir(parents=True)
+    (folder / "a.txt").write_bytes(b"x" * 1000)
+    (folder / "src" / "b.bin").write_bytes(b"y" * 2500)
+    (folder / "src" / "deep" / "c").write_bytes(b"z" * 7)
+    assert native.folder_bytes(folder) == 3507
+
+
+def test_folder_bytes_never_follows_a_link_out_of_the_folder(tmp_path: Path) -> None:
+    """A linked folder elsewhere is not this install's: only the link itself is there."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "big").write_bytes(b"x" * 100_000)
+    folder = tmp_path / "server"
+    folder.mkdir()
+    (folder / "a").write_bytes(b"x" * 10)
+    try:
+        (folder / "linked").symlink_to(elsewhere, target_is_directory=True)
+    except OSError:
+        pytest.skip("this machine cannot make a symlink")
+    size = native.folder_bytes(folder)
+    assert size is not None and size < 100_000, size
+
+
+def test_folder_bytes_says_unknown_for_a_folder_it_cannot_list(tmp_path: Path) -> None:
+    assert native.folder_bytes(tmp_path / "missing") is None
+
+
+def test_folder_bytes_never_enters_a_windows_junction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A junction lstats as a folder; only its reparse-point attribute gives it away."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "big").write_bytes(b"x" * 100_000)
+    folder = tmp_path / "server"
+    folder.mkdir()
+
+    class Junction:
+        path = str(elsewhere)
+
+        def stat(self, *, follow_symlinks: bool = True) -> object:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_size=0,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+
+    real = native.os.scandir
+
+    def scandir(path: Path) -> object:
+        return iter([Junction()]) if Path(path) == folder else real(path)
+
+    monkeypatch.setattr(native.os, "scandir", scandir)
+    assert native.folder_bytes(folder) == 0

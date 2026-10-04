@@ -204,6 +204,22 @@ class Spent:
     database (review, 2026-10-04). Ignored when `build` is True.
     """
 
+    server_dir_bytes: int = 0
+    """What the server folder already holds, when this press will run the build again (T203).
+
+    Found by the m910q live test of PR 294 (2026-10-04): a WotLK install on one
+    drive lost its builder mid-compile, and the next press was refused, "46 GB
+    free, and the install needs 46 GB" (45.58 against 45.73 GiB), because the 8
+    GB server-folder share -- which sizes the checkout -- was asked for in full
+    with the 2.20 GiB checkout already in the folder.
+
+    `StagedInstaller._spent()` sets it on the cache credit's proof: every stage
+    before `build` recorded, and the folder measured (`native.folder_bytes()`).
+    `evaluate()` credits it up to the server-folder share and no further, only
+    where that share adds to Docker's (one drive), and never below what a
+    finished build is asked for. Ignored when `build` is True.
+    """
+
 
 NOTHING_SPENT = Spent()
 
@@ -226,6 +242,29 @@ def build_cache_note(reused_bytes: int) -> str:
         f"started -- Docker counts it as {reused_bytes / 10**9:.2f} GB -- which the resumed build "
         "reuses instead of writing again, so that much is not asked for twice)"
     )
+
+
+def folder_held_note(held_bytes: int) -> str:
+    """Said on every free-space row the server folder's contents lowered (T203 fix round 3)."""
+    return (
+        f" ({held_bytes / GIB:.1f} GB of the server folder's share is already in the folder, "
+        "from the stages this install finished, so that much is not asked for twice)"
+    )
+
+
+def _short_of(have_gb: float, need_gb: float) -> tuple[str, str]:
+    """Two GB figures, the first below the second, spelled so they never read as equal.
+
+    Whole numbers, unless both round to the same one: then one decimal, then
+    two. Found by the m910q live test of PR 294 (2026-10-04): 45.58 free
+    against 45.73 needed was refused as "46 GB free, and the install needs 46
+    GB". Below a hundredth of a GB apart the first figure says it is less.
+    """
+    for places in (0, 1, 2):
+        have, need = f"{have_gb:.{places}f}", f"{need_gb:.{places}f}"
+        if have != need:
+            return have, need
+    return f"just under {need_gb:.2f}", f"{need_gb:.2f}"
 
 
 @dataclass(frozen=True)
@@ -567,16 +606,26 @@ def evaluate(
         refuse_dir, warn_dir = refuse_root, warn_root
     reused_bytes = 0 if spent.build else spent.build_cache_bytes
     reused = reused_bytes / GIB
-    if reused > 0:
+    # T203 fix round 3: what the folder already holds counts toward the
+    # server-folder share, never past it, and only where that share adds to
+    # Docker's. On two drives the folder's row stays at its pair: that is also
+    # what a finished build is asked there, and a resume is never asked less.
+    held_bytes = 0
+    if facts.same_volume and not spent.build:
+        held_bytes = min(spent.server_dir_bytes, round(native.min_server_dir_gb * GIB))
+    held = held_bytes / GIB
+    if reused > 0 or held > 0:
         # T203: the cache the resumed build reuses is part of the build's
         # share already on the disk. Never below the server-folder pair, the
         # floor a finished build is asked for: a cached build is not done.
-        refuse_root = max(native.min_server_dir_gb, refuse_root - reused)
-        warn_root = max(native.warn_server_dir_gb, warn_root - reused)
+        refuse_root = max(native.min_server_dir_gb, refuse_root - reused - held)
+        warn_root = max(native.warn_server_dir_gb, warn_root - reused - held)
         if facts.same_volume:
             refuse_dir, warn_dir = refuse_root, warn_root
     if facts.same_volume and facts.platform_id != "macos":
-        checks.append(_one_volume_space_check(facts, refuse_root, warn_root, spent, reused_bytes))
+        checks.append(
+            _one_volume_space_check(facts, refuse_root, warn_root, spent, reused_bytes, held_bytes)
+        )
     else:
         checks.append(
             _space_check(
@@ -587,6 +636,7 @@ def evaluate(
                 facts,
                 spent,
                 reused_bytes,
+                held_bytes,
             )
         )
         checks.append(
@@ -598,6 +648,7 @@ def evaluate(
                 facts,
                 spent,
                 reused_bytes if facts.same_volume else 0,
+                held_bytes,
             )
         )
     checks.append(_folder_check(facts, server_dir))
@@ -1080,6 +1131,7 @@ def _one_volume_space_check(
     warn_gb: float,
     spent: Spent = NOTHING_SPENT,
     reused_bytes: int = 0,
+    held_bytes: int = 0,
 ) -> Check:
     """The one-drive case: one pool, one measurement, one row.
 
@@ -1106,7 +1158,9 @@ def _one_volume_space_check(
     """
     readings = [free for free in (facts.data_root_free, facts.server_dir_free) if free is not None]
     free = min(readings) if readings else None
-    return _space_check(ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts, spent, reused_bytes)
+    return _space_check(
+        ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts, spent, reused_bytes, held_bytes
+    )
 
 
 def _space_check(
@@ -1117,8 +1171,13 @@ def _space_check(
     facts: Facts,
     spent: Spent = NOTHING_SPENT,
     reused_bytes: int = 0,
+    held_bytes: int = 0,
 ) -> Check:
-    """One free-space row. `reused_bytes` is the build cache that lowered its floor (T203)."""
+    """One free-space row. `reused_bytes` and `held_bytes` are what lowered its floor (T203).
+
+    The build cache the resumed build reuses, and what the server folder
+    already holds of the folder's share.
+    """
     # On macOS, "Docker's disk" is the HOST volume holding the sparse VM image,
     # and host free space is an upper bound on what the VM can still grow into —
     # the VM can fill at its own cap while the host has room to spare. So a low
@@ -1126,7 +1185,9 @@ def _space_check(
     # does), but an ample reading proves nothing about the cap and must never
     # become a pass. See `_space_check_macos_bounded()`.
     if what == "Docker's disk" and facts.platform_id == "macos":
-        return _space_check_macos_bounded(free, refuse_gb, warn_gb, facts, spent, reused_bytes)
+        return _space_check_macos_bounded(
+            free, refuse_gb, warn_gb, facts, spent, reused_bytes, held_bytes
+        )
     if free is None:
         return Check(
             f"free space on {what}",
@@ -1143,18 +1204,22 @@ def _space_check(
         note = ""
     if reused_bytes > 0:
         note += build_cache_note(reused_bytes)
+    if held_bytes > 0:
+        note += folder_held_note(held_bytes)
     if gigabytes < refuse_gb:
+        have, need = _short_of(gigabytes, refuse_gb)
         return Check(
             f"free space on {what}",
             "refuse",
-            f"{gigabytes:.0f} GB free, and the install needs {refuse_gb:.0f} GB{note}",
+            f"{have} GB free, and the install needs {need} GB{note}",
             _space_remedy(what, facts),
         )
     if gigabytes < warn_gb:
+        have, want = _short_of(gigabytes, warn_gb)
         return Check(
             f"free space on {what}",
             "warn",
-            f"{gigabytes:.0f} GB free; {warn_gb:.0f} GB is the comfortable figure{note}",
+            f"{have} GB free; {want} GB is the comfortable figure{note}",
         )
     return Check(f"free space on {what}", "pass", f"{gigabytes:.0f} GB free")
 
@@ -1243,6 +1308,7 @@ def _space_check_macos_bounded(
     facts: Facts,
     spent: Spent = NOTHING_SPENT,
     reused_bytes: int = 0,
+    held_bytes: int = 0,
 ) -> Check:
     """The macOS-host case of `_space_check`: refuse-when-low, but never a pass.
 
@@ -1272,18 +1338,22 @@ def _space_check_macos_bounded(
     note = BUILD_SPENT_NOTE if spent.build else ""
     if reused_bytes > 0:
         note += build_cache_note(reused_bytes)
+    if held_bytes > 0:
+        note += folder_held_note(held_bytes)
     if gigabytes < refuse_gb:
+        have, need = _short_of(gigabytes, refuse_gb)
         return Check(
             "free space on Docker's disk",
             "refuse",
-            f"{gigabytes:.0f} GB free on the drive, and the install needs {refuse_gb:.0f} GB{note}",
+            f"{have} GB free on the drive, and the install needs {need} GB{note}",
             _docker_disk_remedy(facts),
         )
     if gigabytes < warn_gb:
+        have, want = _short_of(gigabytes, warn_gb)
         return Check(
             "free space on Docker's disk",
             "warn",
-            f"{gigabytes:.0f} GB free on the drive; {warn_gb:.0f} GB is the comfortable figure",
+            f"{have} GB free on the drive; {want} GB is the comfortable figure",
         )
     return Check(
         "free space on Docker's disk",

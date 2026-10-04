@@ -83,6 +83,86 @@ def test_an_ordinary_compile_failure_is_not_called_a_lost_builder(tmp_path: Path
     assert not docker.builder_connection_lost(tail)
 
 
+M910Q_TAIL = (
+    "#25 213.5 [457/1848] Building CXX object src/server/game/CMakeFiles/game.dir/OutdoorPvP/"
+    "OutdoorPvPMgr.cpp.o",
+    "#25 213.9 [458/1848] Building CXX object src/server/game/CMakeFiles/game.dir/Petitions/"
+    "PetitionMgr.cpp.o",
+    "#25 215.0 [459/1848] Building CXX object src/server/game/CMakeFiles/game.dir/Quests/"
+    "enuminfo_QuestDef.cpp.o",
+    "target ac-db-import: failed to solve: Unavailable: error reading from server: EOF",
+    "",
+)
+"""The second builder loss of the PR 294 live test (m910q, Docker 29.7.2, 2026-10-04), verbatim.
+
+`sudo systemctl restart docker` at [459/1848]: the same event as A7's, in
+BuildKit's other wording -- `failed to solve: Unavailable:`, not `rpc error:
+code = Unavailable` -- and the player was shown a bare "the build failed (exit 1)".
+"""
+
+
+def test_failed_to_solve_unavailable_is_named_as_a_lost_builder(tmp_path: Path) -> None:
+    rec = Recorder(images=False, build_result=docker.AttachedRun(1, M910Q_TAIL))
+    with pytest.raises(InstallerError) as caught:
+        install(rec, tmp_path / "wow")
+    said = str(caught.value)
+    assert "lost its connection to Docker's builder" in said, said
+    assert "failed to solve: Unavailable: error reading from server: EOF" in said, said
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "failed to solve: error reading from server: EOF",
+        "failed to receive status: error reading from server: EOF",
+    ],
+    ids=["solve", "receive-status"],
+)
+def test_the_transport_s_eof_without_a_code_is_named_as_a_lost_builder(line: str) -> None:
+    """gRPC's own words for the connection closing, with no code before them."""
+    assert docker.builder_connection_lost((*M910Q_TAIL[:3], f"target ac-db-import: {line}", ""))
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        (
+            # A RUN step that runs a nested build of its own: its words, not Docker's.
+            "#9 [ac-worldserver build 4/9] RUN ./nested-build.sh",
+            "#9 3.2 ERROR: failed to solve: Unavailable: error reading from server: EOF",
+            "#9 3.2 failed to receive status: error reading from server: EOF",
+            '#9 ERROR: process "/bin/sh -c ./nested-build.sh" did not complete successfully: '
+            "exit code: 1",
+            'failed to solve: process "/bin/sh -c ./nested-build.sh" did not complete '
+            "successfully: exit code: 1",
+        ),
+        (
+            "failed to solve: mysql:8.4: failed to resolve source metadata for "
+            "docker.io/library/mysql:8.4: failed to authorize: failed to fetch oauth token: "
+            "unexpected status from GET request to https://auth.docker.io/token: "
+            "429 Too Many Requests",
+        ),
+        (
+            "failed to solve: failed to resolve source metadata for "
+            "docker.io/library/nosuch:latest: docker.io/library/nosuch:latest: not found",
+        ),
+        (
+            "failed to solve: failed to fetch anonymous token: unexpected status from GET "
+            "request to https://auth.docker.io/token: 503 Service Unavailable",
+        ),
+        (
+            "failed to solve: failed to copy: httpReadSeeker: failed open: failed to do "
+            "request: unexpected EOF",
+        ),
+    ],
+    ids=["run-step-says-eof", "registry-429", "image-not-found", "registry-503", "pull-eof"],
+)
+def test_a_step_s_own_failure_or_a_registry_error_is_not_a_lost_builder(
+    tail: tuple[str, ...],
+) -> None:
+    assert not docker.builder_connection_lost(tail)
+
+
 # -- a build that prints nothing -------------------------------------------------
 #
 # Lead ruling on review (2026-10-04): never stop a build for silence alone. A

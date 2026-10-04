@@ -2609,6 +2609,51 @@ def build_cache_baseline_for(server_dir: Path, measured: int | None) -> int | No
     return min(earlier, measured)
 
 
+def folder_bytes(folder: Path) -> int | None:
+    """What the files under `folder` add up to, in bytes; `None` when it cannot be listed (T203).
+
+    Preflight credits a resumed install with what its finished stages already
+    put in the server folder (`Spent.server_dir_bytes`). Found by the m910q
+    live test of PR 294 (2026-10-04): a one-drive press after a lost builder
+    was asked again for the whole server-folder share although the 2.20 GiB
+    checkout it sizes was already there.
+
+    Every miss counts SHORT, which credits less and so asks for more: a link or
+    a Windows reparse point (junction, OneDrive placeholder) is neither entered
+    nor counted, since what it stands for is not this folder's, and an entry or
+    a subfolder that cannot be looked at adds nothing. Only a folder that cannot
+    be listed at all is `None`, which credits nothing.
+    """
+    total = 0
+    pending = [folder]
+    first = True
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError as exc:
+            if first:
+                logger.info(f"could not measure {folder}: {exc}")
+                return None
+            continue
+        first = False
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            # A symlink looked at without following it is neither a folder nor a
+            # file below, so it is skipped there; a Windows junction looks like a
+            # folder and is told apart only by its reparse-point attribute.
+            if getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                pending.append(Path(entry.path))
+            elif stat.S_ISREG(st.st_mode):
+                total += st.st_size
+    return total
+
+
 @dataclass(frozen=True)
 class Secrets:
     """What a stage may need that must never be printed: the database password.
@@ -3830,6 +3875,8 @@ class Seams:
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
+    folder_bytes: Callable[[Path], int | None] = folder_bytes
+    """What the server folder already holds; preflight counts it for a resumed build (T203)."""
     build: Callable[..., docker.AttachedRun] = docker.build_staged
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
@@ -7810,18 +7857,22 @@ class StagedInstaller:
         (`BUILD_CACHE_FILE`), which the build reuses (`Spent.build_cache_bytes`).
         No record of that start, or a cache now smaller than it, credits
         nothing: the rest of the machine's cache may be another server's.
+
+        The same press is also credited with what the server folder already
+        holds (`Spent.server_dir_bytes`, `folder_bytes()`): the checkout and
+        whatever else the finished stages wrote there, which the m910q live test
+        of PR 294 (2026-10-04) found asked for again on one drive.
         """
         if state.has("build") and self._seams.images_built(self.image_refs_at(server_dir)) is True:
             return preflight.Spent(build=True)
         if not self._resumes_at_build(state):
             return preflight.NOTHING_SPENT
+        folder = self._seams.folder_bytes(server_dir)
+        held = folder if folder is not None and folder > 0 else 0
         baseline = read_build_cache_baseline(server_dir)
-        if baseline is None:
-            return preflight.NOTHING_SPENT
-        cache = self._seams.build_cache_bytes()
-        if cache is None or cache <= baseline:
-            return preflight.NOTHING_SPENT
-        return preflight.Spent(build_cache_bytes=cache - baseline)
+        cache = self._seams.build_cache_bytes() if baseline is not None else None
+        added = cache - baseline if cache is not None and baseline is not None else 0
+        return preflight.Spent(build_cache_bytes=max(added, 0), server_dir_bytes=held)
 
     def _resumes_at_build(self, state: InstallState) -> bool:
         """Is every recorded stage before `build` in this folder's record? (T203)

@@ -4380,7 +4380,11 @@ CE on Linux and stated as a guarantee.
 
 _EXIT_CODE = re.compile(r"exit(?:ed with)? code:? (\d+)")
 
-_BUILDER_GONE = re.compile(r"rpc error: code = Unavailable\b")
+_BUILDER_GONE = re.compile(
+    r"rpc error: code = Unavailable\b"
+    r"|failed to solve: Unavailable:"
+    r"|failed to (?:solve|receive status): error reading from server: EOF\b"
+)
 """The build's client losing BuildKit: gRPC's `Unavailable`, the transport gone (T202).
 
 Measured twice on one Windows test VM (Docker Desktop 29.7.2, 2026-10-03, the
@@ -4391,16 +4395,30 @@ then raised and whose next build passed. The `desc` after the code is the
 transport's to word (`error reading from server: EOF`, `closing transport due
 to: ...`), so the code is what is matched. No build step prints this, so a
 compiler's line cannot be read as it.
+
+BuildKit words the same event a second way. The m910q live test of PR 294
+(Docker 29.7.2, 2026-10-04) restarted Docker under a build at [459/1848], and
+the build ended on `target ac-db-import: failed to solve: Unavailable: error
+reading from server: EOF` -- the code spelled as `Unavailable:` after `failed
+to solve:`, with no `rpc error`. The third form is the transport's own EOF with
+no code in front of it. All three are Docker's own lines, never a step's: a
+step's output arrives as `#<n> <seconds> ...` and is not read at all
+(`builder_connection_lost()`), and a registry's `503 Service Unavailable`,
+`429 Too Many Requests`, `not found` or a pull's `unexpected EOF` matches none.
 """
+
+_STEP_OUTPUT = re.compile(r"^\s*#\d+\s")
+"""A line BuildKit's plain progress prints for a step: `#25 213.5 ...`, `#9 ERROR: ...`."""
 
 
 def builder_connection_lost(tail: Sequence[str]) -> bool:
     """Did this build end because its client lost Docker's builder? (T202)
 
     The whole tail is read: the line is the last one Docker prints, but blank
-    lines may follow it.
+    lines may follow it. A step's own output lines are skipped: what a RUN step
+    prints is that program's, not Docker's word on its builder.
     """
-    return any(_BUILDER_GONE.search(line) for line in tail)
+    return any(_BUILDER_GONE.search(line) and not _STEP_OUTPUT.match(line) for line in tail)
 
 
 def _build_log_elsewhere(said: list[str]) -> str:
