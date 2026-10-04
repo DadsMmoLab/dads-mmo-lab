@@ -24,4 +24,10 @@ class SaidByYulon(Exception):
     every instance is Yu'lon's (`StartRefused`) carries it on the class; a type
     that holds both kinds (`DockerCommandError`) has a refusal subclass, raised
     where the sentence is Yu'lon's.
+
+    `detail` is a program's own words that explain the sentence -- an
+    importer's last lines -- kept OUT of the message, so the line says what
+    happened and Details shows what the program said.
     """
+
+    detail: str = ""

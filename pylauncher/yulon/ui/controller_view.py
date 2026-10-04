@@ -223,6 +223,17 @@ def _said_by_yulon(exc: object) -> bool:
     return isinstance(exc, SaidByYulon)
 
 
+def _detail_of(exc: object) -> str:
+    """What a program printed beside Yu'lon's sentence, for Details; "" for none (T214)."""
+    return exc.detail if isinstance(exc, SaidByYulon) else ""
+
+
+def _for_the_log(exc: object) -> str:
+    """The whole failure for the app log: the sentence and, under it, what the program said."""
+    detail = _detail_of(exc)
+    return f"{exc}\n{detail}" if detail else str(exc)
+
+
 def _docker_is_away(exc: object) -> bool:
     """No Docker CLI, or Docker not answering in a wording `docker_advice` knows (T194 F2)."""
     return isinstance(exc, docker.DockerCliMissingError) or docker_advice.unreachable(exc)
@@ -7211,6 +7222,9 @@ class ControllerView(QWidget):
         self.danger_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
         self.danger_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.danger_label.setVisible(False)
+        # T214 review: a repair's import that died says so on the line and
+        # quotes its last lines here, as the Server tab's problem line does.
+        self.danger_details = Details(tab)
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -7396,6 +7410,7 @@ class ControllerView(QWidget):
         ]
         danger_column.addWidget(_bar(danger, *danger_presses))
         danger_column.addWidget(self.danger_label)
+        danger_column.addWidget(self.danger_details)
         danger_column.addWidget(self.repair_label)
         # A27: a game with no Uninstall says what it has instead of saying nothing.
         self.uninstall_absent_label = QLabel(
@@ -11262,15 +11277,18 @@ class ControllerView(QWidget):
         self._say_under_the_presses("Removing containers…")
         self._run(self.services.controller.remove, self._remove_done, self._remove_failed)
 
-    def _say_under_the_presses(self, text: str) -> None:
+    def _say_under_the_presses(self, text: str, *, details: str = "") -> None:
         """Say it under the Danger zone's presses, and bring that on screen (T189).
 
         The label appears under a press the player has just pressed, so on a
         page shorter than the Danger zone it would open below the window's
         edge; the page is asked to show it once the layout has made room.
+        `details` is a program's own words under the line, folded (T214); every
+        new line takes the last one's down.
         """
         self.danger_label.setText(text)
         self.danger_label.setVisible(True)
+        self.danger_details.set_text(details)
         QTimer.singleShot(0, self._bring_the_danger_label_on_screen)
 
     @Slot()
@@ -11289,6 +11307,7 @@ class ControllerView(QWidget):
     def _clear_danger_label(self) -> None:
         self.danger_label.setText("")
         self.danger_label.setVisible(False)
+        self.danger_details.set_text("")
 
     def _disarm_remove(self) -> None:
         """Unload the press; its warning goes with it, and only its own.
@@ -11466,8 +11485,9 @@ class ControllerView(QWidget):
     def _repair_failed(self, exc: object) -> None:
         self._set_busy(False)
         self._import_running = False
-        self._say_under_the_presses(str(exc))
-        self.action_failed.emit(str(exc))
+        # T214 review: the import's last lines go under Details, not in the line.
+        self._say_under_the_presses(str(exc), details=_detail_of(exc))
+        self.action_failed.emit(_for_the_log(exc))
         self._import_asked = False
         self.refresh_status()
 
@@ -15570,6 +15590,7 @@ class ControllerView(QWidget):
         what = what[:1].upper() + what[1:]
         if _said_by_yulon(exc):
             self.module_report.setPlainText(f"{what} did not finish: {exc}")
+            self.module_details.set_text(_detail_of(exc))
         else:
             self.module_report.setPlainText(MODULE_JOB_BROKE.format(what=what))
             self.module_details.set_text(str(exc))
@@ -15582,7 +15603,7 @@ class ControllerView(QWidget):
         # writes the report, so the FAILED line above stays what the user reads.
         self.reload_modules()
         self.reload_tuning()
-        self.action_failed.emit(str(exc))
+        self.action_failed.emit(_for_the_log(exc))
 
     def _ask_to_update_unchecked(
         self, exc: ReleaseDirectionUnknown, manifest: Manifest, values: Mapping[str, str] | None
@@ -15682,10 +15703,11 @@ class ControllerView(QWidget):
         self.module_updates_button.setEnabled(self.services.module_updates is not None)
         if _said_by_yulon(exc):
             self.module_report.setPlainText(f"Yu'lon couldn't check for module updates: {exc}")
+            self.module_details.set_text(_detail_of(exc))
         else:
             self.module_report.setPlainText(MODULE_UPDATES_BROKE)
             self.module_details.set_text(str(exc))
-        self.action_failed.emit(str(exc))
+        self.action_failed.emit(_for_the_log(exc))
 
     @Slot()
     def apply_module_sql(self) -> None:
@@ -15778,11 +15800,14 @@ class ControllerView(QWidget):
         # from one that never started and only its own output can tell them
         # apart.
         if _said_by_yulon(exc):
+            # T214 review: an importer's last lines are its own words, so they
+            # go under Details with the sentence that names them on the line.
             self.module_report.appendPlainText(f"The SQL run did not finish: {exc}")
+            self.module_details.set_text(_detail_of(exc))
         else:
             self.module_report.appendPlainText(MODULE_SQL_BROKE)
             self.module_details.set_text(str(exc))
-        self.action_failed.emit(str(exc))
+        self.action_failed.emit(_for_the_log(exc))
         # As above: a refusal can arrive after the database was started, and
         # Start and Stop are locked until something reads the status.
         self.refresh_status()
@@ -17353,10 +17378,11 @@ class ControllerView(QWidget):
         self._refresh_tuning_owed()
         if _said_by_yulon(exc):
             self.tuning_report.setPlainText(str(exc))  # T214: ours, as written
+            self.tuning_details.set_text(_detail_of(exc))
         else:
             self.tuning_report.setPlainText(TUNING_JOB_BROKE.format(job=job))
             self.tuning_details.set_text(str(exc))
-        self.action_failed.emit(str(exc))
+        self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default
 

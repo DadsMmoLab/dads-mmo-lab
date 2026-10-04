@@ -55,8 +55,13 @@ class DockerRefusal(DockerCommandError, SaidByYulon):
     """A `DockerCommandError` whose message is Yu'lon's own sentence, not Docker's (T214).
 
     Shown on the line as written. A plain `DockerCommandError` carries what
-    Docker or compose said, and goes under Details.
+    Docker or compose said, and goes under Details. `detail` is what a
+    container printed that explains the sentence, shown under Details beside it.
     """
+
+    def __init__(self, message: str, *, detail: str = "") -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 class DockerCliMissingError(DockerCommandError, SaidByYulon):
@@ -2484,16 +2489,17 @@ def verify_import(
         # broken server with a success message (review, 2026-08-23).
         raise DockerRefusal(
             f"{service} ran and wrote some rows, but did not finish: {after.detail}. The "
-            f"databases are in a half-imported state. Its last words were: "
-            f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
-            "rest of what it printed."
+            f"databases are in a half-imported state. Its last words are under Details, and "
+            f"`docker compose logs {service}` in {server_dir} has the rest of what it printed.",
+            detail=last_words(run.tail),
         )
     else:
         raise DockerRefusal(
             f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
-            f"Nothing is imported that was not imported before. Its last words were: "
-            f"{last_words(run.tail)}. `docker compose logs {service}` in {server_dir} has the "
-            "rest of what it printed."
+            f"Nothing is imported that was not imported before. Its last words are under "
+            f"Details, and `docker compose logs {service}` in {server_dir} has the rest of what "
+            "it printed.",
+            detail=last_words(run.tail),
         )
     logger.info(f"{service} finished; the databases now read as {after.state}")
     return after
@@ -2638,8 +2644,9 @@ def apply_module_sql(
     if run.returncode != 0:
         raise DockerRefusal(
             f"{service} exited {run.returncode}, so its modules' SQL may be part-applied. Its "
-            f"last words were: {last_words(run.tail)}. The container was removed when it exited "
-            "(`--rm`), so those lines are all there is — `docker compose logs` has nothing to add."
+            "last words are under Details. The container was removed when it exited (`--rm`), "
+            "so those lines are all there is — `docker compose logs` has nothing to add.",
+            detail=last_words(run.tail),
         )
     return run
 

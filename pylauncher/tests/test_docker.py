@@ -2768,7 +2768,8 @@ def test_the_failure_text_of_a_broken_import_reaches_the_error_on_screen(
     with pytest.raises(docker.DockerCommandError) as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
     said = str(raised.value)
-    assert "ERROR 1698" in said, said
+    assert "ERROR 1698" in raised.value.detail, raised.value.detail
+    assert "ERROR 1698" not in said, "the import's own words are Details', not the line's (T214)"
     assert "still read as absent" in said, "the state it is in stopped being said"
 
 

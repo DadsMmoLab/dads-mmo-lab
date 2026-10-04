@@ -1817,6 +1817,78 @@ def test_the_modules_tab_can_apply_the_module_sql_nothing_else_applies(
     assert ">> Applying update aoe_loot_module_string.sql" in view.module_report.toPlainText()
 
 
+def test_the_importers_last_words_go_under_details_and_yulons_sentence_stays_on_the_line(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214 review: "Its last words were: ERROR 1054 …" put the importer's own text on the line.
+
+    Through the real `docker.apply_module_sql()` with the importer exiting 1:
+    Yu'lon's sentence (it exited, the SQL may be part-applied) is the report,
+    and what the importer printed last is under Details and in the log.
+    """
+    from tests.test_docker import SPEC, _repair_doubles
+
+    (tmp_path / "modules" / "mod-aoe-loot").mkdir(parents=True)
+    _repair_doubles(
+        monkeypatch,
+        [],
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: ("applying mod-aoe-loot", "ERROR 1054 (42S22): Unknown column 'x'"),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.apply_module_sql(SPEC, tmp_path)
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.module_report.setPlainText("ac-db-import: applying mod-aoe-loot…")
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._module_sql_failed(raised.value)
+
+    report = view.module_report.toPlainText()
+    assert "The SQL run did not finish: ac-db-import exited 1" in report, report
+    assert "ERROR 1054" not in report, "the importer's own words are on the line"
+    assert "ERROR 1054" in view.module_details.text()
+    assert failures and "ERROR 1054" in failures[0], "the log lost them"
+
+
+def test_a_repair_whose_import_died_says_so_with_its_last_words_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214 review: the same for Repair's post-check, under the Danger zone's presses."""
+    from tests.test_docker import SPEC, UNIMPORTED, _probe, _repair_doubles
+
+    _repair_doubles(
+        monkeypatch,
+        [],
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: (
+            "applying acore_auth",
+            "ERROR 1698 (28000): Access denied for user 'root'@'localhost'",
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED))
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._repair_failed(raised.value)
+
+    said = view.danger_label.text()
+    assert "still read as absent" in said, said
+    assert "ERROR 1698" not in said, "the import's own words are on the line"
+    assert "ERROR 1698" in view.danger_details.text()
+    assert failures and "ERROR 1698" in failures[0], "the log lost them"
+
+    view._say_under_the_presses("the next press's line")
+
+    assert view.danger_details.isHidden(), "old Details stood under a new line"
+
+
 def test_the_refusal_that_makes_this_not_a_button_that_always_works(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
