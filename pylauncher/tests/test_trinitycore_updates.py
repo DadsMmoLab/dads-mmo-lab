@@ -1500,8 +1500,19 @@ def test_a_rollback_that_stops_early_after_a_failed_import_keeps_what_was_not_im
 
 
 def _docker_gone_after_the_compile(box: Box) -> None:
-    """Docker answers until the compile is done, then not: the recreate replaces nothing."""
+    """Docker answers until the compile is done, then not: the recreate replaces nothing.
+
+    T223: the recreate now waits 3 minutes for it, on a clock that moves only when
+    the engine sleeps, so the refusal's measured duration is the same on every box.
+    """
     box.seams["docker_ready"] = lambda: "build" not in box.m.rec.calls
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    box.seams["monotonic"] = lambda: now[0]
+    box.seams["sleep"] = sleep
 
 
 def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_tables_waiting(
@@ -1525,9 +1536,8 @@ def test_a_rollback_that_stops_early_before_the_servers_stopped_leaves_the_table
     assert box.engine().start_refusal(box.server_dir) == UNFINISHED
     assert box.world.running is True, "the build from before still runs in its containers"
     assert str(failed.value) == (
-        "Docker is not answering, so the containers were not replaced -- the server you have "
-        "is still the one that was running before this rebuild. Nothing was touched. Check the "
-        "docker daemon is up, then press the same entry under “Server build ▾” on the Modules "
+        "Docker did not answer for 3 minutes, so the containers were not replaced. Check that "
+        "Docker is running, then press the same entry under “Server build ▾” on the Modules "
         "tab again. Putting the build from before this rebuild back was not attempted, because "
         "the new build could not be given a name to undo onto (read-only layer store); the tags "
         "still name the new build, all of them. The old images are on the daemon under their "

@@ -1532,7 +1532,7 @@ def test_a_recreate_that_cannot_even_start_puts_the_recipe_back_and_takes_no_sec
     assert "recreate" not in rec.calls, rec.calls
     assert [line for line in said if "build recipe was put back exactly as it was" in line], said
     assert "no container was replaced" in str(raised.value), raised.value
-    assert "Docker is not answering" in str(raised.value), raised.value
+    assert "Docker did not answer for" in str(raised.value), raised.value
 
 
 def test_a_recreate_that_fails_after_the_daemon_may_have_changed_something_is_not_restored(

@@ -378,13 +378,36 @@ unanswered question fails closed.
 RecipeGround = bytes | None | _UnreadableRecipe
 """What `_recipe_ground()` knows about one file: its bytes, absent, or unreadable."""
 
+DOCKER_PATIENCE_S = 180.0
+"""How long a rebuild's recreate waits for a Docker that does not answer (T223, owner D2).
+
+One `docker info` with a 10-second bound was the whole question until T223, and
+on yulon-win11 (2026-10-04) it went unanswered right after an 85-minute compile
+had exported its image: the restore that followed deleted the new build, while
+the `docker tag` calls it made seconds later all worked. Docker was busy, not
+gone. Three minutes is the time this app already gives Docker Desktop to start
+(`platform._DOCKER_READY_TIMEOUT_SECONDS`).
+"""
+
+DOCKER_PATIENCE_POLL_S = 5.0
+"""How often Docker is asked again during `DOCKER_PATIENCE_S`, and so how soon a Stop is read."""
+
+HUB_RETRY_S = 30.0
+"""The pause before the one retry of a build that could not reach Docker Hub (T223, owner D3).
+
+The failure it answers costs seconds -- BuildKit looks the base image up before
+anything is compiled -- and the one seen (a TLS handshake timeout to
+auth.docker.io, yulon-win11, 2026-10-04) is the kind that has passed half a
+minute later.
+"""
+
 
 def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
     """What a rebuild costs and what it leaves alone, said before the first stage.
 
     `OPENING_NOTE`'s counterpart, and a separate sentence rather than a reuse
     because almost none of that one is true here: a rebuild clones nothing,
-    generates no compose files, downloads nothing and runs no import. Its own
+    generates no compose files, fetches no source and runs no import. Its own
     docstring records what it cost to have one sentence claim more than the
     stages keep, so the rule is the same — every clause names something
     `rebuild_stages()` is responsible for, and the list is exactly as long as
@@ -414,6 +437,14 @@ def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
     somebody else's press, hours later — would silently produce a different
     image. A promise this app can keep is cheaper than a caveat every reader
     has to hold.
+
+    **"It does not fetch anything" was false, and said so until T223.** Every
+    family builds `FROM` a registry image, and BuildKit asks Docker Hub about
+    it at the start of a build -- on Docker Desktop's containerd image store
+    even when the image is already here -- and a `RUN` layer whose cache is
+    gone downloads its packages again. A Rebuild on yulon-win11 (2026-10-04)
+    failed in seconds on a Docker Hub TLS timeout under a note promising it
+    would fetch nothing. What stays true is narrower: no new source code.
     """
     recipe = (
         "it writes this install's build recipe — its Dockerfile and .dockerignore — again "
@@ -428,9 +459,11 @@ def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
         f"and nothing else: {recipe}it "
         "compiles the server again from the source and modules in the folder below, it replaces "
         "the running containers so the new build is what starts, and it waits for the server to "
-        "come back up. It does not fetch anything, does not rewrite your settings, and does not "
-        "touch your database — your characters, accounts and the module SQL already applied are "
-        "not read or written by this. The server is DOWN from the moment the containers are "
+        "come back up. It fetches no new source code, though Docker may go online while it "
+        "builds: to ask Docker Hub about the base image the build starts from, and to download "
+        "system packages its cache no longer holds. It does not rewrite your settings, and does "
+        "not touch your database — your characters, accounts and the module SQL already applied "
+        "are not read or written by this. The server is DOWN from the moment the containers are "
         "replaced until it reports ready."
     )
 
@@ -5505,6 +5538,64 @@ class StagedInstaller:
             "what started it."
         )
 
+    def _wait_for_docker(
+        self, ctx: StageContext, *, rollback: bool
+    ) -> Generator[str, None, float | None]:
+        """Ask Docker until it answers, for up to `DOCKER_PATIENCE_S` (T223).
+
+        Returns None when Docker answered, else the seconds spent asking -- which is
+        what the refusal says, because a duration a user reads is one that was
+        measured (`_spell_seconds()`). Says one sentence when the first ask goes
+        unanswered and one when Docker answers late; silent when it answers at once.
+
+        **Bounded twice, by the clock and by the number of asks.** The clock is the
+        bound that holds in use, where each ask can take its own 10 seconds; the
+        count is the one that holds where `sleep` costs nothing and the clock is
+        real -- every test -- and without it this would spin real seconds.
+
+        **A Stop ends the wait before the replace, and does not end it in a
+        restore.** Before the replace a Stop gives up the new build, which is
+        `_stop_control()`'s `abandon`; in a restore (`rollback`) the Stop is what
+        may have STARTED it, and `_stop_control()` makes a Cancel there force the
+        failed build's stop rather than give up, because a restore abandoned
+        half-way leaves nothing running. Reading the Stop here would end the
+        restore's wait on its first ask.
+        """
+        started = self._seams.monotonic()
+        if self._seams.docker_ready():
+            return None
+        yield (
+            "Docker did not answer. Waiting up to 3 minutes for Docker before starting the build "
+            "from before this rebuild again."
+            if rollback
+            else "Docker did not answer. The new build is finished; waiting up to 3 minutes for "
+            "Docker before replacing the containers. Stop gives up the new build and leaves the "
+            "server as it is."
+        )
+        for _ in range(int(DOCKER_PATIENCE_S // DOCKER_PATIENCE_POLL_S)):
+            if self._seams.monotonic() - started >= DOCKER_PATIENCE_S:
+                break
+            if not rollback:
+                self._stopped_waiting_for_docker(ctx.cancel)
+            self._seams.sleep(DOCKER_PATIENCE_POLL_S)
+            answered = self._seams.docker_ready()
+            if not rollback:
+                self._stopped_waiting_for_docker(ctx.cancel)
+            if answered:
+                yield (
+                    f"Docker answered after "
+                    f"{_spell_seconds(self._seams.monotonic() - started)}."
+                )
+                return None
+        return self._seams.monotonic() - started
+
+    def _stopped_waiting_for_docker(self, cancel: threading.Event | None) -> None:
+        if cancel is not None and cancel.is_set():
+            raise InstallerError(
+                "The rebuild was stopped while it waited for Docker, so the containers were "
+                "not replaced."
+            )
+
     def stage_recreate(
         self,
         ctx: StageContext,
@@ -5547,11 +5638,17 @@ class StagedInstaller:
         probe and the call, and a consumer can stop at the yield, so the flag moved to
         the call.)
         """
-        if not self._seams.docker_ready():
+        # T223: a wait, not one ask -- see `_wait_for_docker()`.
+        waited = yield from self._wait_for_docker(ctx, rollback=rollback)
+        if waited is not None and rollback:
             raise InstallerError(
-                "Docker is not answering, so the containers were not replaced -- the server "
-                "you have is still the one that was running before this rebuild. Nothing was "
-                "touched. Check the docker daemon is up, then press the same entry under "
+                f"Docker did not answer for {_spell_seconds(waited)}, so the containers of the "
+                f"build from before this rebuild were not started."
+            )
+        if waited is not None:
+            raise InstallerError(
+                f"Docker did not answer for {_spell_seconds(waited)}, so the containers were not "
+                f"replaced. Check that Docker is running, then press the same entry under "
                 # T155: not "Rebuild" -- Update to latest and Return to the tested
                 # pin reach this too, through `rebuild()`, and all three are
                 # entries of the one menu. An install does not: its tuple ends
@@ -7143,12 +7240,17 @@ class StagedInstaller:
                     touched=touched,
                 )
             moved.append(ref)
-        yield from self._release(named)
+        held = yield from self._release(named)
         if not touched:
             yield from self._release(kept)
+            # T223 (owner D1): said, because it is what the press cost. The `-failed`
+            # names were the new build's only names, so letting them go deleted it.
+            # Keeping it for the next press is T224.
+            gone = "could not be used" if held else "was removed"
             return (
-                f"{failure} The tags were put back to the build that is running, and no "
-                f"container was replaced."
+                f"{failure} The build that had just finished {gone}, and no container was "
+                f"replaced: the server is still on the build it had before this rebuild, and "
+                f"the next rebuild compiles again."
             )
         said = (
             f" Before it was replaced, {spec.world} had printed:\n{last_words}"
@@ -7267,8 +7369,8 @@ class StagedInstaller:
                 left.append(back)
         return tuple(left)
 
-    def _release(self, kept: Sequence[str]) -> Iterator[str]:
-        """`_let_go()`, with a sentence for whatever the daemon would not take.
+    def _release(self, kept: Sequence[str]) -> Generator[str, None, tuple[str, ...]]:
+        """`_let_go()`, with a sentence for whatever the daemon would not take. Returns those.
 
         Used on every exit that can still speak. The sentence is not a failure --
         the rebuild's own verdict is decided elsewhere and is not changed by a
@@ -7283,6 +7385,7 @@ class StagedInstaller:
                 f"needs them; the log says what docker objected to. `docker image rm -f` "
                 f"each one once this server is stopped."
             )
+        return left
 
     def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:
         """The build-recipe files as found. Bytes, `None` for absent, `UNREADABLE` for neither.
@@ -9197,13 +9300,46 @@ class StagedInstaller:
                 else "This takes hours on a first install."
             )
         )
-        run = yield from self._pump(
-            lambda sink: self._seams.build(
-                ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
-            ),
-            cancel=ctx.cancel,
-            stage="build",
-        )
+        # T223 (owner D3): a build that could not reach Docker Hub to look up its
+        # base image compiled nothing, so it is tried once more after a pause, and
+        # a second such failure says what happened instead of "the build failed".
+        for second_try in (False, True):
+            run = yield from self._pump(
+                lambda sink: self._seams.build(
+                    ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
+                ),
+                cancel=ctx.cancel,
+                stage="build",
+            )
+            unreachable = (
+                docker.base_image_unreachable(run.tail)
+                if run.returncode not in (0, docker.CANCELLED_RETURNCODE)
+                else ""
+            )
+            if not unreachable or second_try:
+                break
+            yield (
+                f"Docker Hub could not be reached to look up the base image {unreachable}, so "
+                f"nothing was compiled. Trying the build again in {_spell_seconds(HUB_RETRY_S)}."
+            )
+            for _ in range(int(HUB_RETRY_S // DOCKER_PATIENCE_POLL_S)):
+                if ctx.cancel is not None and ctx.cancel.is_set():
+                    break
+                self._seams.sleep(DOCKER_PATIENCE_POLL_S)
+            if ctx.cancel is not None and ctx.cancel.is_set():
+                raise InstallerError(_cancelled_message("the build"))
+        if unreachable:
+            again = (
+                f"press the same entry under \u201c{server_build_presses.SERVER_BUILD}\u201d on "
+                f"the Modules tab again"
+                if ctx.force_build
+                else "try again"
+            )
+            raise InstallerError(
+                f"Docker Hub could not be reached to look up the base image {unreachable}, twice, "
+                f"{_spell_seconds(HUB_RETRY_S)} apart, so nothing was compiled. Check this "
+                f"computer's internet connection, then {again}."
+            )
         self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE, from_build=True)
         yield "The build finished."
 

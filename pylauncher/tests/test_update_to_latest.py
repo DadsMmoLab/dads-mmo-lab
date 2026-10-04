@@ -2313,7 +2313,7 @@ def test_a_rollback_that_put_the_tags_back_before_any_container_moved_puts_the_s
         _press(rec, server_dir)
     said = str(raised.value)
     assert not isinstance(raised.value, RollbackNotDone)
-    assert "The tags were put back to the build that is running" in said
+    assert "The build that had just finished was removed, and no container was replaced" in said
     assert set(_heads(rec, server_dir).values()) == {OLD}
     assert said.endswith(native.SOURCES_PUT_BACK_NOTE)
 
