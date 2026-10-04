@@ -2727,3 +2727,60 @@ def test_use_existing_still_opens_in_a_server_under_the_old_folder_name(
         tmp_path / "wow-server-playerbots",
         tmp_path / "yulon-wotlk",
     ]
+
+
+# ---------------------------------------------------------------------------
+# F1 (T195 final fix): the `yulon-<game>` default must never build a second
+# server beside one installed under the former default name. The rule lives in
+# `installer.default_server_dir()`, which the Install suggestion here and the
+# engine's own default (the CLI harness, no --server-dir) both ask.
+
+
+def _with_install(folder: Path) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    return folder
+
+
+def _suggested(tmp_path: Path) -> Path:
+    entry = CATALOG.get("wow-wotlk")
+    view, asked, _titles = _view(tmp_path, take_suggestion=True, picked=None, installs=False)
+    assert view.start_install(entry) is True
+    ((_game, suggested),) = asked
+    return suggested
+
+
+def test_install_suggests_the_new_folder_when_no_server_exists(
+    qapp: object, tmp_path: Path
+) -> None:
+    assert _suggested(tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_install_suggests_the_former_folder_when_only_it_holds_a_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    _with_install(tmp_path / "wow-server-playerbots")
+    assert _suggested(tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+def test_install_suggests_the_new_folder_when_the_former_one_holds_no_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    (tmp_path / "wow-server-playerbots").mkdir()
+    assert _suggested(tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_install_prefers_the_new_folder_when_both_hold_a_server(
+    qapp: object, tmp_path: Path
+) -> None:
+    _with_install(tmp_path / "wow-server-playerbots")
+    _with_install(tmp_path / "yulon-wotlk")
+    assert _suggested(tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_install_keeps_the_former_folder_when_the_new_one_is_empty(
+    qapp: object, tmp_path: Path
+) -> None:
+    _with_install(tmp_path / "wow-server-playerbots")
+    (tmp_path / "yulon-wotlk").mkdir()
+    assert _suggested(tmp_path) == tmp_path / "wow-server-playerbots"

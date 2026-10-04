@@ -104,6 +104,7 @@ from yulon.catalog.installer import (
     UnsupportedPlatformError,
     UpdateRefused,
     WorldStoppedAfterReadyError,
+    default_server_dir,
     docker_unavailable,
     generated_compose_files,
     provision_lines,
@@ -4203,10 +4204,10 @@ class StagedInstaller:
     # -- the contract ----------------------------------------------------
 
     def server_dir(self, options: InstallOptions) -> Path:
-        """Where this install goes: what the user picked, or the entry's default under $HOME."""
+        """Where this install goes: what the user picked, or `default_server_dir()` under $HOME."""
         if options.server_dir is not None:
             return options.server_dir
-        return Path.home() / self.entry.install.default_server_dir
+        return default_server_dir(self.entry, Path.home())
 
     def preflight(
         self,

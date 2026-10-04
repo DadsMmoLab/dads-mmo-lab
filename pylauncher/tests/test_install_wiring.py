@@ -1087,3 +1087,59 @@ def test_the_harness_writes_the_display_text_so_a_gate_transcript_keeps_its_shap
         "--- clone-core",
         "[Map 000] Building tile [22,52] (01 / 741)",
     ]
+
+
+# F1 (T195 final fix): the harness run without --server-dir installs where the
+# engine's default says, and that default must not build a second server beside
+# one under the former default name (`installer.default_server_dir`).
+
+
+def _cli_default(monkeypatch: pytest.MonkeyPatch, home: Path) -> Path:
+    from yulon.catalog.installer import installer_for
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    entry = load_catalog().get("wow-wotlk")
+    engine = installer_for(entry, platform_id=lambda: "linux")
+    return engine.server_dir(InstallOptions())
+
+
+def _holding_install(folder: Path) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+
+def test_the_harness_default_is_the_new_folder_when_no_server_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_the_harness_default_is_the_former_folder_when_only_it_holds_a_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _holding_install(tmp_path / "wow-server-playerbots")
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+def test_the_harness_default_ignores_a_former_folder_with_no_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "wow-server-playerbots").mkdir()
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_the_harness_default_prefers_the_new_folder_when_both_hold_a_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _holding_install(tmp_path / "wow-server-playerbots")
+    _holding_install(tmp_path / "yulon-wotlk")
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_the_harness_default_keeps_the_former_folder_when_the_new_one_is_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _holding_install(tmp_path / "wow-server-playerbots")
+    (tmp_path / "yulon-wotlk").mkdir()
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "wow-server-playerbots"

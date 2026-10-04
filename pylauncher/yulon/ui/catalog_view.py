@@ -35,10 +35,12 @@ from PySide6.QtWidgets import (
 from yulon import docker, platform, wsl
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
+    FORMER_DEFAULT_DIRS,
     InstallEngine,
     InstallOptions,
     cancelled_install_message,
     compose_file,
+    default_server_dir,
     platform_names,
     unsupported_platform_message,
 )
@@ -306,20 +308,6 @@ _CAMPAIGN_SUBTITLES = {
 """The tile's second line; the client version in brackets comes from the entry (T194 C18).
 
 Typed here, the Tortoise tile said 1.17.2 for a server whose client must be 1.18.1.
-"""
-
-FORMER_DEFAULT_DIRS = {
-    "wow-wotlk": "wow-server-playerbots",
-    "wow-tbc": "wow-tbc-server",
-    "wow-vanilla": "wow-vanilla-server",
-    "wow-tortoise": "tortoise-wow-server",
-    "wow-centurion": "wow-centurion-server",
-}
-"""The default folder names before `yulon-<game>` (T195 C30), for "Use existing…" only.
-
-Only new installs take the new name. A server installed under the old one stays
-there, and "Use existing…" still opens its picker in that folder when it is the
-one that exists.
 """
 
 RECOMMENDED = "wow-wotlk"
@@ -932,7 +920,7 @@ class CatalogView(QWidget):
         # used to live in the dialog's title - unclickable, and truncated by the
         # window manager at 91 characters before it reached the name itself
         # (owner, Fedora 44, 2026-09-03). Here it is body text and one button.
-        suggested = self._home / entry.install.default_server_dir
+        suggested = default_server_dir(entry, self._home)
         if self._ask_suggestion(self, entry.name, suggested):
             server_dir: Path | None = suggested
         else:
