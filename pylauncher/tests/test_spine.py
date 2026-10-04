@@ -2466,6 +2466,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "models the index places; its `except OSError` logs and answers None, which is 'no "
         "check ran' and warns about nothing - nothing is written on the strength of it"
     ),
+    ("catalog/build_context.py", "_sorted_entries"): (
+        "T224. Lists the build context, the server folder, the way Docker's own walk "
+        "filters it, to fingerprint the files a finished build was made from. It decides no "
+        "write: it decides whether a kept build may be reused instead of compiling. Every "
+        "OSError, like every other fact it cannot read, answers None, and None never matches, "
+        "so the server is then compiled"
+    ),
     ("catalog/families/sqlplan.py", "_listing"): (
         "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
         "directory) and every other OSError stops the install regardless of `on_error`"
