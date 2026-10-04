@@ -56,6 +56,7 @@ from yulon.catalog.native import (
     RewrittenHistory,
     Seams,
     SourceVersion,
+    StagedInstaller,
     correction_phases,
     read_state,
     return_to_pin_confirmation,
@@ -496,7 +497,13 @@ def update_to_latest_for_app(
         said = dict(met) if (elsewhere or stopped) else rewritten()
         acknowledged.clear()
         acknowledged.update(said)
-        text = update_to_latest_confirmation(entry, server_dir, repo, tuple(said.values()))
+        # T217: the databases the press copies, asked of the family (no git, no docker).
+        family = installer_for(entry)
+        copied = family.snapshot_databases() if isinstance(family, StagedInstaller) else ()
+        not_copied = family.snapshot_left_out() if isinstance(family, StagedInstaller) else ()
+        text = update_to_latest_confirmation(
+            entry, server_dir, repo, tuple(said.values()), copied=copied, not_copied=not_copied
+        )
         return f"{text}\n\n{WSL_DISTRO_STOPPED_NOTE}" if stopped else text
 
     def engine() -> InstallEngine:

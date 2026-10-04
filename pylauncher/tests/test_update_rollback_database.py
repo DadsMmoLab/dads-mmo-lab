@@ -35,7 +35,7 @@ from tests.test_update_to_latest import (  # noqa: F401 - `_gated` is an autouse
     _recreate_given_up,
     _spine,
 )
-from yulon import git
+from yulon import git, server_build_presses
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import (
@@ -557,3 +557,69 @@ def test_the_controllers_start_carries_the_warning_and_still_starts(
     controller.start()
     assert started == [tmp_path]
     assert controller.sources_problem is not None and OLD in controller.sources_problem
+
+
+# -- Task 6: what the player is told before and as the press runs --------------
+
+
+def test_the_wotlk_question_says_its_playerbots_database_goes_back_and_what_the_backup_is_for() -> (
+    None
+):
+    text = native.update_to_latest_confirmation(
+        WOTLK, Path("/srv"), "x/y", copied=("acore_playerbots",)
+    )
+    assert "acore_playerbots" in text
+    assert "as it was just before the new server started" in text
+    assert "Anything the new server writes into your database on first start is not" not in text
+    # The backup still has a job: a later return, which no rollback covers.
+    assert server_build_presses.RETURN_TO_PIN in text
+    assert "backup" in text
+
+
+def test_the_tortoise_question_says_its_world_database_is_not_copied() -> None:
+    text = native.update_to_latest_confirmation(
+        TORTOISE, Path("/srv"), "x/y", copied=("tw_logon", "tw_char"), not_copied=("tw_world",)
+    )
+    assert "tw_logon and tw_char" in text
+    assert "tw_world is not copied" in text
+
+
+def test_the_tbc_question_keeps_its_words() -> None:
+    """No copy, so the old sentence is the true one."""
+    text = native.update_to_latest_confirmation(TBC, Path("/srv"), "x/y")
+    assert text.endswith(
+        "If the build fails, the build you have now is put back. Anything the new server writes "
+        "into your database on first start is not put back — that is what the backup is for."
+    )
+
+
+def test_the_wiring_asks_the_family_which_databases_the_question_names(tmp_path: Path) -> None:
+    from yulon import install_wiring
+
+    route = install_wiring.update_to_latest_for_app(WOTLK, tmp_path)
+    assert route is not None
+    assert "acore_playerbots" in route.confirmation()
+    route = install_wiring.update_to_latest_for_app(TBC, tmp_path)
+    assert route is not None
+    assert "is not put back — that is what the backup is for" in route.confirmation()
+
+
+def test_the_press_says_what_it_copies_before_it_says_anything_else_happens(
+    tmp_path: Path,
+) -> None:
+    """The opening line's clauses are in the order the rollback runs them (Task 3)."""
+    rec, _dir, _made, _fake, said, _raised = _press(tmp_path, WOTLK)
+    opening = native.copy_opening_line(("acore_playerbots",))
+    assert opening in said
+    assert said.index(opening) == said.index(native.UPDATE_TO_LATEST_OPENING_NOTE) + 1
+    # Sources, then the copy, then the build you have: the order `back()` runs.
+    assert (
+        opening.index("the source folders go back first")
+        < opening.index("then that copy")
+        < opening.index("then does the build you have start again")
+    )
+
+
+def test_a_tbc_press_says_nothing_about_a_copy(tmp_path: Path) -> None:
+    _rec, _dir, _made, _fake, said, _raised = _press(tmp_path, TBC)
+    assert not [line for line in said if "copies" in line or "Copying" in line]

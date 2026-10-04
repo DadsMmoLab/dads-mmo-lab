@@ -961,7 +961,13 @@ divergence before it moves anything (T126), and names it the next time.
 
 
 def update_to_latest_confirmation(
-    entry: CatalogEntry, server_dir: Path, repo: str, rewritten: Sequence[str] = ()
+    entry: CatalogEntry,
+    server_dir: Path,
+    repo: str,
+    rewritten: Sequence[str] = (),
+    *,
+    copied: Sequence[str] = (),
+    not_copied: Sequence[str] = (),
 ) -> str:
     """The one question asked before an update to latest. The approved design's own words.
 
@@ -996,13 +1002,37 @@ def update_to_latest_confirmation(
     tested, and this has assertions on it that run without Qt.
     """
     said = "".join(f"\n\n{line}" for line in rewritten)
+    # T217: `copied` is the family's copy of the databases its new build can change
+    # (`StagedInstaller.snapshot_databases()`), put back if that build does not come
+    # up; with none, the database half is the sentence it always was.
+    if copied:
+        names = _listed(copied)
+        database = (
+            f" If the new server starts and does not come up, Yu'lon also puts {names} back "
+            f"{_as_it_was(copied)} just before the new server started: it copies "
+            f"{'it' if len(copied) == 1 else 'them'} then, with your server stopped."
+        )
+        if not_copied:
+            database += (
+                f" {_listed(not_copied)} {'is' if len(not_copied) == 1 else 'are'} not copied: "
+                "what the new server writes into it on first start is not put back."
+            )
+        back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
+        database += (
+            " The backup offered here is for later: if the new server does come up and you "
+            f"go back with {back}, nothing undoes what it wrote."
+        )
+    else:
+        database = (
+            " Anything the new server writes into your database on first start is not put "
+            "back — that is what the backup is for."
+        )
     return (
         f"Update {entry.name} in {server_dir} to the newest {repo} code?\n\n"
         f"This builds code nobody has tested with this app. It takes as long as your first "
         f"build ({MEASURED_BUILD_TIMES}) and it can fail — a module may no longer compile, or "
         f"the new server may refuse your database. If the build fails, the build you have now "
-        f"is put back. Anything the new server writes into your database on first start is not "
-        f"put back — that is what the backup is for.{said}"
+        f"is put back.{database}{said}"
     )
 
 
@@ -2057,6 +2087,20 @@ def _in_backups(paths: Sequence[Path]) -> str:
 
 def _megabytes(size: int) -> str:
     return f"{size / 1_048_576:.1f} MB"
+
+
+def copy_opening_line(names: Sequence[str]) -> str:
+    """Said right after the opening note, when the update copies databases (T217).
+
+    Its clauses are in the order the rollback runs them: source folders, then
+    this copy, then the build you have (`update_to_latest()`'s `back()`).
+    """
+    return (
+        f"Just before the new build first starts, with your servers stopped, Yu'lon copies "
+        f"{_listed(names)}, which it can change. If it does not come up, the source folders "
+        f"go back first, then {'that copy' if len(names) == 1 else 'those copies'}, and only "
+        "then does the build you have start again."
+    )
 
 
 def copy_taking_line(names: Sequence[str]) -> str:
@@ -4692,6 +4736,10 @@ class StagedInstaller:
         """`databases_a_new_build_changes()` in this entry's own schema names (T217)."""
         return self._schema_names(self.databases_a_new_build_changes())
 
+    def snapshot_left_out(self) -> tuple[str, ...]:
+        """`databases_changed_but_not_copied()` in this entry's own schema names (T217)."""
+        return self._schema_names(self.databases_changed_but_not_copied())
+
     def _schema_names(self, roles: Sequence[Db]) -> tuple[str, ...]:
         named = self.entry.schema_map()
         return tuple(named[role] for role in roles if role in named)
@@ -6637,6 +6685,8 @@ class StagedInstaller:
         )
         yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
         yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
+        if self._snapshot is not None and self.snapshot_databases():
+            yield copy_opening_line(self.snapshot_databases())
         for said in targets.values():
             yield said.line
         self._check_cancel(cancel)
@@ -6713,7 +6763,7 @@ class StagedInstaller:
             sources_failed: list[tuple[EmulatorSource, Path, str, str]] = []
             copy = _UpdateCopy(
                 names=self.snapshot_databases() if self._snapshot is not None else (),
-                not_copied=self._schema_names(self.databases_changed_but_not_copied()),
+                not_copied=self.snapshot_left_out(),
             )
             family = self.servers_down_work(server_dir, changes, press=press)
 
