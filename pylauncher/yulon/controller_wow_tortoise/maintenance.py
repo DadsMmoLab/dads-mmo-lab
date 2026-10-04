@@ -141,6 +141,7 @@ def plan_restore(
     *,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
+    can_start_database: bool = False,
 ) -> RestorePlan:
     """Work out what restoring `backup_file` into this install would do, without doing it.
 
@@ -154,6 +155,7 @@ def plan_restore(
         spec=docker_ctl.SPEC,
         running=running,
         wsl_distro=wsl_distro,
+        can_start_database=can_start_database,
     )
 
 

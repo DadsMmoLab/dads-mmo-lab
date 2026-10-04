@@ -412,6 +412,119 @@ def test_restore_refuses_when_the_database_container_is_down(tmp_path: Path) -> 
     assert any("nothing to restore into" in reason for reason in plan.refusals)
 
 
+# -- T216: a stopped server is a plan that starts the database, when it can be ---------------
+
+
+def test_a_stopped_server_is_an_allowed_plan_when_the_database_can_be_started(
+    tmp_path: Path,
+) -> None:
+    """T216: with the whole server stopped the plan goes ahead, and says it will start the db.
+
+    Before T216 the census refused a stopped database outright, and the app's
+    one Stop takes the database down with the world and the login server, so no
+    press on the Maintenance tab reached a state the restore accepted. The plan
+    itself starts nothing: it records that the restore will.
+    """
+    plan = plan_restore(
+        a_backup_of(tmp_path, "acore_characters"),
+        tmp_path,
+        running=running(),
+        can_start_database=True,
+    )
+    assert plan.allowed, plan.refusals
+    assert plan.starts_database is True
+
+
+def test_a_database_that_is_already_up_is_not_planned_to_be_started(tmp_path: Path) -> None:
+    """The plan says it will start the database only when the census found it down."""
+    plan = plan_restore(
+        a_backup_of(tmp_path, "acore_characters"),
+        tmp_path,
+        running=running(DB),
+        can_start_database=True,
+    )
+    assert plan.allowed, plan.refusals
+    assert plan.starts_database is False
+
+
+def test_without_a_way_to_start_it_a_stopped_database_is_still_refused(tmp_path: Path) -> None:
+    """A caller that cannot start the database alone keeps the refusal it always had."""
+    plan = plan_restore(a_backup_of(tmp_path, "acore_world"), tmp_path, running=running())
+    assert any("nothing to restore into" in reason for reason in plan.refusals)
+    assert plan.starts_database is False
+
+
+@pytest.mark.parametrize("game_server", [WORLD, AUTH])
+def test_a_running_game_server_still_refuses_when_the_database_could_be_started(
+    tmp_path: Path, game_server: str
+) -> None:
+    """The world-and-login rule is untouched by T216, and is the ONLY rule broken here.
+
+    The database is down and the caller can start it, so the database rule
+    cannot refuse: the one refusal left is the running game server's, in the
+    words that send the player to Stop -- which now leads somewhere that works.
+    """
+    plan = plan_restore(
+        a_backup_of(tmp_path, "acore_characters"),
+        tmp_path,
+        running=running(game_server),
+        can_start_database=True,
+    )
+    assert len(plan.refusals) == 1, plan.refusals
+    assert f"{game_server} is running" in plan.refusals[0]
+    assert "Stop the server and try again." in plan.refusals[0]
+
+
+def test_a_census_that_fails_still_refuses_when_the_database_could_be_started(
+    tmp_path: Path,
+) -> None:
+    """Fail closed: "Docker would not say" is not "the server is stopped"."""
+
+    def unanswered() -> list[str]:
+        raise docker.DockerCommandError("Cannot connect to the Docker daemon")
+
+    plan = plan_restore(
+        a_backup_of(tmp_path, "acore_characters"),
+        tmp_path,
+        running=unanswered,
+        can_start_database=True,
+    )
+    assert len(plan.refusals) == 1, plan.refusals
+    assert "could not ask Docker" in plan.refusals[0]
+    assert plan.starts_database is False
+
+
+def test_a_plan_made_with_the_database_down_confirms_the_restore_made_with_it_up(
+    tmp_path: Path,
+) -> None:
+    """T216: the press plans with the database down and re-plans after starting it.
+
+    The token is the file's identity, its length and the schemas it names -- not
+    the census -- so the two plans agree, and the restore runs against the
+    database the press brought up.
+    """
+    path = a_backup_of(tmp_path, "acore_characters")
+    down = plan_restore(path, tmp_path, running=running(), can_start_database=True)
+    mysql = FakeMysql(("acore_characters",))
+
+    report = restore(down, mysql, confirm=down.token, running=running(DB), now=AT)
+
+    assert report.databases == ("acore_characters",)
+    assert mysql.loaded == [path.read_bytes()]
+
+
+def test_a_file_replaced_after_a_database_down_plan_is_still_refused(tmp_path: Path) -> None:
+    """The "it changed in between" protection holds across the database being started."""
+    path = a_backup_of(tmp_path, "acore_characters")
+    down = plan_restore(path, tmp_path, running=running(), can_start_database=True)
+    path.write_bytes(good_dump("acore_characters", "acore_auth"))
+    mysql = FakeMysql(("acore_characters", "acore_auth"))
+
+    with pytest.raises(MaintenanceError, match="changed in between"):
+        restore(down, mysql, confirm=down.token, running=running(DB), now=AT)
+    assert mysql.loaded == []
+
+
 def test_restore_refuses_a_path_that_does_not_exist(tmp_path: Path) -> None:
     """A mistyped path fails at plan time, before anything is touched."""
     plan = plan_restore(tmp_path / "typo.sql", tmp_path, running=running(DB))

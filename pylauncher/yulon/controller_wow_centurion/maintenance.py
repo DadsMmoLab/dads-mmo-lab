@@ -74,14 +74,19 @@ def plan_restore(
     *,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
+    can_start_database: bool = False,
 ) -> RestorePlan:
-    """What restoring `backup_file` would do, censused against THIS entry's containers."""
+    """What restoring `backup_file` would do, censused against THIS entry's containers.
+
+    `can_start_database` is the shared planner's (T216): passed on unchanged.
+    """
     return _shared.plan_restore(
         backup_file,
         server_dir,
         spec=entry.container_spec(),
         running=running,
         wsl_distro=wsl_distro,
+        can_start_database=can_start_database,
     )
 
 

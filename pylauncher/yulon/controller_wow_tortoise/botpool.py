@@ -35,6 +35,7 @@ route's two presses and runs only when the module's commit actually changed.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import threading
 import time
@@ -42,7 +43,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from yulon import git
+from yulon import docker, git
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.native import LatestRoute
 from yulon.channel import Answer, Channel
@@ -314,11 +315,17 @@ def restart_world(controller: Controller) -> None:
     Raises:
         StopFailed: the stop raised; nothing was started.
     """
-    try:
-        controller.stop()
-    except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
-        raise StopFailed(str(exc)) from exc
-    controller.start()
+    # One lifecycle command from the stop to the start (T216 review round 3), so a
+    # restore cannot take its hold in between and leave the world stopped. A
+    # server already held refuses before the stop: nothing was stopped or
+    # started, which is what `StopFailed` tells the caller.
+    with contextlib.ExitStack() as composite:
+        try:
+            composite.enter_context(docker.lifecycle(controller.server_dir))
+            controller.stop()
+        except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
+            raise StopFailed(str(exc)) from exc
+        controller.start()
 
 
 def head_sha(dest: Path, *, wsl_distro: str | None = None) -> str | None:

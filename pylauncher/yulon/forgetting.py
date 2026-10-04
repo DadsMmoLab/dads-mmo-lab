@@ -66,6 +66,30 @@ RESTORE_RUNNING = (
     "stopping the server now would leave them half-written. Wait for it to finish, then "
     "try again. Nothing was removed."
 )
+# Why a Start, Stop, Restart or recreate is refused while the Maintenance tab holds the
+# server (`docker.hold_the_server()`, T216). Siblings of the two above: the same jobs, asked
+# about by a different press, so they say "nothing was started or stopped" instead.
+RESTORE_HOLDS_THE_SERVER = (
+    "A restore is writing into this server's databases on its Maintenance tab. Starting "
+    "the server now would let the world save over what is being restored, and stopping it "
+    "would leave the databases half-written. Wait for the restore to finish, then try "
+    "again. Nothing was started or stopped."
+)
+BACKUP_HOLDS_THE_SERVER = (
+    "A backup is running on this server's Maintenance tab with the database started on its "
+    "own for it, and the database is stopped again when the backup ends. Wait for the "
+    "backup to finish, then try again. Nothing was started or stopped."
+)
+# What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
+# own sentence, to which the refused one adds what it did not do (T216 review round 3).
+BACKUP_HOLDS_THE_DATABASES = (
+    "A backup of this server is running on its Maintenance tab. Wait for it to finish, "
+    "then try again."
+)
+RESTORE_HOLDS_THE_DATABASES = (
+    "A restore is writing into this server's databases on its Maintenance tab. Wait for "
+    "it to finish, then try again."
+)
 NETWORK_RUNNING = (
     "A network change is being applied on this server's Networking tab. Wait for it to "
     "finish, then try again. Nothing was removed."
