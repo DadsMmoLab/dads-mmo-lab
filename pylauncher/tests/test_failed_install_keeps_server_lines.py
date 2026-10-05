@@ -368,6 +368,44 @@ def test_the_newest_run_is_cut_to_its_end_and_never_left_out_to_fit_the_cap(
     assert kept.endswith(f"{WORLD} | {CRASH}\n")
 
 
+@pytest.mark.parametrize("order", ["newest-written-first", "newest-written-last"])
+def test_runs_with_one_modification_time_keep_the_one_named_newest(
+    tmp_path: Path, order: str
+) -> None:
+    """Codex T249 adversarial review: a tie on mtime left the choice to listing order.
+
+    The names carry the UTC start and a same-second suffix, so they break the tie.
+    """
+    config = tmp_path / "config"
+    runs = runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    names = [
+        "install-wow-tortoise-20261004T164000Z.log",
+        "install-wow-tortoise-20261004T165226Z.log",
+        "install-wow-tortoise-20261004T165226Z-2.log",
+    ]
+    for name in names if order == "newest-written-last" else reversed(names):
+        path = runs / name
+        path.write_text(_noise(150_000) + f"{name}\n", encoding="utf-8")
+        os.utime(path, (2_000_000, 2_000_000))
+    dest = tmp_path / "support.zip"
+
+    report = bundle.build(
+        dest,
+        Sources(config_dir=config, app_log=None, installs=()),
+        Redactor.build([]),
+        seams=bundle.Seams(
+            live_logs=lambda install, silent: [],
+            docker_version=lambda distro: None,
+            now=lambda: datetime(2026, 10, 4, 16, 52, tzinfo=UTC),
+        ),
+        cap_bytes=150_000,
+    )
+
+    assert f"runs/{names[-1]}" in report.included
+    assert set(report.dropped) == {f"runs/{name}" for name in names[:-1]}
+
+
 def test_the_newest_run_is_cut_only_after_the_app_log(tmp_path: Path) -> None:
     """Last of all: Yu'lon's own log gives way first, and here that alone fits the cap."""
     config = tmp_path / "config"
@@ -451,6 +489,23 @@ def test_a_long_stderr_never_pushes_the_end_of_stdout_out_of_the_cap(
     assert text is not None
     assert CRASH in text, "the end of stdout"
     assert text.endswith(f"warning {native.FAILURE_TAIL_LINES - 1:04d} {'w' * 700}\n")
+    assert len(text.encode("utf-8")) <= native.FAILURE_TAIL_BYTES
+
+
+def test_a_last_line_longer_than_the_cap_keeps_its_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex T249 adversarial review: a stream with no newline in its kept bytes was emptied."""
+    cli, state = lay_fake_docker(tmp_path)
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    huge = "{" + "x" * 300_000 + "} " + CRASH + "\n"
+    set_fake_log(state, WORLD, stdout=huge, stderr="one warning\n")
+
+    text = native.Seams().container_tail(WORLD)
+
+    assert text is not None
+    assert CRASH in text
+    assert text.endswith("one warning\n")
     assert len(text.encode("utf-8")) <= native.FAILURE_TAIL_BYTES
 
 

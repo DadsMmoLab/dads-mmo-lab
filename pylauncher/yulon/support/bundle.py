@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import zipfile
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -469,6 +470,24 @@ def _shorter(member: _Member, redact: Callable[[str], str]) -> _Member:
     return replace(member, data=redact(text).encode("utf-8"), raw=text)
 
 
+_RUN_STAMP = re.compile(r"-(\d{8}T\d{6}Z)(?:-(\d+))?\.log$")
+"""`runlog`'s name: the UTC start, and `-2`, `-3`... for a second run in the same second."""
+
+
+def _run_order(member: _Member) -> tuple[float, str, int]:
+    """Oldest first: by when it was last written, a tie by the start in its name.
+
+    The last write first, because the run that FAILED last is the one asked
+    about, and a long install started before a short rebuild ends after it. A
+    tie -- a coarse clock, a copied folder -- is broken by the name, never left
+    to the order the folder happened to list (Codex T249 review).
+    """
+    found = _RUN_STAMP.search(member.name)
+    if found is None:
+        return (member.mtime, "", 0)
+    return (member.mtime, found.group(1), int(found.group(2) or 1))
+
+
 def _fit(
     members: list[_Member],
     cap: int,
@@ -484,7 +503,7 @@ def _fit(
     install is never remembered, so there is no container to read again.
     """
     queue = sorted((m for m in members if m.group == "snapshots"), key=lambda m: m.mtime)
-    runs = sorted((m for m in members if m.group == "runs"), key=lambda m: m.mtime)
+    runs = sorted((m for m in members if m.group == "runs"), key=_run_order)
     newest_run = runs[-1].name if runs else None
     queue += runs[:-1]
     weight = {m.name: _estimate(m) for m in members}

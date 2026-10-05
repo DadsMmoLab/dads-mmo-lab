@@ -1654,20 +1654,25 @@ def last_lines(
         # Whatever one stream leaves of its half, the other may have.
         out_room = max(half, max_bytes - len(err.encode("utf-8")))
         out = _end_of(out, out_room)
-        err = _end_of(err, max_bytes - len(out.encode("utf-8")) - 1)
+        joint = 0 if not out or out.endswith("\n") else 1
+        err = _end_of(err, max_bytes - len(out.encode("utf-8")) - joint)
     if not err:
         return out
     return (out if not out or out.endswith("\n") else out + "\n") + err
 
 
 def _end_of(text: str, limit: int) -> str:
-    """`text`'s last `limit` bytes (at least none), starting on a whole line."""
+    """`text`'s last `limit` bytes (at least none), starting on a whole line.
+
+    Unless the last line alone is longer than `limit`: then its end, so one huge
+    line -- the newest, and perhaps the reason -- is cut rather than lost.
+    """
     data = text.encode("utf-8")
     if len(data) <= limit:
         return text
     tail = data[len(data) - max(limit, 0) :].decode("utf-8", errors="ignore")
     _, newline, whole = tail.partition("\n")
-    return whole if newline else ""
+    return whole if newline and whole else tail
 
 
 def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> str | None:
