@@ -661,7 +661,8 @@ def _copy_onto(src: Path, target: Path) -> list[Path]:
             onto = client_names.match(names, name) or name
             names.append(onto)
             _copy_unshared(here / name, dest / onto)
-            written.append(dest / onto)
+            if dest / onto not in written:  # one receipt per name, of what is there last
+                written.append(dest / onto)
     return written
 
 

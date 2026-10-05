@@ -672,3 +672,38 @@ def test_an_addon_lands_in_the_interface_folder_already_there_in_another_case(
 
     assert sorted(p.name for p in client.iterdir()) == ["interface"]
     assert (client / "interface" / "addons" / "TortoiseBotsManager" / "patch-Z.MPQ").is_file()
+
+
+@needs_case_sensitive_disk
+def test_two_source_names_that_differ_only_in_case_land_on_one_name(tmp_path: Path) -> None:
+    """T262: the copy never makes the twin it exists to avoid, even from its own source."""
+    from yulon.apply import _copy_onto
+
+    src = tmp_path / "src"
+    _write(src / "Patch.MPQ", b"first")
+    _write(src / "patch.mpq", b"second")
+    target = tmp_path / "client" / "Data"
+
+    written = _copy_onto(src, target)
+
+    assert sorted(p.name for p in target.iterdir()) == ["Patch.MPQ"]
+    assert written == [target / "Patch.MPQ"], "one receipt for the one file"
+
+
+def test_a_folder_copy_never_writes_through_a_file_shared_by_hard_link(tmp_path: Path) -> None:
+    """T181's rule in the folder copy too: a ready-to-play client's archive shares the
+    player's inode, so it is replaced, never opened for writing."""
+    from yulon.apply import _copy_onto
+
+    players = tmp_path / "players" / "patch-4.MPQ"
+    _write(players, b"the player's own patch-4")
+    target = tmp_path / "play" / "Data"
+    target.mkdir(parents=True)
+    os.link(players, target / "patch-4.MPQ")
+    src = tmp_path / "src"
+    _write(src / "patch-4.MPQ", b"the keg's patch-4")
+
+    _copy_onto(src, target)
+
+    assert (target / "patch-4.MPQ").read_bytes() == b"the keg's patch-4"
+    assert players.read_bytes() == b"the player's own patch-4"
