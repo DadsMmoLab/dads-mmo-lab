@@ -69,7 +69,6 @@ import json
 import os
 import re
 import threading
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -1203,36 +1202,22 @@ def _file_facts(folder: Path, prefix: str) -> list[str]:
     return facts
 
 
-RESUME_CHECK_SECONDS = 60.0
-"""How long `_why_it_begins_again()`'s answer for a failed run is reused (T245).
-
-The Server tab polls a failed run every few seconds for as long as it is open, and
-the answer hashes every map file (`_evidence()`): one walk a minute, not twelve. A
-map file changed by hand inside that minute shows on the next one; `start_mmaps()`
-hashes again itself, so what a start does never rests on this cache."""
-
-_monotonic: Callable[[], float] = time.monotonic
-
-_RESUME_CHECKS: dict[Path, tuple[float, str, str]] = {}
-"""Server folder -> (when it was asked, the record's `evidence`, the answer)."""
-
-
 def _why_it_begins_again(job: Job, record: Record) -> str:
     """Why a start would throw away the tiles `record` kept, in words; "" when it continues.
 
     The rule `_resume_or_clear()` starts by: a run whose map data could not be told
-    is never continued, nor one whose map data has changed since. Asked under `_LOCK`.
+    is never continued, nor one whose map data has changed since. Hashed at every
+    reading, never cached: the line beside the press is a promise about that press
+    (T245; a one-minute cache was refused by Codex's adversarial review, because a
+    map file changed inside the minute left the promise false). One hash of ~18,000
+    files took 55 ms on WSL (2026-10-05), once per poll and only while a failed run
+    with kept tiles is shown.
     """
     if not record.evidence:
         return "Yu'lon could not tell which map data it was made from"
-    asked = _monotonic()
-    cached = _RESUME_CHECKS.get(job.server_dir)
-    if cached is not None and cached[1] == record.evidence:
-        if asked - cached[0] < RESUME_CHECK_SECONDS:
-            return cached[2]
-    why = "" if _evidence(job) == record.evidence else "the map data has changed since it began"
-    _RESUME_CHECKS[job.server_dir] = (asked, record.evidence, why)
-    return why
+    if _evidence(job) == record.evidence:
+        return ""
+    return "the map data has changed since it began"
 
 
 def _failed_status(job: Job, record: Record) -> MmapsStatus:
