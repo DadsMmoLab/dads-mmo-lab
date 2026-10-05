@@ -5701,18 +5701,34 @@ def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
     """The tool containers that may still be writing into `folder` (T303), by name.
 
     Started by `run_container()` with `folder` as a writable mount and not yet seen
-    to end: still running, or stopped and refused removal. A stopped Re-extract asks
-    before it puts old map data back into that folder.
+    to end: still running, or stopped and refused removal. A Re-extract asks before
+    it starts, and a stopped one before it puts old map data back into that folder.
+
+    **Docker is asked again about each one first (cold review).** The player may
+    have removed it by hand since, and a name kept on memory alone would block every
+    later press until the app restarts. A container Docker says is gone, or has
+    exited, is dropped; one it does not answer about is kept, which is the safe side.
     """
     wanted = os.path.normcase(os.path.abspath(folder))
     with _UNENDED_LOCK:
-        return tuple(
-            sorted(
-                name
-                for name, writes in _UNENDED.items()
-                if any(os.path.normcase(os.path.abspath(path)) == wanted for path in writes)
-            )
+        named = sorted(
+            name
+            for name, writes in _UNENDED.items()
+            if any(os.path.normcase(os.path.abspath(path)) == wanted for path in writes)
         )
+    still: list[str] = []
+    for name in named:
+        facts = container_exit(name, timeout=_ASK_AGAIN_TIMEOUT)
+        if facts.missing or facts.status in ("exited", "dead"):
+            logger.info(f"the extraction tool container {name} is gone now")
+            _ended(name)
+        else:
+            still.append(name)
+    return tuple(still)
+
+
+_ASK_AGAIN_TIMEOUT = 20.0
+"""How long Docker gets to say whether a remembered tool container is still there."""
 
 
 TOOL_CONTAINER_PREFIX = "yulon-extract-"

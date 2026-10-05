@@ -1322,6 +1322,74 @@ def test_a_stopped_reextract_whose_tool_container_will_not_go_leaves_the_old_dat
         end_fake_containers(state)
 
 
+def _press_one_leaves_a_tool_running(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, dict[str, bytes]]:
+    """Press 1 is stopped mid-tool and Docker refuses to remove the tool's container.
+
+    Returns the fake CLI, its state and `data/` as it was before press 1."""
+    cli, state = lay_fake_docker(tmp_path)
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    box.world.running = False
+    box.seams["run_container"] = docker.run_container
+    outcome, _seen, _took, _laid = _stop_a_reextract(box, state, monkeypatch, stop_when="tool")
+    assert len(outcome) == 1 and isinstance(outcome[0], extract.ContainerLeftRunning)
+    assert len(fake_containers(state)) == 1, "the ground: the tool is still running"
+    return cli, state, before
+
+
+def test_a_second_reextract_is_refused_while_the_first_ones_tool_may_still_write(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review: press 2 must not settle, set aside or extract under press 1's orphan."""
+    _cli, state, _before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        (name,) = fake_containers(state)
+        runs = [call for call in fake_calls(state) if call.startswith("run ")]
+        left = data_files(box)
+        put_back: list[Path] = []
+        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+
+        with pytest.raises(InstallerError) as refused:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+        said = str(refused.value)
+        assert name in said and "Nothing was changed." in said, said
+        assert put_back == [], "the earlier press was settled under a running tool"
+        assert data_files(box) == left, "data/ was touched"
+        assert [c for c in fake_calls(state) if c.startswith("run ")] == runs, "a tool ran"
+    finally:
+        end_fake_containers(state)
+
+
+def test_once_the_tool_is_removed_by_hand_the_next_reextract_runs_and_a_stop_puts_back(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review: Yu'lon asks Docker again rather than trusting what it remembered, so a
+    container the player removed no longer blocks the press or the put-back."""
+    _cli, state, before = _press_one_leaves_a_tool_running(box, tmp_path, monkeypatch)
+    try:
+        end_fake_containers(state)  # the player removes it in Docker Desktop
+        (state / "refuse-rm").unlink()
+
+        outcome, seen_at_put_back, _took, _laid = _stop_a_reextract(
+            box, state, monkeypatch, stop_when="tool"
+        )
+
+        assert len(outcome) == 1 and isinstance(outcome[0], InstallerError), outcome
+        assert not isinstance(outcome[0], extract.ContainerLeftRunning), outcome[0]
+        assert str(outcome[0]).endswith(trinitycore.REEXTRACT_PUT_BACK), outcome[0]
+        assert seen_at_put_back and all(seen == [] for seen in seen_at_put_back)
+        assert data_files(box) == before, "the map data from before press 1 is back"
+        assert fake_containers(state) == []
+    finally:
+        end_fake_containers(state)
+
+
 def test_a_reextract_closed_while_a_tool_container_will_not_go_leaves_the_old_data_aside(
     box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1973,6 +1973,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"“{REEXTRACT_BUTTON}” again. Nothing was changed."
             )
         self._refuse_a_running_world_for_maps()
+        self._refuse_a_tool_still_writing(data_dir)
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
         background = mmaps.background_block(self.entry) is not None
         ident = self._install_id(server_dir) if background else ""
@@ -2141,6 +2142,22 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "back otherwise."
             )
         return REEXTRACT_PUT_BACK
+
+    def _refuse_a_tool_still_writing(self, data_dir: Path) -> None:
+        """Refuse before anything moves while an earlier press's tool may write into data/ (T303).
+
+        A Stop whose tool container Docker would not remove left that container
+        extracting into `data/`. Settling the earlier press, setting data aside and
+        extracting again under it would mix its output with both.
+        """
+        running = docker.tool_containers_writing_into(data_dir)
+        if running:
+            raise InstallerError(
+                f"An earlier extraction is still running in Docker ({', '.join(running)}) and "
+                f"may still be writing into {data_dir}, so {self.entry.name}'s map data was not "
+                "extracted again. Remove it in Docker Desktop's Containers list, then press "
+                f"\u201c{REEXTRACT_BUTTON}\u201d again. Nothing was changed."
+            )
 
     def _refuse_a_running_world_for_maps(self) -> None:
         """A world server that is or may be running reads the map files about to be replaced."""

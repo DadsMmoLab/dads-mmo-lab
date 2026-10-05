@@ -46,6 +46,13 @@ if args[:1] == ["run"]:
     while box.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
+if args[:1] == ["inspect"]:
+    # `docker.container_exit()`'s question (T303): a container still there is running.
+    if (state / "containers" / args[1]).exists():
+        sys.stdout.write(f"{{args[1]}}-id\\trunning\\t0\\t\\n")
+        sys.exit(0)
+    sys.stderr.write(f"Error: No such object: {{args[1]}}\\n")
+    sys.exit(1)
 if args[:2] == ["rm", "-f"]:
     box = state / "containers" / args[2]
     if (state / "refuse-rm").exists():

@@ -3976,6 +3976,10 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
         "bind, resolves `docker_program()` directly for the same reason."
     ),
+    "tool_containers_writing_into": (
+        "T303: asks about containers `run_container()` started, which run on the local "
+        "daemon for its own reason (above)"
+    ),
     "_cli_ended_on": (
         "T303: ends the docker CLI streams THIS thread started (`runner.end_streams_started_on`), "
         "whichever daemon they reach; it addresses no daemon of its own"
