@@ -407,28 +407,33 @@ def sweep_leftover_client_copies(*, config_dir: Path | None = None) -> LeftoverN
     the GUI thread (`build_window()`): removing a client-sized folder of links takes
     a while on a slow disk.
     """
+    from yulon import play_client, ui_settings
     from yulon.catalog.families import trinitycore
 
-    for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir):
+    lost: list[play_client.LostFlag] = []
+    for warning in trinitycore.remove_recorded_leftovers(config_dir=config_dir, flags_lost=lost):
         logger.warning(warning)
-    from yulon import ui_settings
 
+    # T198: a file of the player's whose read-only flag could not be put back, said
+    # every time it happens (it happens once: the copy that shared it is gone).
+    told = play_client.flags_lost_warning(lost)
     targets = trinitycore.recorded_leftover_targets(config_dir=config_dir)
     if targets is None:
-        return LeftoverNotice(LEFTOVER_LIST_UNREAD)
+        return LeftoverNotice(f"{LEFTOVER_LIST_UNREAD} {told}".rstrip())
     # Once per folder (T179 Task 5 fix rounds 1-2): a copy left at every start is in
     # the log every time, and said in the bar until a notice naming it was SHOWN
     # (`leftover_notice_shown`, called by the bar) -- not merely offered.
     fresh = ui_settings.unnoticed_leftovers(targets, ui_settings.ui_settings_path(config_dir))
     left = len(fresh)
     if left == 0:
-        return None
+        return LeftoverNotice(told) if told else None
     copies = (
         "a temporary copy of a game client"
         if left == 1
         else f"{left} temporary copies of a game client"
     )
-    return LeftoverNotice(LEFTOVER_COPIES_NOTICE.format(count=copies), tuple(fresh))
+    text = LEFTOVER_COPIES_NOTICE.format(count=copies)
+    return LeftoverNotice(f"{text} {told}".rstrip(), tuple(fresh))
 
 
 HELPER_STAMP_SECONDS = 30.0
