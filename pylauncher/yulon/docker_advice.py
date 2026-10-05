@@ -80,13 +80,36 @@ _WSL_UNNAMED = (
 )
 
 
+_GREYED: dict[Problem, str] = {
+    "missing": "Start and Stop come back once Docker is installed.",
+    "removed": "Start and Stop come back once Docker is installed again.",
+    "not-running": "Start and Stop come back when Docker answers.",
+    "not-answering": "Start and Stop come back when Docker answers.",
+    "wsl": "Start and Stop come back when the Docker in that distro answers.",
+    "permission": "Start and Stop come back once Docker lets Yu'lon in.",
+    "unknown": "Start and Stop come back once Docker stops answering with that error.",
+}
+"""Why a greyed Start or Stop waits while the banner is up, per failure (T214).
+
+One sentence used to stand for all of them, "…when Docker answers": untrue for
+a Docker that is not installed, and for one that answered with an error. It is
+still the sentence for a Docker given up on at its deadline (`not-answering`),
+which is not running for the player's purposes and has not answered.
+"""
+_GREYED_DISTRO_GONE = "Start and Stop come back once that WSL distro is there again."
+
+
 @dataclass(frozen=True)
 class Advice:
-    """One banner: its title, what to do, and which press it carries beside Try again."""
+    """One banner: its title, what to do, and which press it carries beside Try again.
+
+    `greyed` is the reason a greyed Start or Stop gives while the banner is up.
+    """
 
     title: str
     body: str
     action: Action | None
+    greyed: str = _GREYED["not-running"]
 
 
 def this_host() -> Host:
@@ -176,7 +199,12 @@ def problem_of(exc: object, *, distro: str | None, deck_docker_removed: bool) ->
 
 
 def advise(problem: Problem, host: Host, *, distro: str | None = None) -> Advice:
-    """The banner for `problem` on `host`."""
+    """The banner for `problem` on `host`, with what a greyed Start or Stop waits for."""
+    banner = _banner(problem, host, distro=distro)
+    return Advice(banner.title, banner.body, banner.action, _GREYED[problem])
+
+
+def _banner(problem: Problem, host: Host, *, distro: str | None = None) -> Advice:
     desktop = host in ("windows", "macos")
     if problem == "wsl":
         body = _WSL_NOT_RUNNING.format(distro=distro) if distro else _WSL_UNNAMED
@@ -230,5 +258,5 @@ def advice_for(
         else platform.steamos_docker_removed()
     )
     if distro is not None and str(exc).startswith(f"The WSL distro {distro} no longer exists"):
-        return Advice(UNKNOWN_TITLE, str(exc), None)
+        return Advice(UNKNOWN_TITLE, str(exc), None, _GREYED_DISTRO_GONE)
     return advise(problem_of(exc, distro=distro, deck_docker_removed=removed), where, distro=distro)

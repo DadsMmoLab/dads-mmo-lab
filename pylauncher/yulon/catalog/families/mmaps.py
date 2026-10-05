@@ -178,7 +178,7 @@ class DockerRunner:
 
     def run_detached(self, spec: docker.ContainerRun, name: str, *, timeout: float) -> str:
         if self.wsl_distro is not None:
-            raise docker.DockerCommandError(
+            raise docker.DockerRefusal(
                 f"the pathfinding job cannot be started from here for a server inside the WSL "
                 f"distro {self.wsl_distro}; open Yu'lon inside that distro and start it on the "
                 "server's Server tab there"
@@ -701,6 +701,8 @@ def stop_for_route(
     runner: Runner | None = None,
     platform_id: Callable[[], str] | None = None,
     install_id: str | None = None,
+    kept_note: str = "It continues from there once the server has been rebuilt, or from the "
+    "Server tab.",
 ) -> str | None:
     """Stop a job that may run before `route` changes the server; None when none can.
 
@@ -721,7 +723,11 @@ def stop_for_route(
     run started once the server is ready continues from them; True for Update to
     latest, Return to the tested pin and Re-extract map data, whose new code or
     map data the tiles were not made with -- then a failed run's kept tiles go too
-    and its record is forgotten.
+    and its record is forgotten. Re-extract map data passes False since T241: it
+    keeps the old map data until the new is in and puts it back unchanged when the
+    extraction does not finish, so the tiles made from it are still good; it
+    throws them away itself (`discard()`) once the new data is in. `kept_note` is
+    what the sentence about kept tiles says happens to them next.
     """
     again = f"Check that Docker is running, then press \u201c{press}\u201d again."
     if background_block(entry) is None:
@@ -769,8 +775,7 @@ def stop_for_route(
         if kept:
             return (
                 f"Stopped making the pathfinding data before {route}; its {kept} finished tiles "
-                "are kept and pathfinding stays off. It continues from there once the server "
-                "has been rebuilt, or from the Server tab."
+                f"are kept and pathfinding stays off. {kept_note}"
             )
         return (
             f"Stopped making the pathfinding data before {route}; what it had made so far was "
@@ -1161,8 +1166,10 @@ def _evidence(job: Job) -> str:
     """What the map data is now: a hash of the extraction's evidence and every input file's facts.
 
     `data/.yulon-extract.json` (`extract.EVIDENCE_FILE`) is rewritten whenever the
-    extraction makes the map data, and Re-extract map data removes it first. That
-    alone does not prove the files are the same (Codex adversarial review, T209): a
+    extraction makes the map data, and Re-extract map data moves it aside with the
+    map data and puts it back, unchanged, when the extraction does not finish
+    (T241); a run made from the old data then continues. That alone does not prove
+    the files are the same (Codex adversarial review, T209): a
     map put back or changed by hand leaves it as it was. So the hash also covers
     each file under `_input_dirs()` -- its path, size and modification time, from one
     `os.scandir` walk (the directory listing carries them on Windows), never its

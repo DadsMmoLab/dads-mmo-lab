@@ -49,6 +49,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, QThrea
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractItemView,
     QAbstractScrollArea,
     QAbstractSpinBox,
     QApplication,
@@ -279,6 +280,12 @@ _TYPING_KEYS = frozenset(
         int(Qt.Key.Key_Right),
     }
 )
+# The mapped keys that are letters, and the only typing keys a list takes (T221).
+# A list picks a row by the first letters of its name (Qt's type-ahead), so R in
+# a character list chose the next sub-tab instead of Rexxar. Space, Backspace and
+# the arrows stay the pad's there: a list has no caret, and Left/Right are the
+# way out of it.
+_LETTER_KEYS = frozenset({int(Qt.Key.Key_L), int(Qt.Key.Key_R)})
 # The mapped ACTION keys an open `QMenu` reads for itself (T89): choose and close.
 # The arrows reach it too, because no action is mapped to them, and so does every
 # unmapped key; the other action keys stay the navigator's while a menu is open.
@@ -988,12 +995,20 @@ class Navigator(QObject):
         return None
 
 
-def _accepts_typing(widget: QWidget | None) -> bool:
-    """Whether `widget` is a field the user can type into right now."""
+def _accepts_typing(widget: QWidget | None, key: int) -> bool:
+    """Whether `key` pressed on `widget` is typed into it rather than navigating.
+
+    A field the user can type into takes every typing key (T139); a list takes
+    only the letters, for its type-ahead (T221).
+    """
+    if key not in _TYPING_KEYS:
+        return False
     if isinstance(widget, QLineEdit | QPlainTextEdit | QTextEdit | QAbstractSpinBox):
         return not widget.isReadOnly()
     if isinstance(widget, QComboBox):
         return widget.isEditable()
+    if isinstance(widget, QAbstractItemView):
+        return key in _LETTER_KEYS
     return False
 
 
@@ -1053,13 +1068,13 @@ class KeyboardSource(QObject):
                 # a spinbox value or leak into a widget and desync focus.
                 # Navigation either moved focus or intentionally did nothing —
                 # the key must never leak.
-                if key in _TYPING_KEYS and _accepts_typing(QApplication.focusWidget()):
+                if _accepts_typing(QApplication.focusWidget(), key):
                     return False
                 self._navigator.navigate(_KEY_TO_DIRECTION[key])
                 return True
 
             if key in _KEY_TO_ACTION:
-                if key in _TYPING_KEYS and _accepts_typing(QApplication.focusWidget()):
+                if _accepts_typing(QApplication.focusWidget(), key):
                     return False
                 action = _KEY_TO_ACTION[key]
                 if action in _NON_REPEATING_ACTIONS and event.isAutoRepeat():

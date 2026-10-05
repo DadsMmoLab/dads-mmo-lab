@@ -11,6 +11,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QPlainTextEdit, QVBoxLayout, QWidget
 
+from yulon import ansi
 from yulon.ui.widgets.log_panel import CollapseHandle
 
 _LINES_SHOWN = 8
@@ -48,10 +49,15 @@ class Details(QWidget):
         return self.handle.collapsed
 
     def set_text(self, text: str) -> None:
-        """Hold `text`, folded; an empty text hides the whole fold."""
-        self.text_box.setPlainText(text)
+        """Hold `text`, folded; an empty text hides the whole fold.
+
+        Terminal colour codes are taken out (`yulon.ansi`): a program's own words
+        are what this fold holds, and a text box draws none of them (T214).
+        """
+        plain = ansi.strip(text)
+        self.text_box.setPlainText(plain)
         self.handle.set_collapsed(True)
-        self.setVisible(bool(text))
+        self.setVisible(bool(plain))
 
     def text(self) -> str:
         """What the fold holds, open or not."""

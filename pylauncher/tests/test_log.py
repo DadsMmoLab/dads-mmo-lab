@@ -113,6 +113,23 @@ def test_a_logged_message_actually_reaches_the_log_file(tmp_path: Path) -> None:
     assert "hello from a test" in log_file.read_text(encoding="utf-8")
 
 
+def test_a_programs_colour_codes_never_reach_the_log_file(tmp_path: Path) -> None:
+    """T214, PR 305's live check: yulon.log held the importer's `ESC[31;1mERROR 1064 ...`.
+
+    Mutation: build the handlers' formatter as a plain `logging.Formatter`, and
+    the escape sequence is in the file.
+    """
+    configure(config_dir=tmp_path)
+    get_logger("yulon.tests.colour").warning("\x1b[0m\x1b[31;1mERROR 1064 (42000) at line 2\x1b[0m")
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    written = (tmp_path / "yulon.log").read_text(encoding="utf-8")
+    assert "ERROR 1064 (42000) at line 2" in written
+    assert "\x1b" not in written and "[31;1m" not in written
+
+
 # ----------------------------------------- a config dir that cannot be written
 
 

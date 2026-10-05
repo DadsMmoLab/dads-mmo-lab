@@ -25,6 +25,7 @@ from yulon import docker, wsl
 from yulon.catalog import composegen, native, time_zone
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
 
@@ -110,7 +111,7 @@ class InstallStatus:
         return self.db and self.auth and self.world
 
 
-class StartRefused(RuntimeError):
+class StartRefused(RuntimeError, SaidByYulon):
     """Raised by `Controller.start()` when the install's `start_guard` says it must not start.
 
     T179: a Centurion server whose last update did not finish importing its world
@@ -418,6 +419,10 @@ class Controller:
         # T197 fix round 2: a press left this folder in a state no start may run on
         # (`native.START_REFUSED_FILE`), on every family, before the family's own guard.
         reason = native.owed_start_refusal(self.server_dir)
+        if not reason:
+            # T217 (a), the owner's decision of 2026-10-05: a source folder a failed
+            # update could not put back refuses every start (`native.SOURCES_OFF_FILE`).
+            reason = native.sources_off_refusal(self.server_dir)
         if not reason and self.start_guard is not None:
             reason = self.start_guard()
         if reason:
@@ -562,7 +567,7 @@ class Controller:
                 ran and left the databases exactly as unimported as they were.
         """
         if self.import_probe is None:
-            raise docker.DockerCommandError(
+            raise docker.DockerRefusal(
                 "this game cannot be asked what state its databases are in, so its import will "
                 "not be re-run — an import that cannot be checked afterwards is a guess."
             )

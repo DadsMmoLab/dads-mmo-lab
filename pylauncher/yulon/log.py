@@ -41,6 +41,8 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from yulon import ansi
+
 APP_NAME = "yulon"
 _DEFAULT_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -58,6 +60,19 @@ later `configure()` has to reach the handler that is ALREADY THERE — a level
 applied only to a handler this call had just created would apply to nothing at
 all in the one case that asks for one (`install_wiring.main()`).
 """
+
+
+class PlainFormatter(logging.Formatter):
+    """`logging.Formatter` with terminal colour codes taken out of every line it writes (T214).
+
+    A program's output reaches the log inside messages and tracebacks: the
+    importer's `ESC[31;1mERROR 1064 ...` was in yulon.log as the live check of
+    PR 305 found it. The file is read in an editor and the Logs tab, and neither
+    draws a colour code.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return ansi.strip(super().format(record))
 
 
 def file_log_problem() -> str | None:
@@ -139,7 +154,7 @@ def configure(
     with _lock:
         root = logging.getLogger()
         root.setLevel(level)
-        formatter = logging.Formatter(log_format, datefmt=date_format)
+        formatter = PlainFormatter(log_format, datefmt=date_format)
 
         if not _stderr_configured:
             _stderr_handler = logging.StreamHandler()

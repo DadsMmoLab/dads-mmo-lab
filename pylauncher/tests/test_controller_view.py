@@ -53,7 +53,14 @@ from yulon import (
     useraccounts,
 )
 from yulon import platform as yulon_platform
-from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
+from yulon.apply import (
+    Applier,
+    ApplyError,
+    ApplyRefusal,
+    ApplyReport,
+    DockerSql,
+    required_prompts,
+)
 from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -65,7 +72,7 @@ from yulon.catalog.catalog import (
 )
 from yulon.catalog.families import decisions, sqlplan
 from yulon.catalog.installer import InstallerError, RollbackNotDone, WorldStoppedAfterReadyError
-from yulon.controller import Controller
+from yulon.controller import Controller, StartRefused
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
 from yulon.controller_wow_tortoise import console as tortoise_console
@@ -82,7 +89,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.git import Behind, RunnerGit, git_available
+from yulon.git import Behind, GitError, RunnerGit, git_available
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
@@ -955,7 +962,7 @@ def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
     view._module_pending = "install mod-ah-bot"
     view._module_failed(RuntimeError("the SQL step raised after the clone"))
     assert not view.modules_panel.row("mod-ah-bot-plus").data.installable
-    assert "install mod-ah-bot FAILED" in view.module_report.toPlainText()
+    assert "Install mod-ah-bot did not finish" in view.module_report.toPlainText()
 
     # A remove of it that took the clone away and then raised.
     on_disk["module"] = frozenset()
@@ -963,7 +970,250 @@ def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
     view._module_pending = "remove mod-ah-bot"
     view._module_failed(RuntimeError("a later step raised after the rmtree"))
     assert view.modules_panel.row("mod-ah-bot-plus").data.installable
-    assert "remove mod-ah-bot FAILED" in view.module_report.toPlainText()
+    assert "Remove mod-ah-bot did not finish" in view.module_report.toPlainText()
+
+
+# -- T214: the Modules and Tuning reports say a failure in words ---------------------
+
+_GIT_SAID = "git fetch origin exited 128: fatal: unable to access 'https://github.com/x/y/'"
+
+
+def test_a_module_job_that_broke_says_so_with_what_broke_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T214: the Modules report said "install mod-ah-bot FAILED: <git's own words>"."""
+    from tests.support_player_text import text_faults
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view._module_pending = "install mod-ah-bot"
+
+    view._module_failed(GitError(_GIT_SAID))
+
+    said = view.module_report.toPlainText()
+    assert said == "Install mod-ah-bot did not finish. Details below says why."
+    assert text_faults(said) == [], said
+    assert view.module_details.text() == _GIT_SAID
+    assert view.module_details.collapsed
+    assert any(_GIT_SAID in line for line in failures), "the log lost it"
+
+    view.module_report.setPlainText("the next job's report")
+
+    assert view.module_details.isHidden(), "old Details stood under a new report"
+
+
+def test_a_module_job_yulon_refused_says_its_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-ah-bot-plus"
+    refusal = "conf AuctionHouseBot.GUIDs needs a value, and none was given. Nothing was changed."
+
+    view._module_failed(ApplyRefusal(refusal))
+
+    assert view.module_report.toPlainText() == f"Install mod-ah-bot-plus did not finish: {refusal}"
+    assert view.module_details.isHidden()
+
+
+def _sql_said_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """`_check_sql` on mysql's own refusal, as a module's SQL file gets it at Install."""
+    proc = subprocess.CompletedProcess(
+        ["mysql"], 1, "", "ERROR 1146 (42S02) at line 3: Table 'acore_world.x' doesn't exist"
+    )
+    try:
+        apply_module._check_sql(proc, "x.sql → acore_world")
+    except Exception as exc:
+        return exc
+    raise AssertionError("_check_sql passed a failed run")
+
+
+def _dbc_copy_said_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """`ComposeDbc.copy_dbc_dir` when `docker exec` itself failed, which says so on stdout."""
+
+    def refused(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        said = 'OCI runtime exec failed: exec failed: unable to start container process: "sh"'
+        return subprocess.CompletedProcess(["docker"], 126, said, "")
+
+    monkeypatch.setattr(docker, "compose_run_stdin", refused)
+    src = tmp_path / "dbc"
+    src.mkdir()
+    (src / "CharBaseInfo.dbc").write_bytes(b"x")
+    try:
+        apply_module.ComposeDbc(tmp_path, "ac-worldserver", "/data").copy_dbc_dir(src)
+    except Exception as exc:
+        return exc
+    raise AssertionError("the copy passed a failed docker exec")
+
+
+def _inline_sql_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """An Install whose inline SQL failed part-way: "the SQL failed (<mysql's words>), …"."""
+    from tests.test_mob_multiplier_rerun import _all, _Db, _mob
+
+    server = tmp_path / "srv"
+    server.mkdir()
+    try:
+        Applier(server, sql=_Db(fail=True)).install(_mob(), _all("3"))
+    except Exception as exc:
+        assert "the SQL failed" in str(exc), exc
+        return exc
+    raise AssertionError("the install passed a failed SQL run")
+
+
+@pytest.mark.parametrize(
+    "make",
+    [_sql_said_an_error, _dbc_copy_said_an_error, _inline_sql_failed],
+    ids=lambda f: f.__name__,
+)
+def test_a_module_job_whose_tool_refused_says_so_in_words_with_its_words_under_details(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make: Callable[[Path, pytest.MonkeyPatch], Exception],
+) -> None:
+    """T214 review: an `ApplyError` carrying mysql's or Docker's own words is not Yu'lon's.
+
+    Shown as written while the rule was "no `… exited N:` in it", so a module
+    whose SQL failed at Install put `ERROR 1146 (42S02) …` on the Modules line.
+    """
+    exc = make(tmp_path, monkeypatch)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-x"
+
+    view._module_failed(exc)
+
+    assert (
+        view.module_report.toPlainText() == "Install mod-x did not finish. Details below says why."
+    )
+    assert view.module_details.text() == str(exc)
+
+
+def test_yulons_git_advice_stays_on_the_modules_line(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """T214 review: the sentence that says to install Git is the player's, not Details'."""
+    from tests.test_apply import OWNED_ITEM, OWNED_URL, _Origins
+
+    class _NoGitAtAll:
+        def clone(self, spec: object) -> None:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    server = tmp_path / "srv"
+    server.mkdir()
+    applier = Applier(server, git=_NoGitAtAll(), remote_url=_Origins(OWNED_URL))
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(OWNED_ITEM))
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-ah-bot"
+
+    view._module_failed(caught.value)
+
+    said = view.module_report.toPlainText()
+    assert said == f"Install mod-ah-bot did not finish: {caught.value}"
+    assert "Install Git" in said
+    assert view.module_details.isHidden()
+
+
+def test_a_module_update_check_that_broke_says_so_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._module_updates_failed(GitError(_GIT_SAID))
+
+    assert view.module_report.toPlainText() == controller_view_module.MODULE_UPDATES_BROKE
+    assert view.module_details.text() == _GIT_SAID
+
+
+@pytest.mark.parametrize("ours", [True, False])
+def test_a_module_sql_run_that_failed_keeps_what_it_printed_and_says_why_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path, ours: bool
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.module_report.setPlainText("ac-db-import: applying mod-ah-bot…")
+    refusal = (
+        "The world server is running, and the importer must not run beside it. Press Stop "
+        "on the Server tab, then run the SQL again."
+    )
+    raw = "docker compose run --rm ac-db-import exited 1: Error response from daemon: no such image"
+
+    view._module_sql_failed(
+        docker.DockerRefusal(refusal) if ours else docker.DockerCommandError(raw)
+    )
+
+    lines = view.module_report.toPlainText().splitlines()
+    assert lines[0] == "ac-db-import: applying mod-ah-bot…", "what it printed was lost"
+    if ours:
+        assert lines[-1] == f"The SQL run did not finish: {refusal}"
+        assert view.module_details.isHidden()
+    else:
+        assert lines[-1] == controller_view_module.MODULE_SQL_BROKE
+        assert view.module_details.text() == raw
+
+
+def test_a_module_sql_run_docker_did_not_answer_in_time_says_it_broke(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A timeout is something that broke (T214): its words are Docker's command line, not ours."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    raw = "docker compose run --rm ac-db-import exited 124: timed out after 600.0s"
+
+    view._module_sql_failed(docker.DockerTimedOutError(raw))
+
+    assert view.module_report.toPlainText().splitlines()[-1] == (
+        controller_view_module.MODULE_SQL_BROKE
+    )
+    assert view.module_details.text() == raw
+
+
+def test_a_tuning_restart_that_broke_says_which_press_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214: the Tuning report said "FAILED: docker compose … exited 1: …"."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(view, "_confirm", lambda title, question: True)
+    raw = "docker compose up -d --no-deps ac-worldserver exited 1: OCI runtime create failed"
+
+    def broke() -> NoReturn:
+        raise docker.DockerCommandError(raw)
+
+    monkeypatch.setattr(view, "_do_restart", broke)
+
+    view.restart_server()
+
+    assert view.tuning_report.toPlainText() == "The restart did not finish. Details below says why."
+    assert view.tuning_details.text() == raw
+
+
+@pytest.mark.parametrize("ours", [True, False])
+def test_a_time_zone_that_was_not_changed_says_why_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path, ours: bool
+) -> None:
+    """T214: a bug's words were the Tuning report's; a refusal's still are."""
+    from yulon import server_time_zone
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    refusal = "docker-compose.override.yml sets TZ twice, so Yu'lon left it as it is."
+    exc = server_time_zone.TimeZoneSettingError(refusal) if ours else KeyError("TZ")
+
+    view._time_zone_failed(exc)
+
+    if ours:
+        assert view.tuning_report.toPlainText() == f"The time zone was not changed: {refusal}"
+        assert view.tuning_details.isHidden()
+    else:
+        assert view.tuning_report.toPlainText() == controller_view_module.TIME_ZONE_BROKE
+        assert view.tuning_details.text() == "'TZ'"
+
+
+def test_settings_files_that_cannot_be_read_are_said_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._press_facts_failed(OSError(13, "Permission denied", "worldserver.conf"))
+
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_RESET_UNREADABLE
+    assert "Permission denied" in view.tuning_details.text()
 
 
 def test_installing_a_manifest_with_defaults_still_asks(
@@ -1582,6 +1832,78 @@ def test_the_modules_tab_can_apply_the_module_sql_nothing_else_applies(
     assert ">> Applying update aoe_loot_module_string.sql" in view.module_report.toPlainText()
 
 
+def test_the_importers_last_words_go_under_details_and_yulons_sentence_stays_on_the_line(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214 review: "Its last words were: ERROR 1054 …" put the importer's own text on the line.
+
+    Through the real `docker.apply_module_sql()` with the importer exiting 1:
+    Yu'lon's sentence (it exited, the SQL may be part-applied) is the report,
+    and what the importer printed last is under Details and in the log.
+    """
+    from tests.test_docker import SPEC, _repair_doubles
+
+    (tmp_path / "modules" / "mod-aoe-loot").mkdir(parents=True)
+    _repair_doubles(
+        monkeypatch,
+        [],
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: ("applying mod-aoe-loot", "ERROR 1054 (42S22): Unknown column 'x'"),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.apply_module_sql(SPEC, tmp_path)
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.module_report.setPlainText("ac-db-import: applying mod-aoe-loot…")
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._module_sql_failed(raised.value)
+
+    report = view.module_report.toPlainText()
+    assert "The SQL run did not finish: the database importer stopped with an error" in report
+    assert "ERROR 1054" not in report, "the importer's own words are on the line"
+    assert "ERROR 1054" in view.module_details.text()
+    assert failures and "ERROR 1054" in failures[0], "the log lost them"
+
+
+def test_a_repair_whose_import_died_says_so_with_its_last_words_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214 review: the same for Repair's post-check, under the Danger zone's presses."""
+    from tests.test_docker import SPEC, UNIMPORTED, _probe, _repair_doubles
+
+    _repair_doubles(
+        monkeypatch,
+        [],
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: (
+            "applying acore_auth",
+            "ERROR 1698 (28000): Access denied for user 'root'@'localhost'",
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED))
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._repair_failed(raised.value)
+
+    said = view.danger_label.text()
+    assert "still read as absent" in said, said
+    assert "ERROR 1698" not in said, "the import's own words are on the line"
+    assert "ERROR 1698" in view.danger_details.text()
+    assert failures and "ERROR 1698" in failures[0], "the log lost them"
+
+    view._say_under_the_presses("the next press's line")
+
+    assert view.danger_details.isHidden(), "old Details stood under a new line"
+
+
 def test_the_refusal_that_makes_this_not_a_button_that_always_works(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -1592,7 +1914,7 @@ def test_the_refusal_that_makes_this_not_a_button_that_always_works(
     second copy of it. What the tab owes is that the refusal arrives on screen
     intact and that nothing is claimed to have been applied.
     """
-    refusal = docker.DockerCommandError(
+    refusal = docker.DockerRefusal(
         "ac-worldserver is running. The importer writes to the databases underneath them, and "
         "a running worldserver holds characters in memory and saves them back over whatever it "
         "finds. Press Stop first, then try again."
@@ -1606,7 +1928,8 @@ def test_the_refusal_that_makes_this_not_a_button_that_always_works(
 
     report = view.module_report.toPlainText()
     assert "Press Stop first" in report
-    assert "FAILED" in report
+    assert "The SQL run did not finish: ac-worldserver is running." in report  # T214
+    assert view.module_details.isHidden(), "Yu'lon's own refusal is the report, as written"
     assert "applied" not in report.lower(), report
     assert failures and "Press Stop first" in failures[0]
 
@@ -4354,7 +4677,29 @@ def test_a_stop_whose_snapshot_failed_says_so_rather_than_naming_no_file(
 
     view.stop_server()
 
-    assert "wedged" in view.problem_label.text()
+    # T211 5: a plain sentence on the line, what went wrong under Details.
+    assert view.problem_label.text() == controller_view_module.STOP_LOG_NOT_SAVED
+    assert "wedged" not in view.problem_label.text()
+    assert _shown(view, view.problem_details)
+    assert view.problem_details.collapsed
+    assert view.problem_details.text() == "the log driver is wedged"
+
+
+def test_the_next_line_on_the_server_tab_takes_the_last_details_down(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Details belongs to the line above it; a new line must not stand over old Details."""
+    services = _services(ps, tmp_path, [])
+    services.log_snapshot = _StubRecorder(logsnap.Snapshot(problem="the log driver is wedged"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+    view.stop_server()
+    assert view.problem_details.text()
+
+    view.problem_label.setText("Something else entirely.")
+
+    assert view.problem_details.isHidden()
+    assert view.problem_details.text() == ""
 
 
 def test_the_wotlk_tab_is_wired_with_a_dashboard_and_a_pre_stop_snapshot(
@@ -4929,10 +5274,31 @@ def test_a_start_that_fails_for_another_reason_leaves_the_channel_alone(
         WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
     )
 
-    view._start_failed(docker.DockerCommandError("ac-database exited with code 1"))
+    view._start_failed(
+        _compose_up_said("dependency failed to start: container ac-database exited (1)")
+    )
 
     assert stub.rollbacks == 0
-    assert "exited with code 1" in view.problem_label.text()
+    assert view.problem_label.text() == controller_view_module.START_FAILED_BROKE
+    assert "container ac-database exited (1)" in view.problem_details.text()
+
+
+def _compose_up_said(stderr: str) -> Exception:
+    """What a failed `docker compose up` raises at Start: `docker._run`'s own wording (T214)."""
+    import yulon.docker as docker_module
+
+    def failed(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", stderr)
+
+    real = docker_module._docker
+    docker_module._docker = failed  # type: ignore[assignment]
+    try:
+        docker_module._run(["compose", "up", "-d", "--no-deps", "ac-database"])
+    except docker.DockerCommandError as exc:
+        return exc
+    finally:
+        docker_module._docker = real  # type: ignore[assignment]
+    raise AssertionError("a failed compose up passed")
 
 
 def test_a_channel_that_gave_up_shows_the_reason_rather_than_a_spinner(
@@ -7464,6 +7830,42 @@ def test_declining_the_rebuild_confirmation_starts_nothing(
     assert view.rebuild_log.running is False
 
 
+def test_a_rebuild_the_sources_refuse_is_refused_before_the_question(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T217 live proof, item 3: Rebuild asked its full question and then refused in 0 s.
+
+    A folder off the commit its build came from is refused first, with the
+    engine's own sentence, and the question is never asked.
+    """
+    asked: list[str] = []
+    told: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    def warning(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        told.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", warning)
+    services, started = _rebuild_services(ps, tmp_path)
+    services.rebuild_refusal = lambda: "modules/mod-playerbots is on 037c014. Nothing was changed."
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is False
+    assert asked == [], "asked before refusing"
+    assert told == ["modules/mod-playerbots is on 037c014. Nothing was changed."]
+    assert started == [] and view.rebuild_log.running is False
+
+    services.rebuild_refusal = lambda: None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_server() is True
+    assert len(asked) == 1, "nothing to refuse: the question is asked as before"
+
+
 def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -7717,6 +8119,34 @@ def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> No
     for entry in _every_game():
         services = ControllerServices.for_entry(entry, tmp_path / entry.id)
         assert services.rebuild is not None, entry.id
+
+
+def test_every_tab_asks_install_wiring_what_its_rebuild_would_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review of c5bf1b67: removing the wiring in `_assemble()` left every test green.
+
+    The tab's early refusal is `install_wiring.rebuild_refusal_for_app()`'s, for this
+    entry, this folder and this distro.
+    """
+    asked: list[tuple[str, Path, str | None]] = []
+
+    def refusal_for(
+        entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None, **_kw: object
+    ) -> Callable[[], str | None]:
+        asked.append((entry.id, server_dir, wsl_distro))
+        return lambda: f"refused for {entry.id}"
+
+    monkeypatch.setattr(
+        controller_view_module.install_wiring, "rebuild_refusal_for_app", refusal_for
+    )
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.rebuild_refusal is not None, entry.id
+        assert services.rebuild_refusal() == f"refused for {entry.id}"
+    assert [(game, where) for game, where, _ in asked] == [
+        (entry.id, tmp_path / entry.id) for entry in _every_game()
+    ]
 
 
 def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
@@ -10666,19 +11096,22 @@ def test_a_start_docker_could_not_hear_says_so_once_and_leaves_the_advice_to_the
     assert _near_duplicates(docker_lines) == [], docker_lines
 
 
-def test_a_start_that_failed_for_another_reason_keeps_its_own_words(
+def test_a_start_that_failed_for_another_reason_is_the_starts_to_say(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Only Docker not answering is the banner's; a compose refusal is the Start's to say."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
+    said = _compose_up_said("no such service: ac-worldserver")
+
     def refused() -> NoReturn:
-        raise docker.DockerCommandError("the world service has no image: build it first")
+        raise said
 
     view.services.controller.start = refused  # type: ignore[method-assign]
     view.start_server()
 
-    assert view.problem_label.text() == "the world service has no image: build it first"
+    assert view.problem_label.text() == controller_view_module.START_FAILED_BROKE
+    assert view.problem_details.text() == str(said)
     assert view.docker_banner.isHidden()
 
 
@@ -15395,15 +15828,29 @@ def _two_modules_on_disk(server_dir: Path) -> None:
         path.write_text("-- x\n", encoding="utf-8")
 
 
+class _UpdatesLedger:
+    """The `updates` tables: `SELECT name FROM updates ...` answered from `rows` (T214)."""
+
+    def __init__(self, rows: dict[str, set[str]] | None = None) -> None:
+        self.rows = rows or {}
+
+    def query(self, db: str, statement: str) -> str:
+        return "".join(f"{n}\n" for n in sorted(self.rows.get(db, ())) if f"'{n}'" in statement)
+
+
 def _real_module_sql(
     ps: _Ps,
     tmp_path: Path,
     fake: Callable[..., docker.AttachedRun],
     monkeypatch: pytest.MonkeyPatch,
+    ledger: _UpdatesLedger | None = None,
 ) -> ControllerView:
     monkeypatch.setattr(docker, "apply_module_sql", fake)
     services = _services(ps, tmp_path, [])
-    services.module_sql = lambda output: modules.apply_module_sql(tmp_path, output=output)
+    held = ledger if ledger is not None else _UpdatesLedger()
+    services.module_sql = lambda output: modules.apply_module_sql(
+        tmp_path, output=output, ledger=held
+    )
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
@@ -15432,7 +15879,8 @@ def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
         output(APPLYING_AOE)
         return docker.AttachedRun(0, (APPLYING_AOE,))
 
-    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    ledger = _UpdatesLedger({"world": {"aoe_loot_module_string.sql"}})
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch, ledger)
     view.apply_module_sql()
 
     assert handed == ["mod-aoe-loot"]
@@ -15473,7 +15921,7 @@ def test_a_refused_import_still_says_which_file_this_app_owns(
     view.apply_module_sql()
 
     text = view.module_report.toPlainText()
-    assert f"aoe_loot_module_string.sql -> world: refused: {words}" in text
+    assert "aoe_loot_module_string.sql -> world: not applied: ac-db-import did not run" in text
     assert "arac.sql -> world: not handed to the updater: this app applies it itself" in text
     assert "arac.sql -> world: refused" not in text
     assert failures and words in failures[0]
@@ -15627,7 +16075,13 @@ def test_the_module_sql_press_hands_over_city_bots_and_withholds_only_arac(
             output(line)
         return docker.AttachedRun(0, tuple(applying))
 
-    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    ledger = _UpdatesLedger(
+        {
+            db: {Path(rel).name}
+            for rel, db in zip(CITY_BOTS_FILES[:3], ("auth", "characters", "world"), strict=True)
+        }
+    )
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch, ledger)
     view.apply_module_sql()
 
     assert handed == ["mod-city-bots"], handed
@@ -19756,7 +20210,8 @@ def test_after_a_bumper_the_first_down_or_right_goes_into_the_new_page(
                 process_events()
                 # A start the bumper key is not typed into (T139).
                 start = next(
-                    (w for w in _in_page(sub.widget(index)) if not accepts_typing(w)), None
+                    (w for w in _in_page(sub.widget(index)) if not accepts_typing(w, int(key))),
+                    None,
                 )
                 if start is None:
                     continue
@@ -21286,7 +21741,9 @@ def test_a_reset_that_raised_unlocks_the_tab_and_says_so(
     _menu_action(view, TUNING_RESET_ALL).trigger()
 
     assert failures == ["a bug in the reset"]
-    assert "FAILED: a bug in the reset" in view.tuning_report.toPlainText()
+    # T214: a bug's words are Details', not the report's.
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_RESET_BROKE
+    assert view.tuning_details.text() == "a bug in the reset"
     assert view.busy_reason() is None and view.tuning_reset_button.isEnabled() is True
 
 
@@ -21861,7 +22318,8 @@ def test_a_press_whose_files_cannot_be_read_says_so_and_frees_the_button(
 
     assert asked == [] and view._press_asking is None
     assert view.tuning_reset_button.isEnabled() is True
-    assert "could not be read" in view.tuning_report.toPlainText() and failures
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_RESET_UNREADABLE
+    assert "Input/output error" in view.tuning_details.text() and failures  # T214
 
 
 # -- T99: the Bots tab's "Random bots" box, and the bot keys on the Tuning tab --------------
@@ -22878,7 +23336,8 @@ def test_a_refused_restart_or_recreate_from_tuning_stops_and_removes_nothing(
 
     view.restart_server() if press == "restart" else view.recreate_containers()
 
-    assert view.tuning_report.toPlainText() == f"FAILED: {REFUSED_START}"
+    assert view.tuning_report.toPlainText() == REFUSED_START  # T214: ours, as written
+    assert view.tuning_details.isHidden()
     after = ps.calls[calls_before:]
     assert not any(
         c[:3] in (["docker", "compose", "up"], ["docker", "compose", "stop"]) for c in after
@@ -26531,6 +26990,108 @@ def _deferred_view(
     return view, jobs
 
 
+def _compose_up_broke() -> NoReturn:
+    raise docker.DockerCommandError(
+        "docker compose up -d --no-deps ac-database exited 1: Error response from daemon: "
+        "failed to create task for container: OCI runtime create failed"
+    )
+
+
+def test_a_start_that_broke_says_so_in_words_with_dockers_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T214: a Start that Docker refused showed Docker's own error text as the line."""
+    from tests.support_player_text import text_faults
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.services.controller.start = _compose_up_broke  # type: ignore[method-assign]
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.start_server()
+
+    said = view.problem_label.text()
+    assert said == controller_view_module.START_FAILED_BROKE
+    assert text_faults(said) == [], said
+    assert "OCI" not in said and "exited" not in said
+    assert _shown(view, view.problem_details)
+    assert "OCI runtime create failed" in view.problem_details.text()
+    assert len(failures) == 1 and "OCI runtime create failed" in failures[0], "the log lost it"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        StartRefused(
+            "This server's last update did not finish importing its world. Press Update again."
+        ),
+        docker.ServerHeldError(docker.SERVER_IN_MOTION),
+        docker.DockerRefusal(
+            "The WSL distro dml-arch no longer exists - it was deleted, or renamed. Everything "
+            "on this tab runs docker inside dml-arch, so nothing here can start."
+        ),
+    ],
+    ids=["start-guard", "held", "distro-gone"],
+)
+def test_a_start_yulon_refused_says_its_own_sentence_as_written(
+    qapp: object, ps: _Ps, tmp_path: Path, refusal: Exception
+) -> None:
+    """T214: Yu'lon's own refusal is the line; there is nothing more to fold away."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    if "dml-arch" in str(refusal):
+        view.services.controller.wsl_distro = "dml-arch"
+
+    def refuse() -> NoReturn:
+        raise refusal
+
+    view.services.controller.start = refuse  # type: ignore[method-assign]
+
+    view.start_server()
+
+    assert view.problem_label.text() == str(refusal)
+    assert view.problem_details.isHidden()
+
+
+def _docker_odd() -> NoReturn:
+    raise docker.DockerCommandError("docker ps exited 1: something Yu'lon has never seen")
+
+
+def _docker_hung() -> NoReturn:
+    raise docker.DockerTimedOutError("docker ps exited 124: timed out after 30.0s")
+
+
+@pytest.mark.parametrize(
+    ("failure", "greyed"),
+    [
+        (_docker_gone, "Start and Stop come back once Docker is installed."),
+        (_docker_odd, "Start and Stop come back once Docker stops answering with that error."),
+        (_docker_hung, "Start and Stop come back when Docker answers."),
+    ],
+)
+def test_a_greyed_start_and_stop_say_what_they_wait_for_per_failure(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Callable[[], NoReturn],
+    greyed: str,
+) -> None:
+    """T214: "come back when Docker answers" stood under a Docker not installed, or erroring."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch, steamos=False)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
+    view.services.controller.status = failure  # type: ignore[method-assign]
+    view.services.controller.start = failure  # type: ignore[method-assign]
+
+    view.start_server()
+
+    assert view.docker_banner.isVisibleTo(view)
+    for press in (view.start_button, view.stop_button):
+        assert not press.isEnabled(), press.text()
+        assert press.toolTip() == greyed, press.text()
+    assert view.server_reasons.text() == greyed
+
+
 def _run_the_start(view: ControllerView, jobs: list[Any]) -> None:
     """Run only the Start's own job; the follow-up status read stays queued."""
     start = [job for job in jobs if job[2] == view._start_failed]
@@ -27368,7 +27929,7 @@ def test_docker_going_away_under_a_running_server_greys_stop_as_well_as_start(
     view.refresh_status()
 
     assert view.docker_banner.isVisibleTo(view)
-    said = controller_view_module.DOCKER_UNKNOWN
+    said = "Start and Stop come back when Docker answers."
     for press in (view.start_button, view.stop_button):
         assert not press.isEnabled(), press.text()
         assert press.toolTip() == said, press.text()

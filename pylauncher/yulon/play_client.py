@@ -284,6 +284,27 @@ def _volume(path: Path) -> object:
         return None
 
 
+def left_behind(
+    original: Path, game_display_name: str, *, game: str, server_dir: Path
+) -> Path | None:
+    """This server's ready-to-play client where Make… put it, if it is still there (T211).
+
+    "Remove from Yu'lon…" forgets a server and keeps its files, the ready-to-play
+    client among them, and `state.json` was the only link to it: an Install into
+    the same folder offered Make… again over a client already on disk. Found
+    only where Make… puts one (`default_target`), and only when its marker names
+    this game, this server and this player's client, the rule `_whose` keeps
+    for every change to a marked folder.
+    """
+    target = default_target(original, game_display_name, server_dir)
+    marker = read_marker(target)
+    if marker is None or _whose(marker, game=game, server_dir=server_dir) is not None:
+        return None
+    if marker.source_client_dir != original:
+        return None
+    return target
+
+
 def _partial(target: Path) -> Path:
     return target.with_name(target.name + PARTIAL_SUFFIX)
 
