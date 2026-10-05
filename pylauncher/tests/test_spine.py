@@ -2784,6 +2784,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "listed through once, because that is where the game reads its addons. A folder that "
         "cannot be listed answers no names"
     ),
+    ("client_names.py", "on_disk"): (
+        "T227. Lists each folder on the way to one client file to find the name on disk that "
+        "matches it whatever its case (exact spelling first). Read-only. Its answer decides a "
+        "write in exactly one way: which existing name in a ready-to-play client a pack's "
+        "file replaces or `remove_when_off` removes (`client_packs`), after that folder's "
+        "marker was checked and with every link refusal unchanged; it never decides whether "
+        "the app may write somewhere. A folder that cannot be listed ends the matching, and "
+        "the rest keeps the spelling it was asked for"
+    ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "
         "`realmlist.wtf` (name compared casefolded), which it then deletes, as Centurion's "
@@ -2803,6 +2812,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "A rename changes no flag on the inode the copy shares with the player's file; the "
         "player's own client is never listed or written, and the copy is removed through "
         "`play_client.remove_folder()` either way"
+    ),
+    ("catalog/families/trinitycore.py", "_spell_archives_as_the_extractors_open_them"): (
+        "T227. Walks `Data/` of the TEMPORARY extraction client beside the player's client "
+        "for every `.MPQ` the block's `client_archives` keeps under another case than the "
+        "catalog's (`lichking.mpq`), and RENAMES it inside the same copy to the catalog's "
+        "spelling, which the extractors open by exact name. A name the catalog's spelling "
+        "already reaches is never replaced; the player's own client is never listed or "
+        "written, and the copy is removed through `play_client.remove_folder()` either way"
     ),
     ("catalog/families/trinitycore.py", "_put_left_out_back"): (
         "T179 Task 3 (fix round 3). Walks `.yulon-left-out/` of the TEMPORARY extraction "
