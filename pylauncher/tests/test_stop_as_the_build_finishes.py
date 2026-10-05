@@ -324,3 +324,35 @@ def test_a_stop_that_killed_compose_with_docker_silent_still_puts_the_tags_back(
     with pytest.raises(InstallerError):
         list(engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir), cancel=stop))
     assert [call for call in rec.calls if call.endswith(native.FAILED_TAG_SUFFIX)], rec.calls
+
+
+def test_a_run_abandoned_mid_compile_with_docker_silent_keeps_the_rollback_names(
+    tmp_path: Path,
+) -> None:
+    """Scoped re-review N1: closed while compose runs, no return code ever comes back.
+
+    Compose may already have tagged, and Docker gives no id to say: the `-rollback`
+    names may be the only copy of the old build, so they stay and Start is refused.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ids_silent = True
+    said = "[42/1838] Building CXX object src/server/game/World.cpp.o"
+
+    def build(
+        server_dir: Path, files: object, *, sink: object = None, cancel: object = None
+    ) -> docker.AttachedRun:
+        rec.calls.append("build")
+        assert callable(sink)
+        sink(said)
+        return docker.AttachedRun(0, (said,))
+
+    run = engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir))
+    for line in run:
+        if "Building CXX object" in line:
+            break
+    else:
+        raise AssertionError("the compiler's line never reached the panel")
+    run.close()
+    assert not [call for call in rec.calls if call.startswith("rmi")], rec.calls
+    assert engine(rec).start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL

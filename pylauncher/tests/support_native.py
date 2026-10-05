@@ -185,15 +185,15 @@ class Recorder:
     """Called inside the rollback's `stop_servers`: where a test holds a world in its load."""
     ready: bool = True
     tag_problem: str = ""
-    ids_silent: bool = False
-    """T225 (cold review): `image_id` answers None for every name, as a Docker that does not
-    answer `docker image inspect` does."""
     """What `docker tag` answers when it refuses, or empty when it tags.
 
     The rebuild's rollback is kept through this seam, and a double that could
     only ever succeed could not produce the refusal the engine has to make
     BEFORE it compiles over the only copy of the running build.
     """
+    ids_silent: bool = False
+    """T225 (cold review): `image_id` answers None for every name, as a Docker that does not
+    answer `docker image inspect` does."""
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",

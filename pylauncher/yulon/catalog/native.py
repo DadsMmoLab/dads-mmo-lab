@@ -4915,10 +4915,11 @@ class StagedInstaller:
     """The `install.native.family` this class installs; asserted against the entry in preflight."""
 
     _build_exit: int | None = None
-    """The return code of the last `docker compose build` `stage_build()` ran, None before one
-    returned (T225, cold review). `rebuild()` resets it and reads it: only a run that returned
-    0 or was cancelled can have moved the live tags, so only then does an unanswered image id
-    count as a tag that moved."""
+    """The return code of the last `docker compose build` `stage_build()` ran (T225, cold
+    review); None before a run started, and `CANCELLED_RETURNCODE` while one has not answered,
+    so a run abandoned mid-compile counts as cancelled. `rebuild()` resets it and reads it:
+    only a run that returned 0 or was cancelled can have moved the live tags, so only then
+    does an unanswered image id count as a tag that moved."""
 
     def __init__(
         self,
@@ -10624,7 +10625,10 @@ class StagedInstaller:
         # base image compiled nothing, so it is tried once more after a pause, and
         # a second such failure says what happened instead of "the build failed".
         for second_try in (False, True):
-            self._build_exit = None
+            # Until the run answers, it is one that may have tagged (scoped re-review
+            # N1): a consumer that walks away, or a Ctrl+C, leaves `_pump()` before any
+            # return code, with compose possibly past its export.
+            self._build_exit = docker.CANCELLED_RETURNCODE
             run = yield from self._pump(
                 lambda sink: self._seams.build(
                     ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
