@@ -560,6 +560,19 @@ def reset_own_password(
     logger.info(f"rotated the password of this app's own account {name}")  # never the password
 
 
+def account_exists(sql: SqlSeam, name: str) -> bool:
+    """Whether an account by this name is on the server. A read, and nothing else (T386).
+
+    The channel asks it about this app's own account when this machine keeps
+    no password for it, so it can offer Repair rather than wait for a proof
+    that cannot come. The same lookup `create_account()` makes, on every scheme.
+
+    Raises:
+        AccountError: the database could not be asked.
+    """
+    return _account_id(sql, _checked_username(name)) is not None
+
+
 def _valid_password(password: str) -> bool:
     """The server's own rule, borrowed from the one place that already states it."""
     from yulon import commands

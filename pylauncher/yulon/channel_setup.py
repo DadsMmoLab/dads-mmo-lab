@@ -204,6 +204,31 @@ class Refused:
     account: str
     password: str = field(repr=False)
     reason: str
+    plain: bool = False
+    """True when `reason` is the whole line, not why a server said no (T386).
+
+    The account's password is lost, or Repair could not reach the database:
+    neither is the server refusing anything, so the tab does not say "refused".
+    """
+
+
+LOST_PASSWORD = "Yu'lon lost the password for its own server account. Repair sets a new one."
+"""The line for this app's own account on the server with no password this machine keeps (T386).
+
+A fresh data folder, a reinstall of Yu'lon or a new machine against a server
+that already has the account: `create` keeps the row's own password, as it
+must, so the one just minted can never prove it.
+"""
+
+DATABASE_UNREACHABLE = (
+    "Repair could not reach the server's database, so nothing was changed. "
+    "Start the server, then press Repair again."
+)
+
+
+def lost(account: str, password: str = "") -> Refused:
+    """This app's own account exists and its password is not one this machine has (T386)."""
+    return Refused(account=account, password=password, reason=LOST_PASSWORD, plain=True)
 
 
 @dataclass(frozen=True)
@@ -1011,7 +1036,14 @@ def ensure(
     if isinstance(current, Verified | Refused | GaveUp):
         return current
     if isinstance(current, Idle):
-        create(account, password, gm_level)
+        made = create(account, password, gm_level)
+        if getattr(made, "created", None) is False:
+            # The row was already there, and `create` kept its password, as it
+            # must (T386). The one minted above can never prove it, so no round
+            # trip is needed to know that and nothing is kept as pending: the
+            # way out is a reset of this app's own row, which is Repair.
+            logger.info(f"{account} already exists with a password this machine does not have")
+            return lost(account, password)
         current = current.created(account, password)
         # After `create` and not before it: a record on disk says the row is
         # there, which is what lets a later launch re-verify rather than
@@ -1124,22 +1156,49 @@ def repair(
     """
     _ = create, gm_level
     password = generate_password()
-    reset(state.account, password)
+    try:
+        reset(state.account, password)
+    except Exception as exc:  # noqa: BLE001 - every way the write fails is the same sentence
+        # The reset is a write to the auth database, and a database that is
+        # not running is the ordinary reason it fails (T386). Nothing changed,
+        # so the state is the one the press found, with a line that says what
+        # to do; the detail goes to the log, never onto the line.
+        logger.info(f"{game}: the reset of {state.account} did not land: {type(exc).__name__}")
+        return Refused(
+            account=state.account,
+            password=state.password,
+            reason=DATABASE_UNREACHABLE,
+            plain=True,
+        )
+    # The row has this password now, whatever the server says next, so it is
+    # kept the way a fresh account's is (T138, T386): a world that is still
+    # loading proves it at the next ask, and closing Yu'lon first loses nothing.
+    pending = Pending(account=state.account, password=password)
+    try:
+        save_pending(pending, game=game, install_id=install_id, config_dir=config_dir)
+    except OSError as exc:
+        logger.warning(
+            f"could not keep the reset command-channel account for {game} "
+            f"({type(exc).__name__}); closing Yu'lon before it is proved will need a repair"
+        )
     # Built from the password that was just written, not before it: a channel
     # made ahead of the reset carries the credential the server has already
     # refused, and would prove nothing while looking like a repair that failed.
     channel = channel_for(password)
     answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
-    if getattr(answer, "outcome", "") != "yes":
-        logger.info(f"{game}: the reset password did not answer either; nothing saved")
+    if getattr(answer, "denied", False):
+        logger.info(f"{game}: the reset password was refused too; nothing saved")
         return Refused(
             account=state.account,
             password=password,
             reason=(
-                "the account's password was reset and the server still did not answer, "
+                "the account's password was reset and the server still did not accept it, "
                 "so nothing was saved"
             ),
         )
+    if getattr(answer, "outcome", "") != "yes":
+        logger.info(f"{game}: the reset password has not answered yet; it waits to be proved")
+        return pending
     verified = Verified(account=state.account, password=password, at=now())
     save_credential(
         verified,
@@ -1199,6 +1258,7 @@ class InstallChannel:
         create: Callable[[str, str, int], object],
         channel_for: Callable[[soap.Endpoint], object],
         reset: Callable[[str, str], object] | None = None,
+        exists: Callable[[str], bool] | None = None,
         config_dir: Path | None = None,
         db_password: str | Callable[[], str] | None = None,
     ) -> None:
@@ -1208,6 +1268,10 @@ class InstallChannel:
         self.install_id = install_id
         self._create = create
         self._reset = reset
+        # A read of the auth database: is this app's own account there (T386)?
+        # Asked by `check()` with nothing saved, so a tab or a Refresh can offer
+        # Repair for a lost password without writing a row.
+        self._exists = exists
         self._channel_for = channel_for
         self._config_dir = config_dir
         # A reader rather than the value for a server inside a WSL distro
@@ -1284,6 +1348,8 @@ class InstallChannel:
                 return after
             self._state = state
             return state
+        if isinstance(state, Idle):
+            return self._find_a_lost_account()
         if not isinstance(state, Verified):
             return state
         channel = self._channel_for(self._endpoint(state.account, state.password))
@@ -1300,6 +1366,26 @@ class InstallChannel:
                 "install has changed; the account's password can be reset for it."
             ),
         )
+        return self._state
+
+    def _find_a_lost_account(self) -> State:
+        """`Idle`, or `lost()` when this app's own account is on the server already (T386).
+
+        Nothing on this machine remembers a password for it -- that is what
+        `Idle` means -- so an account that is there has one nobody here has.
+        Only read: the database is asked whether the row exists, and a
+        database that cannot be asked leaves the state as it was.
+        """
+        if self._exists is None or self.entry.operations is None:
+            return self._state
+        account = account_name(self.install_id)
+        try:
+            there = self._exists(account)
+        except Exception as exc:  # noqa: BLE001 - a look that cannot be made changes nothing
+            logger.info(f"{self.entry.id}: could not look for {account}: {type(exc).__name__}")
+            return self._state
+        if there:
+            self._state = lost(account)
         return self._state
 
     def repair(self) -> State:

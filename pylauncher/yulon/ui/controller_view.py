@@ -2928,6 +2928,8 @@ def _for_wotlk(
             gm_level=level,
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         # The repair seam, and the reason it is a different function from
         # `create`: `create_account` deliberately refuses to re-salt a row that
         # exists, because silently changing an owner's password is worse than
@@ -3288,6 +3290,8 @@ def _for_tbc(
         # This core's own columns: `v`/`s`, not `salt`/`verifier`. A shared
         # implementation here would write a row that looks right and can never
         # log in.
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tbc_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3425,6 +3429,8 @@ def _for_vanilla(
         create=lambda name, pw, level: vanilla_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: vanilla_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3589,6 +3595,8 @@ def _for_centurion(
         create=lambda name, pw, level: centurion_accounts.create_account(
             entry, sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: centurion_accounts.reset_own_password(entry, sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -3815,6 +3823,8 @@ def _for_tortoise(
         create=lambda name, pw, level: tortoise_accounts.create_account(
             sql, name, pw, gm_level=level
         ),
+        # T386: a read, so a tab or a Refresh can offer Repair for a lost password.
+        exists=lambda name: wotlk_accounts.account_exists(sql, name),
         reset=lambda name, pw: tortoise_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
@@ -4115,6 +4125,9 @@ def _channel_sentence(state: object) -> str:
         when = f" at {state.at}" if state.at else " (before this app recorded when)"
         return f"Command channel: verified as {state.account}{when}."
     if isinstance(state, channel_setup.Refused):
+        # A lost password (T386) is nobody refusing anything: its reason is the line.
+        if state.plain:
+            return f"Command channel: {state.reason}"
         return f"Command channel: refused. {state.reason}"
     if isinstance(state, channel_setup.Pending):
         return (
@@ -8333,6 +8346,10 @@ class ControllerView(QWidget):
         self._import_asked = False
         self.refresh_status()
         self.check_server_files()
+        # T386: and the channel. A check proves an account that waits to be
+        # proved, re-asks a saved credential, and finds this app's own account
+        # on a server this machine keeps no password for; it creates nothing.
+        self._check_the_channel()
         # T124: the day's cache answers this, so pressing Refresh repeatedly
         # costs no network.
         self._refresh_upstream_news()
