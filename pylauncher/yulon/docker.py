@@ -4957,7 +4957,10 @@ def build_staged(
     compose-context-resend.md`). Splitting the calls without the folders fixes
     nothing: the one key then flips between targets call by call. A game with
     one built service keeps the single call and the user's own buildx config,
-    because it has no race to lose and a new key costs one cold send.
+    because it has no race to lose and a new key costs one cold send. A
+    builder picked with `docker buildx use` is not in those folders, so the
+    split calls build on the docker context's default builder, which is the
+    one Yu'lon has always assumed.
 
     The calls run in the overlay's order and the first that does not exit 0
     ends the build: its run is returned as it is, so its status and its own
