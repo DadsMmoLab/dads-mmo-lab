@@ -1322,6 +1322,42 @@ def test_a_stopped_reextract_whose_tool_container_will_not_go_leaves_the_old_dat
         end_fake_containers(state)
 
 
+def test_a_reextract_closed_while_a_tool_container_will_not_go_leaves_the_old_data_aside(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial review, round 2: a press closed part-way (the panel gone, the app
+    quitting) cannot be told of a refused removal by an exception, so it asks Docker's side
+    whether a tool may still write into data/ before putting anything back."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        (state / "refuse-rm").write_text("", encoding="utf-8")
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+        put_back: list[Path] = []
+        monkeypatch.setattr(extract, "put_back", lambda data_dir: put_back.append(data_dir))
+        press = box.engine().reextract(
+            InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+        )
+        for line in press:
+            if ": running " in line:
+                break
+        deadline = time.monotonic() + HANG_BOUND
+        while not fake_containers(state):
+            assert time.monotonic() < deadline, "the first tool's container never started"
+            time.sleep(0.01)
+
+        press.close()  # type: ignore[attr-defined]
+
+        assert len(fake_containers(state)) == 1, "the ground: Docker refused the removal"
+        assert put_back == [], "the old data was put back under a tool that may still write"
+        assert (box.server_dir / "data" / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE).is_file()
+    finally:
+        end_fake_containers(state)
+
+
 def interrupted(box: Box) -> dict[str, bytes]:
     """The state a press that crashed in `vmap extract` leaves: old data aside, new data half in."""
     finished_with_pathfinding(box)

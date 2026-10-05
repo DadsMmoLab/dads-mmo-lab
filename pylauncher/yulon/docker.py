@@ -5589,23 +5589,65 @@ def run_container(
     argv = spec.to_argv(name=name)
     logger.info(f"run_container(): `docker {' '.join(argv)}`")
     launcher = platform.docker_prefix(None)
+    writes = tuple(mount.host for mount in spec.mounts if not mount.read_only)
+    with _UNENDED_LOCK:
+        _UNENDED[name] = writes
     try:
         with _cli_ended_on(cancel):
             run = run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
     except BaseException:
         # Abandoned: whatever took the run away mid-tool left its container running.
-        if launcher is not None:
-            container_end.end_container(launcher, name, what=_TOOL)
+        # A refusal cannot travel in a result here, so it stays in `_UNENDED`.
+        if launcher is None or container_end.end_container(launcher, name, what=_TOOL) is None:
+            _ended(name)
         raise
     if cancel is None or not cancel.is_set():
+        _ended(name)  # it ran to its end, and `--rm` removed it
         return run
     refused = container_end.end_container(launcher, name, what=_TOOL) if launcher else None
-    if refused is not None:
+    if refused is None:
+        _ended(name)
+    else:
         try:
             sink(tool_container_left_line(name, refused))
         except Exception as exc:  # noqa: BLE001 - `run_attached()`'s rule for a dead sink
             logger.warning(f"the output sink stopped accepting lines: {exc}")
     return AttachedRun(CANCELLED_RETURNCODE, run.tail, container_left=name if refused else "")
+
+
+_UNENDED: dict[str, tuple[Path, ...]] = {}
+"""Tool containers this process started and has not seen end, with the folders they write.
+
+Codex adversarial review, round 2: a run abandoned by an exception (a closed stream,
+the app quitting) re-raises what abandoned it, so a refused removal cannot reach its
+caller in a result -- and a worker still ending its container when the abandoner
+stopped waiting has no result yet. Both stay here until they are seen gone, for
+`tool_containers_writing_into()`."""
+
+_UNENDED_LOCK = threading.Lock()
+
+
+def _ended(name: str) -> None:
+    with _UNENDED_LOCK:
+        _UNENDED.pop(name, None)
+
+
+def tool_containers_writing_into(folder: Path) -> tuple[str, ...]:
+    """The tool containers that may still be writing into `folder` (T303), by name.
+
+    Started by `run_container()` with `folder` as a writable mount and not yet seen
+    to end: still running, or stopped and refused removal. A stopped Re-extract asks
+    before it puts old map data back into that folder.
+    """
+    wanted = os.path.normcase(os.path.abspath(folder))
+    with _UNENDED_LOCK:
+        return tuple(
+            sorted(
+                name
+                for name, writes in _UNENDED.items()
+                if any(os.path.normcase(os.path.abspath(path)) == wanted for path in writes)
+            )
+        )
 
 
 TOOL_CONTAINER_PREFIX = "yulon-extract-"

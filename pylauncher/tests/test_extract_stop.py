@@ -178,6 +178,49 @@ def test_an_abandoned_tool_run_ends_its_container(fake_docker: tuple[Path, Path]
     assert f"rm -f {name}" in fake_calls(state)
 
 
+def test_an_abandoned_tool_whose_container_will_not_go_is_known_to_write_into_its_folder(
+    fake_docker: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Codex adversarial review, round 2: an abandoned run re-raises what abandoned it, so a
+    refused removal cannot travel in its result. It is kept where a caller about to write
+    into the same folder can ask (`tool_containers_writing_into()`)."""
+    _cli, state = fake_docker
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    out = tmp_path / "data"
+    out.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(out, "/out"),)
+    )
+
+    def interrupted(_line: str) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        docker.run_container(spec, sink=interrupted, cancel=threading.Event())
+
+    (name,) = fake_containers(state)
+    assert docker.tool_containers_writing_into(out) == (name,)
+    assert docker.tool_containers_writing_into(tmp_path / "elsewhere") == ()
+
+
+def test_a_tool_whose_container_was_removed_is_not_counted_as_writing(
+    fake_docker: tuple[Path, Path], tmp_path: Path
+) -> None:
+    out = tmp_path / "data"
+    out.mkdir()
+    spec = docker.ContainerRun(
+        image=SPEC.image, argv=SPEC.argv, mounts=(docker.Mount(out, "/out"),)
+    )
+
+    def interrupted(_line: str) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        docker.run_container(spec, sink=interrupted, cancel=threading.Event())
+
+    assert docker.tool_containers_writing_into(out) == ()
+
+
 def test_a_tool_that_finishes_on_its_own_is_left_to_its_rm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
