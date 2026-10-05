@@ -3836,6 +3836,7 @@ def _for_tortoise(
         world_log=lambda: docker.current_run_log(spec.world, wsl_distro=wsl_distro),
         world_started=lambda: docker.started_at(spec.world, wsl_distro=wsl_distro),
         module_moved=module_moved,
+        image_id=lambda ref: docker.image_id(ref, wsl_distro=wsl_distro),
     )
     return replace(
         services,

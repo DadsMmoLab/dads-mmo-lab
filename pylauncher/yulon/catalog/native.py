@@ -2641,26 +2641,67 @@ def forget_stopped_build(server_dir: Path) -> str:
 
 
 def stopped_build_refusal(server_dir: Path, image_id: Callable[[str], str | None]) -> str | None:
-    """`STOPPED_BUILD_LANDED_REFUSAL` when a stopped build moved a live tag, else None (T225).
+    """Why a stopped build refuses a start, or None (T225; the lead, scoped re-review).
 
     Docker is asked only while `STOPPED_BUILD_FILE` is there, so a server with
-    none never waits on it. A tag moved when both it and its `-rollback` name
-    answer an id and the ids differ; an id Docker does not give refuses nothing
-    here, because a Start that cannot reach Docker fails on its own. Never raises.
+    none never waits on it. Per ref: both it and its `-rollback` name answer and
+    differ -- the build landed (`STOPPED_BUILD_LANDED_REFUSAL`); exactly one of
+    the two answers (a lookup that timed out, a `-rollback` name deleted by hand)
+    -- the check could not be completed, which refuses too
+    (`STOPPED_BUILD_UNCHECKED_REFUSAL`); neither answers -- Docker is silent, and
+    a Start fails on its own then, so that alone refuses nothing. Never raises.
     """
     record = read_stopped_build(server_dir)
     if record is None:
         return None
-    for ref in record.refs:
+
+    def ask(ref: str) -> str | None:
         try:
-            now = image_id(ref)
-            before = image_id(ref + ROLLBACK_TAG_SUFFIX)
+            return image_id(ref)
         except Exception as exc:  # noqa: BLE001 - a question, never a new failure
             logger.warning(f"could not read the image {ref} names: {exc}")
-            continue
-        if now is not None and before is not None and now != before:
-            return STOPPED_BUILD_LANDED_REFUSAL
-    return None
+            return None
+
+    unchecked = False
+    for ref in record.refs:
+        now = ask(ref)
+        before = ask(ref + ROLLBACK_TAG_SUFFIX)
+        if now is not None and before is not None:
+            if now != before:
+                return STOPPED_BUILD_LANDED_REFUSAL
+        elif now is not None or before is not None:
+            unchecked = True
+    return STOPPED_BUILD_UNCHECKED_REFUSAL if unchecked else None
+
+
+STOPPED_EARLIER_NOTE = (
+    "A rebuild stopped earlier may still finish in Docker's background, so the build you have "
+    "now stays kept under a second name, and every Start still checks whether the tags moved."
+)
+"""Said after a press that failed while a stopped build's record was there (T225)."""
+
+STOPPED_BUILD_UNCHECKED_REFUSAL = (
+    "Yu'lon could not check whether a rebuild that was stopped finished in Docker's background, "
+    "so Start waits: if it did, a Start would run a build that never started. Press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}, which settles it."
+)
+"""Why no start may run while Docker half-answers the stopped-build check (T225, lead)."""
+
+
+def folder_start_refusal(
+    server_dir: Path, image_id: Callable[[str], str | None], *, rebuilding: bool = False
+) -> str | None:
+    """Every refusal of a start that the server folder records, or None (T197, T223, T225).
+
+    `START_REFUSED_FILE` first, then a stopped build that landed or could not be
+    checked. A Rebuild (`rebuilding`) is the way out of both, so neither refuses it.
+    The one call every start path makes: the controller's `refuse_start()`, the
+    engine's `start_refusal()`, the Tortoise bot rebuild's pre-check and the
+    Centurion finish.
+    """
+    if rebuilding:
+        return None
+    return owed_start_refusal(server_dir) or stopped_build_refusal(server_dir, image_id)
 
 
 REMOVE_KEPT_BUILD_LABEL = "Remove kept build…"
@@ -5216,11 +5257,8 @@ class StagedInstaller:
         TrinityCore's adds a world update left unfinished
         (`trinitycore.world_update_start_refusal`).
         """
-        refused = owed_start_refusal(server_dir, rebuilding=rebuilding)
-        if refused is None and not rebuilding:
-            # T225 (live): a stopped rebuild whose build Docker finished afterwards.
-            refused = stopped_build_refusal(server_dir, self._seams.image_id)
-        return refused
+        # T225 (live): with a stopped rebuild's build that may have landed since.
+        return folder_start_refusal(server_dir, self._seams.image_id, rebuilding=rebuilding)
 
     def family_start_refusal(self, server_dir: Path) -> str | None:
         """The family's own reason no start may run, apart from `START_REFUSED_FILE` (T223).
@@ -6625,10 +6663,12 @@ class StagedInstaller:
           released before it raises;
         * **a stage failed before the compile finished** -- released; the live
           tags never moved, so they were duplicates;
-        * **...the compile was stopped or abandoned** -- KEPT, with
+        * **...the compile was stopped or abandoned, or a stopped build's record is
+          there (scoped re-review)** -- KEPT, here and in every restore, with
           `STOPPED_BUILD_FILE` (T225, measured live: BuildKit moved the live tag 13
           minutes after a Stop): every Start compares the tags with them, and the
-          next Rebuild, Update or Return settles them (`_settle_stopped_build()`);
+          next Rebuild, Update or Return settles them (`_settle_stopped_build()`)
+          and the record goes only once that press succeeds;
         * **the world came up and then stopped** (`WorldStoppedAfterReadyError`,
           T71's keep) -- released, and the new build keeps the live names;
         * **a stage failed after the compile** -- `_restore_rollback` puts the
@@ -6824,6 +6864,7 @@ class StagedInstaller:
         refs = self.built_image_refs(ctx)
         # T225 (live): a build an earlier Stop left running may have landed since.
         yield from self._settle_stopped_build(server_dir, refs)
+        hold = read_stopped_build(server_dir) is not None
         kept = yield from self._keep_rollback(ctx, refs, missing_ok=missing_images_ok)
         try:
             state = yield from self._staged(stages, ctx)
@@ -6854,6 +6895,11 @@ class StagedInstaller:
                 message = f"{exc} {STOPPED_BUILD_NOTE}{kept_note}"
                 self._record_error(server_dir, ctx.state, message)
                 raise InstallerError(message) from exc
+            if not built and kept and hold:
+                # An earlier stop's build may still land: its record and the names stay.
+                message = f"{exc} {STOPPED_EARLIER_NOTE}"
+                self._record_error(server_dir, ctx.state, message)
+                raise InstallerError(message) from exc
             if not built:
                 # A compile that failed leaves the live tags on the build that is
                 # running: the second name is a duplicate.
@@ -6879,6 +6925,8 @@ class StagedInstaller:
                 # server never came up at all is a build worth putting back, and
                 # that is the whole of what this subclass separates.
                 yield from self._release(kept)
+                # The new build started: as a success, the stopped build's record goes.
+                forget_stopped_build(server_dir)
                 kept_build = (
                     f"{exc} The build from this rebuild was KEPT and is what the containers "
                     f"are running: the compile finished and the server it made did start, so "
@@ -6904,6 +6952,7 @@ class StagedInstaller:
                 servers_down=servers_down,
                 press=press,
                 parking=parking,
+                hold_rollback=hold,
             )
             self._record_error(server_dir, ctx.state, message)
             if isinstance(message, _LeftStopped):
@@ -6956,9 +7005,14 @@ class StagedInstaller:
             if not built and not self._compose_tagged(
                 refs, kept, unanswered_moved=may_have_tagged()
             ):
-                if kept and self._build_exit == docker.CANCELLED_RETURNCODE:
-                    # T225 (live): abandoned mid-compile; the solve can still land.
-                    note = self._remember_the_stopped_build(server_dir, refs, parking)
+                if kept and (self._build_exit == docker.CANCELLED_RETURNCODE or hold):
+                    # T225 (live): abandoned mid-compile, or an earlier stop's record is
+                    # there; a solve can still land.
+                    note = (
+                        self._remember_the_stopped_build(server_dir, refs, parking)
+                        if self._build_exit == docker.CANCELLED_RETURNCODE
+                        else ""
+                    )
                     logger.error(
                         f"rebuild of {self.entry.id} was abandoned mid-compile; the build from "
                         f"before it stays on the daemon as {', '.join(kept)}.{note}"
@@ -6985,6 +7039,8 @@ class StagedInstaller:
                 )
             raise
         yield from self._release(kept)
+        # T225: only a press that succeeded settles a stopped build's record.
+        forget_stopped_build(server_dir)
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
         left = forget_owed_start(server_dir)
@@ -8287,6 +8343,7 @@ class StagedInstaller:
         servers_down: ServersDownWork | None = None,
         press: str = server_build_presses.REBUILD,
         parking: _Parking | None = None,
+        hold_rollback: bool = False,
     ) -> Generator[str, None, str]:
         """Put the old build back after a compile that finished and a server that did not.
 
@@ -8316,6 +8373,9 @@ class StagedInstaller:
         new one. Then the tags go back and nothing is restarted, which is what
         `REBUILD_OPENING_NOTE` promised a stop before the replacement costs.
         """
+        # T225 (scoped re-review): while a stopped build may still land, the
+        # `-rollback` names stay on every exit, so every Start can compare with them.
+        letting_go: Sequence[str] = () if hold_rollback else kept
         spec = self.entry.container_spec()
         last_words = ""
         if touched:
@@ -8423,7 +8483,7 @@ class StagedInstaller:
         not_kept = self._park(ctx, refs, kept, parking) if not touched and not still_kept else ""
         held = yield from self._release(named)
         if not touched:
-            yield from self._release(kept)
+            yield from self._release(letting_go)
             again = server_build_presses.under_server_build(press)
             if still_kept:
                 # The failure says the kept build was not used and is still kept.
@@ -8486,7 +8546,7 @@ class StagedInstaller:
         refused = self.start_refusal(ctx.server_dir)
         if stay is not None:
             yield from self._release(named)
-            yield from self._release(kept)
+            yield from self._release(letting_go)
             also = f" {refused}" if refused is not None else ""
             return _LeftStopped(
                 f"{failure} The build from before this rebuild was put back, and its servers "
@@ -8498,7 +8558,7 @@ class StagedInstaller:
             # stay stopped and the tags name it; the finish or the Rebuild starts
             # it. Said without "running" anywhere: nothing of this server runs now.
             yield from self._release(named)
-            yield from self._release(kept)
+            yield from self._release(letting_go)
             return _LeftStopped(
                 f"{failure} The build from before this rebuild was put back, and its servers "
                 f"were left STOPPED: {refused}{said}{stopped_database}"
@@ -8531,7 +8591,7 @@ class StagedInstaller:
             # path had and the harder one to notice, because the press was
             # already reporting a failure.
             yield from self._release(named)
-            yield from self._release(kept)
+            yield from self._release(letting_go)
             if isinstance(second, _DockerSilentForRestart):
                 # T223 (cold review): never started, so not "did not report ready",
                 # and nothing of it runs on the database yet.
@@ -8540,7 +8600,7 @@ class StagedInstaller:
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
             )
-        yield from self._release(kept)
+        yield from self._release(letting_go)
         return (
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
@@ -8675,8 +8735,9 @@ class StagedInstaller:
             if now is not None and before is not None and now != before:
                 moved[ref] = now
         if not moved:
-            logger.info(f"rebuild of {self.entry.id}: the stopped build never landed")
-            forget_stopped_build(server_dir)
+            # Kept until this press succeeds (scoped re-review): the solve may still
+            # be running, and a press that fails must leave the Start check armed.
+            logger.info(f"rebuild of {self.entry.id}: the stopped build has not landed")
             return
         kept = len(moved) == len(refs) and self._park_landed(server_dir, refs, moved, record)
         for ref in moved:
@@ -8689,7 +8750,6 @@ class StagedInstaller:
                     f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} "
                     f"again once Docker answers."
                 )
-        forget_stopped_build(server_dir)
         yield (
             "A rebuild stopped earlier finished in Docker's background and moved this server's "
             "image tags onto its build, which never started. The tags are back on the build "

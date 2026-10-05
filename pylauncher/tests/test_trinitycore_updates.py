@@ -2144,3 +2144,21 @@ def test_the_record_stays_until_the_new_build_is_up_even_when_the_press_dies(
     ], "the ground: forward() imported every table"
     pending = box.pending()
     assert pending is not None and ARENA in cast(list[str], pending["reimport"])
+
+
+def test_the_finish_and_its_start_are_refused_once_a_stopped_build_landed(box: Box) -> None:
+    """T225 (scoped re-review 7): the finish ends in a start, so it asks what every Start asks."""
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    refs = box.engine().image_refs_at(box.server_dir)
+    assert native.remember_stopped_build(box.server_dir, native.StoppedBuild(refs, None, 1)) == ""
+    box.m.rec.image_ids[refs[0]] = "sha256:landed"
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value) == f"{native.STOPPED_BUILD_LANDED_REFUSAL} Nothing was changed."
+    assert box.pending() is not None, "the world update still waits"
+    box.world.running = False
+    with pytest.raises(InstallerError) as also:
+        list(box.engine()._start_after_finish(context(box.m)))
+    assert str(also.value).startswith("The world update is finished, but "), also.value
+    assert native.STOPPED_BUILD_LANDED_REFUSAL in str(also.value)

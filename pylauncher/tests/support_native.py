@@ -194,6 +194,8 @@ class Recorder:
     ids_silent: bool = False
     """T225 (cold review): `image_id` answers None for every name, as a Docker that does not
     answer `docker image inspect` does."""
+    image_ids: dict[str, str | None] = field(default_factory=dict)
+    """T225: what `image_id` answers for these names instead (a tag a stopped build moved)."""
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
@@ -852,6 +854,8 @@ class Recorder:
         test about which image a name holds drives `test_rebuild._Daemon` instead,
         whose names are moved by the build, the tags and the removals it is asked for.
         """
+        if ref in self.image_ids:
+            return self.image_ids[ref]
         if self.ids_silent or ref.endswith(native.PARKED_TAG_SUFFIX):
             return None
         for suffix in (native.ROLLBACK_TAG_SUFFIX, native.FAILED_TAG_SUFFIX):
