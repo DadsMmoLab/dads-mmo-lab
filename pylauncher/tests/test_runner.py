@@ -2005,7 +2005,7 @@ def test_on_windows_a_root_that_outlives_its_ended_job_is_still_terminated(
 def test_on_windows_an_error_while_ending_the_child_still_closes_its_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Codex's third adversarial review: the job is let go in a `finally`, whatever `_end_child` did.
+    """The job is let go in a `finally`, whatever `_end_child` did (Codex, third review).
 
     Mutation this catches: the close skipped when `_end_child` raises.
     """
