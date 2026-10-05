@@ -2842,6 +2842,25 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "Read-only on the checkout; it writes only under the install's own `data/`, and a "
         "folder with no files is a refusal, never a quiet no-op"
     ),
+    ("catalog/families/extract.py", "_spelled"): (
+        "T260. Lists one folder of the player's client -- the client itself, its `Data/`, "
+        "a locale folder in it -- to name each entry in the view of links the CMaNGOS map "
+        "tools read it through. Read-only on the client; the links are written only under "
+        "the server folder's `.yulon-client-view`, and a listing that fails is an OSError "
+        "the extract stage refuses on, saying nothing was extracted"
+    ),
+    ("catalog/families/extract.py", "overlaid"): (
+        "T241. Lists the server's own checkout folder `dbc_overlay_from` to ask whether each "
+        "file is already under `data/dbc` with the same size and date, which is how a "
+        "re-extraction tells new map data that finished from a press that died. Read-only; "
+        "a folder that cannot be read answers False, which puts the old map data back"
+    ),
+    ("catalog/families/extract.py", "put_back"): (
+        "T241. Lists `data/.yulon-previous`, which only a re-extraction makes, to move each "
+        "folder of the old map data back over the new extraction's partial output. It "
+        "decides no write outside the install's own `data/`; a folder that is not there "
+        "answers that nothing was set aside"
+    ),
     ("catalog/families/extract.py", "missing_map_data"): (
         "T179 Task 3. Lists `data/maps` under the server folder to ask whether a map file "
         "exists for each map the world server checks at start. Read-only, and a listing that "

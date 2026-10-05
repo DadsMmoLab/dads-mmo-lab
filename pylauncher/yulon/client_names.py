@@ -54,3 +54,57 @@ def find(root: Path, rel: str | PurePosixPath) -> Path | None:
     """The file or folder at `rel` under `root`, matched case-insensitively, or None."""
     path = root.joinpath(*on_disk(root, rel).parts)
     return path if os.path.lexists(path) else None
+
+
+# -- the names the map tools open (T260) ----------------------------------------------
+
+DATA_FOLDER = "Data"
+"""The client's archive folder, as every map tool spells it."""
+
+RETAIL_LOCALES: tuple[str, ...] = (
+    "enGB",
+    "enUS",
+    "deDE",
+    "esES",
+    "frFR",
+    "koKR",
+    "zhCN",
+    "zhTW",
+    "enCN",
+    "enTW",
+    "esMX",
+    "ruRU",
+)
+"""The locale folders the CMaNGOS tools look for, in their spelling.
+
+`langs[]` in `contrib/extractor/System.cpp` (mangos-tbc 75f9ae68, :95) and
+`searchLocales` in `contrib/vmap_extractor/vmapextract/vmapexport.cpp` (:357-368),
+the same twelve in both.
+"""
+
+_LOCALE_BY_FOLD = {name.casefold(): name for name in RETAIL_LOCALES}
+
+
+def retail_locale(name: str) -> str | None:
+    """`name` as the tools spell that locale folder (`enus` -> `enUS`), or None: not a locale."""
+    return _LOCALE_BY_FOLD.get(name.casefold())
+
+
+def retail_archive(name: str) -> str | None:
+    """`name` as the tools open that archive (`PATCH-ENUS-2.mpq` -> `patch-enUS-2.MPQ`).
+
+    None for a name that is not an `.MPQ`.
+
+    Every archive name the CMaNGOS tools open -- read in their pinned sources
+    (`contrib/extractor/System.cpp` and `contrib/vmap_extractor/vmapextract/
+    vmapexport.cpp` at mangos-tbc 75f9ae68 and mangos-classic 8ec338a1,
+    `tools/extractor/System.cpp` and `tools/vmap_extractor/vmapextract/
+    vmapexport.cpp` at tortoise-wow 187af788) -- is a lower-case stem whose
+    dash-separated locale part is spelled `enUS`, then `.MPQ`: `common.MPQ`,
+    `patch-2.MPQ`, `locale-enUS.MPQ`, `expansion-locale-enUS.MPQ`,
+    `patch-enUS-2.MPQ`, `dbc.MPQ`.
+    """
+    if not name.casefold().endswith(".mpq"):
+        return None
+    parts = name[: -len(".mpq")].lower().split("-")
+    return "-".join(retail_locale(part) or part for part in parts) + ".MPQ"

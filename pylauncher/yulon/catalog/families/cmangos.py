@@ -66,7 +66,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import ClassVar, cast
@@ -985,6 +985,53 @@ class CmangosInstaller(StagedInstaller):
             else:
                 yield f"{name} is already exactly what this install needs."
 
+    def _case_view(self, client_dir: Path, view: Path) -> Generator[str, None, Path]:
+        """The folder the tools read the client from: itself, or a view of it in `view` (T260).
+
+        The CMaNGOS tools open the client's archives by fixed names
+        (`client_names.retail_archive()`), and a client named in another case
+        on a disk that tells cases apart (`Data/common.mpq`) gives them nothing
+        to read: the extraction would end short, with a sentence blaming the
+        client's completeness. The view is links under the names they open,
+        pointing at the player's files, so nothing of the player's is renamed or
+        changed. A view a crash left is removed first: it may point at another
+        client.
+
+        Raises:
+            InstallerError: the view could not be made. Nothing was extracted.
+        """
+        if not client_dir.is_dir():
+            return client_dir  # nothing to list; the run says what is wrong, as it always has
+        try:
+            extract.remove_case_view(view)
+            if not extract.lay_case_view(client_dir, view):
+                return client_dir
+        except OSError as exc:
+            try:
+                extract.remove_case_view(view)
+            except OSError as left:
+                logger.warning(f"the links in {view} could not be removed: {left}")
+            try:
+                renames = extract.renamed_in_view(client_dir)
+            except OSError:
+                renames = []
+            named = ", ".join(f"{theirs} to {ours}" for theirs, ours in renames[:3])
+            more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+            raise InstallerError(
+                f"Some of your client's files are named in another case than {self.entry.name}'s "
+                f"map tools open, and Yu'lon could not make the links that let the tools read "
+                f"them in {view} ({exc}). Nothing was extracted. Free that folder, or rename the "
+                f"client's files ({named}{more}), then press Install again."
+            ) from exc
+        renames = extract.renamed_in_view(client_dir)
+        named = ", ".join(f"{theirs} as {ours}" for theirs, ours in renames[:3])
+        more = f" and {len(renames) - 3} more" if len(renames) > 3 else ""
+        yield (
+            f"Some of your client's files are named in another case than the map tools open; "
+            f"they read them through links in {view} ({named}{more}). Your client is not changed."
+        )
+        return view
+
     def _extract(self, ctx: StageContext) -> Iterator[str]:
         """Pull dbc/maps/vmaps out of the client, mounted read-only: one container per tool.
 
@@ -1038,23 +1085,36 @@ class CmangosInstaller(StagedInstaller):
         image_ref = self._image_ref(ctx, data.extract.image)
         user_args = self._user_args()
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
-        yield from self._stream(
-            lambda sink: extract.run_plan(
-                data.extract,
-                image_ref=image_ref,
-                client_dir=client_dir,
-                data_dir=data_dir,
-                run_container=self._seams.run_container,
-                user_args=user_args,
-                sink=sink,
+        view = ctx.server_dir / extract.CASE_VIEW_DIR
+        read_from = client_dir
+        try:
+            # Inside the `try`: `_case_view()` yields after laying the view, and a
+            # stream closed there must take the view with it.
+            read_from = yield from self._case_view(client_dir, view)
+            yield from self._stream(
+                lambda sink: extract.run_plan(
+                    data.extract,
+                    image_ref=image_ref,
+                    client_dir=read_from,
+                    data_dir=data_dir,
+                    run_container=self._seams.run_container,
+                    user_args=user_args,
+                    sink=sink,
+                    cancel=ctx.cancel,
+                    required_file=data.client.required_file,
+                    client_build=self.entry.client.build,
+                    selinux_enforcing=self._seams.ask_selinux,
+                    evidence_client_dir=client_dir,
+                    client_files=None if read_from == client_dir else client_dir,
+                ),
                 cancel=ctx.cancel,
-                required_file=data.client.required_file,
-                client_build=self.entry.client.build,
-                selinux_enforcing=self._seams.ask_selinux,
-            ),
-            cancel=ctx.cancel,
-            stage="extract",
-        )
+                stage="extract",
+            )
+        finally:
+            try:
+                extract.remove_case_view(view)
+            except OSError as exc:
+                logger.warning(f"the links in {view} could not be removed: {exc}")
         self._check_cancel(ctx.cancel)
         # Option C of `pyplan/upstream-cmangos-doodad-drop.md`, built as the
         # gate that proves `patch-sources` took rather than as a shipped
