@@ -739,6 +739,8 @@ def test_an_all_digit_name_is_refused_on_a_tree_that_reads_digits_as_an_id(
 
     report = view.account_report.text()
     assert report.startswith("123 is a name made only of digits"), report
+    # The command the player types is on a line of its own (T296).
+    assert report.splitlines()[-1] == "account delete ID"
     assert asked.questions == []
     assert cmangos.wire.commands == []
     assert "VICTIM" in _listed(view) and "123" in _listed(view)

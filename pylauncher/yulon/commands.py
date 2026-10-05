@@ -84,11 +84,14 @@ def digits_read_as_an_id(account: str) -> str:
     """
     if not account.isdigit():
         return ""
+    # The command is one the player has to type, since no press can do it
+    # safely, so it stays on the line: on a line of its own, never in
+    # backticks (owner rule, T296).
     return (
         f"{account} is a name made only of digits, and this server reads digits in its account "
-        f"commands as an account number, so the command could reach a different account. "
-        f"Yu'lon does not delete it. To delete it, type account delete followed by its id (the "
-        f"list shows it) on the Console tab."
+        "commands as an account number, so the delete could reach a different account. "
+        "Yu'lon does not delete it. To delete it, type this on the Console tab, with the "
+        "account's id from the list in place of ID:\naccount delete ID"
     )
 
 
