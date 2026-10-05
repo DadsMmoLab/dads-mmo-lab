@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from tests.test_controller_view import (
     WOTLK,
@@ -228,21 +228,23 @@ def test_the_pad_sees_which_paragraph_it_stopped_on(qapp: object) -> None:
         process_events()
         paragraphs = box.findChildren(QLabel, QUESTION_PARAGRAPH)
         assert len(paragraphs) == 6
-        first = paragraphs[0]
-        assert first.focusPolicy() & Qt.FocusPolicy.TabFocus, "not a stop the pad can reach"
+        # The last: a programmatic `setFocus()` from the buttons is a pad move, and the pad
+        # coming up from the buttons lands on the last paragraph (live test, 2026-10-05).
+        stop = paragraphs[-1]
+        assert stop.focusPolicy() & Qt.FocusPolicy.TabFocus, "not a stop the pad can reach"
 
         def edge() -> QColor:
             # Rendered over black, not `grab()`ed: a label paints no background
             # of its own, and what `grab()` leaves under it is not a colour.
-            image = QImage(first.size(), QImage.Format.Format_ARGB32)
+            image = QImage(stop.size(), QImage.Format.Format_ARGB32)
             image.fill(QColor("black"))
-            first.render(image)
-            return image.pixelColor(0, first.height() // 2)
+            stop.render(image)
+            return image.pixelColor(0, stop.height() // 2)
 
         unlit = edge()
-        first.setFocus()
+        stop.setFocus()
         process_events()
-        assert first.hasFocus()
+        assert stop.hasFocus()
         assert edge() == QColor(COLOR_GOLD_BRIGHT), "the focused paragraph is not ringed"
         assert unlit != QColor(COLOR_GOLD_BRIGHT), "every paragraph is ringed, focused or not"
     finally:
@@ -456,7 +458,7 @@ def test_enter_on_a_paragraph_presses_no_button(qapp: object) -> None:
     try:
         box.show()
         process_events()
-        paragraph = box.findChildren(QLabel, QUESTION_PARAGRAPH)[1]
+        paragraph = box.findChildren(QLabel, QUESTION_PARAGRAPH)[-1]  # where the pad lands
         paragraph.setFocus()
         process_events()
         assert paragraph.hasFocus()
@@ -471,6 +473,117 @@ def test_enter_on_a_paragraph_presses_no_button(qapp: object) -> None:
         QTest.keyClick(yes, Qt.Key.Key_Return)
         process_events()
         assert clicked == [yes]
+    finally:
+        box.hide()
+        box.deleteLater()
+
+
+# -- T243 live test (yulon-win11, 2026-10-05): where the focus lands among the paragraphs --------
+
+
+def _open_long_box() -> FittedMessageBox:
+    """A shown Yes/No box, default No, whose question overflows the 800×800 offscreen screen."""
+    from tests.conftest import process_events
+
+    box = FittedMessageBox(QMessageBox.Icon.Question, "t", LONG, SB.Yes | SB.No)
+    box.setDefaultButton(SB.No)
+    box.show()
+    process_events()
+    return box
+
+
+def _paragraphs(box: FittedMessageBox) -> list[Any]:
+    from PySide6.QtWidgets import QLabel
+
+    from yulon.ui.theme import QUESTION_PARAGRAPH
+
+    return [p for p in box.findChildren(QLabel, QUESTION_PARAGRAPH) if p.isVisibleTo(box)]
+
+
+def _in_view(box: FittedMessageBox, widget: Any) -> bool:
+    """Whether all of `widget` shows in the question's scroll area."""
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtWidgets import QScrollArea
+
+    from yulon.ui.message_box import QUESTION_SCROLL
+
+    scroll = box.findChild(QScrollArea, QUESTION_SCROLL)
+    assert scroll is not None
+    viewport = scroll.viewport()
+    seen = QRect(widget.mapTo(viewport, QPoint(0, 0)), widget.size())
+    return viewport.rect().contains(seen)
+
+
+def test_tab_onto_a_paragraph_scrolls_it_into_view(qapp: object) -> None:
+    """Live test: Tab from No wrapped to the first paragraph while it was scrolled out of view."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QScrollArea
+
+    from tests.conftest import process_events
+    from yulon.ui.message_box import QUESTION_SCROLL
+
+    box = _open_long_box()
+    try:
+        scroll = box.findChild(QScrollArea, QUESTION_SCROLL)
+        assert scroll is not None
+        bar = scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        process_events()
+        first = _paragraphs(box)[0]
+        assert not _in_view(box, first), "control: the first paragraph starts out of view"
+        no = box.button(SB.No)
+        assert no is not None
+        no.setFocus()
+        process_events()
+        for _ in range(4):
+            QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Tab)
+            process_events()
+            if QApplication.focusWidget() in _paragraphs(box):
+                break
+        focused = QApplication.focusWidget()
+        assert focused in _paragraphs(box), "Tab never reached a paragraph"
+        assert _in_view(box, focused), "Tab put the focus on a paragraph out of view"
+    finally:
+        box.hide()
+        box.deleteLater()
+
+
+def test_pad_up_from_the_buttons_lands_on_the_last_paragraph_and_shows_it(qapp: object) -> None:
+    """Live test: Up from No skipped the paragraphs scrolled below the view."""
+    from tests.conftest import process_events
+    from yulon.ui.gamepad import Direction, Navigator
+
+    box = _open_long_box()
+    try:
+        last = _paragraphs(box)[-1]
+        assert not _in_view(box, last), "control: the last paragraph starts below the view"
+        no = box.button(SB.No)
+        assert no is not None
+        no.setFocus()
+        process_events()
+        assert Navigator().navigate(Direction.UP)
+        process_events()
+        assert QApplication.focusWidget() is last, "Up did not land on the nearest paragraph"
+        assert _in_view(box, last)
+    finally:
+        box.hide()
+        box.deleteLater()
+
+
+def test_pad_down_from_the_last_paragraph_lands_on_the_default_button(qapp: object) -> None:
+    """Live test: Down from the last paragraph landed on Yes; the default (No) is where it goes."""
+    from tests.conftest import process_events
+    from yulon.ui.gamepad import Direction, Navigator
+
+    box = _open_long_box()
+    try:
+        last = _paragraphs(box)[-1]
+        last.setFocus()
+        process_events()
+        assert QApplication.focusWidget() is last
+        assert Navigator().navigate(Direction.DOWN)
+        process_events()
+        assert QApplication.focusWidget() is box.button(SB.No)
     finally:
         box.hide()
         box.deleteLater()

@@ -60,8 +60,8 @@ from __future__ import annotations
 
 from typing import cast
 
-from PySide6.QtCore import QEvent, QObject, QRect, Qt
-from PySide6.QtGui import QImage, QKeyEvent, QPixmap
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer
+from PySide6.QtGui import QFocusEvent, QImage, QKeyEvent, QPixmap, QShowEvent
 from PySide6.QtGui import Qt as GuiQt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -112,6 +112,11 @@ class FittedMessageBox(QMessageBox):
         self._paragraphs: list[QLabel] = []
         self._scroll: QScrollArea | None = None
         self._scrolled_text: str | None = None
+        # Where the focus was before it last arrived somewhere in this box: a
+        # paragraph, a button, or neither. Read when a pad move crosses between
+        # the question and the buttons (`_focus_arrived`).
+        self._focus_was: str | None = None
+        self._buttons_watched: set[int] = set()
         # Now, not at the first show: a widget added to a box that is already
         # being shown is shown a turn of the event loop later, and `QMessageBox`
         # sizes itself without a widget that is not shown yet.
@@ -136,7 +141,56 @@ class FittedMessageBox(QMessageBox):
             and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
         ):
             return True
+        if event.type() == QEvent.Type.FocusIn and isinstance(event, QFocusEvent):
+            self._focus_arrived(watched, event.reason())
         return bool(super().eventFilter(watched, event))
+
+    def _focus_arrived(self, widget: QObject, reason: Qt.FocusReason) -> None:
+        """Keep a focused paragraph in view, and land a pad move between the parts sensibly.
+
+        Live test, yulon-win11 2026-10-05: Tab from No wrapped to a first paragraph
+        scrolled out of view; Up from the buttons skipped the paragraphs scrolled
+        below the view, because the pad only aims at what shows (T175); and Down
+        from the last paragraph landed on Yes. So a paragraph that takes the focus
+        is scrolled into view; the pad (`OtherFocusReason`) coming up from the
+        buttons lands on the LAST paragraph, the one nearest them; and coming down
+        from the question it lands on the default button. Tab and the mouse go
+        where they go. The pad's own move finishes first (it scrolls its target
+        into view after `setFocus()`), so the landing is put right a turn later.
+        """
+        was, self._focus_was = self._focus_was, None
+        pad = reason == Qt.FocusReason.OtherFocusReason
+        if widget in self._paragraphs:
+            self._focus_was = "paragraph"
+            last = self._paragraphs[-1]
+            if pad and was == "button" and widget is not last:
+                QTimer.singleShot(0, self, lambda: self._land_on(last))
+            else:
+                self._show_paragraph(widget)
+        elif widget in self.buttons():
+            self._focus_was = "button"
+            default = self.defaultButton()
+            if pad and was == "paragraph" and default is not None and widget is not default:
+                QTimer.singleShot(0, self, lambda: self._land_on(default))
+
+    def _land_on(self, widget: QWidget) -> None:
+        widget.setFocus(Qt.FocusReason.OtherFocusReason)
+        if widget in self._paragraphs:
+            self._show_paragraph(widget)
+
+    def _show_paragraph(self, paragraph: QObject) -> None:
+        if self._scroll is not None and isinstance(paragraph, QWidget):
+            self._scroll.ensureWidgetVisible(paragraph, 0, 0)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt's name
+        """Watch the buttons' focus too: they exist, relabelled and all, by the time it shows."""
+        for button in self.buttons():
+            if id(button) not in self._buttons_watched:
+                self._buttons_watched.add(id(button))
+                button.installEventFilter(self)
+        if self._focus_was is None and self.focusWidget() in self.buttons():
+            self._focus_was = "button"
+        super().showEvent(event)
 
     # Qt lays the box out again (`setupLayout()`) on each of these, from a fresh
     # grid that holds its own label and not the scroll area: the question would
