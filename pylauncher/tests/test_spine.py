@@ -2419,6 +2419,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "listing it removes nothing and is logged; the copies stay, which costs disk and "
         "nothing else"
     ),
+    ("catalog/snapshot.py", "older_copies"): (
+        "T217. Lists this server's own `sql_scripts/backups/` to NAME the older update copies "
+        "in the sentence a rollback says when the old build did not come up, newest first. It "
+        "decides no write: only files carrying the update's own `_before-new-build_` label, "
+        "never the copy just taken, so a backup the player took is never named as one. An "
+        "OSError listing it names none, and the sentence then says nothing about older copies"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "

@@ -19,7 +19,7 @@ the fix.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -472,22 +472,176 @@ def _safety_of(fake: FakeSnapshot) -> tuple[Path, ...]:
     )
 
 
-def test_an_old_build_that_cannot_be_stopped_after_failing_says_so(tmp_path: Path) -> None:
+def _copies_named(fake: FakeSnapshot) -> tuple[str, str]:
+    """The copy's files and the rollback's safety files, as the sentence names them."""
+    copy = fake.taken[0]
+    files = ", ".join(f"backups/{path.name}" for path in copy.files)
+    safety = ", ".join(f"backups/{path.name}" for path in _safety_of(fake))
+    return files, safety
+
+
+def test_an_old_build_that_did_not_come_up_is_said_stopped_in_exactly_these_words(
+    tmp_path: Path,
+) -> None:
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make(wait_ready=_asked_ready(rec, [False, False]))
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    files, safety = _copies_named(fake)
+    assert (
+        f"Its source folders and {WOTLK_LISTED} were put back, and the build from before this "
+        "update still did not come up, so its servers were stopped. Every copy is kept: "
+        f"{WOTLK_LISTED} as they were just before the new build started are in {files}, as the "
+        f"new build left them in {safety}. Restore the one you want on Maintenance (it works "
+        "with the server stopped), then press Start."
+    ) in str(raised.value)
+    assert "next older" not in str(raised.value), "no older copy to send the player to"
+
+
+def test_the_old_builds_failure_is_said_once_when_it_reads_as_the_new_ones(
+    tmp_path: Path,
+) -> None:
+    """Re-live 2026-10-05: the crash-loop sentence was printed twice in a row, word for word."""
     rec, server_dir, make = _spine(tmp_path, WOTLK)
     made = make(wait_ready=_asked_ready(rec, [False, False]))
     made._snapshot = FakeSnapshot(rec)
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    assert text.count("never reported ready") == 1, text
+    assert "but it did not come up either, for the same reason." in text
+
+
+def test_an_old_build_that_cannot_be_stopped_after_failing_is_never_said_to_be_stopped(
+    tmp_path: Path,
+) -> None:
+    """Scoped re-review of c5bf1b67: a failed stop read "were stopped" and "stays stopped" too."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make(wait_ready=_asked_ready(rec, [False, False]))
+    fake = FakeSnapshot(rec)
+    made._snapshot = fake
 
     def refuse(control: object) -> None:
         if rec.calls.count("recreate") == 2:
             raise docker.DockerCommandError("the daemon did not answer the stop")
 
     rec.on_stop_servers = refuse
+    with pytest.raises(native.OldBuildNotStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert not isinstance(raised.value, native.ServersLeftStopped)
+    text = str(raised.value)
+    files, safety = _copies_named(fake)
+    assert (
+        f"Its source folders and {WOTLK_LISTED} were put back, and the build from before this "
+        "update still did not come up. Yu'lon could not stop its servers (the daemon did not "
+        "answer the stop), so they may still be restarting: press Stop on the Server tab. Every "
+        f"copy is kept: {WOTLK_LISTED} as they were just before the new build started are in "
+        f"{files}, as the new build left them in {safety}. Once it is stopped, restore the one "
+        "you want on Maintenance, then press Start."
+    ) in text
+    assert text.endswith(
+        " The source folders were put back on the commits they were on, so what is on disk is "
+        "the build that was put back."
+    )
+    assert "were stopped" not in text and "stays stopped" not in text and "STOPPED" not in text
+    assert "agree again" not in text
+    assert "prune" not in rec.calls
+
+
+def test_an_old_build_that_fails_another_way_says_how(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Said once only when it is the same sentence; a different failure is said in full."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    made = make()
+    made._snapshot = FakeSnapshot(rec)
+    failures = iter(["the new world aborted on a missing table.", "the old world crashed."])
+
+    def wait_for_ready(ctx: object, ready: object) -> Iterator[str]:
+        raise InstallerError(next(failures))
+        yield ""  # pragma: no cover - a generator, like the real one
+
+    monkeypatch.setattr(made, "wait_for_ready", wait_for_ready)
     with pytest.raises(native.ServersLeftStopped) as raised:
         list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
     text = str(raised.value)
-    assert "could not be stopped" in text and "the daemon did not answer the stop" in text
-    assert "Stop on the Server tab" in text
-    assert "prune" not in rec.calls
+    assert "for the same reason" not in text
+    assert "did not come up either: the old world crashed." in text
+
+
+def test_older_copies_are_named_only_when_there_are_any(tmp_path: Path) -> None:
+    """Scoped re-review: "the copies earlier updates took" was said on a first update too."""
+    from yulon.catalog.snapshot import SNAPSHOT_LABEL
+
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    backups = server_dir / "sql_scripts" / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    oldest = backups / f"20261002_090000_{SNAPSHOT_LABEL}_acore_playerbots.sql"
+    older = backups / f"20261003_090000_{SNAPSHOT_LABEL}_acore_playerbots.sql"
+    for path in (oldest, older):
+        path.write_text("-- dump\n", encoding="utf-8")
+    (backups / "20261002_090000_acore_characters.sql").write_text("-- mine\n", encoding="utf-8")
+    made = make(wait_ready=_asked_ready(rec, [False, False]))
+    made._snapshot = FakeSnapshot(rec)
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    text = str(raised.value)
+    # Re-live 2026-10-05: named by file, newest first, and what to do if the newest
+    # copy is itself one a restarted old world had already changed.
+    assert (
+        "Copies earlier updates took before their new build started are kept too, newest "
+        f"first: backups/{older.name}, backups/{oldest.name}. If Restore of the newest copy "
+        "does not bring the old build up, restore the next older copy listed."
+    ) in text
+    assert "20261002_090000_acore_characters.sql" not in text, "the player's own backup is not one"
+
+
+def test_a_tortoise_old_build_that_crash_loops_is_stopped_at_its_restart_with_its_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review: Tortoise's stop waits for a world to load, and a crash loop never does.
+
+    The stop ends the wait when the world restarts (T159's control), and while it
+    waits the press says the hint that goes with "Stop now anyway".
+    """
+    import subprocess
+
+    spec = TORTOISE.container_spec()
+    assert spec.stop_waits_for_load
+    runs = iter(["2026-10-05T01:00:00Z", "2026-10-05T01:00:09Z"])
+    monkeypatch.setattr(
+        docker,
+        "container_state",
+        lambda name, **_kw: docker.ContainerState(status="running", started_at=next(runs)),
+    )
+    monkeypatch.setattr(
+        docker,
+        "exec_output",
+        lambda *_a, **_kw: subprocess.CompletedProcess([], 0, "SigCgt:\t0000000000000000\n", ""),
+    )
+    monkeypatch.setattr(docker, "_pause", lambda control, seconds: None)
+    rec, server_dir, make = _spine(tmp_path, TORTOISE)
+    made = make(wait_ready=_asked_ready(rec, [False, False]))
+    made._snapshot = FakeSnapshot(rec)
+    heard: list[str] = []
+
+    def stop(control: docker.StopControl | None) -> None:
+        if control is not None and rec.calls.count("ready?no") == 2:
+            for line in docker.world_load_steps(spec, control):
+                heard.append(line)
+                if control.say is not None:
+                    control.say(line)
+
+    rec.on_stop_servers = stop
+    said: list[str] = []
+    with pytest.raises(native.ServersLeftStopped):
+        for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert heard == [docker.WORLD_STILL_LOADING, docker.WORLD_RESTARTED_STOPPING]
+    assert native.OLD_BUILD_WAIT_HINT in said
+    assert said.index(native.OLD_BUILD_WAIT_HINT) == said.index(docker.WORLD_STILL_LOADING) + 1
 
 
 def test_a_mixed_tags_record_refuses_the_update_before_anything_is_fetched(
@@ -725,7 +879,7 @@ def test_the_rebuild_refusal_before_the_question_reads_the_record_and_the_head_f
     from yulon import install_wiring
 
     rec, server_dir, make = _spine(tmp_path, WOTLK)
-    ask = install_wiring.rebuild_refusal_for_app(WOTLK, server_dir)
+    ask = install_wiring.rebuild_refusal_for_app(WOTLK, server_dir, engine=make)
     module = server_dir / MODULE
     _detached_on(server_dir, OLD)
     _detached_on(module, NEW)
@@ -735,19 +889,59 @@ def test_the_rebuild_refusal_before_the_question_reads_the_record_and_the_head_f
         rec,
         {"mod-playerbots/azerothcore-wotlk": OLD, "mod-playerbots/mod-playerbots": OLD},
     )
+    rec.heads[module] = NEW
     refused = ask()
     assert refused is not None
     assert f"{module} is on {NEW[:7]}, but this server was built from {OLD[:7]}" in refused
     assert f"git -C {module} checkout --detach --force {OLD[:7]}" in refused
-    rec.heads[module] = NEW
     with pytest.raises(InstallerError) as pressed:
         list(make().rebuild(InstallOptions(server_dir=server_dir)))
     assert str(pressed.value) == refused, "one sentence, asked twice"
     _detached_on(module, OLD)
-    assert ask() is None
+    assert ask() is None, "the HEAD file says it is back: git is not asked"
+    _detached_on(module, NEW)
     (module / ".git" / "HEAD").unlink()
     assert ask() is None, "a HEAD it cannot read is the press's to report"
     assert install_wiring.rebuild_refusal_for_app(WOTLK, server_dir, wsl_distro="Ubuntu")() is None
+
+
+def test_the_early_rebuild_refusal_refuses_only_where_the_press_would(tmp_path: Path) -> None:
+    """Scoped re-review: the press builds as-is when git cannot answer, so the early check
+    must not refuse there, nor on a HEAD file it cannot read as a commit."""
+    from yulon import install_wiring
+
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    module = server_dir / MODULE
+    _built_from(
+        server_dir,
+        rec,
+        {"mod-playerbots/azerothcore-wotlk": OLD, "mod-playerbots/mod-playerbots": OLD},
+    )
+    ask = install_wiring.rebuild_refusal_for_app(WOTLK, server_dir, engine=make)
+    _detached_on(server_dir, OLD)
+    _detached_on(module, NEW)
+    rec.heads[module] = NEW
+    rec.git_reads = False
+    assert ask() is None, "git cannot answer: the press goes on, so the early check does too"
+    said = list(make().rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" in rec.calls and any("could not check" in line for line in said)
+    rec.git_reads = True
+    assert ask() is not None, "git answers off its build: refused before the question"
+
+
+def test_a_head_file_that_is_not_a_commit_is_read_as_unknown(tmp_path: Path) -> None:
+    gitdir = tmp_path / ".git"
+    (gitdir / "refs" / "heads").mkdir(parents=True)
+    (gitdir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (gitdir / "refs" / "heads" / "main").write_text("ref: refs/heads/other\n", encoding="utf-8")
+    assert native.read_head_file(tmp_path) is None, "a loose ref holding a ref is not a commit"
+    (gitdir / "HEAD").write_text("not a commit\n", encoding="utf-8")
+    assert native.read_head_file(tmp_path) is None
+    (gitdir / "HEAD").write_text(f"{NEW}\n", encoding="utf-8")
+    assert native.read_head_file(tmp_path) == NEW
+    (gitdir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (gitdir / "refs" / "heads" / "main").write_text(f"{OLD}\n", encoding="utf-8")
+    assert native.read_head_file(tmp_path) == OLD
 
 
 def test_rebuild_goes_on_and_says_so_when_git_cannot_say_where_a_source_is(

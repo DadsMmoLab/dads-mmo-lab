@@ -7700,6 +7700,34 @@ def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> No
         assert services.rebuild is not None, entry.id
 
 
+def test_every_tab_asks_install_wiring_what_its_rebuild_would_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review of c5bf1b67: removing the wiring in `_assemble()` left every test green.
+
+    The tab's early refusal is `install_wiring.rebuild_refusal_for_app()`'s, for this
+    entry, this folder and this distro.
+    """
+    asked: list[tuple[str, Path, str | None]] = []
+
+    def refusal_for(
+        entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None, **_kw: object
+    ) -> Callable[[], str | None]:
+        asked.append((entry.id, server_dir, wsl_distro))
+        return lambda: f"refused for {entry.id}"
+
+    monkeypatch.setattr(
+        controller_view_module.install_wiring, "rebuild_refusal_for_app", refusal_for
+    )
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.rebuild_refusal is not None, entry.id
+        assert services.rebuild_refusal() == f"refused for {entry.id}"
+    assert [(game, where) for game, where, _ in asked] == [
+        (entry.id, tmp_path / entry.id) for entry in _every_game()
+    ]
+
+
 def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

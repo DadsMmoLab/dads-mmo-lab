@@ -116,6 +116,21 @@ def _rollback_safety_database(path: Path) -> str | None:
     return path.stem.split(marker, 1)[1]
 
 
+def older_copies(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
+    """The update copies in `directory` other than `keep`, newest first. Never raises.
+
+    What a rollback whose old build did not come up names as kept (T217): a
+    backup the player took, or a restore's safety copy, is not one of them.
+    """
+    kept = {path.name for path in keep}
+    try:
+        found = sorted(directory.iterdir())
+    except OSError:
+        return ()
+    older = [path for path in found if path.name not in kept and is_snapshot_file(path)]
+    return tuple(reversed(older))
+
+
 def prune_older(directory: Path, keep: Sequence[Path]) -> tuple[Path, ...]:
     """Remove every update copy in `directory` that is not in `keep`. Never raises.
 
