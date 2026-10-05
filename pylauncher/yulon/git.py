@@ -3050,8 +3050,9 @@ class ContainerGit:
         it is also the answer while the daemon is still creating a container
         whose CLI the Stop killed mid-request: the name is not there yet, and a
         never-started container appears a moment later. So a "gone" is asked
-        again once, `_LATE_CREATE_SETTLE` later, and the log says which of the
-        three it was.
+        again once, `_LATE_CREATE_SETTLE` later, and the log says what it saw. A
+        container that appears later than that is not caught, and the log does
+        not claim it was ruled out.
         """
         first = _remove_container(launcher, name)
         if first is _REMOVED:
@@ -3068,7 +3069,12 @@ class ContainerGit:
         if second is not _GONE:
             logger.warning(f"could not remove the clone container {name}: {second}")
             return second
-        logger.info(f"the clone container {name} was already gone")
+        # Not "gone": a container the daemon creates later than the second look
+        # is not ruled out, and the line says only what was seen.
+        logger.info(
+            f"the clone container {name} was not there when Yu'lon looked, after the Stop "
+            f"and again {_LATE_CREATE_SETTLE:g} s later"
+        )
         return None
 
     @staticmethod

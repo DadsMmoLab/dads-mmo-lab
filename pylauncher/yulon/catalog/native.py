@@ -2083,7 +2083,20 @@ class RebuildChangedTheServer(InstallerError, TrueAfterStop):
     less true, so the log panel shows it after a Stop too. A failure that changed
     nothing (a compile stopped before any container moved) stays a plain
     `InstallerError`, which after a Stop is a clean cancel.
+
+    `up` False: the server is not up -- the new build never came up with nothing
+    to put back, or the old build was put back and did not report ready either --
+    so the update route's closing note must not say the folder agrees with what
+    is running.
     """
+
+    def __init__(self, *args: object, up: bool = True) -> None:
+        super().__init__(*args)
+        self.up = up
+
+
+class _NotUpEither(str):
+    """`_restore_rollback()`'s sentence when the old build was put back and did not come up."""
 
 
 class _LeftStopped(str):
@@ -2119,6 +2132,12 @@ SOURCES_PUT_BACK_STOPPED_NOTE = (
     "build that was put back; it stays stopped until its world tables are in."
 )
 """`SOURCES_PUT_BACK_NOTE` for a press whose rollback left the servers stopped (T179)."""
+
+SOURCES_PUT_BACK_NOT_UP_NOTE = (
+    "The source folders were put back on the commits they were on, so what is on disk and the "
+    "build that was put back agree again; the server is not up."
+)
+"""`SOURCES_PUT_BACK_NOTE` for a press whose put-back build did not report ready (T228)."""
 
 SOURCES_PUT_BACK_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk and what "
@@ -6127,7 +6146,7 @@ class StagedInstaller:
                 message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
                 if touched:
-                    raise RebuildChangedTheServer(message) from exc
+                    raise RebuildChangedTheServer(message, up=False) from exc
                 raise InstallerError(message) from exc
             message = yield from self._restore_rollback(
                 ctx, refs, kept, touched, str(exc), servers_down=servers_down
@@ -6150,7 +6169,9 @@ class StagedInstaller:
             if touched:
                 # The old build is back, running or not, on whatever the new one
                 # wrote into the database: `_restore_rollback()` says so.
-                raise RebuildChangedTheServer(message) from exc
+                raise RebuildChangedTheServer(
+                    message, up=not isinstance(message, _NotUpEither)
+                ) from exc
             raise InstallerError(message) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
@@ -6706,7 +6727,8 @@ class StagedInstaller:
                 if isinstance(exc, RebuildChangedTheServer):
                     # T228: the rebuild's sentence is true after a Stop, and so is
                     # this one; the type carries that through.
-                    raise RebuildChangedTheServer(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+                    note = SOURCES_PUT_BACK_NOTE if exc.up else SOURCES_PUT_BACK_NOT_UP_NOTE
+                    raise RebuildChangedTheServer(f"{exc} {note}", up=exc.up) from exc
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
@@ -7456,7 +7478,7 @@ class StagedInstaller:
             # already reporting a failure.
             yield from self._release(named)
             yield from self._release(kept)
-            return (
+            return _NotUpEither(
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
             )

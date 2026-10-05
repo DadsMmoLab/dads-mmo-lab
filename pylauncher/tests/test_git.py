@@ -3498,7 +3498,10 @@ def test_a_container_the_daemon_creates_after_the_stop_is_removed_too(
 
 
 def test_a_removal_already_in_progress_is_a_container_going_not_a_refusal(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_docker: tuple[Path, Path],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """T240 cold review: Moby's answer when `--rm` is already removing the container.
 
@@ -3507,6 +3510,7 @@ def test_a_removal_already_in_progress_is_a_container_going_not_a_refusal(
     cli, state = fake_docker
     (state / "rm-in-progress").write_text("", encoding="utf-8")
     container_git = _container_git(monkeypatch, cli)
+    caplog.set_level("INFO", logger="yulon.git")
     said, outcome = _stop_mid_clone(
         container_git, git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core"), state
     )
@@ -3514,6 +3518,9 @@ def test_a_removal_already_in_progress_is_a_container_going_not_a_refusal(
     assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
     assert fake_containers(state) == []
     assert not [line for line in said if "could not be removed" in line], said
+    logged = [r.getMessage() for r in caplog.records if "clone container" in r.getMessage()]
+    # Not "gone": one that appears later than the second look is not ruled out.
+    assert any("was not there when Yu'lon looked" in message for message in logged), logged
 
 
 @pytest.mark.parametrize(

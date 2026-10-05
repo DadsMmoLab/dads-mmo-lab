@@ -2453,6 +2453,8 @@ def test_a_stop_whose_old_build_did_not_come_up_either_says_so(
     header = panel.status_text()
     assert header.startswith(STOPPED_THEN_FAILED), header
     assert "did not report ready either" in header, header
+    assert header.endswith(native.SOURCES_PUT_BACK_NOT_UP_NOTE), header
+    assert native.SOURCES_PUT_BACK_NOTE not in header, "the server is not up to agree with"
     assert finished and finished[0][0] is False, finished
 
 
