@@ -3606,6 +3606,23 @@ def _line_around(text: str, found: re.Match[str]) -> str:
     return (text[start:] if end < 0 else text[start:end]).strip()
 
 
+def _spell_elapsed(seconds: float) -> str:
+    """`31 -> "31 seconds"`, `70 -> "1 minute 10 seconds"`, `180 -> "3 minutes"` (T223).
+
+    For the waits for Docker, which measure seconds and say them: `_spell_seconds()`
+    rounds to whole minutes from 30 seconds up, and a 31-second wait read "Docker
+    answered after 1 minute." on yulon-win11 (2026-10-05).
+    """
+    total = int(round(seconds))
+    if total == 0:
+        return "less than a second"
+    minutes, rest = divmod(total, 60)
+    parts = [f"{minutes} minute{'s' if minutes != 1 else ''}"] if minutes else []
+    if rest:
+        parts.append(f"{rest} second{'s' if rest != 1 else ''}")
+    return " ".join(parts)
+
+
 def _spell_seconds(seconds: float) -> str:
     """`30 -> "30 seconds"`, `1800 -> "30 minutes"`, `21600 -> "6 hours"`.
 
@@ -5975,7 +5992,7 @@ class StagedInstaller:
 
         Returns None when Docker answered, else the seconds spent asking -- which is
         what the refusal says, because a duration a user reads is one that was
-        measured (`_spell_seconds()`). Says `saying` when the first ask goes
+        measured (`_spell_elapsed()`). Says `saying` when the first ask goes
         unanswered and one sentence when Docker answers late; silent when it
         answers at once.
 
@@ -6020,7 +6037,7 @@ class StagedInstaller:
             if answered:
                 yield (
                     f"Docker answered after "
-                    f"{_spell_seconds(self._seams.monotonic() - started)}."
+                    f"{_spell_elapsed(self._seams.monotonic() - started)}."
                 )
                 return None
         return self._seams.monotonic() - started
@@ -6099,7 +6116,7 @@ class StagedInstaller:
             # Its servers were stopped by the restore before the tags moved back
             # (`ROLLBACK_STOPPING`), so they are left stopped, on the old build.
             raise _DockerSilentForRestart(
-                f"Docker did not answer for {_spell_seconds(waited)}, so the build from before "
+                f"Docker did not answer for {_spell_elapsed(waited)}, so the build from before "
                 f"this rebuild is back on its tags but was not started: its servers are "
                 f"stopped. Once Docker answers, press Start."
             )
@@ -6108,7 +6125,7 @@ class StagedInstaller:
             # (`_restore_rollback()`), or T170's when nothing was kept: said here too,
             # they were said twice (cold review).
             raise InstallerError(
-                f"Docker did not answer for {_spell_seconds(waited)} after the build finished. "
+                f"Docker did not answer for {_spell_elapsed(waited)} after the build finished. "
                 f"Check that Docker is running."
             )
         yield (
@@ -7871,7 +7888,7 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back on its tags was "
                     f"not possible either: Docker did not answer for another "
-                    f"{_spell_seconds(waited)}. No container was replaced, so the server is "
+                    f"{_spell_elapsed(waited)}. No container was replaced, so the server is "
                     f"still running the build it had if it is up, but the image tags name the "
                     f"new build, which has never started; the old images are on the daemon "
                     f"under their {ROLLBACK_TAG_SUFFIX} tags.",

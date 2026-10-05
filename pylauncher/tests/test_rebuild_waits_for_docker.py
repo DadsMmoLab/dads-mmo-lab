@@ -173,6 +173,35 @@ def test_a_recreate_waits_for_a_docker_that_answers_late_and_keeps_the_new_build
     assert said[-1].endswith(f"was rebuilt and is running in {server_dir}"), said
 
 
+@pytest.mark.parametrize(
+    ("unanswered", "cost", "said"),
+    [
+        # Asks of 1 s every 5 s: the sixth answers at 31 s -- live on yulon-win11
+        # (2026-10-05) a 31-second wait read "Docker answered after 1 minute."
+        pytest.param(5, 1.0, "Docker answered after 31 seconds.", id="31-seconds"),
+        pytest.param(14, 0.0, "Docker answered after 1 minute 10 seconds.", id="70-seconds"),
+        pytest.param(12, 0.0, "Docker answered after 1 minute.", id="60-seconds"),
+    ],
+)
+def test_the_time_docker_took_to_answer_is_said_as_it_was(
+    tmp_path: Path, unanswered: int, cost: float, said: str
+) -> None:
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    clock = _Clock()
+    lines = list(
+        engine(
+            rec,
+            **_seams_of(rec, daemon),
+            docker_ready=_Probe(clock, *(False,) * unanswered, then=True, cost=cost),
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        ).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert said in lines, [line for line in lines if "answered" in line]
+
+
 def test_a_docker_that_never_answers_is_asked_every_5_seconds_until_3_minutes_then_refused(
     tmp_path: Path,
 ) -> None:
