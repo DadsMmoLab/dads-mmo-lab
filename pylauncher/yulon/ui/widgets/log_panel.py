@@ -88,6 +88,12 @@ Stop taking effect at all (`StopTookEffect`, T250) -- a real one that landed as
 the button was pressed.
 """
 
+FINISHED_AFTER_A_LATE_STOP = "finished: Stop came too late to change anything; the job finished."
+"""The header when a job took its Stop back because it came too late (T247 review, the lead's
+ruling: a Stop that came too late means the press SUCCEEDED). See `after_stop.withdraw_stop()`:
+the job clears the Cancel this panel set, and the panel reads that as "finished", not
+"cancelled" -- so `cancelled` is False and every owner's success path runs."""
+
 _MAX_BLOCKS = 5000
 
 UNDESCRIBED_FAILURE = "It stopped on an error it did not describe; the Logs tab has the details."
@@ -1172,7 +1178,17 @@ class LogPanel(QWidget):
         # finish it. What was left behind is the caller's story to tell — the
         # panel does not know whether it was following a log or building a
         # server.
-        if self._stop_requested:
+        late = self._stop_requested and self._cancel is not None and not self._cancel.is_set()
+        if late:
+            # The job took its Stop back (`after_stop.withdraw_stop()`): it came too
+            # late to change anything, and the press succeeded. Not cancelled, so
+            # `cancelled` is False for every owner's success path.
+            self._stop_requested = False
+            if ok:
+                message = "done"
+        if late and ok:
+            verdict = FINISHED_AFTER_A_LATE_STOP
+        elif self._stop_requested:
             # T228/T250: a stopped job that still FAILED -- with a sentence about
             # what it left (`TrueAfterStop`), or on something that was not the
             # Stop (`StopTookEffect`; the worker decides both by type) -- is shown

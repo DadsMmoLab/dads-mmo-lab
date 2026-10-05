@@ -87,7 +87,7 @@ from yulon import (
     server_build_presses,
     serverlock,
 )
-from yulon.after_stop import TrueAfterStop
+from yulon.after_stop import TrueAfterStop, withdraw_stop
 from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -3274,6 +3274,14 @@ READY_STOPPED_IN_THE_WATCH = (
     "afterwards, before that minute was over, so this build was not proved to stay up."
 )
 """Stop inside T71's watch: true about the banner, and about the proof that was not finished."""
+
+READY_ANYWAY_IN_THE_WATCH = (
+    "Stop was pressed while the world server was loading, and it was let finish; it reported "
+    'ready, and "Stop now anyway" was then pressed during the minute it is watched, so this '
+    "build was not proved to stay up."
+)
+"""`READY_STOPPED_IN_THE_WATCH` for the escape pressed in the watch after a Stop during the load
+(T247 review): the first press came in the load, not in the watch, and the sentence says so."""
 
 READY_STOP_TOO_LATE = (
     "Stop was pressed after the new build had already been watched for the whole minute, so it "
@@ -10082,6 +10090,9 @@ class StagedInstaller:
                     fatal=ready.fatal,
                     cancel=ends,
                 )
+                if after.cut_short and pending:
+                    # Stop came during the LOAD; only "Stop now anyway" came in the watch.
+                    raise StoppedInTheWatch(READY_ANYWAY_IN_THE_WATCH)
                 if after.cut_short:
                     raise StoppedInTheWatch(READY_STOPPED_IN_THE_WATCH)
                 if not after.stopped and pending:
@@ -10092,6 +10103,10 @@ class StagedInstaller:
                     raise ReadyWaitStopped(READY_STOPPED_AFTER_LOADING)
                 if not after.stopped:
                     if ctx.cancel is not None and ctx.cancel.is_set():
+                        # The lead's ruling: too late means the press SUCCEEDED. The
+                        # Stop is taken back, so the rest of the press runs and the
+                        # panel says it finished (`withdraw_stop()`).
+                        withdraw_stop(ctx.cancel)
                         yield READY_STOP_TOO_LATE
                     yield "The server is up."
                     return
@@ -10515,7 +10530,11 @@ class StagedInstaller:
 
         def work() -> None:
             try:
-                outcome.append(call(lambda line: _put_all(queued, line, stage)))
+                ran = call(lambda line: _put_all(queued, line, stage))
+                # Read the moment the command returned (T250 review): `_check_run()`
+                # counts a bare exit 1 as the Stop only if the Stop came first.
+                stopped = cancel is not None and cancel.is_set()
+                outcome.append(replace(ran, stop_seen=stopped) if stopped else ran)
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
                 failure.append(exc)
             finally:
@@ -10566,12 +10585,13 @@ class StagedInstaller:
         A default here is the shape that mistake had.
         """
         if run.returncode == docker.CANCELLED_RETURNCODE or (
-            run.returncode != 0 and cancel is not None and cancel.is_set()
+            cancel is not None and cancel.is_set() and _a_stops_exit(run)
         ):
-            # Asked before the exit status, as `extract._conclude()` does (T250
-            # review): a child another route killed under a Stop exits with a
-            # code of its own, and "failed (exit 143)" would be a refusal for a
-            # button the player pressed.
+            # Asked before the exit status (T250 review): a child another route
+            # ended under a Stop exits with a code of its own, and "failed (exit
+            # 143)" would be a refusal for a button the player pressed. Only an
+            # exit a Stop makes, though: a compile error that lands as Stop is
+            # pressed is still the compile error (`_a_stops_exit()`).
             raise InstallStopped(_cancelled_message(what, note))
         if run.returncode != 0 and from_build and docker.builder_connection_lost(run.tail):
             # T202: said in words before the quote, which alone told the
@@ -10630,6 +10650,22 @@ class StagedInstaller:
         if not (server_dir / STATE_FILE).is_file():
             return
         write_state(server_dir, replace(state, last_error=message))
+
+
+STOP_SIGNAL_EXITS = frozenset({143, 137, -15, -9})
+"""Exit codes a Stop makes on Linux and macOS: SIGTERM and SIGKILL, as a shell reports them
+(128 + signal) and as Python reports a child it signalled (negative)."""
+
+WINDOWS_ENDED_EXIT = 1
+"""What a docker CLI ended by Stop exits with on Windows (TerminateProcess). A real failure
+exits 1 too, so it counts as the Stop only if the Stop came before the command returned."""
+
+
+def _a_stops_exit(run: docker.AttachedRun) -> bool:
+    """Is this exit one a Stop makes, rather than the command's own failure (T250 review)?"""
+    if run.returncode in STOP_SIGNAL_EXITS:
+        return True
+    return sys.platform == "win32" and run.returncode == WINDOWS_ENDED_EXIT and run.stop_seen
 
 
 def _without(said: str, secret: str) -> str:

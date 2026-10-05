@@ -4605,6 +4605,14 @@ class AttachedRun:
 
     returncode: int
     tail: tuple[str, ...] = ()
+    stop_seen: bool = False
+    """The job's Cancel was already set when the command returned (T250 review).
+
+    Set by the engine's bridge (`native.StagedInstaller._pump()`), never here.
+    A bare exit 1 is how a docker CLI ended by Stop exits on Windows, and how
+    many real failures exit everywhere; only one that came after the Stop is
+    the Stop's.
+    """
 
 
 def cli_missing_run(run: AttachedRun) -> bool:

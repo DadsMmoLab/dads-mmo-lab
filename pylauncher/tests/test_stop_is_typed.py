@@ -26,7 +26,12 @@ from tests.support_stop import stop_when
 from yulon import docker, git, platform, runner
 from yulon.after_stop import StopTookEffect, TrueAfterStop, stop_took_effect
 from yulon.catalog import native
-from yulon.catalog.installer import InstallOptions, InstallStopped, ReadyWaitStopped
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    InstallStopped,
+    ReadyWaitStopped,
+)
 from yulon.controller_wow_tortoise import botdash
 from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED
 
@@ -53,27 +58,54 @@ NOT_THE_STOP = {
 CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
-def _said(call: ast.Call, module: object) -> str:
-    """Every word a raise hands its type: literals, and constants named or reached by attribute.
+def _assigned(function: ast.AST) -> dict[str, list[ast.expr]]:
+    """Every value a plain local name is given in `function` (not in functions nested in it)."""
+    found: dict[str, list[ast.expr]] = {}
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    found.setdefault(target.id, []).append(node.value)
+        elif isinstance(node, ast.AnnAssign | ast.AugAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                found.setdefault(node.target.id, []).append(node.value)
+        pending.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _said(call: ast.Call, module: object, assigned: dict[str, list[ast.expr]] | None = None) -> str:
+    """Every word a raise hands its type: literals, constants and locals it was built from.
 
     A sentence kept in a module constant (`ReadyWaitStopped(READY_WAIT_STOPPED)`)
-    is resolved through the imported module, so a stop sentence cannot hide
-    behind a name (cold review of 4cc5f731).
+    is resolved through the imported module, and one built in a local first
+    (`message = f"..."; raise X(message)`) through that function's own
+    assignments, so a stop sentence cannot hide behind a name (cold reviews of
+    4cc5f731 and 0d13c518).
     """
+    assigned = assigned or {}
     parts: list[str] = []
-    for sub in ast.walk(call):
-        if sub is call.func:
-            continue
+    seen: set[str] = set()
+    pending: list[ast.AST] = [arg for arg in [*call.args, *(k.value for k in call.keywords)]]
+    while pending:
+        sub = pending.pop()
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
             parts.append(sub.value)
+        elif isinstance(sub, ast.Name) and sub.id in assigned and sub.id not in seen:
+            seen.add(sub.id)
+            pending.extend(assigned[sub.id])
         named = sub.attr if isinstance(sub, ast.Attribute) else getattr(sub, "id", None)
         if isinstance(sub, ast.Name | ast.Attribute) and named and CONSTANT.match(named):
             try:
                 value = eval(ast.unparse(sub), vars(module))  # noqa: S307 - this tree's names
             except Exception:  # noqa: BLE001 - a local, not a module constant
-                continue
+                value = None
             if isinstance(value, str):
                 parts.append(value)
+        pending.extend(ast.iter_child_nodes(sub))
     return " ".join(parts)
 
 
@@ -91,10 +123,16 @@ def _stop_sentences() -> list[tuple[str, str]]:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         module = _module(rel)
 
-        def visit(node: ast.AST, where: str, rel: str = rel, module: object = module) -> None:
+        def visit(
+            node: ast.AST,
+            where: str,
+            assigned: dict[str, list[ast.expr]],
+            rel: str = rel,
+            module: object = module,
+        ) -> None:
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                    visit(child, child.name)
+                    visit(child, child.name, _assigned(child))
                     continue
                 if isinstance(child, ast.Raise) and isinstance(child.exc, ast.Call):
                     names = {
@@ -103,13 +141,13 @@ def _stop_sentences() -> list[tuple[str, str]]:
                         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
                     }
                     if (
-                        SAYS_A_STOP.search(_said(child.exc, module))
+                        SAYS_A_STOP.search(_said(child.exc, module, assigned))
                         or "_cancelled_message" in names
                     ):
                         found.append((f"{rel}::{where}", ast.unparse(child.exc.func)))
-                visit(child, where)
+                visit(child, where, assigned)
 
-        visit(tree, "<module>")
+        visit(tree, "<module>", {})
     return found
 
 
@@ -248,3 +286,62 @@ def test_a_build_that_exited_on_its_own_under_a_stop_reads_as_the_stop(tmp_path:
             engine(rec, build=killed).run(InstallOptions(server_dir=tmp_path / "s"), cancel=cancel)
         )
     assert str(stopped.value).startswith("the build was stopped."), stopped.value
+
+
+def test_a_real_compile_error_that_lands_as_stop_is_pressed_stays_a_failure(
+    tmp_path: Path,
+) -> None:
+    """T250 the other way: exit 2 is the compiler's own, not a Stop's, so it is shown."""
+    rec = Recorder()
+    cancel = threading.Event()
+
+    def failed(server_dir: Path, files: object, **_kw: object) -> docker.AttachedRun:
+        cancel.set()
+        return docker.AttachedRun(2, ("error: 'foo' was not declared in this scope",))
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, build=failed).run(InstallOptions(server_dir=tmp_path / "s"), cancel=cancel)
+        )
+    assert not isinstance(raised.value, InstallStopped), raised.value
+    assert "failed (exit 2)" in str(raised.value), raised.value
+
+
+def test_windows_exit_1_is_the_stop_only_when_the_stop_came_before_the_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A docker CLI ended by Stop on Windows exits 1, which a real failure exits too: it is the
+    Stop only if the cancel was already set when the command returned."""
+    monkeypatch.setattr(native.sys, "platform", "win32")
+    rec = Recorder()
+    cancel = threading.Event()
+
+    def ended(server_dir: Path, files: object, **_kw: object) -> docker.AttachedRun:
+        cancel.set()
+        return docker.AttachedRun(1, ("compiling",))
+
+    with pytest.raises(InstallStopped):
+        list(engine(rec, build=ended).run(InstallOptions(server_dir=tmp_path / "a"), cancel=cancel))
+
+    made = engine(Recorder())
+    later = threading.Event()
+    later.set()  # set only now: after the command had already returned
+    with pytest.raises(InstallerError) as raised:
+        made._check_run(
+            docker.AttachedRun(1, ("error",)), "the build", later, native.BUILD_CANCEL_NOTE
+        )
+    assert not isinstance(raised.value, InstallStopped), raised.value
+
+
+def test_the_audit_reads_a_sentence_built_in_a_local_first() -> None:
+    """`message = f"... was stopped ..."; raise X(message)` is seen, not hidden behind a name."""
+    tree = ast.parse(
+        "def f(x):\n"
+        "    message = f'the build was stopped. {x}'\n"
+        "    raise InstallerError(message)\n"
+    )
+    function = tree.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    raised = function.body[-1]
+    assert isinstance(raised, ast.Raise) and isinstance(raised.exc, ast.Call)
+    assert SAYS_A_STOP.search(_said(raised.exc, native, _assigned(function)))

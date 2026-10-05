@@ -24,6 +24,8 @@ pressed, not the press.
 
 from __future__ import annotations
 
+import threading
+
 
 class TrueAfterStop(Exception):
     """Mixed into an exception type whose message says what a press LEFT, Stop or no Stop.
@@ -69,3 +71,24 @@ def stop_took_effect(exc: BaseException) -> bool:
         seen.add(id(current))
         current = current.__cause__
     return False
+
+
+def withdraw_stop(cancel: threading.Event | None) -> None:
+    """The job's Stop came too late to change anything: take it back, so the press SUCCEEDS.
+
+    The lead's ruling (T247 review, 2026-10-05): a rebuild whose new world had
+    already passed its whole watch when Stop was pressed has met its proof, so
+    the build is kept, and the press is a success -- not a cancel. The job
+    clears its Cancel (and the "Stop now anyway" riding on it), which does two
+    things, and both are the point: what the press still runs (an update's
+    after-work, Tortoise's dashboard rebuild) sees no Stop; and `LogPanel`,
+    finding the Cancel it set cleared when the job ends, reports the job as
+    finished, so every owner's success path runs. A Stop pressed again after
+    this sets the Cancel again and is an ordinary Stop.
+    """
+    if cancel is None:
+        return
+    anyway = getattr(cancel, "anyway", None)
+    if isinstance(anyway, threading.Event):
+        anyway.clear()
+    cancel.clear()

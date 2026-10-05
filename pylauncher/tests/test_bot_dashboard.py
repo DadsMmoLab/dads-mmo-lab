@@ -590,6 +590,57 @@ def test_the_update_rebuilds_the_dashboard_and_restarts_only_for_a_new_address(
     assert lifecycle.calls == ["stop", "start"], "a new address: the world is restarted"
 
 
+def test_an_update_whose_stop_came_too_late_still_rebuilds_the_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T247 review: the real update press, Stop pressed in the last pause of T71's watch.
+
+    The press SUCCEEDED (the lead's ruling), so what Tortoise runs after it --
+    the dashboard rebuild, on the same Cancel -- must not see a Stop already set
+    and end "Stopped. FAILED". The build here answers as the real one does to
+    a set Cancel.
+    """
+    from tests.support_native import engine as wotlk_engine
+    from tests.test_ready_wait_stop import WATCH_PAUSES
+    from tests.test_update_to_latest import _ready
+    from yulon.catalog.installer import InstallOptions
+
+    rec, update_dir = _ready(tmp_path / "update")
+    cancel = threading.Event()
+    pauses = {"n": 0}
+
+    def pause(_seconds: float) -> None:
+        pauses["n"] += 1
+        if pauses["n"] == WATCH_PAUSES:
+            cancel.set()  # the panel's Stop, in the last pause of the watch
+
+    made = wotlk_engine(rec, sleep=pause)
+
+    def update(c: threading.Event | None) -> Iterator[str]:
+        return made.update_to_latest(InstallOptions(server_dir=update_dir), cancel=c)
+
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    built = fake.build_image
+
+    def build_image(context: Path, tag: str, **kw: object) -> docker.AttachedRun:
+        stop = kw.get("cancel")
+        if isinstance(stop, threading.Event) and stop.is_set():
+            return docker.AttachedRun(docker.CANCELLED_RETURNCODE, ())
+        return built(context, tag, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(docker, "build_image", build_image)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.calls.clear()
+
+    said = list(botdash.after_update(update, cancel, dashboard=switch))
+
+    assert any(line == native.READY_STOP_TOO_LATE for line in said), said
+    assert "up tortoise-observability --force-recreate" in fake.calls, (fake.calls, said)
+    assert not files.state(server_dir).rebuild_owed, "the dashboard rebuild was stopped"
+
+
 def test_the_update_does_nothing_more_for_a_switched_off_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

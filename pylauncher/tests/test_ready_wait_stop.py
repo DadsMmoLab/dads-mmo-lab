@@ -36,7 +36,7 @@ from tests.test_update_to_latest import OLD, _heads, _ready
 from yulon import docker
 from yulon.catalog import native
 from yulon.catalog.installer import InstallOptions, ReadyWaitStopped
-from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED, LogPanel
+from yulon.ui.widgets.log_panel import FINISHED_AFTER_A_LATE_STOP, STOPPED_THEN_FAILED, LogPanel
 
 Step = Callable[[docker.ReadySpec], bool]
 
@@ -339,6 +339,36 @@ def test_stop_in_the_last_pause_of_the_watch_came_too_late_and_the_build_is_kept
     assert f"{ENTRY.name} was rebuilt and is running" in said, said
     assert rec.calls.count("recreate") == 1, "a build that met its proof was put back"
     assert native.ROLLBACK_STOPPING not in said, said
+    # The lead's ruling: a Stop that came too late means the press SUCCEEDED, and the
+    # panel says so -- so every owner's success path runs (`cancelled` is what they read).
+    assert panel.status_text() == FINISHED_AFTER_A_LATE_STOP, panel.status_text()
+    assert _finished == [(True, "done")], _finished
+    assert panel.cancelled is False, "a press that succeeded was reported as stopped"
+
+
+def test_stop_now_anyway_in_the_watch_after_a_stop_let_the_load_finish_says_when_stop_came(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Stop pending through the load, the world reports ready, then "Stop now anyway" in the
+    watch: Stop was pressed during the LOAD, not during the watch, and the sentence says so."""
+    rec, server_dir = _ready(tmp_path)
+    reached = threading.Event()
+    cancel = docker.CancelWithForce()
+
+    def pause(_seconds: float) -> None:
+        cancel.anyway.set()  # the rebuild panel's "Stop now anyway", in the watch's first pause
+
+    waits = _Waits(_until_stop(reached), _answers(True), _answers(True))
+    made = engine(rec, wait_ready=waits, sleep=pause)
+    options = InstallOptions(server_dir=server_dir)
+    panel, _finished = stop_when(
+        lambda c: made.rebuild(options, cancel=c), reached, "the ready wait", cancel=cancel
+    )
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED + native.READY_ANYWAY_IN_THE_WATCH), header
+    assert native.READY_STOPPED_IN_THE_WATCH not in header, header
+    assert rec.calls.count("recreate") == 2, "the build from before was not put back"
 
 
 # -------------------------------------------------------------------- Install
