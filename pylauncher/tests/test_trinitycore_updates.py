@@ -2792,3 +2792,15 @@ def test_the_server_tab_polls_open_no_tile_until_the_tiles_folder_changes(
 
     assert len(opened) == 12, "a changed tile is a recount"
     assert fourth.kept == 11
+
+
+def test_a_tile_cut_short_with_its_old_date_kept_is_still_a_recount(box: Box) -> None:
+    """The fingerprint holds the size too: a tool that keeps a file's date is still seen."""
+    _a_run_that_crashed(box, 12)
+    assert box.engine().mmaps_status(box.server_dir).kept == 12
+    tile = sorted((box.server_dir / "data" / "mmaps").glob("*.mmtile"))[0]
+    before = tile.stat()
+    tile.write_bytes(tile.read_bytes()[:-1])
+    os.utime(tile, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert box.engine().mmaps_status(box.server_dir).kept == 11
