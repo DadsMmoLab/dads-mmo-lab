@@ -3637,6 +3637,20 @@ def container_state(
     return ContainerState(status, started, int(count) if count.isdigit() else 0)
 
 
+def daemon_identity(*, wsl_distro: str | None = None) -> str:
+    """Which start of the Docker daemon is answering: its default bridge network's ID (T306).
+
+    Measured on yulon-ubuntu, Docker 29.1.3: the daemon deletes and recreates
+    the default `bridge` network every time it starts (with live-restore off,
+    the default here and on Docker Desktop), so its `Id` changes and its
+    `Created` is the daemon's start time; `docker info`'s `ID` does not change.
+    `""` when it cannot be read (no daemon, no `bridge` network as with Windows
+    containers): the caller must then not assume either way.
+    """
+    proc = _docker(["network", "inspect", "bridge", "--format", "{{.Id}}"], wsl_distro=wsl_distro)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
     """Is this install's worldserver up? THREE-valued, and `None` is not "no".
 
