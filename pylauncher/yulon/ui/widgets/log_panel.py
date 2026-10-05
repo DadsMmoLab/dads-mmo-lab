@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import runner
+from yulon.after_stop import TrueAfterStop
 from yulon.log import get_logger
 from yulon.support import runlog
 from yulon.ui import lines
@@ -75,6 +76,14 @@ class Seams:
     line with the MOMENT it arrived.
     """
 
+
+STOPPED_THEN_FAILED = "Stopped. FAILED: "
+"""The header's opening when a stopped job ended on a failure that says what it left (T228).
+
+Stop was pressed, so "Stopped" comes first; the failure's own sentence follows
+because it says what state the server is in and what to press. Which failures
+those are is decided by type (`yulon.after_stop.TrueAfterStop`), never by words.
+"""
 
 _MAX_BLOCKS = 5000
 
@@ -381,7 +390,14 @@ class _StreamWorker(QObject):
         except Exception as exc:  # boundary: anything the job raises becomes a UI message
             ok = False
             message = f"{type(exc).__name__}: {exc}"
-            if self._stop:
+            if self._stop and isinstance(exc, TrueAfterStop):
+                # T228: NOT the Stop taking effect. What the route did after the
+                # Stop -- a rollback that stopped early, sources left on the new
+                # commits, a start now refused -- left the server in a state its
+                # sentence describes, and that sentence is the one the player
+                # needs. Kept as a failure; `_on_finished` puts "Stopped" first.
+                logger.warning(f"log panel job failed after a stop: {message}")
+            elif self._stop:
                 # A SOURCE THAT RAISES AFTER A STOP IS THE STOP TAKING EFFECT.
                 # `request_stop()` ends the job's children, and a terminated
                 # child exits non-zero, so `runner.stream()` raises
@@ -396,12 +412,14 @@ class _StreamWorker(QObject):
                 ok, message = True, "stopped"
             else:
                 logger.warning(f"log panel job failed: {message}")
-        if self._stop:
+        if self._stop and ok:
             # Said HERE and not only in the loop above, so all three ways out
             # agree. The break reports a stop; a source that returned on its own
             # cancel (`runner.interact()`) reached the end of its iterator and
             # would otherwise have reported "done"; and a source killed with it
-            # came through the `except`.
+            # came through the `except`. Only when `ok`: a failure still standing
+            # here is one the `except` kept on purpose (T228), and its sentence
+            # is what the panel shows.
             message = "stopped"
         self.finished.emit(ok, message)
         self._quit_own_thread()
@@ -1066,7 +1084,10 @@ class LogPanel(QWidget):
         # panel does not know whether it was following a log or building a
         # server.
         if self._stop_requested:
-            verdict = "cancelled"
+            # T228: a stopped job that still FAILED carries a sentence about what
+            # it left (`TrueAfterStop`; the worker decides by type), shown under
+            # "Stopped". Every other stopped job is a clean cancel.
+            verdict = "cancelled" if ok else STOPPED_THEN_FAILED + message
         elif ok and self._ended is not None:
             verdict = self._ended
         else:

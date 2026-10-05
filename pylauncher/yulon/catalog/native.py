@@ -87,6 +87,7 @@ from yulon import (
     server_build_presses,
     serverlock,
 )
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -2063,12 +2064,13 @@ def forget_owed_start(server_dir: Path) -> str:
     return ""
 
 
-class ServersLeftStopped(InstallerError):
+class ServersLeftStopped(InstallerError, TrueAfterStop):
     """A rebuild's rollback put the old build back and did NOT start it (T179 final round).
 
     The update route's world tables could not all be put back for it, and no start
     is allowed until "Finish the world update" has run (`start_refusal()`). Its own
     type so the route's closing note says the server is stopped, not running.
+    `TrueAfterStop` (T228): the log panel shows it after a Stop too.
     """
 
 

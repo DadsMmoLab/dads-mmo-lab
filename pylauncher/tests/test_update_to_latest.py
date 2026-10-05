@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
 from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
 
 # The CMaNGOS half of this file drives a REAL TBC install, and the machinery
@@ -49,6 +51,7 @@ from yulon.catalog.installer import (
 )
 from yulon.controller import Controller, StartRefused
 from yulon.docker import AttachedRun
+from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED, LogPanel
 
 PINNED = ENTRY.emulator.sources[0].rev or ""
 """The commit `catalog.json` pins the WotLK core to — the one every gate ran on."""
@@ -2330,6 +2333,120 @@ def test_a_rollback_that_stops_early_on_a_plain_rebuild_adds_nothing_about_sourc
     assert said.endswith(f"under their {native.ROLLBACK_TAG_SUFFIX} tags.")
     assert raised.value.sources_kept is False
     assert set(_heads(rec, server_dir).values()) == {OLD}, "Rebuild never moved them"
+
+
+def _stopped_in_the_ready_wait(
+    rec: Recorder, server_dir: Path, **overrides: object
+) -> tuple[LogPanel, list[tuple[bool, str]]]:
+    """An update press run in a real `LogPanel`, with Stop pressed while it waits for ready (T228).
+
+    The new build's ready wait blocks until the panel's Stop sets the press's
+    cancel, then answers "not ready", which is the order the m910q check met
+    (P9): build, recreate, ready wait, Stop. What the rollback then does is the
+    test's `overrides`.
+    """
+    cancel = threading.Event()
+    waiting = threading.Event()
+    answers = list(overrides.pop("answers", [False]))  # type: ignore[call-overload]
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        if not waiting.is_set():
+            waiting.set()
+            cancel.wait(HANG_BOUND)
+        return bool(answers.pop(0) if len(answers) > 1 else answers[0])
+
+    rebuild = bool(overrides.pop("rebuild", False))
+    made = engine(rec, wait_ready=wait_ready, **overrides)
+    options = InstallOptions(server_dir=server_dir)
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, message: finished.append((ok, message)))
+    panel.run(
+        lambda: (
+            made.rebuild(options, cancel=cancel)
+            if rebuild
+            else made.update_to_latest(options, cancel=cancel)
+        ),
+        title="Updating",
+        cancel=cancel,
+    )
+    pump_until(waiting.is_set, "the press reached the new build's ready wait")
+    panel.stop()
+    wait_for_panel(panel)
+    process_events()
+    return panel, finished
+
+
+def test_a_stop_whose_rollback_stopped_early_shows_what_the_press_left(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228: the sentence that says what state the server is in survives the Stop.
+
+    The m910q check (P9): Stop in the ready wait, then the rollback's first retag
+    failed. The press ended with "Putting ... back failed" and "The source
+    folders were left on the new commits", and the panel said only "cancelled".
+    """
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, **_retag_refused(rec))
+
+    assert panel.cancelled is True
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert EARLY_SENTENCES["retag-refused"] in header, header
+    assert header.endswith(native.SOURCES_LEFT_NOTE), header
+    assert len(finished) == 1 and finished[0][0] is False, finished
+    assert native.SOURCES_LEFT_NOTE in finished[0][1], "the tab's refusal gets the sentence too"
+    assert set(_heads(rec, server_dir).values()) == {NEW}, "the ground: the sources stayed moved"
+
+
+def test_a_stop_whose_new_build_was_kept_says_the_build_and_sources_were_kept(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228: the build came up and then stopped, so it was KEPT, and so were its sources."""
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(
+        rec, server_dir, answers=[True], world_output=lambda spec: ABORTED_AFTER_READY
+    )
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert header.endswith(native.SOURCES_KEPT_NOTE), header
+    assert finished and finished[0][0] is False, finished
+    assert set(_heads(rec, server_dir).values()) == {NEW}
+
+
+def test_a_stopped_rebuild_whose_rollback_left_the_servers_stopped_says_start_is_refused(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228: a start refusal now in force is said after a Stop, with what to press."""
+    rec, server_dir = _ready(tmp_path)
+    assert native.owe_start(server_dir) == ""
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, rebuild=True)
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "its servers were left STOPPED: " + MIXED_REFUSAL in header, header
+    assert finished and finished[0][0] is False, finished
+    assert rec.calls.count("start") == 0, "the ground: nothing was started"
+
+
+def test_a_stop_whose_rollback_put_the_old_build_back_still_says_only_cancelled(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The other half of T228: a rollback that did its job is a clean cancel.
+
+    Same press, same Stop, same ready wait; the only difference is that the old
+    build is put back and comes up, so the failure is a plain `InstallerError`.
+    The panel decides by the failure's type, never by its words: this sentence
+    is as long as the other one and says "put back" too.
+    """
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, answers=[False, True])
+
+    assert panel.cancelled is True
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+    assert set(_heads(rec, server_dir).values()) == {OLD}, "the ground: the sources went back"
 
 
 def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_and_its_new_one(
