@@ -160,7 +160,7 @@ from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.message_box import FittedMessageBox
+from yulon.ui.message_box import FittedMessageBox, ask_yes_no
 from yulon.ui.theme import (
     COLOR_BG_PARCHMENT,
     COLOR_GOLD_LIGHT,
@@ -16046,18 +16046,14 @@ class ControllerView(QWidget):
             logger.info(f"rebuild of {self.entry.id} refused before its question: {refused}")
             QMessageBox.warning(self, f"Rebuild {self.entry.name}", refused)
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Rebuild {self.entry.name}?",
-                rebuild_confirmation(
-                    self.entry,
-                    self.services.controller.server_dir,
-                    kept_build=self.services.kept_build is not None,
-                ),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Rebuild {self.entry.name}?",
+            rebuild_confirmation(
+                self.entry,
+                self.services.controller.server_dir,
+                kept_build=self.services.kept_build is not None,
+            ),
         ):
             logger.info(f"rebuild of {self.entry.id} declined at the confirmation")
             return False
@@ -16400,14 +16396,10 @@ class ControllerView(QWidget):
             return False
         if self._update_route_busy():
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Put {self.entry.name} back on the tested commit?",
-                route.pin_confirmation(),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Put {self.entry.name} back on the tested commit?",
+            route.pin_confirmation(),
         ):
             logger.info(f"return to the tested pin of {self.entry.id} declined")
             return False
@@ -16474,14 +16466,10 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Apply database updates to {self.entry.name}?",
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Apply database updates to {self.entry.name}?",
+            text,
         ):
             logger.info(f"database updates for {self.entry.id} declined at the confirmation")
             return False
@@ -16568,14 +16556,10 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Apply database corrections to {self.entry.name}?",
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Apply database corrections to {self.entry.name}?",
+            text,
         ):
             logger.info(f"database corrections for {self.entry.id} declined at the confirmation")
             return False
@@ -16643,14 +16627,10 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if not said_yes(
-            QMessageBox.question(
-                self,
-                f"Adopt {self.entry.name}'s databases as a finished import?",
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+        if not ask_yes_no(
+            self,
+            f"Adopt {self.entry.name}'s databases as a finished import?",
+            text,
         ):
             logger.info(f"adopting {self.entry.id} declined at the confirmation")
             return False
@@ -17086,22 +17066,11 @@ class ControllerView(QWidget):
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
     def _confirm(self, title: str, question: str, parent: QWidget | None = None) -> bool:
-        """One Yes/No dialog, defaulting to No, read through `said_yes()`.
+        """One Yes/No dialog, defaulting to No: `ask_yes_no()`'s, which fits the screen (T243).
 
-        `said_yes()` and never `== StandardButton.Yes` by hand: PySide6's
-        static `question()` returns a plain int on some builds, which is T33's
-        closed bug, and one helper is the one place that can be got right.
         `parent` is for a question the launcher window asked (T187); the tab otherwise.
         """
-        return said_yes(
-            QMessageBox.question(
-                parent if parent is not None else self,
-                title,
-                question,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-        )
+        return ask_yes_no(parent if parent is not None else self, title, question)
 
     def _note_tuning_owed(self, file: str, rule: tuning.ApplyRule | None = None) -> None:
         """Record that `file` has been written and the server has not picked it up.

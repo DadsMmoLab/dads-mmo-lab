@@ -23,7 +23,14 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 from tests import test_stop_waits_for_the_world as stop_world
-from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
+from tests.conftest import (
+    HANG_BOUND,
+    HANG_BOUND_MS,
+    process_events,
+    pump_until,
+    three_way_only,
+    wait_for_panel,
+)
 from yulon import apply as apply_module
 from yulon import (
     bot_population,
@@ -13297,7 +13304,8 @@ def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[object]:
         boxes.append(self)
         return which
 
-    monkeypatch.setattr(controller_view_module.QMessageBox, "exec", exec_)
+    # T243: the Yes/No questions are boxes too; they are still answered by `question`.
+    monkeypatch.setattr(controller_view_module.QMessageBox, "exec", three_way_only(exec_))
     return boxes
 
 
