@@ -370,6 +370,8 @@ def test_the_snapshot_is_first_and_the_record_is_forgotten_last(tmp_path: Path) 
         f"remove_volume:{project}_db-data",
         f"remove_volume:{project}_client-data",
         *[f"remove_image:{ref}" for ref in _images(rec.server_dir)],
+        *[f"remove_image:{ref}{native.PARKED_TAG_SUFFIX}" for ref in _images(rec.server_dir)],
+        *[f"remove_image:{ref}{native.ROLLBACK_TAG_SUFFIX}" for ref in _images(rec.server_dir)],
         f"remove_folder:{rec.server_dir}",
         "forget",
     ], rec.order
@@ -467,9 +469,59 @@ def test_only_this_installs_own_four_image_refs_are_removed(tmp_path: Path) -> N
     """`--rmi all` would take `mysql:8.4` with it; `--rmi local` would take nothing."""
     rec = _recorder(tmp_path)
     rec.uninstaller().run(keep_characters=False)
-    assert rec.removed_images == list(_images(rec.server_dir))
+    own = list(_images(rec.server_dir))
+    assert rec.removed_images == (
+        own
+        + [ref + native.PARKED_TAG_SUFFIX for ref in own]
+        + [ref + native.ROLLBACK_TAG_SUFFIX for ref in own]
+    )
     assert not any("mysql" in ref for ref in rec.removed_images)
     assert not any("alpine" in ref for ref in rec.removed_images)
+
+
+def test_uninstall_removes_the_parked_names_too(tmp_path: Path) -> None:
+    """T224: a kept build outlives its press on purpose, so Uninstall takes it with the rest.
+
+    Each of the four refs' `-parked` name; a name that is not there is "no such
+    image", which `docker.remove_image()` reads as done, so no warning is said.
+    """
+    rec = _recorder(tmp_path)
+    report = rec.uninstaller().run(keep_characters=False)
+    parked = [ref + native.PARKED_TAG_SUFFIX for ref in _images(rec.server_dir)]
+    assert len(parked) == 4 and set(parked) <= set(rec.removed_images), rec.removed_images
+    assert not [line for line in report.warnings if native.PARKED_TAG_SUFFIX in line], report
+
+
+def test_uninstall_forgets_the_kept_build_record_with_its_names(tmp_path: Path) -> None:
+    """Cold review: a folder the removal leaves behind must not keep a record of names now gone.
+
+    The fake's folder removal removes nothing, which is the case that matters.
+    """
+    rec = _recorder(tmp_path)
+    record = rec.server_dir / native.PARKED_BUILD_FILE
+    record.write_text('{"version": 1}\n', encoding="utf-8")
+    rec.uninstaller().run(keep_characters=False)
+    assert not record.exists()
+
+
+def test_uninstall_keeps_the_kept_build_record_while_docker_keeps_a_name(tmp_path: Path) -> None:
+    rec = _recorder(tmp_path, image_warning="Error response from daemon: read-only file system")
+    record = rec.server_dir / native.PARKED_BUILD_FILE
+    record.write_text('{"version": 1}\n', encoding="utf-8")
+    report = rec.uninstaller().run(keep_characters=False)
+    assert record.exists()
+    assert [line for line in report.warnings if "(a kept build) was left behind" in line]
+
+
+def test_uninstall_removes_a_stopped_builds_rollback_names_and_record(tmp_path: Path) -> None:
+    """T225 (live): a stopped compile keeps `-rollback` names past its press; Uninstall too."""
+    rec = _recorder(tmp_path)
+    record = rec.server_dir / native.STOPPED_BUILD_FILE
+    record.write_text('{"version": 1}\n', encoding="utf-8")
+    rec.uninstaller().run(keep_characters=False)
+    rollback = [ref + native.ROLLBACK_TAG_SUFFIX for ref in _images(rec.server_dir)]
+    assert set(rollback) <= set(rec.removed_images), rec.removed_images
+    assert not record.exists()
 
 
 def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_images(
@@ -1169,3 +1221,28 @@ def test_uninstall_takes_the_module_client_files_back_before_the_folder_and_name
 
     assert rec.order.index("take_back") < rec.order.index(f"remove_folder:{rec.server_dir}")
     assert "left in your game client: your own X, set aside as /c/Y" in report.warnings
+
+
+# -- T219: a Windows Centurion's map-data volume ------------------------------------------
+
+CENTURION_PROJECT = "yulon-wow-centurion-c808c548"
+WORLD_DATA = f"{CENTURION_PROJECT}_{composegen.WORLD_DATA_VOLUME}"
+"""What compose names the volume the template declares: `<project>_world-data`."""
+
+
+@pytest.mark.parametrize("keep", [True, False], ids=["ticked", "unticked"])
+def test_the_map_data_volume_is_removed_whether_or_not_characters_are_kept(
+    tmp_path: Path, keep: bool
+) -> None:
+    """T219 decision 3: it is a copy of the server folder's `data/`, which Uninstall deletes
+    either way, and a reinstall extracts the map data again -- unlike WotLK's `_client-data`,
+    whose maps are downloaded and live nowhere else."""
+    rec = _recorder(
+        tmp_path,
+        project=CENTURION_PROJECT,
+        volumes=[f"{CENTURION_PROJECT}_db-data", WORLD_DATA],
+    )
+    report = rec.uninstaller().run(keep_characters=keep)
+    assert WORLD_DATA in rec.removed_volumes
+    assert WORLD_DATA not in report.kept_volumes
+    assert (f"{CENTURION_PROJECT}_db-data" in report.kept_volumes) is keep

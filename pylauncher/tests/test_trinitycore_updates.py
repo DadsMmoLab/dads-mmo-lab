@@ -2804,3 +2804,21 @@ def test_a_tile_cut_short_with_its_old_date_kept_is_still_a_recount(box: Box) ->
     os.utime(tile, ns=(before.st_atime_ns, before.st_mtime_ns))
 
     assert box.engine().mmaps_status(box.server_dir).kept == 11
+
+
+def test_the_finish_and_its_start_are_refused_once_a_stopped_build_landed(box: Box) -> None:
+    """T225 (scoped re-review 7): the finish ends in a start, so it asks what every Start asks."""
+    on_the_built_commit(box)
+    box.leave_pending([f"{WORLD_SQL}/creature.sql"])
+    refs = box.engine().image_refs_at(box.server_dir)
+    assert native.remember_stopped_build(box.server_dir, native.StoppedBuild(refs, None, 1)) == ""
+    box.m.rec.image_ids[refs[0]] = "sha256:landed"
+    with pytest.raises(InstallerError) as refused:
+        box.finish()
+    assert str(refused.value) == f"{native.STOPPED_BUILD_LANDED_REFUSAL} Nothing was changed."
+    assert box.pending() is not None, "the world update still waits"
+    box.world.running = False
+    with pytest.raises(InstallerError) as also:
+        list(box.engine()._start_after_finish(context(box.m)))
+    assert str(also.value).startswith("The world update is finished, but "), also.value
+    assert native.STOPPED_BUILD_LANDED_REFUSAL in str(also.value)

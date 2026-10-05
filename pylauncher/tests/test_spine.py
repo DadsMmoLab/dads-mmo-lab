@@ -612,7 +612,7 @@ def test_families_maps_each_id_to_its_class_and_an_unknown_one_is_a_sentence() -
     with pytest.raises(InstallerError, match="install family this app does not have"):
         family_for(stranger)
     bare = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
-    with pytest.raises(InstallerError, match="install.native"):
+    with pytest.raises(InstallerError, match="native install section"):
         family_for(bare)
 
 
@@ -787,7 +787,7 @@ def test_a_folder_installed_as_another_family_is_refused_not_reinterpreted(
         ),
     )
     rec = Recorder()
-    with pytest.raises(InstallerError, match="installed as `cmangos`"):
+    with pytest.raises(InstallerError, match="installed as cmangos"):
         install(rec, server_dir)
     assert "clone" not in " ".join(rec.calls)
 
@@ -2471,6 +2471,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "name is written, never whether the client may be written: that is the step's own "
         "`dest`. A folder that cannot be listed raises, and the install stops"
     ),
+    ("catalog/world_data.py", "_folder_hash"): (
+        "T219. Lists the server folder's map-data folders (`dbc`, `maps`, ...) to hash each "
+        "file's path, size and modification time into the fingerprint a Windows world "
+        "server's volume copy is compared by. It decides no write by itself: what it answers "
+        "is a line in `data/.yulon-world-data`, and the copy inside the container is what "
+        "acts on it. A folder that is not there answers `-` (the server sees it empty); one "
+        "that cannot be listed raises, and `refresh()` then writes nothing and says so, so "
+        "the copy keeps following the last fingerprint written"
+    ),
     ("catalog/native.py", "folder_bytes"): (
         "T203 fix round 3. Adds up the sizes of the files under a server folder for "
         "preflight's credit to a resumed install; it never writes, never enters a link or a "
@@ -2496,6 +2505,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "lists the `Buildings/` this app's own extractor just filled, to count how many of the "
         "models the index places; its `except OSError` logs and answers None, which is 'no "
         "check ran' and warns about nothing - nothing is written on the strength of it"
+    ),
+    ("catalog/build_context.py", "_sorted_entries"): (
+        "T224. Lists the build context, the server folder, the way Docker's own walk "
+        "filters it, to fingerprint the files a finished build was made from. It decides no "
+        "write: it decides whether a kept build may be reused instead of compiling. Every "
+        "OSError, like every other fact it cannot read, answers None, and None never matches, "
+        "so the server is then compiled"
     ),
     ("catalog/families/sqlplan.py", "_listing"): (
         "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "

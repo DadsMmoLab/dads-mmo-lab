@@ -1282,6 +1282,66 @@ def test_an_install_whose_database_never_starts_says_so_instead_of_blaming_the_i
     assert "one-shot:ac-db-import" not in rec.calls
 
 
+def test_an_install_whose_database_never_starts_puts_the_log_command_under_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T248: one sentence on the line, and the install failure carries its Details.
+
+    Through the real `docker.start_database()`, handed what the engine hands it.
+    """
+    from tests.support_player_text import command_faults
+
+    server_dir = tmp_path / "wow"
+    monkeypatch.setattr(docker, "status", lambda **_k: [])
+    monkeypatch.setattr(docker, "_run", lambda *_a, **_k: None)
+    monkeypatch.setattr(docker, "wait_db_healthy", lambda *_a, **_k: False)
+    rec = Recorder(images=False)
+
+    def real_start_db(spec: docker.ContainerSpec, where: Path, **kwargs: str) -> object:
+        return docker.start_database(spec, where, timeout=0, **kwargs)
+
+    monkeypatch.setattr(rec, "start_db", real_start_db)
+    with pytest.raises(InstallerError) as raised:
+        install(rec, server_dir)
+
+    line, details = str(raised.value), raised.value.detail
+    assert line == (
+        "ac-database did not report healthy within 0s, so nothing was imported. "
+        "The database's own log says why."
+    ), line
+    assert command_faults(line) == [], line
+    assert "docker compose logs ac-database" in details
+
+
+@pytest.mark.parametrize("stage", ["verify", "start"])
+def test_an_import_or_start_refusal_keeps_its_details_in_the_install_failure(
+    tmp_path: Path, stage: str
+) -> None:
+    """T248: the import's post-check and the server start, wrapped by the engine, keep Details.
+
+    The detail rides on the `InstallerError`, never in its message, so a wrap
+    that quotes the message keeps the line words.
+    """
+    from tests.support_player_text import command_faults
+
+    server_dir = tmp_path / "wow"
+    refusal = docker.DockerRefusal(
+        "The database import ran, but the databases still read as absent.",
+        detail=docker.logs_command("ac-db-import", server_dir),
+    )
+    if stage == "verify":
+        rec = Recorder(images=False, verify_error=refusal)
+    else:
+        rec = Recorder(images=False, start_error=refusal)
+    with pytest.raises(InstallerError) as raised:
+        install(rec, server_dir)
+
+    line, details = str(raised.value), raised.value.detail
+    assert "still read as absent" in line
+    assert command_faults(line) == [], line
+    assert details == refusal.detail
+
+
 def test_starting_the_database_is_never_recorded_so_a_resume_does_it_again(
     tmp_path: Path,
 ) -> None:

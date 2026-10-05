@@ -409,7 +409,12 @@ def _kept(cause: BaseException, message: str) -> ApplyError:
     not turn it into something that broke, and wrapping Docker's own words must
     not make them Yu'lon's.
     """
-    return ApplyRefusal(message) if isinstance(cause, SaidByYulon) else ApplyError(message)
+    if not isinstance(cause, SaidByYulon):
+        return ApplyError(message)
+    refusal = ApplyRefusal(message)
+    # T248: what goes under Details travels with the sentence it explains.
+    refusal.detail = cause.detail
+    return refusal
 
 
 @dataclass(frozen=True)
@@ -1924,33 +1929,32 @@ def _no_adoption_message(refusal: _NoAdoption, rel: str, retry: str) -> str:
     messages = {
         _NoAdoption.NO_RECORD: (
             f"{rel} is already a git checkout and there is no record here of one this app "
-            f"made. Continuing would run `git fetch` and `git reset --hard` over it, which "
+            f"made. Continuing would reset it to a fresh copy of the module's repository, which "
             f"throws away anything you have changed there, so nothing was touched. {aside}"
         ),
         _NoAdoption.EDITED: (
             f"{rel} is a checkout of the repository this module comes from, but it has "
-            f"changes in it that were never committed. Continuing would run `git fetch` and "
-            f"`git reset --hard` over it, which throws those changes away, so nothing was "
+            f"changes in it that were never committed. Continuing would reset it to a fresh copy "
+            f"of the module's repository, which throws those changes away, so nothing was "
             f"touched. {aside}"
         ),
         _NoAdoption.TREE_UNSEEN: (
             f"{rel} is a checkout of the repository this module comes from, but git would "
             f"not say whether anything in it has been changed. Adopting it would mean "
-            f"running `git fetch` and `git reset --hard` over a folder this app could not "
-            f"look inside first, so nothing was touched. {aside}"
+            f"resetting a folder this app could not look inside first, so nothing was "
+            f"touched. {aside}"
         ),
         _NoAdoption.COMMITTED: (
             f"{rel} is a checkout of the repository this module comes from with nothing "
-            f"uncommitted in it, but it carries commits of your own. Continuing would run "
-            f"`git fetch` and `git reset --hard` over it, which moves those commits off the "
-            f"branch and leaves them reachable only through git's reflog, so nothing was "
-            f"touched. {aside}"
+            f"uncommitted in it, but it carries commits of your own. Continuing would reset "
+            f"it to the module's repository, which moves those commits off the branch and "
+            f"leaves them reachable only through git's reflog, so nothing was touched. {aside}"
         ),
         _NoAdoption.HISTORY_UNSEEN: (
             f"{rel} is a checkout of the repository this module comes from and nothing in it "
             f"has been changed, but this app could not reach that repository to check whether "
-            f"the checkout also carries commits of its own. It will not run `git fetch` and "
-            f"`git reset --hard` over a folder it could not finish checking, so nothing was "
+            f"the checkout also carries commits of its own. It will not reset a folder it "
+            f"could not finish checking, so nothing was "
             f"touched. That check needs the internet: get back online and {retry}. If the "
             f"checkout is your own work rather than an older install, move that folder aside "
             f"and {retry} instead."
@@ -2023,17 +2027,17 @@ def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: st
         ),
         _Destroys.EDITED: (
             f"{rel} has changes in it that are not committed. {doing} {item_id} "
-            f"runs `git reset --hard`, which would delete them. Commit them, stash "
-            f"them, or copy them somewhere else first. Nothing was changed."
+            f"resets that folder to the module's repository, which would delete them. Commit "
+            f"them, stash them, or copy them somewhere else first. Nothing was changed."
         ),
         _Destroys.TREE_UNSEEN: (
             f"git could not say whether {rel} has uncommitted changes in it, and {lower} "
-            f"{item_id} would run `git reset --hard` over whatever is there. Nothing "
+            f"{item_id} would reset whatever is there to the module's repository. Nothing "
             f"was changed."
         ),
         _Destroys.COMMITTED: (
             f"{rel} carries commits of its own that {url} does not have. {doing} "
-            f"{item_id} runs `git reset --hard`, which would move off them and "
+            f"{item_id} resets that folder to {url}, which would move off them and "
             f"leave them reachable only through git's reflog. Nothing was changed."
         ),
         _Destroys.HISTORY_UNSEEN: (
@@ -3138,8 +3142,8 @@ class Applier:
         rel = _rel(self.server_dir, clone)
         return (
             f"{rel} is a checkout of {found.remote}, not of {manifest.source.url}.\n\n"
-            f"Installing {manifest.id} here runs `git fetch` and `git reset --hard` over that "
-            f"folder to make it a checkout of {manifest.source.url}. Anything in it that "
+            f"Installing {manifest.id} here resets that folder to a fresh copy of "
+            f"{manifest.source.url}. Anything in it that "
             f"{found.remote} does not have is lost.\n\nReplace it?"
         )
 
@@ -5330,13 +5334,13 @@ def transaction_refusal(name: str, text: str) -> str:
         word = statement.split(None, 1)[0].upper() if statement.split() else ""
         shown = " ".join(statement.split())[:60]
         if word not in _TRANSACTION_SAFE:
-            return f"{name}: `{shown}` is not a row change or a read, {tail}"
+            return f"{name}: “{shown}” is not a row change or a read, {tail}"
         if word == "SET" and not all(
             _USER_VARIABLE_SET.match("SET " + part.strip())
             for part in statement[3:].split(",")
             if part.strip()
         ):
-            return f"{name}: `{shown}` sets more than a user variable, {tail}"
+            return f"{name}: “{shown}” sets more than a user variable, {tail}"
     return ""
 
 
