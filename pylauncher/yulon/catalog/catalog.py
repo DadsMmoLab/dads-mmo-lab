@@ -301,10 +301,11 @@ class ClientSpec(_Strict):
         default=False,
         description=(
             "Whether the steps after the check open the client's archives whatever their case "
-            "(T227). True only where they do: TrinityCore's client-data stage renames them in "
-            "its temporary extraction client to the names its map tools open. False (CMaNGOS, "
-            "whose tools read the player's own folder by exact name): on a disk that tells "
-            "cases apart, a required file found only under another case is refused, saying so."
+            "(T227). True where they do: TrinityCore's client-data stage renames them in its "
+            "temporary extraction client to the names its map tools open, and the CMaNGOS "
+            "extraction reads them through links carrying those names (T260). False: on a disk "
+            "that tells cases apart, a required file found only under another case is refused, "
+            "saying so."
         ),
     )
 
@@ -809,16 +810,6 @@ class CmangosData(_Strict):
     """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
 
     client: ClientSpec
-
-    @field_validator("client")
-    @classmethod
-    def _archives_by_exact_name(cls, value: ClientSpec) -> ClientSpec:
-        if value.archives_any_case:
-            raise ValueError(
-                "the CMaNGOS extraction opens the client's archives by exact name in the "
-                "player's own folder, so its client spec cannot set archives_any_case (T260)"
-            )
-        return value
 
     dockerfile: DockerfileSpec
     extract: ExtractPlan
