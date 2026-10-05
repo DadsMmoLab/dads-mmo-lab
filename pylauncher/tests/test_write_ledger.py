@@ -203,6 +203,24 @@ def test_deleting_a_docker_volume_is_a_write_and_the_ledger_is_the_place_it_is_n
     assert _sites_in(source) == {"f::docker volume rm"}
 
 
+def test_a_docker_delete_behind_a_spread_launcher_is_still_a_write() -> None:
+    """`[*launcher, "rm", "-f", name]` -- `git.py`'s clone container, ended on a Stop (T240).
+
+    The docker program comes first and is spread in, because it is a list (a WSL
+    distro's docker is `wsl.exe -d <distro> -- docker`). The walk stopped at the
+    first element that was not a string and so saw no verb at all. A spread
+    AHEAD of the verb is the program and is stepped over; one after the verb has
+    started ends the verb as before, so `['volume', *flags, 'rm']` is not read as
+    `volume rm`.
+    """
+    source = "def f(launcher, name):\n    return run([*launcher, 'rm', '-f', name])\n"
+    assert _sites_in(source) == {"f::docker rm"}
+    reading = "def f(prefix):\n    return run([*prefix, 'compose', 'ls', '--all'])\n"
+    assert _sites_in(reading) == set(), "a read behind a launcher is still a read"
+    split = "def f(flags, name):\n    return run(['volume', *flags, 'rm', name])\n"
+    assert _sites_in(split) == set(), "a spread inside the verb ends it"
+
+
 def test_writing_the_import_marker_is_a_write_even_though_it_is_not_the_sql_seam() -> None:
     """`sqlplan.write_marker()` -- the row every later press reads as "this import finished".
 

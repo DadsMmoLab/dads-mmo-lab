@@ -148,7 +148,9 @@ def test_a_stop_before_compose_tagged_anything_restores_nothing_and_keeps_the_ro
     tmp_path: Path,
 ) -> None:
     """The control: no tag moved, so nothing is put back -- but the `-rollback` names stay,
-    because a stopped compile can still land later (live, yulon-win11; `test_stop_mid_compile`)."""
+    because a stopped compile can still land later (seen live on a Windows 11 test machine;
+    `test_stop_mid_compile`).
+    """
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)

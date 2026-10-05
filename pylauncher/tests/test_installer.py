@@ -183,10 +183,19 @@ MODULE_SURFACE_AFTER_7_2 = {
     # upstream commit, which the update route remembers so the tab stops
     # offering it. An exception type, not machinery.
     "UpdateRefused",
+    # Added deliberately with T195's final fix (F1): where an install goes when
+    # nobody picked a folder, asked by the Catalog's suggestion and by the
+    # engine's own default alike, and the old default names it must not build a
+    # second server beside. A rule and its table, not machinery.
+    "FORMER_DEFAULT_DIRS",
+    "default_server_dir",
     # Added deliberately with T197: a rollback that stopped before the old build
     # was back, so the update route leaves its sources with the new one. An
     # exception type, not machinery.
     "RollbackNotDone",
+    # Added deliberately with T228: the mark two of this module's failure types
+    # carry so the log panel shows them after a Stop. A marker class, imported.
+    "TrueAfterStop",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",

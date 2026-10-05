@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import errno
 import os
+import threading
 from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
@@ -47,7 +48,9 @@ from typing import Any
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
+from tests.conftest import HANG_BOUND
 from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
+from tests.support_stop import compile_until_stopped, stop_when
 from tests.test_controller_view import _Ps, _services
 from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import client_folder
@@ -61,6 +64,7 @@ from yulon.docker import AttachedRun
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerView
 from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED
 
 OLD = "a" * 40
 NEW = "b" * 40
@@ -708,6 +712,88 @@ def test_a_new_build_that_does_not_come_up_with_no_rollback_says_nothing_was_put
     assert raised is not None and native.NO_ROLLBACK_BUILT in str(raised), raised
     assert rec.calls.count("recreate") == 1, "a restore was attempted with nothing to restore"
     assert not [c for c in rec.calls if c.startswith(("tag:", "rmi"))], rec.calls
+
+
+def test_a_stop_after_the_new_build_replaced_the_containers_with_no_rollback_says_so(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T228 cold review: no rollback, containers replaced, Stop in the ready wait.
+
+    The server is down on the new build with nothing to put back. That is what
+    the player must read, Stop or no Stop; "cancelled" over it says nothing.
+    Driven through the app's own Rebuild source.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    waiting = threading.Event()
+    gate: list[threading.Event] = []
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        waiting.set()
+        gate[0].wait(HANG_BOUND)
+        return False
+
+    _wired_to(monkeypatch, lambda: tbc_engine(rec, wait_ready=wait_ready))
+    rebuild = install_wiring.rebuild_for_app(TBC, server_dir)
+
+    def press(cancel: threading.Event) -> Any:
+        gate.append(cancel)
+        return rebuild(cancel)
+
+    panel, finished = stop_when(press, waiting, "the rebuild reached the new build's ready wait")
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert native.NO_ROLLBACK_BUILT in header, header
+    assert finished and finished[0][0] is False, finished
+    assert rec.calls.count("recreate") == 1, "the ground: the containers were replaced"
+
+
+def test_a_stop_during_a_compile_with_no_rollback_is_a_clean_cancel(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: nothing was replaced, so the server is as it was and Stop says so."""
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    compiling = threading.Event()
+    _wired_to(monkeypatch, lambda: tbc_engine(rec, build=compile_until_stopped(compiling)))
+    rebuild = install_wiring.rebuild_for_app(TBC, server_dir)
+    panel, finished = stop_when(rebuild, compiling, "the rebuild is compiling")
+
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+    assert "recreate" not in rec.calls, "the ground: no container was replaced"
+
+
+def test_a_stop_after_the_compile_but_before_any_container_moved_is_a_clean_cancel(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No rollback, the compile finished, the replace never started: nothing changed that runs.
+
+    The recreate's own preflight is held until Stop, then answers "no daemon".
+    The containers are the old build's, so this Stop left nothing to report.
+    """
+    rec, server_dir, _client = _tbc_images_gone(tmp_path)
+    reached = threading.Event()
+    gate: list[threading.Event] = []
+
+    def docker_ready() -> bool:
+        if "build" not in rec.calls:
+            return True
+        reached.set()
+        gate[0].wait(HANG_BOUND)
+        return False
+
+    _wired_to(monkeypatch, lambda: tbc_engine(rec, docker_ready=docker_ready))
+    rebuild = install_wiring.rebuild_for_app(TBC, server_dir)
+
+    def press(cancel: threading.Event) -> Any:
+        gate.append(cancel)
+        return rebuild(cancel)
+
+    panel, finished = stop_when(press, reached, "the compile finished and the replace was next")
+
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+    assert "recreate" not in rec.calls, "the ground: no container was replaced"
 
 
 def test_a_finished_compile_whose_recreate_refused_says_the_containers_are_as_they_were(

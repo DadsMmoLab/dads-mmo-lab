@@ -697,7 +697,12 @@ class Uninstaller:
             # Its own words, which never ask the person to delete the copy by hand.
             warnings.append(leftover)
 
-        self._remove_folder(self.server_dir)
+        try:
+            self._remove_folder(self.server_dir)
+        except PurgeError as exc:
+            if leftover:  # its words still reach the person: a flag of theirs, say (T198)
+                raise PurgeError(f"{exc} {leftover}") from exc
+            raise
 
         # LAST. A failure above leaves the record pointing at a server that is
         # still there, which is the failure a user can recover from.

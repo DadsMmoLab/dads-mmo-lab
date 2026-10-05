@@ -29,13 +29,14 @@ the decorations modules: upstream `Yulon` carries Baerthe's passes on those and
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QMouseEvent, QPaintEvent, QResizeEvent
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal, Slot
+from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPaintEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStyle,
     QStyleOptionButton,
     QStylePainter,
@@ -89,10 +91,10 @@ drift.
 """
 
 FAMILY_HINTS: dict[ManifestType, str] = {
-    "module": "compiled into the worldserver — a rebuild is owed before one of these runs",
+    "module": "compiled into the world server — it runs once you rebuild the server",
     "ale": "no rebuild — the world reloads them on restart",
     "keg": "Dad's MMO Lab bundles: server side plus a client addon",
-    "mod": "SQL and conf only — no compile; the importer applies the SQL",
+    "mod": "SQL and settings only — no compile; Yu'lon applies the SQL for you",
 }
 """The sentence under each card's title, saying what that family COSTS (T44 item 3).
 
@@ -615,8 +617,8 @@ def _chips_for(
             Chip(
                 "owed",
                 chip_update_label(behind),
-                f"{item_id}: {_upstream_has(behind)} It is part of the server: the server "
-                "install cloned it, no module manifest covers it, and it is updated with the "
+                f"{item_id}: {_upstream_has(behind)} It is part of the server: it came with "
+                "the server install and is updated with the "
                 f"server. This press is {CHIP_ACTION_LABELS['server_update']}, which asks first "
                 f"and then moves the server's code and {item_id} together to upstream's newest "
                 "and rebuilds.",
@@ -637,8 +639,8 @@ def _chips_for(
             Chip(
                 "owed",
                 chip_update_label(behind, release, key in session.updated),
-                said + "then re-deploys "
-                "and re-applies everything the manifest declares — and it may ask this "
+                said + "then sets it up "
+                "again the way an install does — and it may ask this "
                 "module's install questions again. It REFUSES rather than reset if the "
                 "folder is a different repository, has uncommitted changes in it, or "
                 "carries commits the upstream does not, and says which.",
@@ -978,6 +980,18 @@ different action for.
 """
 
 BUTTON_COLUMN_WIDTH = 110
+TEXT_COLUMN_SHARE = 2
+STATE_COLUMN_SHARE = 3
+"""How a module row splits its width between the name column and the state column (T193).
+
+Pure shares, whatever the text: both columns ask for no width of their own, which
+is what puts every row's badge at the same x. T75 gave the state column two
+shares to the text's one, measured when the columns still claimed their own
+hints on top; once they claim nothing, 1:2 left "TortoiseBots Manager (client
+addon)" cut at 1280x800 beside its GitHub link (review, measured). 2:3 holds
+the shipped names whole at 1280, and still gives the chip strip ~490px there --
+more than T75's 341px lock chip plus the overflow mark.
+"""
 """The shared width of every row's action column, so the buttons line up.
 
 A fixed width and not a layout-derived one: `Install` and `Remove` are different
@@ -1091,16 +1105,41 @@ class _ElidedLabel(QLabel):
         self.setWordWrap(False)
         self._relayout()
 
-    # No setter, deliberately: a row is REBUILT on every `set_rows()` (the panel
-    # says so in its own docstring), so a label whose text changes in place would
-    # be a mechanism with no caller -- and the one thing on this row that really
-    # does fill in late, the version, is a plain `QLabel` with `set_version()`.
+    def set_full_text(self, text: str) -> None:
+        """Replace the whole text in place: the row's version, which fills in late (T193).
+
+        The version became one of these so that a narrow row shows `7c02b1d · 20…`
+        rather than a glyph cut in half, and it is the one thing on a row that
+        changes after the row is built (`RowWidget.set_version()`).
+        """
+        self.full_text = text
+        self.setToolTip(text)
+        self._relayout()
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        """What the WHOLE text needs, whatever is on screen now (T193 review).
+
+        Answered from `text()` -- QLabel's own way -- the hint shrank to the
+        elided string, so a name a narrow window had cut never asked for its
+        room back: "All Races All …" at 1920, beside a 356px version.
+        """
+        hint = super().sizeHint()
+        margins = self.contentsMargins()
+        whole = self._whole_width() + margins.left() + margins.right() + 2 * self.margin()
+        return QSize(whole, hint.height())
+
+    def _whole_width(self) -> int:
+        """The whole text's advance, rounded UP: the integer `horizontalAdvance`
+        rounds a 221.4px name down to 221, and `elidedText` then cuts it in a
+        221px label (measured on "All Races All Classes (ARAC)")."""
+        return math.ceil(QFontMetricsF(self.font()).horizontalAdvance(self.full_text))
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
-        hint = super().minimumSizeHint()
+        hint = self.sizeHint()
         return QSize(
             min(hint.width(), self.fontMetrics().averageCharWidth() * ELIDED_LABEL_MIN_CHARS),
-            hint.height(),
+            super().minimumSizeHint().height(),
         )
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
@@ -1108,13 +1147,31 @@ class _ElidedLabel(QLabel):
         self._relayout()
 
     def _relayout(self) -> None:
-        width = self.width()
-        if width <= 0:
+        # The whole text until the label is on screen: an unshown label's width
+        # is a default nobody laid out, and `text()` is what tests read before
+        # anything is shown. Once shown, the room is the CONTENTS rect -- a
+        # style sheet's padding is not room for text (T193 review: measured
+        # against `width()`, a name that fitted was cut by its own padding).
+        if not self.isVisible():
+            super().setText(self.full_text)
+            return
+        room = max(0, self.contentsRect().width() - 2 * self.margin())
+        if self._whole_width() <= room:
             super().setText(self.full_text)
             return
         super().setText(
-            self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, width)
+            self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, room)
         )
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().showEvent(event)
+        self._relayout()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802  (Qt's own name)
+        """A restyle changes the font, and with it what fits in the same width."""
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._relayout()
 
 
 class _ChipButton(QPushButton):
@@ -1459,12 +1516,26 @@ class RowWidget(QFrame):
         box.setSpacing(10)
         outer.addLayout(box)
 
-        left = QVBoxLayout()
+        # The text column lives in a widget whose WIDTH the row decides (T193).
+        # As a bare layout its minimum was the unelided name, GitHub link and
+        # version, so a long name pushed this row's badge right of every other
+        # row's and, at 960, made the row wider than the list: a sideways
+        # scroll bar with Remove cut in half under it. `Ignored` hands the row
+        # the split -- `TEXT_COLUMN_SHARE` to `STATE_COLUMN_SHARE` -- whatever the
+        # text, and the name elides into what it is given, whole in its tooltip.
+        left_column = QWidget(self)
+        left_column.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        left = QVBoxLayout(left_column)
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(ROW_LINE_SPACING)
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
-        self.name_label = QLabel(data.name, self)
+        self.name_label = _ElidedLabel(data.name, self)
         self.name_label.setStyleSheet(f"color: {COLOR_TEXT_GOLD}; font-weight: bold;")
+        # First claim on the line (T193 review): its hint is the whole name, and
+        # the version and the conf paths after it ask for nothing (`Ignored`),
+        # so they share only what the name and the link leave. The name is cut
+        # only when the column cannot hold it even with both of them at zero.
         title_row.addWidget(self.name_label)
         if data.url is not None:
             # `Manifest.source.url` already resolves a slug to GitHub, so the
@@ -1478,10 +1549,19 @@ class RowWidget(QFrame):
         # The version, beside the name. Empty until the clone has been read --
         # `set_version()` fills it in place, so a late answer never costs the
         # user their selection or their open sections (T44 item 1).
-        self.version_label = QLabel(data.version or "", self)
+        self.version_label = _ElidedLabel(data.version or "", self)
         self.version_label.setFont(QFont("monospace"))
         self.version_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
-        title_row.addWidget(self.version_label)
+        # The first thing on this line to give way when the column is narrow
+        # (T193). The text column is GIVEN its width now, and at 960 that does
+        # not hold a name, the link and `7c02b1d · 2026-09-01` side by side.
+        # `Ignored` asks for nothing, so the name and the link are laid out
+        # first and the version takes the rest, elided from the right: the sha,
+        # the part somebody pastes, is the last of it to go, never a glyph cut
+        # in half, and the whole of it is the tooltip. Stretch 1 is what hands
+        # it that rest, and why the line no longer ends in a spacer.
+        self.version_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title_row.addWidget(self.version_label, 1)
         # The conf files this manifest writes, FOLDED onto the name line (T75).
         # They were a line of their own -- one per file, stacked -- which is a
         # paragraph of paths on a row whose subject is a module. Joined, elided
@@ -1491,10 +1571,12 @@ class RowWidget(QFrame):
             self.paths_label: _ElidedLabel | None = _ElidedLabel(", ".join(data.paths), self)
             self.paths_label.setFont(QFont("monospace"))
             self.paths_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+            # Behind the name, like the version (T193 review): a long list of
+            # paths must not cut the name it is about.
+            self.paths_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             title_row.addWidget(self.paths_label, 1)
         else:
             self.paths_label = None
-        title_row.addStretch(1)
         left.addLayout(title_row)
 
         # One line, elided, with the whole sentence in its tooltip. Wrapped, a
@@ -1510,9 +1592,14 @@ class RowWidget(QFrame):
             self.note_label = QLabel(data.note, self)
             self.note_label.setWordWrap(True)
             left.addWidget(self.note_label)
-        box.addLayout(left, 1)
+        box.addWidget(left_column, TEXT_COLUMN_SHARE)
 
-        middle = QHBoxLayout()
+        # The state column, on the same terms and for the same reason: its
+        # left edge -- the badge -- is then the same x on every row (T193).
+        middle_column = QWidget(self)
+        middle_column.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        middle = QHBoxLayout(middle_column)
+        middle.setContentsMargins(0, 0, 0, 0)
         middle.setSpacing(CHIP_SPACING)
         self.badge_label = QLabel(data.badge, self)
         # Three tones, and the pairing is by what the badge ASKS OF THE READER
@@ -1559,15 +1646,13 @@ class RowWidget(QFrame):
         # nothing is most of the list.
         self.chip_strip = _ChipStrip(buttons, data.chips, self)
         middle.addWidget(self.chip_strip, 1)
-        # TWO shares against the text column's one (T75 review). What this column
-        # carries is the row's STATE, and a chip that does not fit is a sentence
-        # in a tooltip -- which on the Steam Deck (1280x800, touch) is a sentence
-        # nobody can read. What the left column carries is prose, and it is
-        # already elided with the whole of it one hover away on a machine that
-        # HAS hover. Measured at 1280x800: an even split gave the strip 373px
-        # against a lock chip of 341 plus the mark, so `battlepass` drew no chip
-        # at all; two shares give it 533 and both of its chips are on screen.
-        box.addLayout(middle, 2)
+        # The larger share (T75 review, re-measured T193 -- see
+        # `STATE_COLUMN_SHARE`). What this column carries is the row's STATE,
+        # and a chip that does not fit is a sentence in a tooltip -- which on the
+        # Steam Deck (1280x800, touch) is a sentence nobody can read. Measured
+        # at 1280x800 for T75: an even split gave the strip 373px against a lock
+        # chip of 341 plus the mark, so `battlepass` drew no chip at all.
+        box.addWidget(middle_column, STATE_COLUMN_SHARE)
 
         self.install_button: QPushButton | None = None
         self.remove_button: QPushButton | None = None
@@ -1592,6 +1677,10 @@ class RowWidget(QFrame):
             column.addWidget(self.install_button)
         elif data.catalogued:
             self.remove_button = QPushButton("Remove", self)
+            # Destructive, so it looks it (T193 A9): the theme's red edge and
+            # fill, not Install's gold bevel. `panel_qss()` keeps the edge red
+            # under the panel's bevel.
+            self.remove_button.setProperty("danger", True)
             self.remove_button.clicked.connect(lambda: self.pressed_remove.emit(self.data.id))
             if not data.removable:
                 self.remove_button.setToolTip(data.remove_reason or "")
@@ -1666,7 +1755,7 @@ class RowWidget(QFrame):
 
     def set_version(self, version: str | None) -> None:
         """Show what this clone is at, or nothing. Never a placeholder."""
-        self.version_label.setText(version or "")
+        self.version_label.set_full_text(version or "")
 
     def set_selected(self, selected: bool) -> None:
         """Highlight, through the theme's own constants (T42 forbids touching `theme.py`)."""

@@ -233,6 +233,20 @@ class SoapChannel:
                 ),
                 indeterminate=True,
             )
+        if reply.outcome == "unreadable":
+            # A whole HTTP reply came back, so something IS listening, and the
+            # container state has nothing better to say (T226). It carried
+            # neither a result nor a fault, so whether the command ran is not
+            # known: indeterminate, never a channel that is off.
+            return Answer(
+                "unknown",
+                reply.text,
+                reason=(
+                    "the server answered, but its reply could not be read, so whether the "
+                    "command ran is not known"
+                ),
+                indeterminate=True,
+            )
         return Answer(
             "unknown",
             reply.text,

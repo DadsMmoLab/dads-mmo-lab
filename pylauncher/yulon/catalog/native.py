@@ -88,6 +88,7 @@ from yulon import (
     server_build_presses,
     serverlock,
 )
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog import (
     bot_count,
     build_context,
@@ -114,6 +115,7 @@ from yulon.catalog.installer import (
     UnsupportedPlatformError,
     UpdateRefused,
     WorldStoppedAfterReadyError,
+    default_server_dir,
     docker_unavailable,
     generated_compose_files,
     provision_lines,
@@ -1312,14 +1314,41 @@ class SourceVersion:
     """Whether "Return to the tested pin…" has anything to do."""
 
 
-def source_version(state: InstallState | None) -> SourceVersion:
+def source_version(state: InstallState | None, off: Sequence[SourceOff] = ()) -> SourceVersion:
     """Both halves of the version line, from one `InstallState`.
 
     Deliberately takes the state rather than reading it: the read is the
     caller's (`install_wiring`), and a function that read the file itself could
     not be handed the three shapes a test needs.
+
+    `off` (T217, the live check of 65315f9c) are the folders a failed update left
+    off their build (`sources_still_off()`). While there are any, every start is
+    refused with a sentence naming "Return to the tested pin…", so the press is
+    offered whatever the record says, and each such folder's row says the commit
+    it is really on: after the put-back the record reads "on the tested pin" for
+    a folder that is not.
     """
-    return SourceVersion(line=source_revs_line(state), past_the_pin=past_the_tested_pin(state))
+    if not off:
+        return SourceVersion(line=source_revs_line(state), past_the_pin=past_the_tested_pin(state))
+    by_repo = {row.repo: row for row in off}
+    rows = source_revs_line(state).splitlines() if state is not None else []
+    revs = state.source_revs if state is not None else ()
+    if len(revs) == 1 and rows:
+        rows = [f"{revs[0].repo}: {rows[0][0].lower()}{rows[0][1:]}"]
+    lines: list[str] = []
+    for rev, row in zip(revs, rows, strict=False):
+        lines.append(_off_row(by_repo.pop(rev.repo)) if rev.repo in by_repo else row)
+    lines.extend(_off_row(row) for row in by_repo.values())
+    return SourceVersion(line="\n".join(lines), past_the_pin=True)
+
+
+def _off_row(row: SourceOff) -> str:
+    """One version-line row for a folder off its build: what it is on, and that it is off."""
+    now = f"the folder is on {row.head[:7]}, " if row.head else "the folder is "
+    return (
+        f"{row.repo}: {now}not on {row.built[:7]}, the commit this server was built from, so "
+        "it is off its build"
+    )
 
 
 def import_reads_as_finished(state: docker.ImportState) -> bool:
@@ -1604,6 +1633,19 @@ The failed build is stopped before any tag moves back, and it may be force-stopp
 is still loading, the rollback waits and a press stops it regardless.
 """
 
+OLD_BUILD_STOPPING = (
+    "The build from before this update did not come up either; stopping its servers so they "
+    "do not restart over and over."
+)
+"""Said before the old build that failed after a rollback is stopped (T217 live proof, item 5)."""
+
+OLD_BUILD_WAIT_HINT = (
+    "The build from before this update is still loading and cannot be stopped cleanly yet. "
+    'Yu\'lon waits for it, or for it to restart; "Stop now anyway" or Stop stops it regardless '
+    "-- it may then be force-stopped."
+)
+"""`ROLLBACK_WAIT_HINT` for the stop of the old build that did not come up (T217)."""
+
 ROLLBACK_WAIT_HINT = (
     "The new build's world is still loading and cannot be stopped cleanly yet. Yu'lon waits "
     'for it; "Stop now anyway" or Stop stops it regardless -- it may then be force-stopped '
@@ -1691,6 +1733,106 @@ layer cache is precisely what makes a resume cheap — a user told "cancelled"
 without this sentence reaches for `docker builder prune` and throws away the
 thing that would have saved them three hours.
 """
+
+BUILDER_LOST = (
+    "because it lost its connection to Docker's builder part-way through: Docker closed it. "
+    "That happens when Docker's engine is restarted or killed under the build, and the commonest "
+    "reason is Docker running out of memory while it compiles. Check how much memory Docker has "
+    "with `docker info` (Total Memory). On Windows, Docker Desktop's WSL 2 engine has no memory "
+    "slider: Windows sizes it, through `memory=` in %UserProfile%\\.wslconfig, then "
+    "`wsl --shutdown` and start Docker Desktop again. On a Mac, and with Docker Desktop's "
+    "Hyper-V engine, it is Settings → Resources → Memory; Docker Engine on Linux uses the "
+    "machine's own memory. Then run it again: the steps the build had finished are kept in "
+    "Docker's build cache, so it picks up from the last of them instead of starting over. If it "
+    "happens again at the same place, restart Docker first."
+)
+"""T202: what a build that ended in `rpc error: code = Unavailable` is told.
+
+The T179 live check met it twice on one Windows VM (2026-10-03): once after a
+finished compile and 53 silent minutes, once mid-compile at 99%, and the build
+passed after Docker was given more memory. Before this the player read "the
+build failed (exit 1). Its last words were:" and a raw gRPC line. "Run it
+again" rather than "press Install": the same stage serves Rebuild. Windows
+first and in full because that is where it was seen, and because the Resources
+pane there has no memory control on the WSL 2 engine (review, 2026-10-04).
+"""
+
+BUILD_QUIET_NOTICE_SECONDS = 10 * 60
+"""How long a build may print nothing before the player is told so (T202).
+
+Measured, not guessed: the longest quiet stretch inside four real build logs
+(a CMaNGOS TBC install, three CMaNGOS Vanilla rebuilds, an AzerothCore
+rebuild) was about a minute, a CMake configure under WSL; a step that ends is
+followed by the next step's header within a second. The T179 stall that this
+exists for printed nothing for 53 minutes.
+
+**Silence is judged on output alone, on purpose.** The ticket proposed "no
+output AND no Docker CPU/disk progress". The T179 stall had both at once --
+Docker's VM at 0 % CPU and about 50 KB/s of disk writes for those 53 minutes
+(live log, phase A7) -- but output alone already separates 60 seconds from
+3,180 by a factor of fifty, and reading a VM's CPU differs on Docker Desktop
+for Windows, for Mac, under WSL and on a bare Linux engine. And because the
+watch only ever SAYS something, a false reading costs a sentence, never a build.
+"""
+
+BUILD_STALLED_SECONDS = 30 * 60
+"""How long a build may print nothing before it is called stalled (T202).
+
+Thirty times the longest quiet stretch measured, and still well short of the
+53 minutes the T179 stall sat silent before Docker ended it with an EOF.
+
+**Nothing is ended here, by the lead's ruling on review (2026-10-04).** A slow
+image export can be quiet for long on a slow disk, and on Windows ending the
+client is not even possible from here: `proc.terminate()` reaches docker.exe
+only, and the docker-compose.exe and docker-buildx.exe it started run on. So
+the player is told how to check and what to do, and restarting Docker -- which
+the sentence asks for -- is what ends a hung build: the client then fails with
+the EOF that `BUILDER_LOST` explains.
+"""
+
+
+def _minutes(seconds: float) -> str:
+    whole = max(1, round(seconds / 60))
+    return f"{whole} minute{'s' if whole != 1 else ''}"
+
+
+def build_quiet_notice() -> str:
+    """Said once a build has printed nothing for `BUILD_QUIET_NOTICE_SECONDS` (T202)."""
+    return (
+        f"The build has printed nothing for {_minutes(BUILD_QUIET_NOTICE_SECONDS)}. A working "
+        "build is rarely quiet for more than a minute or two, but it is left running; if it is "
+        f"still silent at {_minutes(BUILD_STALLED_SECONDS)} you are told how to check whether it "
+        "has stalled."
+    )
+
+
+def build_stalled_notice() -> str:
+    """Said once a build has printed nothing for `BUILD_STALLED_SECONDS` (T202). Ends nothing."""
+    return (
+        f"The build has printed nothing for {_minutes(BUILD_STALLED_SECONDS)} and looks stalled: "
+        "a working build is never that quiet. It is still running, and Yu'lon will not stop it. "
+        "To check: `docker info` should answer at once, and Docker's CPU use (Task Manager on "
+        "Windows, `top` on Linux or a Mac) should not sit near zero. If it has stalled, restart "
+        "Docker Desktop (on Linux, the docker service): the build then ends, and pressing Install "
+        "again -- or, for a rebuild, "
+        f"{server_build_presses.under_server_build(server_build_presses.REBUILD)} -- resumes it, "
+        "because the steps it finished are kept in Docker's build cache."
+    )
+
+
+@dataclass(frozen=True)
+class QuietWatch:
+    """`_pump()`'s silence watch: one notice after `notice_after`, one after `stalled_after`.
+
+    Silence is "no line from the subprocess" (see `BUILD_QUIET_NOTICE_SECONDS`
+    for why output alone). It SAYS things and ends nothing (`BUILD_STALLED_SECONDS`).
+    """
+
+    notice_after: float
+    stalled_after: float
+    notice: str
+    stalled: str
+
 
 DOWNLOAD_CANCEL_NOTE = (
     "The part of the download that finished is kept: the fetch resumes from where it stopped."
@@ -2103,17 +2245,56 @@ def forget_owed_start(server_dir: Path) -> str:
     return ""
 
 
-class ServersLeftStopped(InstallerError):
+class ServersLeftStopped(InstallerError, TrueAfterStop):
     """A rebuild's rollback put the old build back and did NOT start it (T179 final round).
 
     The update route's world tables could not all be put back for it, and no start
     is allowed until "Finish the world update" has run (`start_refusal()`). Its own
     type so the route's closing note says the server is stopped, not running.
+    `TrueAfterStop` (T228): the log panel shows it after a Stop too.
     """
+
+
+class RebuildChangedTheServer(InstallerError, TrueAfterStop):
+    """A failed rebuild that had already changed what the server runs (T228 cold review).
+
+    The new build replaced the containers with no rollback to put back, or the
+    rollback put the old build back on a database the new build may have written
+    to, running or not. Its sentence says which, and a Stop does not make it any
+    less true, so the log panel shows it after a Stop too. A failure that changed
+    nothing (a compile stopped before any container moved) stays a plain
+    `InstallerError`, which after a Stop is a clean cancel.
+
+    `up` False: the server is not up -- the new build never came up with nothing
+    to put back, or the old build was put back and did not report ready either --
+    so the update route's closing note must not say the folder agrees with what
+    is running.
+    """
+
+    def __init__(self, *args: object, up: bool = True) -> None:
+        super().__init__(*args)
+        self.up = up
+
+
+class _NotUpEither(str):
+    """`_restore_rollback()`'s sentence when the old build was put back and did not come up."""
 
 
 class _LeftStopped(str):
     """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
+
+
+class OldBuildNotStopped(InstallerError, TrueAfterStop):
+    """The old build did not come up after a rollback, and its servers could not be stopped (T217).
+
+    Its own type, NOT `ServersLeftStopped`: nothing here was stopped, so neither
+    the press nor its closing note may say so (scoped re-review of c5bf1b67).
+    `TrueAfterStop` (T228): the state it names outlives a Stop.
+    """
+
+
+class _NotStopped(str):
+    """`_restore_rollback()`'s sentence for `OldBuildNotStopped`."""
 
 
 class _DockerSilentForRestart(InstallerError):
@@ -2194,6 +2375,18 @@ SOURCES_PUT_BACK_STOPPED_NOTE = (
 )
 """`SOURCES_PUT_BACK_NOTE` for a press whose rollback left the servers stopped (T179)."""
 
+SOURCES_PUT_BACK_NOT_STOPPED_NOTE = (
+    "The source folders were put back on the commits they were on, so what is on disk is the "
+    "build that was put back."
+)
+"""`SOURCES_PUT_BACK_NOTE` when the old build did not come up and could not be stopped (T217)."""
+
+SOURCES_PUT_BACK_NOT_UP_NOTE = (
+    "The source folders were put back on the commits they were on, so what is on disk and the "
+    "build that was put back agree again; the server is not up."
+)
+"""`SOURCES_PUT_BACK_NOTE` for a press whose put-back build did not report ready (T228)."""
+
 SOURCES_PUT_BACK_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk and what "
     "your server is running agree again."
@@ -2212,7 +2405,8 @@ SOURCES_PUT_BACK_DATABASE_NOT_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk is the "
     "build that was put back; it stays stopped until its databases are restored."
 )
-"""`SOURCES_PUT_BACK_NOTE` when the update's copy of the databases could not go back (T217)."""
+"""`SOURCES_PUT_BACK_NOTE` when the update's copy of the databases could not go back, or went
+back and the old build still did not come up (T217)."""
 
 
 def _listed(names: Sequence[str]) -> str:
@@ -2360,6 +2554,51 @@ def copy_not_usable(copy: snapshot.Snapshot, reason: str) -> str:
     )
 
 
+def copy_old_build_down(
+    copy: snapshot.Snapshot,
+    put: snapshot.PutBack,
+    *,
+    older: Sequence[Path] = (),
+    not_stopped: str | None = None,
+) -> str:
+    """The old build did not come up on the databases put back (T217 live proof, item 5).
+
+    "Stopped" only when `not_stopped` is None, i.e. the stop went through; else it
+    says why it did not and sends the player to Stop (scoped re-review). `older`
+    are the copies earlier updates took, newest first, named only when there are
+    any -- with the next older one as the way back when the newest does not do it:
+    a world restarted during the update can change its databases before the
+    newest copy is taken (the re-live of 2026-10-05, item 5).
+    """
+    names = put.restored
+    left = f", as the new build left them in {_in_backups(put.safety)}" if put.safety else ""
+    earlier = (
+        " Copies earlier updates took before their new build started are kept too, newest "
+        f"first: {_in_backups(older)}. If Restore of the newest copy does not bring the old "
+        "build up, restore the next older copy listed."
+        if older
+        else ""
+    )
+    head = (
+        f"Its source folders and {_listed(names)} were put back, and the build from before "
+        "this update still did not come up"
+    )
+    kept = (
+        f"Every copy is kept: {_listed(copy.databases)} as they were just before the new build "
+        f"started are in {_in_backups(copy.files)}{left}.{earlier}"
+    )
+    if not_stopped is not None:
+        return (
+            f"{head}. Yu'lon could not stop its servers ({not_stopped}), so they may still be "
+            f"restarting: press Stop on the Server tab. {kept} Once it is stopped, restore the "
+            "one you want on Maintenance, then press Start."
+        )
+    return (
+        f"{head}, so its servers were stopped. {kept} Restore the one you want on Maintenance "
+        "(it works with the server stopped), then press Start."
+    )
+
+
 def copy_kept_note(copy: snapshot.Snapshot) -> str:
     """Added when the new build stays: its copy was not needed (T217, T197's exits)."""
     names = copy.databases
@@ -2400,8 +2639,9 @@ SOURCES_OFF_FILE = ".yulon-sources-off.json"
 """A rollback could not put a source folder back on the commit the running build came from.
 
 Written by the update route beside the install record (T217), read by every
-Start (`Controller.start()`), which warns and still starts the image it has
-(the owner's word, 2026-10-04: Start warns, Rebuild refuses). Forgotten once
+start (`Controller.refuse_start()`), which REFUSES while a folder it names is
+off its commit (the owner's decision on T217 (a), 2026-10-05; it warned until
+then), as Rebuild does. Forgotten once
 every folder it names is back on its commit, or by a Rebuild or update that
 succeeds. `{"version": 1, "sources": [{"repo", "dest", "commit"}]}`.
 """
@@ -2436,6 +2676,21 @@ def forget_sources_off(server_dir: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning(f"could not remove {path}: {exc}")
+
+
+def source_off_its_build(dest: Path, head: str, built: str) -> str:
+    """Rebuild's refusal of a folder off the commit its build came from (T217): one sentence.
+
+    Said by the press (`_refuse_sources_off_their_build()`) and, before its
+    question, by the view (`rebuild_refusal_before_asking()`).
+    """
+    update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+    return (
+        f"{dest} is on {head[:7]}, but this server was built from {built[:7]}, so rebuilding "
+        f"it now would compile a mix of the two. Put it back with `git -C {dest} checkout "
+        f"--detach --force {built}`, or press {update} to move every source together. Nothing "
+        "was changed."
+    )
 
 
 PARKED_BUILD_FILE = ".yulon-parked-build.json"
@@ -2539,7 +2794,7 @@ def forget_parked_build(server_dir: Path) -> str:
 STOPPED_BUILD_FILE = ".yulon-stopped-build.json"
 """A rebuild was stopped mid-compile, and Docker may still finish that build (T225).
 
-Measured on yulon-win11, 2026-10-05: Stop pressed during the compile, the live
+Measured on a Windows 11 test machine, 2026-10-05: Stop pressed during the compile, the live
 tag still on the old image two minutes later -- and about 13 minutes after the
 Stop BuildKit exported a new image and moved the live tag onto it. So a press
 whose compile was cancelled or abandoned keeps its `-rollback` names and writes
@@ -2750,53 +3005,108 @@ def read_head_file(dest: Path) -> str | None:
     try:
         head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
         if not head.startswith("ref: "):
-            return head or None
+            return _a_commit(head)
         ref = head[len("ref: ") :]
         loose = gitdir.joinpath(*ref.split("/"))
         if loose.is_file():
-            return loose.read_text(encoding="utf-8").strip() or None
+            # A loose ref that itself says `ref: …` is not a commit: unknown, not a
+            # refusal (scoped re-review of c5bf1b67).
+            return _a_commit(loose.read_text(encoding="utf-8").strip())
         for line in (gitdir / "packed-refs").read_text(encoding="utf-8").splitlines():
             sha, _, name = line.partition(" ")
             if name == ref:
-                return sha
+                return _a_commit(sha)
     except OSError:
         return None
     return None
 
 
-def sources_off_warning(server_dir: Path) -> str | None:
-    """What a Start says while `SOURCES_OFF_FILE` names a folder still off its commit; else None.
+_COMMIT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
-    Never raises and never refuses. A folder back on its commit is not named,
-    and once none is left the record is forgotten.
+
+def _a_commit(text: str) -> str | None:
+    """`text` if it is a full commit id (SHA-1 or SHA-256), else None."""
+    return text if _COMMIT_ID.fullmatch(text) else None
+
+
+@dataclass(frozen=True)
+class SourceOff:
+    """One folder `SOURCES_OFF_FILE` names that is still off the commit its build came from."""
+
+    repo: str
+    dest: Path
+    built: str
+    """The full commit the server's build was made from, which the folder should be on."""
+    head: str | None
+    """What `.git/HEAD` says the folder is on now; None when it cannot be read as a commit."""
+
+
+def sources_still_off(server_dir: Path) -> tuple[SourceOff, ...]:
+    """The folders `SOURCES_OFF_FILE` names that are still off their build (T217). Never raises.
+
+    Reads `.git/HEAD` (`read_head_file()`), no git run. Once none is left the
+    record is forgotten. The one reading behind the start refusal and the
+    Modules tab's version line and "Return to the tested pin…", so the two
+    cannot disagree about whether a folder is off.
     """
     path = server_dir / SOURCES_OFF_FILE
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
+        return ()
     except (OSError, ValueError) as exc:
-        logger.warning(f"{path} could not be read ({exc}); not warning from it")
-        return None
+        logger.warning(f"{path} could not be read ({exc}); not reading it")
+        return ()
     rows = raw.get("sources") if isinstance(raw, dict) else None
-    off: list[str] = []
+    off: list[SourceOff] = []
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
         dest, commit = Path(str(row.get("dest", ""))), str(row.get("commit", ""))
-        if not commit or read_head_file(dest) == commit:
+        head = read_head_file(dest)
+        if not commit or head == commit:
             continue
-        off.append(
-            f"{row.get('repo', dest.name)} in {dest} is not on {commit[:7]}, the commit this "
-            f"server was built from; put it back with "
-            f"`git -C {dest} checkout --detach --force {commit}`"
-        )
+        off.append(SourceOff(str(row.get("repo", dest.name)), dest, commit, head))
     if not off:
         forget_sources_off(server_dir)
-        return None
+    return tuple(off)
+
+
+def _on_now(row: SourceOff) -> str:
     return (
-        f"{'; '.join(off)}. The server runs the image it has, but its world server reads its "
-        "database updates from that folder."
+        f"is on {row.head[:7]}, not on {row.built[:7]}"
+        if row.head
+        else (f"is not on {row.built[:7]}")
+    )
+
+
+def sources_off_refusal(server_dir: Path) -> str | None:
+    """Why no start may run while `SOURCES_OFF_FILE` names a folder still off its commit; else None.
+
+    The owner's decision on T217 (a), 2026-10-05: Start REFUSES (it warned until
+    then). The live proof showed the warned start's old world server apply the
+    database updates it found in the off-commit module folder and crash-loop.
+    Read by `Controller.refuse_start()`, so Start, Start and play, the launcher's
+    PLAY, Restart and Recreate all refuse; NOT by the engine's `start_refusal()`,
+    because "Return to the tested pin…" is one of the two ways out it names, and
+    the Modules tab offers it while this refuses (`source_version()`).
+
+    Each `git` command is on a line of its own (the owner's T296 rule: a command
+    the player types stays, on its own line). Never raises.
+    """
+    off = sources_still_off(server_dir)
+    if not off:
+        return None
+    named = "; ".join(f"{row.repo} in {row.dest} {_on_now(row)}" for row in off)
+    commands = "\n".join(f"git -C {row.dest} checkout --detach --force {row.built}" for row in off)
+    back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    one = len(off) == 1
+    return (
+        f"{named}, the commit this server was built from, and its world server would apply the "
+        f"database updates in {'that folder' if one else 'those folders'}, so the server is not "
+        f"started: press {back}, or put the {'folder' if one else 'folders'} back with "
+        f"{'this command' if one else 'these commands'} and press {rebuild}:\n{commands}"
     )
 
 
@@ -2810,6 +3120,7 @@ class _UpdateCopy:
     put: snapshot.PutBack | None = None
     take_failed: bool = False
     put_failed: bool = False
+    old_build_down: bool = False
 
 
 REPAIR_FILES_LABEL = "Repair server files…"
@@ -3389,6 +3700,139 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         logger.warning(f"could not record install progress in {path}: {exc}")
 
 
+BUILD_CACHE_FILE = ".yulon-build-cache.json"
+"""How much build cache Docker held as this install's unfinished build first started (T203).
+
+Preflight credits a resumed build with the cache it ADDED since, never with the
+whole machine's: Yu'lon never prunes, so the cache on a machine with two servers
+is mostly the other one's, and crediting it let a second server's resume pass
+the floor on space the first server's database volume needs (review,
+2026-10-04). A file of its own and not a key in `STATE_FILE`, because the spine
+writes the record from its own copy at every stage end and on failure
+(`_run_one()`, `_record_error()`), so a key a stage wrote mid-way would be gone
+by the next write.
+
+`finished` is what makes the figure the FIRST attempt's. A build that starts
+while the file says an earlier one never finished keeps the lower of the two
+figures (`build_cache_baseline_for()`): writing the new one over it credited a
+second failed build with nothing, because its starting figure already held the
+first one's compile (review of PR 294, 2026-10-04). What starts a figure anew:
+a build that finished (`finished: true`), and an uninstall, which deletes the
+folder. A fresh install never meets an earlier figure: with no install record
+the guard lets through only an empty folder -- this file is deliberately NOT
+one of `OUR_OWN_FILES`, so a folder holding it is not empty -- or a git
+checkout, which the clone stage then refuses.
+"""
+
+
+BUILD_CACHE_ASKING = (
+    "Asking Docker how much build cache it already holds, so that if this build fails, the "
+    "next press is not asked again for the space it took. This can take up to two minutes."
+)
+"""Said before `stage_build` asks (T203): `buildx du`, then `system df`, get 60 s each."""
+
+
+def write_build_cache_baseline(
+    server_dir: Path, cache_bytes: int | None, *, finished: bool = False
+) -> None:
+    """Record the build cache this build starts on; `None` (Docker would not say) credits nothing.
+
+    `finished=True` once the build has ended well, so the next build starts its
+    own figure. Best-effort: a file that cannot be written is logged, and a
+    missing or torn one credits nothing.
+    """
+    try:
+        (server_dir / BUILD_CACHE_FILE).write_text(
+            json.dumps({"baseline_bytes": cache_bytes, "finished": finished}) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning(f"could not record the build cache this build starts on: {exc}")
+
+
+def _build_cache_record(server_dir: Path) -> dict[str, object] | None:
+    try:
+        parsed = json.loads((server_dir / BUILD_CACHE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def read_build_cache_baseline(server_dir: Path) -> int | None:
+    """The recorded starting figure, or `None` for a missing, unreadable or garbled file."""
+    record = _build_cache_record(server_dir)
+    value = record.get("baseline_bytes") if record is not None else None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def build_cache_baseline_for(server_dir: Path, measured: int | None) -> int | None:
+    """The figure a build starting now on `measured` bytes of cache records (`BUILD_CACHE_FILE`).
+
+    After a build that did not finish, the lower of its figure and `measured`:
+    the cache has only grown by what that build compiled, which this one reuses,
+    or it was pruned, and then only what is there now can be reused. `None` on
+    either side is "not known", so the other figure stands.
+    """
+    record = _build_cache_record(server_dir)
+    earlier = (
+        read_build_cache_baseline(server_dir)
+        if record is not None and record.get("finished") is not True
+        else None
+    )
+    if earlier is None:
+        return measured
+    if measured is None:
+        return earlier
+    return min(earlier, measured)
+
+
+def folder_bytes(folder: Path) -> int | None:
+    """What the files under `folder` add up to, in bytes; `None` when it cannot be listed (T203).
+
+    Preflight credits a resumed install with what its finished stages already
+    put in the server folder (`Spent.server_dir_bytes`). Found by the m910q
+    live test of PR 294 (2026-10-04): a one-drive press after a lost builder
+    was asked again for the whole server-folder share although the 2.20 GiB
+    checkout it sizes was already there.
+
+    Every miss counts SHORT, which credits less and so asks for more: a link or
+    a Windows reparse point (junction, OneDrive placeholder) is neither entered
+    nor counted, since what it stands for is not this folder's, and an entry or
+    a subfolder that cannot be looked at adds nothing. Only a folder that cannot
+    be listed at all is `None`, which credits nothing.
+    """
+    total = 0
+    pending = [folder]
+    first = True
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError as exc:
+            if first:
+                logger.info(f"could not measure {folder}: {exc}")
+                return None
+            continue
+        first = False
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            # A symlink looked at without following it is neither a folder nor a
+            # file below, so it is skipped there; a Windows junction looks like a
+            # folder and is told apart only by its reparse-point attribute.
+            if getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                pending.append(Path(entry.path))
+            elif stat.S_ISREG(st.st_mode):
+                total += st.st_size
+    return total
+
+
 @dataclass(frozen=True)
 class Secrets:
     """What a stage may need that must never be printed: the database password.
@@ -3572,6 +4016,22 @@ class ServersDownWork:
     puts back its copy of the databases a new build changes (`snapshot`), and then
     this says what went back, or that nothing was changed because the new build
     never started.
+    """
+    came_back: Callable[[], None] = lambda: None
+    """Once the old build the rollback started has REPORTED READY (T217 live proof, item 5).
+
+    The update route forgets its older copies here and nowhere earlier in a
+    rollback: until the old build is up, an older copy may be the only one that
+    can bring it back. Must not raise.
+    """
+    did_not_come_back: Callable[[], Callable[[str | None], str] | None] = lambda: None
+    """When the old build the rollback started did not report ready (T217 live proof, item 5).
+
+    A sentence-maker means: stop its servers rather than leave them restarting,
+    then say what it returns -- given None once they stopped, or why the stop
+    failed (scoped re-review: "stopped" only after a stop) -- in place of
+    `database()`'s. None keeps the rollback's own sentence, with the servers as
+    they are. Must not raise.
     """
     finishes_start_refusal: bool = True
     """This work finishes what refuses a start, so `rebuild()` need not ask first (T217).
@@ -3989,6 +4449,23 @@ def _line_around(text: str, found: re.Match[str]) -> str:
     start = text.rfind("\n", 0, found.start()) + 1
     end = text.find("\n", found.end())
     return (text[start:] if end < 0 else text[start:end]).strip()
+
+
+def _spell_elapsed(seconds: float) -> str:
+    """`31 -> "31 seconds"`, `70 -> "1 minute 10 seconds"`, `180 -> "3 minutes"` (T223).
+
+    For the waits for Docker, which measure seconds and say them: `_spell_seconds()`
+    rounds to whole minutes from 30 seconds up, and a 31-second wait read "Docker
+    answered after 1 minute." on yulon-win11 (2026-10-05).
+    """
+    total = int(round(seconds))
+    if total == 0:
+        return "less than a second"
+    minutes, rest = divmod(total, 60)
+    parts = [f"{minutes} minute{'s' if minutes != 1 else ''}"] if minutes else []
+    if rest:
+        parts.append(f"{rest} second{'s' if rest != 1 else ''}")
+    return " ".join(parts)
 
 
 def _spell_seconds(seconds: float) -> str:
@@ -4638,6 +5115,10 @@ class Seams:
     changed_lines: Callable[[Path, str, str, str], tuple[str, ...] | None] = _git_changed_lines
     """T179: one file's `+`/`-` lines between two commits; `None` when git could not say."""
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
+    build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
+    """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
+    folder_bytes: Callable[[Path], int | None] = folder_bytes
+    """What the server folder already holds; preflight counts it for a resumed build (T203)."""
     image_id: Callable[[str], str | None] = docker.image_id
     """T224/T225: the image a ref names, or None. A rebuild reads whether its live tags moved
     (against their `-rollback` names) and whether a kept build's names still hold it."""
@@ -4999,6 +5480,7 @@ class Seams:
             changed_files=repo.changed_files,
             changed_lines=repo.changed_lines,
             images_built=on(docker.images_built, wsl_distro=distro),
+            build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
             context_fingerprint=_no_fingerprint,
@@ -5272,10 +5754,10 @@ class StagedInstaller:
     # -- the contract ----------------------------------------------------
 
     def server_dir(self, options: InstallOptions) -> Path:
-        """Where this install goes: what the user picked, or the entry's default under $HOME."""
+        """Where this install goes: what the user picked, or `default_server_dir()` under $HOME."""
         if options.server_dir is not None:
             return options.server_dir
-        return Path.home() / self.entry.install.default_server_dir
+        return default_server_dir(self.entry, Path.home())
 
     def preflight(
         self,
@@ -6384,7 +6866,7 @@ class StagedInstaller:
 
         Returns None when Docker answered, else the seconds spent asking -- which is
         what the refusal says, because a duration a user reads is one that was
-        measured (`_spell_seconds()`). Says `saying` when the first ask goes
+        measured (`_spell_elapsed()`). Says `saying` when the first ask goes
         unanswered and one sentence when Docker answers late; silent when it
         answers at once.
 
@@ -6430,7 +6912,7 @@ class StagedInstaller:
             if answered:
                 yield (
                     f"Docker answered after "
-                    f"{_spell_seconds(self._seams.monotonic() - started)}."
+                    f"{_spell_elapsed(self._seams.monotonic() - started)}."
                 )
                 return None
         return self._seams.monotonic() - started
@@ -6517,7 +6999,7 @@ class StagedInstaller:
             # Its servers were stopped by the restore before the tags moved back
             # (`ROLLBACK_STOPPING`), so they are left stopped, on the old build.
             raise _DockerSilentForRestart(
-                f"Docker did not answer for {_spell_seconds(waited)}, so the build from before "
+                f"Docker did not answer for {_spell_elapsed(waited)}, so the build from before "
                 f"this rebuild is back on its tags but was not started: its servers are "
                 f"stopped. Once Docker answers, press Start."
             )
@@ -6526,7 +7008,7 @@ class StagedInstaller:
             # (`_restore_rollback()`), or T170's when nothing was kept: said here too,
             # they were said twice (cold review).
             raise InstallerError(
-                f"Docker did not answer for {_spell_seconds(waited)} after the build finished. "
+                f"Docker did not answer for {_spell_elapsed(waited)} after the build finished. "
                 f"Check that Docker is running."
             )
         yield (
@@ -6889,7 +7371,7 @@ class StagedInstaller:
                 if cancel is not None and cancel.is_set():
                     failure = STOPPED_AS_THE_BUILD_FINISHED
             if not built and kept and self._build_exit == docker.CANCELLED_RETURNCODE:
-                # T225 (live, yulon-win11): a stopped compile can still land 13 minutes
+                # T225 (seen live on Windows 11): a stopped compile can still land 13 minutes
                 # later, so the `-rollback` names stay, whatever the ids say now.
                 kept_note = self._remember_the_stopped_build(server_dir, refs, parking)
                 message = f"{exc} {STOPPED_BUILD_NOTE}{kept_note}"
@@ -6942,6 +7424,8 @@ class StagedInstaller:
                 # build has no old one to go back to, so one would leave nothing runnable.
                 message = f"{failure} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
+                if touched:
+                    raise RebuildChangedTheServer(message, up=False) from exc
                 raise InstallerError(message) from exc
             message = yield from self._restore_rollback(
                 ctx,
@@ -6962,6 +7446,8 @@ class StagedInstaller:
             self._record_error(server_dir, ctx.state, message_said)
             if isinstance(message, _LeftStopped):
                 raise ServersLeftStopped(message_said) from exc
+            if isinstance(message, _NotStopped):
+                raise OldBuildNotStopped(message_said) from exc
             if isinstance(message, _NotPutBack):
                 # T197: the tags still name the new build (or are mixed), so the
                 # update route must not put the old sources back under it.
@@ -6987,6 +7473,12 @@ class StagedInstaller:
                     f"{message_said} {warned}" if warned else message_said,
                     touched=message.touched,
                     mixed=message.mixed,
+                ) from exc
+            if touched:
+                # The old build is back, running or not, on whatever the new one
+                # wrote into the database: `_restore_rollback()` says so.
+                raise RebuildChangedTheServer(
+                    message_said, up=not isinstance(message, _NotUpEither)
                 ) from exc
             raise InstallerError(message_said) from exc
         except BaseException:
@@ -7566,6 +8058,8 @@ class StagedInstaller:
                 keep=family.keep if family is not None else lambda: iter(()),
                 done=family.done if family is not None else lambda: iter(()),
                 database=lambda: self._copy_database_sentence(copy),
+                came_back=lambda: self._forget_older_copies(server_dir, copy),
+                did_not_come_back=lambda: self._old_build_down(copy),
                 finishes_start_refusal=family is not None and family.finishes_start_refusal,
             )
             try:
@@ -7648,8 +8142,8 @@ class StagedInstaller:
                     left_over = forget_owed_start(server_dir)
                     if left_over:
                         also += f" {left_over}"
-                # T217: the database stays with the new build too; its copy is kept.
-                self._forget_older_copies(server_dir, copy)
+                # T217: the database stays with the new build too; its copy is kept, and
+                # so are the older ones -- no build reported ready (live proof, item 5).
                 also += self._copy_kept(copy)
                 self._record_source_revs(
                     server_dir,
@@ -7678,17 +8172,30 @@ class StagedInstaller:
                     sources_failed.extend(
                         (yield from self._restore_the_folder(moved, server_dir, opts, state, press))
                     )
+                if isinstance(exc, OldBuildNotStopped):
+                    # T217: the old build may still be restarting; no "stopped", and
+                    # no "agree again" about a server that does not run.
+                    raise OldBuildNotStopped(f"{exc} {SOURCES_PUT_BACK_NOT_STOPPED_NOTE}") from exc
                 if isinstance(exc, ServersLeftStopped):
                     # T179: nothing runs, so the note must not say it does. T217: and
                     # when it is a folder or the database that did not go back, the
                     # note says that instead.
                     if sources_failed:
                         note = SOURCES_NOT_ALL_BACK_NOTE
-                    elif copy.put_failed:
+                    elif copy.put_failed or copy.old_build_down:
                         note = SOURCES_PUT_BACK_DATABASE_NOT_NOTE
                     else:
                         note = SOURCES_PUT_BACK_STOPPED_NOTE
                     raise ServersLeftStopped(f"{exc} {note}") from exc
+                if isinstance(exc, RebuildChangedTheServer):
+                    # T228: the rebuild's sentence is true after a Stop, and so is
+                    # this one; the type carries that through. T217: never "agree
+                    # again" after a folder that did not go back.
+                    if sources_failed:
+                        note = SOURCES_NOT_ALL_BACK_NOTE
+                    else:
+                        note = SOURCES_PUT_BACK_NOTE if exc.up else SOURCES_PUT_BACK_NOT_UP_NOTE
+                    raise RebuildChangedTheServer(f"{exc} {note}", up=exc.up) from exc
                 raise InstallerError(f"{exc} {_sources_note(sources_failed)}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
@@ -7951,7 +8458,7 @@ class StagedInstaller:
         says what actually went wrong.
 
         Returns the sources that would not go back (T217), and remembers them in
-        `SOURCES_OFF_FILE` so every Start warns until they are back.
+        `SOURCES_OFF_FILE` so every start is refused until they are back.
         """
         failed = yield from self._put_sources_back(moved)
         if failed:
@@ -8026,7 +8533,8 @@ class StagedInstaller:
                 logger.warning(f"could not put {dest} back on {old}: {exc}")
                 yield (
                     f"{source.repo} in {dest} could NOT be put back on {old[:7]} ({exc}). That "
-                    f"folder is now ahead of the server that is running: put it back with "
+                    "folder is still on the commit this press moved it to, not the commit the "
+                    "build this server has was made from: put it back with "
                     f"`git -C {dest} checkout --detach --force {old}`."
                 )
                 failed.append((source, dest, old, str(exc)))
@@ -8069,7 +8577,9 @@ class StagedInstaller:
             copy.put_failed = True
             raise LeaveStopped(copy_not_put_back(copy.taken, str(exc))) from exc
         yield copy_put_back_line(copy.put)
-        self._forget_older_copies(server_dir, copy)
+        # NOT forgotten here: the old build has not started yet, and until it reports
+        # ready an older copy may be the only one that brings it back (live proof
+        # 2026-10-05, item 5). `came_back` forgets them.
 
     @staticmethod
     def _copy_kept(copy: _UpdateCopy) -> str:
@@ -8085,6 +8595,20 @@ class StagedInstaller:
         if copy.put is not None:
             return copy_put_back_database(copy.put, not_copied=copy.not_copied)
         return None
+
+    @staticmethod
+    def _old_build_down(copy: _UpdateCopy) -> Callable[[str | None], str] | None:
+        """`did_not_come_back` for the update route: a sentence-maker once its copy went back."""
+        taken, put = copy.taken, copy.put
+        if taken is None or put is None:
+            return None
+        copy.old_build_down = True
+        older = snapshot.older_copies(taken.directory, taken.files)
+
+        def say(not_stopped: str | None) -> str:
+            return copy_old_build_down(taken, put, older=older, not_stopped=not_stopped)
+
+        return say
 
     def _forget_older_copies(self, server_dir: Path, copy: _UpdateCopy) -> None:
         """Keep only this press's copy (owner, 2026-10-04), once it is not the only good one."""
@@ -8409,8 +8933,7 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build's servers could not be stopped ({exc}); "
-                    f"the tags still name the new build, all of them. The old images are on "
-                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"the tags still name the new build, all of them. {self._old_images(kept)}",
                     touched=touched,
                 )
         else:
@@ -8433,7 +8956,7 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back on its tags was "
                     f"not possible either: Docker did not answer for another "
-                    f"{_spell_seconds(waited)}. No container was replaced, so the server is "
+                    f"{_spell_elapsed(waited)}. No container was replaced, so the server is "
                     f"still running the build it had if it is up, but the image tags name the "
                     f"new build, which has never started; the old images are on the daemon "
                     f"under their {ROLLBACK_TAG_SUFFIX} tags.",
@@ -8452,8 +8975,8 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
-                    f"onto ({problem}); the tags still name the new build, all of them. The "
-                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"onto ({problem}); the tags still name the new build, all of them. "
+                    f"{self._old_images(kept)}",
                     touched=touched,
                     # T223 (lead, under owner answer D1): untouched, the new build never
                     # started, so no Start may run it.
@@ -8472,16 +8995,16 @@ class StagedInstaller:
                         f"{failure} Putting the build from before this rebuild back failed "
                         f"part-way ({problem}) and undoing it failed too, so the tags are "
                         f"MIXED: {', '.join(mixed)} name the old build and the rest name the "
-                        f"new one. Do not start this server until they agree; the old images "
-                        f"are under their {ROLLBACK_TAG_SUFFIX} tags.",
+                        f"new one. Do not start this server until they agree. "
+                        f"{self._old_images(kept)}",
                         touched=touched,
                         mixed=True,
                     )
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back failed "
                     f"({problem}), and the {len(undone)} tag(s) already moved were moved back, "
-                    f"so the tags still name the new build, all of them. The old images are "
-                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"so the tags still name the new build, all of them. "
+                    f"{self._old_images(kept)}",
                     touched=touched,
                     untested=not touched,
                 )
@@ -8606,15 +9129,79 @@ class StagedInstaller:
                 # T223 (cold review): never started, so not "did not report ready",
                 # and nothing of it runs on the database yet.
                 return _LeftStopped(f"{failure} {second}{said}{stopped_database}{back_failed}")
-            return (
+            down = servers_down.did_not_come_back() if servers_down is not None else None
+            if down is not None:
+                # T217 live proof, item 5: the old build crash-looped on the
+                # databases put back. Its servers are stopped rather than left
+                # restarting, and the sentence names the copies that can restore
+                # it, never "starts on the databases it knows" -- and "stopped"
+                # only once they are (scoped re-review of c5bf1b67).
+                not_stopped = yield from self._stop_the_old_build(ctx)
+                # Said once when the old build failed as the new one did: the
+                # re-live of 2026-10-05 printed the same crash-loop sentence twice.
+                why = ", for the same reason." if str(second) in failure else f": {second}"
+                said_down = (
+                    f"{failure} The build from before this rebuild was put back, but it did "
+                    f"not come up either{why}{said}\n{down(not_stopped)}{back_failed}"
+                )
+                if not_stopped is not None:
+                    return _NotStopped(said_down)
+                return _LeftStopped(said_down)
+            return _NotUpEither(
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
             )
         yield from self._release(letting_go)
+        if servers_down is not None:
+            servers_down.came_back()
         return (
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+
+    def _stop_the_old_build(self, ctx: StageContext) -> Generator[str, None, str | None]:
+        """Stop the old build that did not come up after a rollback (T217). Never raises.
+
+        Returns None once its servers are stopped, else why they could not be, so
+        the press never claims a stop it did not make. A world that restarts while
+        the stop waits for it to load (CMaNGOS) is a crash loop that never loads,
+        so its restart ends the wait (T159's control), and the wait's hint goes
+        with the panel's "Stop now anyway".
+        """
+        spec = self.entry.container_spec()
+        yield OLD_BUILD_STOPPING
+        control = replace(_stop_control(ctx, rollback=True), restart_ends_the_wait=True)
+
+        def stop_it(say: docker.OutputSink) -> None:
+            self._seams.stop_servers(spec, ctx.server_dir, control=replace(control, say=say))
+
+        try:
+            yield from _with_hint(_speaking(stop_it, control.abandon), OLD_BUILD_WAIT_HINT)
+        except docker.DockerCommandError as exc:
+            logger.warning(f"could not stop the old build of {self.entry.id}: {exc}")
+            return str(exc)
+        return None
+
+    def _old_images(self, kept: Sequence[str]) -> str:
+        """Where the build from before is, ASKED rather than assumed (m910q P9).
+
+        A rollback that stopped early said "the old images are on the daemon
+        under their -rollback tags" right after Docker had answered "No such
+        image: ...-rollback": the names had been removed out of band. So the
+        daemon is asked, and the sentence says what it answered.
+        """
+        gone = [ref for ref in kept if self._seams.images_built([ref]) is False]
+        if gone:
+            return (
+                f"Docker no longer has {', '.join(gone)}, so the build from before this "
+                f"rebuild cannot be put back from them."
+            )
+        if any(self._seams.images_built([ref]) is None for ref in kept):
+            return (
+                f"Yu'lon could not ask Docker whether the old images are still under their "
+                f"{ROLLBACK_TAG_SUFFIX} tags."
+            )
+        return f"The old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
 
     def _use_or_clear_the_kept_build(
         self,
@@ -9245,14 +9832,36 @@ class StagedInstaller:
                     )
                 continue
             if not head.startswith(expected):
-                raise InstallerError(
-                    f"{dest} is on {head[:7]}, but this server was built from {expected[:7]}, "
-                    "so rebuilding it now would compile a mix of the two. Put it back with "
-                    f"`git -C {dest} checkout --detach --force {expected}`, or press "
-                    f"{server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)}"
-                    " to move every source together. Nothing was changed."
-                )
+                raise InstallerError(source_off_its_build(dest, head, expected))
         return tuple(unchecked)
+
+    def rebuild_refusal_before_asking(self, server_dir: Path) -> str | None:
+        """What `_refuse_sources_off_their_build()` would refuse, asked before the question.
+
+        T217 live proof (item 3): Rebuild asked its whole question -- an hour's
+        compile, the server down -- and then refused in no time. The view asks
+        this first, and it refuses ONLY where the press would (scoped re-review):
+        `.git/HEAD` is read first (`read_head_file()`, no git run), and only a
+        folder it says is off its build is asked again of the press's own reader
+        (`Seams.head_sha`). Where git cannot answer the press goes on, and so
+        does this: None. No record or no recorded build is None too.
+        """
+        state = read_state(server_dir, valid=self.stage_names())
+        if state is None:
+            return None
+        for source in self.sources_that_move():
+            recorded = state.rev_for(source.repo)
+            built = recorded.built.split()[0] if recorded is not None and recorded.built else ""
+            if not built:
+                continue
+            dest = server_dir / source.dest
+            seen = read_head_file(dest)
+            if seen is None or seen.startswith(built):
+                continue
+            head = self._seams.head_sha(dest)
+            if head is not None and not head.startswith(built):
+                return source_off_its_build(dest, head, built)
+        return None
 
     def _claim_before_writing(
         self, server_dir: Path, state: InstallState, started_empty: bool
@@ -9663,12 +10272,41 @@ class StagedInstaller:
 
         The daemon is asked only when the record already says `build`, so a
         fresh install and an early resume ask nothing they did not ask before.
+
+        T203: a press that will run the build AGAIN -- every recorded stage
+        before it done, and the build not spent -- is credited with the build
+        cache Docker GAINED since this folder's build last started
+        (`BUILD_CACHE_FILE`), which the build reuses (`Spent.build_cache_bytes`).
+        No record of that start, or a cache now smaller than it, credits
+        nothing: the rest of the machine's cache may be another server's.
+
+        The same press is also credited with what the server folder already
+        holds (`Spent.server_dir_bytes`, `folder_bytes()`): the checkout and
+        whatever else the finished stages wrote there, which the m910q live test
+        of PR 294 (2026-10-04) found asked for again on one drive.
         """
-        if not state.has("build"):
+        if state.has("build") and self._seams.images_built(self.image_refs_at(server_dir)) is True:
+            return preflight.Spent(build=True)
+        if not self._resumes_at_build(state):
             return preflight.NOTHING_SPENT
-        if self._seams.images_built(self.image_refs_at(server_dir)) is not True:
-            return preflight.NOTHING_SPENT
-        return preflight.Spent(build=True)
+        folder = self._seams.folder_bytes(server_dir)
+        held = folder if folder is not None and folder > 0 else 0
+        baseline = read_build_cache_baseline(server_dir)
+        cache = self._seams.build_cache_bytes() if baseline is not None else None
+        added = cache - baseline if cache is not None and baseline is not None else 0
+        return preflight.Spent(build_cache_bytes=max(added, 0), server_dir_bytes=held)
+
+    def _resumes_at_build(self, state: InstallState) -> bool:
+        """Is every recorded stage before `build` in this folder's record? (T203)
+
+        A family with no `build` stage never resumes at one.
+        """
+        stages = self.stages()
+        names = [stage.name for stage in stages]
+        if "build" not in names:
+            return False
+        before = stages[: names.index("build")]
+        return all(state.has(stage.name) for stage in before if stage.recorded)
 
     # -- the guard -------------------------------------------------------
 
@@ -10964,6 +11602,12 @@ class StagedInstaller:
                 yield (
                     "Docker would not say whether this install is built, so it is being rebuilt."
                 )
+        # T203: what the cache holds as this build starts, so the next press's
+        # preflight can credit only what THIS build added to it -- or, after an
+        # attempt that did not finish, what that one added (`BUILD_CACHE_FILE`).
+        yield BUILD_CACHE_ASKING
+        baseline = build_cache_baseline_for(ctx.server_dir, self._seams.build_cache_bytes())
+        write_build_cache_baseline(ctx.server_dir, baseline)
         # Two sentences for one action, because "on a first install" is the
         # wrong half of the truth for the press that is deliberately rebuilding
         # a finished one, and this feature is about not telling a user something
@@ -10991,6 +11635,12 @@ class StagedInstaller:
                     ),
                     cancel=ctx.cancel,
                     stage="build",
+                    watch=QuietWatch(
+                        notice_after=BUILD_QUIET_NOTICE_SECONDS,
+                        stalled_after=BUILD_STALLED_SECONDS,
+                        notice=build_quiet_notice(),
+                        stalled=build_stalled_notice(),
+                    ),
                 )
             except InstallerError:
                 # The command could not be run at all: nothing of it can land later.
@@ -11024,6 +11674,7 @@ class StagedInstaller:
                 f"computer's internet connection, then {again}."
             )
         self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE, from_build=True)
+        write_build_cache_baseline(ctx.server_dir, baseline, finished=True)
         yield "The build finished."
 
     def stage_start_db(self, ctx: StageContext) -> Iterator[str]:
@@ -11716,6 +12367,7 @@ class StagedInstaller:
         *,
         cancel: threading.Event | None,
         stage: str,
+        watch: QuietWatch | None = None,
     ) -> Generator[str, None, docker.AttachedRun]:
         """Turn a push-style docker call into yielded lines, without buffering the run.
 
@@ -11742,6 +12394,11 @@ class StagedInstaller:
 
         `stage` names the activity for the progress line's field; see
         `lines.relayed()`.
+
+        `watch` is the build's silence watch (T202): after `notice_after`
+        seconds with no line its notice is said, after `stalled_after` its
+        stalled notice, each once per silence. It ends nothing and sets
+        nothing -- see `BUILD_STALLED_SECONDS` for the ruling and why.
         """
         queued: queue.Queue[str | None] = queue.Queue()
         outcome: list[docker.AttachedRun] = []
@@ -11758,11 +12415,14 @@ class StagedInstaller:
         worker = threading.Thread(target=work, daemon=True, name="yulon-install-output")
         worker.start()
         try:
-            while True:
-                item = queued.get()
-                if item is None:
-                    break
-                yield item
+            if watch is None:
+                while True:
+                    item = queued.get()
+                    if item is None:
+                        break
+                    yield item
+            else:
+                yield from _watched(queued, watch)
         except BaseException:
             # Abandonment, or an exception thrown INTO this frame — never the
             # normal path, which leaves the loop by `break` once the worker has
@@ -11798,6 +12458,13 @@ class StagedInstaller:
         """
         if run.returncode == docker.CANCELLED_RETURNCODE:
             raise InstallerError(_cancelled_message(what, note))
+        if run.returncode != 0 and from_build and docker.builder_connection_lost(run.tail):
+            # T202: said in words before the quote, which alone told the
+            # player nothing (a raw gRPC line, left-truncated).
+            raise InstallerError(
+                f"{what} failed (exit {run.returncode}) {BUILDER_LOST} Its last words were: "
+                f"{docker.last_words(run.tail, from_build=from_build)}"
+            )
         if run.returncode != 0:
             raise InstallerError(
                 f"{what} failed (exit {run.returncode}). Its last words were: "
@@ -11884,6 +12551,36 @@ the extraction has left. The number is read from `runner` rather than typed
 here a second time: `_SHUTDOWN_TIMEOUT_SECONDS` answers the same question one
 layer down, and `test_spine.py` pins that the two agree.
 """
+
+
+def _watched(queued: queue.Queue[str | None], watch: QuietWatch) -> Iterator[str]:
+    """`_pump()`'s read loop with T202's silence watch: it says, and never ends anything.
+
+    The clock restarts on every line, so only an unbroken silence counts: a
+    build that prints once a minute for four hours is never told anything.
+    """
+    quiet_since = time.monotonic()
+    said = 0  # 0: nothing yet this silence; 1: the notice; 2: the stalled notice too
+    while True:
+        marks = (watch.notice_after, watch.stalled_after)
+        timeout = None if said >= 2 else max(0.0, quiet_since + marks[said] - time.monotonic())
+        try:
+            item = queued.get(timeout=timeout)
+        except queue.Empty:
+            quiet = time.monotonic() - quiet_since
+            if said == 0 and quiet >= watch.notice_after:
+                said = 1
+                yield watch.notice
+            elif said == 1 and quiet >= watch.stalled_after:
+                said = 2
+                logger.warning(f"the build has printed nothing for {quiet:.0f}s; told the player")
+                yield watch.stalled
+            continue
+        if item is None:
+            return
+        quiet_since = time.monotonic()
+        said = 0
+        yield item
 
 
 def _put_all(queued: queue.Queue[str | None], line: str, stage: str) -> None:

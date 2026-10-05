@@ -340,3 +340,37 @@ def test_a_yes_no_default_spelled_as_a_word_is_shown_as_that_answer(
     (combo,) = dialog.findChildren(QComboBox)
     assert combo.currentText() == shown
     assert dialog.answers() == {"on": answer}
+
+
+def test_the_dialog_names_the_module_and_not_its_catalog_id(qapp: object) -> None:
+    """C20 (T194): "Auction House Bot (mod-ah-bot) asks for this…" showed the file's id."""
+    from PySide6.QtWidgets import QLabel
+
+    manifest = _ahbot()
+    dialog = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
+    shown = [label.text() for label in dialog.findChildren(QLabel) if not label.isHidden()]
+
+    assert manifest.name != manifest.id  # type: ignore[attr-defined]
+    assert any(manifest.name in text for text in shown), shown  # type: ignore[attr-defined]
+    assert not any(f"({manifest.id})" in text for text in shown), shown  # type: ignore[attr-defined]
+    assert f"({manifest.id})" not in dialog.notes()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("family", "item", "key", "subject"),
+    [
+        ("ale", "battlepass", "enabled", "battle pass"),
+        ("ale", "unlimitedammo", "enabled", "ammo"),
+        ("ale", "sitmeanrest", "regen_aura", "sit"),
+    ],
+)
+def test_a_question_says_what_it_is_about(
+    qapp: object, family: str, item: str, key: str, subject: str
+) -> None:
+    """C20 (T194): "Enabled?" on its own, in a dialog of several, does not say what is on."""
+    manifest = wotlk_modules.store().load(family, item)
+    dialog = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
+    keys = [prompt.key for prompt in manifest.prompts]  # type: ignore[attr-defined]
+    question = dialog.questions()[keys.index(key)]
+
+    assert subject in question.lower(), question

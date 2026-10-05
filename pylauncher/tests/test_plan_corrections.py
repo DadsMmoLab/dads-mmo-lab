@@ -1379,3 +1379,24 @@ def test_a_press_whose_dialog_no_longer_describes_the_databases_sends_nothing(
         pressed(engine, tmp_path, check)
     assert db.scripts[sent_before:] == []
     assert "hotfix_v2" not in db.tables("mangos")
+
+
+def test_the_corrections_press_opens_the_page_its_log_is_on(
+    qapp: object, ps: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pressed on the Server tab's banner, the job's lines are on the Modules page, shown (T191)."""
+    from tests.conftest import pump_until
+
+    route = _Route("stale")
+    view = _view(ps, tmp_path, route)
+    tabs = view._tabs  # type: ignore[attr-defined]
+    titles = [tabs.tabText(index) for index in range(tabs.count())]
+    tabs.setCurrentIndex(titles.index("Server"))
+    _database(ps, view, up=True)
+    _answer(monkeypatch, yes=True)
+    view.corrections_banner_button.click()  # type: ignore[attr-defined]
+    pump_until(lambda: len(route.pressed) == 1, "the corrections press ran")
+
+    assert tabs.currentWidget().isAncestorOf(view.rebuild_log), (  # type: ignore[attr-defined]
+        f"the corrections ran on {tabs.tabText(tabs.currentIndex())!r}"
+    )

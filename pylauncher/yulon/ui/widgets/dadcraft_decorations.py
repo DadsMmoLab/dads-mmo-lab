@@ -12,10 +12,11 @@ import math
 import random
 
 import shiboken6
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QEnterEvent,
+    QFontMetricsF,
     QHideEvent,
     QLinearGradient,
     QPainter,
@@ -23,6 +24,7 @@ from PySide6.QtGui import (
     QPaintEvent,
     QPen,
     QRadialGradient,
+    QResizeEvent,
     QShowEvent,
 )
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
@@ -95,6 +97,28 @@ def format_dadcraft_tooltip(
     return "\n".join(lines)
 
 
+def realm_tone(status: str) -> str:
+    """What a realm status says, in five words: "up", "between", "restarting", "down", "unknown".
+
+    The badge's colour and the sidebar's status dot (T192) both read this, so
+    the two cannot drift apart: a status the badge calls in between is one the
+    dot draws amber. "unknown" is its own answer, not "down" -- Docker did not
+    answer, and nothing is known about the realm (T188).
+    """
+    status = status.lower()
+    if status in ("running", "online", "ready", "up"):
+        return "up"
+    if status in ("starting", "importing", "working", "building", "stopping", "partial"):
+        # T188 C4/C5: "stopping" and "partial" used to fall through to OFFLINE
+        # while the realm was still up. In between, like starting.
+        return "between"
+    if status in ("restarting", "loop"):
+        return "restarting"
+    if status == "unknown":
+        return "unknown"
+    return "down"
+
+
 class DadcraftRealmBadge(QWidget):
     """A glowing realm status badge with classic Dadcraft gem styling."""
 
@@ -129,21 +153,13 @@ class DadcraftRealmBadge(QWidget):
         """Update the displayed status with appropriate gem lighting and text."""
         changed = status.lower() != self._status
         self._status = status.lower()
-        if self._status in ("running", "online", "ready", "up"):
+        tone = realm_tone(self._status)
+        if tone == "up":
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E824C, stop:1 #145A32)"
             border_color = COLOR_UNCOMMON
             text_color = "#E8F8F5"
             display_text = "● REALM ONLINE"
-        elif self._status in (
-            "starting",
-            "importing",
-            "working",
-            "building",
-            "stopping",
-            "partial",
-        ):
-            # T188 C4/C5: "stopping" and "partial" used to fall through to OFFLINE
-            # while the realm was still up. Same amber as starting: in between.
+        elif tone == "between":
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B7950B, stop:1 #7D6608)"
             border_color = COLOR_GOLD_BRIGHT
             text_color = COLOR_GOLD_LIGHT
@@ -151,12 +167,12 @@ class DadcraftRealmBadge(QWidget):
                 "stopping": "◈ STOPPING",
                 "partial": "◐ PARTLY UP",
             }.get(self._status, "◈ STARTING / BUSY")
-        elif self._status in ("restarting", "loop"):
+        elif tone == "restarting":
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1B4F72, stop:1 #154360)"
             border_color = COLOR_RARE
             text_color = "#EBF5FB"
             display_text = "◆ RESTARTING"
-        elif self._status == "unknown":
+        elif tone == "unknown":
             # T188: Docker did not answer, so nothing is known about the realm.
             # The offline sheet's neutral colours, with words that do not claim it.
             bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
@@ -182,6 +198,75 @@ class DadcraftRealmBadge(QWidget):
             self.status_changed.emit(self._status)
 
 
+REALM_TITLE_MIN_CHARS = 8
+"""How much of the header's server name survives the narrowest window (T192):
+enough to see which game it is, the whole of it one hover away."""
+
+
+class _RealmTitle(QLabel):
+    """The header's server name: one line, shortened to the room it is given (T192).
+
+    It asks for the whole name and settles for `REALM_TITLE_MIN_CHARS`, so a
+    narrow window shortens the name before it squeezes the update check or the
+    badge. `full_text` is the name; `text()` is what is on screen.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.full_text = ""
+        self.setWordWrap(False)
+
+    def set_full_text(self, text: str) -> None:
+        self.full_text = text
+        self._relayout()
+        self.updateGeometry()
+
+    def _whole_width(self) -> int:
+        # Rounded UP: `elidedText` cuts a 221.4px name in a 221px label.
+        return math.ceil(QFontMetricsF(self.font()).horizontalAdvance(self.full_text))
+
+    def sizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        """The WHOLE name's width, whatever is on screen, so a cut name asks for its room back."""
+        margins = self.contentsMargins()
+        return QSize(
+            self._whole_width() + margins.left() + margins.right(), super().sizeHint().height()
+        )
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        return QSize(
+            min(
+                self.sizeHint().width(),
+                self.fontMetrics().averageCharWidth() * REALM_TITLE_MIN_CHARS,
+            ),
+            super().minimumSizeHint().height(),
+        )
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().resizeEvent(event)
+        self._relayout()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().showEvent(event)
+        self._relayout()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802  (Qt's own name)
+        """A restyle changes the font, and with it what fits in the same width."""
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._relayout()
+
+    def _relayout(self) -> None:
+        # The whole name until it is on screen: an unshown label's width is a
+        # default nobody laid out.
+        room = self.contentsRect().width()
+        if not self.isVisible() or self._whole_width() <= room:
+            super().setText(self.full_text)
+            return
+        super().setText(
+            self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, room)
+        )
+
+
 class DadcraftHeader(QFrame):
     """Ornate Dadcraft header banner displaying title, filigree and realm status,
     with an animated warm firepit / hearth background glow and floating ember sparks.
@@ -196,7 +281,11 @@ class DadcraftHeader(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFixedHeight(56)
-        self.setStyleSheet("background: transparent; border: none;")
+        # Scoped to the frame itself (T193 A20). Selector-less, the same two
+        # declarations reached every child -- T188 C1's mechanism -- and took the
+        # border and fill off "Check for updates", which then read as a caption.
+        self.setObjectName("dadcraft-header")
+        self.setStyleSheet("QFrame#dadcraft-header { background: transparent; border: none; }")
         self._time = 0.0
 
         # Pool of floating firepit embers
@@ -235,6 +324,17 @@ class DadcraftHeader(QFrame):
         left_col.addWidget(sub_label)
         layout.addLayout(left_col, 1)
 
+        # T192's game strip: the whole name of the server the badge is about,
+        # right beside it. The rail shows only "WotLK"; this says which one.
+        self._realm_title = _RealmTitle(self)
+        self._realm_title.setObjectName("realm-title")
+        self._realm_title.setStyleSheet(
+            f"font-family: {FONT_FAMILY_TITLE}; font-size: 13px; font-weight: bold; "
+            f"color: {COLOR_GOLD_LIGHT}; background: transparent;"
+        )
+        self._realm_title.hide()
+        layout.addWidget(self._realm_title, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self._badge = DadcraftRealmBadge("stopped", self)
         layout.addWidget(self._badge, 0, Qt.AlignmentFlag.AlignVCenter)
         self._followed: DadcraftRealmBadge | None = None
@@ -247,11 +347,20 @@ class DadcraftHeader(QFrame):
         """Forward realm status to the embedded badge."""
         self._badge.set_status(status)
 
-    def follow(self, badge: DadcraftRealmBadge | None) -> None:
+    def follow(
+        self,
+        badge: DadcraftRealmBadge | None,
+        title: str | None = None,
+        tooltip: str | None = None,
+    ) -> None:
         """Show what `badge` shows from now on, or hide the header's badge (T188 C6).
 
         The window hands over the Server tab badge of the tab on screen, and
         None on the Catalog and Logs, where there is no one realm to name.
+        `title` is that server's whole name ("WoW WotLK — DadsMmoLab", T192),
+        shown left of the badge, shortened if the window is narrow, with
+        `tooltip` (the full path) on hover; without a badge or a title it is
+        hidden.
         The badge left behind is let go of first, unless it is already gone:
         a closed tab's badge is deleted while this still holds it, and Qt drops
         a deleted sender's connections by itself.
@@ -267,19 +376,53 @@ class DadcraftHeader(QFrame):
             badge.status_changed.connect(self._badge.set_status)
             self._badge.set_status(badge.status)
         self._badge.setVisible(badge is not None)
+        if badge is not None and title is not None:
+            self._realm_title.set_full_text(title)
+            self._realm_title.setToolTip(tooltip or title)
+            self._realm_title.show()
+        else:
+            self._realm_title.hide()
 
     def add_action(self, widget: QWidget) -> None:
-        """Place a small control left of the realm badge (the update check's home, T90).
+        """Place a small control left of the realm badge and its name (the update check, T90).
 
         There is no menu bar in this app, so the header is where a control that
         belongs to the whole window goes. Left of the badge rather than right:
         the badge is the rightmost thing in every screenshot of this app, and
         moving it would move the one element a user looks for by position.
+        Left of the server's name too (T192), which belongs to the badge.
         """
         widget.setParent(self)
         self._row.insertWidget(
-            self._row.indexOf(self._badge), widget, 0, Qt.AlignmentFlag.AlignVCenter
+            self._row.indexOf(self._realm_title), widget, 0, Qt.AlignmentFlag.AlignVCenter
         )
+
+    def event(self, event: QEvent) -> bool:
+        """Re-fit the server's name whenever the row is laid out again (T192)."""
+        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.Resize):
+            self._fit_title()
+        return super().event(event)
+
+    def _fit_title(self) -> None:
+        """Cap the server's name at the room the other header items leave it (T192).
+
+        Asked for its whole width, a long name made the row short of room, and
+        a box layout then takes the shortfall from EVERY item that can shrink,
+        in equal parts: "Check for updates" (whose minimum is the theme's
+        `min-width`) was cut to 94 of its 140px before the name gave up a pixel.
+        Capped here, the name is the only thing short of room; the cap moves
+        with every layout, so a wider window gives the whole name back.
+        """
+        row = self._row
+        margins = row.contentsMargins()
+        room = self.contentsRect().width() - margins.left() - margins.right()
+        for index in range(row.count()):
+            item = row.itemAt(index)
+            if item is None or item.widget() is self._realm_title or item.isEmpty():
+                continue
+            room -= item.sizeHint().width() + max(0, row.spacing())
+        floor = self._realm_title.minimumSizeHint().width()
+        self._realm_title.setMaximumWidth(max(floor, room))
 
     def _tick(self) -> None:
         """Advance the firepit animation clock and rise the ember particles."""

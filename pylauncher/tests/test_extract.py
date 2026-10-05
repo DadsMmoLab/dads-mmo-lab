@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import shutil
 import threading
@@ -641,6 +642,17 @@ def tool_program(spec: docker.ContainerRun) -> str:
     return spec.argv[4] if spec.argv[:2] == ("sh", "-c") else spec.argv[0]
 
 
+REFUSES_POLLUTED_OUTPUT = ("vmap_extractor", "vmap4extractor")
+"""The extractors whose source refuses a `Buildings/` holding `dir` or `dir_bin`.
+
+This double's own list, read in the sources (CMaNGOS `vmap_extractor`, and
+TrinityCore's `vmap4extractor` at Centurion faac5fc9, `vmapexport.cpp:529-541`,
+T241) and deliberately NOT `extract.DIRTY_OUTPUT_TOOLS`: a double that followed
+the production list would stop refusing for a tool dropped from it, and the
+test meant to catch the drop would pass.
+"""
+
+
 class Runner:
     """A `run_container` double: records every spec by field and fabricates the tool's output.
 
@@ -689,7 +701,7 @@ class Runner:
         program = tool_program(spec)
         sink(f"ran {program}")
         out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
-        extractor = Path(program).name == extract.DIRTY_OUTPUT_TOOL
+        extractor = Path(program).name in REFUSES_POLLUTED_OUTPUT
         if extractor:
             buildings = out / extract.BUILDINGS_DIR
             if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
@@ -950,6 +962,35 @@ def test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_t
     evidence = extract.read_evidence(data)
     assert evidence is not None
     assert [record.name for record in evidence.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
+
+
+def test_trinitycores_vmap4extractor_over_a_finished_buildings_is_refused_before_any_container(
+    tmp_path: Path,
+) -> None:
+    """T241: `vmap4extractor` has the same "polluted" check as CMaNGOS's tool.
+
+    Centurion faac5fc9, `src/tools/vmap4_extractor/vmapexport.cpp:529-541`: it
+    stats `./Buildings/dir` and `./Buildings/dir_bin` and exits (255, with no
+    stdin) saying "Your output directory seems to be polluted". The up-front
+    question knew only `vmap_extractor`, so a TrinityCore extraction over a
+    finished `Buildings/` ran `mapextractor` first and died in the container.
+    """
+    vmap4 = VMAP.model_copy(
+        update={"argv": ("/opt/trinitycore/bin/vmap4extractor", "-d", "/client/Data/")}
+    )
+    plan = ExtractPlan(image="server", tools=(AD, vmap4, ASSEMBLE))
+    writes = {**FULL, "/opt/trinitycore/bin/vmap4extractor": {"Buildings": 2}}
+    run(plan, Runner(writes), tmp_path)
+    data = tmp_path / "server" / "data"
+    buildings = data / extract.BUILDINGS_DIR
+    assert (buildings / extract.DIR_BIN).is_file(), "the double left no finished extraction"
+    (data / extract.EVIDENCE_FILE).unlink()
+
+    blocked = Runner(writes)
+    with pytest.raises(InstallerError) as caught:
+        run(plan, blocked, tmp_path)
+    assert named_folder(str(caught.value)) == buildings
+    assert blocked.names() == [], "refused before the first container, mapextractor included"
 
 
 def _data_snapshot(data_dir: Path) -> dict[str, bytes]:
@@ -3655,6 +3696,11 @@ def test_a_second_overlay_copies_nothing_that_is_already_there(tmp_path: Path) -
     assert extract.overlay_files(source, target) == 1
     assert extract.overlay_files(source, target) == 0
     (target / "Spell.dbc").write_bytes(b"edited")
+    # T200: same size, so only the time tells it changed. On a coarse clock (one timer
+    # tick, e.g. ext4 on Linux 6.8) this write can land in the source's tick and look
+    # unchanged, which made the test flaky; the edit is stamped a fixed minute later.
+    later = (source / "Spell.dbc").stat().st_mtime_ns + 60 * 10**9
+    os.utime(target / "Spell.dbc", ns=(later, later))
     assert extract.overlay_files(source, target) == 1, "a file that changed is laid again"
     assert (target / "Spell.dbc").read_bytes() == b"server"
 
@@ -3708,3 +3754,20 @@ def test_no_data_folder_at_all_is_every_half_missing(tmp_path: Path) -> None:
         "map 530: no maps/530????.map",
         "map 530: no vmaps/530.vmtree",
     )
+
+
+def test_a_lowercase_required_file_still_identifies_the_client(tmp_path: Path) -> None:
+    """T227: `Data/expansion.mpq` on a case-sensitive disk is the required file.
+
+    Read exactly, its `stat()` raised, the facts were marked incomplete, and no
+    resume could ever skip a tool: every Install press extracted again.
+    """
+    folder = tmp_path / "client"
+    (folder / "Data").mkdir(parents=True)
+    (folder / "Data" / "expansion.mpq").write_bytes(b"MPQ" * 77)
+
+    expected = extract.expected_evidence(PLAN, folder, REQUIRED)
+
+    assert expected.client_facts_complete is True
+    assert expected.required_file_size == 231
+    assert expected.required_file_mtime == int((folder / "Data" / "expansion.mpq").stat().st_mtime)

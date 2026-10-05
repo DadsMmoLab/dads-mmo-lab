@@ -1464,3 +1464,75 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
             f"{game_id} declares {declared!r} but fell back to {argv[0]!r} with no probe; "
             f"on a MariaDB image that binary does not exist"
         )
+
+
+# -- R1 (T194 final fix): docker exec's stderr is detail, never the sentence --------------------
+
+PIPE_STDERR = (
+    b'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/'
+    b'containers/ac-database/json": open //./pipe/dockerDesktopLinuxEngine: The system '
+    b"cannot find the file specified."
+)
+
+
+def _docker_exec_failing(monkeypatch: pytest.MonkeyPatch, *, fail: str) -> None:
+    """`docker exec` that answers, except `fail` ("list", "dump" or "load"): rc 1, pipe stderr."""
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
+        if any("mysqldump" in part for part in argv):
+            step = "dump"
+        elif kw.get("input") is not None:
+            step = "list"
+        else:
+            step = "load"
+        if step == fail:
+            return subprocess.CompletedProcess(argv, 1, b"", PIPE_STDERR)
+        sink = kw.get("stdout")
+        if step == "dump" and hasattr(sink, "write"):
+            sink.write(good_dump(argv[-1]))  # type: ignore[union-attr]
+        return subprocess.CompletedProcess(argv, 0, b"acore_world\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+@pytest.mark.parametrize("fail", ["list", "dump", "load"])
+def test_a_docker_exec_that_fails_says_a_sentence_and_carries_dockers_words_as_detail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail: str
+) -> None:
+    _docker_exec_failing(monkeypatch, fail=fail)
+    mysql = DockerMysql(DB, "hunter2")
+    with pytest.raises(MaintenanceError) as caught:
+        if fail == "list":
+            mysql.databases()
+        elif fail == "dump":
+            with (tmp_path / "out.sql").open("wb") as sink:
+                mysql.dump_into("acore_world", sink)
+        else:
+            mysql.load_from(io.BytesIO(good_dump("acore_world")))
+    assert "//./pipe/" not in str(caught.value) and "%2F" not in str(caught.value)
+    assert "//./pipe/" in caught.value.detail
+
+
+def test_an_incomplete_backup_keeps_dockers_words_in_the_detail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _docker_exec_failing(monkeypatch, fail="dump")
+    with pytest.raises(MaintenanceError) as caught:
+        backup(tmp_path, DockerMysql(DB, "hunter2"), running=running(DB), now=AT)
+    assert "INCOMPLETE" in str(caught.value)
+    assert "//./pipe/" not in str(caught.value)
+    assert "//./pipe/" in caught.value.detail
+
+
+def test_a_restore_that_fails_part_way_keeps_dockers_words_in_the_detail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _docker_exec_failing(monkeypatch, fail="load")
+    path = a_backup_of(tmp_path, "acore_world")
+    plan = plan_restore(path, tmp_path, running=running(DB))
+    with pytest.raises(MaintenanceError) as caught:
+        restore(plan, DockerMysql(DB, "hunter2"), confirm=plan.token, running=running(DB), now=AT)
+    said = str(caught.value)
+    assert "failed part-way" in said and "unknown state" in said
+    assert "//./pipe/" not in said
+    assert "//./pipe/" in caught.value.detail

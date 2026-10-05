@@ -57,7 +57,14 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from yulon import __version__, client_config, platform, play_client, server_build_presses
+from yulon import (
+    __version__,
+    client_config,
+    client_names,
+    platform,
+    play_client,
+    server_build_presses,
+)
 from yulon.catalog.catalog import ClientPack
 from yulon.log import get_logger
 from yulon.selfupdate import fetch
@@ -1661,7 +1668,14 @@ def _install(
 ) -> dict[str, Any]:
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the pack {pack.label}")
     with zipfile.ZipFile(fetched.path) as archive:
-        items = _plan(pack, archive)
+        # Onto the name already in the folder, whatever its case (T227): a
+        # `patch-X.MPQ` written beside the player's `patch-x.mpq` would be a
+        # second archive that differs only in case, and the game would load
+        # one of the two.
+        items = [
+            _Item(item.info, client_names.on_disk(play_dir, item.rel))
+            for item in _plan(pack, archive)
+        ]
         for item in items:
             _check_path(play_dir, item.rel)
         _recover_asides([play_dir / Path(*item.rel.parts) for item in items], sleep)
@@ -1808,6 +1822,9 @@ def _removal_path(play_dir: Path, rel: object) -> tuple[str, Path]:
             "client or one of Yu'lon's own files, so nothing was removed. Make the "
             "ready-to-play client again from the server's Client settings."
         )
+    # The name in the folder, whatever its case (T227): `remove_when_off` names
+    # `Data/patch-Y.MPQ`, and a client named in lower case holds `Data/patch-y.mpq`.
+    clean = client_names.on_disk(play_dir, clean)
     here = play_dir
     for part in clean.parts[:-1]:
         here = here / part
@@ -1843,9 +1860,12 @@ def remove(
     """
     _gate(play_dir, game=game, server_dir=server_dir, what=f"the removal of {pack_label(pack)}")
     try:
-        return _remove(play_dir, rec_entry, pack, when_off)
+        left = _remove(play_dir, rec_entry, pack, when_off)
     except OSError as exc:
         raise _write_refusal(pack_label(pack), exc) from exc
+    name = pack.id if pack is not None else "a pack no longer in the catalog"
+    logger.info("client-packs: removed %s from %s", name, play_dir)
+    return left
 
 
 def pack_label(pack: ClientPack | None) -> str:

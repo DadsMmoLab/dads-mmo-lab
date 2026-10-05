@@ -1,6 +1,6 @@
 """T224: a finished build that replaced no container is kept, and the next Rebuild may use it.
 
-Seen on yulon-win11, 2026-10-04: an 85-minute Centurion compile finished, Docker
+Seen on a Windows 11 test machine, 2026-10-04: an 85-minute Centurion compile finished, Docker
 did not answer the recreate, and the restore deleted the new build. The owner's
 answers (2026-10-04):
 

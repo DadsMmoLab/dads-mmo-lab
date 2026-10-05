@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_case import needs_case_sensitive_disk
 from yulon.catalog.catalog import ClientSpec
 from yulon.catalog.families import clientdir
 from yulon.catalog.preflight import GIB
@@ -621,3 +622,120 @@ def test_a_spec_naming_locales_must_also_require_the_locale_folder() -> None:
         ClientSpec(required_file=None, locales=("enUS",))
     with pytest.raises(ValidationError, match="String should match pattern"):
         ClientSpec(required_file=None, locale_mpq_required=True, locales=("en/US",))
+
+
+# -- T227: a client whose archives are named in lower case -------------------
+
+
+def _centurion_spec() -> ClientSpec:
+    """The real catalog's Centurion client rule: `Data/lichking.MPQ`, enUS archives."""
+    from yulon.catalog.catalog import load_catalog
+
+    native = load_catalog().get("wow-centurion").install.native
+    assert native is not None and native.trinitycore is not None
+    return native.trinitycore.client
+
+
+def _lowercase_335a(root: Path) -> Path:
+    """A complete 3.3.5a enUS client whose archive names are all lower case.
+
+    How the Centurion proof's client looked (yulon-ubuntu2, 2026-10-04), and how
+    clients copied from Windows or unpacked by some tools arrive.
+    """
+    data = root / "client" / "Data"
+    (data / "enus").mkdir(parents=True)
+    for name in ("common", "common-2", "expansion", "lichking", "patch", "patch-2", "patch-3"):
+        (data / f"{name}.mpq").write_bytes(b"MPQ")
+    for name in ("locale-enus", "speech-enus", "patch-enus"):
+        (data / "enus" / f"{name}.mpq").write_bytes(b"MPQ")
+    return root / "client"
+
+
+@needs_case_sensitive_disk
+def test_a_lowercase_335a_client_passes_on_a_case_sensitive_disk(tmp_path: Path) -> None:
+    """T227: refused on Linux as 'Data/lichking.MPQ is missing' while it was right there."""
+    folder = _lowercase_335a(tmp_path)
+
+    checks = clientdir.validate(folder, _centurion_spec(), free_bytes=lambda _p: PLENTY)
+
+    assert [check for check in checks if check.verdict == "refuse"] == []
+    required = next(check for check in checks if check.name == clientdir.REQUIRED_CHECK)
+    assert required.verdict == "pass"
+    assert "Data/lichking.mpq" in required.detail, "the name said is the one on disk"
+    assert sorted(p.name for p in (folder / "Data").iterdir() if p.is_file())[3] == (
+        "lichking.mpq"
+    ), "nothing in the player's client was renamed"
+    assert not (folder / "Data" / "lichking.MPQ").exists()
+
+
+def test_a_folder_wearing_the_required_file_s_name_in_another_case_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The match is on the name; a folder is not the archive whatever it is called."""
+    folder = _lowercase_335a(tmp_path)
+    (folder / "Data" / "lichking.mpq").unlink()
+    (folder / "Data" / "LICHKING.mpq").mkdir()
+
+    checks = clientdir.validate(folder, _centurion_spec(), free_bytes=lambda _p: PLENTY)
+
+    refused = [check for check in checks if check.verdict == "refuse"]
+    assert [check.name for check in refused] == [clientdir.REQUIRED_CHECK]
+    assert "Data/lichking.MPQ is missing" in refused[0].detail
+
+
+def _native_client(game: str) -> ClientSpec:
+    """The real catalog's client rule for a CMaNGOS game."""
+    from yulon.catalog.catalog import load_catalog
+
+    native = load_catalog().get(game).install.native
+    assert native is not None and native.cmangos is not None
+    return native.cmangos.client
+
+
+@needs_case_sensitive_disk
+@pytest.mark.parametrize(
+    ("game", "lower"),
+    [
+        ("wow-tbc", "Data/expansion.mpq"),
+        ("wow-vanilla", "Data/dbc.mpq"),
+    ],
+)
+def test_a_cmangos_game_accepts_a_lowercase_client_its_map_tools_read_through_links(
+    tmp_path: Path, game: str, lower: str
+) -> None:
+    """T260: was the T227 refusal "named in lower case; this server's map tools open ... only".
+
+    The extraction now reads such a client through links carrying the names the
+    tools open (`extract.lay_case_view()`), so the check passes it and names the
+    file as the disk names it.
+    """
+    folder = client(tmp_path, required=False)
+    (folder / lower).write_bytes(b"MPQ")
+
+    checks = clientdir.validate(folder, _native_client(game), free_bytes=lambda _p: PLENTY)
+
+    assert [check for check in checks if check.verdict == "refuse"] == []
+    required = next(check for check in checks if check.name == clientdir.REQUIRED_CHECK)
+    assert (required.verdict, required.detail) == ("pass", f"{lower} is there")
+    assert (folder / lower).is_file(), "nothing in the player's client was renamed"
+
+
+@needs_case_sensitive_disk
+def test_a_spec_whose_tools_read_exact_names_still_refuses_another_case(tmp_path: Path) -> None:
+    """`archives_any_case` false: the refusal T227 wrote stays for a family that needs it."""
+    folder = client(tmp_path, required=False)
+    (folder / "Data" / "Expansion.mpq").write_bytes(b"MPQ")
+
+    checks = clientdir.validate(folder, TBC, free_bytes=lambda _p: PLENTY)
+
+    (refused,) = [check for check in checks if check.verdict == "refuse"]
+    assert refused.detail == (
+        "Data/Expansion.mpq is named in another case; this server's map tools open "
+        "Data/expansion.MPQ only"
+    )
+
+
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_every_cmangos_client_spec_accepts_archives_in_any_case(game: str) -> None:
+    """T260: each CMaNGOS extraction reads another case through links, so each spec says so."""
+    assert _native_client(game).archives_any_case is True

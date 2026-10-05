@@ -59,6 +59,17 @@ refused every install.
 """
 
 
+POLLUTED_OUTPUT_EXITS: Mapping[str, int] = {"vmap_extractor": 1, "vmap4extractor": 255}
+"""The extractors that refuse a `Buildings/` holding `dir` or `dir_bin`, and the status they exit.
+
+Read in the sources, not copied from `extract.py`: CMaNGOS's `vmap_extractor`
+(`contrib/vmap_extractor/vmapextract/vmapexport.cpp`, mangos-classic 8ec338a1)
+`return 1`s; TrinityCore's `vmap4extractor` (`src/tools/vmap4_extractor/
+vmapexport.cpp:529-541`, Centurion faac5fc9) `return scanf(...)`s, which with no
+stdin is EOF, and the live Centurion press exited 255 (T241).
+"""
+
+
 VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
 """`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
 
@@ -116,6 +127,12 @@ class Recorder:
     images: bool | None = True
     images_asked: list[tuple[str, ...]] = field(default_factory=list)
     """Every ref tuple `images_built()` was asked about, in order (T112: what preflight checks)."""
+    build_cache: int | None = None
+    """What `docker.build_cache_bytes()` answers (T203). `None`, "could not ask", by default."""
+    build_cache_asked: int = 0
+    folder_size: int | None = None
+    """What `native.folder_bytes()` answers (T203 fix round 3). `None`, "could not measure"."""
+    folder_asked: list[Path] = field(default_factory=list)
     build_result: docker.AttachedRun = docker.AttachedRun(0, ("built",))
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
@@ -618,22 +635,29 @@ class Recorder:
           tool's own last words and writes nothing, which is `main()`'s first
           `if`.
 
-        Keyed on `argv[0]`'s basename, like `extract.DIRTY_OUTPUT_TOOL` and for
-        its reason: `wow-tortoise`'s `vmapextractor` is a different binary with
-        no such check, and a double that refused for it would be inventing a
-        rule for a tool nobody has read at the pinned revision.
+        Keyed on `argv[0]`'s basename, from this double's OWN list
+        (`POLLUTED_OUTPUT_EXITS`) and never from `extract.DIRTY_OUTPUT_TOOLS`: a
+        double that followed the production list would stop refusing the day a
+        tool fell off it, and the test meant to catch that would pass.
+        `wow-tortoise`'s `vmapextractor` is a different binary with no such
+        check, and a double that refused for it would be inventing a rule for a
+        tool nobody has read at the pinned revision. TrinityCore's
+        `vmap4extractor` has the same check (T241), and exits 255.
         """
         self.calls.append(f"run:{spec.argv[0]}")
         self.container_runs.append(spec)
         sink(f"{spec.argv[0]} ran")
         out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
-        extractor = spec.argv[0].rsplit("/", 1)[-1] == extract.DIRTY_OUTPUT_TOOL
+        program = spec.argv[0].rsplit("/", 1)[-1]
+        extractor = program in POLLUTED_OUTPUT_EXITS
         buildings = None if out is None else out / extract.BUILDINGS_DIR
         if extractor and buildings is not None:
             if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
                 polluted = "Your output directory seems to be polluted, please use an empty "
                 sink(polluted + "directory!")
-                return docker.AttachedRun(1, (polluted + "directory!",))
+                return docker.AttachedRun(
+                    POLLUTED_OUTPUT_EXITS[program], (polluted + "directory!",)
+                )
         if out is not None and self.run_result.returncode in self.success_returncodes:
             for name, count in self.produce.items():
                 folder = out / name
@@ -779,6 +803,8 @@ class Recorder:
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
+            build_cache_bytes=self.build_cache_bytes,
+            folder_bytes=self.folder_bytes,
             image_id=self.image_id,
             build=build,
             one_shot=one_shot,
@@ -837,6 +863,16 @@ class Recorder:
         """Answer `self.ready`, and KEEP the pattern that was asked about."""
         self.ready_specs.append(ready)
         return self.ready
+
+    def build_cache_bytes(self) -> int | None:
+        """`docker.build_cache_bytes()`: answers `self.build_cache`, and counts the asks."""
+        self.build_cache_asked += 1
+        return self.build_cache
+
+    def folder_bytes(self, folder: Path) -> int | None:
+        """`native.folder_bytes()`: answers `self.folder_size`, and keeps what it was asked."""
+        self.folder_asked.append(folder)
+        return self.folder_size
 
     def images_built(self, refs: Sequence[str]) -> bool | None:
         """`docker.images_built()`: answers `self.images`, and keeps what it was asked about."""

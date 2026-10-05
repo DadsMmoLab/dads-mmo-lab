@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import threading
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -404,18 +406,531 @@ def test_a_machine_with_no_mnt_at_all_leaves_the_data_root_unknown(
     assert platform._windows_drive_mounts() == []
 
 
-def test_the_windows_data_root_comes_from_docker_desktops_settings(
+# -- Docker Desktop's data root on Windows (T199 round 2) -----------------
+#
+# Docker Desktop 29.7.2 records Settings -> Resources -> Advanced -> Disk image
+# location as `CustomWslDistroDir` in settings-store.json, and the data disk
+# then lives at `<dir>\disk\docker_data.vhdx` (seen on the Windows gate box,
+# 2026-10-03). The rule throughout: a location the settings NAME but that
+# cannot be found is unchecked, never the default — the default may be the
+# stale copy the move left behind, and its drive's free space under a refusal
+# is a guess. Only settings that name nothing (or no settings file at all)
+# keep the default.
+#
+# The Windows branch's paths are Windows paths, which a POSIX test host cannot
+# open; `_windows_host_path`, the one call that turns a validated Windows path
+# into a host path (`Path(str(location))` on Windows), is pointed at `tmp_path`
+# here: `E:\X` -> `<tmp>/E/X`, `\\nas\share\X` -> `<tmp>/UNC/nas/share/X`.
+# Everything before it — reading the store, the key order, the absolute-path
+# rule — and the existence checks after it are the real code.
+
+
+def _drives_under(root: Path) -> Callable[[PureWindowsPath], Path]:
+    def to_host(location: PureWindowsPath) -> Path:
+        anchor = location.drive
+        if anchor.endswith(":"):
+            base = root / anchor[0].upper()
+        else:
+            base = root.joinpath("UNC", *anchor.strip("\\").split("\\"))
+        return base.joinpath(*location.parts[1:])
+
+    return to_host
+
+
+def _windows_machine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A Windows machine with its drives under `tmp_path`; returns where its store goes."""
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    monkeypatch.setattr(platform, "_windows_host_path", _drives_under(tmp_path))
+    store = tmp_path / "Roaming" / "Docker" / "settings-store.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    return store
+
+
+def _legacy_disk(folder: Path, name: str = "DockerDesktop.vhdx") -> Path:
+    """A folder a legacy key can name: it holds a disk image directly."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(b"a disk image")
+    return folder
+
+
+def _windows_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settings: dict[str, object]
+) -> None:
+    """A Windows machine whose Docker Desktop settings store says `settings`."""
+    store = _windows_machine(monkeypatch, tmp_path)
+    store.write_text(json.dumps(settings), encoding="utf-8")
+
+
+def _data_disk(folder: Path) -> Path:
+    """Docker Desktop's data disk as it sits in `folder`: `<folder>/disk/docker_data.vhdx`."""
+    vhdx = folder / "disk" / "docker_data.vhdx"
+    vhdx.parent.mkdir(parents=True, exist_ok=True)
+    vhdx.write_bytes(b"not really 23 GB")
+    return vhdx
+
+
+def _stale_default(tmp_path: Path) -> Path:
+    """The C: copy a move leaves behind under `%LOCALAPPDATA%\\Docker\\wsl`."""
+    return _data_disk(tmp_path / "Local" / "Docker" / "wsl")
+
+
+def _said_about(caplog: pytest.LogCaptureFixture, key: str) -> list[str]:
+    return [record.getMessage() for record in caplog.records if key in record.getMessage()]
+
+
+def test_a_moved_docker_desktop_disk_is_measured_where_it_was_moved_to(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Read defensively: an unreadable settings file falls through to the default."""
-    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    """`CustomWslDistroDir` wins, over a legacy `dataFolder` that resolves as well.
+
+    Before T199 the key was never read: this answered the `dataFolder`, and with
+    no legacy key the default under `%LOCALAPPDATA%` — the drive the player had
+    just been told to move the disk off. The folder is returned, not the file:
+    free space is the volume's, and `disk_usage` reads a folder reliably.
+    """
+    _data_disk(tmp_path / "E" / "DockerDesktopWSL")
+    _legacy_disk(tmp_path / "D" / "docker-data")
+    _stale_default(tmp_path)
+    _windows_store(
+        monkeypatch,
+        tmp_path,
+        {"CustomWslDistroDir": "E:\\DockerDesktopWSL", "dataFolder": "D:\\docker-data"},
+    )
+    assert platform.docker_desktop_data_root() == tmp_path / "E" / "DockerDesktopWSL" / "disk"
+
+
+def test_a_disk_moved_to_a_network_share_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A UNC path is absolute on Windows; the share's folder is measured."""
+    _data_disk(tmp_path / "UNC" / "nas" / "docker" / "DockerDesktopWSL")
+    _windows_store(
+        monkeypatch, tmp_path, {"CustomWslDistroDir": "\\\\nas\\docker\\DockerDesktopWSL"}
+    )
+    assert platform.docker_desktop_data_root() == (
+        tmp_path / "UNC" / "nas" / "docker" / "DockerDesktopWSL" / "disk"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        None,
+        {},
+        {"CustomWslDistroDir": ""},
+        {"CustomWslDistroDir": "   ", "dataFolder": ""},
+        {"CustomWslDistroDir": None},
+    ],
+    ids=["no-store-file", "no-keys", "empty-key", "blank-keys", "null-key"],
+)
+def test_settings_that_name_no_location_keep_the_unconditional_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settings: dict[str, object] | None
+) -> None:
+    """No move named is exactly the old answer: the default folder, disk or no disk.
+
+    An empty `CustomWslDistroDir` is "no move" because that is how Docker
+    Desktop itself reads it: its backend carries "customWslDistroDir is empty,
+    setting it to the default value" (seen in com.docker.backend.exe on the gate
+    box, 2026-10-03). A missing settings file is a fresh install, not an
+    unreadable one.
+    """
+    store = _windows_machine(monkeypatch, tmp_path)
+    if settings is not None:
+        store.write_text(json.dumps(settings), encoding="utf-8")
+    assert not (tmp_path / "Local" / "Docker").exists()
+    assert platform.docker_desktop_data_root() == tmp_path / "Local" / "Docker" / "wsl"
+
+
+def _unresolved_custom_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: str) -> object:
+    """A `CustomWslDistroDir` value that breaks exactly one of its rules.
+
+    Each is otherwise as close to valid as its rule allows: where a reading of
+    the bad value could land on a real disk, that disk is made — `E:X` read as
+    `E:\\X`, `E:` read as `E:\\`, the relative name under the working directory —
+    so only "absolute" is what refuses it. The missing folder is absolute, so
+    only "exists" is broken; the folder holding only `main/ext4.vhdx` (the
+    distro, not the data) exists, so only "holds the data disk" is.
+    """
+    if broken == "not-a-string":
+        return 42
+    if broken == "drive-relative":
+        _data_disk(tmp_path / "E" / "DockerDesktopWSL")
+        return "E:DockerDesktopWSL"
+    if broken == "rooted-without-drive":
+        _data_disk(tmp_path / "DockerDesktopWSL")
+        return "\\DockerDesktopWSL"
+    if broken == "bare-drive":
+        _data_disk(tmp_path / "E")
+        return "E:"
+    if broken == "relative":
+        monkeypatch.chdir(tmp_path)
+        _data_disk(tmp_path / "DockerDesktopWSL")
+        return "DockerDesktopWSL"
+    if broken == "missing":
+        return "E:\\does-not-exist"
+    assert broken == "no-data-disk", broken
+    folder = tmp_path / "E" / "DockerDesktopWSL"
+    (folder / "main").mkdir(parents=True)
+    (folder / "main" / "ext4.vhdx").write_bytes(b"the distro, not the data")
+    return "E:\\DockerDesktopWSL"
+
+
+_UNRESOLVED_CUSTOM_DIRS = [
+    "not-a-string",
+    "drive-relative",
+    "rooted-without-drive",
+    "bare-drive",
+    "relative",
+    "missing",
+    "no-data-disk",
+]
+
+
+@pytest.mark.parametrize("broken", _UNRESOLVED_CUSTOM_DIRS)
+def test_a_move_that_cannot_be_found_is_unchecked_even_with_a_default_disk_there(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    broken: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The settings say the disk was moved and it is not there: no guessed drive.
+
+    The default disk exists here — the copy a move leaves behind on C: — and it
+    is still not the answer: its drive's free space under a refusal would be a
+    guess about where the images go. One log line names the key and the value.
+    """
+    value = _unresolved_custom_dir(monkeypatch, tmp_path, broken)
+    _stale_default(tmp_path)
+    _windows_store(monkeypatch, tmp_path, {"CustomWslDistroDir": value})
+    with caplog.at_level("INFO", logger=platform.logger.name):
+        assert platform.docker_desktop_data_root() is None
+    said = _said_about(caplog, "CustomWslDistroDir")
+    assert len(said) == 1 and repr(value) in said[0], said
+
+
+@pytest.mark.parametrize("broken", ["drive-relative", "missing"])
+def test_a_move_that_cannot_be_found_does_not_fall_back_to_a_legacy_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, broken: str
+) -> None:
+    """The first location the settings name decides; an older key is no better a guess."""
+    value = _unresolved_custom_dir(monkeypatch, tmp_path, broken)
+    _legacy_disk(tmp_path / "D" / "docker-data")
+    _windows_store(
+        monkeypatch, tmp_path, {"CustomWslDistroDir": value, "dataFolder": "D:\\docker-data"}
+    )
+    assert platform.docker_desktop_data_root() is None
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "image", "expected"),
+    [
+        ("dataFolder", "D:\\docker-data", "docker-data/DockerDesktop.vhdx", "docker-data"),
+        ("DataFolder", "D:\\docker-data", "docker-data/Docker.raw", "docker-data"),
+        ("diskPath", "D:\\vm\\DockerDesktop.vhdx", "vm/DockerDesktop.vhdx", "vm"),
+        ("virtualDiskPath", "D:\\vm\\disk.VHDX", "vm/disk.VHDX", "vm"),
+    ],
+    ids=["folder-with-vhdx", "folder-with-raw", "vhdx-file", "upper-case-suffix"],
+)
+def test_a_legacy_key_naming_a_disk_image_is_the_data_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    key: str,
+    value: str,
+    image: str,
+    expected: str,
+) -> None:
+    """`dataFolder` and the other legacy spellings still answer when no move is named.
+
+    Only with proof that Docker's disk is there: the path is a disk image
+    (`.vhdx`, `.raw`), or a folder holding one directly. A file comes back as
+    its folder, as the moved disk does, so `disk_usage` is handed a folder.
+    """
+    (tmp_path / "D" / image).parent.mkdir(parents=True)
+    (tmp_path / "D" / image).write_bytes(b"a disk image")
+    _stale_default(tmp_path)
+    _windows_store(monkeypatch, tmp_path, {key: value})
+    assert platform.docker_desktop_data_root() == tmp_path / "D" / expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        42,
+        "docker-data",
+        "D:docker-data",
+        "D:\\does-not-exist",
+        "D:\\empty",
+        "D:\\vm\\notes.txt",
+        "D:\\nested",
+    ],
+    ids=[
+        "not-a-string",
+        "relative",
+        "drive-relative",
+        "missing",
+        "folder-without-image",
+        "file-not-an-image",
+        "image-two-levels-down",
+    ],
+)
+def test_a_legacy_data_folder_that_cannot_be_found_is_unchecked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    value: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A legacy key gets the same rule as the move: named and not there is unchecked.
+
+    Before round 2 any non-empty string was taken as it stood, so a
+    `D:\\docker-data` that did not exist sent `free_bytes()` walking up to `D:\\`
+    — or, with no D: at all, to nothing — and called that Docker's disk. An
+    existing path is not proof either (round 3): a folder with no disk image in
+    it, a file that is not one, or an image one folder further down than a
+    legacy key points is no evidence that Docker's disk lives there. Where a
+    reading of the bad value could land on a real image, the image is made, so
+    each value breaks only its own rule.
+    """
+    monkeypatch.chdir(tmp_path)
+    _legacy_disk(tmp_path / "docker-data")
+    _legacy_disk(tmp_path / "D" / "docker-data")
+    (tmp_path / "D" / "empty").mkdir(parents=True)
+    (tmp_path / "D" / "empty" / "notes.txt").write_text("not a disk")
+    _legacy_disk(tmp_path / "D" / "vm", "notes.txt")
+    _data_disk(tmp_path / "D" / "nested")
+    _stale_default(tmp_path)
+    _windows_store(monkeypatch, tmp_path, {"dataFolder": value})
+    with caplog.at_level("INFO", logger=platform.logger.name):
+        assert platform.docker_desktop_data_root() is None
+    said = _said_about(caplog, "dataFolder")
+    assert len(said) == 1 and repr(value) in said[0], said
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"{ not json", b"\xef\xbb\xbf{}", b"[]", None],
+    ids=["bad-json", "bom", "not-an-object", "a-directory"],
+)
+def test_a_settings_file_that_is_there_but_cannot_be_read_is_unchecked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: bytes | None
+) -> None:
+    """It may name a move this code cannot see, so the default would be a guess.
+
+    The BOM case is deliberate: Docker Desktop itself refuses a store that starts
+    with one (measured on the gate box, 2026-09-16). The directory stands in for
+    every `OSError` on open other than "not there" — a sharing violation while
+    Desktop rewrites the file, a permission refusal.
+    """
+    store = _windows_machine(monkeypatch, tmp_path)
+    _stale_default(tmp_path)
+    if content is None:
+        store.mkdir()
+    else:
+        store.write_bytes(content)
+    assert platform.docker_desktop_data_root() is None
+
+
+@pytest.mark.parametrize("older", [None, {"CustomWslDistroDir": "E:\\DockerDesktopWSL"}])
+def test_an_unreadable_current_store_is_unchecked_whatever_the_older_file_says(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, older: dict[str, object] | None
+) -> None:
+    """`settings.json` stands in for `settings-store.json` only when that is not there.
+
+    Here the current store is there and cannot be read (a directory stands in
+    for a sharing violation; `is_file()` says False for it, which is how the
+    old choice of file fell through to `settings.json`, or with no
+    `settings.json` to nothing at all, and so to the default).
+    """
+    store = _windows_machine(monkeypatch, tmp_path)
+    _stale_default(tmp_path)
+    _data_disk(tmp_path / "E" / "DockerDesktopWSL")
+    store.mkdir()
+    if older is not None:
+        (store.parent / "settings.json").write_text(json.dumps(older), encoding="utf-8")
+    assert platform.docker_desktop_data_root() is None
+
+
+def test_the_older_settings_file_is_read_when_the_current_one_is_not_there(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = _windows_machine(monkeypatch, tmp_path)
+    _stale_default(tmp_path)
+    _data_disk(tmp_path / "E" / "DockerDesktopWSL")
+    (store.parent / "settings.json").write_text(
+        json.dumps({"CustomWslDistroDir": "E:\\DockerDesktopWSL"}), encoding="utf-8"
+    )
+    assert platform.docker_desktop_data_root() == tmp_path / "E" / "DockerDesktopWSL" / "disk"
+
+
+def test_macos_ignores_the_windows_custom_disk_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No evidence of the key on macOS: a store naming only it still gives `Docker.raw`."""
+    monkeypatch.setattr(platform, "detect", lambda: "macos")
+    monkeypatch.setattr(platform.Path, "home", lambda: Path("/Users/deck"))
+    custom = tmp_path / "Elsewhere"
+    _data_disk(custom)
     store = tmp_path / "settings-store.json"
-    store.write_text('{"dataFolder": "D:\\\\docker-data"}', encoding="utf-8")
+    store.write_text(json.dumps({"CustomWslDistroDir": str(custom)}), encoding="utf-8")
     monkeypatch.setattr(platform, "docker_desktop_settings_file", lambda: store)
-    assert platform.docker_desktop_data_root() == Path("D:\\docker-data")
-    store.write_text("{ not json", encoding="utf-8")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    assert platform.docker_desktop_data_root() == tmp_path / "Docker" / "wsl"
+    assert platform.docker_desktop_data_root() == Path(
+        "/Users/deck/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+    )
+
+
+# -- the same chain under Desktop's WSL integration -------------------------
+
+
+def _wsl_desktop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(platform, "detect", lambda: "linux")
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(platform, "_WSL_MOUNT_ROOT", tmp_path)
+
+
+def _wsl_profile_store(
+    root: Path,
+    settings: dict[str, object] | bytes,
+    user: str = "pk",
+    name: str = "settings-store.json",
+) -> None:
+    """`/mnt/c/Users/<user>/AppData/Roaming/Docker/<name>` holding `settings`."""
+    store = root.joinpath("c", "Users", user, "AppData", "Roaming", "Docker", name)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(settings, bytes):
+        store.write_bytes(settings)
+    else:
+        store.write_text(json.dumps(settings), encoding="utf-8")
+
+
+def _wsl_root() -> Path | None:
+    """What preflight is handed under Desktop's WSL integration."""
+    return platform.docker_desktop_data_root(_canned(_DESKTOP_INTEGRATION_INFO))
+
+
+@pytest.mark.parametrize("name", ["settings-store.json", "settings.json"])
+def test_wsl_integration_follows_a_moved_disk_to_its_drive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    """`E:\\DockerDesktopWSL` is `/mnt/e/DockerDesktopWSL` from the distro.
+
+    The C: copy is left in place, as it was on the gate box after the move: the
+    profile still offers exactly one candidate, and it is the E: one. The older
+    `settings.json` is read when there is no `settings-store.json`, as on Windows.
+    """
+    _wsl_desktop(monkeypatch, tmp_path)
+    _windows_profile_with_desktops_vhdx(tmp_path, "pk")
+    _wsl_profile_store(tmp_path, {"CustomWslDistroDir": "E:\\DockerDesktopWSL"}, name=name)
+    _data_disk(tmp_path / "e" / "DockerDesktopWSL")
+    assert _wsl_root() == tmp_path / "e" / "DockerDesktopWSL" / "disk"
+
+
+def test_wsl_integration_reads_a_legacy_data_folder_through_the_mount(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _wsl_desktop(monkeypatch, tmp_path)
+    _windows_profile_with_desktops_vhdx(tmp_path, "pk")
+    _wsl_profile_store(tmp_path, {"dataFolder": "E:\\docker-data"})
+    _legacy_disk(tmp_path / "e" / "docker-data")
+    assert _wsl_root() == tmp_path / "e" / "docker-data"
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"CustomWslDistroDir": "E:\\DockerDesktopWSL"},
+        {"CustomWslDistroDir": "E:DockerDesktopWSL"},
+        {"CustomWslDistroDir": "\\\\nas\\docker\\DockerDesktopWSL"},
+        {"dataFolder": "E:\\does-not-exist"},
+        b"{ not json",
+    ],
+    ids=["no-data-disk", "drive-relative", "unc", "legacy-missing", "unreadable-store"],
+)
+def test_wsl_integration_never_falls_back_to_a_stale_default_for_a_move_it_cannot_find(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settings: dict[str, object] | bytes
+) -> None:
+    """Named and not found from the distro is unchecked, with C:'s copy right there.
+
+    `E:DockerDesktopWSL` is drive-relative and must not become
+    `/mnt/e/DockerDesktopWSL`, whose data disk is made here so that only that
+    rule can refuse it. A UNC share has no `/mnt/<letter>` to stand for it.
+    """
+    _wsl_desktop(monkeypatch, tmp_path)
+    _windows_profile_with_desktops_vhdx(tmp_path, "pk")
+    _wsl_profile_store(tmp_path, settings)
+    moved = tmp_path / "e" / "DockerDesktopWSL"
+    if settings == {"CustomWslDistroDir": "E:\\DockerDesktopWSL"}:
+        (moved / "main").mkdir(parents=True)
+    else:
+        _data_disk(moved)
+    assert _wsl_root() is None
+
+
+def test_wsl_integration_with_nothing_named_keeps_the_profile_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _wsl_desktop(monkeypatch, tmp_path)
+    default = _windows_profile_with_desktops_vhdx(tmp_path, "pk")
+    _wsl_profile_store(tmp_path, {"CustomWslDistroDir": "", "SomethingElse": True})
+    assert _wsl_root() == default
+
+
+def test_wsl_integration_with_two_profiles_holding_a_disk_each_is_unchecked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One moved to E:, one at its default: which owns the daemon is not knowable here."""
+    _wsl_desktop(monkeypatch, tmp_path)
+    _windows_profile_with_desktops_vhdx(tmp_path, "pk")
+    _wsl_profile_store(tmp_path, {"CustomWslDistroDir": "E:\\DockerDesktopWSL"})
+    _data_disk(tmp_path / "e" / "DockerDesktopWSL")
+    _windows_profile_with_desktops_vhdx(tmp_path, "another-user")
+    assert _wsl_root() is None
+
+
+def test_wsl_integration_with_one_profile_unresolved_is_unchecked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A second profile whose move cannot be found may be the daemon's, so no answer."""
+    _wsl_desktop(monkeypatch, tmp_path)
+    default = _windows_profile_with_desktops_vhdx(tmp_path, "pk")
+    _wsl_profile_store(tmp_path, {"CustomWslDistroDir": "E:\\gone"}, user="another-user")
+    assert default.is_file()
+    assert _wsl_root() is None
+
+
+@pytest.mark.parametrize("how", ["permission", "not-a-directory", "store-is-a-directory"])
+def test_wsl_integration_with_one_profile_whose_settings_cannot_be_read_is_unchecked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
+) -> None:
+    """Any error finding or reading a profile's settings is "cannot tell", not "absent".
+
+    `pk` has a perfectly good default disk; `another-user`'s settings may name
+    a move this distro cannot see, and that profile may be the daemon's. A
+    `Path.is_file()` that swallows the error (it does on Python 3.14 for every
+    `OSError`, and for a directory always) must not turn this into "no file".
+    """
+    _wsl_desktop(monkeypatch, tmp_path)
+    _windows_profile_with_desktops_vhdx(tmp_path, "pk")
+    docker = tmp_path.joinpath("c", "Users", "another-user", "AppData", "Roaming", "Docker")
+    if how == "not-a-directory":
+        docker.parent.mkdir(parents=True)
+        docker.write_text("a file where Docker's settings folder should be")
+        assert _wsl_root() is None
+        return
+    _wsl_profile_store(tmp_path, {"CustomWslDistroDir": ""}, user="another-user")
+    if how == "store-is-a-directory":
+        (docker / "settings-store.json").unlink()
+        (docker / "settings-store.json").mkdir()
+        _wsl_profile_store(tmp_path, {}, user="another-user", name="settings.json")
+        assert _wsl_root() is None
+        return
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder whatever its mode")
+    docker.chmod(0)
+    try:
+        assert _wsl_root() is None
+    finally:
+        docker.chmod(0o755)
 
 
 @pytest.mark.parametrize(

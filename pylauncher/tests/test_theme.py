@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
@@ -42,7 +43,7 @@ def test_dadcraft_theme_qss_covers_essential_controls() -> None:
     assert "QMainWindow" in DADCRAFT_THEME_QSS
     assert "QTabWidget" in DADCRAFT_THEME_QSS
     assert "QTabBar::tab" in DADCRAFT_THEME_QSS
-    assert "QTabWidget#sidebar-tabs QTabBar::tab" in DADCRAFT_THEME_QSS
+    assert "QTabWidget#sidebar-tabs > QTabBar::tab" in DADCRAFT_THEME_QSS
     assert "QMenu" in DADCRAFT_THEME_QSS
     assert "QMenu::item" in DADCRAFT_THEME_QSS
     assert "QPushButton" in DADCRAFT_THEME_QSS
@@ -173,7 +174,7 @@ def test_the_sidebar_tab_is_bounded_to_a_narrow_rail() -> None:
     # The West sidebar (objectName "sidebar-tabs") reads as an icon-first rail:
     # `max-width` caps it near the icon-plus-padding width, `min-width` keeps it
     # from collapsing, and it carries a real touch-target height.
-    west = DADCRAFT_THEME_QSS.split("QTabWidget#sidebar-tabs QTabBar::tab {")[1].split("}")[0]
+    west = DADCRAFT_THEME_QSS.split("QTabWidget#sidebar-tabs > QTabBar::tab {")[1].split("}")[0]
     assert "max-width: 64px" in west
     assert "min-width: 48px" in west
     assert "min-height: 44px" in west
@@ -235,6 +236,23 @@ def test_the_generated_sheet_contains_no_negation_selector() -> None:
         assert "not(" not in qss
 
 
+@pytest.fixture
+def _application_theme_is_restored(qapp: QApplication) -> Iterator[QApplication]:
+    """The app's style sheet and palette, put back after a test that themes the app (T212).
+
+    `apply_dadcraft_theme(qapp)` changes the one `QApplication` every later test
+    shares. Left in place, the theme's touch-target floor grew the fixed-size
+    buttons of `test_gamepad_keyboard.py`'s `placed` fixture from 60x20 to
+    98x50, and four navigation tests failed whenever this file ran first.
+    `conftest.py`'s `_no_test_leaves_the_application_restyled` fails any test
+    that forgets this.
+    """
+    sheet, palette = qapp.styleSheet(), QPalette(qapp.palette())
+    yield qapp
+    qapp.setStyleSheet(sheet)
+    qapp.setPalette(palette)
+
+
 LIVE_WIDGETS_A_RESTYLE_MAY_REPOLISH = 2000
 """How many live widgets the app-wide restyles below may find. T109.
 
@@ -258,7 +276,9 @@ def test_no_earlier_module_left_widgets_for_the_restyle_to_repolish(qapp: QAppli
     )
 
 
-def test_qt_actually_parses_the_generated_stylesheet(qapp: QApplication) -> None:
+def test_qt_actually_parses_the_generated_stylesheet(
+    _application_theme_is_restored: QApplication,
+) -> None:
     # The only test that proves the sheet is VALID, not merely present. Qt emits
     # `Could not parse application stylesheet` (via qWarning) when the parser
     # rejects input; this installs a message handler, forces widget polish, and
@@ -268,6 +288,7 @@ def test_qt_actually_parses_the_generated_stylesheet(qapp: QApplication) -> None
 
     from yulon.ui.theme import apply_dadcraft_theme
 
+    qapp = _application_theme_is_restored
     messages: list[str] = []
     previous = qInstallMessageHandler(lambda _t, _c, msg: messages.append(msg))
     try:
@@ -300,7 +321,8 @@ def test_apply_dadcraft_theme_on_widget(qapp: QApplication) -> None:
     assert widget.styleSheet() == DADCRAFT_THEME_QSS
 
 
-def test_apply_dadcraft_theme_on_qapp(qapp: QApplication) -> None:
+def test_apply_dadcraft_theme_on_qapp(_application_theme_is_restored: QApplication) -> None:
+    qapp = _application_theme_is_restored
     apply_dadcraft_theme(qapp)
     assert qapp.styleSheet() == DADCRAFT_THEME_QSS
 
@@ -478,3 +500,61 @@ def test_get_app_icon_renders_a_valid_non_null_icon(qapp: QApplication) -> None:
         assert not pixmap.isNull()
         assert pixmap.width() == size
         assert pixmap.height() == size
+
+
+# -- T192: one reading of a realm status for the badge and the sidebar's dot -------
+
+
+@pytest.mark.parametrize(
+    ("status", "tone", "says"),
+    [
+        ("running", "up", "ONLINE"),
+        ("online", "up", "ONLINE"),
+        ("ready", "up", "ONLINE"),
+        ("starting", "between", "STARTING"),
+        ("importing", "between", "STARTING"),
+        ("building", "between", "STARTING"),
+        ("stopping", "between", "STOPPING"),
+        ("partial", "between", "PARTLY UP"),
+        ("restarting", "restarting", "RESTARTING"),
+        ("loop", "restarting", "RESTARTING"),
+        ("unknown", "unknown", "UNKNOWN"),
+        ("stopped", "down", "OFFLINE"),
+        ("exited", "down", "OFFLINE"),
+    ],
+)
+def test_realm_tone_is_what_the_badge_says(
+    qapp: QApplication, status: str, tone: str, says: str
+) -> None:
+    """The sidebar's dot reads `realm_tone()`; the badge must read it too, or they drift."""
+    from yulon.ui.widgets.dadcraft_decorations import realm_tone
+
+    badge = DadcraftRealmBadge("running" if status != "running" else "stopped")
+    badge.set_status(status)
+    assert realm_tone(status) == tone
+    assert realm_tone(status.upper()) == tone
+    assert says in badge._label.text(), badge._label.text()
+
+
+def test_the_header_names_the_server_it_follows(qapp: QApplication) -> None:
+    """T192: the header's game strip -- the server's whole name beside its badge.
+
+    Hidden with the badge, on the Catalog and Logs (`follow(None)`), and when a
+    caller hands a badge with no title.
+    """
+    header = DadcraftHeader("TEST REALM", "Subtitle")
+    header.resize(1200, 56)
+    header.show()
+    badge = DadcraftRealmBadge("running")
+
+    header.follow(badge, title="WoW WotLK — DadsMmoLab", tooltip="WoW WotLK — D:/DadsMmoLab")
+
+    assert header._realm_title.isHidden() is False
+    assert header._realm_title.text() == "WoW WotLK — DadsMmoLab"
+    assert header._realm_title.toolTip() == "WoW WotLK — D:/DadsMmoLab"
+
+    header.follow(None)
+    assert header._realm_title.isHidden() is True
+    header.follow(badge)
+    assert header._realm_title.isHidden() is True
+    header.close()

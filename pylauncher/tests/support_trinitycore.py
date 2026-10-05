@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -128,6 +129,7 @@ TRINITYCORE: dict[str, Any] = {
     "checkout": CHECKOUT,
     "client": {
         "required_file": "Data/lichking.MPQ",
+        "archives_any_case": True,
         "min_mpq": 6,
         "mpq_depth": "recursive",
         "locale_mpq_required": True,
@@ -159,6 +161,8 @@ TRINITYCORE: dict[str, Any] = {
     "mmaps": {
         "argv": [f"{CORE_DIR}/bin/mmaps_generator", "--threads", "{{THREADS}}"],
         "background": True,
+        # T209: Centurion's values (catalog.json), read off `MmapTileHeader` at faac5fc9.
+        "tile_header": {"length": 20, "magic": 0x4D4D4150, "size_offset": 12},
     },
     "conf": {
         "source_dir": f"{CORE_DIR}/etc",
@@ -281,8 +285,8 @@ def centurion_like(
             # (cs_character.cpp:72-73); the inventory row carries the item INSTANCE
             # guid and `item_instance.itemEntry` the template, as on AzerothCore;
             # `MAX_MAIL_ITEMS` is 12 (Mail.h:33).
-            # Offered only once T179 Task 9 has watched them work
-            # (`controller_wow_centurion.characters`).
+            # Which are offered is `controller_wow_centurion.characters` (T208's live
+            # check, 2026-10-04).
             "play": {
                 "equipped": {
                     "template_column": "itemEntry",
@@ -312,7 +316,7 @@ def centurion_like(
         },
         "must_not_listen": [3443],
     }
-    entry["install"]["default_server_dir"] = "wow-centurion-server"
+    entry["install"]["default_server_dir"] = "yulon-centurion"
     entry["install"]["password"] = {"mode": "generated", "file": ".db_password", "prefix": "tc-"}
     entry["install"]["native"] = {
         "family": "trinitycore",
@@ -329,6 +333,35 @@ def centurion_like(
 
 
 # -- the movement-map job's Docker (T179 Task 4) ------------------------------------------
+
+
+MMAP_MAGIC = 0x4D4D4150
+"""`const uint32 MMAP_MAGIC = 0x4d4d4150; // 'MMAP'` (src/common/Collision/Maps/MapDefines.h:24
+at CENTURION faac5fc9)."""
+
+MMAP_VERSION = 15
+"""`#define MMAP_VERSION 15` (MapDefines.h:25 at faac5fc9)."""
+
+DT_NAVMESH_VERSION = 7
+"""Recast's `DT_NAVMESH_VERSION`; Yu'lon never reads it, so any value serves."""
+
+TILE_HEADER = struct.Struct("<IIIIc3x")
+"""`struct MmapTileHeader` (MapDefines.h:27-38 at faac5fc9) as the generator writes it with
+`fwrite(&header, sizeof(MmapTileHeader), 1, file)` (MapBuilder.cpp:980) on a little-endian
+machine: `uint32 mmapMagic, dtVersion, mmapVersion, size; char usesLiquids; char padding[3]`,
+20 bytes (the source's own `static_assert`, MapDefines.h:41). Spelled here from the C source,
+not from the catalog, so a catalog value that disagrees with the struct fails a test."""
+
+
+def mmtile(data_size: int = 64, *, magic: int = MMAP_MAGIC, cut: int | None = None) -> bytes:
+    """A `.mmtile` as `buildMoveMapTile` writes it (MapBuilder.cpp:977-988): header, then data.
+
+    `cut` keeps only the first `cut` bytes: the file a generator that died while
+    writing leaves behind.
+    """
+    header = TILE_HEADER.pack(magic, DT_NAVMESH_VERSION, MMAP_VERSION, data_size, b"\x01")
+    whole = header + bytes(index % 251 for index in range(data_size))
+    return whole if cut is None else whole[:cut]
 
 
 @dataclass
@@ -433,10 +466,16 @@ class FakeMmapsDocker:
     def say(self, *lines: str) -> None:
         self.only()[1].logs.extend(lines)
 
-    def write_tiles(self, count: int) -> None:
+    def write_tiles(self, count: int, *, first: int = 0) -> None:
+        """`count` whole tiles of map 000, numbered from `first`, as the generator writes them."""
         out = self.output_dir(self.only()[1].spec)
-        for index in range(count):
-            (out / f"000{index:04}.mmtile").write_bytes(b"MMAP")
+        for index in range(first, first + count):
+            (out / f"000{index:04}.mmtile").write_bytes(mmtile(16 + index % 7))
+
+    def write_cut_tile(self, name: str = "0013251.mmtile") -> None:
+        """The tile the generator was writing when it died: its header and half its data."""
+        out = self.output_dir(self.only()[1].spec)
+        (out / name).write_bytes(mmtile(64, cut=20 + 32))
 
     def finish(self, code: int = 0, *, tiles: int = 0) -> None:
         self.write_tiles(tiles)

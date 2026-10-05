@@ -137,7 +137,7 @@ def test_save_writes_the_zip_and_says_where_and_how_big(qapp: object, tmp_path: 
     assert view.save_button.isEnabled()
 
 
-def test_a_bundle_over_the_cap_warns_about_discord_and_points_at_the_manifest(
+def test_a_bundle_over_the_cap_warns_about_discord_and_points_at_the_list_inside(
     qapp: object, tmp_path: Path
 ) -> None:
     dest = tmp_path / "big.zip"
@@ -148,7 +148,8 @@ def test_a_bundle_over_the_cap_warns_about_discord_and_points_at_the_manifest(
     assert view.save_for_support() is True
     text = view.status.text()
     assert str(dest) in text
-    assert "Discord" in text and "MANIFEST.txt" in text, text
+    # T194: the list is MANIFEST.txt in the zip; the screen does not say the file's name.
+    assert "Discord" in text and "list of contents inside the zip" in text, text
 
 
 def test_a_bundle_at_the_cap_does_not_warn(qapp: object, tmp_path: Path) -> None:
@@ -328,7 +329,60 @@ def test_the_newest_read_that_fails_says_so(qapp: object, monkeypatch: pytest.Mo
     view = _view(jobs=_holding(held))
     view.refresh()
     _settle(held[0])
-    assert view.shown_text() == "The logs could not be read (RuntimeError)."
+    assert view.shown_text() == "The logs could not be read. Yu'lon's own log has the details."
+
+
+def test_a_failed_read_says_so_in_words_and_logs_the_class_name(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T194 C8: "(RuntimeError)" was the whole explanation; the app log is where it belongs."""
+
+    def read_logs(*args: Any) -> object:
+        raise RuntimeError("broke")
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    held: Held = []
+    view = _view(jobs=_holding(held))
+    view.refresh()
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        _settle(held[0])
+    assert view.shown_text() == "The logs could not be read. Yu'lon's own log has the details."
+    assert any("RuntimeError" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+def test_a_listing_that_fails_says_so_without_a_class_name(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same rule for the listing: "(KeyError)" on screen, the reason nowhere."""
+
+    def sources_for_app(*args: Any, **kwargs: Any) -> object:
+        raise KeyError("x")
+
+    monkeypatch.setattr(support_sources, "sources_for_app", sources_for_app)
+    view = _view()
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        view.refresh()
+    assert view.shown_text() == "The logs could not be listed. Yu'lon's own log has the details."
+    assert any("KeyError" in r.getMessage() for r in caplog.records)
+
+
+def test_a_save_that_fails_for_no_os_reason_names_no_class(
+    qapp: object, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Not an `OSError`: the line said "something went wrong (ValueError)"."""
+    view = _view(
+        pick_save_path=lambda parent, suggested: tmp_path / "support.zip",
+        jobs=lambda work, done, failed: failed(ValueError("bad zip member")),
+    )
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        view.save_for_support()
+    text = view.status.text()
+    assert text == (
+        "Could not save support.zip: something went wrong. Yu'lon's own log has the details."
+    ), text
+    assert any("ValueError" in r.getMessage() for r in caplog.records)
 
 
 def test_a_secret_stored_after_the_first_read_is_masked_after_a_picker_change(
@@ -458,3 +512,200 @@ def test_without_a_short_password_the_tab_warns_of_nothing(qapp: object, tmp_pat
     view.save_for_support()
     assert "already taken out" in view.status.text()
     assert "very short password" not in view.status.text()
+
+
+SECRET_LINE = "line 3: password=Hunter2Secret"
+"""What a credentials parse error can quote: the line it could not read."""
+
+
+def test_a_listing_error_quoting_a_credential_line_keeps_it_out_of_the_log(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fix round 1, M5: `gather_known` reads credential files, and the log is not redacted."""
+
+    def sources_for_app(*args: Any, **kwargs: Any) -> object:
+        raise ValueError(SECRET_LINE)
+
+    monkeypatch.setattr(support_sources, "sources_for_app", sources_for_app)
+    view = _view()
+    with caplog.at_level(logging.DEBUG):
+        view.refresh()
+    said = [r.getMessage() for r in caplog.records]
+    assert any("ValueError" in m for m in said), said
+    assert not any("Hunter2Secret" in m for m in said), said
+
+
+def test_a_read_error_quoting_a_credential_line_keeps_it_out_of_the_log(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same rule past `_read_logs`, where `_read_failed` writes the warning."""
+
+    def read_logs(*args: Any) -> object:
+        raise ValueError(SECRET_LINE)
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    view = _view()
+    with caplog.at_level(logging.DEBUG):
+        view.refresh()
+    said = [r.getMessage() for r in caplog.records]
+    assert any("ValueError" in m for m in said), said
+    assert not any("Hunter2Secret" in m for m in said), said
+
+
+def test_an_os_error_is_logged_with_what_the_system_said(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An OSError's text is the system's own words about a path, so it is kept."""
+
+    def read_logs(*args: Any) -> object:
+        raise PermissionError(13, "Permission denied", "/some/where/yulon.log")
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    view = _view()
+    with caplog.at_level(logging.WARNING, logger="yulon.ui.logs_view"):
+        view.refresh()
+    assert any("Permission denied" in r.getMessage() for r in caplog.records)
+
+
+# -- T195 C33: the viewer colours a line by its level ----------------------------
+
+
+def _near(image: Any, top: int, bottom: int, width: int, colour: Any) -> int:
+    """How many pixels in rows top..bottom are within 24 per channel of `colour`."""
+    count = 0
+    for y in range(max(top, 0), min(bottom, image.height())):
+        for x in range(min(width, image.width())):
+            pixel = image.pixelColor(x, y)
+            count += (
+                abs(pixel.red() - colour.red()) <= 24
+                and abs(pixel.green() - colour.green()) <= 24
+                and abs(pixel.blue() - colour.blue()) <= 24
+            )
+    return count
+
+
+def test_warnings_and_errors_are_drawn_in_the_install_logs_colours(qapp: object) -> None:
+    """C33 (T195): the app log was one grey wall; a WARNING or ERROR now stands out.
+
+    The same `line_format` the install log paints with, so the two tabs agree
+    about what a warning looks like. Sampled off the drawn viewer, not read
+    back from the highlighter. Mutation: no highlighter and neither colour is
+    anywhere on screen.
+    """
+    from yulon.ui.widgets.log_panel import line_format
+
+    platform.config_dir().mkdir(parents=True, exist_ok=True)
+    (platform.config_dir() / "yulon.log").write_text(
+        "2026-10-04 10:00:00 INFO [yulon.main] the window opened\n"
+        "2026-10-04 10:00:01 WARNING [yulon.docker] Docker answered slowly\n"
+        "2026-10-04 10:00:02 ERROR [yulon.docker] Docker did not answer\n"
+        "2026-10-04 10:00:03 INFO [yulon.main] the window closed\n",
+        encoding="utf-8",
+    )
+    view = _view()
+    view.resize(900, 400)
+    view.show()
+    try:
+        pump_until(lambda: "did not answer" in view.viewer.toPlainText(), "the app log read")
+        process_events(50)
+        viewer = view.viewer
+        palette = viewer.palette()
+        warning = line_format("warning", palette).foreground().color()
+        failure = line_format("failure", palette).foreground().color()
+        image = viewer.viewport().grab().toImage()
+        rows: dict[str, list[tuple[int, int]]] = {}
+        block = viewer.document().begin()
+        while block.isValid():
+            rect = viewer.blockBoundingGeometry(block).translated(viewer.contentOffset())
+            words = block.text().split(" ")
+            if len(words) > 2:
+                rows.setdefault(words[2], []).append((int(rect.top()), int(rect.bottom())))
+            block = block.next()
+        width = viewer.viewport().width()
+        ((warn_top, warn_bottom),) = rows["WARNING"]
+        ((err_top, err_bottom),) = rows["ERROR"]
+        # Counted, and against the INFO lines: plain black text drawn with
+        # subpixel antialiasing has amber fringes (about 20 pixels a line here),
+        # so "any pixel near amber" is true of every line. A painted line has
+        # its whole text in the colour, several times what a fringe gives.
+        info = rows["INFO"]
+        warned = _near(image, warn_top, warn_bottom, width, warning)
+        failed = _near(image, err_top, err_bottom, width, failure)
+        info_warned = max(_near(image, top, bottom, width, warning) for top, bottom in info)
+        info_failed = max(_near(image, top, bottom, width, failure) for top, bottom in info)
+        assert warned > 3 * max(info_warned, 10), (warned, info_warned)
+        assert failed > 3 * max(info_failed, 10), (failed, info_failed)
+    finally:
+        view.hide()
+
+
+def _drawn_lines(text: str, last: str) -> tuple[Any, Any, list[tuple[int, int]], int]:
+    """Show `text` as the app log; return the viewer, its grabbed image, each line's rows, width."""
+    platform.config_dir().mkdir(parents=True, exist_ok=True)
+    (platform.config_dir() / "yulon.log").write_text(text, encoding="utf-8")
+    view = _view()
+    view.resize(900, 600)
+    view.show()
+    pump_until(lambda: last in view.viewer.toPlainText(), "the app log read")
+    process_events(50)
+    viewer = view.viewer
+    rows: list[tuple[int, int]] = []
+    block = viewer.document().begin()
+    while block.isValid():
+        rect = viewer.blockBoundingGeometry(block).translated(viewer.contentOffset())
+        rows.append((int(rect.top()), int(rect.bottom())))
+        block = block.next()
+    return view, viewer.viewport().grab().toImage(), rows, viewer.viewport().width()
+
+
+def test_debug_is_dimmed_and_critical_continuations_and_a_bare_traceback_are_red(
+    qapp: object,
+) -> None:
+    """C33 (T195): the rest of the highlighter's promise, sampled off the drawn viewer.
+
+    DEBUG in the dimmed `marker` tone (none of its text as dark as plain text);
+    CRITICAL red; a record's later lines red with it until the next record; a
+    bare Traceback red through its frames and its exception line, and the
+    line after that plain again. Mutation: drop the continuation rule and the
+    ERROR record's second line is plain; let a bare traceback run on and the
+    line after its exception is red.
+    """
+    from yulon.ui.widgets.log_panel import line_format
+
+    lines = [
+        "2026-10-04 10:00:00 INFO [yulon.main] the window opened",  # 0
+        "2026-10-04 10:00:01 DEBUG [yulon.runner] argv: docker compose ps",  # 1
+        "2026-10-04 10:00:02 CRITICAL [yulon.main] the window could not be built",  # 2
+        "2026-10-04 10:00:03 ERROR [yulon.docker] Docker did not answer:",  # 3
+        "the pipe it was asked on was not there",  # 4: the same record
+        "  and nothing else answered either",  # 5: the same record
+        "2026-10-04 10:00:04 INFO [yulon.main] carrying on without Docker",  # 6
+        "Traceback (most recent call last):",  # 7
+        '  File "yulon/main.py", line 1, in <module>',  # 8
+        "    build()",  # 9
+        "ValueError: the window could not be built",  # 10
+        "a plain line someone printed after it",  # 11
+    ]
+    view, image, rows, width = _drawn_lines("\n".join(lines) + "\n", lines[-1])
+    try:
+        palette = view.viewer.palette()
+        failure = line_format("failure", palette).foreground().color()
+        marker = line_format("marker", palette).foreground().color()
+        text = palette.color(palette.ColorRole.Text)
+
+        def near(index: int, colour: Any) -> int:
+            top, bottom = rows[index]
+            return _near(image, top, bottom, width, colour)
+
+        # A line is red when more of it is drawn in the failure colour than in
+        # plain text's: a short frame line has few pixels of either, so a
+        # count against other lines would miss it, but the two never tie --
+        # red text has no plain-text pixels, plain text only stray red fringes.
+        red = [index for index in range(len(lines)) if near(index, failure) > near(index, text)]
+        assert red == [2, 3, 4, 5, 7, 8, 9, 10], red
+        assert near(11, text) > 20, "the line after the traceback is not plain text"
+
+        assert near(1, text) == 0, "DEBUG drew text as dark as a plain line's"
+        assert near(1, marker) > 20, near(1, marker)
+    finally:
+        view.hide()

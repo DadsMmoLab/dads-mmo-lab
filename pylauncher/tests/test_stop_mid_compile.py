@@ -1,6 +1,6 @@
 """T225, seen live: a Stop mid-compile whose build Docker finished in the background anyway.
 
-Sitting B on yulon-win11, 2026-10-05: Stop was pressed during the compile. Two
+On a Windows 11 test machine, 2026-10-05: Stop was pressed during the compile. Two
 minutes later `<ref>` still held the old image (the same as its `-rollback`), so
 the press let the `-rollback` names go -- and about 13 minutes after the Stop
 BuildKit exported a new image and moved the live tag onto it. Nothing said so;

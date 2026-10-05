@@ -65,6 +65,7 @@ from yulon.catalog.native import (
     return_to_pin_confirmation,
     rewritten_line,
     source_version,
+    sources_still_off,
     update_to_latest_confirmation,
 )
 from yulon.catalog.snapshot import (
@@ -457,6 +458,32 @@ def rebuild_for_app(
     return rebuild
 
 
+def rebuild_refusal_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    engine: Callable[[], InstallEngine] | None = None,
+) -> Callable[[], str | None]:
+    """What the Rebuild press would refuse before compiling, asked before its question (T217).
+
+    `StagedInstaller.rebuild_refusal_before_asking()`, on an engine built per
+    ask (`engine`, for a test's seams; else `installer_for(entry)`). A server
+    inside a WSL distro answers None: reading its checkout from Windows goes
+    through `\\\\wsl.localhost`, and the press still makes its own check there.
+    """
+
+    def ask() -> str | None:
+        if wsl_distro is not None:
+            return None
+        made = engine() if engine is not None else installer_for(entry)
+        if not isinstance(made, StagedInstaller):
+            return None
+        return made.rebuild_refusal_before_asking(server_dir)
+
+    return ask
+
+
 def update_to_latest_for_app(
     entry: CatalogEntry,
     server_dir: Path,
@@ -560,7 +587,7 @@ def update_to_latest_for_app(
     def version() -> SourceVersion:
         if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
             return SourceVersion(line="", past_the_pin=False)
-        return source_version(read_state(server_dir, valid=()))
+        return source_version(read_state(server_dir, valid=()), sources_still_off(server_dir))
 
     def news() -> upstream.UpstreamNews:
         # T124. Built per call like the presses: it is asked off the GUI thread

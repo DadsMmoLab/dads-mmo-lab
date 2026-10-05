@@ -622,7 +622,7 @@ def test_dismiss_all_with_no_bots_in_the_list_sends_nothing_and_never_arms(qapp:
 
 def test_showing_the_party_stands_an_armed_dismiss_all_down_and_says_so(qapp: object) -> None:
     """The idle button's own escape route, and the tab's (`REMOVE_ARMED`'s
-    paragraph says "Press Refresh to cancel"). It has to SAY it happened: a read
+    paragraph said "Press Refresh to cancel" until T195). It has to SAY it happened: a read
     clears the report line, so an armed press followed by a refresh would
     otherwise leave a disarmed button and no record of the cancellation."""
     stub = _StubParty(state=party.PartyState(True, "", READY_CHECKS, members=(_member(),)))

@@ -380,7 +380,7 @@ def test_a_tree_with_no_level_command_refuses_the_press_and_sends_nothing(tmp_pa
 
     assert outcome.done is False
     assert channel.sent == [], channel.sent
-    assert "reset level" in outcome.problem, outcome.problem
+    assert "reset a logged-in character" in outcome.problem, outcome.problem
 
 
 def test_the_tortoise_block_carries_this_forks_own_numbers_and_not_a_siblings() -> None:
@@ -449,28 +449,16 @@ def test_the_sentence_in_place_of_the_level_control_names_what_this_fork_has() -
     said = TORTOISE.play.set_level_absent_reason
 
     assert said
-    assert "reset level" in said, said
-    assert "logged in" in said, said
-    assert "configured starting level" in said, said
+    # T194 (I2): the sentence is the player's. The console commands and why each
+    # was chosen stay in this docstring; the screen says what each one does.
+    assert "`" not in said and ".rndbot" not in said and ".levelup" not in said, said
+    assert "can't move a character to a level you pick" in said, said
+    assert "reset a logged-in character to the starting level" in said, said
     # Finding 5: a conf key's current value is not a fact this file may ship.
     assert "level 1" not in said, said
     # Finding 1: the console route that DOES take a level is named, and named as
     # what it is -- a new character rather than a change to an existing one.
-    assert "rndbot create level=" in said, said
-    assert "NEW" in said, said
-    assert "existing character" in said, said
-    assert "no command that puts a character at a level you pick" not in said, said
-    # 8.4d's live gate, m910q 2026-09-08 07:27-07:30Z. The sentence named the
-    # command in an argument order this server REFUSES. Sent as spelled --
-    # `rndbot Aniel level 60` -- the console answered
-    #     Aniel: level - character not found
-    # and sent verb-first -- `rndbot level Aniel 60` -- it answered
-    #     level: Aniel - ok
-    # and left Aniel at level 18, which is the behaviour the sentence describes.
-    # So the description was right about what happens and wrong about what to
-    # type, and somebody following it would read the refusal as the feature.
-    assert ".rndbot level <bot>" in said, said
-    assert ".rndbot <bot> level" not in said, said
+    assert "make a new bot at the level you name" in said, said
 
 
 def test_the_offline_rename_this_fork_would_destroy_a_name_with_is_refused(tmp_path) -> None:
