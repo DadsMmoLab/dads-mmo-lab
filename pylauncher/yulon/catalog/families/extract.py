@@ -357,8 +357,9 @@ def _remove_tree(path: Path) -> bool:
     remove" must not arrive at the same place.
 
     Its callers are the removals in this module: `empty_out_dirs()` below,
-    `run_mmaps()`'s wipe, and the re-extraction's kept-aside data
-    (`put_back()`, `drop_aside()`, T241).
+    `run_mmaps()`'s wipe, the re-extraction's kept-aside data (`put_back()`,
+    `supersede()`, `drop_superseded()`, T241), and the case view
+    (`remove_case_view()`, T260).
     """
     try:
         shutil.rmtree(path)
@@ -2041,11 +2042,22 @@ def replaced_names(plan: ExtractPlan, also: Iterable[str] = ()) -> tuple[str, ..
     return (*folders, EVIDENCE_FILE)
 
 
+ABSENT_SUFFIX = ".yulon-absent"
+"""An empty folder `<name>.yulon-absent` in `PREVIOUS_DIR`: `<name>` was not there before.
+
+So that `put_back()` also clears an output the old map data never had (an older
+install without `Cameras/`), and does so without being told the plan again --
+a put-back resumed after a crash must not take a name it already put back for a
+new one (Codex review, T241).
+"""
+
+
 def set_aside(data_dir: Path, names: Sequence[str]) -> tuple[str, ...]:
     """Move each of `names` that is under `data_dir` into `PREVIOUS_DIR`; the names moved.
 
     Renames only, so nothing is deleted and the old map data is whole wherever
-    it is. `put_back()` is the undo.
+    it is. A name that is not there gets an `ABSENT_SUFFIX` marker instead.
+    `put_back()` is the undo.
 
     Raises:
         InstallerError: `PREVIOUS_DIR` is already there (an earlier press's, which
@@ -2065,6 +2077,8 @@ def set_aside(data_dir: Path, names: Sequence[str]) -> tuple[str, ...]:
             if os.path.lexists(data_dir / name):
                 os.rename(data_dir / name, aside / name)
                 moved.append(name)
+            else:
+                (aside / f"{name}{ABSENT_SUFFIX}").mkdir()
     except OSError as exc:
         try:
             put_back(data_dir)
@@ -2085,8 +2099,10 @@ def put_back(data_dir: Path) -> tuple[str, ...]:
     """Return everything under `PREVIOUS_DIR` to `data_dir`, replacing what is there; the names.
 
     What is there is the new extraction's partial output, and it is removed
-    first, name by name, because a rename onto a folder that is not empty fails.
-    `()` when nothing was set aside.
+    first, name by name, because a rename onto a folder that is not empty fails;
+    a name the old data did not have (`ABSENT_SUFFIX`) is only removed. Each
+    name leaves `PREVIOUS_DIR` only once it is settled, so a put-back cut short
+    is finished by the next call. `()` when nothing was set aside.
 
     Raises:
         OSError: a name could not be removed or moved back. What is still under
@@ -2098,23 +2114,55 @@ def put_back(data_dir: Path) -> tuple[str, ...]:
     except FileNotFoundError:
         return ()
     for name in names:
-        target = data_dir / name
+        absent = name.endswith(ABSENT_SUFFIX)
+        target = data_dir / (name[: -len(ABSENT_SUFFIX)] if absent else name)
         if target.is_dir() and not target.is_symlink():
             _remove_tree(target)
         elif os.path.lexists(target):
             target.unlink()
-        os.rename(aside / name, target)
+        if absent:
+            (aside / name).rmdir()
+        else:
+            os.rename(aside / name, target)
     aside.rmdir()
     return tuple(names)
 
 
-def drop_aside(data_dir: Path) -> bool:
-    """Delete `PREVIOUS_DIR` once the data that replaced it is in; False when there was none.
+SUPERSEDED_DIR = ".yulon-previous-superseded"
+"""Under `data/`: `PREVIOUS_DIR` once the map data that replaces it is in, only to be deleted.
+
+The one fact that makes the old data safe to delete, recorded by a rename rather
+than inferred: an old record back in `data/` says nothing about whether every
+folder came back with it (`put_back()` may have been cut short), and a new
+record says nothing about whether the stage after the tools finished. Anything
+still in `PREVIOUS_DIR` is put back; only this name is ever deleted.
+"""
+
+
+def supersede(data_dir: Path) -> None:
+    """The new map data is in: rename `PREVIOUS_DIR` to `SUPERSEDED_DIR`, then delete it.
+
+    Raises:
+        OSError: it could not be renamed or deleted. Renamed, the next
+            re-extraction deletes it; not renamed, the caller deletes it outright.
+    """
+    aside = data_dir / PREVIOUS_DIR
+    gone = data_dir / SUPERSEDED_DIR
+    _remove_tree(gone)
+    try:
+        os.rename(aside, gone)
+    except FileNotFoundError:
+        return
+    _remove_tree(gone)
+
+
+def drop_superseded(data_dir: Path) -> bool:
+    """Delete what an earlier press superseded and could not delete; False when there was none.
 
     Raises:
         OSError: it would not go.
     """
-    return _remove_tree(data_dir / PREVIOUS_DIR)
+    return _remove_tree(data_dir / SUPERSEDED_DIR)
 
 
 # ------------------------------------- T179: the tree's own DBCs, and the start check

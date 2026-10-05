@@ -710,7 +710,10 @@ class TrinityCoreInstaller(CmangosInstaller):
         """Refuse before `up` when the start check would fail, and make the next press extract.
 
         The evidence file is removed with the refusal, so pressing Install again
-        runs this step's extraction again rather than finding it vouched for.
+        runs this step's extraction again rather than finding it vouched for. Not
+        said during "Re-extract map data" (its old data kept in
+        `extract.PREVIOUS_DIR`): that press puts the old map data and its record
+        back and says so itself (T241).
         """
         tc = self._tc()
         missing = extract.missing_map_data(data_dir, tc.required_maps)
@@ -719,17 +722,20 @@ class TrinityCoreInstaller(CmangosInstaller):
         evidence = data_dir / extract.EVIDENCE_FILE
         try:
             evidence.unlink(missing_ok=True)
-            cleared = "Its record was cleared, so pressing Install again runs client-data again."
         except OSError as exc:
             cleared = (
-                f"Its record {evidence} could not be cleared ({exc}); delete it, then press "
+                f" Its record {evidence} could not be cleared ({exc}); delete it, then press "
                 "Install again to run client-data again."
             )
+        else:
+            cleared = " Its record was cleared, so pressing Install again runs client-data again."
+        if os.path.lexists(data_dir / extract.PREVIOUS_DIR):
+            cleared = ""
         raise InstallerError(
             f"The map data the world server needs at start is not all there "
             f"({'; '.join(missing)}), and without it the server stops with 'Unable to load "
             f"critical files'. The client-data step made it from {original}: check that it is "
-            f"a complete {self.entry.client.version} client. Nothing was started. {cleared}"
+            f"a complete {self.entry.client.version} client. Nothing was started.{cleared}"
         )
 
     # -- conf ------------------------------------------------------------------
@@ -1863,8 +1869,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         again in the background. A failure, a Stop or a closed stream puts the old
         map data back with its record (`extract.put_back()`), and the movement maps
         and pathfinding are as they were. A press that died harder than that (a
-        crash) leaves the old data aside, and the next press puts it back first --
-        unless the data in place is a finished extraction, which makes it stale.
+        crash) leaves the old data aside, and the next press puts it back first;
+        only a press whose new data is in marks the old as superseded
+        (`extract.supersede()`), and only that is ever deleted.
         The player's own client is the folder given, or the one the map data was
         last made from.
 
@@ -1931,12 +1938,13 @@ class TrinityCoreInstaller(CmangosInstaller):
                 failure.args = (f"{failure} {told}",)  # same object: its type is kept
             raise
         try:
-            extract.drop_aside(data_dir)
+            extract.supersede(data_dir)
         except OSError as exc:
             yield (
                 f"warning: the map data from before this press, in "
-                f"{data_dir / extract.PREVIOUS_DIR}, could not be deleted ({exc}); it takes "
-                "space but is not used. Delete that folder when the server is stopped."
+                f"{data_dir / extract.SUPERSEDED_DIR} or {data_dir / extract.PREVIOUS_DIR}, "
+                f"could not be deleted ({exc}); it takes space but is not used. Delete that "
+                "folder when the server is stopped."
             )
         if background:
             mmaps.discard(server_dir, self.entry, install_id=ident)
@@ -1958,31 +1966,28 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
     def _settle_an_earlier_press(self, data_dir: Path) -> Iterator[str]:
-        """The map data an earlier press set aside and never settled: put back, or dropped (T241).
+        """What an earlier press left under `data/`: superseded data deleted, kept data put back.
 
-        Put back when what is in `data/` is not a finished extraction: that press
-        died part way, and what it set aside is the last whole map data. Dropped
-        when it is: that press finished and could not delete it, so it is older
-        than what is in place, and putting it back would lose the newer data.
+        `extract.SUPERSEDED_DIR` is old map data a press finished replacing and
+        could not delete; it goes. `extract.PREVIOUS_DIR` is old map data a press
+        set aside and never settled -- it died part way, in the extraction or in
+        putting the data back -- so it is the last whole map data, and it is put
+        back over whatever is in place. Never decided from the record in
+        `data/`: an old record put back first says nothing about the folders
+        still aside (Codex adversarial review, T241).
         """
+        superseded = data_dir / extract.SUPERSEDED_DIR
         aside = data_dir / extract.PREVIOUS_DIR
-        if not os.path.lexists(aside):
-            return
-        current = extract.read_evidence(data_dir)
-        finished = current is not None and all(
-            current.record_for(tool.name) is not None for tool in self._tc().extract.tools
-        )
         try:
-            if finished:
-                extract.drop_aside(data_dir)
+            extract.drop_superseded(data_dir)
+            if not os.path.lexists(aside):
                 return
             extract.put_back(data_dir)
         except OSError as exc:
             raise InstallerError(
-                f"An earlier “{REEXTRACT_BUTTON}” left map data in {aside}, and it could not be "
-                f"{'deleted' if finished else 'put back'} ({exc}), so nothing was extracted. "
-                "Close whatever is using that folder, then press "
-                f"“{REEXTRACT_BUTTON}” again."
+                f"An earlier “{REEXTRACT_BUTTON}” left map data in {superseded} or {aside}, and "
+                f"it could not be settled ({exc}), so nothing was extracted. Close whatever is "
+                f"using that folder, then press “{REEXTRACT_BUTTON}” again."
             ) from exc
         yield (
             f"An earlier “{REEXTRACT_BUTTON}” did not finish; the map data from before it was "

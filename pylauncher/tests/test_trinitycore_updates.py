@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1074,6 +1076,24 @@ def test_a_reextract_that_fails_leaves_the_old_map_data_its_record_and_pathfindi
     assert box.engine().mmaps_status(box.server_dir).state == "done"
     assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
     assert str(failed.value).endswith(trinitycore.REEXTRACT_PUT_BACK)
+    assert "record was cleared" not in str(failed.value), "the old record is back, not cleared"
+
+
+def test_a_folder_the_old_map_data_did_not_have_is_not_left_by_a_failed_reextract(
+    box: Box,
+) -> None:
+    """Codex review: nothing set aside for it, so the put-back must still clear the new one."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    shutil.rmtree(box.server_dir / "data" / "vmaps")
+    before = data_files(box)
+    box.m.tools.missing = ("530",)
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert "vmap4assembler" in box.m.tools.seen, "the new extraction wrote vmaps/"
+    assert data_files(box) == before
+    assert not (box.server_dir / "data" / "vmaps").exists()
 
 
 def test_a_reextract_closed_part_way_puts_the_old_map_data_back(box: Box) -> None:
@@ -1137,21 +1157,35 @@ def test_a_reextract_after_one_that_crashed_finishes_and_leaves_nothing_aside(bo
     assert (box.server_dir / "data" / "maps" / "0003232.map").read_bytes() == b"MAPS"
 
 
-def test_map_data_left_aside_by_a_press_that_finished_is_dropped_not_put_back(box: Box) -> None:
-    """A finished extraction in place is newer than anything aside; putting that back loses it."""
+def test_map_data_superseded_by_a_press_that_finished_is_dropped_not_put_back(box: Box) -> None:
+    """A press whose new map data was in, and that could not delete the old: never put back."""
     finished_with_pathfinding(box)
     flagged(box)
     data = box.server_dir / "data"
-    (data / extract.PREVIOUS_DIR / "maps").mkdir(parents=True)
-    (data / extract.PREVIOUS_DIR / "maps" / "0003232.map").write_bytes(b"STALE")
+    (data / extract.SUPERSEDED_DIR / "maps").mkdir(parents=True)
+    (data / extract.SUPERSEDED_DIR / "maps" / "0003232.map").write_bytes(b"STALE")
     current = data_files(box)
     box.m.tools.fail_tool = "vmap4assembler"
     box.world.running = False
     with pytest.raises(InstallerError):
         list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
     assert data_files(box) == {
-        name: body for name, body in current.items() if not name.startswith(extract.PREVIOUS_DIR)
+        name: body for name, body in current.items() if not name.startswith(extract.SUPERSEDED_DIR)
     }
+
+
+def test_a_put_back_cut_short_after_the_record_is_finished_by_the_next_press(box: Box) -> None:
+    """Codex adversarial review: the old record back in place does not make the folders still
+    aside stale. Only a press whose new map data was in marks them so (`extract.supersede()`)."""
+    old = interrupted(box)
+    data = box.server_dir / "data"
+    os.replace(data / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE, data / extract.EVIDENCE_FILE)
+    assert extract.read_evidence(data) is not None, "a finished extraction's record, in place"
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == old
 
 
 @pytest.mark.parametrize("running", [True, None])
