@@ -5120,6 +5120,37 @@ def _container_tail(container: str, *, wsl_distro: str | None = None) -> str | N
     )
 
 
+_STOPPED = object()
+"""`_unless_stopped()`'s answer when Stop was pressed before the read came back."""
+
+_STOP_POLL_S = 0.1
+
+
+def _unless_stopped(
+    read: Callable[[str], str | None], container: str, cancel: threading.Event | None
+) -> object:
+    """`read(container)`, or `_STOPPED` as soon as `cancel` is set (T249 review).
+
+    A tail read is bounded at `FAILURE_TAIL_TIMEOUT_S`, two of them 40 s, and a
+    Stop pressed while a failure is being reported must not wait that out. The
+    read runs on a daemon thread that is left to finish on its own: it holds no
+    lock, writes nothing, and its own timeout ends it.
+    """
+    if cancel is None:
+        return read(container)
+    if cancel.is_set():
+        return _STOPPED
+    answer: list[str | None] = []
+    worker = threading.Thread(
+        target=lambda: answer.append(read(container)), name="yulon-tail-read", daemon=True
+    )
+    worker.start()
+    while worker.is_alive():
+        if cancel.wait(_STOP_POLL_S):
+            return _STOPPED
+    return answer[0] if answer else None
+
+
 def _kept_end(text: str, limit: int) -> str:
     """`text`'s last `limit` bytes, starting on a whole line."""
     data = text.encode("utf-8")
@@ -12071,7 +12102,11 @@ class StagedInstaller:
         redact = Redactor.build([ctx.secrets.db_password]).redact
         shown = False
         for container in dict.fromkeys(containers):
-            text = self._seams.container_tail(container)
+            read = _unless_stopped(self._seams.container_tail, container, ctx.cancel)
+            if read is _STOPPED:
+                yield f"Stopped before {container}'s log was read."
+                break
+            text = read if isinstance(read, str) else None
             if text is None:
                 yield f"{container}'s log could not be read."
                 continue

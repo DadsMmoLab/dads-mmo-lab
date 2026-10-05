@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import time
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -30,16 +31,18 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import HANG_BOUND, wait_for_panel
 from tests.support_fake_docker import calls, lay_fake_docker, set_fake_log
 from tests.support_native import Recorder
 from yulon import docker, platform, resources
 from yulon.catalog import native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import InstallerError, installer_for
 from yulon.support import bundle, runlog
 from yulon.support.redact import Redactor
 from yulon.support.sources import Sources
 from yulon.ui import lines
+from yulon.ui.widgets.log_panel import LogPanel
 
 TORTOISE = load_catalog().get("wow-tortoise")
 SPEC = TORTOISE.container_spec()
@@ -108,7 +111,9 @@ class Tails:
         return self.logs.get(container)
 
 
-def _engine(world: World, tails: Tails, *, db_healthy: bool = True) -> native.StagedInstaller:
+def _engine(
+    world: World, tails: Tails, *, db_healthy: bool = True, entry: CatalogEntry = TORTOISE
+) -> native.StagedInstaller:
     rec = Recorder()
     rec.db_healthy = db_healthy
     seams = rec.seams(
@@ -118,7 +123,7 @@ def _engine(world: World, tails: Tails, *, db_healthy: bool = True) -> native.St
         container_tail=tails,
     )
     engine = installer_for(
-        TORTOISE,
+        entry,
         installers_root=resources.installers_dir(),
         import_probe=rec.probe,
         reset_unfinished=rec.reset,
@@ -128,20 +133,22 @@ def _engine(world: World, tails: Tails, *, db_healthy: bool = True) -> native.St
     return engine
 
 
-def _ctx(server_dir: Path) -> native.StageContext:
+def _ctx(server_dir: Path, cancel: threading.Event | None = None) -> native.StageContext:
     return native.StageContext(
         server_dir=server_dir,
         client_dir=None,
         state=native.InstallState("wow-tortoise", "abc", "cmangos"),
-        cancel=threading.Event(),
+        cancel=cancel if cancel is not None else threading.Event(),
         secrets=native.Secrets(PASSWORD),
     )
 
 
-def _fail(engine: native.StagedInstaller, tmp_path: Path) -> tuple[list[str], InstallerError]:
+def _fail(
+    engine: native.StagedInstaller, tmp_path: Path, *, cancel: threading.Event | None = None
+) -> tuple[list[str], InstallerError]:
     """Drive `stage_ready` to its failure. The lines it yielded, and what it raised."""
     said: list[str] = []
-    stage: Iterator[str] = engine.stage_ready(_ctx(tmp_path))
+    stage: Iterator[str] = engine.stage_ready(_ctx(tmp_path, cancel))
     with pytest.raises(InstallerError) as caught:
         for line in stage:
             said.append(line)
@@ -157,24 +164,25 @@ def _shown(said: list[str]) -> str:
 
 
 def test_a_crash_looping_install_s_support_file_carries_the_world_server_s_last_lines(
-    tmp_path: Path,
+    qapp: object, tmp_path: Path
 ) -> None:
     """The reported case, from the ready stage to the zip, with no install remembered.
 
-    The run log is written the way the panel writes it (`LogPanel._on_line`:
-    every non-progress line's parsed text; `_on_finished`: the verdict and its
-    Details), and the bundle is the real one, built with `installs=()`.
+    The install's own panel writes the run log (`LogPanel.run(record_as=)`, as
+    `CatalogView.start_install` does), and the bundle is the real one, built
+    with `installs=()`.
     """
-    said, error = _fail(_engine(World("loop"), Tails()), tmp_path)
-    config = tmp_path / "config"
-    record = runlog.RunLog.open(runlog.runs_dir(config), "install-wow-tortoise")
-    for line in said:
-        parsed = lines.parse(line)
-        if parsed.kind != "progress":
-            record.write(parsed.text)
-    record.write(f"--- FAILED: {error}\nDetails:\n{error.detail}")
-    record.close()
+    engine = _engine(World("loop"), Tails())
+    panel = LogPanel()
+    assert panel.run(
+        lambda: engine.stage_ready(_ctx(tmp_path)),
+        title="Installing WoW Tortoise",
+        record_as="install-wow-tortoise",
+    )
+    wait_for_panel(panel)
+    assert "crash loop" in panel.failure_label.text(), "the job failed where the report says"
 
+    config = platform.config_dir()
     dest = tmp_path / "support.zip"
     report = bundle.save(
         dest,
@@ -193,6 +201,48 @@ def test_a_crash_looping_install_s_support_file_carries_the_world_server_s_last_
         text = archive.read(runs[0]).decode("utf-8")
     assert CRASH in text, "the world server's own reason must reach the support file"
     assert AUTH_LOG.strip() in text, "and the login server's lines with it"
+    assert PASSWORD not in text
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-centurion"])
+def test_every_family_s_install_shows_the_lines_through_the_one_ready_stage(
+    tmp_path: Path, game: str
+) -> None:
+    """AzerothCore, CMaNGOS and TrinityCore all run `StagedInstaller.stage_ready`."""
+    entry = load_catalog().get(game)
+    spec = entry.container_spec()
+    tails = Tails({spec.world: WORLD_LOG, spec.auth: AUTH_LOG})
+    said, error = _fail(_engine(World("loop"), tails, entry=entry), tmp_path)
+
+    assert "crash loop" in str(error)
+    assert f"{spec.world} | {CRASH}" in _shown(said)
+    assert tails.asked == [spec.world, spec.auth]
+
+
+def test_a_stop_during_the_reads_ends_them_at_once(tmp_path: Path) -> None:
+    """A Stop pressed while a log is being read does not wait out that read's 20 s bound."""
+    cancel = threading.Event()
+    released = threading.Event()
+    asked: list[str] = []
+
+    def slow(container: str) -> str | None:
+        asked.append(container)
+        cancel.set()
+        released.wait(HANG_BOUND)
+        return WORLD_LOG
+
+    engine = _engine(World("loop"), Tails())
+    engine._seams.container_tail = slow
+    started = time.monotonic()
+    try:
+        said, error = _fail(engine, tmp_path, cancel=cancel)
+    finally:
+        released.set()
+
+    assert time.monotonic() - started < HANG_BOUND / 2
+    assert asked == [WORLD], "nothing more is asked once Stop is pressed"
+    assert "crash loop" in str(error), "the failure is still the failure"
+    assert CRASH not in _shown(said)
 
 
 VERDICT_WORDS = {
