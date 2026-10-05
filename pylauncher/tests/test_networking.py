@@ -505,7 +505,7 @@ def test_every_realmlist_under_a_lowercase_data_folder_of_a_ready_to_play_client
     tmp_path: Path,
 ) -> None:
     us = _lowercase_locale(tmp_path / "play")
-    gb = tmp_path / "play" / "data" / "engb" / "realmlist.wtf"
+    gb = tmp_path / "play" / "data" / "engb" / "REALMLIST.WTF"
     gb.parent.mkdir()
     gb.write_text("set realmlist logon.example.com\n", encoding="utf-8")
     os.chmod(us, 0o444)

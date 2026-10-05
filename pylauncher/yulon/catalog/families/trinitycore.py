@@ -636,8 +636,11 @@ class TrinityCoreInstaller(CmangosInstaller):
         exact = temp / client_names.DATA_FOLDER
         if os.path.lexists(exact):
             return
+        # A real folder whenever it is found: `play_client.plan()` refused a client
+        # whose `Data` (found the same way) is a link or no folder, and the copy
+        # reproduces no link.
         found = client_names.find(temp, client_names.DATA_FOLDER)
-        if found is None or play_client._is_link(found) or not found.is_dir():
+        if found is None:
             return
         try:
             os.rename(found, exact)
