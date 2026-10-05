@@ -73,8 +73,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon.log import get_logger
 from yulon.ui.answers import said_yes
 from yulon.ui.theme import QUESTION_PARAGRAPH
+
+logger = get_logger(__name__)
 
 _REFIT_ON = (QEvent.Type.Show, QEvent.Type.LayoutRequest)
 """The two events `QMessageBox` recomputes its size on (`showEvent`, `event`)."""
@@ -104,14 +107,13 @@ class FittedMessageBox(QMessageBox):
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[call-overload]
-        self._scroll: QScrollArea | None = None
         self._paragraphs: list[QLabel] = []
         # Now, not at the first show: a widget added to a box that is already
         # being shown is shown a turn of the event loop later, and `QMessageBox`
         # sizes itself without a widget that is not shown yet.
         # The text is the constructor's: every caller passes it there, and nothing
         # here follows a later `setText()`.
-        self._question_scroll()
+        self._scroll: QScrollArea | None = self._question_scroll()
 
     def event(self, event: QEvent) -> bool:
         if event.type() in _REFIT_ON:
@@ -123,7 +125,7 @@ class FittedMessageBox(QMessageBox):
 
     def _fit_question_to_screen(self) -> None:
         """Size the question's scroll area so `QMessageBox` fixes the box inside the screen."""
-        scroll = self._question_scroll()
+        scroll = self._scroll
         layout = self.layout()
         body = scroll.widget() if scroll is not None else None
         lines = body.layout() if body is not None else None
@@ -152,16 +154,20 @@ class FittedMessageBox(QMessageBox):
             paragraph.setFocusPolicy(policy)
 
     def _question_scroll(self) -> QScrollArea | None:
-        """The scroll area holding the question, put in place of Qt's label the first time."""
-        if self._scroll is not None:
-            return self._scroll
+        """A scroll area holding the question, put in place of Qt's label; None if it cannot be."""
         label = self.findChild(QLabel, _QT_MESSAGE_LABEL)
         grid = self.layout()
-        if label is None or not isinstance(grid, QGridLayout):
+        if label is None or not isinstance(grid, QGridLayout) or grid.indexOf(label) < 0:
+            # Qt's own box, unbounded: say so in the log, so a Qt that lays its box
+            # out differently is found from yulon.log rather than from a player whose
+            # buttons are below the screen. CI runs the newest PySide6, which is the
+            # one a release ships, and `tests/test_dialogs_fit_the_screen.py` fails there.
+            logger.warning(
+                f"T243: this Qt's QMessageBox has no {_QT_MESSAGE_LABEL} in a grid layout; "
+                f"the question {self.windowTitle()!r} is shown unscrolled"
+            )
             return None
         index = grid.indexOf(label)
-        if index < 0:
-            return None
         row, column, rows, columns = cast("tuple[int, int, int, int]", grid.getItemPosition(index))
         text = self.text()
         rich = self.textFormat() == Qt.TextFormat.RichText or (
@@ -194,7 +200,6 @@ class FittedMessageBox(QMessageBox):
         scroll.setWidget(body)
         label.hide()
         grid.addWidget(scroll, row, column, rows, columns)
-        self._scroll = scroll
         return scroll
 
     def _room(self) -> QRect:

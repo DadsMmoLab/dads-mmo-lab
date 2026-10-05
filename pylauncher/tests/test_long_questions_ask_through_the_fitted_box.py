@@ -292,3 +292,37 @@ def test_the_suites_guard_outlives_a_tests_own_undo(monkeypatch: pytest.MonkeyPa
     monkeypatch.undo()
     assert QMessageBox.exec.__name__ == "_answer_like_the_static_question"
     assert QMessageBox.question(None, "t", "q") == SB.No
+
+
+def test_a_qt_whose_box_is_laid_out_otherwise_is_said_in_the_log_and_still_asks(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Codex (adversarial): the fit leans on Qt's own label. A Qt without it gets Qt's own box,
+    which still asks and still answers, and the log says the question is not scrolled."""
+    import logging
+
+    from yulon.ui import message_box
+
+    monkeypatch.setattr(message_box, "_QT_MESSAGE_LABEL", "not_in_this_qt")
+    with caplog.at_level(logging.WARNING):
+        box = FittedMessageBox(QMessageBox.Icon.Question, "Rebuild?", "Long.", SB.Yes | SB.No)
+    try:
+        assert box._scroll is None
+        assert "'Rebuild?' is shown unscrolled" in caplog.text
+        box.show()  # sizing an unscrolled box must not raise
+        assert box.text() == "Long."
+    finally:
+        box.hide()
+        box.deleteLater()
+
+
+def test_the_suites_guard_never_hands_a_box_to_qts_own_question(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex (adversarial): a test that put the real static `question()` back must not have the
+    guard open a real modal through it; the box is answered No instead."""
+    from tests import conftest
+
+    (real,) = conftest._REAL_QUESTION
+    monkeypatch.setattr(QMessageBox, "question", real)
+    assert ask_yes_no(None, "t", "q") is False

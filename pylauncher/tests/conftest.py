@@ -863,8 +863,16 @@ def _no_modal_dialogs() -> Iterator[None]:
         yield
         return
     with pytest.MonkeyPatch.context() as guard:
+        _REAL_QUESTION.append(QMessageBox.question)
         _disarm_modals(guard, QMessageBox)
-        yield
+        try:
+            yield
+        finally:
+            _REAL_QUESTION.clear()
+
+
+_REAL_QUESTION: list[Any] = []
+"""Qt's own static `question()`, held while the guard is up (`_answer_like_the_static_question`)."""
 
 
 def _disarm_modals(monkeypatch: pytest.MonkeyPatch, QMessageBox: Any) -> None:  # noqa: N803
@@ -921,7 +929,9 @@ def _answer_like_the_static_question(box: Any) -> object:
     from PySide6.QtWidgets import QMessageBox
 
     yes_no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-    if box.standardButtons() != yes_no:
+    if box.standardButtons() != yes_no or QMessageBox.question in _REAL_QUESTION:
+        # Not the static call's shape, or a test has put Qt's own `question()` back:
+        # handing the box to that would open a real modal, the one thing this guards.
         return QMessageBox.StandardButton.No
     return QMessageBox.question(
         box.parentWidget(),

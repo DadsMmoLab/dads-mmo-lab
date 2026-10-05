@@ -107,6 +107,8 @@ def _repair_text() -> str:
         counts=" (it adds 12 lines and removes 9)",
         confs=confs,
         others="any other .conf setting",
+        # T219's paragraph too: every part the Repair question can carry, at once.
+        volume=controller_view.REPAIR_FILES_WORLD_DATA.format(gb=4.2),
     )
 
 
