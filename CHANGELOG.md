@@ -28,6 +28,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
 - On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.
 - Long questions such as **Rebuild the server…** scroll inside a dialog that fits the screen; the buttons always show.
 - A fresh Centurion server no longer restarts over and over at the end of its install.
