@@ -2427,23 +2427,33 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "container -- and a listing that comes back without a `.dbc` in it is a refusal "
         "(`no .dbc files in ...`), never a copy reported as done"
     ),
+    ("apply.py", "_plan_onto"): (
+        "T262 (was `_copy_onto`'s). Walks the SOURCE tree inside the clone this app made -- "
+        "the files a folder `client` step copies -- and lists each destination folder once to "
+        "land every folder and file on the name the client already has in another case. "
+        "Read-only: it plans the names; `_copy_onto()` writes them, and the receipts `remove()` "
+        "checks are of those names, taken from the source and never from a listing of the "
+        "destination (round 1 review, 2026-09-16: listing `<client>/Data` recorded the user's "
+        "own archives as this app's). A listing that fails raises, and the install stops"
+    ),
+    ("apply.py", "_data_destinations"): (
+        "T262 scoped re-review. Lists the one destination folder of each single-file `dest: "
+        "data` step to name the file it would write, for the refusal of a module whose file "
+        "another module already put there and for the aside of an earlier crash. Read-only; "
+        "it decides a refusal or which aside is put back, never a write of its own"
+    ),
+    ("apply.py", "_aside_names"): (
+        "T262 scoped re-review. Lists the folder of one client file to find its "
+        "`<name>.yulon-module-old[.N]` asides, any case. Read-only; an aside it finds that "
+        "no receipt records is renamed back to its own name when that is free, and named "
+        "otherwise -- never deleted. A folder that cannot be listed has none"
+    ),
     ("apply.py", "_client"): (
         "T262. Lists the one destination folder of a single-file `client` step (the client's "
         "`Data/`, or `Interface/`) to find the name a file of that name already has there in "
         "another case, so the copy lands on it rather than beside it. It decides which existing "
         "name is written, never whether the client may be written: that is the step's own "
         "`dest`. A folder that cannot be listed raises, and the install stops"
-    ),
-    ("apply.py", "_copy_onto"): (
-        "T262 (was `_receipts`, T67). Walks the SOURCE tree inside the clone this app made -- "
-        "the files a folder `client` step copies -- and lists each destination folder once to "
-        "land every folder and file on the name the client already has in another case. The "
-        "names it returns, one per source file, are what `_receipts` hashes for the record "
-        "`remove()` checks before it DELETES anything from the user's game client, so the "
-        "record is still taken from the source and never from a listing of the destination: "
-        "round 1 review, 2026-09-16, listing `<client>/Data` recorded the user's own archives "
-        "as this app's and removing the Season of Discovery keg emptied the folder. A listing "
-        "that fails raises, and the install stops"
     ),
     ("catalog/native.py", "folder_bytes"): (
         "T203 fix round 3. Adds up the sizes of the files under a server folder for "

@@ -2229,11 +2229,12 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return factory(entry, server_dir, client_dir, wsl_distro)
+            return _with_take_back(factory(entry, server_dir, client_dir, wsl_distro))
         services = factory(entry, server_dir, play_client_dir, wsl_distro)
         if services.applier is not None:
             services.applier.client_origins = _originals_of(play_client_dir, client_dir)
             services.applier.client_game = entry.id
+        services = _with_take_back(services)
         return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
 
     @classmethod
@@ -2258,6 +2259,18 @@ class ControllerServices:
             wsl_distro=wsl_distro,
             play_client_dir=play_client_dir,
         )
+
+
+def _with_take_back(services: ControllerServices) -> ControllerServices:
+    """Uninstall takes the module client files back through the module applier (T262).
+
+    The applier knows which folder is the ready-to-play client and which the
+    player's own, so a receipt from before the switch is acted on where Remove
+    would act on it.
+    """
+    if isinstance(services.uninstall, purge.Uninstaller) and services.applier is not None:
+        services.uninstall.take_back_client_files = services.applier.take_back_everything
+    return services
 
 
 def _originals_of(play_client_dir: Path, client_dir: Path | None) -> tuple[Path, ...]:

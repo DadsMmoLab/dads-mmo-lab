@@ -626,38 +626,40 @@ def test_a_players_file_with_the_same_bytes_is_not_set_aside(
     assert _names(tmp_path / "client") == ["Data"]
 
 
+def _update(applier: Any, manifest: Manifest, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`Applier.update()` with only its git questions answered (a clean checkout, same origin).
+
+    The rest is the real route: `update()` runs `install()` again over the clone, and
+    `install()` hands the claim's receipts to `_client()` (`log.previous_copies`).
+    """
+    monkeypatch.setattr(applier, "_update_refusal", lambda _manifest: None)
+    monkeypatch.setattr(applier, "_reset_cost", lambda _manifest, _clone: None)
+    return applier.update(manifest)
+
+
 def test_a_reinstall_keeps_the_players_file_aside_rather_than_its_own_first_copy(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The second install finds ITS OWN file at the name: that is not the player's to keep,
     and setting it aside would put Yu'lon's patch back where the player's belongs.
 
-    Through `_client()` twice, the second time with the first install's receipts as the
-    claim holds them (`previous_copies`), as `install()` hands them over on an update.
+    Through the real `install()` and then `update()`, so the hand-off of the claim's
+    receipts to `_client()` (`log.previous_copies`) is what is tested.
     """
-    from yulon import apply as apply_module
-
     manifest = _manifest(ARAC)
-    clone = tmp_path / "clone"
-    _write(clone / "Patch-A.MPQ", MPQ)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
     data = tmp_path / "client" / "Data"
-    _write(data / "Patch-A.MPQ", b"the player's own")
-    applier = Applier(tmp_path / "server", client_dir=tmp_path / "client")
-    first = apply_module._Log()
-    applier._client(manifest, clone, first)
-    _write(clone / "Patch-A.MPQ", MPQ + b" v2")
-    second = apply_module._Log(previous_copies=tuple(first.client_copies))
 
-    applier._client(manifest, clone, second)
+    _update(applier, manifest, monkeypatch)
 
     assert _names(data) == ["Patch-A.MPQ", "Patch-A.MPQ" + ASIDE]
     assert (data / ("Patch-A.MPQ" + ASIDE)).read_bytes() == b"the player's own"
-    (copy,) = second.client_copies
+    (copy,) = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
     assert copy.aside == str(data / ("Patch-A.MPQ" + ASIDE)), "the first aside is carried"
-    applier._take_back(copy, (gone := apply_module._Log()))
+    report = applier.remove(manifest)
     assert _names(data) == ["Patch-A.MPQ"]
     assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
-    assert f"put your own Patch-A.MPQ back in {data}" in gone.done
+    assert f"put your own Patch-A.MPQ back in {data}" in report.done
 
 
 def test_a_put_back_that_fails_keeps_the_aside_file_and_names_it(
@@ -881,9 +883,327 @@ def test_two_source_names_of_one_name_set_the_players_file_aside_once(tmp_path: 
     _write(folder / "patch-4.mpq", b"second")
     data = tmp_path / "client" / "Data"
     _write(data / "Patch-4.MPQ", b"the player's own")
-    log = apply_module._Log()
+    log = apply_module._Log(persist=lambda _files: None)
 
     Applier(tmp_path / "server", client_dir=tmp_path / "client")._client(manifest, clone, log)
 
     assert _names(data) == ["Patch-4.MPQ", "Patch-4.MPQ" + ASIDE]
     assert (data / ("Patch-4.MPQ" + ASIDE)).read_bytes() == b"the player's own"
+
+
+# ------------- T262 scoped re-review: the aside is durable, and every path puts it back
+
+
+def _player_and_clone(tmp_path: Path) -> tuple[Path, Path]:
+    """The player's own `Data/Patch-A.MPQ` (read-only) and the server folder, made first."""
+    players = tmp_path / "client" / "Data" / "Patch-A.MPQ"
+    _write(players, b"the player's own")
+    os.chmod(players, 0o444)
+    (tmp_path / "server").mkdir()
+    return players, tmp_path / "server"
+
+
+def _install_failing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail: str
+) -> tuple[Any, pytest.ExceptionInfo[BaseException]]:
+    """Install mod-arac over the player's file, failing at `fail` after the file was moved."""
+    from yulon import apply as apply_module
+
+    manifest = _manifest(ARAC)
+    _compose_run_double(monkeypatch, _volume(tmp_path))
+    applier, _sql = _the_app_s_applier(
+        monkeypatch, tmp_path / "server", tmp_path / "client", manifest
+    )
+    if fail == "the copy":
+
+        def broken(src: object, dst: object) -> object:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(apply_module, "_copy_unshared", broken)
+    elif fail == "the DBC step":
+
+        def dbc(*_a: object, **_k: object) -> None:
+            raise apply_module.ApplyError("the DBC copy failed")
+
+        monkeypatch.setattr(applier, "_dbc", dbc)
+    with pytest.raises(BaseException) as failed:
+        applier.install(manifest)
+    return applier, failed
+
+
+@pytest.mark.parametrize("fail", ["the copy", "the DBC step"])
+def test_an_install_that_fails_after_the_move_puts_the_players_file_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail: str
+) -> None:
+    """Scoped re-review, must-fix 1: a failure after the rename leaves nothing hidden."""
+    players, _server = _player_and_clone(tmp_path)
+    before = players.stat()
+
+    applier, _failed = _install_failing(monkeypatch, tmp_path, fail)
+
+    assert _names(players.parent) == ["Patch-A.MPQ"]
+    assert players.read_bytes() == b"the player's own"
+    assert players.stat().st_mode == before.st_mode, "still read-only"
+    copies = read_client_copies(_clone_of(applier, _manifest(ARAC)), item_id="mod-arac")
+    assert not [copy for copy in copies if copy.aside], "no record of an aside that is gone"
+
+
+def test_a_later_set_aside_blocked_puts_the_first_one_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A keg's second file of the player's cannot be moved (WoW holds it on Windows): the
+    install fails, and the first file it had already moved goes back."""
+    from yulon import apply as apply_module
+
+    manifest = _manifest(SOD)
+    client = tmp_path / "client"
+    _write(client / "Data" / "patch-4.MPQ", b"the player's patch-4")
+    _write(client / "Data" / "patch-Z.MPQ", b"the player's patch-Z")
+    (tmp_path / "server").mkdir()
+    _compose_run_double(monkeypatch, _volume(tmp_path))
+    applier, _sql = _the_app_s_applier(monkeypatch, tmp_path / "server", client, manifest)
+    applier.git = _SodClone(manifest, ARAC_DBCS)
+    real_rename = os.rename
+
+    def held(src: object, dst: object) -> None:
+        if Path(str(src)).name == "patch-Z.MPQ":
+            raise PermissionError(13, "The process cannot access the file")
+        real_rename(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_module.os, "rename", held)
+    with pytest.raises(PermissionError):
+        applier.install(manifest)
+
+    assert sorted(p.name for p in (client / "Data").iterdir() if p.is_file()) == [
+        "patch-4.MPQ",
+        "patch-Z.MPQ",
+    ]
+    assert (client / "Data" / "patch-4.MPQ").read_bytes() == b"the player's patch-4"
+    assert (client / "Data" / "patch-Z.MPQ").read_bytes() == b"the player's patch-Z"
+
+
+def test_a_put_back_after_a_failure_that_fails_is_recorded_named_and_restored_later(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yulon import apply as apply_module
+
+    players, _server = _player_and_clone(tmp_path)
+    aside = players.with_name("Patch-A.MPQ" + ASIDE)
+    real_rename = os.rename
+
+    def no_way_back(src: object, dst: object) -> None:
+        if Path(str(src)) == aside:
+            raise PermissionError(13, "held open")
+        real_rename(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_module.os, "rename", no_way_back)
+    applier, failed = _install_failing(monkeypatch, tmp_path, "the DBC step")
+
+    assert aside.read_bytes() == b"the player's own"
+    assert str(aside) in str(failed.value), "the failure names where the player's file is"
+    (copy,) = read_client_copies(_clone_of(applier, _manifest(ARAC)), item_id="mod-arac")
+    assert copy.aside == str(aside), "and the claim records it"
+    monkeypatch.setattr(apply_module.os, "rename", real_rename)
+
+    applier.remove(_manifest(ARAC))
+
+    assert _names(players.parent) == ["Patch-A.MPQ"]
+    assert players.read_bytes() == b"the player's own"
+
+
+@pytest.mark.parametrize("dies", ["after the move", "before the move"])
+def test_a_crash_during_the_install_leaves_a_record_remove_acts_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dies: str
+) -> None:
+    """The process dies (no rollback runs): the claim was written BEFORE the rename, so
+    the next Remove finds the player's file and puts it back, or finds it never moved."""
+    from yulon import apply as apply_module
+
+    players, server = _player_and_clone(tmp_path)
+    manifest = _manifest(ARAC)
+    _compose_run_double(monkeypatch, _volume(tmp_path))
+    applier, _sql = _the_app_s_applier(monkeypatch, server, tmp_path / "client", manifest)
+    real_rename = os.rename
+
+    class Died(BaseException):
+        pass
+
+    def rename(src: object, dst: object) -> None:
+        if dies == "before the move" and str(dst).endswith(ASIDE):
+            raise Died()
+        real_rename(src, dst)  # type: ignore[arg-type]
+        if dies == "after the move" and str(dst).endswith(ASIDE):
+            raise Died()
+
+    monkeypatch.setattr(apply_module.os, "rename", rename)
+    monkeypatch.setattr(Applier, "_put_asides_back", lambda self, log: [])  # no process left
+    with pytest.raises(Died):
+        applier.install(manifest)
+    monkeypatch.setattr(apply_module.os, "rename", real_rename)
+
+    report = applier.remove(manifest)
+
+    assert _names(players.parent) == ["Patch-A.MPQ"]
+    assert players.read_bytes() == b"the player's own"
+    if dies == "after the move":
+        assert f"put your own Patch-A.MPQ back in {players.parent}" in report.done
+
+
+def test_without_a_claim_the_players_file_is_not_moved(tmp_path: Path) -> None:
+    """No record to write the aside into: refused, the player's file untouched."""
+    from yulon import apply as apply_module
+
+    clone = tmp_path / "clone"
+    _write(clone / "Patch-A.MPQ", MPQ)
+    data = tmp_path / "client" / "Data"
+    _write(data / "Patch-A.MPQ", b"the player's own")
+
+    with pytest.raises(apply_module.ApplyError, match="was not moved"):
+        Applier(tmp_path / "server", client_dir=tmp_path / "client")._client(
+            _manifest(ARAC), clone, apply_module._Log()
+        )
+
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+
+
+def test_an_aside_no_receipt_records_is_put_back_by_remove(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Belt: `<name>.yulon-module-old` beside a module's file with no record is put back."""
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {})
+    data = tmp_path / "client" / "Data"
+    _write(data / ("Patch-A.MPQ" + ASIDE), b"the player's own")
+
+    report = applier.remove(manifest)
+
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert f"put your own Patch-A.MPQ back in {data}" in report.done
+
+
+def test_an_aside_no_receipt_records_is_adopted_by_the_next_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Belt: the install that finds one names it and records it, so Remove puts it back."""
+    manifest = _manifest(ARAC)
+    data = tmp_path / "client" / "Data"
+    _write(data / ("Patch-A.MPQ" + ASIDE), b"the player's own")
+
+    applier = _arac_over(monkeypatch, tmp_path, {})
+
+    (copy,) = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
+    assert copy.aside == str(data / ("Patch-A.MPQ" + ASIDE))
+    applier.remove(manifest)
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+
+
+def test_a_second_module_with_a_file_of_the_same_name_is_refused_naming_both(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Lead decision: no aside chains between two modules. The first module's file stays."""
+    from yulon.apply import ApplyRefusal
+
+    arac = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {})
+    other = arac.model_copy(update={"id": "mod-arac-copy"})
+    applier.git = _CloneFromManifest(other, ARAC_DBCS)
+    data = tmp_path / "client" / "Data"
+    (data / "Patch-A.MPQ").chmod(0o644)
+    (data / "Patch-A.MPQ").write_bytes(MPQ)
+
+    with pytest.raises(ApplyRefusal) as refused:
+        applier.install(other)
+
+    assert "mod-arac-copy" in str(refused.value) and "mod-arac put there" in str(refused.value)
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == MPQ
+
+
+class _SodWithoutTheLocalePatch(_SodClone):
+    """The keg's next version: its `enUS/patch-enUS-4.MPQ` is gone from the source."""
+
+    def clone(self, spec: Any) -> None:
+        super().clone(spec)
+        (spec.dest / self.manifest.client[0].src / "enUS" / "patch-enUS-4.MPQ").unlink()
+
+
+def test_an_update_that_no_longer_ships_a_file_takes_it_back_and_puts_the_players_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = _manifest(SOD)
+    client = tmp_path / "client"
+    locale = client / "Data" / "enUS" / "patch-enUS-4.MPQ"
+    _write(locale, b"the player's own locale patch")
+    (tmp_path / "server").mkdir()
+    _compose_run_double(monkeypatch, _volume(tmp_path))
+    applier, _sql = _the_app_s_applier(monkeypatch, tmp_path / "server", client, manifest)
+    applier.git = _SodClone(manifest, ARAC_DBCS)
+    applier.install(manifest)
+    assert locale.read_bytes() == b"the keg's locale patch"
+    applier.git = _SodWithoutTheLocalePatch(manifest, ARAC_DBCS)
+
+    _update(applier, manifest, monkeypatch)
+
+    assert locale.read_bytes() == b"the player's own locale patch"
+    assert _names(locale.parent) == ["patch-enUS-4.MPQ"]
+    copies = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
+    assert str(locale) not in {copy.path for copy in copies}
+
+
+def test_a_reinstall_over_a_file_the_player_changed_records_it_and_remove_names_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    data = tmp_path / "client" / "Data"
+    (data / "Patch-A.MPQ").write_bytes(b"the player's change to the patch")
+
+    _update(applier, manifest, monkeypatch)
+
+    changed = data / ("Patch-A.MPQ" + ASIDE + ".1")
+    assert changed.read_bytes() == b"the player's change to the patch"
+    (copy,) = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
+    assert copy.kept == (str(changed),)
+    report = applier.remove(manifest)
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert changed.read_bytes() == b"the player's change to the patch"
+    assert any(str(changed) in line for line in report.left_behind)
+
+
+def test_an_aside_the_claim_cannot_read_keeps_the_receipt_and_is_named(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    clone = _clone_of(applier, manifest)
+    claim = json.loads((clone / CLAIM_FILE).read_text("utf-8"))
+    claim["client_files"][0]["aside"] = 5
+    (clone / CLAIM_FILE).write_text(json.dumps(claim), "utf-8")
+
+    (copy,) = read_client_copies(clone, item_id=manifest.id)
+    assert copy.aside == "" and copy.aside_unknown is True
+    report = applier.remove(manifest)
+
+    data = tmp_path / "client" / "Data"
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own", "found beside it"
+    assert any("could not be read" in line for line in report.left_behind)
+
+
+def test_uninstall_takes_every_modules_files_back_and_puts_the_players_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Uninstall seam `ControllerServices.for_entry()` wires: the applier's take-back."""
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    services = ControllerServices.for_entry(WOTLK, tmp_path / "server", tmp_path / "client")
+    assert services.uninstall is not None
+    took, left = services.uninstall.take_back_client_files()  # type: ignore[attr-defined]
+
+    data = tmp_path / "client" / "Data"
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert f"put your own Patch-A.MPQ back in {data}" in took
+    assert left == []
+    assert applier is not None

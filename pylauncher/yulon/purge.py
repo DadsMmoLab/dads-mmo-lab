@@ -125,7 +125,8 @@ behind is the surprise nobody wants. Until then the ticked press removed it
 LEFT_BEHIND = (
     "your backups — an uninstall that deleted them would make "
     '"Keep my characters" pointless in the one case it matters',
-    "your WoW client folder, including any files a module put into it",
+    "your WoW client folder. A file a module put into it is removed when it is still the "
+    "file Yu'lon copied, and a file of yours a module set aside is put back",
     "firewall rules, port forwards and anything else on the host",
     "Docker, WSL, and every other dependency Yu'lon provisioned",
     "another install of this game in another folder — different path, "
@@ -325,6 +326,7 @@ class Uninstaller:
         forget_pending: Callable[[], None] | None = None,
         remove_extraction_client: Callable[[], str] | None = None,
         stop_background_jobs: Callable[[], None] | None = None,
+        take_back_client_files: Callable[[], tuple[list[str], list[str]]] | None = None,
     ) -> None:
         self.game = game
         self.server_dir = server_dir
@@ -357,6 +359,13 @@ class Uninstaller:
             if remove_extraction_client is not None
             else self._real_remove_extraction_client
         )
+        self.take_back_client_files = (
+            take_back_client_files
+            if take_back_client_files is not None
+            else self._real_take_back_client_files
+        )
+        """Set again by `ControllerServices.for_entry()` to its module applier's, which knows
+        the ready-to-play client and the player's own (T262 cold review)."""
         self._stop_background_jobs = (
             stop_background_jobs
             if stop_background_jobs is not None
@@ -440,6 +449,16 @@ class Uninstaller:
             return remove_for_uninstall(self.server_dir, self.game)
         except LeftoverNotNoted as exc:
             raise PurgeError(str(exc)) from exc
+
+    @staticmethod
+    def _real_take_back_client_files() -> tuple[list[str], list[str]]:
+        """Nothing, until `ControllerServices.for_entry()` sets its module applier's here.
+
+        The take-back needs the applier the Modules tab uses (which client is the
+        ready-to-play one, and the world-running seam every applier the app builds
+        carries), and every Uninstall the app runs is built through that factory.
+        """
+        return [], []
 
     def _real_stop_background_jobs(self) -> None:
         """A TrinityCore server's movement-map job, removed before its containers (T179 Task 4).
@@ -652,6 +671,21 @@ class Uninstaller:
                 warnings.append(f"{ref} was left behind: {problem}")
             else:
                 removed_images.append(ref)
+
+        # BEFORE the folder: every module's receipts live in its clone in it. Each
+        # module's client file goes, and each file of the player's a module set
+        # aside is put back; what cannot be is named, never deleted (T262).
+        try:
+            took, kept_back = self.take_back_client_files()
+        except (OSError, ValueError) as exc:
+            took, kept_back = [], [
+                f"the files modules put into your game client could not be checked ({exc}); "
+                f"any file of yours a module set aside is still beside it, named "
+                f"<name>.yulon-module-old"
+            ]
+        for line in took:
+            logger.info(f"uninstall: {line}")
+        warnings.extend(f"left in your game client: {line}" for line in kept_back)
 
         # BEFORE the folder: the record of where a leftover copy is lives in it. A
         # copy it could neither remove nor note elsewhere raises here, and the

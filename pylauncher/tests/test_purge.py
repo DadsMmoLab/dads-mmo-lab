@@ -1151,3 +1151,21 @@ def test_an_unticked_purge_with_no_pending_record_says_nothing_about_one(tmp_pat
     report = rec.uninstaller().run(keep_characters=False)
 
     assert report.warnings == ()
+
+
+# -- T262: module client files go back before the folder that holds their receipts ----
+
+
+def test_uninstall_takes_the_module_client_files_back_before_the_folder_and_names_the_rest(
+    tmp_path: Path,
+) -> None:
+    rec = _recorder(tmp_path)
+
+    def take_back() -> tuple[list[str], list[str]]:
+        rec.order.append("take_back")
+        return ["put your own Patch-A.MPQ back in /c/Data"], ["your own X, set aside as /c/Y"]
+
+    report = rec.uninstaller(take_back_client_files=take_back).run(keep_characters=False)
+
+    assert rec.order.index("take_back") < rec.order.index(f"remove_folder:{rec.server_dir}")
+    assert "left in your game client: your own X, set aside as /c/Y" in report.warnings
