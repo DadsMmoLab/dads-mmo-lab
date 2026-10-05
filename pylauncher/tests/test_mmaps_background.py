@@ -9,19 +9,31 @@ drives the job through the states a real daemon would report.
 Review Focus 3 is the property most of these are about: pathfinding is switched
 on in worldserver.conf ONLY after a complete run -- exit status the plan calls
 finished AND at least `min_files` files -- and a failed, short, stopped or
-vanished run leaves it off with its partial output removed. Nothing here proves
-the real generator runs in the image (the live proof, Task 9).
+vanished run leaves it off. Since T209 such a run keeps its finished tiles and
+removes only a cut-off one, and the next start continues from them while the
+map data is the one the run began with. Tiles here are real bytes laid out as
+the pinned source's `MmapTileHeader` (`tests/support_trinitycore.mmtile`).
+Nothing here proves the real generator runs in the image (the live proof).
 """
 
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from tests.support_trinitycore import CORE_DIR, FakeJob, FakeMmapsDocker
+from tests.support_trinitycore import (
+    CORE_DIR,
+    MMAP_MAGIC,
+    TILE_HEADER,
+    FakeJob,
+    FakeMmapsDocker,
+    mmtile,
+)
 from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytest resolves them
     ENTRY,
     MAP_NAMES,
@@ -77,6 +89,7 @@ def lay_server(server_dir: Path) -> None:
     for name in VMAP_TREES:
         (data / "vmaps" / name).write_bytes(b"VMAP_4.8")
     (data / "dbc" / "LiquidType.dbc").write_bytes(b"LIQUID")
+    (data / extract.EVIDENCE_FILE).write_text('{"plan_hash": "first"}\n', encoding="utf-8")
     (server_dir / "etc").mkdir()
     (server_dir / "etc" / "worldserver.conf").write_text(WORLD_CONF, encoding="utf-8")
 
@@ -202,9 +215,13 @@ def test_docker_refusing_the_start_is_a_failed_job_that_can_start_again(server: 
 
 
 def test_a_start_over_an_old_partial_set_empties_it_first(server: Path) -> None:
-    """The generator skips every tile it finds a file for: old files would look finished."""
+    """The generator skips every tile it finds a file for: old files would look finished.
+
+    WHOLE tiles with no record (T209): nothing says which map data they were made
+    from, so even a tile the resume would keep goes.
+    """
     (server / "data" / "mmaps").mkdir()
-    (server / "data" / "mmaps" / "0003232.mmtile").write_bytes(b"half")
+    (server / "data" / "mmaps" / "0003232.mmtile").write_bytes(mmtile())
     fake = FakeMmapsDocker()
     start(server, fake)
     assert fake.mmaps_at_run == [[]]
@@ -330,23 +347,33 @@ def test_an_incomplete_run_never_switches_pathfinding_on(
     assert now.state == "failed" and now.can_start and not now.pathfinding_on
     assert why in now.error
     assert "mmap.enablePathFinding = 0" in conf_text(server)
-    assert output(server) == [], "the partial output is removed"
+    assert len(output(server)) == tiles, "its finished tiles are kept (T209)"
     assert NAME not in fake.jobs
     start(server, fake)
-    assert record(server)["state"] == "running", "a failed job starts again from scratch"
+    assert record(server)["state"] == "running", "a failed job starts again"
+    assert len(fake.mmaps_at_run[-1]) == tiles, "and continues from the tiles it kept"
 
 
-def test_a_container_that_vanished_while_running_is_a_failed_run_cleared(server: Path) -> None:
+def test_a_container_that_vanished_while_running_is_a_failed_run_that_keeps_its_tiles(
+    server: Path,
+) -> None:
+    """Docker losing the container (a restart of Docker Desktop) keeps the finished tiles."""
     fake = FakeMmapsDocker()
     start(server, fake)
     fake.write_tiles(40)
+    fake.write_cut_tile()
     fake.vanish()
     now = status(server, fake)
-    assert now.state == "failed"
+    assert now.state == "failed" and now.kept == 40
     assert "container is gone" in now.error
-    assert output(server) == []
+    assert len(output(server)) == 40 and "0013251.mmtile" not in output(server)
     assert "mmap.enablePathFinding = 0" in conf_text(server)
-    assert now.line().endswith("It can be started again.")
+    assert now.line().endswith(
+        "Its 40 finished tiles are kept, and the next run continues from there."
+    )
+    start(server, fake)
+    assert len(fake.mmaps_at_run[-1]) == 40
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "not a crash: the usual threads"
 
 
 def test_an_app_that_died_between_queued_and_the_container_finds_a_failed_start(
@@ -386,17 +413,41 @@ def test_a_lost_record_never_leaves_pathfinding_on_over_emptied_maps(server: Pat
 # -- stopping ---------------------------------------------------------------------------
 
 
-def test_stop_removes_the_container_and_the_partial_output(server: Path) -> None:
+def test_stop_removes_the_container_and_keeps_the_finished_tiles(server: Path) -> None:
+    """The player's Stop (T209): the container goes, the finished tiles stay, a start continues."""
     fake = FakeMmapsDocker()
     start(server, fake)
     fake.write_tiles(12)
+    fake.write_cut_tile()
     said = mmaps.stop_mmaps(server, ENTRY, runner=fake, install_id=INSTALL_ID)
-    assert said.startswith("Stopped making the pathfinding data")
+    assert said == (
+        "Stopped making the pathfinding data. Its 12 finished tiles are kept, and the next "
+        "run continues from there. Pathfinding stays off until a run finishes."
+    )
     assert NAME not in fake.jobs
+    assert len(output(server)) == 12 and "0013251.mmtile" not in output(server)
+    now = status(server, fake)
+    assert now.state == "failed" and now.can_start and now.kept == 12
+    assert now.line() == (
+        "Pathfinding data stopped part-way: you stopped it. Its 12 finished tiles are kept, "
+        "and the next run continues from there."
+    )
+    assert "mmap.enablePathFinding = 0" in conf_text(server)
+    start(server, fake)
+    assert len(fake.mmaps_at_run[-1]) == 12, "the next start continues from them"
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "a Stop is not a crash"
+
+
+def test_a_stop_before_any_tile_was_finished_leaves_nothing_behind(server: Path) -> None:
+    """Nothing to keep: as before T209, no record and not started."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_cut_tile()
+    said = mmaps.stop_mmaps(server, ENTRY, runner=fake, install_id=INSTALL_ID)
+    assert said.startswith("Stopped making the pathfinding data and removed what it had made")
     assert output(server) == []
     assert not (server / mmaps.RECORD_FILE).exists()
     assert status(server, fake).state == "not-started"
-    assert "mmap.enablePathFinding = 0" in conf_text(server)
 
 
 def test_a_stop_docker_refuses_keeps_the_record(server: Path) -> None:
@@ -444,11 +495,15 @@ def test_a_job_that_cannot_start_is_a_warning_and_the_install_still_finishes(
 
 
 def test_a_rebuild_stops_the_job_first_and_starts_it_again_after(box: Machine) -> None:
+    """Rebuild keeps the finished tiles (T209, same pin) and the run continues from them."""
     install(box)
     box.mmaps.write_tiles(30)
+    box.mmaps.write_cut_tile()
     eng = engine(box)
+    said: list[str] = []
     seen: list[tuple[str, bool, list[str]]] = []
     for line in eng.rebuild(InstallOptions(server_dir=box.server_dir)):
+        said.append(line)
         if line.startswith("--- "):
             seen.append((line, bool(box.mmaps.jobs), output(box.server_dir)))
     assert [line for line, _running, _files in seen] == [
@@ -459,12 +514,19 @@ def test_a_rebuild_stops_the_job_first_and_starts_it_again_after(box: Machine) -
     ]
     stopped = [call for call in box.mmaps.calls if call.startswith("remove:")]
     assert stopped, "the job was stopped"
-    assert all(not running and not files for _line, running, files in seen), (
-        "no stage of the rebuild ran beside the job or its partial output",
+    assert all(not running for _line, running, _files in seen), (
+        "no stage of the rebuild ran beside the job",
         seen,
     )
+    assert all(len(files) == 30 for _line, _running, files in seen), "only the cut tile went"
+    assert (
+        "Stopped making the pathfinding data before the rebuild; its 30 finished tiles are "
+        "kept and pathfinding stays off. It continues from there once the server has been "
+        "rebuilt, or from the Server tab."
+    ) in said
     assert "mmap.enablePathFinding = 0" in conf_text(box.server_dir)
     assert len(box.mmaps.started) == 2, "started again once the rebuilt server was ready"
+    assert len(box.mmaps.mmaps_at_run[-1]) == 30, "continuing from the kept tiles"
     assert record(box.server_dir)["state"] == "running"
 
 
@@ -518,14 +580,21 @@ def test_the_update_routes_stop_the_job_after_the_source_checks_and_before_the_r
 
     monkeypatch.setattr(eng, "check_moved_sources", check)
     monkeypatch.setattr(eng, "before_rebuild", before)
-    list(eng.update_to_latest(InstallOptions(server_dir=box.server_dir), to_pin=True))
+    box.mmaps.write_tiles(30)
+    said = list(eng.update_to_latest(InstallOptions(server_dir=box.server_dir), to_pin=True))
     assert order == [
         "refusals",
         "source checks",
         "stop:the return to the tested commit:Return to the tested pin…",
         "rebuild",
     ]
-    assert not box.mmaps.jobs and output(box.server_dir) == []
+    assert not box.mmaps.jobs and output(box.server_dir) == [], "a new pin clears them (T209)"
+    assert not (box.server_dir / mmaps.RECORD_FILE).exists()
+    assert (
+        "Stopped making the pathfinding data before the return to the tested commit; what it "
+        "had made so far was removed and pathfinding stays off. It starts again from the "
+        "beginning once the server has been rebuilt, or from the Server tab."
+    ) in said
 
 
 @pytest.fixture
@@ -692,7 +761,9 @@ def test_a_route_stops_a_job_whose_record_cannot_be_read(server: Path) -> None:
     start(server, fake)
     fake.write_tiles(9)
     (server / mmaps.RECORD_FILE).write_text("{torn", "utf-8")
-    said = mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+    said = mmaps.stop_for_route(
+        server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+    )
     assert said is not None and said.startswith("Stopped making the pathfinding data")
     assert NAME not in fake.jobs and output(server) == []
     assert not (server / mmaps.RECORD_FILE).exists()
@@ -768,7 +839,9 @@ def test_a_hung_daemon_reads_as_unanswered_and_refuses_the_route(server: Path) -
     fake.hang = True
     assert status(server, fake).docker_unanswered
     with pytest.raises(mmaps.MmapsError, match="the rebuild was not started"):
-        mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+        mmaps.stop_for_route(
+            server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+        )
     assert record(server)["state"] == "running"
 
 
@@ -850,7 +923,9 @@ def test_a_route_removes_a_failed_jobs_container_if_it_is_still_there(server: Pa
     raw["state"] = "failed"
     (server / mmaps.RECORD_FILE).write_text(json.dumps(raw), "utf-8")
     assert NAME in fake.jobs, "a live container the record no longer vouches for"
-    mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+    mmaps.stop_for_route(
+        server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+    )
     assert NAME not in fake.jobs
 
 
@@ -861,7 +936,9 @@ def test_a_failed_jobs_container_that_cannot_be_removed_refuses_the_route(server
     )
     fake.refuse_remove = "daemon busy"
     with pytest.raises(mmaps.MmapsError, match="the rebuild was not started"):
-        mmaps.stop_for_route(server, ENTRY, "the rebuild", runner=fake, install_id=INSTALL_ID)
+        mmaps.stop_for_route(
+            server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+        )
 
 
 def test_a_poll_over_an_emptied_set_it_cannot_clear_is_a_failed_state_not_a_raise(
@@ -938,3 +1015,416 @@ def test_uninstall_removes_the_derived_job_and_never_a_container_a_record_names(
     rec.uninstaller(game=ENTRY.id).run(keep_characters=False)
     removed = [call for call in box.mmaps.calls if call.startswith("remove:")]
     assert removed == [f"remove:{name}"]
+
+
+# -- T209: a run that stops part-way keeps its finished tiles ------------------------------
+
+
+def lay_tiles(server_dir: Path, tiles: dict[str, bytes]) -> None:
+    out = server_dir / "data" / "mmaps"
+    out.mkdir(exist_ok=True)
+    for name, body in tiles.items():
+        (out / name).write_bytes(body)
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "kept"),
+    [
+        ("0014251.mmtile", mmtile(64), True),
+        ("0014251.mmtile", mmtile(0), True),
+        ("0014251.mmtile", mmtile(64, cut=20 + 32), False),
+        ("0014251.mmtile", mmtile(64, cut=20), False),
+        ("0014251.mmtile", mmtile(64) + b"\0", False),
+        ("0014251.mmtile", mmtile(64, magic=MMAP_MAGIC ^ 1), False),
+        ("0014251.mmtile", mmtile(64, cut=7), False),
+        ("001.mmap", b"\x01" * 7, True),
+        ("notes.txt", b"x", True),
+    ],
+    ids=(
+        "whole",
+        "whole-empty-data",
+        "header-and-half-its-data",
+        "header-only",
+        "one-byte-too-long",
+        "bad-magic",
+        "seven-bytes",
+        "map-file-left-alone",
+        "not-a-tile-left-alone",
+    ),
+)
+def test_a_crash_keeps_exactly_the_whole_tiles(
+    server: Path, name: str, body: bytes, kept: bool
+) -> None:
+    """Each fixture breaks ONE rule of the pinned header (MapDefines.h:27-38): its length
+    against `size`, or its magic. Driven through the failure a poll finds (`_finished`)."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    lay_tiles(server, {"0000000.mmtile": mmtile(16), name: body})
+    fake.finish(139)
+    now = status(server, fake)
+    assert now.state == "failed"
+    assert (name in output(server)) is kept
+    assert "0000000.mmtile" in output(server), "the whole neighbour is never touched"
+    if name == "0014251.mmtile":
+        assert now.kept == (2 if kept else 1)
+
+
+def test_the_test_tiles_are_the_pinned_structs_size() -> None:
+    """`sizeof(MmapTileHeader) == 20` is the pinned source's own static_assert (MapDefines.h:41)."""
+    assert TILE_HEADER.size == 20
+    assert len(mmtile(64)) == 84
+
+
+def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_from_them(
+    server: Path,
+) -> None:
+    """The crash seen live (exit 139 at 16 %): the retry continues from the kept tiles, on the
+    usual threads -- one thread crashed at 16-17 % too (live, 2026-10-05), so it gains nothing."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "the first run: half the cores"
+    fake.write_tiles(3)
+    fake.write_cut_tile()
+    fake.finish(139)
+    now = status(server, fake)
+    assert now.state == "failed" and now.kept == 3 and not now.pathfinding_on
+    saved = record(server)
+    assert saved["resumable"] is True and saved["kept"] == 3
+    assert output(server) == ["0000000.mmtile", "0000001.mmtile", "0000002.mmtile"]
+    assert "mmap.enablePathFinding = 0" in conf_text(server)
+    assert now.line().startswith("Pathfinding data stopped part-way: the generator stopped with")
+    assert now.line().endswith(
+        "Its 3 finished tiles are kept, and the next run continues from there."
+    )
+    said = start(server, fake)
+    assert fake.mmaps_at_run[-1] == ["0000000.mmtile", "0000001.mmtile", "0000002.mmtile"]
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "the usual threads after a crash"
+    assert said.startswith("Continuing the pathfinding data in the background from its 3 ")
+
+
+def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
+    server: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    (server / "data" / extract.EVIDENCE_FILE).write_text('{"plan_hash": "second"}\n', "utf-8")
+    with caplog.at_level("WARNING"):
+        start(server, fake)
+    assert fake.mmaps_at_run[-1] == [], "tiles made from other map data are not continued"
+    assert any(
+        "map data" in rec.getMessage() and "changed" in rec.getMessage() for rec in caplog.records
+    )
+    assert record(server)["kept"] == 0
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "a new set: the usual threads"
+
+
+def test_map_data_changed_during_a_run_is_never_switched_on(server: Path) -> None:
+    """Codex adversarial review: a run that ends well over map data that changed under it
+    is a set made from two map datas; its tiles go and pathfinding stays off."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    _change_size_only(next(iter(sorted((server / "data" / "maps").iterdir()))))
+    fake.finish(0, tiles=MIN_FILES)
+    now = status(server, fake)
+    assert now.state == "failed" and not now.pathfinding_on and now.kept == 0
+    assert "map data changed while" in now.error
+    assert output(server) == []
+    assert "mmap.enablePathFinding = 0" in conf_text(server)
+
+
+def _change_size_only(path: Path) -> None:
+    stamp = path.stat().st_mtime_ns
+    path.write_bytes(path.read_bytes() + b"!")
+    os.utime(path, ns=(stamp, stamp))
+
+
+def _change_mtime_only(path: Path) -> None:
+    stamp = path.stat().st_mtime_ns + 5_000_000_000
+    os.utime(path, ns=(stamp, stamp))
+
+
+def _add_a_file(path: Path) -> None:
+    (path.parent / "999.vmtree").write_bytes(b"VMAP_4.8")
+
+
+@pytest.mark.parametrize(
+    ("folder", "change"),
+    [
+        ("maps", _change_size_only),
+        ("dbc", _change_mtime_only),
+        ("vmaps", _add_a_file),
+    ],
+    ids=("a-map-file-of-another-size", "a-dbc-file-rewritten", "a-vmap-file-added"),
+)
+def test_map_data_changed_behind_an_unchanged_evidence_file_clears_the_tiles(
+    server: Path, folder: str, change: Callable[[Path], None]
+) -> None:
+    """Codex adversarial review: the evidence file alone does not prove the maps are the same.
+    Each fixture changes ONE fact of ONE file the generator reads; the evidence file stays."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    change(next(iter(sorted((server / "data" / folder).iterdir()))))
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+
+
+def test_a_run_whose_map_data_had_no_evidence_is_never_continued(server: Path) -> None:
+    """Nothing to compare with is not "unchanged"."""
+    (server / "data" / extract.EVIDENCE_FILE).unlink()
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+
+
+def test_a_cut_tile_laid_while_the_run_was_failed_is_removed_before_the_resume(
+    server: Path,
+) -> None:
+    """The start checks the tiles again: a file can change between the failure and the start."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    lay_tiles(server, {"0000001.mmtile": mmtile(16 + 1, cut=30)})
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == ["0000000.mmtile", "0000002.mmtile"]
+    assert record(server)["kept"] == 2
+
+
+def test_a_record_that_cannot_be_read_clears_the_tiles_on_start(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    (server / mmaps.RECORD_FILE).write_text("{torn", "utf-8")
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+
+
+def test_a_rebuild_route_keeps_the_tiles_of_a_failed_run(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    said = mmaps.stop_for_route(
+        server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+    )
+    assert said is None
+    assert len(output(server)) == 3 and record(server)["resumable"] is True
+
+
+def test_an_update_route_clears_the_tiles_of_a_failed_run_and_forgets_it(server: Path) -> None:
+    """The generator's code may change while `MMAP_VERSION` does not (owner, 2026-10-04)."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    said = mmaps.stop_for_route(
+        server,
+        ENTRY,
+        "the update to the newest code",
+        clear=True,
+        runner=fake,
+        install_id=INSTALL_ID,
+    )
+    assert output(server) == []
+    assert not (server / mmaps.RECORD_FILE).exists()
+    assert said == (
+        "The 3 pathfinding tiles kept from an earlier run were removed before the update to "
+        "the newest code, which can change how they are made. It starts again from the "
+        "beginning once the server has been rebuilt, or from the Server tab."
+    )
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+    assert fake.started[-1].argv[-2:] == ("--threads", "4"), "a new start: the usual threads"
+
+
+def test_an_update_of_a_failed_run_after_a_real_crash_clears_the_tiles(box: Machine) -> None:
+    """Through the engine's update route, after the run crashed (T209): nothing is continued."""
+    install(box)
+    box.mmaps.write_tiles(30)
+    box.mmaps.finish(139)
+    eng = engine(box)
+    assert eng.mmaps_status(box.server_dir).kept == 30
+    said = list(
+        eng.before_rebuild(
+            box.server_dir, "the update to the newest code", "Update the server to latest…"
+        )
+    )
+    assert output(box.server_dir) == [] and said
+    rebuilt = list(eng.before_rebuild(box.server_dir, "the rebuild"))
+    assert rebuilt == []
+
+
+def test_a_rebuild_through_the_engine_keeps_the_tiles_of_a_failed_run(box: Machine) -> None:
+    install(box)
+    box.mmaps.write_tiles(30)
+    box.mmaps.finish(139)
+    eng = engine(box)
+    assert eng.mmaps_status(box.server_dir).kept == 30
+    list(eng.rebuild(InstallOptions(server_dir=box.server_dir)))
+    assert len(box.mmaps.mmaps_at_run[-1]) == 30
+    assert box.mmaps.started[-1].argv[-2:] == ("--threads", "4")
+
+
+def test_reextract_discards_the_kept_tiles(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    mmaps.discard(server, ENTRY, install_id=INSTALL_ID)
+    assert output(server) == [] and not (server / mmaps.RECORD_FILE).exists()
+
+
+def test_a_resumed_run_is_done_only_with_the_success_code_and_min_files(server: Path) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(300)
+    fake.finish(139)
+    status(server, fake)
+    start(server, fake)
+    fake.finish(0, tiles=0)
+    short = status(server, fake)
+    assert short.state == "failed" and "300 files where at least 500" in short.error
+    start(server, fake)
+    fake.write_tiles(MIN_FILES - 300, first=300)
+    fake.finish(0)
+    done = status(server, fake)
+    assert done.state == "done" and done.kept == 0 and done.pathfinding_on
+
+
+def test_one_warning_per_failure_however_often_it_is_polled(
+    server: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F15: the live "logged twice" was not in yulon.log (one line at 03:07:00); pinned here."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            status(server, fake)
+        mmaps.stop_for_route(
+            server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+        )
+    failed = [rec for rec in caplog.records if " failed: " in rec.getMessage()]
+    assert len(failed) == 1
+
+
+def test_an_update_route_clears_the_tiles_of_a_run_that_crashed_since_the_last_poll(
+    server: Path,
+) -> None:
+    """Codex review: the route's own reconcile turns the run `failed` and keeps its tiles;
+    an update must still throw them away (the record still said `running`)."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    assert record(server)["state"] == "running", "nobody polled since it crashed"
+    said = mmaps.stop_for_route(
+        server,
+        ENTRY,
+        "the update to the newest code",
+        clear=True,
+        runner=fake,
+        install_id=INSTALL_ID,
+    )
+    assert output(server) == []
+    assert not (server / mmaps.RECORD_FILE).exists()
+    assert said is not None and said.startswith("The 3 pathfinding tiles kept from an earlier run")
+
+
+def test_a_rebuild_route_keeps_the_tiles_of_a_run_that_crashed_since_the_last_poll(
+    server: Path,
+) -> None:
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    said = mmaps.stop_for_route(
+        server, ENTRY, "the rebuild", clear=False, runner=fake, install_id=INSTALL_ID
+    )
+    assert said is None
+    assert len(output(server)) == 3 and record(server)["resumable"] is True
+
+
+def test_a_record_written_before_t209_is_never_continued(server: Path) -> None:
+    """No `resumable` and no `evidence` in it: its tiles are not known to be whole or current."""
+    lay_tiles(server, {"0000000.mmtile": mmtile(), "0000001.mmtile": mmtile()})
+    (server / mmaps.RECORD_FILE).write_text(
+        json.dumps({"version": 1, "state": "failed", "container": NAME}), "utf-8"
+    )
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+
+
+def test_an_update_route_forgets_a_crashed_run_that_kept_no_tile(server: Path) -> None:
+    """Codex review: a failed run that kept no whole tile is forgotten by an update too."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_cut_tile()
+    fake.finish(139)
+    assert status(server, fake).state == "failed"
+    said = mmaps.stop_for_route(
+        server,
+        ENTRY,
+        "the update to the newest code",
+        clear=True,
+        runner=fake,
+        install_id=INSTALL_ID,
+    )
+    assert said is None, "nothing kept, so nothing to say"
+    assert not (server / mmaps.RECORD_FILE).exists()
+    start(server, fake)
+    assert fake.started[-1].argv[-2:] == ("--threads", "4")
+
+
+@pytest.mark.parametrize("linked", ["file", "folder"])
+def test_map_data_reached_through_a_link_is_never_continued(server: Path, linked: str) -> None:
+    """Codex adversarial review: a link's own size and time say nothing about what it points
+    at, which the generator reads. Unchanged otherwise, the run still starts from 0."""
+    elsewhere = server.parent / "elsewhere"
+    elsewhere.mkdir()
+    if linked == "file":
+        (elsewhere / "0004331.map").write_bytes(b"MAPS")
+        (server / "data" / "maps" / "0004331.map").symlink_to(elsewhere / "0004331.map")
+    else:
+        (server / "data" / "vmaps" / "extra").symlink_to(elsewhere, target_is_directory=True)
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+
+
+@pytest.mark.parametrize("code", [139, 134, 255, 137, 143, 1])
+def test_every_failed_exit_keeps_the_tiles_and_the_usual_threads(server: Path, code: int) -> None:
+    """A crash (139, 134), Docker going away (255, 137, 143) or an error (1): the next run
+    continues from the kept tiles on the usual threads. The one-thread retry was dropped on
+    the live evidence of 2026-10-05: one thread crashed at 16-17 % as well (T209)."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(code)
+    now = status(server, fake)
+    assert now.state == "failed" and now.kept == 3
+    start(server, fake)
+    assert len(fake.mmaps_at_run[-1]) == 3
+    assert fake.started[-1].argv[-2:] == ("--threads", "4")

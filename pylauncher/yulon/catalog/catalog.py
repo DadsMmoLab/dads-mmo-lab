@@ -937,6 +937,42 @@ class TrinityCoreExtractPlan(ExtractPlan):
         return value
 
 
+class MmapTileHeader(_Strict):
+    """The header `mmaps_generator` writes at the start of every `.mmtile`, little-endian.
+
+    Centurion's (CENTURION faac5fc9, src/common/Collision/Maps/MapDefines.h:24-41):
+    `const uint32 MMAP_MAGIC = 0x4d4d4150`, then `struct MmapTileHeader { uint32
+    mmapMagic; uint32 dtVersion; uint32 mmapVersion; uint32 size; char usesLiquids;
+    char padding[3]; }`, 20 bytes (its own `static_assert`, :41). A tile is written
+    as that header and then exactly `size` bytes of navmesh data
+    (src/tools/mmaps_generator/MapBuilder.cpp:977-988). So a tile is finished when
+    it starts with the magic and is `length + size` bytes long; anything else was
+    cut off and is removed before a run continues.
+    """
+
+    length: Annotated[StrictInt, Field(ge=1)] = Field(
+        description="`sizeof(MmapTileHeader)`: the bytes before the data (Centurion: 20)."
+    )
+    magic: Annotated[StrictInt, Field(ge=0, lt=1 << 32)] = Field(
+        description=(
+            "The uint32 every tile starts with, read little-endian: `MMAP_MAGIC` "
+            "(Centurion: 0x4d4d4150, 1296908624)."
+        )
+    )
+    size_offset: Annotated[StrictInt, Field(ge=4)] = Field(
+        description="Where the uint32 data length (`size`) sits, after the magic (Centurion: 12)."
+    )
+
+    @model_validator(mode="after")
+    def _size_inside_the_header(self) -> MmapTileHeader:
+        if self.size_offset + 4 > self.length:
+            raise ValueError(
+                f"tile_header: the size at byte {self.size_offset} runs past the "
+                f"{self.length}-byte header"
+            )
+        return self
+
+
 class TrinityCoreMmaps(MmapPlan):
     """The movement-map generator, which on this family runs after the server is up."""
 
@@ -955,6 +991,16 @@ class TrinityCoreMmaps(MmapPlan):
             "the cores of the Docker daemon that runs it (Docker Desktop's VM, not this host), at "
             "least 1 -- the generator's own default is every core (PathGenerator.cpp:343), and "
             "the world server runs beside it. A number: exactly that many."
+        ),
+    )
+    tile_header: MmapTileHeader | None = Field(
+        default=None,
+        description=(
+            "T209: how a finished `.mmtile` is told from one the generator was writing when it "
+            "stopped, so a run that stops part-way keeps its finished tiles and the next run "
+            "continues from them (the generator skips every tile whose header it can read, and "
+            "does not check the length: MapBuilder.cpp:1133-1152 at faac5fc9). None: nothing is "
+            "kept and every run starts from the beginning."
         ),
     )
 

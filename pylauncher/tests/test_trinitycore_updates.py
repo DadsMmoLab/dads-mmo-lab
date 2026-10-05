@@ -1369,6 +1369,65 @@ def test_a_named_file_must_be_one_the_plan_imports(
         centurion_like()
 
 
+def test_reextract_stops_a_running_job_and_keeps_its_tiles_only_until_the_new_data_is_in(
+    box: Box,
+) -> None:
+    """T209 with T241: the stop keeps the tiles (the old map data may come back), and a
+    finished extraction throws them away with the old data, so the new run starts empty."""
+    fake: FakeMmapsDocker = box.m.mmaps
+    flagged(box)
+    assert not fake.jobs, "the update stopped it, and the flag holds the restart"
+    box.engine().start_mmaps(box.server_dir)
+    fake.write_tiles(30)
+    box.world.running = False
+    said = list(
+        box.engine().reextract(
+            InstallOptions(server_dir=box.server_dir, client_dir=box.m.client), cancel=None
+        )
+    )
+    assert (
+        "Stopped making the pathfinding data before the extraction; its 30 finished tiles are "
+        "kept and pathfinding stays off. If the extraction does not finish, the run continues "
+        "from them; once it has, they are removed with the old map data."
+    ) in said
+    assert len(fake.mmaps_at_run[-1]) == 0, "the new run starts from an empty folder"
+
+
+def _a_run_that_crashed(box: Box, tiles: int) -> list[str]:
+    """A pathfinding run that crashed part way and kept `tiles` whole tiles (T209)."""
+    fake: FakeMmapsDocker = box.m.mmaps
+    flagged(box)
+    box.engine().start_mmaps(box.server_dir)
+    fake.write_tiles(tiles)
+    fake.finish(139)
+    now = box.engine().mmaps_status(box.server_dir)
+    assert now.state == "failed" and now.kept == tiles
+    return sorted(path.name for path in (box.server_dir / "data" / "mmaps").iterdir())
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["crashed", "running"])
+def test_a_failed_reextract_leaves_a_pathfinding_run_that_continues_from_its_tiles(
+    box: Box, running: bool
+) -> None:
+    """The cold review of 4d672a26: the old map data comes back unchanged -- names, sizes and
+    dates, which `mmaps._evidence()` hashes -- so the run made from it continues."""
+    fake: FakeMmapsDocker = box.m.mmaps
+    if running:
+        flagged(box)
+        box.engine().start_mmaps(box.server_dir)
+        fake.write_tiles(12)
+        tiles = sorted(path.name for path in (box.server_dir / "data" / "mmaps").iterdir())
+    else:
+        tiles = _a_run_that_crashed(box, 12)
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert box.engine().mmaps_status(box.server_dir).kept == 12
+    box.engine().start_mmaps(box.server_dir)
+    assert fake.mmaps_at_run[-1] == tiles, "continued from its tiles, not from 0 %"
+
+
 def test_the_flag_file_is_json_naming_what_changed(box: Box) -> None:
     flagged(box)
     raw = json.loads((box.server_dir / trinitycore.REEXTRACT_FILE).read_text("utf-8"))
@@ -1391,6 +1450,7 @@ def test_a_failed_job_whose_container_is_already_gone_stops_nothing(tmp_path: Pa
             ENTRY,
             "the rebuild",
             press="Rebuild the server…",
+            clear=False,
             runner=fake,
             install_id="0123abcd",
         )
@@ -1417,6 +1477,7 @@ def test_a_route_the_job_holds_up_says_to_check_docker_and_press_it_again(
             ENTRY,
             "the update to the newest code",
             press="Update the server to latest…",
+            clear=True,
             runner=fake,
             install_id="0123abcd",
         )

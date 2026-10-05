@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from yulon import docker, platform, resources, runner
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource
 from yulon.catalog.upstream import UpstreamNews
@@ -138,7 +139,7 @@ class InstallerError(RuntimeError):
     """The install could not start or did not finish (message is user-readable)."""
 
 
-class WorldStoppedAfterReadyError(InstallerError):
+class WorldStoppedAfterReadyError(InstallerError, TrueAfterStop):
     """The world server printed its ready banner and then stopped (T71).
 
     A subclass rather than a flag because ONE caller treats it differently and
@@ -158,6 +159,9 @@ class WorldStoppedAfterReadyError(InstallerError):
     3): True when "Update the server to latest…" or "Return to the tested pin…"
     left the moved sources on their new commits with the kept build, so the
     Modules tab drops the counts the move made stale, as after a finished press.
+
+    `TrueAfterStop` (T228): the kept build is true whether or not Stop was
+    pressed, so the log panel shows this sentence after a Stop too.
     """
 
     def __init__(self, *args: object, sources_kept: bool = False) -> None:
@@ -165,7 +169,7 @@ class WorldStoppedAfterReadyError(InstallerError):
         self.sources_kept = sources_kept
 
 
-class RollbackNotDone(InstallerError):
+class RollbackNotDone(InstallerError, TrueAfterStop):
     """A rebuild's rollback stopped before the old build was back on its tags (T197).
 
     `StagedInstaller._restore_rollback()` has four ways to stop early: the new
@@ -182,6 +186,9 @@ class RollbackNotDone(InstallerError):
     build until its next start. `mixed` True: the tags name neither build, so there
     is no new build for the sources to stay with, and the route puts them back
     (fix round 1).
+
+    `TrueAfterStop` (T228): the old build is not back whether or not Stop was
+    pressed, so the log panel shows this sentence after a Stop too.
     """
 
     def __init__(

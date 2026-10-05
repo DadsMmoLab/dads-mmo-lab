@@ -240,6 +240,10 @@ def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer
     return found[labels.index(choice)]
 
 
+INSTALL_STOPPED_TITLE = "Install stopped"
+"""The popup's title when a stopped install ended on a failure that says what it left (T228)."""
+
+
 class Identification(Enum):
     """What `_identify()` established about a folder: three answers, not two.
 
@@ -1042,6 +1046,16 @@ class CatalogView(QWidget):
         game_id, server_dir, client_dir = self._current
         self._current = None
         self._set_buttons_enabled(True)
+        if self._log.cancelled and not ok:
+            # T228 cold review: Stop was pressed and the job still FAILED, with a
+            # sentence about what it left (`TrueAfterStop`, a kept build). The
+            # header reads "Stopped. FAILED: ..."; the popup says exactly that,
+            # rather than the plain-cancel copy beside it. Not remembered either.
+            said = self._log.status_text()
+            logger.info(f"install of {game_id} was stopped and left something: {message}")
+            QMessageBox.warning(self, INSTALL_STOPPED_TITLE, said)
+            self.install_finished.emit(game_id, False, said)
+            return
         if self._log.cancelled:
             # A cancelled install reaches here as a SUCCESS: `runner.interact()`
             # returns rather than raising when its cancel event is set, so the

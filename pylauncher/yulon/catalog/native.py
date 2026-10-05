@@ -87,6 +87,7 @@ from yulon import (
     server_build_presses,
     serverlock,
 )
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -2064,13 +2065,39 @@ def forget_owed_start(server_dir: Path) -> str:
     return ""
 
 
-class ServersLeftStopped(InstallerError):
+class ServersLeftStopped(InstallerError, TrueAfterStop):
     """A rebuild's rollback put the old build back and did NOT start it (T179 final round).
 
     The update route's world tables could not all be put back for it, and no start
     is allowed until "Finish the world update" has run (`start_refusal()`). Its own
     type so the route's closing note says the server is stopped, not running.
+    `TrueAfterStop` (T228): the log panel shows it after a Stop too.
     """
+
+
+class RebuildChangedTheServer(InstallerError, TrueAfterStop):
+    """A failed rebuild that had already changed what the server runs (T228 cold review).
+
+    The new build replaced the containers with no rollback to put back, or the
+    rollback put the old build back on a database the new build may have written
+    to, running or not. Its sentence says which, and a Stop does not make it any
+    less true, so the log panel shows it after a Stop too. A failure that changed
+    nothing (a compile stopped before any container moved) stays a plain
+    `InstallerError`, which after a Stop is a clean cancel.
+
+    `up` False: the server is not up -- the new build never came up with nothing
+    to put back, or the old build was put back and did not report ready either --
+    so the update route's closing note must not say the folder agrees with what
+    is running.
+    """
+
+    def __init__(self, *args: object, up: bool = True) -> None:
+        super().__init__(*args)
+        self.up = up
+
+
+class _NotUpEither(str):
+    """`_restore_rollback()`'s sentence when the old build was put back and did not come up."""
 
 
 class _LeftStopped(str):
@@ -2106,6 +2133,12 @@ SOURCES_PUT_BACK_STOPPED_NOTE = (
     "build that was put back; it stays stopped until its world tables are in."
 )
 """`SOURCES_PUT_BACK_NOTE` for a press whose rollback left the servers stopped (T179)."""
+
+SOURCES_PUT_BACK_NOT_UP_NOTE = (
+    "The source folders were put back on the commits they were on, so what is on disk and the "
+    "build that was put back agree again; the server is not up."
+)
+"""`SOURCES_PUT_BACK_NOTE` for a press whose put-back build did not report ready (T228)."""
 
 SOURCES_PUT_BACK_NOTE = (
     "The source folders were put back on the commits they were on, so what is on disk and what "
@@ -6113,6 +6146,8 @@ class StagedInstaller:
                 # back to. `touched` says whether the containers run it yet.
                 message = f"{exc} {NO_ROLLBACK_BUILT if touched else NO_ROLLBACK_UNTOUCHED}"
                 self._record_error(server_dir, ctx.state, message)
+                if touched:
+                    raise RebuildChangedTheServer(message, up=False) from exc
                 raise InstallerError(message) from exc
             message = yield from self._restore_rollback(
                 ctx, refs, kept, touched, str(exc), servers_down=servers_down
@@ -6131,6 +6166,12 @@ class StagedInstaller:
                     f"{message} {warned}" if warned else str(message),
                     touched=message.touched,
                     mixed=message.mixed,
+                ) from exc
+            if touched:
+                # The old build is back, running or not, on whatever the new one
+                # wrote into the database: `_restore_rollback()` says so.
+                raise RebuildChangedTheServer(
+                    message, up=not isinstance(message, _NotUpEither)
                 ) from exc
             raise InstallerError(message) from exc
         except BaseException:
@@ -6684,6 +6725,11 @@ class StagedInstaller:
                 if isinstance(exc, ServersLeftStopped):
                     # T179: nothing runs, so the note must not say it does.
                     raise ServersLeftStopped(f"{exc} {SOURCES_PUT_BACK_STOPPED_NOTE}") from exc
+                if isinstance(exc, RebuildChangedTheServer):
+                    # T228: the rebuild's sentence is true after a Stop, and so is
+                    # this one; the type carries that through.
+                    note = SOURCES_PUT_BACK_NOTE if exc.up else SOURCES_PUT_BACK_NOT_UP_NOTE
+                    raise RebuildChangedTheServer(f"{exc} {note}", up=exc.up) from exc
                 raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
             except BaseException:
                 # Not a refusal: a bug, an interrupt, a reader that went away. The
@@ -7312,8 +7358,7 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build's servers could not be stopped ({exc}); "
-                    f"the tags still name the new build, all of them. The old images are on "
-                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"the tags still name the new build, all of them. {self._old_images(kept)}",
                     touched=touched,
                 )
         else:
@@ -7330,8 +7375,8 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
-                    f"onto ({problem}); the tags still name the new build, all of them. The "
-                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"onto ({problem}); the tags still name the new build, all of them. "
+                    f"{self._old_images(kept)}",
                     touched=touched,
                 )
             named.append(name)
@@ -7347,16 +7392,16 @@ class StagedInstaller:
                         f"{failure} Putting the build from before this rebuild back failed "
                         f"part-way ({problem}) and undoing it failed too, so the tags are "
                         f"MIXED: {', '.join(mixed)} name the old build and the rest name the "
-                        f"new one. Do not start this server until they agree; the old images "
-                        f"are under their {ROLLBACK_TAG_SUFFIX} tags.",
+                        f"new one. Do not start this server until they agree. "
+                        f"{self._old_images(kept)}",
                         touched=touched,
                         mixed=True,
                     )
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back failed "
                     f"({problem}), and the {len(undone)} tag(s) already moved were moved back, "
-                    f"so the tags still name the new build, all of them. The old images are "
-                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"so the tags still name the new build, all of them. "
+                    f"{self._old_images(kept)}",
                     touched=touched,
                 )
             moved.append(ref)
@@ -7433,7 +7478,7 @@ class StagedInstaller:
             # already reporting a failure.
             yield from self._release(named)
             yield from self._release(kept)
-            return (
+            return _NotUpEither(
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
             )
@@ -7442,6 +7487,27 @@ class StagedInstaller:
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+
+    def _old_images(self, kept: Sequence[str]) -> str:
+        """Where the build from before is, ASKED rather than assumed (m910q P9).
+
+        A rollback that stopped early said "the old images are on the daemon
+        under their -rollback tags" right after Docker had answered "No such
+        image: ...-rollback": the names had been removed out of band. So the
+        daemon is asked, and the sentence says what it answered.
+        """
+        gone = [ref for ref in kept if self._seams.images_built([ref]) is False]
+        if gone:
+            return (
+                f"Docker no longer has {', '.join(gone)}, so the build from before this "
+                f"rebuild cannot be put back from them."
+            )
+        if any(self._seams.images_built([ref]) is None for ref in kept):
+            return (
+                f"Yu'lon could not ask Docker whether the old images are still under their "
+                f"{ROLLBACK_TAG_SUFFIX} tags."
+            )
+        return f"The old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
 
     def _let_go(self, kept: Sequence[str]) -> tuple[str, ...]:
         """Take the transient names off the daemon. Returns the ones still there.

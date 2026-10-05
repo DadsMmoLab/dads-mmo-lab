@@ -840,11 +840,18 @@ class TrinityCoreInstaller(CmangosInstaller):
     def before_rebuild(
         self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
     ) -> Iterator[str]:
-        """Stop a running movement-map job before `route`; pathfinding stays off (spec §3)."""
+        """Stop a running movement-map job before `route`; pathfinding stays off (spec §3).
+
+        T209 (owner, 2026-10-04): a Rebuild keeps the server's code, so the job's
+        finished tiles stay and the run started once it is ready continues from
+        them; every other press (Update to latest, Return to the tested pin) may
+        change the generator, so its tiles go and the next run starts from 0 %.
+        """
         said = mmaps.stop_for_route(
             server_dir,
             self.entry,
             route,
+            clear=press != server_build_presses.REBUILD,
             press=press,
             runner=self._mmaps_runner,
             install_id=self._install_id(server_dir),
@@ -873,7 +880,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
     def stop_mmaps(self, server_dir: Path) -> str:
-        """Stop the job and remove its partial output: `mmaps.stop_mmaps()`."""
+        """Stop the job and keep its finished tiles (T209): `mmaps.stop_mmaps()`."""
         return mmaps.stop_mmaps(
             server_dir,
             self.entry,
@@ -1913,9 +1920,17 @@ class TrinityCoreInstaller(CmangosInstaller):
                 server_dir,
                 self.entry,
                 "the extraction",
+                # Not cleared (T241): the old map data comes back unchanged if the
+                # extraction does not finish, and the tiles made from it with it;
+                # `mmaps.discard()` below throws them away once the new data is in.
+                clear=False,
                 press=REEXTRACT_BUTTON,
                 runner=self._mmaps_runner,
                 install_id=ident,
+                kept_note=(
+                    "If the extraction does not finish, the run continues from them; once it "
+                    "has, they are removed with the old map data."
+                ),
             )
             if stopped is not None:
                 yield stopped
