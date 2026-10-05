@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import HANG_BOUND
+from tests.conftest import HANG_BOUND, wait_for_panel
 from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
 from tests.support_player_text import text_faults
 from tests.support_stop import compile_until_stopped, stop_when
@@ -1084,7 +1084,7 @@ def test_the_restore_writes_this_apps_own_compose_back_into_the_checkout_it_reve
 
 
 def test_a_source_that_will_not_go_back_is_said_out_loud_with_the_command_to_fix_it(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The one state this route can end in where the folder and the image disagree.
 
@@ -1112,7 +1112,12 @@ def test_a_source_that_will_not_go_back_is_said_out_loud_with_the_command_to_fix
     # is handed has to be the one that works: without it git refuses whenever a
     # tracked file differs in the working tree and between the commits, which is
     # the state this folder is in.
-    assert f"checkout --detach --force {OLD}" in text
+    # T248 (lead): the line says it in words -- that commit, or Return to the
+    # tested pin -- and the git command is in the log for whoever reads it.
+    assert f"put it back on commit {OLD[:7]}" in text, text
+    assert "Return to the tested pin" in text, text
+    assert "checkout" not in text, text
+    assert f"checkout --detach --force {OLD}" in caplog.text
     assert rec.heads[server_dir] == NEW, "the head moved back though the restore refused"
 
 
@@ -2737,3 +2742,75 @@ def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_
     )
     assert real.changed_files(dest, first, "f" * 40, ["sql"]) is None, "an unknown commit"
     assert real.changed_files(tmp_path / "nowhere", first, moved, ["sql"]) is None
+
+
+def _update_failure(tmp_path: Path, case: str) -> InstallerError:
+    """An update whose new build never reports ready (or stops after it), per route out (T248)."""
+    rec, server_dir = _ready(tmp_path)
+    options = InstallOptions(server_dir=server_dir)
+    if case == "kept":
+        made = engine(rec, world_output=lambda spec: ABORTED_AFTER_READY)
+    elif case == "rollback stopped early":
+        rec.ready = False
+        made = engine(rec, **EARLY_RETURNS["stop-refused"](rec))
+    elif case == "mixed":
+        rec.ready = False
+        made = engine(rec, **_mixed(rec))
+    else:
+        answers = [False, True]
+
+        def wait_ready(spec: object, ready: object) -> bool:
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+
+        made = engine(rec, wait_ready=wait_ready)
+    with pytest.raises(InstallerError) as raised:
+        list(made.update_to_latest(options))
+    return raised.value
+
+
+UPDATE_ROUTES_OUT = {
+    "kept": WorldStoppedAfterReadyError,
+    "rollback stopped early": RollbackNotDone,
+    "mixed": RollbackNotDone,
+    "put back": native.RebuildChangedTheServer,
+}
+
+
+@pytest.mark.parametrize("case", list(UPDATE_ROUTES_OUT))
+def test_an_update_that_fails_keeps_the_command_that_shows_the_world_servers_log(
+    tmp_path: Path, case: str
+) -> None:
+    """T248 review: `rebuild()` carried the Details; the update route's re-wraps dropped them."""
+    exc = _update_failure(tmp_path, case)
+
+    assert isinstance(exc, UPDATE_ROUTES_OUT[case]), (type(exc), str(exc))
+    assert "docker compose logs" in exc.detail, (case, str(exc))
+    assert "docker compose logs" not in str(exc)
+
+
+def test_an_update_that_was_put_back_shows_its_details_in_the_fold_and_the_message(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T248 review: through the real update route and a real `LogPanel`, as the tab runs it.
+
+    The line holds the sentence, the fold under it the command, and the message
+    `run_finished` hands on -- the one the app log and the Install failed dialog
+    read -- both.
+    """
+    rec, server_dir = _ready(tmp_path)
+    answers = [False, True]
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    made = engine(rec, wait_ready=wait_ready)
+    panel = LogPanel()
+    finished: list[str] = []
+    panel.run_finished.connect(lambda _ok, message: finished.append(message))
+    panel.run(lambda: made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    wait_for_panel(panel)
+
+    line = panel.failure_label.text()
+    assert "put back" in line and "docker compose logs" not in line, line
+    assert "docker compose logs" in panel.failure_details.text_box.toPlainText()
+    assert finished and "\nDetails:\n" in finished[0] and "docker compose logs" in finished[0]

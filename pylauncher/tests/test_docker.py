@@ -1674,12 +1674,16 @@ def test_the_message_for_two_owners_offers_no_single_name_to_pin() -> None:
     irreversible write that leaves half the containers still foreign — and the
     next Stop still refuses (review, 2026-08-22).
     """
-    message = docker._stranger_message(
-        ((SPEC.auth, "install-a"), (SPEC.world, "zzz-other")), PROJECT, Path("/tmp/wow")
-    )
+    strangers = ((SPEC.auth, "install-a"), (SPEC.world, "zzz-other"))
+    message = docker._stranger_message(strangers, PROJECT, Path("/tmp/wow"))
     assert f"{docker.PROJECT_NAME_VAR}=install-a" not in message
     assert "More than one project" in message
-    assert "docker compose ls" in message
+    assert "Docker can list each running project" in message
+    # T248: the listing command is under Details, not on the line.
+    assert "docker compose ls" not in message
+    refusal = docker._stranger_refusal(strangers, PROJECT, Path("/tmp/wow"))
+    assert str(refusal) == message
+    assert "docker compose ls" in refusal.detail
 
 
 def test_the_remedy_offers_deleting_a_copied_pin_not_a_folder_rename(tmp_path: Path) -> None:
@@ -1784,7 +1788,7 @@ def test_start_staged_will_not_report_success_for_a_container_that_died(
     calls: list[list[str]] = []
     # Only the database came up; auth and world died on start.
     monkeypatch.setattr(docker.runner, "run", _start_runner(calls, up=(SPEC.db,)))
-    with pytest.raises(docker.DockerCommandError, match="compose reported success"):
+    with pytest.raises(docker.DockerCommandError, match="reported the start as done"):
         docker.start_staged(SPEC, Path("/tmp/wow"))
 
 
@@ -2181,21 +2185,26 @@ def test_the_polls_say_why_and_stop_when_this_host_has_no_docker_cli(
     at the time: `wait_ready('a','w','h',1,timeout=1.0,interval=0.1)` returned
     False after 1.00s, 10 polls, zero records at WARNING or above.
 
-    The grace window is shortened here, not removed. Giving up on the first
-    miss is the other wrong answer — `docker_program()` deliberately never
-    caches one so that Docker arriving mid-run is picked up — so both loops are
-    also asserted to have polled more than once.
+    The grace window is the real one, run on a clock that moves only when the
+    poll sleeps: a 0.2 s window in wall time flaked under xdist, because one
+    slow first poll outlasted the whole window and there was no second (T315).
+    Giving up on the first miss is the other wrong answer —
+    `docker_program()` deliberately never caches one so that Docker arriving
+    mid-run is picked up — so both loops are also asserted to have polled more
+    than once, and to have given up at the end of the window, not of the timeout.
     """
-    monkeypatch.setattr(docker, "_CLI_MISSING_GRACE_SECONDS", 0.2)
+    grace = docker._CLI_MISSING_GRACE_SECONDS
     for label, poll in (
         (
             "wait_ready()",
             lambda: docker.wait_ready(
-                "a", "w", docker.azerothcore_ready("h", 1, timeout=60.0, interval=0.02)
+                "a", "w", docker.azerothcore_ready("h", 1, timeout=480.0, interval=2.0)
             ),
         ),
-        ("wait_db_healthy()", lambda: docker.wait_db_healthy("db", timeout=60.0, interval=0.02)),
+        ("wait_db_healthy()", lambda: docker.wait_db_healthy("db", timeout=480.0, interval=2.0)),
     ):
+        clock = _PollClock()
+        monkeypatch.setattr(docker, "time", clock)
         caplog.clear()
         with caplog.at_level("DEBUG", logger="yulon.docker"):
             assert poll() is False
@@ -2206,7 +2215,30 @@ def test_the_polls_say_why_and_stop_when_this_host_has_no_docker_cli(
         assert all(label in line for line in loud), loud
         waited = [r for r in caplog.records if "still no docker CLI" in r.getMessage()]
         assert waited, f"{label}: gave up on the first miss; a mid-run install is now locked out"
+        assert grace <= clock.now < grace + 2.0, f"{label}: gave up at {clock.now}s"
     assert no_docker == [], "a command was spawned on a host with no docker binary"
+
+
+class _PollClock:
+    """`docker.time` on a clock that moves only when a poll sleeps (T315).
+
+    `wait_ready()` and `wait_db_healthy()` read `time.monotonic()` and wait with
+    `time.sleep()`, so this is the whole of their time: a poll that is slow in
+    wall time is still one interval on this clock. Any other `time` attribute
+    is the real one.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
 
 
 def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
@@ -2233,6 +2265,8 @@ def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
         return _completed(stdout="realm.example:3724 ready...")
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
+    # Two polls on the poll's own clock, not two inside five seconds of wall time.
+    monkeypatch.setattr(docker, "time", _PollClock())
     ready = docker.azerothcore_ready("realm.example", 3724, timeout=5.0, interval=0.01)
     assert docker.wait_ready(SPEC.auth, SPEC.world, ready) is True
 
@@ -2623,7 +2657,9 @@ def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
     _repair_doubles(monkeypatch, calls, running={SPEC.db})
     with pytest.raises(docker.DockerCommandError, match="still read as absent") as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
-    assert "ac-db-import" in str(raised.value), "did not say which logs to read"
+    # T248: which logs to read is under Details, as a command; the line says it in words.
+    assert isinstance(raised.value, docker.DockerRefusal)
+    assert "docker compose logs ac-db-import" in raised.value.detail, "did not say which logs"
     assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
 
 
@@ -4303,8 +4339,12 @@ def test_the_diagnostic_it_offers_is_a_command_that_actually_runs(
     assert (
         "c-auth, c-world are not running" in said
     ), "it must still name the containers it looked for"
-    assert "docker compose logs s-auth" in said, said
-    assert "docker compose logs c-auth" not in said
+    # T248: the command is under Details now, and it still names the SERVICE.
+    assert isinstance(raised.value, docker.DockerRefusal)
+    detail = raised.value.detail
+    assert "docker compose logs s-auth" in detail, detail
+    assert "docker compose logs c-auth" not in detail
+    assert "docker compose logs" not in said, said
 
 
 def test_container_spec_translates_a_container_name_to_its_service() -> None:

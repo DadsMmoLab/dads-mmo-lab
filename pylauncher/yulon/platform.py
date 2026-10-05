@@ -709,7 +709,8 @@ CERT_VERIFY_FIX = (
 )
 _MANUAL_ROOT_CERTS = f"{CERT_VERIFY_FIX} Yu'lon will not install software it could not verify."
 _MANUAL_WSL = (
-    "Open an Administrator PowerShell and run: wsl --install --no-distribution, then reboot."
+    "Open an Administrator PowerShell, run this, then restart Windows:\n"
+    "wsl --install --no-distribution"
 )
 _MANUAL_START_DOCKER_DESKTOP = (
     "Yu'lon could not find Docker Desktop on this PC. Open the Start menu, type "
@@ -1588,13 +1589,15 @@ there would be the same defect in a new place.
 """
 
 _STEAMOS_READONLY_CAUSE = (
-    " On SteamOS the system files are read-only until you unlock them, so sudo "
-    "steamos-readonly disable comes first (SteamOS re-locks itself on the next update)."
+    " On SteamOS the system files are read-only until you unlock them (SteamOS re-locks "
+    "itself on the next update), so this comes first:\n"
+    "sudo steamos-readonly disable"
 )
 
 _PACMAN_KEYRING_FIX = (
-    " Run sudo pacman-key --init, then sudo pacman-key --populate archlinux holo, then press "
-    "Install again."
+    "\nThen run these two, in order, and press Install again:\n"
+    "sudo pacman-key --init\n"
+    "sudo pacman-key --populate archlinux holo"
 )
 
 _KEYRING_WORDS = ("keyring", "pacman-key", "required key", "signature from")
@@ -1630,8 +1633,8 @@ def docker_setup_remedy(step: str, *, steamos: bool) -> str:
         return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
     cause = (
         f"{command} did not run, and the steps after it needed what it would have installed. "
-        f"Run it in a terminal — sudo {command} — and it will say what stopped it, then press "
-        "Install again."
+        "Run it in a terminal and it will say what stopped it, then press Install again:\n"
+        f"sudo {command}"
     )
     return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
 
@@ -3383,9 +3386,10 @@ _NEW_PASSWORD_ATTEMPTS = 3
 
 STEAMOS_SET_PASSWORD_BY_HAND_STEP = (
     "Nothing was changed: reinstalling Docker needs a sudo password, and {user} has none yet. "
-    "To set one yourself: switch to Desktop Mode, open Konsole, type passwd and press Enter, "
-    f'and choose a password. Then press "{STEAMOS_DOCKER_REPAIR_LABEL}" again and give it '
-    "that password."
+    "To set one yourself: switch to Desktop Mode, open Konsole, type this, press Enter and "
+    "choose a password:\n"
+    "passwd\n"
+    f'Then press "{STEAMOS_DOCKER_REPAIR_LABEL}" again and give it that password.'
 )
 
 STEAMOS_DOCKER_BACK_STEP = "Docker is back and running. Press Start to bring the server up again."
