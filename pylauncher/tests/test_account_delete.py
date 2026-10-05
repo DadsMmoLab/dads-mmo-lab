@@ -49,6 +49,14 @@ from yulon.ui.widgets.job import run_inline
 
 CATALOG = load_catalog()
 FAMILIES = ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"]
+CMANGOS = ["wow-tbc", "wow-vanilla", "wow-tortoise"]
+"""The trees whose `ExtractAccountId` reads an all-digit argument as an account
+id before it tries it as a name: mangos-classic `src/game/Chat/Chat.cpp:3358`,
+mangos-tbc `Chat.cpp:3420`, tortoise-wow `Chat.cpp:3549` (`checkAccountId`
+defaults to true, `Chat.h:858`)."""
+NAME_ONLY = ["wow-wotlk", "wow-centurion"]
+"""`AccountMgr::GetId(accountName)` and nothing else: AzerothCore
+`cs_account.cpp:347`, TrinityCore112 `cs_account.cpp:303`."""
 APP_ACCOUNT = "YULON_AB12CD34"
 
 
@@ -136,6 +144,15 @@ class _Sql:
             self.conn.execute(f"DELETE FROM {self.chars}.{self.table} WHERE account = ?", row)
             self.conn.execute(f"DELETE FROM {self.auth}.account WHERE id = ?", row)
 
+    def remove_id(self, account_id: int) -> None:
+        """`account delete <digits>` on a CMaNGOS tree: the digits are an id."""
+        with self.lock:
+            row = self.conn.execute(
+                f"SELECT username FROM {self.auth}.account WHERE id = ?", (account_id,)
+            ).fetchone()
+        if row is not None:
+            self.remove(row[0])
+
     def usernames(self) -> list[str]:
         with self.lock:
             return [r[0] for r in self.conn.execute(f"SELECT username FROM {self.auth}.account")]
@@ -201,7 +218,10 @@ class _Soap:
                 else:
                     status = 200
                     hit = re.fullmatch(r"account delete ([A-Za-z0-9_]+)", command)
-                    if hit:
+                    if hit and hit.group(1).isdigit() and stand_in.sql.entry.id in CMANGOS:
+                        # `ExtractAccountId` tries the digits as an id first.
+                        stand_in.sql.remove_id(int(hit.group(1)))
+                    elif hit:
                         stand_in.sql.remove(hit.group(1))
                     result = (
                         "<result/>"
@@ -256,6 +276,16 @@ def server(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_Server]:
 @pytest.fixture
 def wotlk(tmp_path: Path) -> Iterator[_Server]:
     yield from _server("wow-wotlk", tmp_path)
+
+
+@pytest.fixture(params=CMANGOS)
+def cmangos(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_Server]:
+    yield from _server(request.param, tmp_path)
+
+
+@pytest.fixture(params=NAME_ONLY)
+def name_only(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[_Server]:
+    yield from _server(request.param, tmp_path)
 
 
 def _server(game: str, tmp_path: Path) -> Iterator[_Server]:
@@ -686,3 +716,110 @@ def test_a_character_made_again_under_the_same_name_is_not_the_one_confirmed(
     assert outcome.done is False
     assert outcome.problem.startswith("ALICE's characters changed while you were being asked")
     assert wotlk.wire.commands == []
+
+
+# -- an all-digit name on the CMaNGOS trees (cold review) --------------------
+
+
+def _digits(server: _Server) -> None:
+    """`123` is account 50; account 123 is somebody else entirely."""
+    server.sql.account(50, "123", ("Numbo", False))
+    server.sql.account(123, "VICTIM", ("Innocent", False))
+
+
+def test_an_all_digit_name_is_refused_on_a_tree_that_reads_digits_as_an_id(
+    cmangos: _Server, tmp_path: Path, asked: _Asked
+) -> None:
+    """`account delete 123` there deletes account id 123, not the account named 123."""
+    _digits(cmangos)
+    view, failed = _tab(cmangos, tmp_path)
+    _choose(view, "123")
+
+    view.delete_account_button.click()
+
+    report = view.account_report.text()
+    assert report.startswith("123 is a name made only of digits"), report
+    assert asked.questions == []
+    assert cmangos.wire.commands == []
+    assert "VICTIM" in _listed(view) and "123" in _listed(view)
+    assert failed == [report]
+
+
+def test_the_digit_rule_needs_no_read_and_holds_where_the_line_is_sent(cmangos: _Server) -> None:
+    _digits(cmangos)
+
+    outcome = cmangos.admin.delete_account(_confirmed("123", "Numbo", account_id=50))
+
+    assert outcome.problem.startswith("123 is a name made only of digits"), outcome
+    assert cmangos.sql.asked == []
+    assert cmangos.wire.commands == []
+
+
+def test_an_all_digit_name_is_deleted_by_name_where_the_server_reads_names_only(
+    name_only: _Server, tmp_path: Path, asked: _Asked
+) -> None:
+    """The neighbour of the rule above: AzerothCore and TrinityCore read a name."""
+    _digits(name_only)
+    view, _ = _tab(name_only, tmp_path)
+    _choose(view, "123")
+
+    view.delete_account_button.click()
+
+    assert name_only.wire.commands == ["account delete 123"]
+    assert "123" not in _listed(view)
+    assert "VICTIM" in _listed(view)
+
+
+def test_a_name_with_a_trailing_line_break_is_not_a_name() -> None:
+    """`$` matches before a final newline; the rule is the whole string."""
+    from yulon import commands
+
+    assert commands.valid_account_name("ALICE") is True
+    assert commands.valid_account_name("ALICE\n") is False
+    assert commands.valid_account_password("pass1234\n") is False
+    assert commands.valid_character_name("Guglu\n") is False
+
+
+@pytest.mark.parametrize(
+    ("scheme", "refused"),
+    [("mangos_srp6", True), ("mangos_sha", True), ("azerothcore", False), ("trinitycore", False)],
+)
+def test_yulon_makes_no_all_digit_account_on_a_tree_that_reads_digits_as_an_id(
+    scheme: str, refused: bool
+) -> None:
+    """Such an account could never be named in a later account command there."""
+    from yulon.controller_wow_wotlk import accounts as writer
+
+    class _NoSql:
+        asked: list[str] = []
+
+        def query(self, db: str, statement: str) -> str:
+            self.asked.append(statement)
+            raise _Stop
+
+        def run_statement(self, db: str, statement: str) -> None:
+            self.asked.append(statement)
+            raise _Stop
+
+    class _Stop(Exception):
+        """The writer got past the name rules."""
+
+    sql = _NoSql()
+    if refused:
+        with pytest.raises(writer.AccountError, match="only of digits"):
+            writer.create_account(sql, "123", "pw1234", scheme=scheme)  # type: ignore[arg-type]
+        assert sql.asked == []
+    else:
+        with pytest.raises(_Stop):
+            writer.create_account(sql, "123", "pw1234", scheme=scheme)  # type: ignore[arg-type]
+
+
+def test_the_line_itself_refuses_an_all_digit_name_where_digits_are_ids() -> None:
+    """The builder's own guard, for any caller that skips `useraccounts`."""
+    from yulon import commands
+
+    with pytest.raises(commands.CommandError, match="only of digits"):
+        commands.account_delete("123", digits_are_ids=True)
+    assert commands.account_delete("123", digits_are_ids=False) == "account delete 123"
+    with pytest.raises(commands.CommandError, match="only of digits"):
+        commands.account_create("123", "pw1234", digits_are_ids=True)

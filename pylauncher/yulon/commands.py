@@ -56,23 +56,54 @@ def line(text: str) -> str:
 
 
 def valid_account_name(name: str) -> bool:
-    """`^[A-Za-z0-9_]{3,20}$` — what account creation accepts."""
-    return bool(_ACCOUNT_NAME.match(name))
+    """`^[A-Za-z0-9_]{3,20}$` — what account creation accepts.
+
+    `fullmatch`, not `match`: `$` also matches just before a final line break,
+    so `"ALICE\n"` passed (T301's cold review).
+    """
+    return bool(_ACCOUNT_NAME.fullmatch(name))
 
 
 def valid_account_password(password: str) -> bool:
     """`^[A-Za-z0-9_@#%+=!-]{4,16}$` — and the 16 is a ceiling, not a preference."""
-    return bool(_ACCOUNT_PASSWORD.match(password))
+    return bool(_ACCOUNT_PASSWORD.fullmatch(password))
 
 
 def valid_character_name(name: str) -> bool:
     """`^[A-Za-z0-9_]{1,12}$` — a character name as this core stores it."""
-    return bool(_CHARACTER_NAME.match(name))
+    return bool(_CHARACTER_NAME.fullmatch(name))
 
 
-def account_create(account: str, password: str) -> str:
-    """`account create <user> <pass>`, with both parts checked first."""
+def digits_read_as_an_id(account: str) -> str:
+    """The refusal for an all-digit account name on a tree that reads digits as an id.
+
+    The CMaNGOS trees' `ExtractAccountId` tries the argument as a number before
+    it tries it as a name (mangos-classic `src/game/Chat/Chat.cpp:3358`,
+    mangos-tbc `:3420`, tortoise-wow `:3549`), so `account delete 123` there
+    deletes account id 123, whatever it is called. Empty for any other name.
+    """
+    if not account.isdigit():
+        return ""
+    return (
+        f"{account} is a name made only of digits, and this server reads digits in its account "
+        f"commands as an account number, so the command could reach a different account. "
+        f"Yu'lon does not delete it. To delete it, type account delete followed by its id (the "
+        f"list shows it) on the Console tab."
+    )
+
+
+def account_create(account: str, password: str, *, digits_are_ids: bool) -> str:
+    """`account create <user> <pass>`, with both parts checked first.
+
+    `digits_are_ids` is required for the reason `account_delete()` gives: an
+    all-digit account made on such a tree could never be named afterwards.
+    """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    _require(
+        not (digits_are_ids and account.isdigit()),
+        f"{account} is made only of digits, which this server's account commands read as an "
+        "account number",
+    )
     _require(valid_account_password(password), "that password is not one this server would accept")
     return line(f"account create {account} {password}")
 
@@ -111,7 +142,7 @@ def account_set_gm_level(account: str, level: int, *, realms: bool, highest: int
     return line(f"account set gmlevel {account} {level}{every_realm}")
 
 
-def account_delete(account: str) -> str:
+def account_delete(account: str, *, digits_are_ids: bool) -> str:
     """`account delete <user>` -- the same line on all five trees (T301).
 
     Read from each pinned tree: AzerothCore `cs_account.cpp:93` (handler :330),
@@ -124,8 +155,16 @@ def account_delete(account: str) -> str:
 
     The server deletes the account's characters with it
     (`AccountMgr::DeleteAccount`); the caller asks the person about them first.
+
+    `digits_are_ids` is the tree's, and required: on the CMaNGOS trees an
+    all-digit argument is read as an account id (`digits_read_as_an_id()`),
+    while AzerothCore and TrinityCore look the name up and nothing else
+    (`cs_account.cpp:347` and `:303`).
     """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
+    if digits_are_ids:
+        refusal = digits_read_as_an_id(account)
+        _require(not refusal, refusal)
     return line(f"account delete {account}")
 
 

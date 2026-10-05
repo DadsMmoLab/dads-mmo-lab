@@ -362,8 +362,18 @@ def deletion_plan(
     The last is a refusal rather than a log-out (lead decision, T301): taking
     somebody out of the game is a second thing the press would do without
     saying so.
+
+    "In the game" is the characters table's `online` column: a character in
+    the world. Somebody logged in and sitting at the character list has no
+    character online and is not refused. The server's delete kicks only a
+    player in the world (AzerothCore `AccountMgr.cpp:131-137`); a session at
+    the character list stays where it is, with its characters gone, and the
+    next login fails.
+
+    An all-digit name is refused on the trees that read digits as an account
+    id (`commands.digits_read_as_an_id()`), before anything is read.
     """
-    refusal = _not_ours_to_delete(account, app_account)
+    refusal = _not_ours_to_delete(account, app_account, digits_are_ids=digits_are_ids(entry))
     if refusal:
         return DeletePlan(account, problem=refusal)
     ops = entry.observability
@@ -456,7 +466,12 @@ def deletion_plan(
 
 
 def delete_account(
-    channel: object, *, account: str, app_account: str, characters: tuple[str, ...]
+    channel: object,
+    *,
+    account: str,
+    app_account: str,
+    characters: tuple[str, ...],
+    digits_are_ids: bool,
 ) -> Outcome:
     """`account delete <user>` through the server, and its answer read truthfully.
 
@@ -469,11 +484,11 @@ def delete_account(
     is built; the rules that need a read are `InstallAccounts.delete_account`'s,
     which asks them again right before it calls this.
     """
-    refusal = _not_ours_to_delete(account, app_account)
+    refusal = _not_ours_to_delete(account, app_account, digits_are_ids=digits_are_ids)
     if refusal:
         return Outcome(False, problem=refusal)
     try:
-        line = commands.account_delete(account)
+        line = commands.account_delete(account, digits_are_ids=digits_are_ids)
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     answer = channel.send(line)  # type: ignore[attr-defined]
@@ -503,10 +518,33 @@ def delete_account(
     return outcome_of(answer)
 
 
-def _not_ours_to_delete(account: str, app_account: str) -> str:
-    """The rules that need no read: the name, the channel accounts, the auction house."""
+def digits_are_ids(entry: CatalogEntry) -> bool:
+    """Does this tree read an all-digit account argument as an account id?
+
+    True unless the tree is one measured to look names up by name alone, so a
+    tree added later starts on the safe side (T301's cold review).
+    """
+    return entry.id not in _NAMES_ARE_NAMES
+
+
+_NAMES_ARE_NAMES = frozenset({"wow-wotlk", "wow-centurion"})
+"""`AccountMgr::GetId(accountName)` and nothing else: AzerothCore `cs_account.cpp:347`
+(7f12e89e), TrinityCore112 `cs_account.cpp:303` (faac5fc9). The CMaNGOS trees try
+the digits as an id first: `commands.digits_read_as_an_id()`."""
+
+
+def _not_ours_to_delete(account: str, app_account: str, *, digits_are_ids: bool) -> str:
+    """The rules that need no read: the name, the channel accounts, the auction house.
+
+    The auction-house account is refused by that exact name, `AHBOT`, the one
+    its manifest asks for; one made under another name is an ordinary account.
+    """
     if not commands.valid_account_name(account):
         return f"{account!r} is not a name this server would accept"
+    if digits_are_ids:
+        refusal = commands.digits_read_as_an_id(account)
+        if refusal:
+            return refusal
     own = _not_our_own(account, app_account, "be deleted")
     if own is not None:
         return own.problem
@@ -643,7 +681,9 @@ class InstallAccounts:
 
     def delete_plan(self, account: str) -> DeletePlan:
         """What deleting `account` would remove, read now, or why it will not be deleted."""
-        refusal = _not_ours_to_delete(account, self.app_account)
+        refusal = _not_ours_to_delete(
+            account, self.app_account, digits_are_ids=digits_are_ids(self.entry)
+        )
         if refusal:
             return DeletePlan(account, problem=refusal)
         if self._channel() is None:
@@ -703,7 +743,11 @@ class InstallAccounts:
                 ),
             )
         return delete_account(
-            channel, account=account, app_account=self.app_account, characters=plan.characters
+            channel,
+            account=account,
+            app_account=self.app_account,
+            characters=plan.characters,
+            digits_are_ids=digits_are_ids(self.entry),
         )
 
     def _channel(self) -> object | None:
