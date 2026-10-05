@@ -380,13 +380,108 @@ def test_a_rebuild_refused_for_the_database_puts_the_same_offer_on_the_server_ta
     assert view.repair_database_button.isVisibleTo(view)
 
 
-def test_a_world_seen_running_takes_the_offer_down_however_it_was_started(
-    qapp: object, db: _DbDocker, tmp_path: Path
+# -- the presses that stop before they start (cold review) ---------------------------------
+
+
+def _all_up(db: _DbDocker) -> None:
+    db.names = "".join(f"{name}\n" for name in (SPEC.db, SPEC.auth, SPEC.world))
+
+
+def _stops(db: _DbDocker) -> list[list[str]]:
+    return [
+        c
+        for c in db.calls
+        if c[:2] == ["docker", "stop"]
+        or c[:3] in (["docker", "compose", "stop"], ["docker", "compose", "rm"])
+        or c[:3] == ["docker", "compose", "down"]
+    ]
+
+
+@pytest.mark.parametrize("press", ["_do_restart", "_do_recreate"])
+def test_restart_and_recreate_refuse_an_empty_database_before_they_stop_anything(
+    qapp: object, db: _DbDocker, tmp_path: Path, press: str
+) -> None:
+    """A world running on the empty database compose made is the case T377 was filed for."""
+    _all_up(db)
+    db.tables = {}
+    view = _view(db, tmp_path, [])
+    with pytest.raises(DatabaseMissing):
+        getattr(view, press)()
+    assert _stops(db) == [], "refused after the stop"
+    assert sorted(db.names.split()) == sorted((SPEC.db, SPEC.auth, SPEC.world))
+
+
+def test_a_refused_restart_offers_repair_on_the_server_tab(
+    qapp: object, db: _DbDocker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _all_up(db)
+    db.tables = {}
+    view = _view(db, tmp_path, [])
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    view.restart_server()
+    assert view.problem_label.text() == database_presence.MISSING
+    assert view.repair_database_button.isVisibleTo(view)
+
+
+def test_the_bots_restart_refuses_before_its_stop(db: _DbDocker, tmp_path: Path) -> None:
+    from yulon.controller_wow_tortoise import botpool
+
+    _all_up(db)
+    db.tables = {}
+    with pytest.raises(DatabaseMissing):
+        botpool.restart_world(Controller(SPEC, tmp_path))
+    assert _stops(db) == []
+
+
+def test_stopping_the_other_server_waits_for_this_one_s_database(
+    db: _DbDocker, tmp_path: Path
+) -> None:
+    db.volumes.clear()
+    db.ports = "tbc-realmd\t0.0.0.0:3724->3724/tcp\n"
+    with pytest.raises(DatabaseMissing):
+        Controller(SPEC, tmp_path).stop_conflicting_and_start()
+    assert _stops(db) == []
+
+
+def test_a_restart_that_works_takes_the_offer_down(
+    qapp: object, db: _DbDocker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db.volumes.clear()
     view = _view(db, tmp_path, [])
     view.start_server()
-    assert view.repair_database_button.isVisibleTo(view)
-    db.names = "".join(f"{name}\n" for name in (SPEC.db, SPEC.auth, SPEC.world))
-    view.refresh_status()
+    db.volumes.add(VOLUME)
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    view.restart_server()
     assert not view.repair_database_button.isVisibleTo(view)
+
+
+def test_a_world_in_a_restart_loop_does_not_take_the_offer_down(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    """On an empty database the world restarts over and over, and `docker ps` lists it."""
+    view = _view(db, tmp_path, [])
+    view._rebuild_finished(False, f"{database_presence.MISSING} Nothing was changed.")
+    _all_up(db)
+    view.refresh_status()
+    assert view.repair_database_button.isVisibleTo(view)
+
+
+def test_a_tortoise_start_refused_for_its_database_starts_no_bot_dashboard(
+    db: _DbDocker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.controller_wow_tortoise import botdash
+    from yulon.controller_wow_tortoise.controller import TortoiseController
+
+    tortoise = load_catalog().get("wow-tortoise")
+    fake = _DbDocker(tortoise)
+    fake.volumes.clear()
+    monkeypatch.setattr(runner, "run", fake)
+    asked: list[str] = []
+    monkeypatch.setattr(botdash, "start_if_on", lambda *a, **_k: asked.append("dashboard"))
+    plan = tortoise.install.password
+    assert plan.file is not None
+    (tmp_path / plan.file).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / plan.file).write_text("tw0123456789abcd\n", encoding="utf-8")
+    with pytest.raises(DatabaseMissing):
+        TortoiseController(tmp_path).start()
+    assert asked == []

@@ -85,14 +85,16 @@ def read(
     wsl_distro: str | None = None,
     *,
     keep_running: bool = False,
+    spec: docker.ContainerSpec | None = None,
 ) -> Reading:
     """Ask Docker whether `entry`'s database at `server_dir` is missing, empty or present.
 
     Never raises: every failure to ask is `unknown`. `keep_running` leaves a
     database this started running when the answer lets a start go on, because
-    the start that follows would only start it again.
+    the start that follows would only start it again. `spec` is the caller's own
+    containers where it has them (a `Controller`), else the entry's.
     """
-    spec = entry.container_spec()
+    spec = spec if spec is not None else entry.container_spec()
     try:
         volume = docker.database_volume(spec, server_dir, wsl_distro=wsl_distro)
         if volume is None:

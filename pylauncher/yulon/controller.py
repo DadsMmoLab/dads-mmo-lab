@@ -353,7 +353,9 @@ class Controller:
         entry = self.entry or _entry_for(self.spec)
         if entry is None:
             return
-        reading = database_presence.read(entry, self.server_dir, self.wsl_distro, keep_running=True)
+        reading = database_presence.read(
+            entry, self.server_dir, self.wsl_distro, keep_running=True, spec=self.spec
+        )
         if reading.refuses:
             logger.warning(f"start() refused: the database is {reading.presence} ({reading.why})")
             raise DatabaseMissing(database_presence.MISSING)
@@ -498,9 +500,23 @@ class Controller:
         # Windows world reads the volume, never this file. Written only when it changed.
         self.world_data_problem = self._refresh_world_data()
 
+    def refuse_before_a_stop(self) -> None:
+        """Every refusal a start would make, asked by a press that stops something first.
+
+        `refuse_start()`, then the database (T377): Restart, Recreate, the bots
+        restart and "stop the other server" each stop something before their
+        start, and a database Docker no longer has must refuse before that stop,
+        not after it. Its world may well be up -- on the empty database compose
+        made in place of the lost one -- and a refusal after the stop would leave
+        it down while saying nothing was stopped (cold review). `start()` asks
+        the database again, after the stop: a second look, never a different rule.
+        """
+        self.refuse_start()
+        self.refuse_a_missing_database()
+
     def stop_conflicting_and_start(self) -> list[str]:
         """Stop the server holding our ports, then start this one."""
-        self.refuse_start()
+        self.refuse_before_a_stop()
         stopped = self.stop_conflicting()
         self.start()
         return stopped

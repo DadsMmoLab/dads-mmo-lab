@@ -4440,6 +4440,8 @@ START_FAILED_DOCKER_MISSING = (
 """A failed Start off a Deck with no docker CLI; the banner says how to install it (T194)."""
 
 START_FAILED_BROKE = "The server did not start. Details below says why."
+"""A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
+
 CORRECTIONS_ASKED_AGAIN_AFTER = (10.0, 20.0, 40.0, 80.0, 160.0, 320.0)
 """Seconds before a corrections reading nobody answered is asked again, in turn (T381).
 
@@ -4461,7 +4463,7 @@ REPAIR_DATABASE_CONFIRM = (
     "have a backup, restore it on the Maintenance tab once the repair has finished.\n\n"
     "This can take several minutes. Repair now?"
 )
-"""A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
+"""What the Server tab's **Repair the database…** asks before it runs (T377)."""
 
 STOP_FAILED_BROKE = "The server did not stop. Details below says why."
 """A Stop that broke rather than being refused by Yu'lon; Docker's words are in Details (T248)."""
@@ -8458,10 +8460,6 @@ class ControllerView(QWidget):
         # not a fact an action of ours can make wrong the way "world down" is.
         if status.distro is not None:
             self._distro_answered(status.distro)
-        if status.world:
-            # T377: a world that runs has a database; however it was started
-            # (Restart, "Start and play", by hand), the offer to repair it goes.
-            self._withdraw_the_database_offer()
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
         self._ask_again_if_superseded(superseded)
@@ -17802,7 +17800,8 @@ class ControllerView(QWidget):
         And one lifecycle command (`docker.lifecycle()`, T216 review round 3), so a
         restore cannot take its hold between the two and leave the server stopped."""
         controller = self.services.controller
-        controller.refuse_start()  # T179: before the stop, so a refusal leaves it running
+        # T179, T377: before the stop, so a refusal leaves it running.
+        controller.refuse_before_a_stop()
         with docker.lifecycle(controller.server_dir):
             stopped = controller.stop()
             controller.start()
@@ -17813,7 +17812,8 @@ class ControllerView(QWidget):
         characters are not touched and the next start creates the containers again --
         the Server tab's own sentence for the same pair of calls."""
         controller = self.services.controller
-        controller.refuse_start()  # T179: before the removal, so a refusal leaves it as it was
+        # T179, T377: before the removal, so a refusal leaves it as it was.
+        controller.refuse_before_a_stop()
         # One lifecycle command, as `_do_restart()` is: a gap here leaves the server removed.
         with docker.lifecycle(controller.server_dir):
             removed = controller.remove()
@@ -17844,6 +17844,7 @@ class ControllerView(QWidget):
             self.problem_label.setText("")  # what this tab said before the press is past
         self._tuning_from_banner = False
         self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
+        self._withdraw_the_database_offer()  # T377: the server started
         self.refresh_status()
 
     @Slot(object)
@@ -17860,6 +17861,10 @@ class ControllerView(QWidget):
         if self._tuning_from_banner:
             self.problem_label.setText(self.tuning_report.toPlainText())
         self._tuning_from_banner = False
+        if isinstance(exc, DatabaseMissing):
+            # T377: refused before the stop; its ways out are on the Server tab.
+            self.problem_label.setText(str(exc))
+            self._offer_to_repair_the_database()
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default
