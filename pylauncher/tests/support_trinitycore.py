@@ -373,6 +373,8 @@ class FakeJob:
     status: str = "running"
     exit_code: int | None = None
     logs: list[str] = field(default_factory=list)
+    cut: str = ""
+    """What it printed after its last newline: a line the crash cut off part-way (T304)."""
 
 
 class FakeMmapsDocker:
@@ -433,7 +435,9 @@ class FakeMmapsDocker:
     def log_tail(self, name: str, lines: int, *, timeout: float) -> str | None:
         self.timeouts.append(("log_tail", timeout))
         job = self.jobs.get(name)
-        return None if job is None else "\n".join(job.logs[-lines:])
+        # As `docker logs` gives it: every whole line ends in a newline, and a line the
+        # generator was cut off in has none (T304).
+        return None if job is None else "".join(f"{line}\n" for line in job.logs[-lines:]) + job.cut
 
     def remove(self, name: str, *, timeout: float) -> None:
         self.calls.append(f"remove:{name}")
@@ -477,10 +481,14 @@ class FakeMmapsDocker:
         out = self.output_dir(self.only()[1].spec)
         (out / name).write_bytes(mmtile(64, cut=20 + 32))
 
-    def finish(self, code: int = 0, *, tiles: int = 0) -> None:
+    def finish(self, code: int = 0, *, tiles: int = 0, cut: str = "") -> None:
+        """The container exits with `code`; `cut` is a last line the crash cut off (T304)."""
         self.write_tiles(tiles)
         job = self.only()[1]
         job.status, job.exit_code = "exited", code
+        if cut:
+            job.cut = cut
+            return
         job.logs.append("Finished. MMAPS were built in 3h 12m 5s" if code == 0 else "Segfault")
 
     def vanish(self) -> None:
