@@ -69,6 +69,9 @@ class FakeSdl:
         self.holder: str | None = None
         self.violations: list[str] = []
         self.inits = 0
+        # What SDL would read for the Windows joystick-thread hint, at each
+        # `pygame.joystick.init()` -- the moment SDL reads it (T387).
+        self.thread_hint_at_init: list[str | None] = []
         self._lock = threading.Lock()
 
     def _who(self) -> str:
@@ -137,7 +140,9 @@ class FakeSdl:
         sdl2 = types.ModuleType("pygame._sdl2")
         sdl2.controller = controller  # type: ignore[attr-defined]
         joystick = types.ModuleType("pygame.joystick")
-        joystick.init = lambda: None  # type: ignore[attr-defined]
+        joystick.init = lambda: fake.thread_hint_at_init.append(  # type: ignore[attr-defined]
+            os.environ.get("SDL_JOYSTICK_THREAD")
+        )
         joystick.quit = lambda: None  # type: ignore[attr-defined]
         pygame = types.ModuleType("pygame")
         pygame.error = FakeError  # type: ignore[attr-defined]
@@ -215,6 +220,52 @@ def test_pad_input_reaches_the_navigator_on_the_gui_thread(
     finally:
         source.stop()
     assert seen and all(on_gui for _name, on_gui in seen), seen
+
+
+@pytest.mark.parametrize(
+    ("platform", "players_own", "sdl_reads"),
+    [
+        ("win32", None, "1"),
+        ("win32", "0", "0"),
+        ("linux", None, None),
+        ("darwin", None, None),
+    ],
+)
+def test_on_windows_sdl_reads_the_pad_on_its_own_thread(
+    fake_sdl: FakeSdl,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    players_own: str | None,
+    sdl_reads: str | None,
+) -> None:
+    """Windows: SDL_JOYSTICK_THREAD=1 is set before SDL starts, unless the player set it (T387).
+
+    SDL's default RAWINPUT driver, which reads every Xbox-type pad on Windows,
+    gets its input as window messages to a helper window on the thread that
+    initialised SDL's joysticks. The poller never pumps messages, so
+    measured on Windows 11 a virtual Xbox 360 pad's presses read 0 of 3 and
+    the D-pad moved nothing in Yu'lon. With the hint SDL runs that window on
+    its own thread and pumps it: 3 of 3, and a DualShock 4 (HIDAPI) still 3
+    of 3. Linux and macOS read no such hint and are left exactly as they were.
+    """
+    from yulon.ui import gamepad
+
+    monkeypatch.setattr(sys, "platform", platform)
+    # setenv first, so the undo removes whatever the code under test writes.
+    monkeypatch.setenv("SDL_JOYSTICK_THREAD", "placeholder")
+    if players_own is None:
+        monkeypatch.delenv("SDL_JOYSTICK_THREAD")
+    else:
+        monkeypatch.setenv("SDL_JOYSTICK_THREAD", players_own)
+    window = _window()
+    _navigator, _keyboard, source = gamepad.install_gamepad_navigation(window)  # type: ignore[arg-type]
+    try:
+        pump_until(_polling(fake_sdl), "the poller polled")
+    finally:
+        source.stop()
+    # The probe on the GUI thread and the poller's own init both read it.
+    assert len(fake_sdl.thread_hint_at_init) >= 2, fake_sdl.thread_hint_at_init
+    assert set(fake_sdl.thread_hint_at_init) == {sdl_reads}, fake_sdl.thread_hint_at_init
 
 
 # ---------------------------------------------------- in a child process
