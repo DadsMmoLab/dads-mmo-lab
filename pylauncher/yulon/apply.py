@@ -380,30 +380,82 @@ def _settings_still_written(
         for key, value in keys.items():
             if tuning.conf_value(text, key) != value.replace('"', "").strip():
                 return False
+    try:
+        return bool(_removal_changes(server_dir, manifest, vals, texts))
+    except ApplyError:
+        return False
+
+
+@dataclass(frozen=True)
+class SettingChange:
+    """One conf key a settings-only mod's Remove changes, as the server reads it (T380)."""
+
+    file: str
+    key: str
+    label: str | None
+    """The key's name on the Tuning tab, or `None` where the catalog gives it none."""
+    now: str | None
+    after: str | None
+
+
+def settings_removal(server_dir: Path, manifest: Manifest) -> tuple[SettingChange, ...]:
+    """What Remove of the settings-only `manifest` would change in its conf, key by key.
+
+    The manifest's own remove patches, run over the conf as it is now, in memory;
+    each key the install writes whose value differs afterwards is listed, in the
+    manifest's order. What the Remove question says (T380 cold review), so a rate
+    changed since the install is named as going back too. Empty for any other
+    manifest, for a conf that cannot be read, and for a patch that cannot render.
+    """
+    if not settings_only(manifest):
+        return ()
+    vals = {p.key: p.default for p in manifest.prompts if p.default is not None}
+    vals.update(module_answers.read_answers(server_dir, manifest))
+    try:
+        return _removal_changes(server_dir, manifest, vals, {})
+    except ApplyError:
+        return ()
+
+
+def _removal_changes(
+    server_dir: Path,
+    manifest: Manifest,
+    vals: Mapping[str, str],
+    texts: dict[str, str | None],
+) -> tuple[SettingChange, ...]:
+    """The keys the remove patches change, compared as the server reads them.
+
+    Key by key and not as text: TBC's remove writes `Rate.XP.Kill    = 1` where
+    the install wrote `Rate.XP.Kill = 1`, the same value. Raises `ApplyError`
+    for a patch that cannot be rendered with `vals`.
+    """
+    confs = _key_written_confs(manifest)
+    files = {conf.file for conf in confs}
     after: dict[str, str] = {}
     for patch in manifest.patches:
-        if patch.when != "remove" or patch.file not in written:
+        if patch.when != "remove" or patch.file not in files:
             continue
         text = after.get(patch.file, _conf_text(server_dir, patch.file, texts))
         if text is None:
             continue
-        try:
-            replacement = _render(patch.replace, vals, f"patch {patch.file}")
-        except ApplyError:
-            return False
+        replacement = _render(patch.replace, vals, f"patch {patch.file}")
         if patch.regex:
             after[patch.file] = re.sub(patch.find, replacement, text, flags=re.MULTILINE)
         else:
             after[patch.file] = text.replace(patch.find, replacement)
-    # Compared key by key, as the server reads them, not as text: TBC's remove
-    # writes `Rate.XP.Kill    = 1` where the install wrote `Rate.XP.Kill = 1`.
-    return any(
-        tuning.conf_value(_conf_text(server_dir, file, texts) or "", key)
-        != tuning.conf_value(after.get(file, ""), key)
-        for file, keys in written.items()
-        if file in after
-        for key in keys
-    )
+    changes: list[SettingChange] = []
+    for conf in confs:
+        if conf.file not in after:
+            continue
+        before_text = _conf_text(server_dir, conf.file, texts) or ""
+        for key in conf.keys:
+            if key.default is None:
+                continue
+            now = tuning.conf_value(before_text, key.key)
+            then = tuning.conf_value(after[conf.file], key.key)
+            if now != then:
+                changes.append(SettingChange(conf.file, key.key, key.label, now, then))
+    return tuple(changes)
 
 
 def _conf_text(server_dir: Path, file: str, texts: dict[str, str | None]) -> str | None:

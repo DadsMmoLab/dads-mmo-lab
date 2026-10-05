@@ -24,7 +24,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QMessageBox
 
+from tests.support_player_text import command_faults, text_faults
 from yulon import apply as apply_module
 from yulon import module_answers, runner
 from yulon.apply import Applier
@@ -35,7 +37,7 @@ from yulon.controller_wow_vanilla import modules as vanilla_modules
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import Manifest
 from yulon.ui import controller_view as controller_view_module
-from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.controller_view import ControllerServices, ControllerView, remove_question
 from yulon.ui.widgets.job import run_inline
 
 CATALOG = load_catalog()
@@ -97,6 +99,21 @@ def _row(view: ControllerView, item_id: str) -> object:
     return view.modules_panel.row(item_id)
 
 
+def _answer_questions(
+    monkeypatch: pytest.MonkeyPatch, answer: QMessageBox.StandardButton
+) -> list[tuple[str, str]]:
+    """`QMessageBox.question`, answering `answer` as the int PySide6 really returns, and
+    keeping each (title, text) it was asked."""
+    asked: list[tuple[str, str]] = []
+
+    def question(parent: object, title: str, text: str, *_: object, **__: object) -> int:
+        asked.append((title, text))
+        return int(answer)
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    return asked
+
+
 # ------------------------------------------------------------ through the tab
 
 
@@ -113,32 +130,38 @@ def _row(view: ControllerView, item_id: str) -> object:
 def test_xp_rates_installs_shows_installed_and_removes_through_the_row_buttons(
     qapp: object,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     entry: CatalogEntry,
     conf: str,
     answers: dict[str, str],
     installed_line: str,
 ) -> None:
-    """The ticket's sequence: Install, the row says Installed and offers Remove; Remove
-    puts the stock values back and the row says Not installed again.
+    """The ticket's sequence: Install, the row says Installed and offers Remove; Remove,
+    answered Yes, puts the stock values back and the row says Not installed again.
 
-    Mutation: drop the receipt write in `Applier.install()` and the row stays
-    Not installed with no Remove, which is what the live test saw.
+    Mutation: drop the receipt write in `Applier.install()` and the receipt is not
+    there (the row itself would still read Installed, off the keys and the saved
+    answers, which is why the receipt is asserted directly).
     """
     server_dir = _server(tmp_path, conf)
     view, asked = _view(entry, server_dir, answers)
+    questions = _answer_questions(monkeypatch, QMessageBox.StandardButton.Yes)
     row = _row(view, "xp-rates")
     assert row.data.badge == "Not installed"  # type: ignore[attr-defined]
 
     row.install_button.click()  # type: ignore[attr-defined]
 
-    assert asked == ["xp-rates"]
+    assert asked == ["xp-rates"] and questions == [], "Install asks only its own question"
     assert installed_line in _conf(server_dir, conf)
+    assert "mod/xp-rates" in module_answers.settings_keys(server_dir)
     row = _row(view, "xp-rates")
     assert row.data.installed and row.data.badge == "Installed"  # type: ignore[attr-defined]
     assert row.remove_button is not None and row.install_button is None  # type: ignore[attr-defined]
 
     row.remove_button.click()  # type: ignore[attr-defined]
 
+    assert len(questions) == 1 and questions[0][0].startswith("Remove "), questions
+    assert "mod/xp-rates" not in module_answers.settings_keys(server_dir)
     text = _conf(server_dir, conf)
     assert installed_line not in text and "Rate.XP.Kill" in text
     assert "= 3" not in text, text
@@ -273,7 +296,7 @@ def test_an_older_install_is_recognised_by_its_keys_and_its_saved_answers(
 
 
 def test_an_older_install_shows_installed_on_the_tab_and_removes(
-    qapp: object, tmp_path: Path
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server_dir = _server(tmp_path, CMANGOS_CONF, STOCK_XP.replace("1", "3"))
     _legacy(server_dir, _manifest(tortoise_modules.store()), {"xp_rate": "3"})
@@ -281,8 +304,11 @@ def test_an_older_install_shows_installed_on_the_tab_and_removes(
     row = _row(view, "xp-rates")
     assert row.data.badge == "Installed"  # type: ignore[attr-defined]
 
+    questions = _answer_questions(monkeypatch, QMessageBox.StandardButton.Yes)
+
     row.remove_button.click()  # type: ignore[attr-defined]
 
+    assert len(questions) == 1
     assert "Rate.XP.Kill = 1" in _conf(server_dir, CMANGOS_CONF)
     assert _row(view, "xp-rates").data.badge == "Not installed"  # type: ignore[attr-defined]
 
@@ -417,3 +443,94 @@ def test_the_real_services_recognise_an_older_install(
 
     assert services.installed_modules is not None
     assert "xp-rates" in services.installed_modules()["mod"]
+
+
+# ------------------------------------------------------------ Remove asks first
+
+
+def _installed_on_tortoise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: QMessageBox.StandardButton
+) -> tuple[ControllerView, Path, list[tuple[str, str]]]:
+    server_dir = _server(tmp_path, CMANGOS_CONF)
+    view, _asked = _view(TORTOISE, server_dir, {"xp_rate": "3"})
+    _row(view, "xp-rates").install_button.click()  # type: ignore[attr-defined]
+    return view, server_dir, _answer_questions(monkeypatch, answer)
+
+
+def test_remove_answered_no_changes_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One press of Remove put XP back to 1, a rate set since included, with no question
+    (cold review). Now it asks, No by default, and No leaves everything as it was.
+
+    Mutation: drop the question and the conf reads 1 after a No.
+    """
+    view, server_dir, questions = _installed_on_tortoise(
+        tmp_path, monkeypatch, QMessageBox.StandardButton.No
+    )
+    before = _conf(server_dir, CMANGOS_CONF)
+
+    _row(view, "xp-rates").remove_button.click()  # type: ignore[attr-defined]
+
+    assert len(questions) == 1
+    assert _conf(server_dir, CMANGOS_CONF) == before
+    assert "mod/xp-rates" in module_answers.settings_keys(server_dir)
+    assert _row(view, "xp-rates").data.badge == "Installed"  # type: ignore[attr-defined]
+    assert view.module_report.toPlainText() == (
+        "remove xp-rates: cancelled — nothing on this machine was changed."
+    )
+
+
+def test_remove_asks_in_plain_words_what_goes_back(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Built from the remove patches over the conf as it is: each setting, by its name on
+    the Tuning tab, and the value Remove gives it. No key name, no developer words."""
+    view, _server_dir, questions = _installed_on_tortoise(
+        tmp_path, monkeypatch, QMessageBox.StandardButton.Yes
+    )
+
+    _row(view, "xp-rates").remove_button.click()  # type: ignore[attr-defined]
+
+    ((title, text),) = questions
+    assert title == "Remove Experience Rates?"
+    assert text == (
+        "XP from kills, XP from quests and XP from exploring go back to 1, including any "
+        "value you set since Experience Rates was installed.\n\n"
+        "Restart the server for this to take effect."
+    ), text
+    assert "Rate.XP" not in text
+    assert text_faults(title + text) == [] and command_faults(title + text) == []
+
+
+SETTINGS_STORES = [
+    ("wow-tbc", tbc_modules.store()),
+    ("wow-tortoise", tortoise_modules.store()),
+    ("wow-vanilla", vanilla_modules.store()),
+    ("wow-wotlk", wotlk_modules.store()),
+]
+
+
+@pytest.mark.parametrize(("game", "store"), SETTINGS_STORES, ids=[g for g, _ in SETTINGS_STORES])
+def test_every_settings_mods_remove_question_passes_the_player_text_rules(
+    tmp_path: Path, game: str, store: object
+) -> None:
+    """Every shipped settings-only mod, installed over a conf at the opposite values: the
+    question names what changes and carries no ticket, command or backtick."""
+    for manifest in store.load_all("mod"):  # type: ignore[attr-defined]
+        if not apply_module.settings_only(manifest):
+            continue
+        server_dir = tmp_path / game / manifest.id
+        written = apply_module.settings_written(manifest, {p.key: "7" for p in manifest.prompts})
+        for file, keys in written.items():
+            (server_dir / file).parent.mkdir(parents=True, exist_ok=True)
+            (server_dir / file).write_text(
+                "".join(f"{key} = {value}\n" for key, value in keys.items()), encoding="utf-8"
+            )
+        changes = apply_module.settings_removal(server_dir, manifest)
+        assert changes, f"{game} {manifest.id}: Remove changes nothing over an install"
+        title, text = remove_question(manifest, changes)
+        assert manifest.name in title
+        assert text_faults(title + text) == [], (manifest.id, text)
+        assert command_faults(title + text) == [], (manifest.id, text)
+        assert "`" not in text

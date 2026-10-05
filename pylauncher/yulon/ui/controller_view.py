@@ -4773,6 +4773,57 @@ FORGET_RECORD_QUESTION = (
 )
 """What the Forget question says, word for word (T121 fix wave)."""
 
+SETTINGS_REMOVE_TAIL = (
+    ", including any value you set since {name} was installed.\n\n"
+    "Restart the server for this to take effect."
+)
+"""The end of a settings-only mod's Remove question (T380 cold review): a rate changed
+since the install goes back too, and the world reads its conf only at start."""
+
+SETTINGS_REMOVE_UNNAMED = "Every setting {name} changed goes back to the value the server came with"
+"""The Remove question's change line for a mod whose settings have no names to list."""
+
+SETTINGS_REMOVE_NOTHING = (
+    "Its settings already read the values the server came with, so nothing in them changes. "
+    "Yu'lon stops listing {name} as installed."
+)
+"""The Remove question when the remove steps would change no value."""
+
+
+def _and_join(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def remove_question(
+    manifest: Manifest, changes: Sequence[apply_module.SettingChange]
+) -> tuple[str, str]:
+    """The title and text of a settings-only mod's Remove question (T380 cold review).
+
+    Built from `apply.settings_removal()`, the manifest's remove patches over the
+    conf as it is: each setting by its name on the Tuning tab and the value it
+    goes back to, settings going to one value named together. A setting with no
+    name of its own is not listed by key; the line then says every setting the
+    mod changed goes back.
+    """
+    title = f"Remove {manifest.name}?"
+    if not changes:
+        return title, SETTINGS_REMOVE_NOTHING.format(name=manifest.name)
+    if any(change.label is None for change in changes):
+        said = SETTINGS_REMOVE_UNNAMED.format(name=manifest.name)
+    else:
+        groups: dict[str, list[str]] = {}
+        for change in changes:
+            groups.setdefault(change.after or "nothing", []).append(str(change.label))
+        said = "; ".join(
+            f"{_and_join(labels)} {'goes' if len(labels) == 1 else 'go'} back to {value}"
+            for value, labels in groups.items()
+        )
+    return title, said + SETTINGS_REMOVE_TAIL.format(name=manifest.name)
+
+
 UNCATALOGUED_PRESS = (
     "This module is installed in this server's folder, but this game's catalog has no "
     "manifest for it, so Yu'lon has no steps to install or remove. Nothing was changed. "
@@ -15465,6 +15516,27 @@ class ControllerView(QWidget):
             and self._play_client_gone_for(f"update {manifest.id}")
         ):
             return
+        if action == "remove" and apply_module.settings_only(manifest):
+            # T380 cold review: one press of Remove put every rate this mod
+            # touched back to stock, a rate set since included. Asked first, No
+            # by default, naming each setting and the value it goes back to.
+            title, text = remove_question(
+                manifest,
+                apply_module.settings_removal(self.services.controller.server_dir, manifest),
+            )
+            answer = QMessageBox.question(
+                self,
+                title,
+                text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if not said_yes(answer):
+                self._module_pending = None
+                self.module_report.setPlainText(
+                    f"remove {manifest.id}: cancelled — nothing on this machine was changed."
+                )
+                return
         relative = reapplies_on_top(manifest)
         if action in ("install", "update") and relative:
             # T115, before any question (T55's order): a mob multiplier applied
