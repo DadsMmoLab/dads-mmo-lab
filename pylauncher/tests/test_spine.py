@@ -2427,15 +2427,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "container -- and a listing that comes back without a `.dbc` in it is a refusal "
         "(`no .dbc files in ...`), never a copy reported as done"
     ),
-    ("apply.py", "_receipts"): (
-        "T67. Lists the SOURCE tree inside the clone this app made -- the files a `dest: data` "
-        "client step copies -- and maps each onto its destination, to hash the record "
-        "`remove()` checks before it DELETES anything from the user's game client. It decides "
-        "no write; it decides a later delete, and it is the reason the listing is of the clone "
-        "and not of the destination: round 1 review, 2026-09-16, listing `<client>/Data` "
-        "recorded the user's own archives as this app's and removing the Season of Discovery "
-        "keg emptied the folder. A listing that comes back empty records nothing, which at "
-        "remove time reads as 'no record of copying it' and LEAVES the file alone"
+    ("apply.py", "_client"): (
+        "T262. Lists the one destination folder of a single-file `client` step (the client's "
+        "`Data/`, or `Interface/`) to find the name a file of that name already has there in "
+        "another case, so the copy lands on it rather than beside it. It decides which existing "
+        "name is written, never whether the client may be written: that is the step's own "
+        "`dest`. A folder that cannot be listed raises, and the install stops"
+    ),
+    ("apply.py", "_copy_onto"): (
+        "T262 (was `_receipts`, T67). Walks the SOURCE tree inside the clone this app made -- "
+        "the files a folder `client` step copies -- and lists each destination folder once to "
+        "land every folder and file on the name the client already has in another case. The "
+        "names it returns, one per source file, are what `_receipts` hashes for the record "
+        "`remove()` checks before it DELETES anything from the user's game client, so the "
+        "record is still taken from the source and never from a listing of the destination: "
+        "round 1 review, 2026-09-16, listing `<client>/Data` recorded the user's own archives "
+        "as this app's and removing the Season of Discovery keg emptied the folder. A listing "
+        "that fails raises, and the install stops"
     ),
     ("catalog/native.py", "folder_bytes"): (
         "T203 fix round 3. Adds up the sizes of the files under a server folder for "
@@ -2787,12 +2795,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("client_names.py", "on_disk"): (
         "T227. Lists each folder on the way to one client file to find the name on disk that "
-        "matches it whatever its case (exact spelling first). Read-only. Its answer decides a "
-        "write in exactly one way: which existing name in a ready-to-play client a pack's "
-        "file replaces or `remove_when_off` removes (`client_packs`), after that folder's "
-        "marker was checked and with every link refusal unchanged; it never decides whether "
-        "the app may write somewhere. A folder that cannot be listed ends the matching, and "
-        "the rest keeps the spelling it was asked for"
+        "matches it whatever its case (exact spelling first). Read-only. Its answer decides "
+        "only WHICH existing name a write lands on, never whether the app may write: which "
+        "name in a ready-to-play client a pack's file replaces or `remove_when_off` removes "
+        "(`client_packs`, after that folder's marker was checked and with every link refusal "
+        "unchanged); since T261/T262 also the realmlist a ready-to-play client's Play writes "
+        "(`networking`), the client folder a module's `client` step copies into (`apply`), "
+        "and the player's file a removed copy's read-only flag goes back on (`play_client`, "
+        "same inode only). A folder that cannot be listed ends the matching, and the rest "
+        "keeps the spelling it was asked for"
     ),
     ("client_config.py", "remove_locale_realmlists"): (
         "T181 b/c. Lists a ready-to-play client's `Data/` and each locale folder in it for "

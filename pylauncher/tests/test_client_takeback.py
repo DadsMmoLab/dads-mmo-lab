@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+from tests.support_case import needs_case_sensitive_disk
 from tests.test_server_dbc import (
     ARAC,
     ARAC_DBCS,
@@ -540,3 +541,134 @@ def test_no_receipt_means_nothing_is_kept(tmp_path: Path) -> None:
 
 def _the_clone(server_dir: Path, manifest: Manifest) -> Path:
     return server_dir / "modules" / manifest.id
+
+
+# ------------------------------- T262: a client file already there in another case
+
+
+def _arac_over(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, files: dict[str, bytes]) -> Any:
+    """Install `mod-arac` into a client holding `files` (relative paths); the applier."""
+    manifest = _manifest(ARAC)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    client_dir = tmp_path / "client"
+    client_dir.mkdir()
+    for rel, blob in files.items():
+        _write(client_dir / rel, blob)
+    _compose_run_double(monkeypatch, _volume(tmp_path))
+    applier, _sql = _the_app_s_applier(monkeypatch, server_dir, client_dir, manifest)
+    applier.install(manifest)
+    return applier
+
+
+def _names(folder: Path) -> list[str]:
+    return sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*"))
+
+
+@needs_case_sensitive_disk
+def test_a_patch_lands_on_the_name_already_in_the_client_in_another_case(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T262: `Data/patch-a.mpq` beside a new `Data/Patch-A.MPQ` is two archives of one name
+    to the game (Wine is case-blind), and the receipt named the new one only."""
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/patch-a.mpq": b"an older ARAC patch"})
+    client = tmp_path / "client"
+
+    assert _names(client) == ["Data", "Data/patch-a.mpq"]
+    assert (client / "Data" / "patch-a.mpq").read_bytes() == MPQ
+    landed = client / "Data" / "patch-a.mpq"
+    copies = read_client_copies(_clone_of(applier, manifest), item_id="mod-arac")
+    assert copies == (ClientCopy(step="Patch-A.MPQ", path=str(landed), sha256=sha256_of(landed)),)
+
+    report = applier.remove(manifest)
+
+    assert _names(client) == ["Data"], "the patch was not taken back from the name it landed on"
+    assert f"took back patch-a.mpq from {client / 'Data'}" in report.done
+
+
+@needs_case_sensitive_disk
+def test_a_patch_lands_in_a_lowercase_data_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T261 with T262: a client whose `Data/` is `data/` gets no second, empty `Data/`."""
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"data/common.MPQ": b"the user's common"})
+    client = tmp_path / "client"
+
+    assert _names(client) == ["data", "data/Patch-A.MPQ", "data/common.MPQ"]
+
+    applier.remove(manifest)
+
+    assert _names(client) == ["data", "data/common.MPQ"]
+
+
+@needs_case_sensitive_disk
+def test_a_folder_of_client_files_lands_on_the_folders_and_files_already_there(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T262: a keg's `Client Files/data` tree, copied onto `data/enus/` and `PATCH-4.MPQ`.
+
+    `copytree` made the source's `enUS/` beside the client's `enus/`, and its
+    `patch-4.MPQ` beside `PATCH-4.MPQ`; each now lands on the name on disk, and
+    Remove takes back exactly what landed. The client's own archives stay.
+    """
+    manifest = _manifest(SOD)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    client = tmp_path / "client"
+    _write(client / "data" / "PATCH-4.MPQ", b"an older keg patch")
+    _write(client / "data" / "enus" / "locale-enus.mpq", b"the user's locale")
+    os.chmod(client / "data" / "enus" / "locale-enus.mpq", 0o444)  # T196/T198: kept
+    _compose_run_double(monkeypatch, _volume(tmp_path))
+    applier, _sql = _the_app_s_applier(monkeypatch, server_dir, client, manifest)
+    applier.git = _SodClone(manifest, ARAC_DBCS)
+
+    applier.install(manifest)
+
+    assert _names(client) == [
+        "Interface",
+        "Interface/patch-Z.MPQ",  # the keg's second step, `dest: interface`
+        "data",
+        "data/PATCH-4.MPQ",
+        "data/enus",
+        "data/enus/locale-enus.mpq",
+        "data/enus/patch-enUS-4.MPQ",
+        "data/patch-Z.MPQ",
+    ]
+    assert (client / "data" / "PATCH-4.MPQ").read_bytes() == b"the keg's patch-4"
+    assert (client / "data" / "enus" / "locale-enus.mpq").stat().st_mode & 0o777 == 0o444
+
+    report = applier.remove(manifest)
+
+    assert _names(client) == [
+        "Interface",
+        "Interface/patch-Z.MPQ",
+        "data",
+        "data/enus",
+        "data/enus/locale-enus.mpq",
+    ]
+    assert f"took back PATCH-4.MPQ from {client / 'data'}" in report.done
+
+
+@needs_case_sensitive_disk
+def test_an_addon_lands_in_the_interface_folder_already_there_in_another_case(
+    tmp_path: Path,
+) -> None:
+    """T262: `interface/addons/` is the client's AddOns folder too; no second tree beside it."""
+    manifest = _bots_manager()
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    client = tmp_path / "client"
+    (client / "interface" / "addons").mkdir(parents=True)
+    applier = Applier(
+        server_dir,
+        client_dir=client,
+        newest_release=lambda slug: upstream.Release("v2026-09-25", "a" * 40),
+    )
+    applier.git = _CloneFromManifest(manifest, ())  # type: ignore[assignment]
+
+    applier.install(manifest)
+
+    assert sorted(p.name for p in client.iterdir()) == ["interface"]
+    assert (client / "interface" / "addons" / "TortoiseBotsManager" / "patch-Z.MPQ").is_file()

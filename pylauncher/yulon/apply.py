@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
-from yulon import docker, module_answers, platform, play_client, rmtree, runner
+from yulon import client_names, docker, module_answers, platform, play_client, rmtree, runner
 from yulon.catalog import composegen, upstream
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -619,6 +619,50 @@ def _copy_unshared(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> 
         tmp.unlink(missing_ok=True)
         raise
     return dst
+
+
+def _copy_onto(src: Path, target: Path) -> list[Path]:
+    """Copy the tree at `src` into `target`, onto the names already there; what was written.
+
+    `shutil.copytree(dirs_exist_ok=True)` made every folder and file under the
+    source's spelling, so on a disk that tells cases apart a keg's `enUS/` landed
+    beside the client's `enus/` and its `patch-4.MPQ` beside `PATCH-4.MPQ`: two
+    archives of one name to the game, which runs under Wine and ignores case, and
+    a receipt for the new one only (T262). Here each folder and file is matched to
+    what its destination folder already holds (`client_names.match()`, exact
+    spelling first) and takes the source's spelling only when nothing is there.
+
+    Each destination folder is listed once, before anything is copied into it, and
+    every name copied joins that listing, so two source names that differ only in
+    case land on one name rather than making the twin this function exists to avoid.
+    Copies go through `_copy_unshared()`, so a hard-linked archive is replaced,
+    never written through; `_NOT_FOR_THE_CLIENT` is left in the clone, as
+    `copytree`'s `ignore` left it; and the source is walked in name order,
+    following its links as `copytree` did.
+
+    Raises:
+        OSError: a folder could not be made or listed, or a file not copied. What
+            was written before it stays, as with `copytree`.
+    """
+    written: list[Path] = []
+    into = {src: target}
+    for folder, dirs, files in os.walk(src, followlinks=True):
+        here = Path(folder)
+        dest = into.pop(here)
+        dest.mkdir(parents=True, exist_ok=True)
+        names = os.listdir(dest)
+        ignored = _NOT_FOR_THE_CLIENT(folder, [*dirs, *files])
+        dirs[:] = sorted(name for name in dirs if name not in ignored)
+        for name in dirs:
+            onto = client_names.match(names, name) or name
+            names.append(onto)  # a twin later in the source lands on it too
+            into[here / name] = dest / onto
+        for name in sorted(name for name in files if name not in ignored):
+            onto = client_names.match(names, name) or name
+            names.append(onto)
+            _copy_unshared(here / name, dest / onto)
+            written.append(dest / onto)
+    return written
 
 
 COMPLETED_KEY = "install_completed"
@@ -4230,32 +4274,29 @@ class Applier:
                 continue
             src = clone / step.src
             if step.dest == "addons":
-                target = self.client_dir / "Interface" / "AddOns" / (step.name or src.name)
+                where = f"Interface/AddOns/{step.name or src.name}"
             elif step.dest == "interface":
-                target = self.client_dir / "Interface"
+                where = "Interface"
             else:
-                target = self.client_dir / "Data"
+                where = client_names.DATA_FOLDER
+            # The client's own folders, whatever their case (T261/T262): `data/` and
+            # `interface/addons/` are those folders on a disk that tells cases apart.
+            target = self.client_dir.joinpath(*client_names.on_disk(self.client_dir, where).parts)
             if src.is_dir():
-                shutil.copytree(
-                    src,
-                    target,
-                    dirs_exist_ok=True,
-                    ignore=_NOT_FOR_THE_CLIENT,
-                    copy_function=_copy_unshared,
-                )
-                if step.dest == "data":
-                    log.client_copies += self._receipts(step.src, src, target)
+                written = _copy_onto(src, target)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
-                _copy_unshared(src, target / src.name)
-                if step.dest == "data":
-                    log.client_copies += self._receipts(step.src, src, target)
+                landed = target / (client_names.match(os.listdir(target), src.name) or src.name)
+                _copy_unshared(src, landed)
+                written = [landed]
             else:
                 raise ApplyError(f"client source missing in clone: {src}")
+            if step.dest == "data":
+                log.client_copies += self._receipts(step.src, written)
             log.done.append(f"client {step.src} → {step.dest}")
 
     @staticmethod
-    def _receipts(step: str, src: Path, target: Path) -> list[ClientCopy]:
+    def _receipts(step: str, written: Sequence[Path]) -> list[ClientCopy]:
         """Hash what a `dest: data` step just put in the client, for `remove()` to check.
 
         Only `dest: data`. An addon folder is never taken back (the owner's
@@ -4285,13 +4326,13 @@ class Applier:
         hashed, yields no receipt — the same state as an older install's: the
         file stays at remove time and is named. Never fatal: the install itself
         succeeded.
+
+        `written` is the list `_client()` made while copying, one name per source
+        file, each the name it landed on (T262): `Data/patch-a.mpq` when the client
+        already had that file in another case, so Remove looks where the file is.
         """
-        if src.is_dir():
-            pairs = [(target / p.relative_to(src)) for p in sorted(src.rglob("*")) if p.is_file()]
-        else:
-            pairs = [target / src.name]
         out: list[ClientCopy] = []
-        for path in pairs:
+        for path in written:
             try:
                 out.append(ClientCopy(step=step, path=str(path), sha256=sha256_of(path)))
             except OSError as exc:
