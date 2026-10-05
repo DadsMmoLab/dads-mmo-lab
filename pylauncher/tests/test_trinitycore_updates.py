@@ -21,6 +21,7 @@ import copy
 import json
 import os
 import shutil
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1099,12 +1100,21 @@ def test_a_folder_the_old_map_data_did_not_have_is_not_left_by_a_failed_reextrac
 
 
 def test_a_reextract_closed_part_way_puts_the_old_map_data_back(box: Box) -> None:
-    """A stream the app stops reading (GeneratorExit) is a way out too: nothing old is lost."""
+    """A stream the app stops reading (GeneratorExit) is a way out too: nothing old is lost.
+
+    With the cancel event the Server tab always passes (`_run_upkeep_press`): it is
+    what stops the extraction's worker thread before the old data is put back, so
+    the two never write `data/` at once. With none, the worker is left running
+    (`native.stop_abandoned_worker`), and on Python 3.11 CI it wrote vmaps/ under
+    the put-back.
+    """
     finished_with_pathfinding(box)
     flagged(box)
     before = data_files(box)
     box.world.running = False
-    press = box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None)
+    press = box.engine().reextract(
+        InstallOptions(server_dir=box.server_dir), cancel=threading.Event()
+    )
     for line in press:
         if line.startswith("vmap assemble: running"):
             break
