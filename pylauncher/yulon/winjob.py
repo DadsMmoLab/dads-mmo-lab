@@ -17,10 +17,12 @@ an instruction. `subprocess` closes the main thread's handle, so the resume is
 `NtResumeProcess` on a process handle — the call psutil's `resume()` and
 Process Explorer use — rather than `ResumeThread`.
 
-**What the job does to a command that finishes normally.** KILL_ON_JOB_CLOSE
-ends whatever is still in the job when its last handle closes: when the stream
-that started it is done, and when this launcher exits or crashes, which before
-left a running build behind. A child that asks to leave the job with
+**What the job does to a command that finishes normally: nothing.** Its
+stream `release()`s the job, which clears KILL_ON_JOB_CLOSE before closing
+the handle, so anything it left running goes on as before. KILL_ON_JOB_CLOSE
+is for the other endings: a stream abandoned or stopped (`close()`), and this
+launcher exiting or crashing with a command still running, which before left
+a build behind. A child that asks to leave the job with
 CREATE_BREAKAWAY_FROM_JOB is let go (BREAKAWAY_OK) rather than refused: a
 process that says it must outlive its parent can still be started.
 
@@ -251,14 +253,44 @@ class Job:
             return bool(ended)
 
     def close(self) -> None:
-        """Let the job go. Whatever is still in it ends (KILL_ON_JOB_CLOSE). Once only."""
+        """Let the job go, ending whatever is still in it (KILL_ON_JOB_CLOSE). Once only."""
+        handle = self._take()
+        if handle:
+            self._close(handle)
+
+    def release(self) -> None:
+        """Let the job go WITHOUT ending what is still in it: for a command that ran out by itself.
+
+        Kill-on-close is cleared before the handle is closed. A command that
+        finished normally keeps what it did before jobs existed: anything it
+        left running goes on (Codex adversarial review of T299). If the flag
+        cannot be cleared the handle is closed anyway, and what is left ends.
+        """
+        handle = self._take()
+        if not handle:
+            return
+        try:
+            limits = ExtendedLimits()
+            limits.BasicLimitInformation.LimitFlags = _BREAKAWAY_OK
+            if not self._api.set_information(handle, _EXTENDED_LIMIT_INFORMATION, limits):
+                logger.warning(
+                    f"could not clear a job's kill-on-close (error {self._api.last_error()})"
+                )
+        except Exception as exc:  # noqa: BLE001 - called from `finally` blocks
+            logger.warning(f"could not clear a job's kill-on-close: {exc!r}")
+        self._close(handle)
+
+    def _take(self) -> int:
+        """The handle, now nobody else's to use: 0 if the job was already let go."""
         with self._lock:
             handle, self._handle = self._handle, 0
-        if handle:
-            try:
-                self._api.close(handle)
-            except Exception as exc:  # noqa: BLE001 - called from `finally` blocks
-                logger.warning(f"could not close a job: {exc!r}")
+        return handle
+
+    def _close(self, handle: int) -> None:
+        try:
+            self._api.close(handle)
+        except Exception as exc:  # noqa: BLE001 - called from `finally` blocks
+            logger.warning(f"could not close a job: {exc!r}")
 
 
 def create() -> Job | None:

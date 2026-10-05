@@ -315,3 +315,51 @@ def test_close_closes_the_handle_once_and_a_closed_job_is_never_ended(
 
     assert api.calls == [("close", _JOB)]
     assert ended is False
+
+
+def test_release_lets_what_is_still_in_the_job_go_before_closing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """For a command that ran out by itself: kill-on-close is cleared first, then the handle closed.
+
+    Codex's adversarial review of T299: closing a KILL_ON_JOB_CLOSE job after a
+    normal exit ended anything the command had left running on purpose, which
+    no Stop asked for. Only BREAKAWAY_OK stays set.
+
+    Mutations this catches: closing without clearing the flag; clearing it
+    after the close (the handle is gone); the flags left as they were.
+    """
+    job, api = _made(monkeypatch)
+
+    job.release()
+
+    assert api.calls == [("set_information", _JOB, 9), ("close", _JOB)]
+    assert api.flags_seen == 0x800
+    assert job.end() is False
+
+
+@pytest.mark.parametrize("how", ["fails", "raises"])
+def test_release_still_closes_a_job_whose_flag_it_could_not_clear(
+    monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The handle is let go anyway: one leaked job per command would add up over a session.
+
+    Mutation this catches: an early return that leaks the handle, or the
+    exception escaping into a stream's `finally`.
+    """
+    job, api = _made(monkeypatch)
+    setattr(api, how, ("set_information",))
+
+    job.release()
+
+    assert api.names() == ["set_information", "close"]
+
+
+def test_a_released_job_is_not_released_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation this catches: `release()` reaching the API with a handle already closed."""
+    job, api = _made(monkeypatch)
+
+    job.close()
+    job.release()
+
+    assert api.calls == [("close", _JOB)]

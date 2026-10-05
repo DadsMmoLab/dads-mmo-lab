@@ -1615,6 +1615,9 @@ class _FakeJob:
     def close(self) -> None:
         self.events.append("close")
 
+    def release(self) -> None:
+        self.events.append("release")
+
 
 def _windows_spawns(
     monkeypatch: pytest.MonkeyPatch, job: _FakeJob | None
@@ -1644,11 +1647,15 @@ def _windows_spawns(
 def test_on_windows_a_stream_child_starts_suspended_and_the_job_resumes_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CREATE_SUSPENDED with the no-window flag, then `job.start(pid)`, then the job closed.
+    """CREATE_SUSPENDED with the no-window flag, then `job.start(pid)`, then the job released.
+
+    A command that ran out by itself has its job RELEASED, not closed: whatever
+    it left running goes on as it did before jobs (Codex adversarial review).
 
     Mutations this catches: CREATE_SUSPENDED not asked for (docker.exe could
     start compose before it joined); `start` never called (the child would stay
-    suspended for ever on Windows); the wrong pid; the job never closed.
+    suspended for ever on Windows); the wrong pid; the job never let go, or
+    closed with its kill-on-close still set.
     """
     job = _FakeJob()
     spawned = _windows_spawns(monkeypatch, job)
@@ -1659,7 +1666,7 @@ def test_on_windows_a_stream_child_starts_suspended_and_the_job_resumes_it(
     assert [record["creationflags"] for record in spawned] == [_NO_WINDOW | _CREATE_SUSPENDED]
     proc = spawned[0]["proc"]
     assert isinstance(proc, _REAL_POPEN)
-    assert job.events == [("start", proc.pid), "close"]
+    assert job.events == [("start", proc.pid), "release"]
 
 
 def test_on_windows_with_no_job_the_child_is_not_started_suspended(
@@ -1850,7 +1857,7 @@ def test_on_windows_stream_progress_runs_its_child_in_a_job(
 
     assert list(runner.stream_progress(_python_cmd("print('cloned')"))) == ["cloned"]
     assert [record["creationflags"] for record in spawned] == [_NO_WINDOW | _CREATE_SUSPENDED]
-    assert job.events[-1] == "close" and job.events[0][0] == "start"  # type: ignore[index]
+    assert job.events[-1] == "release" and job.events[0][0] == "start"  # type: ignore[index]
 
 
 def test_on_windows_interact_runs_its_child_in_a_job(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1865,7 +1872,7 @@ def test_on_windows_interact_runs_its_child_in_a_job(monkeypatch: pytest.MonkeyP
 
     assert "asked" in out
     assert [record["creationflags"] for record in spawned] == [_NO_WINDOW | _CREATE_SUSPENDED]
-    assert job.events[-1] == "close" and job.events[0][0] == "start"  # type: ignore[index]
+    assert job.events[-1] == "release" and job.events[0][0] == "start"  # type: ignore[index]
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
@@ -1883,3 +1890,42 @@ def test_off_windows_no_job_is_ever_made(monkeypatch: pytest.MonkeyPatch, platfo
     monkeypatch.setattr(runner.winjob, "create", no_job)
 
     assert list(stream(_python_cmd("print('built')"))) == ["built"]
+
+
+class _ThreadThatCannotStart(threading.Thread):
+    """`RuntimeError: can't start new thread`, the failure a long-lived GUI process can meet."""
+
+    def start(self) -> None:
+        raise RuntimeError("can't start new thread")
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress", "interact"])
+def test_on_windows_a_reader_that_cannot_start_still_ends_and_closes_the_job(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """The child is running and in its job before the reader starts: a failed start ends both.
+
+    From both Codex reviews of T299: the reader was started before the
+    `try`/`finally` that ends the child, so the job's handle stayed open and the
+    tree ran on. Closing the job (kill-on-close) is what reaches the tree.
+
+    Mutation this catches: the failed start leaving the job open.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    monkeypatch.setattr(runner.threading, "Thread", _ThreadThatCannotStart)
+    command = _python_cmd("import time; time.sleep(60)")
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        if entry == "stream":
+            next(stream(command))
+        elif entry == "stream_progress":
+            next(runner.stream_progress(command))
+        else:
+            next(iter(runner.interact(command, respond=lambda line: None)))
+
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    assert proc.poll() is not None, "the child is still running"
+    assert job.events[-1] == "close", job.events
+    assert "release" not in job.events

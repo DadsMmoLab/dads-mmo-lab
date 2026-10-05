@@ -149,6 +149,38 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None) -> None:
             proc.wait()
 
 
+def _abandon_unread(proc: _AnyPopen, job: winjob.Job | None) -> None:
+    """End a child whose reader could not start, before its stream's `finally` exists.
+
+    From both Codex reviews of T299: the reader starts before the `try` whose
+    `finally` ends the child, so a `RuntimeError: can't start new thread` left
+    the tree running in a job nobody would close.
+    """
+    _end_child(proc, job)
+    if job is not None:
+        job.close()
+
+
+def _finish(proc: _AnyPopen, job: winjob.Job | None) -> None:
+    """A stream's last word on its child: end it if it is running, then let its job go.
+
+    A child that ran out by itself has its job RELEASED, so whatever it left
+    running goes on as before jobs (Codex adversarial review of T299). One
+    that was still running was abandoned: its tree is ended and the job
+    closed, which also ends anything `_end_child`'s fallback could not reach.
+    The job is closed only after it was asked to end the tree, because a
+    closed job's handle can no longer end anything.
+    """
+    ran_out = proc.poll() is not None
+    _end_child(proc, job)
+    if job is None:
+        return
+    if ran_out:
+        job.release()
+    else:
+        job.close()
+
+
 def _taskkill() -> str:
     """The system's own taskkill.exe, by its full path rather than whatever PATH finds first."""
     return ntpath.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "taskkill.exe")
@@ -622,7 +654,11 @@ def _stream_lines(
     reader: threading.Thread | None = None
     if not merge_stderr:
         reader = threading.Thread(target=_drain_stderr, daemon=True)
-        reader.start()
+        try:
+            reader.start()
+        except BaseException:
+            _abandon_unread(proc, job)
+            raise
 
     try:
         assert proc.stdout is not None
@@ -641,11 +677,7 @@ def _stream_lines(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        # The job is closed only after it has been asked to end the tree: a
-        # closed job's handle can no longer end anything (T299).
-        _end_child(proc, job)
-        if job is not None:
-            job.close()
+        _finish(proc, job)
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -792,8 +824,12 @@ def _progress_lines(
         threading.Thread(target=read, args=(pipe,), daemon=True)
         for pipe in (proc.stdout, proc.stderr)
     ]
-    for reader in readers:
-        reader.start()
+    try:
+        for reader in readers:
+            reader.start()
+    except BaseException:
+        _abandon_unread(proc, job)
+        raise
 
     try:
         done = 0
@@ -812,9 +848,7 @@ def _progress_lines(
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader
         # thread stuck on a pipe.
-        _end_child(proc, job)
-        if job is not None:
-            job.close()
+        _finish(proc, job)
         for reader in readers:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for pipe in (proc.stdout, proc.stderr):
@@ -1182,6 +1216,8 @@ def interact(
         # is not far-fetched in a long-lived GUI process (review, 2026-08-22).
         proc.kill()
         proc.wait()
+        if job is not None:
+            job.close()  # kill-on-close: the root's descendants too (T299)
         if master >= 0:
             os.close(master)
         raise
@@ -1355,9 +1391,7 @@ def interact(
     finally:
         # `stream()`'s ending, so a cancelled child's whole tree ends on Windows
         # too (T246); until then this was a copy of it that ended the root alone.
-        _end_child(proc, job)
-        if job is not None:
-            job.close()
+        _finish(proc, job)
         reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for handle in (proc.stdin, proc.stdout):
             if handle is not None:
