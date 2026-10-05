@@ -4741,8 +4741,8 @@ modules are already ledgered in `updates`.
 
 MODULE_SQL_FINISHED = (
     "The importer finished. Any '>> Applying update <file>.sql' line above is a file that was "
-    "applied just now; a module already recorded in the database's `updates` table correctly "
-    "gets nothing. Modules with C++ code still need a rebuild — that is a separate job."
+    "applied just now; a module already recorded in the database's own updates table "
+    "correctly gets nothing. Modules with C++ code still need a rebuild — that is a separate job."
 )
 """What is said at the end, and everything it deliberately does not say.
 
@@ -9113,11 +9113,15 @@ class ControllerView(QWidget):
             # line says so; the words go under Details and, through
             # `action_failed`, to the log. Yu'lon's own refusals stay as written.
             msg, why = START_FAILED_BROKE, raw
+        else:
+            # T248: Yu'lon's own sentence, and what explains it -- a container's
+            # log command -- under Details rather than on the line.
+            why = _detail_of(exc)
         # Asked of the raw text: Docker's port-in-use words are what it reads.
         rolled = self._roll_the_channel_back_if_it_took_the_port(raw)
         self.problem_label.setText(rolled or msg)
         self.problem_details.set_text("" if rolled else why)
-        self.action_failed.emit(rolled or (raw if why else msg))
+        self.action_failed.emit(rolled or (_for_the_log(exc) if why else msg))
         self.refresh_status()
 
     def _roll_the_channel_back_if_it_took_the_port(self, message: str) -> str:
@@ -9356,7 +9360,10 @@ class ControllerView(QWidget):
         self._set_busy(False)
         msg = self._stop_failure_words(exc)
         self.problem_label.setText(msg)
-        self.action_failed.emit(msg)
+        # T248: a refusal's command (`docker compose ls`) is under Details, not on the line.
+        detail = "" if msg == STOP_FAILED_NO_DOCKER else _detail_of(exc)
+        self.problem_details.set_text(detail)
+        self.action_failed.emit(f"{msg}\n{detail}" if detail else msg)
         self.refresh_status()
 
     def _stop_failure_words(self, exc: object) -> str:
@@ -11456,8 +11463,10 @@ class ControllerView(QWidget):
     @Slot(object)
     def _remove_failed(self, exc: object) -> None:
         self._set_busy(False)
-        self._say_under_the_presses(f"Could not remove the containers: {exc}")
-        self.action_failed.emit(str(exc))
+        self._say_under_the_presses(
+            f"Could not remove the containers: {exc}", details=_detail_of(exc)
+        )
+        self.action_failed.emit(_for_the_log(exc))
 
     @Slot()
     def repair_import(self) -> None:
@@ -14448,8 +14457,7 @@ class ControllerView(QWidget):
         # clone they changed (T44 item 1).
         self.refresh_modules_button.clicked.connect(self.refresh_modules)
         self.refresh_modules_button.setToolTip(
-            "Read this install's module folders again. Cheap: directory names and one "
-            "`git log -1` per module, no network."
+            "Read this install's module folders again. Quick, and it does not use the network."
         )
         # The two whose subject is not in the catalog at all: a module this app
         # does not ship, named by the user.

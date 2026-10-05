@@ -1254,7 +1254,7 @@ def test_the_right_repository_this_app_never_cloned_is_still_refused(tmp_path: P
 
     assert git.calls == []
     assert (clone / "src" / "mine.cpp").read_bytes() == before
-    assert "git reset" in str(err.value) and "no record" in str(err.value)
+    assert "reset it to a fresh copy" in str(err.value) and "no record" in str(err.value)
 
 
 def test_git_that_will_not_say_what_a_checkout_is_refuses_rather_than_guesses(
@@ -6403,7 +6403,7 @@ def test_install_refuses_to_reset_a_clone_with_an_uncommitted_edit(tmp_path: Pat
         applier.install(manifest)
 
     assert "has changes in it that are not committed" in str(raised.value)
-    assert "Installing mod-ale runs `git reset --hard`" in str(raised.value)
+    assert "Installing mod-ale resets that folder" in str(raised.value)
     assert str(raised.value).endswith("Nothing was changed.")
     assert edited.read_text(encoding="utf-8") == "// mine, uncommitted\n", "the edit survived"
     assert _git(clone, "rev-parse", "HEAD") == head
@@ -6428,7 +6428,7 @@ def test_install_refuses_to_move_off_a_commit_of_the_users_own(tmp_path: Path) -
         applier.install(manifest)
 
     assert "carries commits of its own" in str(raised.value)
-    assert "Installing mod-ale runs `git reset --hard`" in str(raised.value)
+    assert "Installing mod-ale resets that folder" in str(raised.value)
     assert _git(clone, "rev-parse", "HEAD") == mine, "nothing was changed"
 
 

@@ -1674,12 +1674,16 @@ def test_the_message_for_two_owners_offers_no_single_name_to_pin() -> None:
     irreversible write that leaves half the containers still foreign — and the
     next Stop still refuses (review, 2026-08-22).
     """
-    message = docker._stranger_message(
-        ((SPEC.auth, "install-a"), (SPEC.world, "zzz-other")), PROJECT, Path("/tmp/wow")
-    )
+    strangers = ((SPEC.auth, "install-a"), (SPEC.world, "zzz-other"))
+    message = docker._stranger_message(strangers, PROJECT, Path("/tmp/wow"))
     assert f"{docker.PROJECT_NAME_VAR}=install-a" not in message
     assert "More than one project" in message
-    assert "docker compose ls" in message
+    assert "Docker can list each running project" in message
+    # T248: the listing command is under Details, not on the line.
+    assert "docker compose ls" not in message
+    refusal = docker._stranger_refusal(strangers, PROJECT, Path("/tmp/wow"))
+    assert str(refusal) == message
+    assert "docker compose ls" in refusal.detail
 
 
 def test_the_remedy_offers_deleting_a_copied_pin_not_a_folder_rename(tmp_path: Path) -> None:
@@ -1784,7 +1788,7 @@ def test_start_staged_will_not_report_success_for_a_container_that_died(
     calls: list[list[str]] = []
     # Only the database came up; auth and world died on start.
     monkeypatch.setattr(docker.runner, "run", _start_runner(calls, up=(SPEC.db,)))
-    with pytest.raises(docker.DockerCommandError, match="compose reported success"):
+    with pytest.raises(docker.DockerCommandError, match="reported the start as done"):
         docker.start_staged(SPEC, Path("/tmp/wow"))
 
 
@@ -2623,7 +2627,9 @@ def test_repair_import_catches_an_import_that_exited_zero_having_done_nothing(
     _repair_doubles(monkeypatch, calls, running={SPEC.db})
     with pytest.raises(docker.DockerCommandError, match="still read as absent") as raised:
         docker.repair_import(SPEC, Path("/tmp/wow"), _probe(UNIMPORTED))
-    assert "ac-db-import" in str(raised.value), "did not say which logs to read"
+    # T248: which logs to read is under Details, as a command; the line says it in words.
+    assert isinstance(raised.value, docker.DockerRefusal)
+    assert "docker compose logs ac-db-import" in raised.value.detail, "did not say which logs"
     assert ["docker", "compose", "up", "--no-deps", "ac-db-import"] in calls
 
 
@@ -4273,8 +4279,12 @@ def test_the_diagnostic_it_offers_is_a_command_that_actually_runs(
     assert (
         "c-auth, c-world are not running" in said
     ), "it must still name the containers it looked for"
-    assert "docker compose logs s-auth" in said, said
-    assert "docker compose logs c-auth" not in said
+    # T248: the command is under Details now, and it still names the SERVICE.
+    assert isinstance(raised.value, docker.DockerRefusal)
+    detail = raised.value.detail
+    assert "docker compose logs s-auth" in detail, detail
+    assert "docker compose logs c-auth" not in detail
+    assert "docker compose logs" not in said, said
 
 
 def test_container_spec_translates_a_container_name_to_its_service() -> None:

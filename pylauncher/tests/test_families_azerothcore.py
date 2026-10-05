@@ -1282,6 +1282,33 @@ def test_an_install_whose_database_never_starts_says_so_instead_of_blaming_the_i
     assert "one-shot:ac-db-import" not in rec.calls
 
 
+def test_an_install_whose_database_never_starts_puts_the_log_command_under_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T248: the Install failed dialog has no Details pane, so its text carries a Details part."""
+    from tests.support_player_text import command_faults
+
+    server_dir = tmp_path / "wow"
+    refusal = docker.DockerRefusal(
+        "ac-database did not report healthy within 180s, so nothing was imported. "
+        "The database's own log says why.",
+        detail=docker.logs_command("ac-database", server_dir),
+    )
+    rec = Recorder(images=False)
+
+    def refuse(*_args: object, **_kwargs: object) -> object:
+        raise refusal
+
+    monkeypatch.setattr(rec, "start_db", refuse)
+    with pytest.raises(InstallerError) as raised:
+        install(rec, server_dir)
+
+    line, _, details = str(raised.value).partition("\n\nDetails:\n")
+    assert "database could not be started" in line
+    assert command_faults(line) == [], line
+    assert details == refusal.detail
+
+
 def test_starting_the_database_is_never_recorded_so_a_resume_does_it_again(
     tmp_path: Path,
 ) -> None:

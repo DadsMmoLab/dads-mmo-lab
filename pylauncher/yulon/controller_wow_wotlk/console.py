@@ -116,12 +116,18 @@ _open_pty = runner.open_pty
 
 
 NO_TTY_HELP = (
-    "The worldserver console needs a terminal. Docker refuses `docker attach` "
-    "when its input is not a TTY, and this platform has no pseudo-terminal, so "
-    "the app cannot send console commands here yet. Use the worldserver console "
-    "in a terminal for now: `docker attach --sig-proxy=false {container}` "
-    "(Ctrl+P then Ctrl+Q to leave it running)."
+    "The worldserver console needs a terminal, and Yu'lon cannot open one on this "
+    "computer, so it cannot send console commands here yet. Following the worldserver "
+    "log still works. To type at the console, open a terminal and run "
+    '"docker attach --sig-proxy=false {container}"; press Ctrl+P then Ctrl+Q to leave '
+    "it without stopping the server."
 )
+"""The Console tab's note where this computer cannot type at the console.
+
+It names a command on purpose (T248, beside the Linux banner's systemctl line):
+a terminal is the only way to the console here, the player has to type it, and
+no press can do it for them. Quoted, never in backticks.
+"""
 
 
 DETACH_KEYS = "ctrl-p,ctrl-q"

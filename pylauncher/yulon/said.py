@@ -31,3 +31,15 @@ class SaidByYulon(Exception):
     """
 
     detail: str = ""
+
+
+def with_details(exc: BaseException, sentence: str | None = None) -> str:
+    """`sentence` (else `exc`'s own) with its Details under it, for a place with no pane (T248).
+
+    The install's failure dialog has no Details to fold away, so what a
+    program printed -- and a command, when one helps -- goes under a "Details:"
+    heading in the text itself, below the sentence and never in it.
+    """
+    said = str(exc) if sentence is None else sentence
+    detail = exc.detail if isinstance(exc, SaidByYulon) else ""
+    return f"{said}\n\nDetails:\n{detail}" if detail else said

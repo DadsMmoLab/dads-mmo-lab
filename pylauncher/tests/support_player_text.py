@@ -45,6 +45,34 @@ def text_faults(text: str) -> list[str]:
     return [name for name, pattern in RULES if pattern.search(text)]
 
 
+COMMAND_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("backtick", re.compile(r"`")),
+    (
+        "docker command",
+        re.compile(
+            r"\bdocker\s+(?:compose|ps|logs|exec|run|start|stop|restart|rm|volume|image|"
+            r"info|version|system|attach|inspect|cp|pull|build|create|kill|network)\b"
+        ),
+    ),
+    ("compose command", re.compile(r"\bcompose\s+(?:logs|up|down|ps|run|build|ls|exec)\b")),
+    ("--rm", re.compile(r"--rm\b")),
+    ("systemctl", re.compile(r"\bsystemctl\b")),
+    ("journalctl", re.compile(r"\bjournalctl\b")),
+)
+"""A command on a player's line (T248): the line says in words what failed and
+where to look, and a command worth running goes under Details (T194, T214).
+
+Kept apart from `RULES` because the Linux "start the engine" banner names its
+`systemctl` line on purpose: `RULES` holds for every screen, these for every
+player line but the exceptions `test_player_lines_name_no_commands` names.
+"""
+
+
+def command_faults(text: str) -> list[str]:
+    """The names of the `COMMAND_RULES` `text` breaks, in that order."""
+    return [name for name, pattern in COMMAND_RULES if pattern.search(text)]
+
+
 def _skipped(widget: Any) -> bool:
     """The install console and everything in it, and the Logs tab's file viewer."""
     from yulon.ui.logs_view import LogsView

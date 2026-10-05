@@ -115,6 +115,7 @@ from yulon.catalog.installer import (
 from yulon.catalog.preflight import Spent
 from yulon.log import get_logger
 from yulon.ownership import Ownership as Ownership
+from yulon.said import with_details
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -9564,7 +9565,9 @@ class StagedInstaller:
             self._seams.start_db(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:
             raise InstallerError(
-                f"The database could not be started, so nothing was imported: {exc}"
+                with_details(
+                    exc, f"The database could not be started, so nothing was imported: {exc}"
+                )
             ) from exc
         yield "The database is up."
 
@@ -9684,7 +9687,7 @@ class StagedInstaller:
         try:
             after = self._seams.verify_import(gate.probe, service, ctx.server_dir, run)
         except docker.DockerCommandError as exc:
-            raise InstallerError(str(exc)) from exc
+            raise InstallerError(with_details(exc)) from exc
         yield f"The databases now read as {after.state}."
 
     def _forget_old_database_records(self, ctx: StageContext) -> Iterator[str]:
@@ -9731,7 +9734,7 @@ class StagedInstaller:
         try:
             self._seams.start(self.entry.container_spec(), ctx.server_dir)
         except docker.DockerCommandError as exc:
-            raise InstallerError(f"The server would not start: {exc}") from exc
+            raise InstallerError(with_details(exc, f"The server would not start: {exc}")) from exc
 
     def stage_ready(self, ctx: StageContext) -> Iterator[str]:
         """Wait until the database is healthy and both servers have said they are up.
