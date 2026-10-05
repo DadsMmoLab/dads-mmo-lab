@@ -1239,10 +1239,31 @@ def continues_from(
     if background_block(entry) is None:
         return 0
     before = read_record(server_dir)
-    job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
-    if before is None or not _resumable(job, before) or not before.evidence:
+    if before is None:
         return 0
-    return _whole_tiles(job) if before.evidence == _evidence(job) else 0
+    job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
+    kept, begins_again_because = _continuation(job, before)
+    return 0 if begins_again_because else kept
+
+
+def _continuation(job: Job, record: Record) -> tuple[int, str]:
+    """`(tiles, why)`: the whole tiles a start keeps now, and why it would not (T245, T263).
+
+    The ONE rule the Server tab's line (`_failed_status()`) and a failed Re-extract's
+    sentence (`continues_from()`) both read, so the two can never disagree: the
+    record must be a readable, resumable one of a failed run on an entry that can
+    tell a whole tile (`_resumable()`, as `_resume_or_clear()` demands), the count is
+    of the tiles that are whole now (`_whole_tiles()`, not the record's `kept`, which
+    a tile removed or cut off since makes stale), and `why` is
+    `_why_it_begins_again()`'s map-data answer, empty when the start continues.
+    `(0, "")` when nothing would be kept at all.
+    """
+    if not _resumable(job, record):
+        return 0, ""
+    tiles = _whole_tiles(job)
+    if not tiles:
+        return 0, ""
+    return tiles, _why_it_begins_again(job, record)
 
 
 def _whole_tiles(job: Job) -> int:
@@ -1287,7 +1308,8 @@ def _failed_status(job: Job, record: Record) -> MmapsStatus:
     status = _status_of(record, pathfinding_on=_pathfinding_on(job))
     if not status.kept:
         return status
-    return replace(status, begins_again_because=_why_it_begins_again(job, record))
+    kept, why = _continuation(job, record)  # the Re-extract message's rule too (T263)
+    return replace(status, kept=kept, begins_again_because=why)
 
 
 def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:

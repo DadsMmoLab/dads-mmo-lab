@@ -1648,6 +1648,48 @@ def test_a_failed_reextract_counts_the_tiles_that_are_whole_now(box: Box) -> Non
     assert tiles[1].is_file(), "counted, never removed: the next start decides that"
 
 
+@pytest.mark.parametrize(
+    "case", ["whole", "two tiles gone since", "unknown map data", "not resumable"]
+)
+def test_the_server_tab_and_a_failed_reextract_say_the_same_about_the_kept_tiles(
+    box: Box, case: str
+) -> None:
+    """T245 with T263: one rule and one count. The Server tab's line and the failure's
+    sentence both read `mmaps`' one answer, so after a failed Re-extract they agree on
+    whether the next press continues, and from how many tiles."""
+    _a_run_that_crashed(box, 12)
+    out = box.server_dir / "data" / "mmaps"
+    record = box.server_dir / mmaps.RECORD_FILE
+    if case == "two tiles gone since":
+        tiles = sorted(out.glob("*.mmtile"))
+        tiles[0].unlink()
+        tiles[1].write_bytes(tiles[1].read_bytes()[:-1])
+    elif case in ("unknown map data", "not resumable"):
+        raw = json.loads(record.read_text("utf-8"))
+        raw["evidence" if case == "unknown map data" else "resumable"] = (
+            "" if case == "unknown map data" else False
+        )
+        record.write_text(json.dumps(raw), "utf-8")
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    status = box.engine().mmaps_status(box.server_dir)
+    said = str(failed.value)
+    if case in ("whole", "two tiles gone since"):
+        tiles_now = 12 if case == "whole" else 10
+        assert said.endswith(trinitycore.reextract_kept_tiles(tiles_now))
+        assert status.kept == tiles_now and status.begins_again_because == ""
+        assert f"Its {tiles_now} finished tiles are kept" in status.line()
+        assert f"\u201c{mmaps.START_PRESS}\u201d continues from there" in status.line()
+    else:
+        assert said.endswith(trinitycore.REEXTRACT_PUT_BACK)
+        assert "continues from there" not in status.line()
+    assert mmaps.START_PRESS in trinitycore.reextract_kept_tiles(1)
+
+
 def test_a_failed_reextract_whose_old_data_did_not_come_back_says_nothing_of_kept_tiles(
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:

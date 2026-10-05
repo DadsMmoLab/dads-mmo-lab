@@ -144,8 +144,7 @@ def reextract_kept_tiles(kept: int) -> str:
     """
     return (
         f"The {kept} finished tiles of the pathfinding data that had stopped part-way were "
-        "kept too, and \u201cMake the pathfinding data\u201d on the Server tab continues from "
-        "them."
+        f"kept too, and \u201c{mmaps.START_PRESS}\u201d on the Server tab continues from them."
     )
 
 
