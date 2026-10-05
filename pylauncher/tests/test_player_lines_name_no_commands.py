@@ -18,6 +18,13 @@ something has gone wrong, which no screen sweep reaches:
 A message assembled out of variables is read as far as it is written in the
 source: an f-string's fixed words, a `+` of strings, a module constant, and a
 same-module helper's returned strings.
+
+Not read, and left to T296: text that reaches a widget as data rather than by
+name (`ProvisionReport.manual_steps`, a job's yielded log lines), and
+`InstallerError`, which the Install failed dialog shows as written. Those carry
+remedies that are commands to type (`wsl --install`, `sudo pacman -S …`), and
+whether each stays as a named exception or moves under Details is that
+ticket's decision. The rules name Docker's commands only, for the same reason.
 """
 
 from __future__ import annotations
