@@ -30,7 +30,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 - A fresh Centurion server no longer restarts over and over at the end of its install.
 - A fresh Centurion server no longer crashes on its first start while it makes its bots.
-- On Windows, Centurion no longer stalls at start-up; an older install needs **Repair server files…** once.
+- On Windows, Centurion no longer stalls at start-up; older installs need **Repair server files…**, then **Recreate containers…**.
 - WoW TBC and Vanilla installs and rebuilds work again, with the bots version Yu'lon has tested.
 - A Tortoise server no longer crashes after its weekly honor day; older installs press **Apply database corrections…**.
 - Stopping a TBC, Vanilla or Tortoise server while its world loads no longer kills it and loses progress.
@@ -44,7 +44,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Restore** on the Maintenance tab works with the server stopped, and leaves it stopped.
 - **Re-extract map data** on Centurion works again, and a failed run keeps your old map data.
 - Centurion's pathfinding line says how far a stopped run got and what the next press will do.
-- On Linux and the Steam Deck, a client whose game files are named in lower case is accepted on every game.
+- On Linux and the Steam Deck, lower-case game file names are accepted on every game (a lower-case Data folder not yet).
 - A fresh WoW TBC or Vanilla install gets the latest dungeon and raid updates.
 - WoW WotLK's bots read a real settings file, so My Party, the Bots tab and Tuning see your bot settings.
 - **Install** again after a failed build is no longer refused for space its own build cache already uses.
