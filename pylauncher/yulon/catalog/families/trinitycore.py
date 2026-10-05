@@ -2010,12 +2010,11 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
             yield from self._staged((stage,), ctx)
         except BaseException as failure:
-            if isinstance(
-                failure, extract.ContainerLeftRunning
-            ) or docker.tool_containers_writing_into(data_dir):
-                # T303: a tool Docker would not remove, or one still being ended
-                # after the stream was closed, may still write into data/, so the
-                # old map data stays aside; the next press settles it.
+            if docker.tool_containers_writing_into(data_dir):
+                # T303: a tool Docker would not remove after a Stop
+                # (`extract.ContainerLeftRunning`), or one still being ended after the
+                # stream was closed, may still write into data/, so the old map data
+                # stays aside; the next press settles it.
                 told = REEXTRACT_KEPT_ASIDE
             else:
                 told = self._put_the_old_map_data_back(data_dir)
