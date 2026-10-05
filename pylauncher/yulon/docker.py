@@ -3574,13 +3574,6 @@ class ContainerState:
     host), a live container also reads as missing (`native.py:2170-2175`),
     so every caller that means it must pass `wsl_distro`.
     """
-    said: str = field(default="", compare=False)
-    """What Docker's CLI printed when the read failed, `""` when it answered (T306).
-
-    The dashboard tells Docker going away (`docker_advice.unreachable()`) from
-    any other failed read by it. Left out of `==`, so a failed read still equals
-    `ContainerState()` for every caller that compares against that.
-    """
 
     @property
     def settled(self) -> bool:
@@ -3623,11 +3616,25 @@ def container_state(
     if proc.returncode != 0:
         _note_unread(container, wsl_distro, proc.stderr.strip())
         missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
-        return ContainerState(missing=missing, said=proc.stderr.strip())
+        return ContainerState(missing=missing)
     _note_read(container, wsl_distro)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     status, started, count = (fields + ["", "", ""])[:3]
     return ContainerState(status, started, int(count) if count.isdigit() else 0)
+
+
+def daemon_identity(*, wsl_distro: str | None = None) -> str:
+    """Which start of the Docker daemon is answering: its default bridge network's ID (T306).
+
+    Measured on yulon-ubuntu, Docker 29.1.3: the daemon deletes and recreates
+    the default `bridge` network every time it starts (with live-restore off,
+    the default here and on Docker Desktop), so its `Id` changes and its
+    `Created` is the daemon's start time; `docker info`'s `ID` does not change.
+    `""` when it cannot be read (no daemon, no `bridge` network as with Windows
+    containers): the caller must then not assume either way.
+    """
+    proc = _docker(["network", "inspect", "bridge", "--format", "{{.Id}}"], wsl_distro=wsl_distro)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
 def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:

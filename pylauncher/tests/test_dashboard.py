@@ -54,6 +54,7 @@ def _watch(
         _install(tmp_path),
         sql=sql if sql is not None else _FakeSql(),
         state_of=lambda _container: remaining.pop(0),
+        daemon_of=lambda: "bridge-before",
         now=lambda: NOW,
     )
 
@@ -228,6 +229,7 @@ def test_a_marker_that_cannot_be_resolved_refuses_the_counts_without_hiding_the_
         server_dir,
         sql=sql,
         state_of=lambda _c: _running(),
+        daemon_of=lambda: "bridge-before",
         now=lambda: NOW,
     )
 
@@ -265,6 +267,7 @@ def test_a_game_with_no_measured_block_yet_says_so_and_still_reports_the_contain
         tmp_path,
         sql=_FakeSql(),
         state_of=lambda _c: _running(),
+        daemon_of=lambda: "bridge-before",
         now=lambda: NOW,
     )
 
@@ -355,6 +358,7 @@ def test_a_world_whose_database_is_gone_is_not_stable_even_though_it_is_up(
         _install(tmp_path),
         sql=_Dead(),
         state_of=lambda _c: _running(),
+        daemon_of=lambda: "bridge-before",
         now=lambda: NOW,
     )
 
@@ -376,7 +380,13 @@ def test_a_marker_problem_does_not_make_a_healthy_server_unstable(tmp_path: Path
         "AiPlayerbot.RandomBotAccountPrefix =" + chr(10), encoding="utf-8"
     )
     watch = dashboard.Dashboard(
-        SPEC, WOTLK, server_dir, sql=_FakeSql(), state_of=lambda _c: _running(), now=lambda: NOW
+        SPEC,
+        WOTLK,
+        server_dir,
+        sql=_FakeSql(),
+        state_of=lambda _c: _running(),
+        daemon_of=lambda: "bridge-before",
+        now=lambda: NOW,
     )
 
     verdict = watch.tick()
@@ -511,14 +521,17 @@ def test_the_realm_poll_logs_a_silent_docker_once_not_every_tick(
 
 # ---------------------------------------------------------------- T306: Docker restarted itself
 
+_AWAY = docker.ContainerState()
+"""A read that failed, as with docker.service stopped ("Cannot connect to the Docker daemon")."""
 
-_AWAY = docker.ContainerState(
-    said=(
-        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
-        "Is the docker daemon running?"
-    )
-)
-"""A read that failed because no daemon answered: Docker's own words on Linux (T248 log)."""
+RESTARTED = ("bridge-before", "bridge-after")
+"""The daemon's identity before and after: Docker recreated its default bridge network.
+
+Measured on yulon-ubuntu, Docker 29.1.3: `docker network inspect bridge` gave a new
+`Id`, `Created` the daemon's start time, after every `systemctl restart docker`
+(7e1d2a79… created 20:01:55 → b10dec55… created 22:13:47), while `docker info`'s
+`ID` stayed the same.
+"""
 
 
 def _stamp(at: datetime) -> str:
@@ -526,7 +539,7 @@ def _stamp(at: datetime) -> str:
 
 
 class _ScriptedSql(_FakeSql):
-    """A database that is down (`None`) or answers, one entry per population read.
+    """A database that is down (`False`) or answers (`True`), one entry per population read.
 
     Docker's restore starts the database and the world at once; until the
     database answers, the world's deaths are that race. Past the script it answers.
@@ -546,15 +559,26 @@ def _clocked(
     tmp_path: Path,
     script: list[tuple[timedelta, docker.ContainerState]],
     sql: _FakeSql | None = None,
-) -> tuple[dashboard.Dashboard, list[datetime]]:
-    """A dashboard ticked at the given offsets from NOW, one container state per tick."""
+    daemons: tuple[str, ...] = ("bridge-before",),
+) -> tuple[dashboard.Dashboard, list[str]]:
+    """A dashboard ticked at the given offsets from NOW, one container state per tick.
+
+    `daemons` answers the daemon-identity reads in order, the last one repeating;
+    returns the dashboard and the list of identities it was handed.
+    """
     clock = [NOW]
     remaining = list(script)
+    identities = list(daemons)
+    handed: list[str] = []
 
     def state_of(_container: str) -> docker.ContainerState:
         offset, state = remaining.pop(0)
         clock[0] = NOW + offset
         return state
+
+    def daemon_of() -> str:
+        handed.append(identities.pop(0) if len(identities) > 1 else identities[0])
+        return handed[-1]
 
     watch = dashboard.Dashboard(
         SPEC,
@@ -562,9 +586,10 @@ def _clocked(
         _install(tmp_path),
         sql=sql if sql is not None else _FakeSql(),
         state_of=state_of,
+        daemon_of=daemon_of,
         now=lambda: clock[0],
     )
-    return watch, clock
+    return watch, handed
 
 
 def test_restarts_while_docker_brings_itself_back_are_not_a_restart_loop(
@@ -581,22 +606,23 @@ def test_restarts_while_docker_brings_itself_back_are_not_a_restart_loop(
     start docker`, and the app's log shows Docker answering again at 16:38:59 while
     the world still died until 16:39:02. The ticks below are that sequence.
 
-    Mutation: count restarts during the grace, and the third tick's four new
+    Mutation: count restarts during the window, and the fourth tick's four new
     restarts make a loop that the last tick still reports.
     """
     up = _stamp(NOW - timedelta(hours=2))
     back = _stamp(NOW + timedelta(seconds=13))
-    watch, _clock = _clocked(
+    watch, _handed = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(up, 0)),
-            (timedelta(seconds=5), _AWAY),  # Docker is away
+            (timedelta(seconds=5), _AWAY),
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
             (timedelta(seconds=15), _running(back, 5)),
             (timedelta(seconds=45), _running(back, 5)),
         ],
         # Read 1: before Docker stopped. Read 2: the database is not up yet.
         _ScriptedSql(True, False),
+        RESTARTED,
     )
 
     verdicts = [watch.tick() for _ in range(5)]
@@ -616,15 +642,16 @@ def test_a_world_docker_is_restarting_while_docker_comes_back_is_starting_not_lo
     the tab must not call it a restart loop. Nor `stopped`: that would open the
     enable press (`_press_is_allowed`) under a world about to be running.
 
-    Mutation: let `restarting` win over the grace, and this reads `restart_loop`.
+    Mutation: let `restarting` win over the window, and this reads `restart_loop`.
     """
-    watch, _clock = _clocked(
+    watch, _handed = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
             (timedelta(seconds=5), _AWAY),
             (timedelta(seconds=10), docker.ContainerState("restarting", "", 3)),
         ],
+        daemons=RESTARTED,
     )
 
     watch.tick()
@@ -639,18 +666,18 @@ def test_a_world_docker_is_restarting_while_docker_comes_back_is_starting_not_lo
 
 
 def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: Path) -> None:
-    """The grace forgives Docker's own restart, not a world that keeps dying after it.
+    """The window forgives Docker's own restart, not a world that keeps dying after it.
 
     Measured with the same stand-in while the daemon stayed up: a container that
     exits 3 after four seconds went 0 → 1 → 2 → 3 → 4 → 5 → 6 restarts in forty
     seconds. Here the database never answers, so only the two-minute cap closes
     the window; past it, the count growing three times is a loop again.
 
-    Mutation: make the grace never end, and the last tick reads `up`.
+    Mutation: make the window never end, and the last tick reads `up`.
     """
     grace = dashboard.DOCKER_RESTORE_GRACE
     later = grace + timedelta(seconds=15)
-    watch, _clock = _clocked(
+    watch, _handed = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
@@ -660,6 +687,7 @@ def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: 
             (later, _running(_stamp(NOW + later - timedelta(seconds=1)), 7)),
         ],
         _ScriptedSql(True, False, False),
+        RESTARTED,
     )
 
     verdicts = [watch.tick() for _ in range(5)]
@@ -668,22 +696,132 @@ def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: 
     assert verdicts[-1].state == "restart_loop"
 
 
-def test_a_container_docker_said_was_missing_does_not_open_a_grace(tmp_path: Path) -> None:
-    """`missing` is Docker ANSWERING (T95); it did not go away, so nothing is forgiven.
+def test_a_crash_while_docker_could_not_be_asked_is_still_a_crash(tmp_path: Path) -> None:
+    """The same daemon before and after the silence restarted nothing; the world did.
 
-    Mutation: open the grace on any empty read, missing or not, and this reads `up`.
+    Codex adversarial review, 2026-10-05, round 6: a crash-looping world can start a
+    new run while the CLI cannot reach the daemon for a moment, and a new
+    `StartedAt` after the silence was taken for Docker's restore. Only the daemon's
+    own identity changing says Docker restarted.
+
+    Mutation: open the window on any return from a silence, and the last tick reads `up`.
     """
-    watch, _clock = _clocked(
+    watch, handed = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
-            (timedelta(seconds=5), docker.ContainerState(missing=True)),
-            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=8)), 0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 2)),
             (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 3)),
         ],
+        _ScriptedSql(True, False),
     )
 
     verdicts = [watch.tick() for _ in range(4)]
+
+    assert handed == ["bridge-before", "bridge-before"], "asked once at the start, once after"
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_daemon_whose_identity_cannot_be_read_opens_no_window(tmp_path: Path) -> None:
+    """Without the daemon's identity there is no evidence Docker restarted: count as before.
+
+    Mutation: take an unreadable identity for a changed one, and the last tick reads `up`.
+    """
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 2)),
+            (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 3)),
+        ],
+        _ScriptedSql(True, False),
+        ("bridge-before", ""),
+    )
+
+    verdicts = [watch.tick() for _ in range(4)]
+
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path: Path) -> None:
+    """With no daemon seen before the silence, the one after it cannot be called a new one.
+
+    Codex review, 2026-10-05: a dashboard whose very first read failed would take
+    any later answer for Docker's restore and forgive a crash loop already going.
+
+    Mutation: open the window when nothing was seen before, and the last tick reads `up`.
+    """
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _AWAY),
+            (timedelta(seconds=5), _running(_stamp(NOW + timedelta(seconds=4)), 0)),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 3)),
+        ],
+        _ScriptedSql(False),
+        RESTARTED,
+    )
+
+    verdicts = [watch.tick() for _ in range(3)]
+
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_container_docker_said_was_missing_does_not_open_a_window(tmp_path: Path) -> None:
+    """`missing` is Docker ANSWERING (T95): the outage before it is over, and opens nothing later.
+
+    Codex review and adversarial review, 2026-10-05, round 4: the outage outlived
+    the `missing` answer, and the container recreated much later took its first
+    run for Docker's restore.
+
+    Mutation: keep the outage through a `missing` answer, and the last tick reads `up`.
+    """
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), docker.ContainerState(missing=True)),
+            (timedelta(minutes=5), _running(_stamp(NOW + timedelta(minutes=5)), 0)),
+            (
+                timedelta(minutes=5, seconds=10),
+                _running(_stamp(NOW + timedelta(minutes=5, seconds=9)), 3),
+            ),
+        ],
+        _ScriptedSql(True, False),
+        RESTARTED,
+    )
+
+    verdicts = [watch.tick() for _ in range(5)]
+
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_missing_answer_closes_a_window_already_open(tmp_path: Path) -> None:
+    """A world container removed while the window is open: what comes next is a new container.
+
+    Codex adversarial review, 2026-10-05, round 5: an open window kept running
+    through `missing`, and a container recreated inside it had its crash loop forgiven.
+
+    Mutation: leave the window open through a `missing` answer, and the last tick reads `up`.
+    """
+    watch, _handed = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), _AWAY),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
+            (timedelta(seconds=15), docker.ContainerState(missing=True)),
+            (timedelta(seconds=20), _running(_stamp(NOW + timedelta(seconds=19)), 0)),
+            (timedelta(seconds=25), _running(_stamp(NOW + timedelta(seconds=24)), 3)),
+        ],
+        _ScriptedSql(True, False, False),
+        RESTARTED,
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
 
     assert verdicts[-1].state == "restart_loop"
 
@@ -710,7 +848,7 @@ def test_strikes_from_before_docker_restarted_are_not_carried_into_the_new_run(
     up = _stamp(NOW - timedelta(hours=2))
     after = dashboard.DOCKER_RESTORE_GRACE + timedelta(seconds=30)
     young = _stamp(NOW + after - timedelta(seconds=3))
-    watch, _clock = _clocked(
+    watch, _handed = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(up, 0)),
@@ -719,39 +857,12 @@ def test_strikes_from_before_docker_restarted_are_not_carried_into_the_new_run(
             (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 2)),
             (after, _running(young, 3)),
         ],
+        daemons=RESTARTED,
     )
 
     verdicts = [watch.tick() for _ in range(5)]
 
     assert verdicts[-1].state == "up", "strikes from the run before Docker restarted counted"
-
-
-def test_docker_silent_without_restarting_the_world_opens_no_grace(tmp_path: Path) -> None:
-    """A Docker that went quiet and came back with the same run did not restart anything.
-
-    Docker restarting itself starts every container again (measured: every
-    container's `StartedAt` was new after `systemctl start docker`). A world whose
-    run is the one from before the silence was not restored, so its restarts after
-    are counted at once, and nothing reads "Docker restarted".
-
-    Mutation: open the grace on any return, and the last tick reads `up`.
-    """
-    up = _stamp(NOW - timedelta(hours=2))
-    young = _stamp(NOW + timedelta(seconds=18))
-    watch, _clock = _clocked(
-        tmp_path,
-        [
-            (timedelta(0), _running(up, 0)),
-            (timedelta(seconds=5), _AWAY),
-            (timedelta(seconds=10), _running(up, 0)),
-            (timedelta(seconds=20), _running(young, 3)),
-        ],
-        _ScriptedSql(True, False),  # its database not answering keeps any window open
-    )
-
-    verdicts = [watch.tick() for _ in range(4)]
-
-    assert verdicts[-1].state == "restart_loop"
 
 
 def test_the_window_closes_when_the_database_answers_and_not_before(tmp_path: Path) -> None:
@@ -764,13 +875,12 @@ def test_the_window_closes_when_the_database_answers_and_not_before(tmp_path: Pa
     the tick whose population read reached the database; every death after that is
     the world's own.
 
-    Mutations: never close on the database's answer, and the last tick reads
-    `up`; close on a run held across two ticks, and the fifth reads `restart_loop`.
+    Mutation: never close on the database's answer, and the last tick reads `up`.
     """
     held = _stamp(NOW + timedelta(seconds=9))
     again = _stamp(NOW + timedelta(seconds=24))
     young = _stamp(NOW + timedelta(seconds=38))
-    watch, _clock = _clocked(
+    watch, _handed = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
@@ -782,6 +892,7 @@ def test_the_window_closes_when_the_database_answers_and_not_before(tmp_path: Pa
             (timedelta(seconds=40), _running(young, 7)),  # the world's own deaths
         ],
         _ScriptedSql(True, False, False, False, True),
+        RESTARTED,
     )
 
     verdicts = [watch.tick() for _ in range(7)]
@@ -790,106 +901,31 @@ def test_the_window_closes_when_the_database_answers_and_not_before(tmp_path: Pa
     assert verdicts[-1].state == "restart_loop"
 
 
-def test_a_missing_answer_after_docker_went_away_settles_the_outage(tmp_path: Path) -> None:
-    """`missing` is Docker answering, so the outage before it is over and opens nothing later.
-
-    Codex review and adversarial review, 2026-10-05, round 4: the flag set by the
-    unreachable read outlived the `missing` answer, and the container recreated
-    much later took its first run for Docker's restore.
-
-    Mutation: keep the outage flag through a `missing` answer, and the last tick reads `up`.
-    """
-    watch, _clock = _clocked(
-        tmp_path,
-        [
-            (timedelta(0), _running(restarts=0)),
-            (timedelta(seconds=5), _AWAY),
-            (timedelta(seconds=10), docker.ContainerState(missing=True)),
-            (timedelta(minutes=5), _running(_stamp(NOW + timedelta(minutes=5)), 0)),
-            (
-                timedelta(minutes=5, seconds=10),
-                _running(_stamp(NOW + timedelta(minutes=5, seconds=9)), 3),
-            ),
-        ],
-        _ScriptedSql(True, False),  # its database not answering keeps any window open
-    )
-
-    verdicts = [watch.tick() for _ in range(5)]
-
-    assert verdicts[-1].state == "restart_loop"
-
-
-def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path: Path) -> None:
-    """With no run seen before the silence, a run after it cannot be called a new one.
-
-    Codex review, 2026-10-05: a dashboard whose very first read failed would take
-    any later answer for Docker's restore and forgive a crash loop already going.
-
-    Mutation: open the window when nothing was seen before, and the last tick reads `up`.
-    """
-    watch, _clock = _clocked(
-        tmp_path,
-        [
-            (timedelta(0), _AWAY),
-            (timedelta(seconds=5), _running(_stamp(NOW + timedelta(seconds=4)), 0)),
-            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 3)),
-        ],
-        _ScriptedSql(False),  # its database not answering keeps any window open
-    )
-
-    verdicts = [watch.tick() for _ in range(3)]
-
-    assert verdicts[-1].state == "restart_loop"
-
-
-def test_a_failed_read_that_was_not_docker_going_away_opens_no_window(tmp_path: Path) -> None:
-    """Codex adversarial review, 2026-10-05: a read can fail while the daemon is up.
-
-    Only a failure in which the CLI reached no daemon is evidence that Docker
-    itself went away. Any other failed read, followed by a crash-looping world's
-    next run, is that loop going on, and its restarts are counted.
-
-    Mutation: let any failed read open the window, and the last tick reads `up`.
-    """
-    up = _stamp(NOW - timedelta(hours=2))
-    watch, _clock = _clocked(
-        tmp_path,
-        [
-            (timedelta(0), _running(up, 0)),
-            (timedelta(seconds=5), docker.ContainerState(said="unexpected EOF")),
-            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
-            (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 3)),
-        ],
-    )
-
-    verdicts = [watch.tick() for _ in range(4)]
-
-    assert verdicts[-1].state == "restart_loop"
-
-
-def test_the_real_state_reader_carries_dockers_words_to_the_window(
+def test_the_real_readers_ask_docker_for_the_daemons_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Through the unpatched `container_state()`: only the docker CLI is stood in for.
+    """The unpatched `container_state()` and `daemon_identity()`; only the CLI is stood in for.
 
-    The window hangs on what Docker said when the read failed, so that has to
-    survive the trip from the CLI's stderr to the dashboard.
-
-    Mutation: drop stderr from the failed `ContainerState`, and the last tick
-    reads `restart_loop`.
+    Mutation: let `daemon_identity()` answer nothing, and the last tick reads
+    `restart_loop`.
     """
     up = _stamp(NOW - timedelta(hours=2))
-    answers = [
+    worlds = [
         (0, f"running\t{up}\t0\n", ""),
-        (1, "", _AWAY.said + "\n"),
+        (1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\n"),
         (0, f"running\t{_stamp(NOW + timedelta(seconds=9))}\t1\n", ""),
         (0, f"running\t{_stamp(NOW + timedelta(seconds=13))}\t5\n", ""),
     ]
+    bridges = ["7e1d2a79ddbf\n", "b10dec5534ec\n"]
+    asked: list[list[str]] = []
 
     def run(
         cmd: list[str], cwd: object = None, timeout: object = None
     ) -> subprocess.CompletedProcess[str]:
-        code, out, err = answers.pop(0)
+        if "network" in cmd:
+            asked.append(cmd[cmd.index("network") :])
+            return subprocess.CompletedProcess(cmd, 0, bridges.pop(0), "")
+        code, out, err = worlds.pop(0)
         return subprocess.CompletedProcess(cmd, code, out, err)
 
     monkeypatch.setattr(docker.runner, "run", run)
@@ -898,31 +934,5 @@ def test_the_real_state_reader_carries_dockers_words_to_the_window(
 
     verdicts = [watch.tick() for _ in range(4)]
 
+    assert asked == [["network", "inspect", "bridge", "--format", "{{.Id}}"]] * 2
     assert [v.state for v in verdicts] == ["up", "unknown", "up", "up"]
-
-
-def test_a_missing_answer_closes_a_window_already_open(tmp_path: Path) -> None:
-    """A world container removed while the window is open: what comes next is a new container.
-
-    Codex adversarial review, 2026-10-05, round 5: clearing only the outage flag
-    on `missing` left an open window running, and a container recreated inside it
-    had its crash loop forgiven.
-
-    Mutation: leave the window open through a `missing` answer, and the last tick reads `up`.
-    """
-    watch, _clock = _clocked(
-        tmp_path,
-        [
-            (timedelta(0), _running(restarts=0)),
-            (timedelta(seconds=5), _AWAY),
-            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
-            (timedelta(seconds=15), docker.ContainerState(missing=True)),
-            (timedelta(seconds=20), _running(_stamp(NOW + timedelta(seconds=19)), 0)),
-            (timedelta(seconds=25), _running(_stamp(NOW + timedelta(seconds=24)), 3)),
-        ],
-        _ScriptedSql(True, False, False),
-    )
-
-    verdicts = [watch.tick() for _ in range(6)]
-
-    assert verdicts[-1].state == "restart_loop"
