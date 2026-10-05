@@ -16,12 +16,12 @@ every install's `collect_live_logs` and then to `system_info`, so a daemon that
 ran into a bound is not asked again by a later install or for its version.
 **It stays under 8 MB** (Discord's free limit is 10): each file keeps its last
 2 MiB, and over the cap the oldest snapshots go first, then the oldest runs
-but never the newest (T249: a failed install's only record of its servers);
-then what is left is cut shorter, its END kept -- the container logs first,
-then the app log's rotations, the app log, the confs, and last the newest
-run -- halving the
-largest of the earliest kind each time, never below `MIN_TAIL` (Codex T93
-review: dropping alone left a zip twice the cap). Every drop and cut is a
+but never the newest two (started last, written last -- T249: a failed install's
+only record of its servers); then what is left is cut shorter, its END kept --
+the container logs first, then the app log's rotations, the app log, the confs,
+and last those newest runs -- halving the largest of the earliest kind each
+time, never below `MIN_TAIL` (Codex T93 review: dropping alone left a zip twice
+the cap). Every drop and cut is a
 manifest line. Only when every file is at its floor is a zip written over the
 cap, and then the manifest and the tab say so.
 **A very short password is named, never promised away**: one under the
@@ -427,9 +427,9 @@ class _Fit:
     """Member name -> the bytes of its text still kept, in the order first cut."""
 
 
-def _cut_tier(member: _Member, newest_run: str | None = None) -> int | None:
+def _cut_tier(member: _Member, newest_runs: frozenset[str] = frozenset()) -> int | None:
     """Which files are cut shorter first: container logs, then the app log's rotations,
-    then the app log itself, then the confs, and last the newest run log (T249).
+    then the app log itself, then the confs, and last the newest run logs (T249).
     None: never cut (dropped whole, or tiny)."""
     if member.group == "live":
         return 0
@@ -437,7 +437,7 @@ def _cut_tier(member: _Member, newest_run: str | None = None) -> int | None:
         return 1 if member.name.rpartition(".")[2].isdigit() else 2
     if member.group == "conf":
         return 3
-    if member.group == "runs" and member.name == newest_run:
+    if member.group == "runs" and member.name in newest_runs:
         return 4
     return None
 
@@ -447,13 +447,13 @@ def _raw_size(member: _Member) -> int:
 
 
 def _next_cut(
-    kept: Sequence[_Member], weight: Mapping[str, int], newest_run: str | None = None
+    kept: Sequence[_Member], weight: Mapping[str, int], newest_runs: frozenset[str] = frozenset()
 ) -> int | None:
     """Index of the heaviest member of the earliest tier that can still be cut, or None."""
     candidates = [
         (tier, -weight[member.name], index)
         for index, member in enumerate(kept)
-        if (tier := _cut_tier(member, newest_run)) is not None and _raw_size(member) > MIN_TAIL
+        if (tier := _cut_tier(member, newest_runs)) is not None and _raw_size(member) > MIN_TAIL
     ]
     return min(candidates)[2] if candidates else None
 
@@ -474,18 +474,31 @@ _RUN_STAMP = re.compile(r"-(\d{8}T\d{6}Z)(?:-(\d+))?\.log$")
 """`runlog`'s name: the UTC start, and `-2`, `-3`... for a second run in the same second."""
 
 
-def _run_order(member: _Member) -> tuple[float, str, int]:
-    """Oldest first: by when it was last written, a tie by the start in its name.
-
-    The last write first, because the run that FAILED last is the one asked
-    about, and a long install started before a short rebuild ends after it. A
-    tie -- a coarse clock, a copied folder -- is broken by the name, never left
-    to the order the folder happened to list (Codex T249 review).
-    """
+def _started(member: _Member) -> tuple[str, int, float]:
+    """When a run STARTED, from its name; its last write breaks a tie, or stands in."""
     found = _RUN_STAMP.search(member.name)
     if found is None:
-        return (member.mtime, "", 0)
-    return (member.mtime, found.group(1), int(found.group(2) or 1))
+        return ("", 0, member.mtime)
+    return (found.group(1), int(found.group(2) or 1), member.mtime)
+
+
+def _written(member: _Member) -> tuple[float, str, int, float]:
+    """When a run was last WRITTEN; the start in its name breaks a tie (a coarse clock)."""
+    return (member.mtime, *_started(member))
+
+
+def _newest_runs(runs: Sequence[_Member]) -> frozenset[str]:
+    """The run started last and the run written last: one file, or two (T249).
+
+    "Newest" has two meanings and the run a player is asking about can be
+    either (Codex T249 reviews): a long install that failed last may have
+    started before a short rebuild, and a long build in another tab may be
+    written after an install that started later and failed. Never left to the
+    order the folder happened to list.
+    """
+    if not runs:
+        return frozenset()
+    return frozenset({max(runs, key=_started).name, max(runs, key=_written).name})
 
 
 def _fit(
@@ -497,15 +510,16 @@ def _fit(
     """Leave out the oldest snapshots, then the oldest runs, then cut the rest shorter,
     until the zip fits `cap` or nothing can give any more.
 
-    The NEWEST run is never left out, only cut, END kept, after everything else
-    (T249). It is the job the player is most likely asking about, and for an
-    install that failed it is the only copy of its servers' last lines: a failed
-    install is never remembered, so there is no container to read again.
+    The NEWEST runs -- started last, and written last (`_newest_runs`) -- are
+    never left out, only cut, END kept, after everything else (T249). One of
+    them is the job the player is most likely asking about, and for an install
+    that failed it is the only copy of its servers' last lines: a failed install
+    is never remembered, so there is no container to read again.
     """
     queue = sorted((m for m in members if m.group == "snapshots"), key=lambda m: m.mtime)
-    runs = sorted((m for m in members if m.group == "runs"), key=_run_order)
-    newest_run = runs[-1].name if runs else None
-    queue += runs[:-1]
+    runs = sorted((m for m in members if m.group == "runs"), key=_written)
+    newest_runs = _newest_runs(runs)
+    queue += [m for m in runs if m.name not in newest_runs]
     weight = {m.name: _estimate(m) for m in members}
     fit = _Fit(kept=list(members), dropped=[], cuts={})
 
@@ -516,7 +530,7 @@ def _fit(
             fit.kept.remove(victim)
             fit.dropped.append(victim)
             return True
-        index = _next_cut(fit.kept, weight, newest_run)
+        index = _next_cut(fit.kept, weight, newest_runs)
         if index is None:
             return False
         shorter = _shorter(fit.kept[index], redact)

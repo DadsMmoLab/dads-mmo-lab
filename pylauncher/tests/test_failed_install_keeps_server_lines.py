@@ -406,6 +406,43 @@ def test_runs_with_one_modification_time_keep_the_one_named_newest(
     assert set(report.dropped) == {f"runs/{name}" for name in names[:-1]}
 
 
+def test_the_run_started_last_and_the_run_written_last_are_both_kept(tmp_path: Path) -> None:
+    """Codex T249 adversarial review, round two: "newest" has two meanings, and both count.
+
+    A long job started first can be written last (a build in another tab), and a
+    failed install started later then looked older; a long install that failed
+    last can have started before a short rebuild. Either may hold the lines, so
+    neither is left out: the oldest by both is.
+    """
+    config = tmp_path / "config"
+    runs = runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    oldest = runs / "rebuild-wow-tbc-20261004T120000Z.log"
+    long_job = runs / "rebuild-wow-tbc-20261004T140000Z.log"
+    failed = runs / "install-wow-tortoise-20261004T164000Z.log"
+    for path, mtime in ((oldest, 1_000_000), (failed, 2_000_000), (long_job, 3_000_000)):
+        path.write_text(_noise(150_000) + f"{path.name}\n", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+    dest = tmp_path / "support.zip"
+
+    report = bundle.build(
+        dest,
+        Sources(config_dir=config, app_log=None, installs=()),
+        Redactor.build([]),
+        seams=bundle.Seams(
+            live_logs=lambda install, silent: [],
+            docker_version=lambda distro: None,
+            now=lambda: datetime(2026, 10, 4, 16, 52, tzinfo=UTC),
+        ),
+        cap_bytes=200_000,
+    )
+
+    assert os.path.getsize(dest) <= 200_000, "the two kept are cut shorter instead"
+    assert report.dropped == (f"runs/{oldest.name}",)
+    assert f"runs/{failed.name}" in report.included
+    assert f"runs/{long_job.name}" in report.included
+
+
 def test_the_newest_run_is_cut_only_after_the_app_log(tmp_path: Path) -> None:
     """Last of all: Yu'lon's own log gives way first, and here that alone fits the cap."""
     config = tmp_path / "config"
