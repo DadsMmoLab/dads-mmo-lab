@@ -2514,3 +2514,34 @@ def test_the_trinitycore_build_overlay_builds_the_one_server_image(tmp_path: Pat
     assert composegen.built_image_refs(
         CENTURION, tmp_path / "wow", platform_id=lambda: "linux"
     ) == (tc_services(plan)["centurion-worldserver"]["image"],)
+
+
+# -- T219: Centurion's Linux and macOS files do not move ---------------------------------
+
+
+@pytest.mark.parametrize("folder", sorted(support_rendered.CENTURION_LABELS))
+def test_the_centurion_linux_render_reproduces_its_committed_snapshot_byte_for_byte(
+    folder: str,
+) -> None:
+    """T219 gives a Windows Centurion a named volume for its map data; Linux keeps the bind.
+
+    The snapshots were written before that change (`support_rendered`), with no label and
+    with SELinux's `:z`. A WSL-distro install renders as `linux` and is covered here too.
+    """
+    texts = support_rendered.centurion_rendered(support_rendered.CENTURION_LABELS[folder])
+    root = support_rendered.CENTURION_SNAPSHOT_ROOT / folder
+    assert set(texts) == {path.name for path in root.iterdir() if path.is_file()}
+    for name, text in texts.items():
+        assert text == (root / name).read_text(encoding="utf-8"), f"{folder}: {name}"
+    assert "./data:/opt/trinitycore/data" in texts[composegen.BASE_FILE]
+
+
+@pytest.mark.parametrize("folder", sorted(support_rendered.CENTURION_LABELS))
+def test_the_centurion_macos_render_is_the_linux_snapshot(folder: str) -> None:
+    """macOS keeps the bind until it is measured (T219 Decision 2): nothing in these files
+    differs from Linux on a Mac, so its render is the Linux snapshot byte for byte."""
+    label = support_rendered.CENTURION_LABELS[folder]
+    texts = support_rendered.centurion_rendered(label, platform_id="macos")
+    root = support_rendered.CENTURION_SNAPSHOT_ROOT / folder
+    for name, text in texts.items():
+        assert text == (root / name).read_text(encoding="utf-8"), f"macos {folder}: {name}"
