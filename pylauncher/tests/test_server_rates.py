@@ -61,6 +61,34 @@ def test_a_decimal_too_long_to_be_a_number_is_refused_on_a_key_with_no_bounds() 
         tuning.check(ConfKey(key="K", type="float"), huge)
 
 
+def test_a_decimal_past_what_the_servers_float_holds_is_refused_although_python_reads_it() -> None:
+    """The cores read a rate into a C `float`, whose largest is about 3.4e38.
+
+    39 nines is a finite Python number and `std::stof` throws `out_of_range` on it
+    (mangos-classic and mangos-tbc `Config.cpp:134-139`), which ends the world server
+    at start. No bounds on this key, so only the size rule can refuse it.
+    """
+    tuning.check(ConfKey(key="K", type="float"), "9" * 38)
+    with pytest.raises(tuning.TuningError, match="is too large to be a number"):
+        tuning.check(ConfKey(key="K", type="float"), "9" * 39)
+
+
+def test_a_rate_with_more_than_four_decimals_is_refused_so_none_is_too_small_to_read() -> None:
+    """Cold review 2026-10-05: `0.000...1` under a float's smallest normal value.
+
+    In bounds (0 to 100), so only the decimals rule can refuse it -- and without that
+    rule `std::stof` sets ERANGE and throws at world start. Four places keeps the
+    smallest non-zero rate at 0.0001, which every core reads.
+    """
+    tiny = "0." + "0" * 40 + "1"
+    tuning.check(RATE, "0.0001")
+    tuning.check(RATE, "2.5000")
+    with pytest.raises(tuning.TuningError, match="at most 4 digits after the point"):
+        tuning.check(RATE, tiny)
+    with pytest.raises(tuning.TuningError, match="at most 4 digits after the point"):
+        tuning.check(RATE, "1.23456")
+
+
 @pytest.mark.parametrize("value", ["1,5", "nan", "inf", "2x", "", " "])
 def test_a_rate_that_is_not_a_decimal_number_is_refused(value: str) -> None:
     with pytest.raises(tuning.TuningError, match="is not a number"):
@@ -755,3 +783,90 @@ def test_the_gold_row_says_where_it_also_multiplies_quest_money(
     said = gold.explain or ""
     assert ("money quests reward" in said) is quests
     assert ("level cap" in said) is level_cap
+
+
+# -- installing the XP mod after the card has set XP (cold review 2026-10-05) -----
+
+
+@pytest.mark.parametrize(
+    ("game", "want"),
+    [
+        ("wow-wotlk", {"kill": "2", "quest": "3", "explore": "4"}),
+        ("wow-tbc", {"kill": "2", "quest": "3", "explore": "4"}),
+        ("wow-vanilla", {"kill": "2", "quest": "3", "explore": "4"}),
+        # One answer for all three keys: it starts at the first, XP from kills.
+        ("wow-tortoise", {"xp_rate": "2"}),
+    ],
+)
+def test_the_xp_mods_questions_start_at_what_the_card_says_now(
+    tmp_path: Path, game: str, want: dict[str, str]
+) -> None:
+    import importlib
+
+    _lay(tmp_path, game)
+    manifest = importlib.import_module(STORES[game]).store().load("mod", "xp-rates")
+    rows = server_rates.rows(_entry(game), tmp_path)
+    assert server_rates.prompt_values(manifest, rows) == want
+
+
+def test_a_module_whose_questions_feed_no_rate_starts_nowhere_new(tmp_path: Path) -> None:
+    import importlib
+
+    _lay(tmp_path, "wow-wotlk")
+    store = importlib.import_module(STORES["wow-wotlk"]).store()
+    rows = server_rates.rows(_entry("wow-wotlk"), tmp_path)
+    assert server_rates.prompt_values(store.load("module", "mod-ah-bot"), rows) == {}
+
+
+def test_installing_the_xp_mod_asks_from_the_cards_values_and_says_it_replaces_them(
+    qapp: object, ps: Any, tmp_path: Path
+) -> None:
+    """The box shows the card's 2, not the mod's default 1 nor last install's answer."""
+    _lay(tmp_path, "wow-tbc")
+    seen: dict[str, Any] = {}
+
+    def asker(parent: object, manifest: Any, prompts: Any, **kw: Any) -> dict[str, str]:
+        seen["defaults"] = {p.key: p.default for p in prompts}
+        seen.update(kw)
+        return {p.key: p.default for p in prompts}
+
+    view = _view(ps, tmp_path, "wow-tbc")
+    view._prompt_asker = asker
+    applier = view.services.applier
+    applier.remembered_answers = lambda manifest: {"kill": "9", "quest": "9", "explore": "9"}
+    view.modules_panel.select("xp-rates")
+    view._module_action("install")
+
+    assert seen["defaults"] == {"kill": "2", "quest": "3", "explore": "4"}
+    assert "kill" not in (seen.get("remembered") or {}), "an old answer must not beat the card"
+    (note,) = seen["notes"]
+    assert "Server rates card" in note and "XP from kills" in note
+    assert applier.values == [{"kill": "2", "quest": "3", "explore": "4"}]
+
+
+def test_a_module_that_feeds_no_rate_is_asked_exactly_as_before(
+    qapp: object, ps: Any, tmp_path: Path
+) -> None:
+    _lay(tmp_path, "wow-wotlk")
+    seen: list[dict[str, Any]] = []
+
+    def asker(parent: object, manifest: Any, prompts: Any, **kw: Any) -> dict[str, str]:
+        seen.append(kw)
+        return {"bot_guid": "42", "bot_account": "7"}
+
+    view = _view(ps, tmp_path, "wow-wotlk")
+    view._prompt_asker = asker
+    view.modules_panel.select("mod-ah-bot")
+    view._module_action("install")
+    assert seen and "notes" not in seen[0]
+
+
+def test_the_install_question_shows_the_note_it_is_handed(qapp: object) -> None:
+    from PySide6.QtWidgets import QLabel
+
+    from yulon.controller_wow_tbc import modules as tbc_modules
+    from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
+
+    manifest = tbc_modules.store().load("mod", "xp-rates")
+    dialog = ManifestPromptDialog(None, manifest, manifest.prompts, notes=("The card note.",))
+    assert "The card note." in [label.text() for label in dialog.findChildren(QLabel)]

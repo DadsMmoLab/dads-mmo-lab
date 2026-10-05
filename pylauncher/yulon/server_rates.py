@@ -73,14 +73,15 @@ Nothing here imports Qt. The rows are `tuning.TuningRow`s, drawn by the same
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from yulon import tuning
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
-from yulon.manifest import ConfKey
+from yulon.manifest import ConfKey, Manifest
 
 logger = get_logger(__name__)
 
@@ -113,6 +114,14 @@ and owner decision 5 carries its keys through a reset. `test_server_rates` fails
 another manifest comes to name a rate this card writes, or that mod's removal stops
 writing 1.
 """
+
+PROMPT_REPLACES = (
+    "Your answer replaces {labels} on the Tuning tab's Server rates card. The box starts "
+    "at what that card says now."
+)
+"""The note on a module's install question whose answer is written to a key this card
+writes (cold review, 2026-10-05: installing XP Rate Customization after setting XP on
+the card put the mod's default 1 over the card's value, and the question did not say)."""
 
 _HOW_MUCH = "1 is the normal amount, 2 is double, 0.5 is half."
 
@@ -366,3 +375,44 @@ def shared_with(
         said = SHARED_WITH.format(module=name)
         shared.append(replace(row, explain=f"{row.explain} {said}" if row.explain else said))
     return tuple(shared)
+
+
+_WHOLE_TEMPLATE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+"""A conf key default that is exactly one prompt's answer, `{kill}` (`apply`'s template)."""
+
+
+def prompt_values(manifest: Manifest, card_rows: Iterable[tuning.TuningRow]) -> dict[str, str]:
+    """Prompt key -> what the card's file says now, for each question whose answer IS a card key.
+
+    Read off the manifest's own conf rows: a key whose `default` is exactly one
+    `{prompt}` is written with that answer, so the question should start at the
+    value the card shows rather than the mod's default (or an answer from an
+    install the card has since overruled). The first card key wins when one
+    answer feeds several (Tortoise's `xp_rate` feeds all three XP keys: it starts
+    at XP from kills). A key the file does not carry gives no value.
+    """
+    current = {(row.file, row.key): row.current for row in card_rows}
+    found: dict[str, str] = {}
+    for conf in manifest.conf:
+        for key in conf.keys:
+            match = _WHOLE_TEMPLATE.fullmatch(key.default or "")
+            value = current.get((conf.file, key.key))
+            if match is not None and value is not None:
+                found.setdefault(match.group(1), value)
+    return found
+
+
+def prompt_note(manifest: Manifest, card_rows: Sequence[tuning.TuningRow]) -> str | None:
+    """`PROMPT_REPLACES` naming the card rows this module's answers are written to, or `None`."""
+    owned = {(row.file, row.key): row.label for row in card_rows}
+    labels: list[str] = []
+    for conf in manifest.conf:
+        for key in conf.keys:
+            label = owned.get((conf.file, key.key))
+            if label is not None and _WHOLE_TEMPLATE.fullmatch(key.default or "") is not None:
+                if label not in labels:
+                    labels.append(label)
+    if not labels:
+        return None
+    named = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+    return PROMPT_REPLACES.format(labels=named)

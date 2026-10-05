@@ -724,7 +724,8 @@ class PromptAsker(Protocol):
     is what gets applied now (T100 review). `remembered` is what this install
     last answered (T104, `Applier.remembered_answers()`), filled in over the
     manifest's defaults. `removing` is True for a Remove, which asks only what
-    the record cannot answer (`apply.must_ask()`).
+    the record cannot answer (`apply.must_ask()`). `notes` are sentences shown
+    above the questions (T302: an answer that replaces a Server rates value).
     """
 
     def __call__(
@@ -736,6 +737,7 @@ class PromptAsker(Protocol):
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
         removing: bool = False,
+        notes: Sequence[str] = (),
     ) -> Mapping[str, str] | None: ...
 
 
@@ -15514,6 +15516,22 @@ class ControllerView(QWidget):
         asked = tuple(p for p in needed if must_ask(p, action, known))
         if not asked:
             return True, None
+        extra: dict[str, tuple[str, ...]] = {}
+        if action != "remove":
+            # T302 (cold review): an answer written to a key the Server rates card
+            # writes starts at what the card says now -- over the mod's default and
+            # over last install's answer -- and the dialog says it replaces it.
+            rates = server_rates.rows(self.entry, self.services.controller.server_dir)
+            now = server_rates.prompt_values(manifest, rates)
+            if now:
+                asked = tuple(
+                    p.model_copy(update={"default": now[p.key]}) if p.key in now else p
+                    for p in asked
+                )
+                remembered = {k: v for k, v in remembered.items() if k not in now}
+                note = server_rates.prompt_note(manifest, rates)
+                if note is not None:
+                    extra["notes"] = (note,)
         answers = self._prompt_asker(
             self,
             manifest,
@@ -15521,6 +15539,7 @@ class ControllerView(QWidget):
             again=again,
             remembered=remembered,
             removing=action == "remove",
+            **extra,
         )
         return (False, None) if answers is None else (True, answers)
 

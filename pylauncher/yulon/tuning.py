@@ -435,15 +435,36 @@ differently is refused rather than written.
 """
 
 
+DECIMAL_PLACES = 4
+"""The most digits a `float` key may have after its point (cold review, 2026-10-05).
+
+`std::stof` throws `out_of_range` -- at world start, uncaught -- on a value under a
+C `float`'s smallest normal number (about 1.2e-38), and `0.` followed by forty
+zeros and a 1 is still a plain decimal. Four places keeps the smallest non-zero
+value at 0.0001, which every core reads, and is finer than any rate needs.
+"""
+
+FLOAT_LARGEST = 3.4028234663852886e38
+"""The largest number a C `float` holds (`FLT_MAX`): the cores read a rate into one,
+and `std::stof` throws `out_of_range` above it while Python's `float()` does not."""
+
+
 def _check_decimal(key: ConfKey, value: str) -> None:
     """A `float` key's rule: a plain decimal, inside whichever bounds the key states."""
     text = value.strip()
     if DECIMAL.fullmatch(text) is None:
         raise TuningError(f"{key.key}: `{value}` is not a number (write it like 1, 2 or 1.5)")
+    _, point, places = text.partition(".")
+    if point and len(places) > DECIMAL_PLACES:
+        raise TuningError(
+            f"{key.key}: `{value}` has too many decimals; use at most "
+            f"{DECIMAL_PLACES} digits after the point, like 0.0001"
+        )
     number = float(text)
-    if not math.isfinite(number):
-        # Digits only, and still past what a float holds: `float()` says `inf`, and
-        # the core's parser says out of range (Codex review, 2026-10-05).
+    if not math.isfinite(number) or abs(number) > FLOAT_LARGEST:
+        # Digits only, and still past what the server's float holds: `float()` says
+        # `inf` or a large double, and the core's parser says out of range (Codex
+        # review and cold review, 2026-10-05).
         raise TuningError(f"{key.key}: `{value}` is too large to be a number")
     if key.min is not None and number < key.min:
         raise TuningError(f"{key.key}: {text} is below the smallest allowed value {key.min}")
