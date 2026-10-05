@@ -50,6 +50,17 @@ def test_a_rate_in_another_scripts_digits_is_refused_although_python_reads_it() 
         tuning.check(RATE, "١.٥")
 
 
+def test_a_decimal_too_long_to_be_a_number_is_refused_on_a_key_with_no_bounds() -> None:
+    """Codex review 2026-10-05: 400 digits pass the spelling rule and are `inf` to `float()`.
+
+    No bounds on this key, so no bound can be what refuses it.
+    """
+    huge = "9" * 400
+    tuning.check(ConfKey(key="K", type="float"), "9" * 30)
+    with pytest.raises(tuning.TuningError, match="is too large to be a number"):
+        tuning.check(ConfKey(key="K", type="float"), huge)
+
+
 @pytest.mark.parametrize("value", ["1,5", "nan", "inf", "2x", "", " "])
 def test_a_rate_that_is_not_a_decimal_number_is_refused(value: str) -> None:
     with pytest.raises(tuning.TuningError, match="is not a number"):
@@ -723,3 +734,24 @@ def test_the_card_names_only_a_module_that_writes_the_same_key_in_the_same_file(
     assert said.explain == "Kills. " + server_rates.SHARED_WITH.format(
         module="XP Rate Customization"
     )
+
+
+@pytest.mark.parametrize(
+    ("game", "quests", "level_cap"),
+    [
+        ("wow-wotlk", False, False),  # `Rate.RewardQuestMoney`, QuestDef.cpp:255
+        ("wow-tbc", True, False),  # Quests/QuestDef.cpp:216-222
+        ("wow-vanilla", True, False),  # Quests/QuestDef.cpp:211-217
+        ("wow-tortoise", True, True),  # QuestDef.cpp:204-222
+        ("wow-centurion", False, False),  # `Rate.Money.Quest`, QuestDef.cpp:317-319
+    ],
+)
+def test_the_gold_row_says_where_it_also_multiplies_quest_money(
+    tmp_path: Path, game: str, quests: bool, level_cap: bool
+) -> None:
+    """Codex adversarial review 2026-10-05: CMaNGOS forks scale quest rewards by this key."""
+    _lay(tmp_path, game)
+    gold = next(r for r in server_rates.rows(_entry(game), tmp_path) if r.key == "Rate.Drop.Money")
+    said = gold.explain or ""
+    assert ("money quests reward" in said) is quests
+    assert ("level cap" in said) is level_cap

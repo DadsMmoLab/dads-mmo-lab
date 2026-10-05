@@ -298,6 +298,9 @@ class ConfKey(_Strict):
 
     `float` (T302) is a decimal number such as a server rate (`Rate.XP.Kill = 1.5`):
     a text box that takes digits and one point, checked against its bounds at Save.
+    Its `min`/`max` are whole numbers, like an `int`'s: the one card that uses it
+    (Server rates, 0 to 100) needs no more, and widening the bound type reaches
+    every `TuningRow` and the spinner.
     """
 
     key: str = Field(min_length=1)

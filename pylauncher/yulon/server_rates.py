@@ -172,6 +172,19 @@ _TBC_TIERS = (
     "On this server {key}.Vanilla and {key}.BC also multiply it, for old-world and for "
     "Outland content; they stay as they are in the file."
 )
+_QUEST_MONEY = "On this server it also multiplies the money quests reward."
+"""CMaNGOS's `Quest::GetRewOrReqMoney()` scales a quest's money reward by this key:
+mangos-tbc `src/game/Quests/QuestDef.cpp:216-222`, mangos-classic `:211-217`, Tortoise
+`src/game/QuestDef.cpp:204-210`. AzerothCore and TrinityCore keep a key of their own for
+it (`Rate.RewardQuestMoney`, AC `QuestDef.cpp:255`; `RATE_MONEY_QUEST`, TC112
+`QuestDef.cpp:317-319`), so theirs say nothing (Codex adversarial review, 2026-10-05)."""
+
+_LEVEL_CAP_MONEY = (
+    "On this server it also multiplies the money quests reward, and the gold a quest gives "
+    "instead of XP at the level cap."
+)
+"""Tortoise also scales the max-level XP-to-gold conversion (`src/game/QuestDef.cpp:212-222`)."""
+
 _TURTLE_MODE = "Characters on the Slow and Steady challenge do not get this boost."
 """Tortoise's kill XP skips this rate for that challenge (`src/game/Formulas.h:140-166`)."""
 
@@ -201,8 +214,11 @@ _GAMES: dict[str, _GameRates] = {
         rev="75f9ae68edd5ea94dda5f7f0ddf140f1acd94a6f",
         keys=_ALL_KEYS,
         notes={
-            key: _TBC_TIERS.format(key=key)
-            for key in ("Rate.XP.Kill", "Rate.XP.Quest", "Rate.XP.Explore")
+            **{
+                key: _TBC_TIERS.format(key=key)
+                for key in ("Rate.XP.Kill", "Rate.XP.Quest", "Rate.XP.Explore")
+            },
+            "Rate.Drop.Money": _QUEST_MONEY,
         },
     ),
     "wow-vanilla": _GameRates(
@@ -210,14 +226,14 @@ _GAMES: dict[str, _GameRates] = {
         repo="cmangos/mangos-classic",
         rev="8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
         keys=_ALL_KEYS,
-        notes={},
+        notes={"Rate.Drop.Money": _QUEST_MONEY},
     ),
     "wow-tortoise": _GameRates(
         file="etc/mangosd.conf",
         repo="tortoise-wow/tortoise-wow",
         rev="187af788177aa2f9f0e61eb8c5b9653d8f4f7199",
         keys=_ALL_KEYS,
-        notes={"Rate.XP.Kill": _TURTLE_MODE},
+        notes={"Rate.XP.Kill": _TURTLE_MODE, "Rate.Drop.Money": _LEVEL_CAP_MONEY},
     ),
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",

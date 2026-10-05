@@ -25,6 +25,7 @@ unreadable answers `None`, and the row still lists with its default.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -440,6 +441,10 @@ def _check_decimal(key: ConfKey, value: str) -> None:
     if DECIMAL.fullmatch(text) is None:
         raise TuningError(f"{key.key}: `{value}` is not a number (write it like 1, 2 or 1.5)")
     number = float(text)
+    if not math.isfinite(number):
+        # Digits only, and still past what a float holds: `float()` says `inf`, and
+        # the core's parser says out of range (Codex review, 2026-10-05).
+        raise TuningError(f"{key.key}: `{value}` is too large to be a number")
     if key.min is not None and number < key.min:
         raise TuningError(f"{key.key}: {text} is below the smallest allowed value {key.min}")
     if key.max is not None and number > key.max:
