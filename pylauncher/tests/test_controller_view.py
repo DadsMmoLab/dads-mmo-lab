@@ -6353,7 +6353,10 @@ def test_keep_my_characters_sits_between_the_plan_and_the_confirm_button(
 
     keep = _server_box_index(view, view.keep_characters_check)
     assert _server_box_index(view, view.uninstall_label) < keep
-    assert keep < _server_box_index(view, view.uninstall_confirm_button)
+    # The confirm button shares a row with its Cancel (PR 291 Windows live test).
+    row = view.uninstall_confirm_button.parentWidget()
+    assert view.uninstall_cancel_button.parentWidget() is row
+    assert keep < _server_box_index(view, row)
 
 
 def test_the_confirm_button_names_what_happens_to_the_characters(
