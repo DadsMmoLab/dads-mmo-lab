@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from tests.support_case import needs_case_sensitive_disk
 from yulon import client_packs, play_client
 
 WHEN = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
@@ -2567,6 +2568,7 @@ def test_a_refresh_that_ends_in_an_unexpected_error_still_names_the_flag_it_lost
 # -- T227: a client whose archives are named in lower case -------------------
 
 
+@needs_case_sensitive_disk
 def test_a_lowercase_client_s_archives_are_shared_under_their_own_names(tmp_path: Path) -> None:
     """T227: the ready-to-play copy finds `*.mpq` whatever its case and keeps the name.
 

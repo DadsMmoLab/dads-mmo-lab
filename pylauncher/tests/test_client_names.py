@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
 
+from tests.support_case import needs_case_sensitive_disk
 from yulon import client_names
 
 
@@ -31,6 +32,7 @@ def test_every_folder_on_the_way_is_matched_too(tmp_path: Path) -> None:
     )
 
 
+@needs_case_sensitive_disk
 def test_the_exact_spelling_wins_over_a_case_variant(tmp_path: Path) -> None:
     """Two names that differ only in case are two files here; the one asked for is the one."""
     (tmp_path / "Data").mkdir()

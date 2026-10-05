@@ -38,6 +38,7 @@ from typing import Any, BinaryIO
 
 import pytest
 
+from tests.support_case import CASE_SENSITIVE_DISK, needs_case_sensitive_disk
 from tests.support_native import Recorder
 from tests.support_trinitycore import (
     AUTH,
@@ -623,8 +624,9 @@ STOCK = {
     *(f"Data/{name}.MPQ" for name in ("patch", "patch-2", "patch-3")),
     "Data/enUS/locale-enUS.MPQ",
     # The player's `Patch-enUS.MPQ` is kept and reaches the extractors under the
-    # catalog's `patch-enUS.MPQ`, the name map_extractor opens (T227).
-    "Data/enUS/patch-enUS.MPQ",
+    # catalog's `patch-enUS.MPQ`, the name map_extractor opens (T227). A disk that
+    # ignores case reaches it by either name, so the copy keeps the player's.
+    "Data/enUS/patch-enUS.MPQ" if CASE_SENSITIVE_DISK else "Data/enUS/Patch-enUS.MPQ",
 }
 
 
@@ -657,6 +659,7 @@ def _lowercase_every_name_under_data(client: Path) -> None:
                 os.rename(Path(folder) / name, Path(folder) / name.lower())
 
 
+@needs_case_sensitive_disk
 def test_a_lowercase_client_reaches_the_extractors_under_the_names_they_open(
     machine: Machine,
 ) -> None:
@@ -684,6 +687,7 @@ def test_a_lowercase_client_reaches_the_extractors_under_the_names_they_open(
     assert snapshot(machine.client) == before, "the player's client was changed"
 
 
+@needs_case_sensitive_disk
 def test_an_archive_already_under_the_catalog_s_name_is_never_replaced_by_its_case_twin(
     machine: Machine,
 ) -> None:
@@ -701,6 +705,7 @@ def test_an_archive_already_under_the_catalog_s_name_is_never_replaced_by_its_ca
         assert files["Data/lichking.MPQ"] == b"MPQ lichking", program
 
 
+@needs_case_sensitive_disk
 def test_a_lowercase_client_s_extraction_is_vouched_for_on_the_next_press(
     machine: Machine,
 ) -> None:
