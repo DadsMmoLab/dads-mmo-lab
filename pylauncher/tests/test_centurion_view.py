@@ -941,3 +941,27 @@ def test_kept_tiles_over_changed_map_data_say_start_begins_again_and_it_does(
     view.start_pathfinding()
     assert job.docker.mmaps_at_run[-1] == []
     assert view.problem_label.text() == MAKING
+
+
+def test_a_stop_sentence_that_promised_to_continue_goes_once_the_map_data_changes(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Codex adversarial review of T245, round 3: the state stays `failed`, but Stop's
+    "the next run continues from there" is no longer what the press beside it does."""
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 12)
+    view.stop_pathfinding()
+    view.refresh_pathfinding()
+    assert view.problem_label.text().startswith("Stopped making the pathfinding data. Its 12")
+    path = next(iter(sorted((job.server / "data" / "maps").iterdir())))
+    path.write_bytes(path.read_bytes() + b"!")  # a map file changed by hand after the Stop
+
+    view.refresh_pathfinding()
+
+    assert view.problem_label.text() == "" and view.problem_label.isHidden()
+    assert view.pathfinding_label.text().endswith(
+        "Its 12 finished tiles cannot be continued from, because the map data has changed since "
+        "it began, so “Make the pathfinding data” starts it again from the beginning."
+    )
+    view.start_pathfinding()
+    assert job.docker.mmaps_at_run[-1] == []

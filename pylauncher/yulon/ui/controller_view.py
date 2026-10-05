@@ -4268,15 +4268,24 @@ PATHFINDING_START = mmaps.START_PRESS
 PATHFINDING_STOP = "Stop making the pathfinding data"
 PATHFINDING_ASKING = "Pathfinding data: asking how far it has got…"
 PATHFINDING_UNREAD = "Could not read how far the pathfinding data has got: {exc}"
-_START_SAID_HOLDS: frozenset[mmaps.State] = frozenset({"queued", "running"})
-_STOP_SAID_HOLDS: frozenset[mmaps.State] = frozenset({"failed", "not-started"})
-"""The job's states in which each press's sentence stays true (T245).
 
-Start says "Making…" or "Continuing…", true while a run is queued or running; Stop
-says it stopped and what it kept, true until a run starts again. A reading in any
-other state removes the sentence from the problem line, and the pathfinding line
-(`MmapsStatus.line()`) says what happened and what the press beside it does next.
-"""
+
+def _start_said_holds(status: mmaps.MmapsStatus) -> bool:
+    """Start's "Making…" or "Continuing…" is true while a run is queued or running (T245)."""
+    return status.state in ("queued", "running")
+
+
+def _stop_said_holds(status: mmaps.MmapsStatus) -> bool:
+    """Stop's sentence is true until a run starts again, or the tiles it said the next run
+    continues from would be thrown away (T245; Codex adversarial review, round 3).
+
+    A reading where a press's sentence no longer holds removes it from the problem
+    line, and the pathfinding line (`MmapsStatus.line()`) says what happened and what
+    the press beside it does next.
+    """
+    return status.state in ("failed", "not-started") and not status.begins_again_because
+
+
 WORLD_UPKEEP_UNREAD = "Could not read whether the last update left anything to finish: {exc}"
 WORLD_UPKEEP_BUSY = (
     "This server is busy with another action — wait for it to finish, then press this again. "
@@ -7055,8 +7064,8 @@ class ControllerView(QWidget):
         self._pathfinding_pressing = False
         # T245: the sentence the last press put in `problem_label`, and the job's
         # states it stays true in; None before the first press.
-        self._pathfinding_said: tuple[str, frozenset[mmaps.State]] | None = None
-        self._pathfinding_holds: frozenset[mmaps.State] = frozenset()
+        self._pathfinding_said: tuple[str, Callable[[mmaps.MmapsStatus], bool]] | None = None
+        self._pathfinding_holds: Callable[[mmaps.MmapsStatus], bool] = _start_said_holds
         # Bumped by every read and every press: a read whose generation is not
         # the newest lands after the state it describes has changed, and is dropped.
         self._pathfinding_generation = 0
@@ -7794,17 +7803,17 @@ class ControllerView(QWidget):
         self._pathfinding_pending = False
         if isinstance(status, mmaps.MmapsStatus):
             self._pathfinding_status = status
-            self._take_down_an_ended_press_sentence(status.state)
+            self._take_down_an_ended_press_sentence(status)
         self._show_pathfinding()
 
-    def _take_down_an_ended_press_sentence(self, state: mmaps.State) -> None:
+    def _take_down_an_ended_press_sentence(self, status: mmaps.MmapsStatus) -> None:
         """A press's sentence leaves `problem_label` once the job is no longer as it said (T245).
 
         Only while the line still shows it: anything written there since is
         another press's, and stays.
         """
         said = self._pathfinding_said
-        if said is not None and self.problem_label.text() == said[0] and state not in said[1]:
+        if said is not None and self.problem_label.text() == said[0] and not said[1](status):
             self.problem_label.setText("")
 
     @Slot(object)
@@ -7862,7 +7871,7 @@ class ControllerView(QWidget):
         seam = self.services.pathfinding
         if seam is None or self._busy or self._pathfinding_pressing:
             return
-        self._press_pathfinding(seam.start, _START_SAID_HOLDS)
+        self._press_pathfinding(seam.start, _start_said_holds)
 
     @Slot()
     def stop_pathfinding(self) -> None:
@@ -7870,9 +7879,11 @@ class ControllerView(QWidget):
         seam = self.services.pathfinding
         if seam is None or self._pathfinding_pressing:
             return
-        self._press_pathfinding(seam.stop, _STOP_SAID_HOLDS)
+        self._press_pathfinding(seam.stop, _stop_said_holds)
 
-    def _press_pathfinding(self, press: Callable[[], str], holds: frozenset[mmaps.State]) -> None:
+    def _press_pathfinding(
+        self, press: Callable[[], str], holds: Callable[[mmaps.MmapsStatus], bool]
+    ) -> None:
         self._pathfinding_pressing = True
         self._pathfinding_holds = holds
         # Any read out now describes the job as it was before this press.
