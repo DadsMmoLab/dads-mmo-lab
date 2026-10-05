@@ -81,9 +81,7 @@ class _DbDocker(_Ps):
                     auth: {"image": "auth"},
                     world: {
                         "image": "world",
-                        "volumes": [
-                            {"type": "volume", "source": "client-data", "target": "/data"}
-                        ],
+                        "volumes": [{"type": "volume", "source": "client-data", "target": "/data"}],
                     },
                 },
                 "volumes": {
@@ -347,9 +345,7 @@ def test_repair_declined_runs_nothing(
     assert presses == []
 
 
-def test_with_backups_the_tab_also_offers_them(
-    qapp: object, db: _DbDocker, tmp_path: Path
-) -> None:
+def test_with_backups_the_tab_also_offers_them(qapp: object, db: _DbDocker, tmp_path: Path) -> None:
     backups = tmp_path / "sql_scripts" / "backups"
     backups.mkdir(parents=True)
     (backups / "2026-10-05_acore_characters.sql").write_text("-- dump\n", encoding="utf-8")

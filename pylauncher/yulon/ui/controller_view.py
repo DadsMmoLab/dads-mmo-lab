@@ -7488,9 +7488,7 @@ class ControllerView(QWidget):
         realm_column.addWidget(self.problem_label)
         realm_column.addWidget(self.problem_details)
         realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
-        realm_column.addWidget(
-            _bar(realm, self.repair_database_button, self.restore_backup_button)
-        )
+        realm_column.addWidget(_bar(realm, self.repair_database_button, self.restore_backup_button))
         box.addWidget(realm)
 
         play, play_column = section("Play", tab)

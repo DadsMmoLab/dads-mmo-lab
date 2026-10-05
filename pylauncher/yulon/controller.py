@@ -353,9 +353,7 @@ class Controller:
         entry = self.entry or _entry_for(self.spec)
         if entry is None:
             return
-        reading = database_presence.read(
-            entry, self.server_dir, self.wsl_distro, keep_running=True
-        )
+        reading = database_presence.read(entry, self.server_dir, self.wsl_distro, keep_running=True)
         if reading.refuses:
             logger.warning(f"start() refused: the database is {reading.presence} ({reading.why})")
             raise DatabaseMissing(database_presence.MISSING)
