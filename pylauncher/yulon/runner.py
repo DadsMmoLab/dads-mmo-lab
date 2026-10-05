@@ -139,8 +139,18 @@ def _end_child(proc: _AnyPopen, job: winjob.Job | None = None) -> None:
     macOS need a process group.
     """
     if proc.poll() is None:
-        if sys.platform == "win32" and (job is None or not job.end()):
-            _end_tree(proc)
+        if sys.platform == "win32":
+            if job is not None and job.end():
+                # TerminateJobObject ended docker.exe with the rest: reap it
+                # rather than terminate it a second time (Codex's third
+                # adversarial review). A root still there is ended as before.
+                try:
+                    proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
+            else:
+                _end_tree(proc)
         proc.terminate()
         try:
             proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
@@ -178,13 +188,15 @@ def _finish(proc: _AnyPopen, job: winjob.Job | None, *, stopped: bool = False) -
     a Stop (Codex's second adversarial review).
     """
     ran_out = proc.poll() is not None
-    _end_child(proc, job)
-    if job is None:
-        return
-    if ran_out and not stopped:
-        job.release()
-    else:
-        job.close()
+    try:
+        _end_child(proc, job)
+    finally:
+        # Whatever `_end_child` did, the job is let go (Codex's third review).
+        if job is not None:
+            if ran_out and not stopped:
+                job.release()
+            else:
+                job.close()
 
 
 def _taskkill() -> str:
@@ -1280,9 +1292,9 @@ def interact(
             yield line
             _answer(line)
 
+    cancelled = False
     try:
         eof = False
-        cancelled = False
         while not eof or buffer:
             if cancel is not None and cancel.is_set():
                 cancelled = True
@@ -1397,7 +1409,8 @@ def interact(
     finally:
         # `stream()`'s ending, so a cancelled child's whole tree ends on Windows
         # too (T246); until then this was a copy of it that ended the root alone.
-        _finish(proc, job)
+        # A cancel is this generator's Stop (Codex's third review; see `_finish`).
+        _finish(proc, job, stopped=cancelled)
         reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for handle in (proc.stdin, proc.stdout):
             if handle is not None:

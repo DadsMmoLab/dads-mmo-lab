@@ -1597,19 +1597,33 @@ _REAL_POPEN = subprocess.Popen
 class _FakeJob:
     """A `winjob.Job` double. `events` records start/end/close in order."""
 
-    def __init__(self, *, starts: object = True, ends: bool = True) -> None:
+    def __init__(
+        self, *, starts: object = True, ends: bool = True, root: _TreeRoot | None = None
+    ) -> None:
         self.starts = starts
         self.ends = ends
+        self.root = root
+        """A root this job holds: an `end()` that succeeds ends it, as TerminateJobObject does."""
         self.events: list[object] = []
+        self.pid: int | None = None
 
     def start(self, pid: int) -> bool:
         self.events.append(("start", pid))
+        self.pid = pid
         if isinstance(self.starts, BaseException):
             raise self.starts
         return bool(self.starts)
 
     def end(self) -> bool:
         self.events.append("end")
+        if self.ends and self.root is not None:
+            self.root.alive = False
+        if self.ends and self.pid is not None:
+            # The real child of a `_windows_spawns` test: ended as the job would.
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except OSError:
+                pass
         return self.ends
 
     def close(self) -> None:
@@ -1620,7 +1634,7 @@ class _FakeJob:
 
 
 def _windows_spawns(
-    monkeypatch: pytest.MonkeyPatch, job: _FakeJob | None
+    monkeypatch: pytest.MonkeyPatch, job: _FakeJob | None, *, exited: bool = False
 ) -> list[dict[str, object]]:
     """Pretend to be Windows with `job` as the job `winjob.create()` makes; record every Popen.
 
@@ -1638,6 +1652,8 @@ def _windows_spawns(
         kw["creationflags"] = 0
         proc: subprocess.Popen[str] = real_popen(argv, **kw)  # type: ignore[call-overload]
         record["proc"] = proc
+        if exited:
+            proc.wait(timeout=HANG_BOUND)
         return proc
 
     monkeypatch.setattr(runner.subprocess, "Popen", recording_popen)
@@ -1817,22 +1833,26 @@ def test_on_windows_a_stream_ended_at_exit_ends_its_job(monkeypatch: pytest.Monk
 def test_on_windows_a_job_that_ended_the_tree_takes_the_place_of_taskkill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Job ended: no taskkill, then `terminate()` as before. Job failed: taskkill, as T246.
+    """Job ended: no taskkill and no `terminate()`, only the reap. Job failed: taskkill, as T246.
+
+    `TerminateJobObject` ended docker.exe with the rest, so it is waited for and
+    not terminated a second time (Codex's third adversarial review).
 
     Mutations this catches: taskkill run even after the job ended the tree; the
-    job's failure not falling back to taskkill; `terminate()` dropped.
+    job's failure not falling back to taskkill; `terminate()` dropped from the
+    fallback.
     """
     _as_windows(monkeypatch)
     events: list[object] = []
     root = _TreeRoot(events)
     calls = _taskkill_double(monkeypatch, root)
-    ended = _FakeJob(ends=True)
+    ended = _FakeJob(ends=True, root=root)
 
     runner._end_child(root, ended)  # type: ignore[arg-type]
 
     assert ended.events == ["end"]
     assert calls == []
-    assert events[0] == "terminate", events
+    assert events == ["wait"], events
 
     events.clear()
     root.alive = True
@@ -1957,6 +1977,69 @@ def test_on_windows_a_stopped_stream_whose_root_exits_first_still_closes_its_job
     runner._LIVE_STREAMS[lines].ended = True
 
     assert list(lines) == []
+
+    assert job.events[-1] == "close", job.events
+    assert "release" not in job.events
+
+
+def test_on_windows_a_root_that_outlives_its_ended_job_is_still_terminated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reap after a job's end is bounded; a root still there afterwards gets the old ending.
+
+    Mutation this catches: returning after the bounded wait whether or not the
+    root exited.
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    _taskkill_double(monkeypatch, root)
+    job = _FakeJob(ends=True)  # reports success, but the root is not in it
+
+    runner._end_child(root, job)  # type: ignore[arg-type]
+
+    assert events[:2] == ["wait", "terminate"], events
+    assert not root.alive
+
+
+def test_on_windows_an_error_while_ending_the_child_still_closes_its_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex's third adversarial review: the job is let go in a `finally`, whatever `_end_child` did.
+
+    Mutation this catches: the close skipped when `_end_child` raises.
+    """
+    _as_windows(monkeypatch)
+    root = _TreeRoot([])
+    job = _FakeJob()
+
+    def broken(proc: object, job: object = None) -> None:
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(runner, "_end_child", broken)
+
+    with pytest.raises(PermissionError):
+        runner._finish(root, job)  # type: ignore[arg-type]
+
+    assert job.events == ["close"]
+
+
+def test_on_windows_a_cancelled_interact_closes_its_job_even_when_the_root_exited_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`interact()`'s cancel is its Stop: kill-on-close stays, whatever `poll()` says by then.
+
+    From Codex's third review. The child here has exited before the loop first
+    looks at `cancel`, which is the order that released the job.
+
+    Mutation this catches: `interact()` passing no `stopped` to `_finish`.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job, exited=True)
+    cancel = threading.Event()
+    cancel.set()
+
+    list(runner.interact(_python_cmd("pass"), respond=lambda line: None, cancel=cancel))
 
     assert job.events[-1] == "close", job.events
     assert "release" not in job.events
