@@ -339,3 +339,21 @@ def test_a_view_that_cannot_be_made_refuses_naming_the_rename_that_would_do(
     assert "Data/common.mpq" in message and "Data/common.MPQ" in message
     assert "Nothing was extracted" in message
     assert rec.container_runs == []
+
+
+def test_a_client_folder_that_is_not_there_is_not_blamed_on_case(tmp_path: Path) -> None:
+    """No view for a folder that cannot be listed; the run reports it as it always has."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    said = list(engine(rec)._extract(context(server_dir, tmp_path / "gone")))
+    assert not any("another case" in line for line in said)
+    assert not (server_dir / extract.CASE_VIEW_DIR).exists()
+
+
+@needs_case_sensitive_disk
+def test_a_lowercase_data_folder_alone_is_named_in_the_line(tmp_path: Path) -> None:
+    client = tmp_path / "client"
+    (client / "data").mkdir(parents=True)
+    (client / "data" / "common.MPQ").write_bytes(b"common")
+    assert extract.renamed_in_view(client) == [("data", "Data")]

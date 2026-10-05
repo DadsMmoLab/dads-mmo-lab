@@ -641,9 +641,18 @@ def _in_locale(name: str, is_dir: bool) -> str | None:
     return None if is_dir else client_names.retail_archive(name)
 
 
-def _view_plan(client_dir: Path) -> tuple[list[tuple[PurePosixPath, PurePosixPath | None]], bool]:
-    """Every entry of the view -- `(path in it, client path it links to, None: a folder)` -- and
-    whether it is needed at all.
+@dataclass(frozen=True)
+class _ViewEntry:
+    """One entry of a view: where it is in the view, what it is in the client, and its kind."""
+
+    made: PurePosixPath
+    target: PurePosixPath
+    folder: bool
+    """A folder made in the view (`Data/`, a locale folder) rather than a link to the client's."""
+
+
+def _view_plan(client_dir: Path) -> tuple[list[_ViewEntry], bool]:
+    """Every entry of the view, and whether it is needed at all.
 
     Folders are made for `Data/` and each locale folder in it, the two levels the
     tools name; everything else is one link under its own name or the tools'
@@ -651,7 +660,7 @@ def _view_plan(client_dir: Path) -> tuple[list[tuple[PurePosixPath, PurePosixPat
     reaches: on a disk that ignores case, `Data/common.MPQ` opens
     `Data/common.mpq` and no view is laid.
     """
-    entries: list[tuple[PurePosixPath, PurePosixPath | None]] = []
+    entries: list[_ViewEntry] = []
     needed = False
 
     def descend(
@@ -664,10 +673,10 @@ def _view_plan(client_dir: Path) -> tuple[list[tuple[PurePosixPath, PurePosixPat
                 needed = True
             made = view / name_in_view
             if is_dir and deeper is not None and name_in_view == rename(name, True):
-                entries.append((made, None))
+                entries.append(_ViewEntry(made, rel / name, folder=True))
                 descend(rel / name, made, deeper, _in_locale if deeper is _in_data else None)
             else:
-                entries.append((made, rel / name))
+                entries.append(_ViewEntry(made, rel / name, folder=False))
 
     descend(PurePosixPath(), PurePosixPath(), _top, _in_data)
     return entries, needed
@@ -693,12 +702,12 @@ def lay_case_view(client_dir: Path, view_dir: Path) -> bool:
     if not needed:
         return False
     view_dir.mkdir(parents=True)
-    for made, target in entries:
-        path = view_dir.joinpath(*made.parts)
-        if target is None:
+    for entry in entries:
+        path = view_dir.joinpath(*entry.made.parts)
+        if entry.folder:
             path.mkdir()
         else:
-            path.symlink_to(f"{CLIENT_FILES_MOUNT}/{target.as_posix()}")
+            path.symlink_to(f"{CLIENT_FILES_MOUNT}/{entry.target.as_posix()}")
     return True
 
 
@@ -706,9 +715,9 @@ def renamed_in_view(client_dir: Path) -> list[tuple[str, str]]:
     """`(client's name, the tools' name)` for each entry the view spells another way."""
     entries, _needed = _view_plan(client_dir)
     return [
-        (target.as_posix(), made.as_posix())
-        for made, target in entries
-        if target is not None and target != made
+        (entry.target.as_posix(), entry.made.as_posix())
+        for entry in entries
+        if entry.target.name != entry.made.name
     ]
 
 

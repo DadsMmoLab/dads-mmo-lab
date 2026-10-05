@@ -1000,6 +1000,8 @@ class CmangosInstaller(StagedInstaller):
         Raises:
             InstallerError: the view could not be made. Nothing was extracted.
         """
+        if not client_dir.is_dir():
+            return client_dir  # nothing to list; the run says what is wrong, as it always has
         try:
             extract.remove_case_view(view)
             if not extract.lay_case_view(client_dir, view):

@@ -126,8 +126,8 @@ REEXTRACT_BUTTON = "Re-extract map data"
 """The Server tab's press for `reextract()`, named in the sentences that ask for it."""
 
 REEXTRACT_PUT_BACK = (
-    "The map data from before this press was put back as it was, with the pathfinding data "
-    "made from it, so the server runs on it as before."
+    "The map data from before this press was put back as it was, with its pathfinding data if "
+    "it had finished, so the server runs on it as before."
 )
 """What a failed `reextract()` ends with once the old map data is back in place (T241)."""
 
@@ -1900,7 +1900,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         self._refuse_a_running_world_for_maps()
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
         background = mmaps.background_block(self.entry) is not None
-        ident = self._install_id(server_dir)
+        ident = self._install_id(server_dir) if background else ""
         if background:
             stopped = mmaps.stop_for_route(
                 server_dir,
