@@ -101,6 +101,7 @@ from yulon.catalog.installer import (
     DockerUnavailableError,
     InstallerError,
     InstallOptions,
+    RollbackNotDone,
     UnsupportedPlatformError,
     UpdateRefused,
     WorldStoppedAfterReadyError,
@@ -1919,6 +1920,148 @@ Then the sources stay with it: putting the old commits back would leave the fold
 the running binary disagreeing, under a sentence saying they agree.
 """
 
+SOURCES_LEFT_NOTE = (
+    "The source folders were left on the new commits, because the build from before this "
+    "update was not put back: what is on disk is what the new build was made from."
+)
+"""Appended when the rebuild's rollback stopped early (`RollbackNotDone`, T197).
+
+The tags still name the new build, so a start runs it: the old commits put back under
+it would disagree with every start, under `SOURCES_PUT_BACK_NOTE`'s "agree again".
+"""
+
+SOURCES_LEFT_UNTOUCHED = (
+    "The source folders were left on the new commits, because the image tags name the new "
+    "build made from them. None of your server's containers was replaced, so it is still "
+    "running the build from before this update if it is up"
+)
+"""The first half of the note when no container was replaced (`RollbackNotDone.touched`).
+
+The tags and the sources name the new build, the containers still hold the old one: both
+said, because "what is on disk is what the new build was made from" alone reads as if the
+new build were what runs now. `untouched_note()` says what the next Start does."""
+
+SOURCES_LEFT_UNTOUCHED_NOTE = f"{SOURCES_LEFT_UNTOUCHED}, and its next Start runs the new build."
+"""`SOURCES_LEFT_NOTE` when no container was replaced and nothing refuses a start (fix round 1)."""
+
+
+def untouched_note(refused: str | None) -> str:
+    """The untouched note, with what the next Start does: runs the new build, or is refused.
+
+    Fix round 2: on Centurion the kept build's world tables are left waiting
+    (`ServersDownWork.keep`), so the next Start is refused until they are in, and the
+    note says so with the refusal's own sentence, which names the press that finishes it.
+    """
+    if refused is None:
+        return SOURCES_LEFT_UNTOUCHED_NOTE
+    return f"{SOURCES_LEFT_UNTOUCHED}, and Start is refused until this is done: {refused}"
+
+
+SOURCES_MIXED_BACK = (
+    "The source folders were put back on the commits they were on before this update."
+)
+"""The first sentence of `SOURCES_MIXED_NOTE`; `mixed_note()` may add one after it."""
+
+SOURCES_MIXED_REBUILD = (
+    "Its image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
+    "until it is: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}, which compiles "
+    "every image from those commits."
+)
+"""The last sentence of `SOURCES_MIXED_NOTE`: what the player does next."""
+
+SOURCES_MIXED_NOTE = f"{SOURCES_MIXED_BACK} {SOURCES_MIXED_REBUILD}"
+"""Appended when the rollback left the tags MIXED (`RollbackNotDone.mixed`, fix rounds 1-2).
+
+No single build is on the tags, so there is no new build for the sources to stay with and
+nothing new to record: the record is left as it was and the sources go back to the commits
+they were on. `rebuild()` writes `START_REFUSED_FILE`, so every start refuses until a
+Rebuild succeeds."""
+
+MIXED_UNTOUCHED = (
+    "None of your server's containers was replaced, so it is still running the build from "
+    "before this update if it is up."
+)
+"""What a mixed-tags note adds when no container was replaced (fix round 3)."""
+
+
+def mixed_note(touched: bool) -> str:
+    """`SOURCES_MIXED_NOTE`, saying the old build still runs when no container was replaced."""
+    if touched:
+        return SOURCES_MIXED_NOTE
+    return f"{SOURCES_MIXED_BACK} {MIXED_UNTOUCHED} {SOURCES_MIXED_REBUILD}"
+
+
+START_REFUSED_FILE = ".yulon-start-refused.json"
+"""A rollback left this server's image tags mixed: no start may run until a Rebuild (T197).
+
+Read by every start: `Controller.refuse_start()` (Start, Start and play, the launcher's
+PLAY, Restart, Recreate, the bot reload) and the engine's `start_refusal()`. Written in the
+server folder beside the install record, so it outlives the app; `{"version":1,
+"why":"rebuild"}`, and a record nobody can read refuses the same. Only a successful
+Rebuild clears it (`rebuild()`), and only the Rebuild press is not refused by it; a
+Rebuild that fails leaves the servers its rollback put back stopped (fix round 8), and
+TrinityCore's "Finish the world update" is refused by it too.
+
+A Centurion build kept without its world tables is not recorded here: T179's own
+world-update record holds the tables it still needs (`ServersDownWork.keep`), and only an
+import of them clears that one."""
+
+REBUILD_OWED_REFUSAL = (
+    "This server's image tags are mixed: an update or rebuild could not put the build from "
+    "before it back, and left some images on one build and the rest on the other. It must be "
+    "rebuilt before it can start: press "
+    f"{server_build_presses.under_server_build(server_build_presses.REBUILD)}."
+)
+"""Why no start is allowed while `START_REFUSED_FILE` is there."""
+
+
+def owed_start_refusal(server_dir: Path, *, rebuilding: bool = False) -> str | None:
+    """Why no start may run here (`START_REFUSED_FILE`), or None. Never raises.
+
+    `rebuilding` is the Rebuild press's own question: the rebuild it is about to run is
+    the repair, so the record does not refuse it.
+    """
+    if rebuilding:
+        return None
+    path = server_dir / START_REFUSED_FILE
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning(f"{path} could not be read ({exc}); it refuses as mixed tags")
+    return REBUILD_OWED_REFUSAL
+
+
+def owe_start(server_dir: Path) -> str:
+    """Write `START_REFUSED_FILE`. Returns a warning sentence, or "" once written."""
+    path = server_dir / START_REFUSED_FILE
+    staged = path.with_name(path.name + ".yulon-new")
+    try:
+        staged.write_text(json.dumps({"version": 1, "why": "rebuild"}) + "\n", encoding="utf-8")
+        os.replace(staged, path)
+    except OSError as exc:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as also:
+            logger.warning(f"could not remove {staged}: {also}")
+        return (
+            f"warning: {path} could not be written ({exc}), so nothing stops this server being "
+            "started before it is rebuilt."
+        )
+    return ""
+
+
+def forget_owed_start(server_dir: Path) -> str:
+    """Remove `START_REFUSED_FILE`. Returns a warning sentence, or ""."""
+    path = server_dir / START_REFUSED_FILE
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"warning: {path} could not be removed ({exc}); every start will go on refusing."
+    return ""
+
 
 class ServersLeftStopped(InstallerError):
     """A rebuild's rollback put the old build back and did NOT start it (T179 final round).
@@ -1931,6 +2074,23 @@ class ServersLeftStopped(InstallerError):
 
 class _LeftStopped(str):
     """`_restore_rollback()`'s sentence when it left the servers stopped (`ServersLeftStopped`)."""
+
+
+class _NotPutBack(str):
+    """`_restore_rollback()`'s sentence when it stopped before the old build was back (T197).
+
+    `rebuild()` raises it as `RollbackNotDone`, with whether any container was replaced
+    (`touched`) and whether the tags were left mixed (`mixed`), which the update route reads.
+    """
+
+    touched: bool
+    mixed: bool
+
+    def __new__(cls, text: str, *, touched: bool, mixed: bool = False) -> _NotPutBack:
+        made = super().__new__(cls, text)
+        made.touched = touched
+        made.mixed = mixed
+        return made
 
 
 ROLLBACK_LEFT_STOPPED_DATABASE = (
@@ -2816,6 +2976,19 @@ class ServersDownWork:
 
     A stop given up during the load wait, or one that failed, imports nothing; a
     record saying something is waiting would then be false. Must not raise.
+    """
+    keep: Callable[[], Iterator[str]] = lambda: iter(())
+    """Instead of `settle()`, when the rollback stopped before the old build was back (T197).
+
+    The new build stays on its tags, so what it needs and `forward()` did not get to
+    is left waiting for it rather than undone: there, a record naming the tables to
+    import is true. A raise is said in the press's sentence, not in its place.
+    """
+    done: Callable[[], Iterator[str]] = lambda: iter(())
+    """Once the new build is up, or kept after its banner (T197 fix round 6).
+
+    Nothing the work recorded is removed before this: a build that fails its ready
+    wait is rolled back, and the old build still needs what the record owed then.
     """
 
 
@@ -4428,15 +4601,17 @@ class StagedInstaller:
         """
         return None
 
-    def start_refusal(self, server_dir: Path) -> str | None:
-        """Why the server must not be started now, or None (T179); the spine never refuses.
+    def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
+        """Why the server must not be started now, or None (T179).
 
         Asked by `stage_up()`, by `rebuild()` before anything (a press that would
         start the server and does not finish what stops it), and by the rollback
-        before it starts the old build again. TrinityCore's: a world update left
-        unfinished (`trinitycore.world_update_start_refusal`).
+        before it starts the old build again. The spine's: `START_REFUSED_FILE`
+        (T197 fix round 2), which a Rebuild (`rebuilding`) may clear for itself.
+        TrinityCore's adds a world update left unfinished
+        (`trinitycore.world_update_start_refusal`).
         """
-        return None
+        return owed_start_refusal(server_dir, rebuilding=rebuilding)
 
     # -- the contract ----------------------------------------------------
 
@@ -5740,7 +5915,9 @@ class StagedInstaller:
         * **...and docker refused to NAME or to MOVE a tag** -- the `-rollback`
           names are KEPT, deliberately: the restore did not happen, so they are
           the only copy of the old build there is, and the sentence the user
-          reads says exactly that;
+          reads says exactly that. That exit, and a stop of the new build's
+          servers that failed, raise `RollbackNotDone` (T197), so the update
+          route leaves its sources with the build the tags still name;
         * **anything that is not an `InstallerError`** -- released if no compile
           finished, kept and logged if one did.
 
@@ -5776,7 +5953,7 @@ class StagedInstaller:
         if servers_down is None:
             # T179: a rebuild ends in a start, and this press does not finish what
             # refuses one (the update route's `servers_down` does).
-            refused = self.start_refusal(server_dir)
+            refused = self.start_refusal(server_dir, rebuilding=True)
             if refused is not None:
                 raise InstallerError(f"{refused} Nothing was changed.")
         planned = self.rebuild_stages()
@@ -5942,6 +6119,18 @@ class StagedInstaller:
             self._record_error(server_dir, ctx.state, message)
             if isinstance(message, _LeftStopped):
                 raise ServersLeftStopped(str(message)) from exc
+            if isinstance(message, _NotPutBack):
+                # T197: the tags still name the new build (or are mixed), so the
+                # update route must not put the old sources back under it.
+                # Fix round 2: mixed tags are refused by every start until a
+                # Rebuild succeeds -- in this geometry `compose up -d` would run
+                # the new import image beside the old world server.
+                warned = owe_start(server_dir) if message.mixed else ""
+                raise RollbackNotDone(
+                    f"{message} {warned}" if warned else str(message),
+                    touched=message.touched,
+                    mixed=message.mixed,
+                ) from exc
             raise InstallerError(message) from exc
         except BaseException:
             # NOT a refusal this method has an answer for: a bug in a stage, a
@@ -5977,6 +6166,9 @@ class StagedInstaller:
         yield from self._release(kept)
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
+        left = forget_owed_start(server_dir)
+        if left:
+            yield left
         yield from self.after_ready(server_dir)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
@@ -6282,9 +6474,14 @@ class StagedInstaller:
         Every failure from step 3 through step 5 puts every moved source back on
         the commit it came from, so what is on disk and what the running image was
         compiled from agree (a step-6 failure leaves them: they already agree).
-        The one step-5 exception is a build the rebuild KEPT
-        (`WorldStoppedAfterReadyError`, T71): its sources stay with it and are
-        recorded, for the same invariant (`SOURCES_KEPT_NOTE`, T179).
+        The step-5 exceptions are a build the rebuild KEPT
+        (`WorldStoppedAfterReadyError`, T71) and a rollback that stopped before the
+        old build was back on its tags (`RollbackNotDone`, T197): either way the
+        new build is what the tags name, so its sources stay with it and are
+        recorded, for the same invariant (`SOURCES_KEPT_NOTE`, T179; `SOURCES_LEFT_NOTE`).
+        A rollback that left the tags MIXED has no new build to keep them with: they
+        go back, nothing is recorded, and the sentence says a Rebuild is owed
+        (`SOURCES_MIXED_NOTE`, fix round 1).
         That is the one invariant a user cannot check for themselves and the one
         that quietly breaks everything afterwards: a Modules tab reading a source
         tree that is a hundred commits ahead of the binary answering on the port
@@ -6408,12 +6605,16 @@ class StagedInstaller:
                 work = replace(work, back=back)
             try:
                 yield from self.rebuild(opts, cancel=cancel, servers_down=work)
+                if work is not None:
+                    yield from work.done()
             except WorldStoppedAfterReadyError as exc:
                 # T71: the rebuild KEPT the new build -- it came up, then stopped
                 # on its data -- so the sources it was made from stay with it, and
                 # are recorded as what the running build is (T179 fix round 2).
                 # Putting the old commits back here would be this route's own
                 # invariant broken by its own recovery.
+                if work is not None:
+                    yield from work.done()
                 self._record_source_revs(
                     server_dir,
                     state,
@@ -6429,6 +6630,47 @@ class StagedInstaller:
                     also = f" {after}"
                 raise WorldStoppedAfterReadyError(
                     f"{exc} {SOURCES_KEPT_NOTE}{also}", sources_kept=True
+                ) from exc
+            except RollbackNotDone as exc:
+                if exc.mixed:
+                    # Fix round 1: the tags name neither build, so there is no new
+                    # build to keep the sources with or to record. They go back to
+                    # the commits the record still names, and the sentence says the
+                    # server needs a Rebuild before it can start.
+                    if work is not None:
+                        work.settle()
+                    yield from self._restore_the_folder(moved, server_dir, opts, state, press)
+                    raise RollbackNotDone(
+                        f"{exc} {mixed_note(exc.touched)}", touched=exc.touched, mixed=True
+                    ) from exc
+                # T197: the rollback stopped before the old build was back on its
+                # tags, which still name the NEW build, and a start runs them. Its
+                # sources stay with it and are recorded, as for the kept build above;
+                # putting the old commits back would leave them under a build they
+                # did not make, with a sentence saying the two agree again.
+                also = ""
+                if work is not None:
+                    try:
+                        yield from work.keep()
+                    except (InstallerError, OSError) as kept_failed:
+                        also = f" {kept_failed}"
+                self._record_source_revs(
+                    server_dir,
+                    state,
+                    moved,
+                    {repo: said.tag for repo, said in targets.items() if said.tag},
+                )
+                try:
+                    yield from self.after_update(server_dir, changes, press=press, cancel=cancel)
+                except InstallerError as after:
+                    also = f"{also} {after}"
+                left = (
+                    SOURCES_LEFT_NOTE
+                    if exc.touched
+                    else untouched_note(self.start_refusal(server_dir))
+                )
+                raise RollbackNotDone(
+                    f"{exc}{also} {left}", touched=exc.touched, sources_kept=True
                 ) from exc
             except InstallerError as exc:
                 # AFTER `rebuild()` has done its own rollback, never instead of it.
@@ -7066,11 +7308,12 @@ class StagedInstaller:
             try:
                 yield from _with_hint(_speaking(stop_it, control.abandon), ROLLBACK_WAIT_HINT)
             except docker.DockerCommandError as exc:
-                return (
+                return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build's servers could not be stopped ({exc}); "
                     f"the tags still name the new build, all of them. The old images are on "
-                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    touched=touched,
                 )
         else:
             yield "Putting the build from before this rebuild back."
@@ -7083,11 +7326,12 @@ class StagedInstaller:
             problem = self._seams.tag_image(ref, name)
             if problem:
                 yield from self._release(named)
-                return (
+                return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
                     f"onto ({problem}); the tags still name the new build, all of them. The "
-                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    touched=touched,
                 )
             named.append(name)
         moved: list[str] = []
@@ -7098,18 +7342,21 @@ class StagedInstaller:
                 mixed = [r for r in moved if r not in undone]
                 yield from self._release(named)
                 if mixed:
-                    return (
+                    return _NotPutBack(
                         f"{failure} Putting the build from before this rebuild back failed "
                         f"part-way ({problem}) and undoing it failed too, so the tags are "
                         f"MIXED: {', '.join(mixed)} name the old build and the rest name the "
                         f"new one. Do not start this server until they agree; the old images "
-                        f"are under their {ROLLBACK_TAG_SUFFIX} tags."
+                        f"are under their {ROLLBACK_TAG_SUFFIX} tags.",
+                        touched=touched,
+                        mixed=True,
                     )
-                return (
+                return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back failed "
                     f"({problem}), and the {len(undone)} tag(s) already moved were moved back, "
                     f"so the tags still name the new build, all of them. The old images are "
-                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    touched=touched,
                 )
             moved.append(ref)
         yield from self._release(named)
@@ -7134,26 +7381,29 @@ class StagedInstaller:
             "is NOT put back by this -- the lines above say whether its updater ran -- so "
             "the old build is running on the database as the new one left it."
         )
+        back_failed = ""
         if servers_down is not None:
-            back_failed = ""
             try:
                 yield from servers_down.back(replace(ctx, cancel=None))
             except (InstallerError, OSError) as exc:
                 back_failed = f"\n{exc}"
             database = f"{database}{back_failed}"
-            refused = self.start_refusal(ctx.server_dir)
-            if refused is not None:
-                # T179 (lead ruling): the old build is not started on world tables
-                # its rollback could not all put back. Its servers stay stopped and
-                # the tags name it; the finish starts it (with a recreate). Said
-                # without "running" anywhere: nothing of this server runs now.
-                yield from self._release(named)
-                yield from self._release(kept)
-                return _LeftStopped(
-                    f"{failure} The build from before this rebuild was put back, and its servers "
-                    f"were left STOPPED: {refused}{said}{ROLLBACK_LEFT_STOPPED_DATABASE}"
-                    f"{back_failed}"
-                )
+        # Asked on every rollback, not only the update route's (T197 fix round 8): a
+        # Rebuild pressed to repair MIXED tags (`START_REFUSED_FILE`) keeps those mixed
+        # tags as its rollback, and a repair that failed must not start them again.
+        refused = self.start_refusal(ctx.server_dir)
+        if refused is not None:
+            # T179 (lead ruling): the old build is not started on world tables
+            # its rollback could not all put back, nor on mixed tags. Its servers
+            # stay stopped and the tags name it; the finish or the Rebuild starts
+            # it. Said without "running" anywhere: nothing of this server runs now.
+            yield from self._release(named)
+            yield from self._release(kept)
+            return _LeftStopped(
+                f"{failure} The build from before this rebuild was put back, and its servers "
+                f"were left STOPPED: {refused}{said}{ROLLBACK_LEFT_STOPPED_DATABASE}"
+                f"{back_failed}"
+            )
         try:
             yield from self.stage_recreate(ctx, rollback=True)
             # The `-failed` names again, and the second attempt is the one that

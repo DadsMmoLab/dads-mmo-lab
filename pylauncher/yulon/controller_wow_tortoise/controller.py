@@ -55,6 +55,8 @@ class TortoiseController(Controller):
         dashboard running on its own. `botdash.start_if_on()` never raises: the
         dashboard is never the reason a server does not start.
         """
+        # T197 fix round 2: a refused start must not start the bot dashboard either.
+        self.refuse_start()
         if not self.port_conflicts():
             try:
                 entry = game.entry()

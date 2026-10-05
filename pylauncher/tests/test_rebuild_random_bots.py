@@ -1292,6 +1292,9 @@ def test_restart_world_says_which_half_failed() -> None:
     class Stops:
         server_dir = Path("srv")
 
+        def refuse_start(self) -> None:
+            return None
+
         def stop(self) -> None:
             raise RuntimeError("no stop")
 
@@ -1300,6 +1303,9 @@ def test_restart_world_says_which_half_failed() -> None:
 
     class Starts:
         server_dir = Path("srv")
+
+        def refuse_start(self) -> None:
+            return None
 
         def stop(self) -> None:
             return None

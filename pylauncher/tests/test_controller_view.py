@@ -63,7 +63,7 @@ from yulon.catalog.catalog import (
     load_catalog,
 )
 from yulon.catalog.families import decisions, sqlplan
-from yulon.catalog.installer import InstallerError, WorldStoppedAfterReadyError
+from yulon.catalog.installer import InstallerError, RollbackNotDone, WorldStoppedAfterReadyError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -12687,6 +12687,31 @@ def test_an_update_whose_build_was_kept_drops_the_server_cloned_count(
     assert view._behind.get(("module", "mod-transmog")) == 3
 
 
+def test_an_update_whose_rollback_did_not_put_the_old_build_back_drops_the_count(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T197: a rollback that stopped early left the new build, and its sources with it.
+
+    Read off the route's typed outcome (`RollbackNotDone.sources_kept`), as T179's kept build.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    view, _ = _server_cloned_view(ps, tmp_path)
+    route = view.services.update_to_latest
+    assert route is not None
+
+    def kept(cancel: object = None) -> Iterator[str]:
+        yield "--- update-sources"
+        raise RollbackNotDone("The tags still name the new build.", sources_kept=True)
+
+    view.services.update_to_latest = replace(route, press=kept)
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the update ended")
+
+    assert ("module", "mod-playerbots") not in view._behind
+    assert view._behind.get(("module", "mod-transmog")) == 3
+
+
 def test_an_update_that_failed_and_put_its_sources_back_keeps_the_count(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -18249,12 +18274,16 @@ def test_every_stop_on_every_page_is_in_the_pads_reach(
 def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The live check's first press: 960x640, the conf list, Down (T175).
+    """The live check's first press: 960x640, the control above the conf list, Down (T175).
 
-    It lands on the conf button straight under the middle of the list --
-    `authserver.conf`, 2 px off the list's centre -- and not on the full-width
-    strip at the bottom of the tab, which is 0 px off it.
+    It lands on the first conf button straight under it, and not on the
+    full-width strip at the bottom of the tab. Since T190 the conf list and the
+    cards share 960x640 through a "Settings | Edit file" switch, so the press
+    starts on the switch with the file side shown -- the row a player is on
+    when the conf buttons are what they came for.
     """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
 
     from yulon.ui.gamepad import Direction, install_gamepad_navigation
@@ -18265,23 +18294,25 @@ def test_down_from_tunings_conf_list_stops_at_the_conf_buttons_under_it(
     _at(window, (960, 640))
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     try:
-        confs = view.tuning_panel.file_buttons()
+        panel = view.tuning_panel
+        QTest.mouseClick(panel.edit_file_button, Qt.MouseButton.LeftButton)
+        process_events()
+        confs = panel.file_buttons()
         assert [b.text().split(" ")[0] for b in confs] == [
             "worldserver.conf",
             "authserver.conf",
             "playerbots.conf",
         ], "the Tuning tab does not list the three core confs this press is about"
-        conf_list = view.tuning_panel._area
+        switch = panel.edit_file_button
         assert (
-            _edges_in(confs[1], window)[1] >= _edges_in(conf_list, window)[3]
-        ), "the conf buttons are not under the list at 960x640, so this is not the live layout"
-        conf_list.setFocus()
+            _edges_in(confs[0], window)[1] >= _edges_in(switch, window)[3]
+        ), "the conf buttons are not under the switch at 960x640, so this is not the layout"
+        switch.setFocus()
         process_events()
         nav.navigate(Direction.DOWN)
         landed = QApplication.focusWidget()
-        assert (
-            landed is confs[1]
-        ), f"Down from the conf list went to {_pad_describe(landed, window)}"
+        assert landed is not view.tuning_report_strip, "Down went past the conf buttons"
+        assert landed is confs[0], f"Down from the switch went to {_pad_describe(landed, window)}"
     finally:
         keyboard.stop()
         gamepad.stop()
@@ -21426,6 +21457,33 @@ def test_the_dialog_warns_about_a_folder_onedrive_syncs(
 
     elsewhere = _dialog_for(tmp_path, plan, tmp_path / "Games" / "WoW (Yu'lon)")
     assert elsewhere.onedrive_label.isHidden()
+
+
+def test_make_offers_a_folder_outside_onedrive_and_warns_only_for_one_picked_inside(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T184 steps 1 and 2: the default needs no action; Browse… into OneDrive still warns."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "windows")
+    root = tmp_path / "OneDrive"
+    monkeypatch.setenv("OneDrive", str(root))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    original = _game_client(root / "clients" / "WoW")
+    asker = _Asked(cancel=True)
+    view, _ = _play_view(ps, tmp_path, original=original, asker=asker)
+
+    view.make_play_client()
+
+    offer = asker.offers[0]
+    assert offer.target.parent == tmp_path / "Local" / "Yu'lon" / "Clients"
+    assert offer.plan.same_volume, "the folder chosen must still share the archives"
+    dialog = controller_view_module.PlayClientDialog(offer, jobs=run_inline)
+    assert dialog.onedrive_label.isHidden()
+
+    picked = root / "WoW (Yu'lon)"
+    dialog.path_edit.setText(str(picked))
+    dialog.path_edit.editingFinished.emit()
+    assert not dialog.onedrive_label.isHidden()
+    assert str(root) in dialog.onedrive_label.text()
 
 
 def test_the_client_folder_is_not_forgotten_while_make_is_planning(

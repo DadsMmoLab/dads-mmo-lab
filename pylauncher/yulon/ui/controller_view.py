@@ -115,6 +115,7 @@ from yulon.catalog.families import azerothcore, clientdir, decisions, mmaps, tri
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    RollbackNotDone,
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
@@ -5770,6 +5771,10 @@ TUNING_ALL_REVERTED = (
 TUNING_NO_FILE_BACKUP = (
     "There is no backup of {file} to revert to. Yu'lon takes one every time it saves, so the "
     "first save on this tab is what creates it."
+)
+
+TUNING_NAMED_BACKUP_GONE = (
+    "The backup Revert file names, {backup}, is no longer beside {file}, so nothing was written."
 )
 
 TUNING_CORE_FILE = (
@@ -12183,7 +12188,10 @@ class ControllerView(QWidget):
         grid = QGridLayout(self.time_zone_group)
         self.time_zone_where = QComboBox(self.time_zone_group)
         self.time_zone_place = QComboBox(self.time_zone_group)
-        for box, chars in ((self.time_zone_where, 22), (self.time_zone_place, 16)):
+        for box, chars in (
+            (self.time_zone_where, len(TIME_ZONE_HOST.format(zone=time_zone.host_zone()))),
+            (self.time_zone_place, 16),
+        ):
             box.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
@@ -15570,12 +15578,13 @@ class ControllerView(QWidget):
         T179 Task 6 fix round 3: a failure that KEPT the new build
         (`WorldStoppedAfterReadyError.sources_kept`) left the sources on their new
         commits, so `_rebuild_finished()` drops the counts the move made stale, as
-        after a finished press. Runs on the panel's worker; the flag is read on the
-        GUI thread once the job has ended.
+        after a finished press. So did a rollback that stopped before the old build
+        was back (`RollbackNotDone.sources_kept`, T197). Runs on the panel's worker;
+        the flag is read on the GUI thread once the job has ended.
         """
         try:
             yield from lines
-        except WorldStoppedAfterReadyError as exc:
+        except (WorldStoppedAfterReadyError, RollbackNotDone) as exc:
             self._update_sources_kept = exc.sources_kept
             raise
 
@@ -15746,7 +15755,7 @@ class ControllerView(QWidget):
         self.tuning_reload_button.clicked.connect(self.reload_tuning)
         self.tuning_reload_button.setToolTip(
             "Read this install's conf files again. Cheap: the files themselves, no network. "
-            "Anything you have typed here and not saved is dropped."
+            "Anything you have typed here and not saved is kept."
         )
         # The undo for the FORM, and the one control on this bar that cannot
         # destroy anything: the cards are rebuilt from the rows already read,
@@ -15839,10 +15848,12 @@ class ControllerView(QWidget):
         box.addWidget(self.tuning_panel, 1)
         box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)
-        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
-        # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a
-        # floor of 100 under it could never be the number that applied. A guard
-        # that cannot fire is a guard nobody can test (measured 2026-09-16).
+        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately. Measured 2026-09-16 the
+        # panel asked for 288px of its own, so a floor of 100 could never apply.
+        # Measured again at T190's fix round, when the file side got its scroll
+        # area: 70 side by side and 125 narrow, and side by side it was given
+        # 523 at 1280x800 -- a floor still never the number that applied, and a
+        # guard that cannot fire is a guard nobody can test.
         # "modules", because `icons.py` is a file T43 must not edit and it has
         # no `tuning` key: the fallback is the SERVER icon, which would collide
         # with the Server tab. Sharing the Modules puzzle is the smaller
@@ -15878,6 +15889,8 @@ class ControllerView(QWidget):
         is cheap enough to run after every install and every save.
         """
         if self._waits_for_the_distro("tuning", self.reload_tuning):
+            # A card's Save or Revert that led here still redraws as that card's (T190).
+            self.tuning_panel.defer_pressed_card()
             return
         manifests, _broken = self._load_manifests()
         rows = tuning.rows_for(
@@ -15930,7 +15943,7 @@ class ControllerView(QWidget):
         made, and that is not what a person pressing "revert my changes"
         asked for.
         """
-        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
+        self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()), keep_edits=False)
         self._set_tuning_revert_all()
         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
 
@@ -16927,9 +16940,13 @@ class ControllerView(QWidget):
         if not file or file in self._tuning_core_files():
             return
         path = self.services.controller.server_dir / file
-        backups = tuning.backups_of(path)
+        # The backup the tab names, not merely the newest (T190): a card's Save
+        # may have taken a newer one since, and the label still names this one.
+        named = self.tuning_panel.backup_name()
+        backups = tuple(b for b in tuning.backups_of(path) if named is None or b.name == named)
         if not backups:
-            self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
+            gone = TUNING_NAMED_BACKUP_GONE.format(backup=named, file=file) if named else ""
+            self.tuning_report.setPlainText(gone or TUNING_NO_FILE_BACKUP.format(file=file))
             return
         try:
             note = self._put_back(backups[-1], path)
