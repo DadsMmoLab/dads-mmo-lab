@@ -26,6 +26,7 @@ import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
 
+from yulon import ansi
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -813,7 +814,6 @@ Responder = Callable[[str], str | None]
 # unguessable string no compiler will ever print (review, 2026-08-22).
 Prompter = Callable[[str], str | None]
 
-_ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
 
 # How long a partial line must sit unchanged before it is looked at.
 _PROMPT_QUIET_SECONDS = 0.3
@@ -824,8 +824,8 @@ _OUTPUT_MAY_BE_CUT_OFF = "[Yu'lon] The rest of this output may be cut off: it wa
 
 
 def strip_ansi(text: str) -> str:
-    """Remove ANSI escape sequences (the install scripts colour everything)."""
-    return _ANSI.sub("", text)
+    """Remove ANSI escape sequences (the install scripts colour everything); see `yulon.ansi`."""
+    return ansi.strip(text)
 
 
 def pty_supported() -> bool:

@@ -21,6 +21,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QComboBox,
     QLineEdit,
+    QListWidget,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -47,12 +48,15 @@ def window(qapp: object) -> Iterator[QWidget]:
         ("spin", QSpinBox(first)),
         ("rich", QTextEdit(first)),
         ("combo", QComboBox(first)),
+        ("list", QListWidget(first)),
         ("button", QPushButton("OK", first)),
     ):
         widget.setObjectName(name)
         layout.addWidget(widget)
     first.findChild(QLineEdit, "read_only").setReadOnly(True)
     first.findChild(QComboBox, "combo").setEditable(True)
+    # A character list, as the Characters tab shows one (T221).
+    first.findChild(QListWidget, "list").addItems(["Arthas", "Lyra", "Rexxar"])
     tabs.addTab(first, "one")
     tabs.addTab(QWidget(), "two")
     QVBoxLayout(win).addWidget(tabs)
@@ -138,6 +142,34 @@ def test_a_read_only_field_is_not_a_place_to_type(window: QWidget) -> None:
     _focus(window, "read_only")
     _press(window, Qt.Key.Key_R)
     assert _tabs(window).currentIndex() == 1
+
+
+def test_r_and_l_in_a_list_pick_its_rows_by_name_and_do_not_switch_tab(window: QWidget) -> None:
+    """T221: R in Centurion's Characters list switched the server page to Bots.
+
+    R and L are the bumpers' keys under Steam Input, and only a text field was
+    let have them. A list takes a typed letter as the first letter of a row's
+    name (Qt's type-ahead); R and L must do that like every other letter.
+    """
+    rows = _focus(window, "list")
+    rows.setCurrentRow(0)
+    _press(window, Qt.Key.Key_R)
+    assert rows.currentItem().text() == "Rexxar"
+    rows.keyboardSearch("")  # a new search, not "rl" (Qt joins letters typed quickly)
+    _press(window, Qt.Key.Key_L)
+    assert rows.currentItem().text() == "Lyra"
+    assert _tabs(window).currentIndex() == 0
+
+
+def test_space_and_backspace_keep_their_pad_meaning_in_a_list(window: QWidget) -> None:
+    """A list has no caret: only the letters are its own, not A, B or the arrows."""
+    from yulon.ui import gamepad
+
+    rows = _focus(window, "list")
+    for key in (Qt.Key.Key_Space, Qt.Key.Key_Backspace, Qt.Key.Key_Left, Qt.Key.Key_Right):
+        assert gamepad._accepts_typing(rows, int(key)) is False, key
+    for key in (Qt.Key.Key_R, Qt.Key.Key_L):
+        assert gamepad._accepts_typing(rows, int(key)) is True, key
 
 
 def test_down_still_leaves_a_field(window: QWidget) -> None:

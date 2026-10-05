@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -76,6 +77,70 @@ def test_every_machine_and_failure_gets_the_one_title_a_body_and_its_press(
         assert raw not in advice.body, advice.body
     if host in ("linux", "deck") or problem == "wsl":
         assert "Docker Desktop" not in advice.body, advice.body
+
+
+GREYED = {
+    "missing": "Start and Stop come back once Docker is installed.",
+    "removed": "Start and Stop come back once Docker is installed again.",
+    "not-running": "Start and Stop come back when Docker answers.",
+    "not-answering": "Start and Stop come back when Docker answers.",
+    "wsl": "Start and Stop come back when the Docker in that distro answers.",
+    "permission": "Start and Stop come back once Docker lets Yu'lon in.",
+    "unknown": "Start and Stop come back once Docker stops answering with that error.",
+}
+"""Why a greyed Start or Stop waits, per failure (T214): written out, never derived."""
+
+
+@pytest.mark.parametrize("host", HOSTS)
+@pytest.mark.parametrize("problem", PROBLEMS)
+def test_each_failure_says_what_start_and_stop_wait_for(
+    host: docker_advice.Host, problem: docker_advice.Problem
+) -> None:
+    """T214: "come back when Docker answers" was said for no Docker and for an error too.
+
+    Docker that is not installed will not answer, and Docker that answered with
+    an error already has.
+    """
+    advice = docker_advice.advise(problem, host, distro="Ubuntu")
+
+    assert advice.greyed == GREYED[problem]
+    assert text_faults(advice.greyed) == [], advice.greyed
+
+
+def test_every_problem_the_banner_knows_says_what_start_and_stop_wait_for() -> None:
+    """A `Problem` added without a greyed sentence raised KeyError from `advise()` (T214).
+
+    PR 291 added `not-answering` after T214 wrote the table. Read from the
+    type itself, so a value added later fails here rather than at the first
+    banner a player sees; and the parametrised tests above cover every value.
+
+    Mutation: drop `not-answering` from `_GREYED`, and `advise()` raises here.
+    """
+    every = set(get_args(docker_advice.Problem))
+
+    assert set(PROBLEMS) == every
+    assert set(GREYED) == every
+    for problem in sorted(every):
+        assert docker_advice.advise(problem, "linux").greyed == GREYED[problem]
+
+
+def test_a_docker_given_up_on_at_its_deadline_waits_for_docker_to_answer() -> None:
+    """A timeout is `not-answering`, and a greyed Start or Stop under it says so (T214)."""
+    hung = docker.DockerTimedOutError("docker ps exited 124: timed out after 30.0s")
+
+    advice = docker_advice.advice_for(hung, distro=None, host="linux", deck_docker_removed=False)
+
+    assert advice.greyed == "Start and Stop come back when Docker answers."
+
+
+def test_a_deleted_distro_says_start_and_stop_wait_for_it() -> None:
+    gone = docker.DockerCommandError("The WSL distro Ubuntu no longer exists - it was deleted.")
+
+    advice = docker_advice.advice_for(
+        gone, distro="Ubuntu", host="windows", deck_docker_removed=False
+    )
+
+    assert advice.greyed == "Start and Stop come back once that WSL distro is there again."
 
 
 def test_docker_desktop_down_says_open_it_and_wait_for_engine_running() -> None:
@@ -534,6 +599,24 @@ def test_the_status_poll_given_up_on_is_docker_desktop_not_running_on_windows(
         advice = docker_advice.advice_for(exc, distro=None, host=host, deck_docker_removed=False)
         assert advice.action == "open-desktop", host
         assert advice.body.startswith("Docker Desktop isn't running."), advice.body
+
+
+def test_a_command_given_up_on_is_something_that_broke_not_yulons_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T214: a timeout's words are the command line and exit status, not Yu'lon's sentence.
+
+    So a press a timeout ends says in words that it broke and puts them under
+    Details, rather than showing "docker ps exited 124: ..." on the line.
+
+    Mutation: mark `DockerTimedOutError` `SaidByYulon`, and this fails.
+    """
+    from yulon.said import SaidByYulon
+
+    exc = _hung_poll(monkeypatch, 0.3)
+
+    assert isinstance(exc, docker.DockerTimedOutError)
+    assert not isinstance(exc, SaidByYulon)
 
 
 def test_on_linux_a_poll_given_up_on_says_docker_is_not_answering(

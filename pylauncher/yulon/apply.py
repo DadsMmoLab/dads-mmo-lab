@@ -73,6 +73,7 @@ from yulon.manifest import (
     When,
 )
 from yulon.ownership import Ownership
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
 
@@ -115,7 +116,7 @@ def _default_git(server_dir: Path) -> Git:
     # Refuse precisely instead; `wsl_linux_path()` is the same test the rest of
     # the app uses to spot that shape.
     if platform.wsl_linux_path(server_dir) is not None:
-        raise ApplyError(
+        raise ApplyRefusal(
             f"This server lives inside WSL, at {server_dir}. Yu'lon clones modules with git, "
             f"and this machine has none it can run: the container it would fall back to cannot "
             f"reach a \\\\wsl.localhost path. Install Git inside the distro (or on Windows) "
@@ -388,7 +389,26 @@ _CONF_KEY_WRITE_SUFFIXES = (".conf",)
 
 
 class ApplyError(RuntimeError):
-    """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
+    """A step failed in a way that must stop the run (missing template value, git failure, ...).
+
+    A plain one carries what broke -- a program's output, the system's, a
+    bug's -- and the view puts it under Details. Yu'lon's own refusals are
+    `ApplyRefusal` (T214).
+    """
+
+
+class ApplyRefusal(ApplyError, SaidByYulon):
+    """An `ApplyError` whose message is Yu'lon's own sentence, shown as written (T214)."""
+
+
+def _kept(cause: BaseException, message: str) -> ApplyError:
+    """`message`, around `cause`'s text, as Yu'lon's sentence only if `cause` was one (T214).
+
+    Wrapping a refusal ("ac-database did not report healthy within 120s") must
+    not turn it into something that broke, and wrapping Docker's own words must
+    not make them Yu'lon's.
+    """
+    return ApplyRefusal(message) if isinstance(cause, SaidByYulon) else ApplyError(message)
 
 
 @dataclass(frozen=True)
@@ -406,7 +426,7 @@ class UncheckedApproval:
     release: upstream.Release
 
 
-class ReleaseDirectionUnknown(ApplyError):
+class ReleaseDirectionUnknown(ApplyError, SaidByYulon):
     """An update to a release that nobody could show is not a step back (T150).
 
     Raised by `Applier.update()` before anything is changed, when the clone's
@@ -424,7 +444,7 @@ class ReleaseDirectionUnknown(ApplyError):
         self.approval = approval
 
 
-class SqlNotSent(ApplyError):
+class SqlNotSent(ApplyError, SaidByYulon):
     """A SQL runner failed before anything could reach the server: no process ever ran (T115).
 
     The ONE failure a caller may read as "the database was not changed".
@@ -1347,7 +1367,7 @@ class DockerSql:
         try:
             return self.schemas[db]
         except KeyError:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"this server has no {db} database; it has " f"{', '.join(sorted(self.schemas))}"
             ) from None
 
@@ -1404,7 +1424,7 @@ class ComposeDbc:
             # Refused, not passed over: `_dbc()` writes a done line after this
             # returns, and "copied" over a folder holding nothing is the claim
             # this seam was built to stop the report making.
-            raise ApplyError(f"no .dbc files in {src}, so there was nothing to copy")
+            raise ApplyRefusal(f"no .dbc files in {src}, so there was nothing to copy")
         for path in files:
             dest = f"{self.data_dir.rstrip('/')}/dbc/{path.name}"
             try:
@@ -1418,7 +1438,7 @@ class ComposeDbc:
                         wsl_distro=self.wsl_distro,
                     )
             except (docker.DockerCommandError, docker.SourceUnreadableError) as exc:
-                raise ApplyError(str(exc)) from exc
+                raise _kept(exc, str(exc)) from exc
             if proc.returncode != 0:
                 reason = proc.stderr.strip() or proc.stdout.strip()
                 raise ApplyError(
@@ -2221,7 +2241,7 @@ class Applier:
         slug = upstream.github_slug(source.repo)
         release = self._newest_release(slug) if slug is not None else None
         if release is None:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id} follows the releases {source.repo} publishes, and Yu'lon could "
                 f"not ask GitHub which release is the newest. Nothing was changed; try again "
                 f"when GitHub can be reached."
@@ -2283,14 +2303,14 @@ class Applier:
         undo = self._undo_values(manifest)
         clash = self._conflict_refusal(manifest)
         if clash:
-            raise ApplyError(clash)
+            raise ApplyRefusal(clash)
         # After the conflict and before anything is written. The two guards are
         # independent -- one is about what is here that must not be, the other
         # about what is not here and must be -- and a row can only be told one
         # thing at a time, so the conflict keeps the order it had.
         missing = self._requires_refusal(manifest)
         if missing:
-            raise ApplyError(missing)
+            raise ApplyRefusal(missing)
         clone = self.clone_dir(manifest)
         # Whether a claim of OURS is at `clone`, so the completion mark at the
         # end knows whether there is a record to update. False for the two
@@ -2320,7 +2340,7 @@ class Applier:
         # before `_record_client_copies()` wrote the new ones (round 1 review).
         previous_copies = read_client_copies(clone, item_id=manifest.id)
         if folder is not None and manifest.source is not None:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
                 f"{manifest.source.url} and was also handed the folder {folder.path} to copy. "
                 f"Nothing was changed."
@@ -2369,7 +2389,7 @@ class Applier:
                 # reported as "git could not be started ... Nothing was changed"
                 # with part of the destination already gone. That sentence would
                 # have been false about data loss (review, 2026-09-14).
-                raise ApplyError(
+                raise ApplyRefusal(
                     f"{manifest.id} could not be installed because git could not be started "
                     f"({exc}). Yu'lon clones modules with git, and runs it inside a container "
                     f"when the machine has none -- so this means neither was available. "
@@ -2598,7 +2618,7 @@ class Applier:
         """
         refusal = self._update_refusal(manifest)
         if refusal is not None:
-            raise ApplyError(refusal)
+            raise ApplyRefusal(refusal)
         release = self._release_for(manifest)
         checked = (
             self._refuse_a_step_back(manifest, release, approved=approved)
@@ -2621,7 +2641,7 @@ class Applier:
             return
         now = self._reader("head_sha", HeadReader)(clone)
         if now != expected:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: this checkout moved from {expected[:7]} to "
                 f"{now[:7] if now else 'a commit git could not read'} while Update was checking "
                 f"it, so it was not reset. Nothing was changed; press Update to check it again."
@@ -2654,7 +2674,7 @@ class Applier:
         placed: BehindCount = reader(clone, release.sha, release=True)
         head: str | None = self._reader("head_sha", HeadReader)(clone)
         if placed is None or head is None:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: Yu'lon could not ask git whether release {release.tag} is newer "
                 f"than this checkout, so it did not update it. Nothing was changed; try again."
             )
@@ -2662,7 +2682,7 @@ class Applier:
             placed = self._placed_by_github(manifest, head, release, approved=approved)
         sentence = _NOT_UNDER_RELEASE.get(placed) if isinstance(placed, Behind) else None
         if sentence is not None:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: {sentence.format(release=release.tag)}. Nothing was changed."
             )
         return head
@@ -2827,7 +2847,7 @@ class Applier:
         if found is None:
             return
         url = manifest.source.url if manifest.source is not None else ""
-        raise ApplyError(
+        raise ApplyRefusal(
             _destroys_message(found, _rel(self.server_dir, clone), manifest.id, url, "Installing")
         )
 
@@ -2973,7 +2993,7 @@ class Applier:
                 f"{_rel(self.server_dir, clone)}: {exc}. Nothing was changed."
             ) from exc
         if not clone.is_dir():
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"copying {folder.path} left nothing at {_rel(self.server_dir, clone)}, so there "
                 f"is no module there to install. Nothing was changed."
             )
@@ -3006,7 +3026,7 @@ class Applier:
             if getattr(finished, field) != getattr(manifest, field)
         ]
         if changed:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: finishing this manifest from what is at "
                 f"{_rel(self.server_dir, clone)} changed {', '.join(changed)}, so it is no longer "
                 f"the item that was installed there. Nothing further was changed."
@@ -3034,13 +3054,13 @@ class Applier:
         for prompt in required_prompts(manifest, action):
             value = vals.get(prompt.key)
             if value is None:
-                raise ApplyError(
+                raise ApplyRefusal(
                     f"{manifest.id}: {prompt.question} — no value for {{{prompt.key}}}. "
                     f"Nothing was changed."
                 )
             problem = check_answer(prompt, value)
             if problem:
-                raise ApplyError(
+                raise ApplyRefusal(
                     f"{manifest.id}: {prompt.question} — {problem}, and {value!r} is not. "
                     f"Nothing was changed."
                 )
@@ -3073,7 +3093,7 @@ class Applier:
             if not _SAFE_IN_QUERY.fullmatch(vals.get(key, ""))
         )
         if unsafe:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: {', '.join(unsafe)} cannot be used in a database question "
                 f"(letters, digits, dot, dash and underscore only). Nothing was changed."
             )
@@ -3095,7 +3115,7 @@ class Applier:
             )
             return
         if not rows.strip():
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: {_render(check.missing, vals, f'prompt {prompt.key}')}. "
                 f"Nothing was changed."
             )
@@ -3293,7 +3313,7 @@ class Applier:
         rel = _rel(self.server_dir, clone)
         retry = f"{action} {manifest.id} again"
         if not clone.is_dir():
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{rel} is a file, not this app's clone of {manifest.id}. Nothing was changed. "
                 f"Move it aside and {retry}."
             )
@@ -3325,7 +3345,7 @@ class Applier:
                 return
             leftovers = sorted(item.name for item in clone.iterdir())
             if leftovers:
-                raise ApplyError(
+                raise ApplyRefusal(
                     f"{rel} already has files in it and was not put there by this app "
                     f"({', '.join(leftovers[:5])}). Nothing was changed. Move that folder "
                     f"aside — or delete it yourself if you no longer want it — and then "
@@ -3365,7 +3385,7 @@ class Applier:
             put_back = "Put this server folder back where it was installed"
             if action != "remove":
                 put_back += f", or move {rel} aside,"
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{rel} holds a {CLAIM_FILE} this app cannot read as its own, so it cannot tell "
                 f"whether that checkout is its own {manifest.id} or your own work. Nothing was "
                 f"changed. The likeliest cause is an install folder that was moved, renamed or "
@@ -3375,13 +3395,13 @@ class Applier:
             )
         remote = self.remote_url(clone)
         if remote is None:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
                 f"nothing was changed. Move that folder aside and then "
                 f"{retry}.{self._removal_note(action, manifest)}"
             )
         if url and not same_repo(remote, url):
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{rel} is a checkout of {remote}, not of {url}. Nothing was changed. Move that "
                 f"folder aside and then {retry}.{self._removal_note(action, manifest)}"
             )
@@ -3394,7 +3414,7 @@ class Applier:
         )
         if refusal is None:
             return
-        raise ApplyError(
+        raise ApplyRefusal(
             _no_adoption_message(refusal, rel, retry) + self._removal_note(action, manifest)
         )
 
@@ -3832,7 +3852,7 @@ class Applier:
             # only "Stop the server", which cannot create a container, so on a
             # stack a recreate left without its world every second press met
             # this same refusal. Still a refusal: *could not tell* is not *no*.
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: could not tell whether the world server is running "
                 f"({why or 'the seam gave no answer'}), and a running one holds {dbs} in memory "
                 f"and writes back over whatever it finds there. No SQL was run and no rows were "
@@ -3841,7 +3861,7 @@ class Applier:
                 f"If Docker itself is not answering, start it, then Stop the server and {when} "
                 f"again."
             )
-        raise ApplyError(
+        raise ApplyRefusal(
             f"{manifest.id}: the world server is running, and it holds {dbs} in memory and writes "
             f"back over whatever it finds there. No SQL was run and no rows were written: "
             f"{steps}. Press Stop, then {when} again — the steps this run already took repeat, "
@@ -3898,9 +3918,10 @@ class Applier:
             started = self._start_database()
         except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
             steps = ", ".join(_step_name(step) for step in direct)
-            raise ApplyError(
+            raise _kept(
+                exc,
                 f"{manifest.id}: the database could not be started, so no SQL was run and no "
-                f"rows were written: {steps}. {exc}"
+                f"rows were written: {steps}. {exc}",
             ) from exc
         if started:
             log.done.append("started the database alone; the world server was left stopped")
@@ -3974,7 +3995,7 @@ class Applier:
                 f"renamed or removed it",
             )
         if refusals:
-            raise ApplyError(f"{manifest.id}: nothing was run. " + " ".join(refusals))
+            raise ApplyRefusal(f"{manifest.id}: nothing was run. " + " ".join(refusals))
         return plan
 
     def _run_transaction(
@@ -4124,7 +4145,7 @@ class Applier:
                     f"so {check.missing[0].lower() + check.missing[1:]} would not be noticed here"
                 )
                 continue
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: {check.missing}. {_step_name(step)} was run — the file's "
                 f"statements reached the database — so this is the result being wrong and not "
                 f"the step being skipped. Fix the cause and {step.when} again: the import "
@@ -4482,7 +4503,7 @@ class Applier:
         """The applied record a re-install undoes first, `None` for a first install; or refuse."""
         refusal = self.reapply_refusal(manifest)
         if refusal is not None:
-            raise ApplyError(refusal)
+            raise ApplyRefusal(refusal)
         if not reapplies_on_top(manifest):
             return None
         return self.applied_record(manifest)[0]
@@ -4561,7 +4582,7 @@ class Applier:
         was_pending = module_answers.is_pending(self.server_dir, manifest)
         problem = module_answers.record_pending(self.server_dir, manifest, after)
         if problem:
-            raise ApplyError(
+            raise ApplyRefusal(
                 f"{manifest.id}: nothing was run. Yu'lon could not note in its record that "
                 f"this SQL was about to run ({problem}), and without that note an "
                 f"interrupted run could leave the record saying the wrong values."
@@ -5949,12 +5970,89 @@ def applied_updates(lines: Sequence[str]) -> frozenset[str]:
     return frozenset(found)
 
 
+_FAILED_UPDATE = re.compile(r"Applying of file '([^']+\.sql)' to database '[^']*' failed")
+"""The importer's own word that a file did NOT apply (T214, PR 305's live check, 2026-10-05).
+
+`Applying of file '/azerothcore/modules/mod-npc-beastmaster/data/sql/db-world/
+zz_gate305_broken.sql' to database 'acore_world' failed! If you are a user, ...`,
+printed after `>> Applying update "zz_gate305_broken.sql"` -- so the file was
+started, and `applied_updates()` alone reported it applied.
+"""
+
+_MYSQL_ERROR_LINE = re.compile(r"^ERROR \d+ \([0-9A-Z]+\)")
+"""mysql's own error line, printed just before the failure line above."""
+
+
+def failed_updates(lines: Sequence[str]) -> dict[str, str]:
+    """The file names the importer said it failed to apply, each with mysql's error line.
+
+    Base names, as `applied_updates()` reads them. The error is the last
+    `ERROR nnnn (state) ...` line before the failure line, `""` when there is none.
+    """
+    failed: dict[str, str] = {}
+    error = ""
+    for line in lines:
+        plain = line.strip()
+        if _MYSQL_ERROR_LINE.match(plain):
+            error = plain
+            continue
+        match = _FAILED_UPDATE.search(plain)
+        if match:
+            failed[PurePosixPath(match.group(1)).name] = error
+            error = ""
+    return failed
+
+
+class LedgerReader(Protocol):
+    """The read half of the SQL seam, as `DockerSql.query()` is: one SELECT, tab-separated rows."""
+
+    def query(self, db: Db, statement: str) -> str: ...
+
+
+Ledger = Mapping[Db, frozenset[str]]
+"""Per database, which of the asked-about file names its `updates` table holds."""
+
+
+def read_ledger(sql: LedgerReader, plan: ModuleSqlPlan) -> Ledger | None:
+    """Which of `plan`'s db-import files each database's `updates` table holds; None if unread.
+
+    The database's own record, asked after a run (T214): the importer applies a
+    file and then writes its row, so a row is the one proof a file is in the
+    database. Read only -- `module_sql_plan()` says why this app writes nothing
+    there. The rows are keyed by base name, as upstream ledgers them
+    (`mod-npc-beastmaster.json` notes `updates.name: beastmaster_tames.sql`).
+
+    None when any database could not be asked: a report must then claim nothing
+    the database was not asked about.
+    """
+    wanted: dict[Db, set[str]] = {}
+    for entry in plan.files:
+        name = PurePosixPath(entry.path).name
+        if entry.route == "db-import" and entry.module not in plan.withheld and "*" not in name:
+            wanted.setdefault(entry.db, set()).add(name)
+    ledger: dict[Db, frozenset[str]] = {}
+    for db, names in sorted(wanted.items()):
+        quoted = ", ".join(
+            "'" + n.replace("\\", "\\\\").replace("'", "''") + "'" for n in sorted(names)
+        )
+        try:
+            rows = sql.query(db, f"SELECT name FROM updates WHERE name IN ({quoted})")
+        except Exception as exc:  # noqa: BLE001 - an unread ledger is reported, not raised
+            logger.warning(f"could not read the {db} database's updates ledger: {exc}")
+            return None
+        ledger[db] = frozenset(line.strip() for line in rows.splitlines() if line.strip())
+    return ledger
+
+
 def module_sql_report(
     plan: ModuleSqlPlan,
     *,
     service: str,
     applied: frozenset[str],
     refusal: str = "",
+    failed: Mapping[str, str] | None = None,
+    ledger: Ledger | None = None,
+    ran: bool = True,
 ) -> tuple[str, ...]:
     """One sentence per SQL file: what this press did with it, and what it did not.
 
@@ -5981,12 +6079,26 @@ def module_sql_report(
     the only honest report of one is which route owns it, plus the date of this
     app's own claim where there is one. See `ModuleSqlFile.installed_on`.
 
-    `refusal` is the updater's words, empty when it exited 0. It is printed
-    against every db-import file the run did not name, because an importer that
-    stopped part-way cannot say which of the files it had not reached it would
-    have applied -- and naming them all is the only reading that does not
-    promise one of them was fine.
+    `refusal` is the updater's words, empty when it exited 0. It is no longer
+    printed against each file (T214): PR 305's live check read the whole
+    sentence on every file applied on an earlier day. Instead:
+
+    * a file in `failed` (the importer's own "Applying of file ... failed!")
+      is `failed`, with mysql's error line;
+    * with the database's `updates` `ledger` read, a file is `applied` only if
+      the importer named it AND the ledger holds it, `already applied` if the
+      ledger holds it and this run did not name it, and `not applied`
+      otherwise -- the order the files were listed in decides nothing;
+    * with no ledger, nothing is said to be in the database: a file the
+      importer named is what it "reported", and a file it did not name after it
+      stopped is `not known`. Only a run that finished may still read an
+      unnamed file as already ledgered, because the updater applies every
+      pending file before it says it is up to date.
+
+    `ran` is whether the importer printed anything, so a run refused before it
+    started says so rather than "stopped before it got to this file".
     """
+    failures = failed or {}
     lines: list[str] = []
     for name in plan.withheld:
         blocking = _blocking_files(plan, name)
@@ -6024,16 +6136,49 @@ def module_sql_report(
                 f"{where}: not applied: {entry.module} was not given to {service}, so the "
                 f"updater was not offered this file either"
             )
-        elif PurePosixPath(entry.path).name in applied:
-            lines.append(f"{where}: applied")
-        elif refusal:
-            lines.append(f"{where}: refused: {refusal}")
         else:
-            lines.append(
-                f"{where}: not applied now: {service} did not name it, which is what a file "
-                f"already in its updates ledger looks like"
-            )
+            verdict = _db_import_verdict(entry, service, applied, refusal, failures, ledger, ran)
+            lines.append(f"{where}: {verdict}")
     return tuple(lines)
+
+
+def _db_import_verdict(
+    entry: ModuleSqlFile,
+    service: str,
+    applied: frozenset[str],
+    refusal: str,
+    failed: Mapping[str, str],
+    ledger: Ledger | None,
+    ran: bool,
+) -> str:
+    """What one db-import file of a module given to the updater came to (`module_sql_report()`)."""
+    name = PurePosixPath(entry.path).name
+    if "*" in name:
+        return "nothing to apply: no file here matches it"
+    if name in failed:
+        return f"failed: {failed[name] or 'what the importer said is under Details'}"
+    named = name in applied
+    if ledger is not None:
+        held = name in ledger.get(entry.db, frozenset())
+        if held:
+            return "applied" if named else "already applied"
+        if named:
+            return f"not applied: {service} started it, and the database has no record of it"
+        if not refusal:
+            return f"not applied: {service} did not apply it, and the database has no record of it"
+        if not ran:
+            return f"not applied: {service} did not run"
+        return f"not applied: {service} stopped before it got to this file"
+    if named:
+        return f"{service} reported applying it; its updates ledger could not be read to confirm"
+    if not refusal:
+        return (
+            f"not applied now: {service} did not name it, which is what a file already in "
+            f"its updates ledger looks like"
+        )
+    if not ran:
+        return f"not applied: {service} did not run"
+    return f"not known: {service} stopped, and its updates ledger could not be read"
 
 
 def _github_compare(slug: str, base: str, ref: str) -> upstream.Comparison | None:

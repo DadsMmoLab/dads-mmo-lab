@@ -558,7 +558,7 @@ def build_window() -> object:
         QWidget,
     )
 
-    from yulon import __version__, forgetting, ui_settings
+    from yulon import __version__, forgetting, play_client, ui_settings
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
     from yulon.selfupdate.apply import (
@@ -1525,6 +1525,19 @@ def build_window() -> object:
     # with no server tab nothing has asked yet.
     follow_the_tab_on_screen()
 
+    def _left_behind(game: str, server_dir: Path, client_dir: Path | None) -> Path | None:
+        """A ready-to-play client this server left on disk when Yu'lon forgot it (T211 4)."""
+        if client_dir is None:
+            return None
+        try:
+            name = catalog.get(game).name
+        except KeyError:  # add_controller() says so for an unknown game
+            return None
+        found = play_client.left_behind(client_dir, name, game=game, server_dir=server_dir)
+        if found is not None:
+            logger.info(f"{game}: linked the ready-to-play client left at {found} again")
+        return found
+
     def on_installed(game: str, server_dir: object, client_dir: object) -> None:
         sd = Path(str(server_dir))
         cd = Path(str(client_dir)) if client_dir is not None else None
@@ -1536,25 +1549,20 @@ def build_window() -> object:
         # distro to lose, so keeping the known one costs nothing
         # (review, 2026-08-26).
         known = state.find(game, sd)
+        # T181, for the distro's reason: dropping it would send this server's
+        # module client files back into the player's own client.
+        play = known.play_client_dir if known else _left_behind(game, sd, cd)
         state.remember(
             KnownInstall(
                 game=game,
                 server_dir=sd,
                 client_dir=cd,
                 wsl_distro=known.wsl_distro if known else None,
-                # T181, for the distro's reason: dropping it would send this
-                # server's module client files back into the player's own client.
-                play_client_dir=known.play_client_dir if known else None,
+                play_client_dir=play,
             )
         )
         _warn_unless_remembered(state, window)
-        add_controller(
-            game,
-            sd,
-            cd,
-            known.wsl_distro if known else None,
-            known.play_client_dir if known else None,
-        )
+        add_controller(game, sd, cd, known.wsl_distro if known else None, play)
 
     def on_fresh_install(game: str, server_dir: object, client_dir: object) -> None:
         """A FRESH install ended with the world up and, since T87, with its
@@ -1585,7 +1593,7 @@ def build_window() -> object:
         distro = str(wsl_distro) if wsl_distro else None
         # T181: a re-adopt of a known server keeps its ready-to-play client.
         known = state.find(game, sd)
-        play = known.play_client_dir if known else None
+        play = known.play_client_dir if known else _left_behind(game, sd, cd)
         state.remember(
             KnownInstall(
                 game=game, server_dir=sd, client_dir=cd, wsl_distro=distro, play_client_dir=play
