@@ -1291,6 +1291,37 @@ def test_a_stopped_reextract_starts_no_tool_after_the_stop_ends_its_container_an
         end_fake_containers(state)
 
 
+def test_a_stopped_reextract_whose_tool_container_will_not_go_leaves_the_old_data_aside(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial review: put back only once no tool can write over it. A container
+    Docker would not remove may still be extracting into `data/`, so the old map data stays
+    aside, and the next press settles it once the container is gone."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        (state / "refuse-rm").write_text("", encoding="utf-8")
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+
+        outcome, seen_at_put_back, _took, _laid = _stop_a_reextract(
+            box, state, monkeypatch, stop_when="tool"
+        )
+
+        assert len(outcome) == 1 and isinstance(outcome[0], extract.ContainerLeftRunning)
+        (name,) = fake_containers(state)
+        said = str(outcome[0])
+        assert f"docker rm -f {name}" in said
+        assert said.endswith(trinitycore.REEXTRACT_KEPT_ASIDE), said
+        assert seen_at_put_back == [], "the old data was put back under a running tool"
+        assert (box.server_dir / "data" / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE).is_file()
+        assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
+    finally:
+        end_fake_containers(state)
+
+
 def interrupted(box: Box) -> dict[str, bytes]:
     """The state a press that crashed in `vmap extract` leaves: old data aside, new data half in."""
     finished_with_pathfinding(box)

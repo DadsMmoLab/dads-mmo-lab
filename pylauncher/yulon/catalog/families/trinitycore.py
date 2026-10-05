@@ -133,6 +133,14 @@ REEXTRACT_PUT_BACK = (
 )
 """What a failed `reextract()` ends with once the old map data is back in place (T241)."""
 
+REEXTRACT_KEPT_ASIDE = (
+    "The map data from before this press is kept aside in the server's data folder and was "
+    "not put back while that container may still write there. Once it is removed, press "
+    f"\u201c{REEXTRACT_BUTTON}\u201d again: it puts the old map data back first, or keeps the "
+    "new map data if it is whole."
+)
+"""What a stopped `reextract()` ends with when a tool's container could not be removed (T303)."""
+
 REEXTRACT_CANCEL_NOTE = (
     "A Stop puts the map data from before this press back as it was. The temporary copy of "
     "your client is removed either way."
@@ -1993,7 +2001,12 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
             yield from self._staged((stage,), ctx)
         except BaseException as failure:
-            told = self._put_the_old_map_data_back(data_dir)
+            if isinstance(failure, extract.ContainerLeftRunning):
+                # T303: a tool Docker would not remove may still write into data/,
+                # so the old map data stays aside; the next press settles it.
+                told = REEXTRACT_KEPT_ASIDE
+            else:
+                told = self._put_the_old_map_data_back(data_dir)
             if isinstance(failure, InstallerError):  # its words are what the person reads
                 failure.args = (f"{failure} {told}",)  # same object: its type is kept
             raise

@@ -28,6 +28,7 @@ from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
 from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from yulon import container_end, docker, platform
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog.families import extract
 from yulon.catalog.installer import InstallerError
 
@@ -157,6 +158,7 @@ def test_a_tool_container_that_will_not_go_is_named_in_the_run_log(
         name, "Error response from daemon: the daemon is shutting down"
     ), said[-1]
     assert f"docker rm -f {name}" in said[-1]
+    assert got[0].container_left == name, "the caller must know the tool may still write"
 
 
 def test_an_abandoned_tool_run_ends_its_container(fake_docker: tuple[Path, Path]) -> None:
@@ -222,3 +224,36 @@ def test_a_stop_before_the_first_tool_runs_no_tool(tmp_path: Path) -> None:
         f"Stop was pressed before {test_extract.AD.name} started, so it was not run."
     )
     assert extract.EXTRACT_CANCEL_NOTE in str(stopped.value)
+
+
+def test_a_stopped_tool_whose_container_was_not_removed_is_a_refusal_true_after_stop(
+    tmp_path: Path,
+) -> None:
+    """Codex adversarial review: the caller must not treat it as a clean Stop -- a stopped
+    Re-extract would put the old map data back under a tool still writing into `data/`."""
+
+    class LeftRunning(test_extract.Runner):
+        def __call__(
+            self,
+            spec: docker.ContainerRun,
+            *,
+            sink: docker.OutputSink,
+            cancel: threading.Event | None,
+        ) -> docker.AttachedRun:
+            self.specs.append(spec)
+            if cancel is not None:
+                cancel.set()
+            return docker.AttachedRun(
+                docker.CANCELLED_RETURNCODE, (), container_left="yulon-extract-0123456789ab"
+            )
+
+    runner = LeftRunning(test_extract.FULL)
+
+    with pytest.raises(extract.ContainerLeftRunning) as left:
+        test_extract.run(test_extract.PLAN, runner, tmp_path, cancel=threading.Event())
+
+    assert isinstance(left.value, TrueAfterStop), "said under Stopped, not swallowed by it"
+    said = str(left.value)
+    assert "yulon-extract-0123456789ab" in said and str(tmp_path / "server" / "data") in said
+    assert "docker rm -f yulon-extract-0123456789ab" in said
+    assert runner.names() == ["ad"], "nothing after it"

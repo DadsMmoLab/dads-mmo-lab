@@ -4699,6 +4699,10 @@ class AttachedRun:
 
     returncode: int
     tail: tuple[str, ...] = ()
+    container_left: str = ""
+    """The tool container a Stop could not remove, by name, or "" (T303, Codex adversarial
+    review): it may still be writing into its mounts, so the caller must not treat the
+    run as a clean Stop -- a stopped Re-extract leaves the old map data aside for it."""
 
 
 def cli_missing_run(run: AttachedRun) -> bool:
@@ -5601,7 +5605,7 @@ def run_container(
             sink(tool_container_left_line(name, refused))
         except Exception as exc:  # noqa: BLE001 - `run_attached()`'s rule for a dead sink
             logger.warning(f"the output sink stopped accepting lines: {exc}")
-    return AttachedRun(CANCELLED_RETURNCODE, run.tail)
+    return AttachedRun(CANCELLED_RETURNCODE, run.tail, container_left=name if refused else "")
 
 
 TOOL_CONTAINER_PREFIX = "yulon-extract-"

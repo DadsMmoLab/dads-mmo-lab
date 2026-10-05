@@ -999,7 +999,9 @@ def _quoted(tail: str) -> str:
     whole word. A full stop ends it, so the sentence after it does not run on.
     """
     lines = tail.splitlines()[-20:]
-    cut = bool(lines) and not tail.endswith(("\n", "\r"))
+    if not any(line.strip() for line in lines):
+        return f"{docker.last_words(())}."  # nothing said is not a quote cut short
+    cut = not tail.endswith(("\n", "\r"))
     if cut:
         last = lines[-1]
         whole = last.rstrip() if last[-1:].isspace() else last.rpartition(" ")[0].rstrip()

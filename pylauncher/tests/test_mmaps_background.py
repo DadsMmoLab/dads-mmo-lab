@@ -1485,3 +1485,24 @@ def test_a_new_run_over_changed_map_data_continues_from_its_own_tiles(
             "Its 3 finished tiles are kept, and “Make the pathfinding data” continues from there."
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("tail", "quoted"),
+    [
+        ("", "it printed nothing at all."),
+        ("   ", "it printed nothing at all."),
+        ("Segfau", "Segfau…."),
+        ("16% [Map 001] Building tile [40,53]\n16% [Map 001] Building t", None),
+    ],
+    ids=("nothing", "only-a-cut-space", "one-cut-word", "cut-mid-word"),
+)
+def test_the_generators_quote_never_claims_more_or_less_than_the_log_said(
+    tail: str, quoted: str | None
+) -> None:
+    """T304, Codex review: a log with nothing in it is said as nothing, with one full stop."""
+    said = mmaps._quoted(tail)
+    if quoted is not None:
+        assert said == quoted
+    else:
+        assert said == "16% [Map 001] Building tile [40,53] / 16% [Map 001] Building…."

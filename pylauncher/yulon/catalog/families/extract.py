@@ -52,6 +52,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from yulon import client_names, docker, platform
+from yulon.after_stop import TrueAfterStop
 from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
@@ -1029,6 +1030,26 @@ def _stage_failed(run: docker.AttachedRun) -> bool:
     )
 
 
+class ContainerLeftRunning(InstallerError, TrueAfterStop):
+    """A stopped tool whose container Docker would not remove (T303, Codex adversarial review).
+
+    It may still be writing into the server's `data/`, so it is not a clean Stop: it
+    is said under "Stopped" (`TrueAfterStop`), and a stopped Re-extract keeps the old
+    map data aside instead of putting it back under a tool that could write over it.
+    """
+
+
+def _left_running(what: str, run: docker.AttachedRun, data_dir: Path) -> None:
+    """`ContainerLeftRunning` when a Stop could not remove the tool's container."""
+    if run.container_left:
+        name = run.container_left
+        raise ContainerLeftRunning(
+            f"{what} was stopped, but its container {name} could not be removed, so it may "
+            f"still be writing into {data_dir}. Remove it in Docker Desktop's Containers "
+            f"list, or run: docker rm -f {name}"
+        )
+
+
 def run_plan(
     plan: ExtractPlan,
     *,
@@ -1367,6 +1388,7 @@ def _conclude(
     caller's "done" line.
     """
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        _left_running(tool.name, run, data_dir)
         raise InstallerError(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
@@ -1960,6 +1982,7 @@ def run_mmaps(
         cancel=cancel,
     )
     if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        _left_running("map generation", run, data_dir)
         raise InstallerError(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
     if docker.cli_missing_run(run):
         raise InstallerError(
