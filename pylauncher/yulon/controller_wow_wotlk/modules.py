@@ -23,11 +23,14 @@ from yulon.apply import (
     DbcCopier,
     DockerSql,
     FolderSource,
+    LedgerReader,
     ModuleUpdate,
     SqlRunner,
     applied_updates,
+    failed_updates,
     module_sql_plan,
     module_sql_report,
+    read_ledger,
 )
 from yulon.apply import module_updates as apply_updates
 from yulon.catalog.upstream import github_slug
@@ -377,6 +380,7 @@ def apply_module_sql(
     *,
     output: Callable[[str], None] | None = None,
     wsl_distro: str | None = None,
+    ledger: LedgerReader | None,
 ) -> docker.AttachedRun:
     """Run the AzerothCore importer over `server_dir` for the modules that are ON DISK.
 
@@ -428,6 +432,16 @@ def apply_module_sql(
     and the importer's service name, and prints the per-file verdicts through
     `output` so they arrive in the same panel as the importer's own lines,
     whether the run finishes or is refused.
+
+    **`ledger` is the database's own record (T214).** PR 305's live check read
+    "zz_gate305_broken.sql -> world: applied" for the file the importer failed
+    on, and "refused: <the whole sentence>" for every file applied on an earlier
+    day. After the run, finished or not, each database's `updates` table is
+    asked which of the plan's files it holds (`apply.read_ledger()`), and the
+    importer's own "Applying of file ... failed!" lines say which file failed
+    (`apply.failed_updates()`). Required, and `None` only by saying so: a
+    caller with no SQL seam gets a report that claims nothing about the
+    database rather than one that quietly guesses.
     """
     say: Callable[[str], None] = output if output is not None else logger.info
     plan = module_sql_plan(server_dir, _module_manifests(), docker.module_dir_names(server_dir))
@@ -449,12 +463,23 @@ def apply_module_sql(
         )
     except docker.DockerCommandError as refused:
         for line in module_sql_report(
-            plan, service=service, applied=applied_updates(seen), refusal=str(refused)
+            plan,
+            service=service,
+            applied=applied_updates(seen),
+            refusal=str(refused),
+            failed=failed_updates(seen),
+            ledger=read_ledger(ledger, plan) if ledger is not None else None,
+            ran=bool(seen),
         ):
             say(line)
         raise
+    said = [*seen, *run.tail]
     for line in module_sql_report(
-        plan, service=service, applied=applied_updates([*seen, *run.tail])
+        plan,
+        service=service,
+        applied=applied_updates(said),
+        failed=failed_updates(said),
+        ledger=read_ledger(ledger, plan) if ledger is not None else None,
     ):
         say(line)
     return run

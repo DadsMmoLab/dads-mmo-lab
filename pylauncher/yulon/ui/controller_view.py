@@ -3110,7 +3110,7 @@ def _for_wotlk(
         module_sql=(
             (
                 lambda output: wotlk_modules.apply_module_sql(
-                    server_dir, output=output, wsl_distro=wsl_distro
+                    server_dir, output=output, wsl_distro=wsl_distro, ledger=sql
                 )
             )
             if spec.import_service

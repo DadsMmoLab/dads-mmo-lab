@@ -1862,7 +1862,7 @@ def test_the_importers_last_words_go_under_details_and_yulons_sentence_stays_on_
     view._module_sql_failed(raised.value)
 
     report = view.module_report.toPlainText()
-    assert "The SQL run did not finish: ac-db-import exited 1" in report, report
+    assert "The SQL run did not finish: the database importer stopped with an error" in report
     assert "ERROR 1054" not in report, "the importer's own words are on the line"
     assert "ERROR 1054" in view.module_details.text()
     assert failures and "ERROR 1054" in failures[0], "the log lost them"
@@ -15764,15 +15764,29 @@ def _two_modules_on_disk(server_dir: Path) -> None:
         path.write_text("-- x\n", encoding="utf-8")
 
 
+class _UpdatesLedger:
+    """The `updates` tables: `SELECT name FROM updates ...` answered from `rows` (T214)."""
+
+    def __init__(self, rows: dict[str, set[str]] | None = None) -> None:
+        self.rows = rows or {}
+
+    def query(self, db: str, statement: str) -> str:
+        return "".join(f"{n}\n" for n in sorted(self.rows.get(db, ())) if f"'{n}'" in statement)
+
+
 def _real_module_sql(
     ps: _Ps,
     tmp_path: Path,
     fake: Callable[..., docker.AttachedRun],
     monkeypatch: pytest.MonkeyPatch,
+    ledger: _UpdatesLedger | None = None,
 ) -> ControllerView:
     monkeypatch.setattr(docker, "apply_module_sql", fake)
     services = _services(ps, tmp_path, [])
-    services.module_sql = lambda output: modules.apply_module_sql(tmp_path, output=output)
+    held = ledger if ledger is not None else _UpdatesLedger()
+    services.module_sql = lambda output: modules.apply_module_sql(
+        tmp_path, output=output, ledger=held
+    )
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
@@ -15801,7 +15815,8 @@ def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
         output(APPLYING_AOE)
         return docker.AttachedRun(0, (APPLYING_AOE,))
 
-    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    ledger = _UpdatesLedger({"world": {"aoe_loot_module_string.sql"}})
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch, ledger)
     view.apply_module_sql()
 
     assert handed == ["mod-aoe-loot"]
@@ -15842,7 +15857,7 @@ def test_a_refused_import_still_says_which_file_this_app_owns(
     view.apply_module_sql()
 
     text = view.module_report.toPlainText()
-    assert f"aoe_loot_module_string.sql -> world: refused: {words}" in text
+    assert "aoe_loot_module_string.sql -> world: not applied: ac-db-import did not run" in text
     assert "arac.sql -> world: not handed to the updater: this app applies it itself" in text
     assert "arac.sql -> world: refused" not in text
     assert failures and words in failures[0]
@@ -15996,7 +16011,13 @@ def test_the_module_sql_press_hands_over_city_bots_and_withholds_only_arac(
             output(line)
         return docker.AttachedRun(0, tuple(applying))
 
-    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    ledger = _UpdatesLedger(
+        {
+            db: {Path(rel).name}
+            for rel, db in zip(CITY_BOTS_FILES[:3], ("auth", "characters", "world"), strict=True)
+        }
+    )
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch, ledger)
     view.apply_module_sql()
 
     assert handed == ["mod-city-bots"], handed

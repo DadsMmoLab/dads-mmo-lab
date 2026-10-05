@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 
-from yulon import platform, runner, wsl
+from yulon import ansi, platform, runner, wsl
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
 from yulon.ui import lines
@@ -2466,7 +2466,8 @@ def run_one_shot(
         # Not raised here. See above — the probe is the only thing that can
         # tell the two failures apart, so this only makes sure the reason is in
         # the log.
-        logger.warning(f"{service} exited {run.returncode}: {last_words(run.tail)}")
+        words = " / ".join(importer_last_words(run.tail))
+        logger.warning(f"{service} exited {run.returncode}: {words}")
     return run
 
 
@@ -2675,13 +2676,43 @@ def apply_module_sql(
         service, server_dir, allowed_modules=allowed, wsl_distro=wsl_distro, sink=output
     )
     if run.returncode != 0:
+        # In words (T214, PR 305's live check): the sentence used to name `--rm`
+        # and `docker compose logs`. The importer's container is removed when it
+        # stops, so what it printed is all there is; Details holds its error.
         raise DockerRefusal(
-            f"{service} exited {run.returncode}, so its modules' SQL may be part-applied. Its "
-            "last words are under Details. The container was removed when it exited (`--rm`), "
-            "so those lines are all there is — `docker compose logs` has nothing to add.",
-            detail=last_words(run.tail),
+            "the database importer stopped with an error, so the modules' SQL may be only "
+            "partly applied. What it said is under Details, and the importer keeps nothing "
+            "else once it stops.",
+            detail="\n".join(importer_last_words(run.tail)),
         )
     return run
+
+
+_MYSQL_ERROR = re.compile(r"^ERROR \d+ \([0-9A-Z]+\)")
+"""The mysql client's own error line: `ERROR 1064 (42000) at line 2: You have an error ...`."""
+_IMPORTER_APPLYING = re.compile(r"Applying update\b")
+_IMPORTER_CONTEXT_AFTER = 3
+"""Lines kept after the error line: the importer's "Applying of file ... failed!" and its end."""
+
+
+def importer_last_words(tail: Sequence[str]) -> list[str]:
+    """The lines of an importer's output that say why it stopped, whole (T214).
+
+    PR 305's live check read Details beginning "…_world' failed!" -- the last
+    400 characters of `last_words()`, cut mid-line -- with the mysql error it
+    stopped on, `ERROR 1064 (42000) ... near 'THIS IS NOT SQL AT ALL'`, not in
+    it. So the last mysql `ERROR` line is looked for and always kept, with the
+    `Applying update` line before it that names the file and the few lines after
+    it that say what the importer made of it. Without one, the last five lines.
+    Every line is kept whole; colour codes are already gone (`run_attached()`).
+    """
+    said = [line.strip() for line in tail if line.strip()]
+    errors = [i for i, line in enumerate(said) if _MYSQL_ERROR.match(line)]
+    if not errors:
+        return said[-_LAST_WORDS_LINES:] or ["it printed nothing at all"]
+    at = errors[-1]
+    applying = [line for line in said[:at] if _IMPORTER_APPLYING.search(line)]
+    return [*applying[-1:], *said[at : at + 1 + _IMPORTER_CONTEXT_AFTER]]
 
 
 _NO_SUCH_CONTAINER = re.compile(r"\bno such (?:object|container)\b", re.IGNORECASE)
@@ -4717,6 +4748,10 @@ def run_attached(
                 if cancel is not None and cancel.is_set():
                     logger.warning(f"docker {' '.join(argv)} was cancelled; abandoning the client")
                     return AttachedRun(CANCELLED_RETURNCODE, tuple(tail))
+                # Colour codes off at the source (T214): this line goes to the
+                # screen, to Details through `tail` and to the log, and none of
+                # them draws `ESC[36m`. AzerothCore's importer colours every line.
+                line = ansi.strip(line)
                 tail.append(line)
                 if live is not None:
                     try:

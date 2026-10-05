@@ -5970,12 +5970,89 @@ def applied_updates(lines: Sequence[str]) -> frozenset[str]:
     return frozenset(found)
 
 
+_FAILED_UPDATE = re.compile(r"Applying of file '([^']+\.sql)' to database '[^']*' failed")
+"""The importer's own word that a file did NOT apply (T214, PR 305's live check, 2026-10-05).
+
+`Applying of file '/azerothcore/modules/mod-npc-beastmaster/data/sql/db-world/
+zz_gate305_broken.sql' to database 'acore_world' failed! If you are a user, ...`,
+printed after `>> Applying update "zz_gate305_broken.sql"` -- so the file was
+started, and `applied_updates()` alone reported it applied.
+"""
+
+_MYSQL_ERROR_LINE = re.compile(r"^ERROR \d+ \([0-9A-Z]+\)")
+"""mysql's own error line, printed just before the failure line above."""
+
+
+def failed_updates(lines: Sequence[str]) -> dict[str, str]:
+    """The file names the importer said it failed to apply, each with mysql's error line.
+
+    Base names, as `applied_updates()` reads them. The error is the last
+    `ERROR nnnn (state) ...` line before the failure line, `""` when there is none.
+    """
+    failed: dict[str, str] = {}
+    error = ""
+    for line in lines:
+        plain = line.strip()
+        if _MYSQL_ERROR_LINE.match(plain):
+            error = plain
+            continue
+        match = _FAILED_UPDATE.search(plain)
+        if match:
+            failed[PurePosixPath(match.group(1)).name] = error
+            error = ""
+    return failed
+
+
+class LedgerReader(Protocol):
+    """The read half of the SQL seam, as `DockerSql.query()` is: one SELECT, tab-separated rows."""
+
+    def query(self, db: Db, statement: str) -> str: ...
+
+
+Ledger = Mapping[Db, frozenset[str]]
+"""Per database, which of the asked-about file names its `updates` table holds."""
+
+
+def read_ledger(sql: LedgerReader, plan: ModuleSqlPlan) -> Ledger | None:
+    """Which of `plan`'s db-import files each database's `updates` table holds; None if unread.
+
+    The database's own record, asked after a run (T214): the importer applies a
+    file and then writes its row, so a row is the one proof a file is in the
+    database. Read only -- `module_sql_plan()` says why this app writes nothing
+    there. The rows are keyed by base name, as upstream ledgers them
+    (`mod-npc-beastmaster.json` notes `updates.name: beastmaster_tames.sql`).
+
+    None when any database could not be asked: a report must then claim nothing
+    the database was not asked about.
+    """
+    wanted: dict[Db, set[str]] = {}
+    for entry in plan.files:
+        name = PurePosixPath(entry.path).name
+        if entry.route == "db-import" and entry.module not in plan.withheld and "*" not in name:
+            wanted.setdefault(entry.db, set()).add(name)
+    ledger: dict[Db, frozenset[str]] = {}
+    for db, names in sorted(wanted.items()):
+        quoted = ", ".join(
+            "'" + n.replace("\\", "\\\\").replace("'", "''") + "'" for n in sorted(names)
+        )
+        try:
+            rows = sql.query(db, f"SELECT name FROM updates WHERE name IN ({quoted})")
+        except Exception as exc:  # noqa: BLE001 - an unread ledger is reported, not raised
+            logger.warning(f"could not read the {db} database's updates ledger: {exc}")
+            return None
+        ledger[db] = frozenset(line.strip() for line in rows.splitlines() if line.strip())
+    return ledger
+
+
 def module_sql_report(
     plan: ModuleSqlPlan,
     *,
     service: str,
     applied: frozenset[str],
     refusal: str = "",
+    failed: Mapping[str, str] | None = None,
+    ledger: Ledger | None = None,
+    ran: bool = True,
 ) -> tuple[str, ...]:
     """One sentence per SQL file: what this press did with it, and what it did not.
 
@@ -6002,12 +6079,26 @@ def module_sql_report(
     the only honest report of one is which route owns it, plus the date of this
     app's own claim where there is one. See `ModuleSqlFile.installed_on`.
 
-    `refusal` is the updater's words, empty when it exited 0. It is printed
-    against every db-import file the run did not name, because an importer that
-    stopped part-way cannot say which of the files it had not reached it would
-    have applied -- and naming them all is the only reading that does not
-    promise one of them was fine.
+    `refusal` is the updater's words, empty when it exited 0. It is no longer
+    printed against each file (T214): PR 305's live check read the whole
+    sentence on every file applied on an earlier day. Instead:
+
+    * a file in `failed` (the importer's own "Applying of file ... failed!")
+      is `failed`, with mysql's error line;
+    * with the database's `updates` `ledger` read, a file is `applied` only if
+      the importer named it AND the ledger holds it, `already applied` if the
+      ledger holds it and this run did not name it, and `not applied`
+      otherwise -- the order the files were listed in decides nothing;
+    * with no ledger, nothing is said to be in the database: a file the
+      importer named is what it "reported", and a file it did not name after it
+      stopped is `not known`. Only a run that finished may still read an
+      unnamed file as already ledgered, because the updater applies every
+      pending file before it says it is up to date.
+
+    `ran` is whether the importer printed anything, so a run refused before it
+    started says so rather than "stopped before it got to this file".
     """
+    failures = failed or {}
     lines: list[str] = []
     for name in plan.withheld:
         blocking = _blocking_files(plan, name)
@@ -6045,16 +6136,49 @@ def module_sql_report(
                 f"{where}: not applied: {entry.module} was not given to {service}, so the "
                 f"updater was not offered this file either"
             )
-        elif PurePosixPath(entry.path).name in applied:
-            lines.append(f"{where}: applied")
-        elif refusal:
-            lines.append(f"{where}: refused: {refusal}")
         else:
-            lines.append(
-                f"{where}: not applied now: {service} did not name it, which is what a file "
-                f"already in its updates ledger looks like"
-            )
+            verdict = _db_import_verdict(entry, service, applied, refusal, failures, ledger, ran)
+            lines.append(f"{where}: {verdict}")
     return tuple(lines)
+
+
+def _db_import_verdict(
+    entry: ModuleSqlFile,
+    service: str,
+    applied: frozenset[str],
+    refusal: str,
+    failed: Mapping[str, str],
+    ledger: Ledger | None,
+    ran: bool,
+) -> str:
+    """What one db-import file of a module given to the updater came to (`module_sql_report()`)."""
+    name = PurePosixPath(entry.path).name
+    if "*" in name:
+        return "nothing to apply: no file here matches it"
+    if name in failed:
+        return f"failed: {failed[name] or 'what the importer said is under Details'}"
+    named = name in applied
+    if ledger is not None:
+        held = name in ledger.get(entry.db, frozenset())
+        if held:
+            return "applied" if named else "already applied"
+        if named:
+            return f"not applied: {service} started it, and the database has no record of it"
+        if not refusal:
+            return f"not applied: {service} did not apply it, and the database has no record of it"
+        if not ran:
+            return f"not applied: {service} did not run"
+        return f"not applied: {service} stopped before it got to this file"
+    if named:
+        return f"{service} reported applying it; its updates ledger could not be read to confirm"
+    if not refusal:
+        return (
+            f"not applied now: {service} did not name it, which is what a file already in "
+            f"its updates ledger looks like"
+        )
+    if not ran:
+        return f"not applied: {service} did not run"
+    return f"not known: {service} stopped, and its updates ledger could not be read"
 
 
 def _github_compare(slug: str, base: str, ref: str) -> upstream.Comparison | None:
