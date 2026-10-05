@@ -193,6 +193,10 @@ class Recorder:
 
     db_started: bool = False
     db_start_error: str = ""
+    verify_error: Exception | None = None
+    """What `verify_import()` raises instead of answering imported (T248)."""
+    start_error: Exception | None = None
+    """What `start` raises instead of starting (T248)."""
     db_healthy: bool = True
     load_lines: tuple[str, ...] = ()
     """What `recreate`'s wait for a loading world says (T158); nothing, as a loaded world does."""
@@ -208,6 +212,11 @@ class Recorder:
     only ever succeed could not produce the refusal the engine has to make
     BEFORE it compiles over the only copy of the running build.
     """
+    ids_silent: bool = False
+    """T225 (cold review): `image_id` answers None for every name, as a Docker that does not
+    answer `docker image inspect` does."""
+    image_ids: dict[str, str | None] = field(default_factory=dict)
+    """T225: what `image_id` answers for these names instead (a tag a stopped build moved)."""
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
@@ -590,7 +599,9 @@ class Recorder:
         self.relabelled.append(path)
         return True
 
-    def start_db(self, spec: docker.ContainerSpec, server_dir: Path) -> None:
+    def start_db(
+        self, spec: docker.ContainerSpec, server_dir: Path, *, because: str = "nothing was run"
+    ) -> None:
         self.calls.append("start-db")
         if self.db_start_error:
             raise docker.DockerCommandError(self.db_start_error)
@@ -769,6 +780,8 @@ class Recorder:
             probe: object, service: str, server_dir: Path, run: object
         ) -> docker.ImportState:
             self.calls.append("verify")
+            if self.verify_error is not None:
+                raise self.verify_error
             return IMPORTED
 
         seams = native.Seams(
@@ -800,6 +813,7 @@ class Recorder:
             images_built=self.images_built,
             build_cache_bytes=self.build_cache_bytes,
             folder_bytes=self.folder_bytes,
+            image_id=self.image_id,
             build=build,
             one_shot=one_shot,
             verify_import=verify,
@@ -875,6 +889,23 @@ class Recorder:
             return True
         return self.images
 
+    def image_id(self, ref: str) -> str | None:
+        """`docker.image_id()` on a machine where no tag ever moves (T225). NOT evidence.
+
+        A ref and its `-rollback` and `-failed` names answer the SAME id, so a rebuild that fails
+        reads "the live tags did not move" and keeps the path it took before T225;
+        a `-parked` name answers None, so no kept build is ever found (T224). Every
+        test about which image a name holds drives `test_rebuild._Daemon` instead,
+        whose names are moved by the build, the tags and the removals it is asked for.
+        """
+        if ref in self.image_ids:
+            return self.image_ids[ref]
+        if self.ids_silent or ref.endswith(native.PARKED_TAG_SUFFIX):
+            return None
+        for suffix in (native.ROLLBACK_TAG_SUFFIX, native.FAILED_TAG_SUFFIX):
+            ref = ref.removesuffix(suffix)
+        return "sha256:" + ref
+
     def gather(self, entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:
         self.calls.append("gather")
         return preflight.Facts(
@@ -890,6 +921,8 @@ class Recorder:
 
     def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         self.calls.append("start")
+        if self.start_error is not None:
+            raise self.start_error
         return True
 
     def tag_image(self, src: str, dst: str) -> str:

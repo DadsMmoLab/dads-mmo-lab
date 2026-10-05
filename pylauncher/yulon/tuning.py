@@ -791,7 +791,7 @@ def lint(text: str) -> tuple[LintIssue, ...]:
 
 
 LINT_SENTENCE = (
-    "Line {line} does not look like a setting: {text!r}. A .conf file holds `Key = Value` "
+    "Line {line} does not look like a setting: {text!r}. A .conf file holds “Key = Value” "
     "lines, comments starting with #, and [section] headers. Save it anyway?"
 )
 

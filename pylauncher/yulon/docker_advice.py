@@ -32,21 +32,22 @@ _DESKTOP_NOT_RUNNING = (
     "Yu'lon checks again every few seconds."
 )
 _ENGINE_NOT_RUNNING = (
-    "Docker is installed but not running. Restart the computer, or run "
-    '"sudo systemctl start docker" in a terminal.'
+    "Docker is installed but not running. Restart the computer, or run this in a terminal:\n"
+    "sudo systemctl start docker"
 )
 _DECK_NOT_RUNNING = (
-    "Docker is installed but not running. Restart the Deck, or run "
-    '"sudo systemctl start docker" in a terminal in Desktop Mode.'
+    "Docker is installed but not running. Restart the Deck, or run this in a terminal in "
+    "Desktop Mode:\n"
+    "sudo systemctl start docker"
 )
 _ENGINE_NOT_ANSWERING = (
-    "Docker isn't answering. Restart it with "
-    '"sudo systemctl restart docker" in a terminal (or restart the computer); '
-    "Yu'lon checks again every few seconds."
+    "Docker isn't answering. Restart the computer, or restart Docker with this in a terminal; "
+    "Yu'lon checks again every few seconds.\n"
+    "sudo systemctl restart docker"
 )
 _DECK_NOT_ANSWERING = (
-    "Docker isn't answering. Restart the Deck, or run "
-    '"sudo systemctl restart docker" in a terminal in Desktop Mode.'
+    "Docker isn't answering. Restart the Deck, or run this in a terminal in Desktop Mode:\n"
+    "sudo systemctl restart docker"
 )
 _ENGINE_PERMISSION = (
     "Docker is running, but your account isn't allowed to use it yet. Log out and back in "
@@ -66,17 +67,18 @@ _MACOS_PERMISSION = (
 )
 _WSL_NOT_RUNNING = (
     "This server runs inside the WSL distro {distro}, and the Docker in that distro isn't "
-    'answering. Open a terminal in {distro} and run "sudo systemctl start docker" (or restart '
-    "the computer), then press Try again."
+    "answering. Restart the computer, or open a terminal in {distro} and run this, then press "
+    "Try again:\n"
+    "sudo systemctl start docker"
 )
 _UNKNOWN = (
     "Docker answered with an error Yu'lon doesn't recognise. The Logs tab has what it "
     "said; press Try again once it's sorted."
 )
 _WSL_UNNAMED = (
-    "This server runs inside a WSL distro, and the Docker in that distro isn't answering. Open "
-    'a terminal in it and run "sudo systemctl start docker" (or restart the computer), then '
-    "press Try again."
+    "This server runs inside a WSL distro, and the Docker in that distro isn't answering. "
+    "Restart the computer, or open a terminal in it and run this, then press Try again:\n"
+    "sudo systemctl start docker"
 )
 
 

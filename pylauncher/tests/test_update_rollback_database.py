@@ -769,6 +769,21 @@ def _module_will_not_go_back(rec: Recorder, server_dir: Path) -> None:
     rec.restore_errors[server_dir / MODULE] = git.GitError("index.lock exists")
 
 
+def test_an_update_left_stopped_keeps_the_command_that_shows_the_world_servers_log(
+    tmp_path: Path,
+) -> None:
+    """T248 review: the update route's ServersLeftStopped re-wrap carries the Details too."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    _module_will_not_go_back(rec, server_dir)
+    made = make(wait_ready=_old_build_comes_back())
+    made._snapshot = FakeSnapshot(rec)
+    with pytest.raises(native.ServersLeftStopped) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+
+    assert "docker compose logs" in raised.value.detail, str(raised.value)
+    assert "docker compose logs" not in str(raised.value)
+
+
 def test_a_module_that_will_not_go_back_leaves_the_servers_stopped_and_names_the_command(
     tmp_path: Path,
 ) -> None:

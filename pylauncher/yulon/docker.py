@@ -64,6 +64,17 @@ class DockerRefusal(DockerCommandError, SaidByYulon):
         self.detail = detail
 
 
+def logs_command(service: str, server_dir: Path) -> str:
+    """How to read everything `service` printed, for Details -- never for the line (T248).
+
+    The line says in words that the container's own log has the reason; the
+    command is what a player who wants it copies from Details.
+    """
+    return (
+        f"To read everything it printed, run this in {server_dir}:\ndocker compose logs {service}"
+    )
+
+
 class DockerCliMissingError(DockerCommandError, SaidByYulon):
     """Raised when there is no docker CLI to run at all — nothing was asked of Docker.
 
@@ -1288,9 +1299,10 @@ def start_staged(
     missing = [name for name in (spec.db, spec.auth, spec.world) if name not in running]
     if missing:
         raise DockerRefusal(
-            f"compose reported success but {', '.join(missing)} are not running. "
-            f"`docker compose logs {spec.service_for(missing[0])}` in {server_dir} "
-            f"will say why."
+            f"Docker reported the start as done, but {', '.join(missing)} "
+            f"{'is' if len(missing) == 1 else 'are'} not running. "
+            f"{missing[0]}'s own log says why.",
+            detail=logs_command(spec.service_for(missing[0]), server_dir),
         )
     return True
 
@@ -1683,7 +1695,7 @@ def remove_staged(
             "removed."
         )
     if running.strangers:
-        raise DockerRefusal(_stranger_message(running.strangers, project, server_dir))
+        raise _stranger_refusal(running.strangers, project, server_dir)
 
     before = _project_containers(project, wsl_distro=wsl_distro)
     if before is None:
@@ -1722,7 +1734,9 @@ def remove_staged(
     if after is None:
         raise DockerRefusal(
             "the containers were asked to go, but Docker will no longer say what this install "
-            "has, so the removal cannot be confirmed. Check with `docker ps -a`."
+            "has, so the removal cannot be confirmed. Once Docker answers again, its list of "
+            "containers shows whether any are left.",
+            detail="Docker's list of every container, running or not: docker ps -a",
         )
     if after:
         # Only names the census already proved carry this project's label.
@@ -2070,7 +2084,7 @@ def repair_import(
             "not re-run."
         )
     if running.strangers:
-        raise DockerRefusal(_stranger_message(running.strangers, project, server_dir))
+        raise _stranger_refusal(running.strangers, project, server_dir)
     servers = [name for name in (spec.world, spec.auth) if name in running.ours]
     if servers:
         verb = "is" if len(servers) == 1 else "are"
@@ -2199,7 +2213,8 @@ def start_database(
     if not wait_db_healthy(spec.db, timeout=timeout, wsl_distro=wsl_distro):
         raise DockerRefusal(
             f"{spec.db} did not report healthy within {timeout:.0f}s, so {because}. "
-            f"`docker compose logs {spec.service_for(spec.db)}` in {server_dir} will say why."
+            "The database's own log says why.",
+            detail=logs_command(spec.service_for(spec.db), server_dir),
         )
     return True
 
@@ -2471,6 +2486,23 @@ def run_one_shot(
     return run
 
 
+IMPORT_REST_UNDER_DETAILS = (
+    "Its last lines, and how to read everything it printed, are under Details."
+)
+"""Where an import that did not finish points the player (T248): never at a command.
+
+Both callers show Details: Repair under its press, and the install engine's
+failure through `said.with_details()`.
+"""
+
+
+def _import_details(service: str, server_dir: Path, run: AttachedRun) -> str:
+    """The importer's last lines, then how to read all of them (T248)."""
+    return "\n\n".join(
+        part for part in (last_words(run.tail), logs_command(service, server_dir)) if part
+    )
+
+
 def verify_import(
     probe: ImportProbe, service: str, server_dir: Path, run: AttachedRun
 ) -> ImportState:
@@ -2522,18 +2554,16 @@ def verify_import(
         # called this a finished repair, hid the button, and left the user a
         # broken server with a success message (review, 2026-08-23).
         raise DockerRefusal(
-            f"{service} ran and wrote some rows, but did not finish: {after.detail}. The "
-            f"databases are in a half-imported state. Its last words are under Details, and "
-            f"`docker compose logs {service}` in {server_dir} has the rest of what it printed.",
-            detail=last_words(run.tail),
+            f"The database import ran and wrote some rows, but did not finish: {after.detail}. "
+            f"The databases are in a half-imported state. {IMPORT_REST_UNDER_DETAILS}",
+            detail=_import_details(service, server_dir, run),
         )
     else:
         raise DockerRefusal(
-            f"{service} ran, but the databases still read as {after.state} ({after.detail}). "
-            f"Nothing is imported that was not imported before. Its last words are under "
-            f"Details, and `docker compose logs {service}` in {server_dir} has the rest of what "
-            "it printed.",
-            detail=last_words(run.tail),
+            f"The database import ran, but the databases still read as {after.state} "
+            f"({after.detail}). Nothing is imported that was not imported before. "
+            f"{IMPORT_REST_UNDER_DETAILS}",
+            detail=_import_details(service, server_dir, run),
         )
     logger.info(f"{service} finished; the databases now read as {after.state}")
     return after
@@ -2628,7 +2658,7 @@ def apply_module_sql(
             "was applied."
         )
     if running.strangers:
-        raise DockerRefusal(_stranger_message(running.strangers, project, server_dir))
+        raise _stranger_refusal(running.strangers, project, server_dir)
     servers = [name for name in (spec.world, spec.auth) if name in running.ours]
     if servers:
         verb = "is" if len(servers) == 1 else "are"
@@ -2801,8 +2831,8 @@ def _run_docker_stop(
         return
     if deadline is not None and proc.returncode == _TIMEOUT_RETURNCODE:
         raise DockerRefusal(
-            f"docker stop {container} did not return within {deadline:.0f} seconds, so whether "
-            f"{container} stopped is not known"
+            f"Docker did not finish stopping {container} within {deadline:.0f} seconds, so "
+            f"whether {container} stopped is not known"
         )
     if _STOP_SAYS_GONE in proc.stderr:
         logger.debug(f"docker stop {container}: already gone")
@@ -2856,6 +2886,23 @@ def _refuse_without_an_identity(
     )
 
 
+STRANGER_DETAIL = (
+    "Each running compose project and the compose file it came from: docker compose ls"
+)
+"""What the stranger refusal's "Docker can list each running project" means, for Details (T248)."""
+
+
+def _stranger_refusal(
+    strangers: tuple[tuple[str, str | None], ...], project: str, server_dir: Path
+) -> DockerRefusal:
+    """`_stranger_message()` as the refusal, with the listing command under Details (T248)."""
+    owned = any(owner for _name, owner in strangers)
+    return DockerRefusal(
+        _stranger_message(strangers, project, server_dir),
+        detail=STRANGER_DETAIL if owned else "",
+    )
+
+
 def _stranger_message(
     strangers: tuple[tuple[str, str | None], ...], project: str, server_dir: Path
 ) -> str:
@@ -2893,9 +2940,9 @@ def _stranger_message(
         which = " and ".join(f"'{owner}'" for owner in owners)
         lines.append(
             f"{', '.join(labelled)} belong to compose project {which}. Find out which folder "
-            "that is before changing anything: `docker compose ls` prints each running "
-            "project's own compose file. If it is a different install, stop that server from "
-            "its own folder and leave this one alone."
+            "that is before changing anything: Docker can list each running project with its "
+            "own compose file. If it is a different install, stop that server from its own "
+            "folder and leave this one alone."
         )
     if len(owners) == 1 and not unlabelled:
         # Both conditions matter. With a second, unlabelled stranger in the set,
@@ -3353,7 +3400,7 @@ def stop_staged(
             "again in a moment."
         )
     if before.strangers:
-        raise DockerRefusal(_stranger_message(before.strangers, project, server_dir))
+        raise _stranger_refusal(before.strangers, project, server_dir)
 
     # No pin is written here, though the census has just proved the basename and
     # the labels agree. Writing it down was tried and reverted the same day: a
@@ -3430,8 +3477,9 @@ def stop_staged(
         # refusal three lines above, silently discarded (review, 2026-08-22).
         raise DockerRefusal(
             f"{', '.join(after.unreadable)} are still running and Docker will no longer say "
-            "which project owns them, so this stop cannot be confirmed. Check with "
-            "`docker ps` before assuming the server is down."
+            "which project owns them, so this stop cannot be confirmed. Do not take the server "
+            "as down until Docker's list of running containers leaves them out.",
+            detail="Docker's list of running containers: docker ps",
         )
     logger.info("stop_staged(): stopped; containers kept for a fast restart")
     return True
@@ -5100,6 +5148,23 @@ def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
         return size
     logger.info("`docker system df` printed no Build Cache row")
     return None
+
+
+def image_id(ref: str, *, wsl_distro: str | None = None) -> str | None:
+    """The id of the image `ref` names, or None when there is none to read (T224, T225).
+
+    Asked the way `images_built()` asks, one ref at a time. None covers both
+    "no such image" and a daemon that did not answer, and the caller decides
+    what that means: a rebuild's Stop counts an unanswered id as a tag that
+    moved (putting back a tag that never moved costs nothing, and trusting the
+    silence would lose the old build), and a kept build is never used on one.
+    """
+    proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref], wsl_distro=wsl_distro)
+    found = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not found:
+        logger.info(f"no image id for {ref}: {proc.stderr.strip() or 'empty answer'}")
+        return None
+    return found
 
 
 def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[str]:

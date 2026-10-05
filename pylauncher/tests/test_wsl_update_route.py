@@ -287,6 +287,8 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "install_id": "the id the install RECORDED (`recorded_install_id`), tested on its own",
     "host_zone": "a new install's zone (T171); a rebuild or update of an installed server "
     "carries its own off the override, and Windows is the computer the player sits at",
+    "context_fingerprint": "answered None: a server inside WSL keeps no finished build (T224, "
+    "owner D4), because a host walk of \\\\wsl.localhost boots the distro (T133)",
     "distro": "not a seam but the distro's own name, so a sentence can say where a press is "
     "(T179); asserted equal to it below",
 }

@@ -163,7 +163,7 @@ services:
     image: {{IMAGE_PREFIX}}server:{{IMAGE_TAG}}
     networks: [{{CONTAINER_PREFIX}}net]
     working_dir: {{CORE_DIR}}/bin
-    command: ["./worldserver"]
+    command: ["./worldserver"]{{WORLD_DATA_ENTRYPOINT}}
     # stdin HELD OPEN, and not only for the console: the worldserver STOPS
     # when its stdin reaches end of file (CommandLine/CliRunnable.cpp:183-186,
     # `feof(stdin)` -> World::StopNow), so without these two it shuts itself
@@ -190,7 +190,7 @@ services:
       # WORLDSERVER_FOLDERS token after ./data is the same folder rule over
       # worldserver.conf's table: its LogsDir.
       - ./etc:{{CORE_DIR}}/etc{{BIND_LABEL}}
-      - ./data:{{CORE_DIR}}/data{{BIND_LABEL}}{{WORLDSERVER_FOLDERS}}
+      - {{WORLD_DATA_MOUNTS}}{{WORLDSERVER_FOLDERS}}
     depends_on:
       {{CONTAINER_PREFIX}}db:
         condition: service_healthy
@@ -199,4 +199,4 @@ networks:
   {{CONTAINER_PREFIX}}net:
 
 volumes:
-  db-data:
+  db-data:{{WORLD_DATA_VOLUME}}

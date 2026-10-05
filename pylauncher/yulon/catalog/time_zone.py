@@ -122,7 +122,7 @@ A copy, because `composegen` imports this module; `test_time_zone.py` holds the 
 """
 
 MISSING_DATA = (
-    "the time zone list is not in this copy of Yu'lon (its `tzdata` package could not be read), "
+    "the time zone list is not in this copy of Yu'lon (its list of time zones could not be read), "
     "so no zone can be set here; the server keeps the zone its files name"
 )
 
