@@ -60,3 +60,8 @@ pyplan/upstream-cmangos-doodad-issue.md                       text eol=lf
 # fixture asserting the opposite of what it was recorded for.
 pylauncher/tests/fixtures/git-clone-progress.stderr           -text
 pylauncher/tests/data/centurion-rendered/**/*.yml  text eol=lf
+
+# mod-playerbots/azerothcore-wotlk's recipe files at the catalog pin, vendored byte for
+# byte: `test_build_context.py` checks their sha256 against the table `build_context`
+# recognises the recipe by (T230), so a CRLF checkout would fail it on Windows.
+pylauncher/tests/data/azerothcore-wotlk-7f12e89e/**           -text
