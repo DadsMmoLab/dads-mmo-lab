@@ -1929,3 +1929,34 @@ def test_on_windows_a_reader_that_cannot_start_still_ends_and_closes_the_job(
     assert proc.poll() is not None, "the child is still running"
     assert job.events[-1] == "close", job.events
     assert "release" not in job.events
+
+
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
+def test_on_windows_a_stopped_stream_whose_root_exits_first_still_closes_its_job(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """A Stop already chosen wins over "it ran out by itself": the job is closed, not released.
+
+    From Codex's second adversarial review: Stop marks the stream and hands
+    `_end_child` to a thread; if docker.exe exits before that thread runs, the
+    thread finds nothing alive and never ends the job, and the stream's
+    `finally` saw a root that had exited and released the job, leaving the
+    rest of the tree running. Here the root exits, the stream is marked as a
+    Stop marks it, and the `finally` runs: kill-on-close must still be set.
+
+    Mutation this catches: `_finish` deciding from `poll()` alone.
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    start = stream if entry == "stream" else runner.stream_progress
+    lines = start(_python_cmd("print('first', flush=True)"))
+    assert next(lines) == "first"
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    proc.wait(timeout=HANG_BOUND)
+    runner._LIVE_STREAMS[lines].ended = True
+
+    assert list(lines) == []
+
+    assert job.events[-1] == "close", job.events
+    assert "release" not in job.events

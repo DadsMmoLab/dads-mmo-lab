@@ -161,7 +161,7 @@ def _abandon_unread(proc: _AnyPopen, job: winjob.Job | None) -> None:
         job.close()
 
 
-def _finish(proc: _AnyPopen, job: winjob.Job | None) -> None:
+def _finish(proc: _AnyPopen, job: winjob.Job | None, *, stopped: bool = False) -> None:
     """A stream's last word on its child: end it if it is running, then let its job go.
 
     A child that ran out by itself has its job RELEASED, so whatever it left
@@ -170,12 +170,18 @@ def _finish(proc: _AnyPopen, job: winjob.Job | None) -> None:
     closed, which also ends anything `_end_child`'s fallback could not reach.
     The job is closed only after it was asked to end the tree, because a
     closed job's handle can no longer end anything.
+
+    `stopped` is `_Child.ended`, which `end_streams_started_on()` sets before it
+    starts the thread that ends the child. It overrides `poll()`: if docker.exe
+    exits before that thread runs, the thread finds nothing alive and ends
+    nothing, and a release here would leave the rest of the tree running after
+    a Stop (Codex's second adversarial review).
     """
     ran_out = proc.poll() is not None
     _end_child(proc, job)
     if job is None:
         return
-    if ran_out:
+    if ran_out and not stopped:
         job.release()
     else:
         job.close()
@@ -677,7 +683,7 @@ def _stream_lines(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        _finish(proc, job)
+        _finish(proc, job, stopped=child.ended)
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -848,7 +854,7 @@ def _progress_lines(
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader
         # thread stuck on a pipe.
-        _finish(proc, job)
+        _finish(proc, job, stopped=child.ended)
         for reader in readers:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for pipe in (proc.stdout, proc.stderr):

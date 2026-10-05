@@ -298,16 +298,25 @@ def create() -> Job | None:
     try:
         api = _native()
         handle = api.create_job()
-        if not handle:
-            logger.warning(f"could not create a job (error {api.last_error()})")
-            return None
-        limits = ExtendedLimits()
-        limits.BasicLimitInformation.LimitFlags = _KILL_ON_JOB_CLOSE | _BREAKAWAY_OK
-        if not api.set_information(handle, _EXTENDED_LIMIT_INFORMATION, limits):
-            logger.warning(f"could not set a job's limits (error {api.last_error()})")
-            api.close(handle)
-            return None
     except Exception as exc:  # noqa: BLE001 - no job is no harm; a failed spawn is
         logger.warning(f"could not create a job: {exc!r}")
         return None
-    return Job(api, handle)
+    if not handle:
+        logger.warning(f"could not create a job (error {api.last_error()})")
+        return None
+    job = Job(api, handle)
+    try:
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = _KILL_ON_JOB_CLOSE | _BREAKAWAY_OK
+        limited = api.set_information(handle, _EXTENDED_LIMIT_INFORMATION, limits)
+        if not limited:
+            logger.warning(f"could not set a job's limits (error {api.last_error()})")
+    except Exception as exc:  # noqa: BLE001 - as above
+        logger.warning(f"could not set a job's limits: {exc!r}")
+        limited = False
+    if not limited:
+        # Closed whichever way the limits failed (Codex's second review: an
+        # exception here used to skip the close and leak the handle).
+        job.close()
+        return None
+    return job

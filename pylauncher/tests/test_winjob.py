@@ -152,12 +152,17 @@ def test_create_answers_none_when_no_job_can_be_made(monkeypatch: pytest.MonkeyP
     assert api.names() == ["create_job"]
 
 
-def test_create_closes_a_job_whose_limits_it_could_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("how", ["fails", "raises"])
+def test_create_closes_a_job_whose_limits_it_could_not_set(
+    monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
     """A job without KILL_ON_JOB_CLOSE is not the job this module promises, so it is let go.
 
-    Mutation this catches: returning the job anyway, or leaking its handle.
+    `raises` is from Codex's second review: an exception there skipped the close.
+
+    Mutations this catches: returning the job anyway, or leaking its handle.
     """
-    api = _with(monkeypatch, _FakeApi(fails=("set_information",)))
+    api = _with(monkeypatch, _FakeApi(**{how: ("set_information",)}))
 
     assert winjob.create() is None
     assert api.names() == ["create_job", "set_information", "close"]
