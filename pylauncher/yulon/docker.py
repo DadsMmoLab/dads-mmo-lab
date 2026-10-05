@@ -4579,6 +4579,70 @@ def _exit_code(said: Sequence[str]) -> str:
     return ""
 
 
+_METADATA_STEP = re.compile(r"^#(\d+) \[[^\]]*\] load metadata for (\S+)$")
+"""BuildKit's header for the step that looks a `FROM` image up in its registry.
+
+`#3 [ac-worldserver internal] load metadata for docker.io/library/ubuntu:24.04` --
+the first thing a build does, before any layer is built.
+"""
+
+_RESOLVE_FAILED = re.compile(r"failed to resolve source metadata for (\S+): ")
+"""The same failure in the build's closing `failed to solve:` line."""
+
+_REGISTRY_UNREACHABLE = re.compile(
+    r"TLS handshake timeout|i/o timeout|no such host|connection reset by peer"
+    r"|connection refused|connection timed out|no route to host|network is unreachable"
+    r"|context deadline exceeded|server misbehaving|Temporary failure in name resolution"
+    r"|(?::|\bunexpected) EOF$"
+)
+"""The network's words, as Go's HTTP client and BuildKit's resolver print them.
+
+`EOF` only at the end of the line, after Go's `: ` or as `unexpected EOF` -- a
+connection the registry's side closed mid-answer -- so the three letters inside
+an image name or a URL are not read as one. Every word here counts only on the
+metadata step's lines (`base_image_unreachable()`), which is what keeps a `RUN`
+step's own failure out.
+
+Transport errors only. "failed to fetch anonymous token" is NOT one: it is
+BuildKit's wrapper around whatever the token request met, which was a TLS
+handshake timeout on yulon-win11 (2026-10-04) but is an HTTP status when Docker
+Hub answers and refuses -- 401, 403, or a 429 rate limit -- and telling that
+user to check their internet connection is false (Codex review). Nor is an
+image name that does not exist (`...: not found`): asking again cannot fix it.
+"""
+
+
+def base_image_unreachable(tail: Sequence[str]) -> str:
+    """The base image a failed build could not look up because the registry did not answer.
+
+    `""` for every other failure (T223). Only the metadata step counts -- its
+    own `#N ERROR:` line, or the closing line's `failed to resolve source
+    metadata for` -- because that step runs before anything is built, so a
+    failure there means nothing was compiled and another try costs seconds. The
+    same network words in a `RUN` step's output are that step's command failing,
+    perhaps after an hour of compiling, and are not this.
+
+    The name comes back without `docker.io/library/`, as the Dockerfile spells it.
+    """
+    said = [line.strip() for line in tail]
+    looked_up: dict[str, str] = {}
+    for line in said:
+        header = _METADATA_STEP.match(line)
+        if header:
+            looked_up[header.group(1)] = header.group(2)
+    image = ""
+    for line in said:
+        if not _REGISTRY_UNREACHABLE.search(line):
+            continue
+        step = re.match(r"^#(\d+) ERROR: ", line)
+        resolved = _RESOLVE_FAILED.search(line)
+        if step and step.group(1) in looked_up:
+            image = looked_up[step.group(1)]
+        elif resolved:
+            image = resolved.group(1)
+    return image.removeprefix("docker.io/").removeprefix("library/")
+
+
 def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
     """The end of a command's output, short enough to put inside a sentence.
 
@@ -4701,13 +4765,17 @@ def run_attached(
     as an exception — the callers here already have to handle a failed run.
 
     `cancel`, when set mid-run, stops reading and lets `runner.stream()`'s
-    generator-abandonment path terminate the compose client. The result comes
-    back as `CANCELLED_RETURNCODE`. What it does NOT do is stop work already
-    handed to the daemon: BuildKit finishes the build step it is on, and a
-    one-shot container keeps running to completion. That is desirable (the
-    layer cache keeps the work, and a resumed install re-probes the databases)
-    and it is the caller's job to say so, per stage — see
-    `native.BUILD_CANCEL_NOTE` and its neighbours. `repair_import()`
+    generator-abandonment path end the compose client. The result comes
+    back as `CANCELLED_RETURNCODE`. What a Stop does to work already handed to
+    the daemon differs by platform. A one-shot container keeps running to
+    completion everywhere. A build goes on to finish its current step on Linux
+    and macOS, where only the docker CLI is ended (T298 asks whether that
+    holds). On Windows the client's whole process tree is ended (T246), and the
+    yulon-win11 probe of 2026-10-05 saw BuildKit's build end at once as `Error`.
+    Either way the layer cache keeps every finished step and a resumed install
+    re-probes the databases, and it is the caller's job to say what a Stop
+    costs, per stage — see `native.build_cancel_note()` and its neighbours.
+    `repair_import()`
     deliberately passes no cancel at all; see there.
 
     `merge_stderr` is for the build, whose entire progress output is stderr;

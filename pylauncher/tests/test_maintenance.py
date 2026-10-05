@@ -644,6 +644,172 @@ def test_a_restore_notices_a_marker_that_appeared_after_its_plan_was_made(
     assert mysql.dumped == [], "no dump of a database a previous restore had part-overwritten"
 
 
+def test_a_restore_runs_its_before_load_step_after_the_safety_copy_and_the_marker(
+    tmp_path: Path,
+) -> None:
+    """T217's update rollback drops the tables its copy does not hold in this step.
+
+    After the safety copy (which still holds those tables) and after the marker
+    (so a step that dies leaves a recognisable half-state), and before the load.
+    """
+    seen: list[str] = []
+    mysql = FakeMysql(("acore_world",))
+
+    def before_load() -> None:
+        marker = maintenance.marker_path(tmp_path).is_file()
+        seen.append(f"before marker={marker} dumped={mysql.dumped} loaded={len(mysql.loaded)}")
+
+    plan = plan_restore(a_backup_of(tmp_path, "acore_world"), tmp_path, running=running(DB))
+    restore(plan, mysql, confirm=plan.token, running=running(DB), now=AT, before_load=before_load)
+    assert seen == ["before marker=True dumped=['acore_world'] loaded=0"]
+    assert mysql.loaded == [good_dump("acore_world")]
+    assert interrupted_restore(tmp_path) is None
+
+
+def test_a_before_load_step_that_fails_is_the_unknown_state_and_keeps_the_marker(
+    tmp_path: Path,
+) -> None:
+    def before_load() -> None:
+        raise MaintenanceError("connection lost")
+
+    mysql = FakeMysql(("acore_world",))
+    plan = plan_restore(a_backup_of(tmp_path, "acore_world"), tmp_path, running=running(DB))
+    with pytest.raises(MaintenanceError, match="unknown state.*pre-restore_acore_world"):
+        restore(
+            plan, mysql, confirm=plan.token, running=running(DB), now=AT, before_load=before_load
+        )
+    assert mysql.loaded == []
+    assert interrupted_restore(tmp_path) is not None
+
+
+def test_a_restore_names_its_safety_copy_with_the_label_it_is_given(tmp_path: Path) -> None:
+    """The update rollback's safety copies carry their own label, so they can be pruned."""
+    mysql = FakeMysql(("acore_world",))
+    plan = plan_restore(a_backup_of(tmp_path, "acore_world"), tmp_path, running=running(DB))
+    report = restore(
+        plan, mysql, confirm=plan.token, running=running(DB), now=AT, safety_label="x-label"
+    )
+    assert [p.name for p in report.safety_backup] == ["20260823_143005_x-label_acore_world.sql"]
+
+
+_TABLED_DUMP = (
+    b"-- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)\n--\n"
+    b"CREATE DATABASE /*!32312 IF NOT EXISTS*/ `acore_playerbots`;\n"
+    b"USE `acore_playerbots`;\n"
+    b"DROP TABLE IF EXISTS `playerbots_random_bots`;\n"
+    b"CREATE TABLE `playerbots_random_bots` (\n  `id` int\n) ENGINE=InnoDB;\n"
+    b"INSERT INTO `playerbots_random_bots` VALUES (1),(2);\n"
+    b"DROP TABLE IF EXISTS `updates`;\n"
+    b"CREATE TABLE `updates` (\n  `name` varchar(200)\n) ENGINE=InnoDB;\n"
+    b"/*!50001 DROP VIEW IF EXISTS `bots_view`*/;\n"
+    b"/*!50001 CREATE VIEW `bots_view` AS SELECT 1 AS `id`*/;\n"
+    b"-- Dump completed on 2026-10-04 21:00:00\n"
+)
+
+
+def test_the_tables_a_copy_holds_are_read_out_of_it_by_database(tmp_path: Path) -> None:
+    path = tmp_path / "copy.sql"
+    path.write_bytes(_TABLED_DUMP)
+    assert maintenance.tables_in_copy(path) == {
+        "acore_playerbots": ("playerbots_random_bots", "updates", "bots_view")
+    }
+
+
+def test_a_copy_cut_short_or_holding_no_table_is_refused_before_anything_is_dropped(
+    tmp_path: Path,
+) -> None:
+    cut = tmp_path / "cut.sql"
+    cut.write_bytes(_TABLED_DUMP.replace(b"-- Dump completed on 2026-10-04 21:00:00\n", b""))
+    with pytest.raises(MaintenanceError, match="cut short"):
+        maintenance.tables_in_copy(cut)
+    empty = tmp_path / "empty.sql"
+    empty.write_bytes(good_dump("acore_playerbots").replace(b"INSERT INTO `t` VALUES (1);\n", b""))
+    with pytest.raises(MaintenanceError, match="no table for acore_playerbots"):
+        maintenance.tables_in_copy(empty)
+
+
+class SchemaMysql(FakeMysql):
+    """A `FakeMysql` that also lists a database's tables and runs a statement."""
+
+    def __init__(self, tables: dict[str, list[tuple[str, str]]]) -> None:
+        super().__init__(tuple(tables))
+        self.tables_of = tables
+        self.executed: list[str] = []
+
+    def tables(self, database: str) -> tuple[tuple[str, str], ...]:
+        return tuple(self.tables_of[database])
+
+    def execute(self, sql: str) -> None:
+        self.executed.append(sql)
+
+
+def test_dropping_drops_exactly_the_tables_and_views_the_copy_does_not_hold() -> None:
+    mysql = SchemaMysql(
+        {
+            "acore_playerbots": [
+                ("playerbots_random_bots", "BASE TABLE"),
+                ("playerbots_speech", "BASE TABLE"),
+                ("new`view", "VIEW"),
+                ("updates", "BASE TABLE"),
+            ]
+        }
+    )
+    dropped = maintenance.drop_tables_not_in(
+        mysql, "acore_playerbots", ("playerbots_random_bots", "updates")
+    )
+    assert dropped == ("playerbots_speech", "new`view")
+    assert mysql.executed == [
+        "SET FOREIGN_KEY_CHECKS=0;\n"
+        "DROP TABLE IF EXISTS `acore_playerbots`.`playerbots_speech`;\n"
+        "DROP VIEW IF EXISTS `acore_playerbots`.`new``view`;\n"
+    ]
+
+
+def test_dropping_with_nothing_extra_runs_nothing() -> None:
+    mysql = SchemaMysql({"acore_playerbots": [("updates", "BASE TABLE")]})
+    assert maintenance.drop_tables_not_in(mysql, "acore_playerbots", ("updates",)) == ()
+    assert mysql.executed == []
+
+
+def test_listing_tables_and_running_a_statement_go_over_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argvs, kwargs = _capture(monkeypatch)
+    mysql = DockerMysql(DB, "hunter2")
+    mysql.tables("o'dd")
+    mysql.execute("DROP TABLE IF EXISTS `a`.`b`;\n")
+    assert argvs[0][:3] == ["docker", "exec", "-i"] and "hunter2" not in " ".join(argvs[0])
+    assert kwargs[0]["input"] == (
+        b"SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES "
+        b"WHERE TABLE_SCHEMA = 'o''dd';\n"
+    )
+    assert kwargs[1]["input"] == b"DROP TABLE IF EXISTS `a`.`b`;\n"
+
+
+def test_a_table_listing_is_read_as_name_and_type_per_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, b"updates\tBASE TABLE\nv\tVIEW\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert DockerMysql(DB, "hunter2").tables("acore_playerbots") == (
+        ("updates", "BASE TABLE"),
+        ("v", "VIEW"),
+    )
+
+
+def test_a_statement_that_fails_is_a_maintenance_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 1, b"", b"ERROR 1051")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(MaintenanceError, match="ERROR 1051"):
+        DockerMysql(DB, "hunter2").execute("DROP TABLE x;")
+    with pytest.raises(MaintenanceError, match="ERROR 1051"):
+        DockerMysql(DB, "hunter2").tables("acore_world")
+
+
 def test_a_finished_restore_leaves_no_marker(tmp_path: Path) -> None:
     """The marker means "in flight"; a completed restore must not look interrupted."""
     mysql = FakeMysql(("acore_world",))

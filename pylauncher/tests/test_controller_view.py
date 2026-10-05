@@ -7831,6 +7831,42 @@ def test_declining_the_rebuild_confirmation_starts_nothing(
     assert view.rebuild_log.running is False
 
 
+def test_a_rebuild_the_sources_refuse_is_refused_before_the_question(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T217 live proof, item 3: Rebuild asked its full question and then refused in 0 s.
+
+    A folder off the commit its build came from is refused first, with the
+    engine's own sentence, and the question is never asked.
+    """
+    asked: list[str] = []
+    told: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    def warning(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        told.append(text)
+        return controller_view_module.QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    monkeypatch.setattr(controller_view_module.QMessageBox, "warning", warning)
+    services, started = _rebuild_services(ps, tmp_path)
+    services.rebuild_refusal = lambda: "modules/mod-playerbots is on 037c014. Nothing was changed."
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is False
+    assert asked == [], "asked before refusing"
+    assert told == ["modules/mod-playerbots is on 037c014. Nothing was changed."]
+    assert started == [] and view.rebuild_log.running is False
+
+    services.rebuild_refusal = lambda: None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_server() is True
+    assert len(asked) == 1, "nothing to refuse: the question is asked as before"
+
+
 def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8084,6 +8120,34 @@ def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> No
     for entry in _every_game():
         services = ControllerServices.for_entry(entry, tmp_path / entry.id)
         assert services.rebuild is not None, entry.id
+
+
+def test_every_tab_asks_install_wiring_what_its_rebuild_would_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoped re-review of c5bf1b67: removing the wiring in `_assemble()` left every test green.
+
+    The tab's early refusal is `install_wiring.rebuild_refusal_for_app()`'s, for this
+    entry, this folder and this distro.
+    """
+    asked: list[tuple[str, Path, str | None]] = []
+
+    def refusal_for(
+        entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None, **_kw: object
+    ) -> Callable[[], str | None]:
+        asked.append((entry.id, server_dir, wsl_distro))
+        return lambda: f"refused for {entry.id}"
+
+    monkeypatch.setattr(
+        controller_view_module.install_wiring, "rebuild_refusal_for_app", refusal_for
+    )
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.rebuild_refusal is not None, entry.id
+        assert services.rebuild_refusal() == f"refused for {entry.id}"
+    assert [(game, where) for game, where, _ in asked] == [
+        (entry.id, tmp_path / entry.id) for entry in _every_game()
+    ]
 
 
 def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
