@@ -356,6 +356,29 @@ the channel works and something a person can read in a capture.
 """
 
 
+_ENDS_THE_WORLD = re.compile(
+    r"^\.?server\s+(?:shutdown|exit|idleshutdown)(?:\s+(?P<rest>.*))?$", re.I
+)
+
+
+def ends_the_world(typed: str) -> bool:
+    """Does this console line shut the world server down for good (T412)?
+
+    `server shutdown`, `server exit` and `server idleshutdown`, with or without a
+    leading dot, in any case -- and not their `cancel`. Measured on yulon-ubuntu
+    2026-10-05 (WotLK): `server shutdown 1` saved and closed the world cleanly,
+    exit 0, and Docker started it again at once, because every service here has
+    `restart: unless-stopped` and an exit the container chose itself is not a
+    stop. `server restart` is not one of these: Docker bringing it back is what
+    it asks for.
+    """
+    found = _ENDS_THE_WORLD.match(typed.strip())
+    if found is None:
+        return False
+    rest = (found.group("rest") or "").split()
+    return not (rest and rest[0].lower() == "cancel")
+
+
 def _require(ok: bool, message: str) -> None:
     if not ok:
         raise CommandError(message)

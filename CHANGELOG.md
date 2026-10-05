@@ -29,6 +29,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - **Stop** lets the world server finish saving every character before it closes, even on a slow disk.
+- On Centurion and Tortoise, **Stop** has the world server save every character, bots included, before it closes.
+- A `server shutdown` typed on the Console tab is not sent: Docker would start the world again, so it points to **Stop**.
 - The Server tab no longer says "restart loop" after Docker itself was stopped and started.
 - Stop takes effect at once and never kills a loading world, and a clean put-back after Stop reads Stopped.
 - On Windows, an Xbox or Xbox-style gamepad now moves around Yu'lon; before, its buttons were not read.

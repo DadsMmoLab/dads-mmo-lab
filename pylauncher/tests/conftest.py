@@ -1399,3 +1399,23 @@ def _no_save_wait_runs_on_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> Non
     ticks = iter(range(0, 10**9, 2))
     monkeypatch.setattr(docker, "_save_clock", lambda: float(next(ticks)))
     monkeypatch.setattr(docker, "_SAVE_POLL_SECONDS", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_stop_types_at_a_real_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop of a world that saves first never runs a real `docker attach` (T410, T411).
+
+    `docker.save_then_stop_the_world()` types `saveall` at a Centurion or Tortoise
+    console through the console transport, which opens a pty and starts the docker
+    CLI with `subprocess.Popen` -- outside the `runner.run` every stop test fakes.
+    Here it fails as a console this host cannot reach does, so such a stop says
+    `SAVE_FIRST_NOT_ASKED` and goes on. The tests of the save itself
+    (`test_stop_saves_before_exit.py`) put their own console in its place.
+    """
+    from yulon import docker
+    from yulon.controller_wow_wotlk.console import ConsoleError
+
+    def unreachable(command: str, **_kw: object) -> object:
+        raise ConsoleError(f"no console in the test suite ({command!r} was not typed)")
+
+    monkeypatch.setattr(docker, "_console_send", unreachable)

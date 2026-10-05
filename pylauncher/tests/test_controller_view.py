@@ -106,6 +106,7 @@ from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
     BOT_COUNT_RUNNING,
+    CONSOLE_SHUTDOWN_REFUSED,
     RETURN_TO_PIN_BUTTON_LABEL,
     TUNING_CORE_FILES,
     TUNING_RECREATE_LABEL,
@@ -461,6 +462,39 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
     view.send_console_command()
     assert sent == ["server info"]
     assert "> server info" in view.console_log.text() and "ok" in view.console_log.text()
+
+
+@pytest.mark.parametrize(
+    "typed", ["server shutdown 1", ".server shutdown 60", "server exit", "SERVER IdleShutdown 5"]
+)
+def test_a_shutdown_typed_at_the_console_is_not_sent_and_stop_is_named(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """T412, measured on yulon-ubuntu 2026-10-05: `server shutdown 1` saved and closed the world
+    cleanly (exit 0), and Docker started it again at once (`restart: unless-stopped`) -- an exit
+    the container chose is not a stop. The tab said Running over a server the player had shut
+    down. Stop is the press that stops it and keeps it stopped."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == []
+    assert CONSOLE_SHUTDOWN_REFUSED in view.console_log.text()
+    assert "Stop" in CONSOLE_SHUTDOWN_REFUSED
+
+
+@pytest.mark.parametrize(
+    "typed", ["server shutdown cancel", "server restart 10", "server info", "server motd hi"]
+)
+def test_what_does_not_end_the_world_for_good_is_still_sent(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """A cancel ends nothing, and a restart is what Docker's policy does anyway."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == [typed]
 
 
 def test_an_empty_reply_is_said_out_loud_rather_than_shown_as_silence(

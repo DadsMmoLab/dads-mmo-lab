@@ -4477,6 +4477,11 @@ CHARACTERS_EMPTY = (
 
 CONSOLE_STOP_IDLE = "Nothing to stop yet: Follow worldserver log starts the log, and Stop ends it."
 CONSOLE_NO_TTY = "This computer can't type at this server's console; the note below says why."
+CONSOLE_SHUTDOWN_REFUSED = (
+    "Not sent: a shutdown typed here closes the world server, and Docker starts it again at "
+    "once. To stop the server and keep it stopped, press Stop on the Server tab."
+)
+"""Said instead of sending a shutdown (`commands.ends_the_world`, T412)."""
 
 
 BOTS_FIRST_PAGE = "This is the first page of bots."
@@ -11776,6 +11781,12 @@ class ControllerView(QWidget):
     @Slot()
     def send_console_command(self) -> None:
         command = self.command_edit.text().strip()
+        if command and commands.ends_the_world(command):
+            # T412: the world would close and Docker would start it again at once.
+            self.console_log.append(f"> {command}")
+            self.console_log.append(CONSOLE_SHUTDOWN_REFUSED)
+            self.command_edit.clear()
+            return
         if command:
             self._send(command)
             self.command_edit.clear()
