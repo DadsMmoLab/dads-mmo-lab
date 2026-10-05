@@ -2105,6 +2105,14 @@ class RebuildChangedTheServer(InstallerError, TrueAfterStop):
         self.up = up
 
 
+class StoppedInTheWatch(ReadyWaitStopped):
+    """`ReadyWaitStopped` inside the watch after the banner: the world had reported ready (T247).
+
+    Its own type so the install says the world is up rather than loading
+    (`INSTALL_LEFT_RUNNING`), in the log and in the Catalog's popup.
+    """
+
+
 class _NotUpEither(str):
     """`_restore_rollback()`'s sentence when the old build was put back and did not come up."""
 
@@ -3222,6 +3230,14 @@ already up, and then waits again. Not stopping is T158's rule, the owner's:
 never kill a world mid-load (`docker.wait_for_the_world_to_load()`). Driven in
 `test_an_install_stopped_in_its_ready_wait_resumes_at_the_wait`.
 """
+
+INSTALL_LEFT_RUNNING = (
+    "The server's containers are left running, and its world server had reported ready. "
+    "Nothing was stopped. Press Install again on the same folder to finish the install; the "
+    "steps already done are not done again."
+)
+"""`INSTALL_LEFT_LOADING` for a Stop inside the watch after the banner (Codex review, T247):
+the world HAD reported ready, so it is not "left to finish starting"."""
 
 READY_WAIT_STOP_HINT = (
     '"Stop now anyway" ends this wait now and puts the build from before back at once: the new '
@@ -4853,10 +4869,14 @@ class StagedInstaller:
             state = yield from self._staged(
                 self._locking(self.stages(), server_dir, started_empty), ctx
             )
-        except ReadyWaitStopped:
-            # T247: the containers are up and the world is still loading. That is
-            # what this Stop leaves, and it is said before the Stop ends the press.
-            yield INSTALL_LEFT_LOADING
+        except ReadyWaitStopped as stopped:
+            # T247: the containers are up, and the world is still loading -- or,
+            # stopped inside the watch after its banner, had reported ready. That
+            # is what this Stop leaves, said before the Stop ends the press.
+            if isinstance(stopped, StoppedInTheWatch):
+                yield INSTALL_LEFT_RUNNING
+            else:
+                yield INSTALL_LEFT_LOADING
             raise
         # OUTSIDE the staged loop, and after the last stage, on purpose. Outside,
         # because everything in there is a reason to fail the install and this
@@ -10045,7 +10065,7 @@ class StagedInstaller:
                     cancel=ends,
                 )
                 if after.cut_short:
-                    raise ReadyWaitStopped(READY_STOPPED_IN_THE_WATCH)
+                    raise StoppedInTheWatch(READY_STOPPED_IN_THE_WATCH)
                 if not after.stopped and pending:
                     # The lead's ruling: the load was let finish, and it succeeded,
                     # but the player asked to stop -- so the build from before goes

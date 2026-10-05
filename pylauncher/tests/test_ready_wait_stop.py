@@ -328,6 +328,40 @@ def test_stop_in_an_installs_ready_wait_is_a_clean_stop_that_says_the_server_is_
     assert record is not None and native.READY_WAIT_STOPPED in record.last_error
 
 
+def test_an_install_stopped_in_the_watch_after_its_banner_says_the_world_had_reported_ready(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Codex review: Stop inside T71's watch on an install. The world HAD reported ready, so the
+    log and the popup say so, not that it is still loading."""
+    from yulon.ui.catalog_view import ready_wait_stopped_message
+
+    rec = Recorder()
+    reached = threading.Event()
+    gate: list[threading.Event] = []
+
+    def pause(_seconds: float) -> None:
+        if not reached.is_set():
+            reached.set()
+            assert gate[0].wait(HANG_BOUND), "Stop never came"
+
+    made = engine(rec, sleep=pause)
+    options = InstallOptions(server_dir=tmp_path / "server")
+
+    def press(cancel: threading.Event) -> Iterator[str]:
+        gate.append(cancel)
+        return made.run(options, cancel=cancel)
+
+    panel, finished = stop_when(press, reached, "the install's watch after the banner")
+
+    said = panel.text()
+    assert panel.status_text() == "cancelled"
+    assert native.INSTALL_LEFT_RUNNING in said, said
+    assert native.INSTALL_LEFT_LOADING not in said, said
+    assert panel.stopped_by is native.StoppedInTheWatch, panel.stopped_by
+    popup = ready_wait_stopped_message(ENTRY, native.StoppedInTheWatch)
+    assert native.INSTALL_LEFT_RUNNING in popup and native.INSTALL_LEFT_LOADING not in popup
+
+
 def test_an_install_stopped_in_its_ready_wait_resumes_at_the_wait(tmp_path: Path) -> None:
     """The sentence's promise, driven: the next Install starts the servers and waits again."""
     rec = Recorder()
