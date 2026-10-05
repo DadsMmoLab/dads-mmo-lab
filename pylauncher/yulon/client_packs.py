@@ -1751,6 +1751,9 @@ def _install(
             for item in items:
                 made += _make_dirs((play_dir / Path(*item.rel.parts)).parent, play_dir)
                 staged.append(_stage(pack, fetched, archive, item, play_dir, server_dir, cancelled))
+            # Once more before anything is renamed in: a Stop after the last chunk
+            # (Codex review, T303) is answered here, not by a pack laid in anyway.
+            _stop_if_asked(pack, cancelled)
         except BaseException:
             for tmp, _, _ in staged:
                 _unlink_quietly(tmp)

@@ -2621,3 +2621,26 @@ def test_a_stop_while_a_cached_archive_is_checked_stops_before_it_is_linked_in(
         rig.install(WORLD, fetched, cancelled=lambda: True)
 
     assert _snapshot(rig.play) == before
+
+
+def test_a_stop_after_the_last_file_is_staged_still_installs_nothing(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: asked once more between staging and the renames, so a Stop that lands
+    after the last chunk was read is not answered by a pack laid in anyway."""
+    staged: list[bool] = []
+    real_stage = client_packs._stage
+
+    def stage(*args: Any) -> Any:
+        made = real_stage(*args)
+        staged.append(True)  # the Stop lands now: every chunk of this file was read
+        return made
+
+    monkeypatch.setattr(client_packs, "_stage", stage)
+    before = _snapshot(rig.play)
+
+    with pytest.raises(client_packs.Cancelled):
+        rig.install(WORLD, rig.fetched({"patch-Y.MPQ": NEW_Y}), cancelled=lambda: bool(staged))
+
+    assert staged == [True], "the ground: the one file was staged before the Stop"
+    assert _snapshot(rig.play) == before
