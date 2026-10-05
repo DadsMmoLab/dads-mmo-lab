@@ -64,7 +64,7 @@ class _Child:
     whoever is blocked reading it.
     """
 
-    __slots__ = ("proc", "started_on", "ended", "job", "settled", "cut_short", "lock")
+    __slots__ = ("proc", "started_on", "ended", "job", "settled", "cut_short", "answered", "lock")
 
     def __init__(self) -> None:
         self.proc: _AnyPopen | None = None
@@ -73,7 +73,18 @@ class _Child:
         self.settled = False
         """Set under `lock` when `_finish` lets `job` go; a Stop then skips it."""
         self.cut_short = False
-        """Set when a Stop ended `job` after the root exited: its exit status is not the story."""
+        """Set under `lock` when a Stop claims a stream that has a job: it reads as a Stop.
+
+        The Stop ends the job, root or no root, so a root that exits 0 on its
+        own a moment later has still had its descendants' work cut off.
+        """
+        self.answered = False
+        """Set under `lock` when the stream reads its exit and gives its answer (`_answer`).
+
+        From then on the answer stands: a Stop's choice skips the stream, so a
+        command reported as a success never has its job ended by a late Stop
+        (scoped review of d3252e19).
+        """
         self.lock = threading.RLock()
         """Guards `ended` and `settled` between a Stop and `_finish` (T299).
 
@@ -448,9 +459,18 @@ def end_streams_started_on(ident: int) -> int:
         # adversarial review of T299). Marked before the end is even asked for,
         # so the reading thread can never see this child's exit before it can
         # see why (T240).
+        # `cut_short` in the same block, not on the Stop's thread: the reader
+        # reads it under this lock in `_answer`, so either the Stop claims the
+        # stream first and the reader reports a Stop, or the reader answers
+        # first and the Stop leaves the stream alone (scoped review of d3252e19).
+        # Only with a job: off Windows nothing ends a root that has exited, and
+        # its exit status is the whole story, as before.
         with child.lock:
+            if child.answered:
+                continue
             if _still_running(child.proc) or _job_unsettled(child):
                 child.ended = True
+                child.cut_short = child.job is not None
                 children.append(child)
     for child in children:
         proc = child.proc
@@ -480,18 +500,26 @@ def _job_unsettled(child: _Child) -> bool:
 def _stop_child(child: _Child) -> None:
     """A Stop's ending: `_end_child`, or the job alone when the root has already exited (T299).
 
-    A root that had exited before the job was ended may have exited 0, but the
-    work it left its descendants was cut off: `cut_short` makes the stream
-    report a Stop rather than a success (cold review). Set before the end, so
-    the reader, which reaches EOF only once the writers are gone, sees it.
+    The choice in `end_streams_started_on()` already set `cut_short` for a
+    child with a job, so whatever this ends, the stream reports a Stop.
     """
     proc, job = child.proc, child.job
     assert proc is not None  # chosen streams have started
     if proc.poll() is None:
         _end_child(proc, job)
     elif job is not None:
-        child.cut_short = True
         job.end()
+
+
+def _answer(child: _Child) -> bool:
+    """Close the stream's answer to a Stop; True if a Stop claimed it first (`cut_short`).
+
+    Read and marked under `child.lock`, the lock the Stop's choice holds, so
+    the answer and the choice cannot interleave: see `_Child.answered`.
+    """
+    with child.lock:
+        child.answered = True
+        return child.cut_short
 
 
 def _cwd_arg(cwd: Path | None) -> str | None:
@@ -749,9 +777,10 @@ def _stream_lines(
         proc.wait()
         yield from stderr_lines
 
-        if proc.returncode or child.cut_short:
+        # `_answer` first and always: it is what closes the stream to a Stop.
+        if _answer(child) or proc.returncode:
             # 1, the code a terminated child leaves on Windows, for a root that
-            # had exited 0 before its tree was stopped (`_stop_child`).
+            # exited 0 although a Stop had claimed its tree (`_answer`).
             raise _exit_failure(child, proc.returncode or 1, command)
     finally:
         # Runs on normal completion (all no-ops below, since the process has
@@ -923,9 +952,10 @@ def _progress_lines(
         for reader in readers:
             reader.join()
         proc.wait()
-        if proc.returncode or child.cut_short:
+        # `_answer` first and always: it is what closes the stream to a Stop.
+        if _answer(child) or proc.returncode:
             # 1, the code a terminated child leaves on Windows, for a root that
-            # had exited 0 before its tree was stopped (`_stop_child`).
+            # exited 0 although a Stop had claimed its tree (`_answer`).
             raise _exit_failure(child, proc.returncode or 1, command)
     finally:
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that

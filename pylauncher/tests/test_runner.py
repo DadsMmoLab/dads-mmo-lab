@@ -2165,16 +2165,21 @@ class _JobHoldingAPid(_FakeJob):
         return ended
 
 
+@pytest.mark.parametrize("entry", ["stream", "stream_progress"])
 def test_on_windows_a_stop_that_ends_the_tree_after_its_root_exited_0_is_reported_as_a_stop(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, entry: str
 ) -> None:
     """docker.exe exited 0, its tree was still writing, Stop ended the tree: that is a Stop.
 
     From the cold review of T299: the exit status alone read as success,
     although the work the root had handed its descendants was cut off.
 
-    Mutations this catches: the generator deciding from `returncode` alone; the
-    error carrying exit 0, which `docker.run_attached()` would report as success.
+    `stream_progress` is the git clone's path, from the scoped review of
+    d3252e19: its own check could drop the flag with every test still green.
+
+    Mutations this catches: either generator deciding from `returncode` alone;
+    the error carrying exit 0, which `docker.run_attached()` would report as
+    success.
     """
     job = _JobHoldingAPid()
     spawned = _windows_spawns(monkeypatch, job)
@@ -2186,7 +2191,8 @@ def test_on_windows_a_stop_that_ends_the_tree_after_its_root_exited_0_is_reporte
         "\"import os, time; print('pid', os.getpid(), flush=True); time.sleep(60)\"]); "
         "print('first', flush=True)"
     )
-    lines = stream(_python_cmd(script))
+    start = stream if entry == "stream" else runner.stream_progress
+    lines = start(_python_cmd(script))
     seen = [next(lines), next(lines)]
     said = next(line for line in seen if line.startswith("pid "))
     job.member = int(said.split()[1])
@@ -2201,3 +2207,56 @@ def test_on_windows_a_stop_that_ends_the_tree_after_its_root_exited_0_is_reporte
     finally:
         lines.close()
     assert raised.value.returncode == 1, "a Stop must not read as exit 0"
+
+
+def test_on_windows_a_stop_after_the_stream_gave_its_answer_leaves_it_a_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reader's answer and a Stop's choice are one decision: whichever is first wins whole.
+
+    From the scoped review of d3252e19: the flag that turns a success into a
+    Stop was set on the Stop's thread after the choice, so a reader that had
+    just passed its exit check reported success while `_finish` then closed
+    the job on the tree. Here the Stop lands in exactly that window, between
+    the answer and `_finish`: it must find the stream answered and leave it
+    alone, and the job is released as for any command that finished.
+
+    Mutations this catches: the choice not skipping an answered stream (the
+    Stop ends the job of a command reported as a success).
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    real_finish = runner._finish
+    chosen: list[int] = []
+
+    def stop_in_the_window(*args: object, **kw: object) -> None:
+        chosen.append(runner.end_streams_started_on(threading.get_ident()))
+        real_finish(*args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "_finish", stop_in_the_window)
+
+    assert list(stream(_python_cmd("print('built')"))) == ["built"]
+
+    assert chosen == [0]
+    assert "end" not in job.events
+    assert job.events[-1] == "release", job.events
+
+
+def test_off_windows_a_root_that_exits_0_after_a_stop_chose_it_is_still_a_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a job nothing ends a root that has exited, so its exit status is the whole story.
+
+    The Stop here chooses the stream while the root runs, and the root exits 0
+    on its own before the Stop's thread could end anything (the thread is
+    stubbed out to hold that order). Linux and macOS report it as before T299.
+
+    Mutation this catches: `cut_short` set for a child with no job.
+    """
+    _as_windows(monkeypatch, "linux")
+    monkeypatch.setattr(runner, "_stop_child", lambda child: None)
+    lines = stream(_python_cmd("print('first', flush=True); import time; time.sleep(0.3)"))
+    assert next(lines) == "first"
+
+    assert runner.end_streams_started_on(threading.get_ident()) == 1
+    assert list(lines) == []
