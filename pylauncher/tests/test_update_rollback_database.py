@@ -996,12 +996,13 @@ def _off(server_dir: Path) -> Path:
 def _refusal_for(module: Path) -> str:
     """The owner's sentence (T217 (a), 2026-10-05): what is off, and what to press."""
     return (
-        f"mod-playerbots/mod-playerbots in {module} is not on {OLD[:7]}, the commit this server "
-        "was built from, and its world server would apply the database updates in that folder, "
-        "so the server is not started: press \u201cReturn to the tested pin\u2026\u201d under "
-        "\u201cServer build \u25be\u201d on the Modules tab, or put the folder back with "
-        f"`git -C {module} checkout --detach --force {OLD}` and press \u201cRebuild the "
-        "server\u2026\u201d under \u201cServer build \u25be\u201d on the Modules tab."
+        f"mod-playerbots/mod-playerbots in {module} is on {NEW[:7]}, not on {OLD[:7]}, the "
+        "commit this server was built from, and its world server would apply the database "
+        "updates in that folder, so the server is not started: press \u201cReturn to the tested "
+        "pin\u2026\u201d under \u201cServer build \u25be\u201d on the Modules tab, or put the "
+        "folder back with this command and press \u201cRebuild the server\u2026\u201d under "
+        "\u201cServer build \u25be\u201d on the Modules tab:\n"
+        f"git -C {module} checkout --detach --force {OLD}"
     )
 
 

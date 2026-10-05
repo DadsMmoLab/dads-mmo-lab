@@ -63,6 +63,7 @@ from yulon.catalog.native import (
     return_to_pin_confirmation,
     rewritten_line,
     source_version,
+    sources_still_off,
     update_to_latest_confirmation,
 )
 from yulon.catalog.snapshot import (
@@ -584,7 +585,7 @@ def update_to_latest_for_app(
     def version() -> SourceVersion:
         if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
             return SourceVersion(line="", past_the_pin=False)
-        return source_version(read_state(server_dir, valid=()))
+        return source_version(read_state(server_dir, valid=()), sources_still_off(server_dir))
 
     def news() -> upstream.UpstreamNews:
         # T124. Built per call like the presses: it is asked off the GUI thread

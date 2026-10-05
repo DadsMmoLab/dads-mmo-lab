@@ -1239,14 +1239,41 @@ class SourceVersion:
     """Whether "Return to the tested pin…" has anything to do."""
 
 
-def source_version(state: InstallState | None) -> SourceVersion:
+def source_version(state: InstallState | None, off: Sequence[SourceOff] = ()) -> SourceVersion:
     """Both halves of the version line, from one `InstallState`.
 
     Deliberately takes the state rather than reading it: the read is the
     caller's (`install_wiring`), and a function that read the file itself could
     not be handed the three shapes a test needs.
+
+    `off` (T217, the live check of 65315f9c) are the folders a failed update left
+    off their build (`sources_still_off()`). While there are any, every start is
+    refused with a sentence naming "Return to the tested pin…", so the press is
+    offered whatever the record says, and each such folder's row says the commit
+    it is really on: after the put-back the record reads "on the tested pin" for
+    a folder that is not.
     """
-    return SourceVersion(line=source_revs_line(state), past_the_pin=past_the_tested_pin(state))
+    if not off:
+        return SourceVersion(line=source_revs_line(state), past_the_pin=past_the_tested_pin(state))
+    by_repo = {row.repo: row for row in off}
+    rows = source_revs_line(state).splitlines() if state is not None else []
+    revs = state.source_revs if state is not None else ()
+    if len(revs) == 1 and rows:
+        rows = [f"{revs[0].repo}: {rows[0][0].lower()}{rows[0][1:]}"]
+    lines: list[str] = []
+    for rev, row in zip(revs, rows, strict=False):
+        lines.append(_off_row(by_repo.pop(rev.repo)) if rev.repo in by_repo else row)
+    lines.extend(_off_row(row) for row in by_repo.values())
+    return SourceVersion(line="\n".join(lines), past_the_pin=True)
+
+
+def _off_row(row: SourceOff) -> str:
+    """One version-line row for a folder off its build: what it is on, and that it is off."""
+    now = f"the folder is on {row.head[:7]}, " if row.head else "the folder is "
+    return (
+        f"{row.repo}: {now}not on {row.built[:7]}, the commit this server was built from, so "
+        "it is off its build"
+    )
 
 
 def import_reads_as_finished(state: docker.ImportState) -> bool:
@@ -2563,6 +2590,57 @@ def _a_commit(text: str) -> str | None:
     return text if _COMMIT_ID.fullmatch(text) else None
 
 
+@dataclass(frozen=True)
+class SourceOff:
+    """One folder `SOURCES_OFF_FILE` names that is still off the commit its build came from."""
+
+    repo: str
+    dest: Path
+    built: str
+    """The full commit the server's build was made from, which the folder should be on."""
+    head: str | None
+    """What `.git/HEAD` says the folder is on now; None when it cannot be read as a commit."""
+
+
+def sources_still_off(server_dir: Path) -> tuple[SourceOff, ...]:
+    """The folders `SOURCES_OFF_FILE` names that are still off their build (T217). Never raises.
+
+    Reads `.git/HEAD` (`read_head_file()`), no git run. Once none is left the
+    record is forgotten. The one reading behind the start refusal and the
+    Modules tab's version line and "Return to the tested pin…", so the two
+    cannot disagree about whether a folder is off.
+    """
+    path = server_dir / SOURCES_OFF_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ()
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); not reading it")
+        return ()
+    rows = raw.get("sources") if isinstance(raw, dict) else None
+    off: list[SourceOff] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        dest, commit = Path(str(row.get("dest", ""))), str(row.get("commit", ""))
+        head = read_head_file(dest)
+        if not commit or head == commit:
+            continue
+        off.append(SourceOff(str(row.get("repo", dest.name)), dest, commit, head))
+    if not off:
+        forget_sources_off(server_dir)
+    return tuple(off)
+
+
+def _on_now(row: SourceOff) -> str:
+    return (
+        f"is on {row.head[:7]}, not on {row.built[:7]}"
+        if row.head
+        else (f"is not on {row.built[:7]}")
+    )
+
+
 def sources_off_refusal(server_dir: Path) -> str | None:
     """Why no start may run while `SOURCES_OFF_FILE` names a folder still off its commit; else None.
 
@@ -2571,43 +2649,25 @@ def sources_off_refusal(server_dir: Path) -> str | None:
     database updates it found in the off-commit module folder and crash-loop.
     Read by `Controller.refuse_start()`, so Start, Start and play, the launcher's
     PLAY, Restart and Recreate all refuse; NOT by the engine's `start_refusal()`,
-    because "Return to the tested pin…" is one of the two ways out it names.
+    because "Return to the tested pin…" is one of the two ways out it names, and
+    the Modules tab offers it while this refuses (`source_version()`).
 
-    Never raises. Reads `.git/HEAD` (`read_head_file()`), no git run. A folder
-    back on its commit is not named, and once none is left the record is
-    forgotten.
+    Each `git` command is on a line of its own (the owner's T296 rule: a command
+    the player types stays, on its own line). Never raises.
     """
-    path = server_dir / SOURCES_OFF_FILE
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        logger.warning(f"{path} could not be read ({exc}); not refusing from it")
-        return None
-    rows = raw.get("sources") if isinstance(raw, dict) else None
-    off: list[tuple[str, Path, str]] = []
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        dest, commit = Path(str(row.get("dest", ""))), str(row.get("commit", ""))
-        if not commit or read_head_file(dest) == commit:
-            continue
-        off.append((str(row.get("repo", dest.name)), dest, commit))
+    off = sources_still_off(server_dir)
     if not off:
-        forget_sources_off(server_dir)
         return None
-    named = "; ".join(f"{repo} in {dest} is not on {commit[:7]}" for repo, dest, commit in off)
-    fixes = " and ".join(
-        f"`git -C {dest} checkout --detach --force {commit}`" for _repo, dest, commit in off
-    )
+    named = "; ".join(f"{row.repo} in {row.dest} {_on_now(row)}" for row in off)
+    commands = "\n".join(f"git -C {row.dest} checkout --detach --force {row.built}" for row in off)
     back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
     rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
-    folders = "that folder" if len(off) == 1 else "those folders"
+    one = len(off) == 1
     return (
         f"{named}, the commit this server was built from, and its world server would apply the "
-        f"database updates in {folders}, so the server is not started: press {back}, or put "
-        f"the {'folder' if len(off) == 1 else 'folders'} back with {fixes} and press {rebuild}."
+        f"database updates in {'that folder' if one else 'those folders'}, so the server is not "
+        f"started: press {back}, or put the {'folder' if one else 'folders'} back with "
+        f"{'this command' if one else 'these commands'} and press {rebuild}:\n{commands}"
     )
 
 

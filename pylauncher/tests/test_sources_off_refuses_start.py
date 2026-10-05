@@ -114,3 +114,71 @@ def test_the_launchers_play_starts_nothing(
     assert launched == []
     assert _touched(ps) == []
     assert view.problem_label.text() == refused
+
+
+# -- The live check of 65315f9c: the way out the refusal names must be on the tab -----------
+
+
+def _built_on_the_pin(server_dir: Path) -> None:
+    """The record a put-back leaves: every source "on the tested pin" (the live state)."""
+    from dataclasses import replace
+
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    revs = tuple(
+        native.SourceRev(repo=source.repo, built=f"{OLD[:7]} · 2026-10-05", pin=OLD)
+        for source in WOTLK.emulator.sources
+    )
+    native.write_state(server_dir, replace(state, source_revs=revs))
+
+
+def test_the_modules_tab_offers_return_to_the_tested_pin_and_says_the_folders_real_commit(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Live check of 65315f9c: the refusal said to press "Return to the tested pin…" while the
+    menu hid it (the record said "on the pin"), and the line said the module was on 7bae1b5
+    while its folder was on 037c014. Through the real route and the real tab."""
+    from tests.test_update_to_latest import _ready
+    from yulon import install_wiring
+
+    _rec, server_dir = _ready(tmp_path / "srv")
+    _built_on_the_pin(server_dir)
+    (server_dir / ".git").mkdir(parents=True, exist_ok=True)
+    (server_dir / ".git" / "HEAD").write_text(f"{OLD}\n", encoding="utf-8")
+    _off(server_dir)
+    services = _services(ps, tmp_path, [])
+    services.update_to_latest = install_wiring.update_to_latest_for_app(WOTLK, server_dir)
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view._refresh_source_version()
+
+    assert view.return_to_pin_action.isVisible() and view.return_to_pin_action.isEnabled()
+    rows = view.source_version_label.text().splitlines()
+    assert rows == [
+        f"mod-playerbots/azerothcore-wotlk: on the tested pin {OLD[:7]} (2026-10-05)",
+        f"mod-playerbots/mod-playerbots: the folder is on {NEW[:7]}, not on {OLD[:7]}, the "
+        "commit this server was built from, so it is off its build",
+    ]
+    view.return_to_pin_action.trigger()
+    assert asked and "tested" in asked[0], "pressing it asks the Return question"
+
+    (server_dir / MODULE / ".git" / "HEAD").write_text(f"{OLD}\n", encoding="utf-8")
+    view._refresh_source_version()
+    assert not view.return_to_pin_action.isVisible(), "back on its build: nothing to return from"
+    assert view.source_version_label.text().splitlines()[1] == (
+        f"mod-playerbots/mod-playerbots: on the tested pin {OLD[:7]} (2026-10-05)"
+    )
+
+
+def test_the_refusal_puts_each_command_on_its_own_line(tmp_path: Path) -> None:
+    """The owner's T296 rule: a command the player types stays, on a line of its own."""
+    refused = _off(tmp_path)
+    module = tmp_path / MODULE
+    assert refused.splitlines()[-1] == f"git -C {module} checkout --detach --force {OLD}"
+    assert "`" not in refused.splitlines()[0]
