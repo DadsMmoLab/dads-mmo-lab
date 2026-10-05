@@ -76,7 +76,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from yulon import docker, platform, rmtree, server_build_presses
-from yulon.catalog import composegen
+from yulon.catalog import composegen, world_data
 from yulon.catalog.catalog import CatalogEntry, ConfPatchTable, MmapTileHeader, TrinityCoreData
 from yulon.catalog.families import conf, extract
 from yulon.catalog.installer import InstallerError
@@ -566,6 +566,10 @@ def start_mmaps(
         )
         before = read_record(server_dir)
         evidence = _evidence(job)
+        # T219: on a Windows install the world server's copy of `data/mmaps` must stay
+        # empty while this job writes it, should Docker restart the world meanwhile;
+        # the fingerprint says `-` until the run is done. A failure is logged there.
+        world_data.refresh(entry, server_dir)
         argv = _filled_argv(job, run)
         _remove_container(run, job.container)
         kept = _resume_or_clear(job, before, evidence)

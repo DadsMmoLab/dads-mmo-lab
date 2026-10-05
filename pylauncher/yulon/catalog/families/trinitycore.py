@@ -59,7 +59,7 @@ from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, cast
 
 from yulon import client_packs, docker, platform, play_client, server_build_presses
-from yulon.catalog import bot_count
+from yulon.catalog import bot_count, world_data
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
@@ -1481,6 +1481,9 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
+        warned = world_data.refresh(self.entry, ctx.server_dir)
         if warned is not None:
             yield warned
         spec = self.entry.container_spec()

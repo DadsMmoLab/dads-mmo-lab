@@ -88,7 +88,7 @@ from yulon import (
     serverlock,
 )
 from yulon.after_stop import TrueAfterStop
-from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream
+from yulon.catalog import bot_count, composegen, preflight, time_zone, upstream, world_data
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -5817,6 +5817,9 @@ class StagedInstaller:
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
             yield warned
+        warned = world_data.refresh(self.entry, ctx.server_dir)
+        if warned is not None:
+            yield warned
         spec = self.entry.container_spec()
         # The replace begins with a stop, and a world still loading cannot hear
         # it (T158). `recreate_staged()` waits for it right before that stop --
@@ -9726,6 +9729,9 @@ class StagedInstaller:
             raise InstallerError(f"{refused} The server was not started.")
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
+        warned = world_data.refresh(self.entry, ctx.server_dir)
         if warned is not None:
             yield warned
         try:

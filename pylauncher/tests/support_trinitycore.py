@@ -228,12 +228,17 @@ TRINITYCORE: dict[str, Any] = {
 
 
 def centurion_like(
-    *, packs: list[dict[str, Any]] | None = None, rev: str | None = None
+    *,
+    packs: list[dict[str, Any]] | None = None,
+    rev: str | None = None,
+    world_data_dirs: tuple[str, ...] = (),
 ) -> CatalogEntry:
     """A whole, valid `trinitycore` entry: generated password, SOAP channel published.
 
     `packs` are the client's packs (T181 shapes, none by default) and `rev` the
-    core source's pin, for the install engine's tests (Task 3).
+    core source's pin, for the install engine's tests (Task 3). `world_data_dirs`
+    are the folders a Windows world server reads from its volume (T219); none by
+    default, so the entry binds `data/` on every platform.
     """
     data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     entry: dict[str, Any] = copy.deepcopy(
@@ -327,7 +332,7 @@ def centurion_like(
         "db": {"image": "mysql:8.4", "client": "mysql", "user": "root"},
         "ready": {"world": "World initialized"},
         "update_to_latest": True,
-        "trinitycore": copy.deepcopy(TRINITYCORE),
+        "trinitycore": {**copy.deepcopy(TRINITYCORE), "world_data_dirs": list(world_data_dirs)},
     }
     return parse_catalog({"schema_version": 1, "games": [entry]}).get("wow-centurion")
 

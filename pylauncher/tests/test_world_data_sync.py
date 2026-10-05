@@ -320,3 +320,44 @@ def test_the_server_replaces_the_script_as_the_containers_first_process(
     out, _ = started.communicate(timeout=60)
     assert started.returncode == 0
     assert f"pid={started.pid} args=-c worldserver.conf" in out
+
+
+def test_the_fingerprint_yulon_writes_is_the_one_the_copy_reads(tmp_path: Path) -> None:
+    """End to end over the two halves: `world_data.refresh()` writes the server folder's file
+    on a Windows install, the rendered script copies by it, and a second start with nothing
+    changed copies nothing -- then a changed map file moves `maps` alone."""
+    from yulon.catalog import world_data
+
+    entry = load_catalog().get("wow-centurion")
+    server_dir = tmp_path / "server"
+    plan = composegen.render(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        db_password="t219-password-for-tests",
+        platform_id=lambda: "windows",
+    )
+    server_dir.mkdir()
+    (server_dir / composegen.BASE_FILE).write_text(plan.base, encoding="utf-8")
+    box = Box(tmp_path)
+    assert box.src == server_dir.parent / "data"
+    box.src.rename(server_dir / "data")
+    box.src = server_dir / "data"
+    box.script = pointed_at(box.src, box.vol)
+
+    assert world_data.refresh(entry, server_dir) is None
+    first = box.run()
+    assert first.returncode == 0, first.stderr
+    assert "yulon: no fingerprint" not in first.stdout
+    assert box.copied_from() == {"dbc", "maps", "vmaps", "Cameras"}, "mmaps is not done"
+    assert list((box.vol / "mmaps").iterdir()) == []
+
+    assert world_data.refresh(entry, server_dir) is None
+    assert box.run().returncode == 0
+    assert box.copied_from() == set()
+
+    (box.src / "maps" / "0013238.map").write_bytes(b"map one, extracted again")
+    assert world_data.refresh(entry, server_dir) is None
+    assert box.run().returncode == 0
+    assert box.copied_from() == {"maps"}
+    assert (box.vol / "maps" / "0013238.map").read_bytes() == b"map one, extracted again"

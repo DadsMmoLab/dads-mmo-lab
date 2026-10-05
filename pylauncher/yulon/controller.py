@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import docker, wsl
-from yulon.catalog import composegen, native, time_zone
+from yulon.catalog import composegen, native, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
@@ -310,6 +310,7 @@ class Controller:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         self.zone_problem = self._put_back_the_zone_file()
+        self._refresh_world_data()
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
@@ -343,6 +344,17 @@ class Controller:
         except (OSError, UnicodeDecodeError):
             return None  # no override to name a zone; compose says what is wrong with it
         return time_zone.refresh(entry, self.server_dir, override)
+
+    def _refresh_world_data(self) -> None:
+        """T219: the map-data fingerprint a Windows Centurion world copies by, before every start.
+
+        `world_data.refresh()` writes it only on an install whose compose file declares
+        the `world-data` volume, and only when it changed. A failure is logged there and
+        never stops the Start: the copy then follows the last fingerprint written.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is not None:
+            world_data.refresh(entry, self.server_dir)
 
     def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
         """Where each blocking container came from, best effort and never fatal."""
