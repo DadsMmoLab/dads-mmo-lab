@@ -21,7 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_plan_corrections import _database, _Route, _view, ps  # noqa: F401 - fixture
+from tests.test_controller_view import _Ps
+from tests.test_plan_corrections import _database, _Route, _view
+from yulon import runner
 from yulon.catalog import native
 from yulon.ui import controller_view as controller_view_module
 
@@ -44,6 +46,17 @@ class _Clock:
 
     def __call__(self) -> float:
         return self.now
+
+
+@pytest.fixture
+def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
+    """`test_plan_corrections`'s Docker double, with the tab's jobs run inline."""
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
+    fake = _Ps()
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
 
 
 @pytest.fixture
