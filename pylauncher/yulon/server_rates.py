@@ -402,17 +402,79 @@ def prompt_values(manifest: Manifest, card_rows: Iterable[tuning.TuningRow]) -> 
     return found
 
 
-def prompt_note(manifest: Manifest, card_rows: Sequence[tuning.TuningRow]) -> str | None:
-    """`PROMPT_REPLACES` naming the card rows this module's answers are written to, or `None`."""
-    owned = {(row.file, row.key): row.label for row in card_rows}
-    labels: list[str] = []
+SAME_NUMBER = "It starts at {first}. {others} will be set to the same number."
+"""Added when ONE answer feeds several card rows the card now holds at different values
+(Tortoise's `xp_rate` feeds all three XP keys): OK puts the first one's value on all
+of them (scoped re-review, 2026-10-05)."""
+
+
+def _and(labels: Sequence[str]) -> str:
+    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def _fed(
+    manifest: Manifest, card: Mapping[tuple[str, str], tuning.TuningRow]
+) -> dict[str, list[tuning.TuningRow]]:
+    """Answer key -> the card rows that answer is written to, in the manifest's order."""
+    fed: dict[str, list[tuning.TuningRow]] = {}
     for conf in manifest.conf:
         for key in conf.keys:
-            label = owned.get((conf.file, key.key))
-            if label is not None and _WHOLE_TEMPLATE.fullmatch(key.default or "") is not None:
-                if label not in labels:
-                    labels.append(label)
+            match = _WHOLE_TEMPLATE.fullmatch(key.default or "")
+            row = card.get((conf.file, key.key))
+            if match is not None and row is not None:
+                fed.setdefault(match.group(1), []).append(row)
+    return fed
+
+
+def prompt_note(manifest: Manifest, card_rows: Sequence[tuning.TuningRow]) -> str | None:
+    """`PROMPT_REPLACES` naming the card rows this module's answers are written to, or `None`.
+
+    Plus `SAME_NUMBER` for an answer that feeds several rows the card holds at
+    different values, because the box can start at only one of them.
+    """
+    fed = _fed(manifest, {(row.file, row.key): row for row in card_rows})
+    labels: list[str] = []
+    for rows in fed.values():
+        for row in rows:
+            if row.label not in labels:
+                labels.append(row.label)
     if not labels:
         return None
-    named = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
-    return PROMPT_REPLACES.format(labels=named)
+    said = PROMPT_REPLACES.format(labels=_and(labels))
+    for rows in fed.values():
+        if len(rows) > 1 and len({row.current for row in rows}) > 1:
+            first, *others = rows
+            said += " " + SAME_NUMBER.format(
+                first=first.label, others=_and([row.label for row in others])
+            )
+    return said
+
+
+def answer_problem(
+    entry: CatalogEntry, manifest: Manifest, answers: Mapping[str, str] | None
+) -> str | None:
+    """Why a module's answer cannot be written to a key this card writes, or `None`.
+
+    The mod's own question checks only its `kind` -- Tortoise's `xp_rate` is a
+    `string`, and WotLK's `float` takes `1e-45` -- so a value the core's parser
+    throws on at world start reached `Rate.XP.*` that way. Each answer that is
+    written to a card key is held to that key's own rule (`tuning.check`: a plain
+    decimal, at most 4 places, inside 0 to 100), whether or not the conf is on
+    disk yet. The first refusal, in `tuning`'s own words.
+    """
+    file = card_file(entry)
+    if file is None or not answers:
+        return None
+    spec = conf_keys(entry)
+    for conf in manifest.conf:
+        if conf.file != file:
+            continue
+        for key in conf.keys:
+            match = _WHOLE_TEMPLATE.fullmatch(key.default or "")
+            if match is None or key.key not in spec or match.group(1) not in answers:
+                continue
+            try:
+                tuning.check(spec[key.key], answers[match.group(1)])
+            except tuning.TuningError as exc:
+                return str(exc)
+    return None

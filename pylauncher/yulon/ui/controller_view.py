@@ -15455,6 +15455,16 @@ class ControllerView(QWidget):
                 f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
             )
             return
+        # T302: an answer written to a Server rates key is held to that key's rule,
+        # because the world server stops at start on a rate it cannot read.
+        problem = server_rates.answer_problem(self.entry, manifest, values)
+        if problem is not None:
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"{action} {manifest.id}: nothing on this machine was changed — {problem}"
+            )
+            self.action_failed.emit(problem)
+            return
         run = {
             "install": applier.install,
             "remove": applier.remove,

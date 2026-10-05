@@ -870,3 +870,96 @@ def test_the_install_question_shows_the_note_it_is_handed(qapp: object) -> None:
     manifest = tbc_modules.store().load("mod", "xp-rates")
     dialog = ManifestPromptDialog(None, manifest, manifest.prompts, notes=("The card note.",))
     assert "The card note." in [label.text() for label in dialog.findChildren(QLabel)]
+
+
+# -- one answer, three keys; and the answer itself (scoped re-review 2026-10-05) ---
+
+SAME_NUMBER = (
+    "It starts at XP from kills. XP from quests and XP from exploring will be set to the "
+    "same number."
+)
+
+
+def test_tortoises_one_xp_answer_says_it_sets_all_three_when_the_card_differs(
+    tmp_path: Path,
+) -> None:
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    _lay(tmp_path, "wow-tortoise")  # kills 2, quests 3, exploring 4
+    manifest = tortoise_modules.store().load("mod", "xp-rates")
+    note = server_rates.prompt_note(manifest, server_rates.rows(_entry("wow-tortoise"), tmp_path))
+    assert note is not None and note.endswith(" " + SAME_NUMBER)
+
+
+def test_tortoises_one_xp_answer_says_nothing_more_when_the_card_agrees(tmp_path: Path) -> None:
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    same = TORTOISE_RATES.replace("= 3\n", "= 2\n").replace("= 4\n", "= 2\n")
+    _lay(tmp_path, "wow-tortoise", same)
+    manifest = tortoise_modules.store().load("mod", "xp-rates")
+    note = server_rates.prompt_note(manifest, server_rates.rows(_entry("wow-tortoise"), tmp_path))
+    assert note is not None and "same number" not in note and "starts at XP" not in note
+
+
+def test_wotlks_three_answers_never_say_they_set_one_number(tmp_path: Path) -> None:
+    """Three questions for three keys: the card differing is no reason for the sentence."""
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    _lay(tmp_path, "wow-wotlk")
+    manifest = wotlk_modules.store().load("mod", "xp-rates")
+    note = server_rates.prompt_note(manifest, server_rates.rows(_entry("wow-wotlk"), tmp_path))
+    assert note is not None and "same number" not in note
+
+
+@pytest.mark.parametrize(
+    ("game", "answers"),
+    [
+        ("wow-tortoise", {"xp_rate": "{v}"}),
+        ("wow-wotlk", {"kill": "1", "quest": "{v}", "explore": "1"}),
+    ],
+)
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ("1e-45", "is not a number"),
+        ("1.23456", "use at most 4 digits after the point"),
+        ("1" + "0" * 39, "is too large to be a number"),
+        ("150", "is above the largest allowed value 100"),
+    ],
+)
+def test_an_xp_mod_answer_the_server_cannot_read_is_refused_and_nothing_is_installed(
+    qapp: object, ps: Any, tmp_path: Path, game: str, answers: dict[str, str], value: str, why: str
+) -> None:
+    """The mod's own question took `1e-45` (Tortoise's is a `string`), and mangosd died at start."""
+    _lay(tmp_path, game)
+    given = {k: v.format(v=value) for k, v in answers.items()}
+    view = _view(ps, tmp_path, game)
+    view._prompt_asker = lambda parent, manifest, prompts, **_: given
+    view.services.client_dir = tmp_path / "client"
+    view.modules_panel.select("xp-rates")
+    view._module_action("install")
+
+    applier = view.services.applier
+    assert applier.installed == [], "a value the server cannot read reached the applier"
+    said = view.module_report.toPlainText()
+    assert "nothing on this machine was changed" in said and why in said, said
+
+
+@pytest.mark.parametrize(
+    ("game", "answers"),
+    [
+        ("wow-tortoise", {"xp_rate": "2.5"}),
+        ("wow-wotlk", {"kill": "0.0001", "quest": "3", "explore": "100"}),
+    ],
+)
+def test_an_xp_mod_answer_the_server_reads_installs(
+    qapp: object, ps: Any, tmp_path: Path, game: str, answers: dict[str, str]
+) -> None:
+    _lay(tmp_path, game)
+    view = _view(ps, tmp_path, game)
+    view._prompt_asker = lambda parent, manifest, prompts, **_: answers
+    view.services.client_dir = tmp_path / "client"
+    view.modules_panel.select("xp-rates")
+    view._module_action("install")
+    assert view.services.applier.installed == ["xp-rates"]
+    assert view.services.applier.values == [answers]
