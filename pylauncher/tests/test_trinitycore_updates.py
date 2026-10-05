@@ -2749,3 +2749,11 @@ def test_the_record_stays_until_the_new_build_is_up_even_when_the_press_dies(
     ], "the ground: forward() imported every table"
     pending = box.pending()
     assert pending is not None and ARENA in cast(list[str], pending["reimport"])
+
+
+def test_the_kept_tiles_sentence_names_the_press_as_the_server_tab_spells_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One spelling of the press (T245's `START_PRESS`): a renamed button renames it here too."""
+    monkeypatch.setattr(mmaps, "START_PRESS", "Build the pathfinding data")
+    assert "“Build the pathfinding data”" in trinitycore.reextract_kept_tiles(3)
