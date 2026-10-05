@@ -255,7 +255,9 @@ def test_a_stop_during_a_copy_ends_at_once_and_the_next_start_copies_that_folder
         started.send_signal(signal.SIGTERM)
         started.wait(timeout=5)
         assert time.monotonic() - signalled < 2.0
-        assert started.returncode != 0
+        # 143 is the trap's own exit: a shell without the trap dies OF the signal (-15 here),
+        # and as a container's PID 1 it would not die at all -- it would ignore it.
+        assert started.returncode == 143
     finally:
         # The shim's `sleep` outlives the script, as it would outlive PID 1 only until the
         # container ends; its own session makes it this test's to end.
