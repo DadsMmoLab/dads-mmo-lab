@@ -37,6 +37,7 @@ from yulon import docker, resources
 from yulon.catalog import composegen, world_data
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import mmaps
+from yulon.catalog.installer import InstallOptions
 from yulon.controller_wow_centurion.controller import CenturionController
 
 DIRS = ("dbc", "maps", "vmaps", "mmaps", "Cameras")
@@ -53,7 +54,6 @@ def lay_compose(server_dir: Path, platform_id: str, entry: CatalogEntry = MIRROR
         templates_root=resources.installers_dir(),
         db_password="tc-0123456789abcdef",
         platform_id=lambda: platform_id,
-        install_id="0123abcd",
     )
     server_dir.mkdir(parents=True, exist_ok=True)
     (server_dir / composegen.BASE_FILE).write_text(plan.base, encoding="utf-8")
@@ -395,3 +395,45 @@ def test_the_folder_held_back_until_pathfinding_is_done_is_the_jobs_own() -> Non
     it names the pathfinding folder itself; this holds the two names together."""
     assert world_data.MMAPS_DIR == mmaps.MMAPS_DIR
     assert world_data.MMAPS_DIR in DIRS
+
+
+# -- an install made before the volume: Repair server files... ----------------------------------
+
+
+def lay_old_windows_compose(server_dir: Path) -> None:
+    """What a Windows Centurion install wrote before T219: the bind, on every platform."""
+    lay_compose(server_dir, "windows", entry=centurion_like(packs=[*REQUIRED_PACKS], rev=REV))
+    assert not world_data.mirrored(server_dir)
+
+
+def test_a_windows_install_on_the_old_bind_file_is_offered_the_repair_and_its_cost(
+    tc: Machine,
+) -> None:
+    lay_old_windows_compose(tc.server_dir)
+    check = engine(tc, entry=MIRRORED, platform_id=lambda: "windows").base_compose_check(
+        InstallOptions(server_dir=tc.server_dir)
+    )
+    assert check.state == "stale"
+    assert check.world_data_gb == 4
+
+
+def test_a_repair_that_adds_nothing_about_the_volume_says_nothing_about_it(tc: Machine) -> None:
+    """A Windows file that already has the volume, but differs elsewhere, and a Linux file
+    that differs: neither repair adds the volume, so neither confirmation names a copy."""
+    lay_compose(tc.server_dir, "windows")
+    path = tc.server_dir / composegen.BASE_FILE
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("    stop_grace_period: 5m\n", "", 1),
+        encoding="utf-8",
+    )
+    windows = engine(tc, entry=MIRRORED, platform_id=lambda: "windows").base_compose_check(
+        InstallOptions(server_dir=tc.server_dir)
+    )
+    assert windows.state == "stale" and windows.world_data_gb == 0
+    lay_compose(tc.server_dir, "linux")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("    stop_grace_period: 5m\n", "", 1),
+        encoding="utf-8",
+    )
+    linux = engine(tc, entry=MIRRORED).base_compose_check(InstallOptions(server_dir=tc.server_dir))
+    assert linux.state == "stale" and linux.world_data_gb == 0

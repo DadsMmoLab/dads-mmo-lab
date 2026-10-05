@@ -618,3 +618,48 @@ def test_an_update_that_ends_while_a_check_is_out_asks_once_more(
     assert view._compose_state == "upstream", "the stale answer overwrote the fresh one"
     assert not view.compose_banner.isHidden()
     assert view.compose_banner_label.text() == controller_view_module.REPAIR_FILES_UPSTREAM_BANNER
+
+
+# -- T219: the repair that moves a Windows Centurion's map data into a volume ----------------
+
+
+class _VolumeRoute(_Route):
+    def __init__(self, world_data_gb: float) -> None:
+        super().__init__("stale")
+        self.world_data_gb = world_data_gb
+
+    def check(self) -> native.ComposeCheck:
+        self.checks += 1
+        return native.ComposeCheck("stale", added=40, removed=2, world_data_gb=self.world_data_gb)
+
+
+def test_the_repair_that_adds_the_map_data_volume_names_the_copy_and_its_size(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = _view(ps, tmp_path, _VolumeRoute(4))
+    asked = _answer(monkeypatch, yes=False)
+    view.compose_banner_button.click()
+    [question] = asked
+    assert "first start after Recreate containers…" in question, question
+    assert "about 4 GB on Docker's disk" in question, question
+    assert question.index("about 4 GB") < question.index("Nothing else changes"), question
+
+
+def test_every_other_repair_question_is_word_for_word_as_before(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T219 adds a paragraph only where the volume is added; this is the text before it."""
+    view = _view(ps, tmp_path, _VolumeRoute(0))
+    asked = _answer(monkeypatch, yes=False)
+    view.compose_banner_button.click()
+    assert asked == [
+        "Repair this server's files now?\n\ndocker-compose.yml differs from what this version "
+        "of Yu'lon writes for this server, either because another version wrote it or because "
+        "it was edited by hand. Yu'lon writes it again the way this version installs it, with "
+        "this install's own project name, ports and SELinux labels (it adds 40 lines and "
+        "removes 2). Any hand edits in it are replaced; the file as it is now is kept beside it "
+        "as a backup (docker-compose.yml.<date>.repair.bak).\n\nNothing else changes: not your "
+        "characters, not your .conf settings, not docker-compose.override.yml or .env. The "
+        "running containers keep the old file until they are recreated, which Yu'lon offers "
+        "next."
+    ]

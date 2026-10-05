@@ -569,11 +569,21 @@ def test_centurion_copies_the_five_folders_its_world_server_opens() -> None:
 
 def test_a_world_data_folder_named_twice_is_refused() -> None:
     with pytest.raises(ValidationError, match=r"world_data_dirs names \['maps'\] more than once"):
-        NativeInstall.model_validate(_native(world_data_dirs=["maps", "dbc", "maps"]))
+        NativeInstall.model_validate(
+            _native(world_data_dirs=["maps", "dbc", "maps"], world_data_gb=4)
+        )
 
 
 @pytest.mark.parametrize("name", ["../maps", "maps/x", ".yulon-previous", "a b", ""])
 def test_a_world_data_folder_must_be_a_plain_name(name: str) -> None:
     """Spliced into the script's folder list and a `sed` pattern: letters, digits and `_`."""
     with pytest.raises(ValidationError, match="world_data_dirs"):
-        NativeInstall.model_validate(_native(world_data_dirs=[name]))
+        NativeInstall.model_validate(_native(world_data_dirs=[name], world_data_gb=4))
+
+
+def test_folders_copied_into_a_volume_must_say_the_room_they_take() -> None:
+    """Preflight adds the number to Docker's disk on Windows; without it the floor is short."""
+    with pytest.raises(ValidationError, match="world_data_gb must say how much room"):
+        NativeInstall.model_validate(_native(world_data_dirs=["maps"]))
+    block = NativeInstall.model_validate(_native(world_data_dirs=["maps"], world_data_gb=4))
+    assert block.trinitycore.world_data_gb == 4  # type: ignore[union-attr]

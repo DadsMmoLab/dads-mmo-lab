@@ -1151,3 +1151,28 @@ def test_an_unticked_purge_with_no_pending_record_says_nothing_about_one(tmp_pat
     report = rec.uninstaller().run(keep_characters=False)
 
     assert report.warnings == ()
+
+
+# -- T219: a Windows Centurion's map-data volume ------------------------------------------
+
+CENTURION_PROJECT = "yulon-wow-centurion-c808c548"
+WORLD_DATA = f"{CENTURION_PROJECT}_{composegen.WORLD_DATA_VOLUME}"
+"""What compose names the volume the template declares: `<project>_world-data`."""
+
+
+@pytest.mark.parametrize("keep", [True, False], ids=["ticked", "unticked"])
+def test_the_map_data_volume_is_removed_whether_or_not_characters_are_kept(
+    tmp_path: Path, keep: bool
+) -> None:
+    """T219 decision 3: it is a copy of the server folder's `data/`, which Uninstall deletes
+    either way, and a reinstall extracts the map data again -- unlike WotLK's `_client-data`,
+    whose maps are downloaded and live nowhere else."""
+    rec = _recorder(
+        tmp_path,
+        project=CENTURION_PROJECT,
+        volumes=[f"{CENTURION_PROJECT}_db-data", WORLD_DATA],
+    )
+    report = rec.uninstaller().run(keep_characters=keep)
+    assert WORLD_DATA in rec.removed_volumes
+    assert WORLD_DATA not in report.kept_volumes
+    assert (f"{CENTURION_PROJECT}_db-data" in report.kept_volumes) is keep

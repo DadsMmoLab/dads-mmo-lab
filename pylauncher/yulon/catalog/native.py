@@ -753,6 +753,11 @@ class ComposeCheck:
     repair sets so the server writes into a folder it binds (`LogsDir =
     "../logs" in etc/mangosd.conf`), and why a folder setting is left as the
     player has it. The confirmation names both.
+
+    `world_data_gb` is T219's, and only on `stale`: non-zero when the repair adds
+    the `world-data` volume a Windows Centurion world reads its map data from, the
+    room it takes on Docker's disk; the confirmation then says the first start
+    after the recreate copies the map data into it.
     """
 
     state: ComposeState
@@ -761,6 +766,7 @@ class ComposeCheck:
     removed: int = 0
     settings: tuple[str, ...] = ()
     kept: tuple[str, ...] = ()
+    world_data_gb: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -9004,8 +9010,22 @@ class StagedInstaller:
             logger.info(f"{self.entry.id}: {why}")
         added, removed = _lines_changed(text, fresh)
         settings = tuple(line for edit in edits for line in edit.settings)
-        check = ComposeCheck("stale", added=added, removed=removed, settings=settings, kept=kept)
+        check = ComposeCheck(
+            "stale",
+            added=added,
+            removed=removed,
+            settings=settings,
+            kept=kept,
+            world_data_gb=self._world_data_added(text, fresh),
+        )
         return check, fresh, text, edits
+
+    def _world_data_added(self, text: str, fresh: str) -> float:
+        """T219: the room the volume takes, when this repair is the one that adds it; else 0."""
+        if not world_data.declares(fresh) or world_data.declares(text):
+            return 0.0
+        trinitycore = self._native().trinitycore
+        return (trinitycore.world_data_gb or 0.0) if trinitycore is not None else 0.0
 
     def _conf_edits(
         self, server_dir: Path, text: str

@@ -71,6 +71,11 @@ def mirrored(server_dir: Path) -> bool:
         text = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
+    return declares(text)
+
+
+def declares(text: str) -> bool:
+    """Does this base compose text declare the `world-data` volume? (`mirrored()`'s rule)"""
     return _DECLARED.search(text) is not None
 
 

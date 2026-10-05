@@ -332,7 +332,11 @@ def centurion_like(
         "db": {"image": "mysql:8.4", "client": "mysql", "user": "root"},
         "ready": {"world": "World initialized"},
         "update_to_latest": True,
-        "trinitycore": {**copy.deepcopy(TRINITYCORE), "world_data_dirs": list(world_data_dirs)},
+        "trinitycore": {
+            **copy.deepcopy(TRINITYCORE),
+            "world_data_dirs": list(world_data_dirs),
+            **({"world_data_gb": 4} if world_data_dirs else {}),
+        },
     }
     return parse_catalog({"schema_version": 1, "games": [entry]}).get("wow-centurion")
 

@@ -1749,6 +1749,7 @@
               "mmaps",
               "Cameras"
             ],
+            "world_data_gb": 4,
             "updates": {
               "reimport_phases": [
                 "world routines",

@@ -1282,6 +1282,19 @@ class TrinityCoreData(_Strict):
             "platform, as before. Linux, a WSL-distro install and macOS always bind it."
         ),
     )
+    world_data_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "T219: what the `world-data` volume adds to Docker's disk on Windows, where it is a "
+            "second copy of those folders; preflight adds it to the Docker's-disk floors there "
+            "and nowhere else. Required when `world_data_dirs` names any. Centurion's 4: the "
+            "folders measured 1.05 GiB without pathfinding data (yulon-win11, 2026-10-04), a "
+            "folder copied again sits beside its old copy until it is swapped in (vmaps, 0.7 "
+            "GB), and the pathfinding data comes on top once made -- not measured, since no "
+            "Centurion run had finished then (T209)."
+        ),
+    )
     updates: TrinityCoreUpdates | None = Field(
         default=None,
         description=(
@@ -1367,6 +1380,16 @@ class TrinityCoreData(_Strict):
                     "name plain paths only"
                 )
         return value
+
+    @model_validator(mode="after")
+    def _a_volume_says_its_size(self) -> TrinityCoreData:
+        """Folders copied into a volume need the room they take named, for preflight."""
+        if self.world_data_dirs and self.world_data_gb is None:
+            raise ValueError(
+                "world_data_dirs names folders to copy into a volume on Windows, so "
+                "world_data_gb must say how much room that copy takes on Docker's disk"
+            )
+        return self
 
     @field_validator("world_data_dirs")
     @classmethod

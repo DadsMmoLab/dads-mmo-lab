@@ -5918,7 +5918,8 @@ REPAIR_FILES_CONFIRM = (
     "Yu'lon writes for this server, either because another version wrote it or because it was "
     "edited by hand. Yu'lon writes it again the way this version installs it, with this "
     "install's own project name, ports and SELinux labels{counts}. Any hand edits in it are "
-    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}\n\n"
+    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}{volume}"
+    "\n\n"
     "Nothing else changes: not your characters, not {others}, not docker-compose.override.yml "
     "or .env. The running containers keep the old file until they are recreated, which Yu'lon "
     "offers next."
@@ -5930,6 +5931,15 @@ REPAIR_FILES_CONFS = (
     "is kept beside itself as a backup too."
 )
 """T169's paragraph in the question, when the same repair sets a conf's folder setting."""
+
+REPAIR_FILES_WORLD_DATA = (
+    "\n\nIt also gives the world server a Docker volume of its own for the map data it reads, "
+    "so it no longer reads every map file through Windows' file share, which slowed the world "
+    "server's start. The first start after Recreate containers… copies the map data from the "
+    "server folder into it, which takes a few minutes, and the copy takes about {gb:g} GB on "
+    "Docker's disk. The server folder's data folder stays where it is."
+)
+"""T219's paragraph in the question, when the same repair adds the `world-data` volume."""
 
 REPAIR_FILES_DONE = (
     "docker-compose.yml was repaired; the old one is kept as {backup}. The containers still run "
@@ -17261,7 +17271,12 @@ class ControllerView(QWidget):
             if last is not None and last.state == "upstream"
             else REPAIR_FILES_CONFIRM
         )
-        question = confirm.format(backup=backup, counts=counts, confs=confs, others=others)
+        # T219: a Windows Centurion's file from before the map-data volume.
+        gb = last.world_data_gb if last is not None and last.state == "stale" else 0.0
+        volume = REPAIR_FILES_WORLD_DATA.format(gb=gb) if gb else ""
+        question = confirm.format(
+            backup=backup, counts=counts, confs=confs, others=others, volume=volume
+        )
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
