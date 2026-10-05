@@ -1742,6 +1742,13 @@
               1,
               530
             ],
+            "world_data_dirs": [
+              "dbc",
+              "maps",
+              "vmaps",
+              "mmaps",
+              "Cameras"
+            ],
             "updates": {
               "reimport_phases": [
                 "world routines",

@@ -1269,6 +1269,19 @@ class TrinityCoreData(_Strict):
             "§3) -- 0 and 1, and 530 with `Expansion = 2`."
         ),
     )
+    world_data_dirs: tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")], ...] = Field(
+        default=(),
+        description=(
+            "T219: the folders under `data/` the world server opens, which on Windows are copied "
+            "into the install's `world-data` volume before every start and read from there "
+            "instead of over Docker Desktop's file share (about 12 ms per file opened; the "
+            "first rebalance took 58.9 s over the share and 1.81 s from a volume, yulon-win11 "
+            "2026-10-04). Read off the pin's source: `GetDataPath()` + `dbc/`, `maps/`, "
+            "`vmaps`, `mmaps`, and `Cameras` (LoadM2Cameras); `Buildings` is the extractor's "
+            "and no data path names it. Empty: the world server binds `data/` on every "
+            "platform, as before. Linux, a WSL-distro install and macOS always bind it."
+        ),
+    )
     updates: TrinityCoreUpdates | None = Field(
         default=None,
         description=(
@@ -1353,6 +1366,15 @@ class TrinityCoreData(_Strict):
                     f"sparse_exclude holds a git pattern character {special} in {path!r}; "
                     "name plain paths only"
                 )
+        return value
+
+    @field_validator("world_data_dirs")
+    @classmethod
+    def _each_world_folder_once(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Each folder once: the fingerprint has one line per folder, and the copy one pass."""
+        twice = sorted({name for name in value if value.count(name) > 1})
+        if twice:
+            raise ValueError(f"world_data_dirs names {twice} more than once")
         return value
 
 

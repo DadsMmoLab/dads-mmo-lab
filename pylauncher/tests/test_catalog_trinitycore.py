@@ -551,3 +551,29 @@ def test_the_tile_header_refuses_nonsense_and_retry_threads_is_no_longer_a_field
     raw["trinitycore"]["mmaps"][field] = value
     with pytest.raises(ValidationError):
         NativeInstall.model_validate(raw)
+
+
+# -- T219: the folders a Windows world server reads from its volume ---------------------------
+
+
+def test_no_world_data_folders_is_the_default_and_keeps_the_bind() -> None:
+    assert NativeInstall.model_validate(_native()).trinitycore.world_data_dirs == ()  # type: ignore[union-attr]
+
+
+def test_centurion_copies_the_five_folders_its_world_server_opens() -> None:
+    """Read off the pin's source in T219 Task 0 (`GetDataPath()` + each name); never
+    `Buildings`, the extractor's own, and never `.yulon-previous` (T241)."""
+    block = load_catalog().get("wow-centurion").install.native.trinitycore  # type: ignore[union-attr]
+    assert block.world_data_dirs == ("dbc", "maps", "vmaps", "mmaps", "Cameras")
+
+
+def test_a_world_data_folder_named_twice_is_refused() -> None:
+    with pytest.raises(ValidationError, match=r"world_data_dirs names \['maps'\] more than once"):
+        NativeInstall.model_validate(_native(world_data_dirs=["maps", "dbc", "maps"]))
+
+
+@pytest.mark.parametrize("name", ["../maps", "maps/x", ".yulon-previous", "a b", ""])
+def test_a_world_data_folder_must_be_a_plain_name(name: str) -> None:
+    """Spliced into the script's folder list and a `sed` pattern: letters, digits and `_`."""
+    with pytest.raises(ValidationError, match="world_data_dirs"):
+        NativeInstall.model_validate(_native(world_data_dirs=[name]))
