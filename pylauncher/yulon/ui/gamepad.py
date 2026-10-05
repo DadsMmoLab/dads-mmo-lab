@@ -38,6 +38,8 @@ window composes it and connects its signals.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 from collections.abc import Iterable
@@ -222,6 +224,26 @@ POLL_S = 1 / 120
 # on SDL 2.28.4). A few seconds keeps the launcher responsive to a pad the owner
 # turns on mid-session without re-polling SDL every tick.
 RESCAN_INTERVAL_S = 3.0
+
+# T387. On Windows SDL's default RAWINPUT driver reads every Xbox-type pad, and it
+# gets that input as window messages to a helper window SDL makes on the thread
+# that initialises its joysticks. Nothing here pumps window messages (see the
+# poller's note on `pygame.event.pump()`), so the pad's buttons never changed:
+# measured on Windows 11 with a virtual Xbox 360 pad, 0 of 3 presses read and the
+# D-pad moved nothing in Yu'lon. This SDL hint makes SDL run that window on a
+# thread of its own and pump it there: 3 of 3, with every pad still read by the
+# same SDL driver as before (a DualShock 4 through HIDAPI read 3 of 3 either way).
+# SDL reads it when the joystick subsystem starts, so it is set before the first
+# `pygame.joystick.init()`; a value the player set already is left alone.
+_WINDOWS_SDL_HINTS = {"SDL_JOYSTICK_THREAD": "1"}
+
+
+def _prepare_sdl_hints() -> None:
+    """Put the Windows-only SDL hints in place before SDL's joysticks start (T387)."""
+    if sys.platform != "win32":
+        return
+    for name, value in _WINDOWS_SDL_HINTS.items():
+        os.environ.setdefault(name, value)
 
 
 class Direction(Enum):
@@ -1170,6 +1192,9 @@ class GamepadSource(QObject):
             # drive the UI with a wrong mapping (the keyboard source already
             # runs independent of pygame).
             return
+        # Before ANY joystick init in this process: this probe is the first, and
+        # the poller (and its rescans) inherit the environment it leaves.
+        _prepare_sdl_hints()
         try:
             # The controller subsystem ALONE under-counts on macOS: it reports
             # only the device SDL enumerated first (a phantom that reads all
@@ -1394,7 +1419,9 @@ class _GamepadWorker(QObject):
                 # is NOT used here — it requires `pygame.init()`'s video/event
                 # system, which nothing initializes (we init only the controller
                 # subsystem), so the first pump raises
-                # `pygame.error: video system not initialized`.
+                # `pygame.error: video system not initialized`. On Windows the
+                # window messages SDL's RAWINPUT driver needs are pumped by
+                # SDL's own thread instead (`_prepare_sdl_hints`, T387).
                 try:
                     rescan_if_due()
                     _sdl2ctl.update()
