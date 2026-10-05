@@ -26,6 +26,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
@@ -33,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 
-from yulon import ansi, platform, runner, wsl
+from yulon import ansi, container_end, platform, runner, wsl
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
 from yulon.ui import lines
@@ -4768,14 +4769,15 @@ def run_attached(
     generator-abandonment path end the compose client. The result comes
     back as `CANCELLED_RETURNCODE`. What a Stop does to work already handed to
     the daemon differs by platform. A one-shot container keeps running to
-    completion everywhere. A build goes on to finish its current step on Linux
-    and macOS, where only the docker CLI is ended (T298 asks whether that
-    holds). On Windows the client's whole process tree is ended (T246), and the
-    yulon-win11 probe of 2026-10-05 saw BuildKit's build end at once as `Error`.
-    Either way the layer cache keeps every finished step and a resumed install
-    re-probes the databases, and it is the caller's job to say what a Stop
-    costs, per stage — see `native.build_cancel_note()` and its neighbours.
-    `repair_import()`
+    completion everywhere, unless its caller ends it by name, as
+    `run_container()` does for the extraction tools (T303). A build goes on
+    to finish its current step on Linux and macOS, where only the docker CLI
+    is ended (T298 asks whether that holds). On Windows the client's whole
+    process tree is ended (T246), and the yulon-win11 probe of 2026-10-05 saw
+    BuildKit's build end at once as `Error`. Either way the layer cache keeps
+    every finished step and a resumed install re-probes the databases, and it
+    is the caller's job to say what a Stop costs, per stage — see
+    `native.build_cancel_note()` and its neighbours. `repair_import()`
     deliberately passes no cancel at all; see there.
 
     `merge_stderr` is for the build, whose entire progress output is stderr;
@@ -5440,8 +5442,11 @@ class ContainerRun:
     would be one nobody took.
     """
 
-    def to_argv(self) -> list[str]:
+    def to_argv(self, name: str | None = None) -> list[str]:
         """The `docker` argv (without the program name), fields in a fixed order.
+
+        `name` is `--name <name>`, right after `--rm`: `run_container()` names
+        every tool's container so a Stop can end it (T303).
 
         `--rm` always. Every run this describes is a tool that runs to
         completion and leaves its result on a bind mount; a container left
@@ -5468,7 +5473,8 @@ class ContainerRun:
                 relative bind source with a daemon-side error that names
                 neither the field nor the caller; refusing here does both.
         """
-        return ["run", "--rm", *self._options_and_command()]
+        name_args = ["--name", name] if name is not None else []
+        return ["run", "--rm", *name_args, *self._options_and_command()]
 
     def to_detached_argv(self, name: str) -> list[str]:
         """`to_argv()` for a job that outlives this process: `-d --name <name>`, and NO `--rm`.
@@ -5514,11 +5520,21 @@ def run_container(
 ) -> AttachedRun:
     """Run one throwaway container attached, streaming its output to `sink`.
 
-    `run_attached()` does the work, so this has the build's cancel semantics
-    (the client is abandoned; the daemon finishes the container — the caller's
-    `Stage.cancel_note` says so, and the spine yields it) and the build's
-    bounded tail. Output is read merged because the tools this exists for —
-    the map, vmap and mmap extractors — print their progress to stderr, which
+    `run_attached()` does the work, and its bounded tail. **A Stop ends the
+    container too (T303)**, where for a build only the client is abandoned: a
+    tool's container writes into the server's `data/`, and on Docker Desktop
+    one whose CLI was ended went on extracting until it was removed by hand
+    (yulon-win11, 2026-10-05). So each container is named
+    (`TOOL_CONTAINER_PREFIX`), a set `cancel` ends the CLI within
+    `_STOP_POLL_SECONDS` even while the tool is silent, and the container is
+    then killed and removed by its name (`container_end.end_container()`, the
+    second look for a late create included) before this returns -- so whatever
+    the caller does next, putting old data back included, does not race it. A
+    run abandoned by an exception ends its container the same way. A `cancel`
+    already set when this is called starts nothing.
+
+    Output is read merged because the tools this exists for — the map, vmap and
+    mmap extractors — print their progress to stderr, which
     `runner.stream()` otherwise withholds until the tool has exited.
 
     Four different things can come back, and they stay four, because a stage
@@ -5560,9 +5576,83 @@ def run_container(
     this is a stage that has a log panel to fill, and a run whose only trace
     is a 200-line tail after an hour is the silence phase 6 measured against.
     """
-    argv = spec.to_argv()
+    if cancel is not None and cancel.is_set():
+        # Nothing is started after a Stop (T303): the token was set while the
+        # caller was getting here -- laying the client packs, or a tool before.
+        logger.info(f"run_container(): stopped before it began; not running {spec.argv[0]}")
+        return AttachedRun(CANCELLED_RETURNCODE)
+    name = f"{TOOL_CONTAINER_PREFIX}{uuid.uuid4().hex[:12]}"
+    argv = spec.to_argv(name=name)
     logger.info(f"run_container(): `docker {' '.join(argv)}`")
-    return run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
+    launcher = platform.docker_prefix(None)
+    try:
+        with _cli_ended_on(cancel):
+            run = run_attached(argv, Path.cwd(), sink=sink, cancel=cancel, merge_stderr=True)
+    except BaseException:
+        # Abandoned: whatever took the run away mid-tool left its container running.
+        if launcher is not None:
+            container_end.end_container(launcher, name, what=_TOOL)
+        raise
+    if cancel is None or not cancel.is_set():
+        return run
+    refused = container_end.end_container(launcher, name, what=_TOOL) if launcher else None
+    if refused is not None:
+        try:
+            sink(tool_container_left_line(name, refused))
+        except Exception as exc:  # noqa: BLE001 - `run_attached()`'s rule for a dead sink
+            logger.warning(f"the output sink stopped accepting lines: {exc}")
+    return AttachedRun(CANCELLED_RETURNCODE, run.tail)
+
+
+TOOL_CONTAINER_PREFIX = "yulon-extract-"
+"""Every extraction tool's container is `yulon-extract-<12 hex>` (T303), as clones are
+`yulon-git-<12 hex>` (T240): a name is what a Stop ends a container by."""
+
+_TOOL = "extraction tool"
+
+_STOP_POLL_SECONDS = 0.1
+"""How often a running tool looks at its cancel token: a Stop's cost before the CLI ends."""
+
+
+def tool_container_left_line(name: str, reason: str) -> str:
+    """The log line for a stopped tool whose container could not be removed (T303)."""
+    return (
+        f"The extraction tool's container {name} could not be removed after Stop ({reason}), "
+        "so it may still be writing into the server's data folder. Remove it in Docker "
+        f"Desktop's Containers list, or run: docker rm -f {name}"
+    )
+
+
+@contextmanager
+def _cli_ended_on(cancel: threading.Event | None) -> Iterator[None]:
+    """While inside, a set `cancel` ends the docker CLI this thread started (T303).
+
+    `run_attached()` reads the token only when a line arrives, and a tool can be
+    silent for minutes (`vmap4assembler`), so a watcher ends the CLI through
+    `runner.end_streams_started_on()` -- the panel's own Stop for a stream -- and
+    the read returns. It keeps ending while it watches, for a CLI started a
+    moment after the token was set. Ending the CLI does not end the container on
+    Docker Desktop; `run_container()` does that next, by its name.
+    """
+    if cancel is None:
+        yield
+        return
+    ident = threading.get_ident()
+    done = threading.Event()
+
+    def watch() -> None:
+        while not done.is_set():
+            if cancel.wait(_STOP_POLL_SECONDS) and not done.is_set():
+                runner.end_streams_started_on(ident)
+                done.wait(_STOP_POLL_SECONDS)
+
+    watcher = threading.Thread(target=watch, name="yulon-tool-stop", daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        done.set()
+        watcher.join()
 
 
 def run_detached(spec: ContainerRun, name: str, *, timeout: float | None = None) -> str:

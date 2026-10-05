@@ -30,7 +30,7 @@ from tests.conftest import HANG_BOUND
 from tests.support_fake_docker import calls as fake_calls
 from tests.support_fake_docker import containers as fake_containers
 from tests.support_fake_docker import end_fake_containers, lay_fake_docker
-from yulon import git, runner
+from yulon import container_end, git, runner
 from yulon.catalog import native
 from yulon.ui import lines
 
@@ -3547,6 +3547,6 @@ def test_each_answer_of_docker_rm_is_read_for_what_it_says_about_the_container(
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
     monkeypatch.setattr(runner, "run", run)
-    said = git._remove_container(["fake-docker"], "yulon-git-0")
-    expected = {"removed": git._REMOVED, "gone": git._GONE}.get(answer, stderr)
+    said = container_end.remove_once(["fake-docker"], "yulon-git-0")
+    expected = {"removed": container_end.REMOVED, "gone": container_end.GONE}.get(answer, stderr)
     assert said == expected

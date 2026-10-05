@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -29,6 +30,10 @@ from typing import BinaryIO, cast
 
 import pytest
 
+from tests.conftest import HANG_BOUND
+from tests.support_fake_docker import calls as fake_calls
+from tests.support_fake_docker import containers as fake_containers
+from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from tests.support_trinitycore import (
     AUTH,
     CHARS,
@@ -50,7 +55,7 @@ from tests.test_families_trinitycore import (  # noqa: F401 - fixtures, as pytes
     known_password,
     machine,
 )
-from yulon import docker
+from yulon import client_packs, docker, platform
 from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import extract, mmaps, trinitycore
@@ -1158,6 +1163,132 @@ def test_reextract_says_a_stop_brings_the_old_map_data_back(box: Box) -> None:
     said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
     assert trinitycore.REEXTRACT_CANCEL_NOTE in said
     assert trinitycore.CLIENT_DATA_CANCEL_NOTE not in said, "finished tools are not kept here"
+
+
+# -- T303: a Stop during Re-extract starts no further tool and ends the tool's container -----
+
+
+def _stop_a_reextract(
+    box: Box, state: Path, monkeypatch: pytest.MonkeyPatch, *, stop_when: str
+) -> tuple[list[BaseException], list[list[str]], float, list[str]]:
+    """Press Re-extract on a worker over the fake docker CLI, and Stop it at `stop_when`.
+
+    `"pack"`: while the first client pack is being laid into the copy (the live case
+    of 2026-10-05); `"proof"`: while its zip is read to prove it, before that.
+    `"tool"`: once the first tool's container runs. Returns the press's
+    outcome, the containers still running each time the old map data was put back, how
+    long the press took to end after the Stop, and how each client pack's laying ended.
+    """
+    cancel = threading.Event()
+    stopped_at: list[float] = []
+    laid: list[str] = []
+    if stop_when == "proof":
+        real_fetch = client_packs.fetch_checkout
+
+        def fetch(*args: object, **kwargs: object) -> client_packs.Fetched:
+            if not cancel.is_set():
+                stopped_at.append(time.monotonic())
+                cancel.set()  # the Stop lands while this pack's zip is being proved
+            try:
+                return real_fetch(*args, **kwargs)  # type: ignore[arg-type]
+            except client_packs.Cancelled:
+                laid.append("stopped while proved")
+                raise
+
+        monkeypatch.setattr(client_packs, "fetch_checkout", fetch)
+    if stop_when == "pack":
+        real_install = client_packs.install
+
+        def install(*args: object, **kwargs: object) -> dict[str, object]:
+            if not cancel.is_set():
+                stopped_at.append(time.monotonic())
+                cancel.set()  # the Stop lands while this pack is being laid
+            try:
+                return real_install(*args, **kwargs)  # type: ignore[arg-type]
+            except client_packs.Cancelled:
+                laid.append("stopped part-way")
+                raise
+            finally:
+                laid.append(str(args[1].id))  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(client_packs, "install", install)
+    seen_at_put_back: list[list[str]] = []
+    real_put_back = extract.put_back
+
+    def put_back(data_dir: Path) -> tuple[str, ...]:
+        seen_at_put_back.append(fake_containers(state))
+        return real_put_back(data_dir)
+
+    monkeypatch.setattr(extract, "put_back", put_back)
+    outcome: list[BaseException] = []
+
+    def press() -> None:
+        try:
+            list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=cancel))
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is asserted
+            outcome.append(exc)
+
+    worker = threading.Thread(target=press)
+    worker.start()
+    if stop_when == "tool":
+        deadline = time.monotonic() + HANG_BOUND
+        while not fake_containers(state):
+            assert time.monotonic() < deadline, "the first tool's container never started"
+            time.sleep(0.01)
+        stopped_at.append(time.monotonic())
+        cancel.set()
+    worker.join(HANG_BOUND)
+    assert not worker.is_alive(), "the stopped Re-extract did not end"
+    return outcome, seen_at_put_back, time.monotonic() - stopped_at[0], laid
+
+
+@pytest.mark.parametrize("stop_when", ["proof", "pack", "tool"])
+def test_a_stopped_reextract_starts_no_tool_after_the_stop_ends_its_container_and_puts_back(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_when: str
+) -> None:
+    """T303, through the real `docker.run_container()` on a docker CLI whose containers
+    outlive it: the old map data comes back only once no tool container is left to write
+    over it."""
+    cli, state = lay_fake_docker(tmp_path)
+    try:
+        monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+        finished_with_pathfinding(box)
+        flagged(box)
+        before = data_files(box)
+        box.world.running = False
+        box.seams["run_container"] = docker.run_container
+
+        outcome, seen_at_put_back, took, laid = _stop_a_reextract(
+            box, state, monkeypatch, stop_when=stop_when
+        )
+
+        assert took < 10.0, f"the Stop took {took:.1f} s to end the press"
+        assert len(outcome) == 1 and isinstance(outcome[0], InstallerError), outcome
+        if stop_when == "tool":
+            assert str(outcome[0]).startswith(f"{TOOL_NAMES[0]} was stopped."), outcome[0]
+        else:
+            assert str(outcome[0]).startswith(
+                "Stop was pressed while Centurion world was being laid into the temporary copy"
+            ), outcome[0]
+        assert str(outcome[0]).endswith(trinitycore.REEXTRACT_PUT_BACK)
+        runs = [call for call in fake_calls(state) if call.startswith("run ")]
+        if stop_when == "proof":
+            assert runs == [], "a tool was started after the Stop"
+            assert laid == ["stopped while proved"], laid
+        elif stop_when == "pack":
+            assert runs == [], "a tool was started after the Stop"
+            assert laid == ["stopped part-way", "world"], laid
+        else:
+            assert len(runs) == 1, "a further tool was started after the Stop"
+            name = runs[0].split()[runs[0].split().index("--name") + 1]
+            assert f"rm -f {name}" in fake_calls(state)
+        assert fake_containers(state) == [], "a tool container is still running"
+        assert seen_at_put_back == [[]], "the old data came back while a tool could still write"
+        assert data_files(box) == before, "the old map data, its record and the movement maps"
+        assert not trinitycore.extraction_client_dir(box.m.client, box.server_dir).exists()
+        assert needs_reextract(box.server_dir, ENTRY) is not None, "the press is still offered"
+    finally:
+        end_fake_containers(state)
 
 
 def interrupted(box: Box) -> dict[str, bytes]:

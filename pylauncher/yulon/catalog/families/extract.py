@@ -1201,6 +1201,14 @@ def run_plan(
             seen = counts(tool.produces, data_dir)
             yield f"{tool.name}: already extracted ({_counts_text(seen)})"
             continue
+        if cancel is not None and cancel.is_set():
+            # T303: a Stop that landed before this tool -- while the client packs
+            # were laid, or before the first tool -- starts no tool. `_conclude()`
+            # answers a Stop during a tool; nothing else asked before the first.
+            raise InstallerError(
+                f"Stop was pressed before {tool.name} started, so it was not run. "
+                f"{EXTRACT_CANCEL_NOTE}"
+            )
         make_out_dirs(tool.produces, data_dir)
         yield f"{tool.name}: running {' '.join(tool.argv)}"
         run = run_container(spec_for(tool), sink=sink, cancel=cancel)

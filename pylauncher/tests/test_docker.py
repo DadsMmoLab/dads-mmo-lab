@@ -3910,6 +3910,10 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
         "bind, resolves `docker_program()` directly for the same reason."
     ),
+    "_cli_ended_on": (
+        "T303: ends the docker CLI streams THIS thread started (`runner.end_streams_started_on`), "
+        "whichever daemon they reach; it addresses no daemon of its own"
+    ),
     "run_detached": (
         "`run_container`'s reason, for the background job T179 starts the same way: its "
         "mounts are paths on this machine, and a server Yu'lon installed is on the local "
@@ -4404,7 +4408,9 @@ def test_run_container_streams_the_spelled_argv_with_stderr_merged(
     )
     heard: list[str] = []
     run = docker.run_container(spec, sink=heard.append)
-    assert seen == [["docker", *spec.to_argv()]]
+    name = seen[0][seen[0].index("--name") + 1]
+    assert re.fullmatch(r"yulon-extract-[0-9a-f]{12}", name), name  # T303: Stop ends it by name
+    assert seen == [["docker", *spec.to_argv(name=name)]]
     assert merged == [True]
     assert heard == ["extracting 1/3", "extracting 2/3"]
     assert run.returncode == 0

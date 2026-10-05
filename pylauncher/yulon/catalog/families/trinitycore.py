@@ -613,13 +613,30 @@ class TrinityCoreInstaller(CmangosInstaller):
                 "Left out of the copy, because this server's map data is made from the stock "
                 f"archives and its own packs only: {', '.join(left_out)}."
             )
+        stop = ctx.cancel
+
+        def stopped() -> bool:
+            return stop is not None and stop.is_set()
+
         for pack in packs:
             yield f"Laying {pack.label} into the copy."
+            # T303: proving and laying a pack reads it end to end, which took 47 s
+            # for one pack on yulon-win11; the Stop is asked between its chunks.
             try:
-                fetched = client_packs.fetch_checkout(pack, ctx.server_dir)
+                fetched = client_packs.fetch_checkout(pack, ctx.server_dir, cancelled=stopped)
                 client_packs.install(
-                    temp, pack, fetched, game=self.entry.id, server_dir=ctx.server_dir
+                    temp,
+                    pack,
+                    fetched,
+                    game=self.entry.id,
+                    server_dir=ctx.server_dir,
+                    cancelled=stopped,
                 )
+            except client_packs.Cancelled as exc:
+                raise InstallerError(
+                    f"Stop was pressed while {pack.label} was being laid into the temporary "
+                    "copy of your client, so nothing was extracted."
+                ) from exc
             except client_packs.PackError as exc:
                 raise InstallerError(f"{exc} The map data was not extracted.") from exc
 
