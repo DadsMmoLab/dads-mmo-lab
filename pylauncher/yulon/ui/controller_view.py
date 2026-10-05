@@ -2873,6 +2873,24 @@ def _record_backed_keys(store: ManifestStore) -> Callable[[], frozenset[str]]:
     return keys
 
 
+def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
+    """The store's settings-only mods, read once on first use (T380).
+
+    `apply.settings_only()` over the `mod` family: Experience Rates and its kin,
+    which leave no folder. `apply.installed_modules()` is handed them so an
+    install made before their receipt existed still reads Installed. Lazy and
+    cached for `_record_backed_keys()`'s reasons.
+    """
+    cached: list[tuple[Manifest, ...]] = []
+
+    def mods() -> tuple[Manifest, ...]:
+        if not cached:
+            cached.append(tuple(m for m in store.load_all("mod") if apply_module.settings_only(m)))
+        return cached[0]
+
+    return mods
+
+
 def _for_wotlk(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2882,6 +2900,7 @@ def _for_wotlk(
     """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
     spec = entry.container_spec()
     record_backed = _record_backed_keys(wotlk_modules.store())
+    settings_mods = _settings_mods(wotlk_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3149,7 +3168,7 @@ def _for_wotlk(
         # mob multipliers leave no folder and read Not installed for ever
         # without it -- and `conflicts_with` never saw them.
         installed_modules=(
-            (lambda: apply_module.installed_modules(server_dir, record_backed()))
+            (lambda: apply_module.installed_modules(server_dir, record_backed(), settings_mods()))
             if entry.has_manifests
             else None
         ),
@@ -3258,6 +3277,7 @@ def _for_tbc(
     `repairable`, so nothing is offered; `_show_repair()` gates on the same
     fact a second time.
     """
+    tbc_settings_mods = _settings_mods(tbc_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3337,6 +3357,14 @@ def _for_tbc(
         ),
         create_account=lambda name, pw, gm: tbc_accounts.create_account(sql, name, pw, gm_level=gm),
         store=tbc_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=tbc_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # `sql=sql`, the SAME runner the console and the account tile use, and
         # that is the point of `tbc_modules.applier()` requiring it: it carries
         # this install's generated password (read once, above) and this game's
@@ -3395,6 +3423,7 @@ def _for_vanilla(
     binding rather than a `del` a future manifest would have to come back and
     undo — the same call the TBC factory makes.
     """
+    vanilla_settings_mods = _settings_mods(vanilla_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3509,6 +3538,14 @@ def _for_vanilla(
         # `cross-faction` is ten keys here, because mangos-classic has
         # `AllowTwoSide.Interaction.Trade` and mangos-tbc does not.
         store=vanilla_modules.store() if entry.has_manifests else None,
+        # T380: this game's mods are all repository-less, so without this reader
+        # none of them ever read Installed and none offered Remove. The settings-only
+        # ones carry a receipt; an install from before it is read off its conf.
+        installed_modules=(
+            (lambda: apply_module.installed_modules(server_dir, manifests=vanilla_settings_mods()))
+            if entry.has_manifests
+            else None
+        ),
         # The same two 8.7a seams as TBC and for the same reasons (T7), over
         # this tree's own containers.
         applier=(
@@ -3777,6 +3814,7 @@ def _for_tortoise(
     has no manifests that want it, but the Steam client entry is a path to that
     folder's own executable and there is nowhere else to get it.
     """
+    tortoise_settings_mods = _settings_mods(tortoise_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -3885,8 +3923,12 @@ def _for_tortoise(
         module_updates=(
             (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
+        # T380: the folders AND the settings-only mods (Experience Rates, Message
+        # of the Day, Performance Stats), which leave no folder.
         installed_modules=(
-            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_modules(server_dir, manifests=tortoise_settings_mods()))
+            if entry.has_manifests
+            else None
         ),
         # T121's seam rides with `installed_modules`. Tortoise ships no relative
         # (record-backed) mod, so nothing here writes a pending mark and this

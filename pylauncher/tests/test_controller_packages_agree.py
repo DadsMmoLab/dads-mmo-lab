@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from yulon import apply as apply_module
 from yulon import install_wiring, party, serverlock
 from yulon.catalog import bot_dashboard, native
 from yulon.catalog.catalog import CatalogEntry
@@ -481,16 +482,23 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # it qualifies: which of the recorded sourceless mods a press stopped on
         # mid-statement. A game with no `installed_modules` has no row for it to
         # mark.
+        # T380: `installed_modules` is also the reading for the mods that only
+        # change settings, which leave no folder. A game whose store ships one
+        # offers it with no clone at all (TBC and Vanilla), or every such row
+        # reads Not installed and offers no Remove.
+        settings = services.store is not None and any(
+            apply_module.settings_only(m) for m in services.store.load_all("mod")
+        )
         uncounted = (
             set()
             if cloned
             else {
                 "module_updates",
-                "installed_modules",
                 "unfinished_modules",
                 "unknown_modules",
                 "module_version",
             }
+            | (set() if settings else {"installed_modules"})
         ) | (set() if counted else custom)
         # 8.6's My Party, and the one seam whose absence is decided by the
         # ENGINE rather than by a measurement. The route is `mod-ale`, an

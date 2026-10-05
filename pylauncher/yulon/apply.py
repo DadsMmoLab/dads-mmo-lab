@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
-from yulon import docker, module_answers, platform, play_client, rmtree, runner
+from yulon import docker, module_answers, platform, play_client, rmtree, runner, tuning
 from yulon.catalog import composegen, upstream
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -62,6 +62,7 @@ from yulon.git import (
 )
 from yulon.log import get_logger
 from yulon.manifest import (
+    ConfFile,
     Db,
     Deploy,
     ExistsCheck,
@@ -240,19 +241,175 @@ def unknown_modules(
 
 
 def installed_modules(
-    server_dir: Path, relative: frozenset[str] = frozenset()
+    server_dir: Path,
+    relative: frozenset[str] = frozenset(),
+    manifests: Iterable[Manifest] = (),
 ) -> dict[str, frozenset[str]]:
-    """What is installed per family: the clone folders, plus the recorded sourceless mods (T121).
+    """What is installed per family: the clone folders, the recorded sourceless mods (T121),
+    and the settings-only mods (T380).
 
     The Modules tab's reading and the applier's conflict and requirement
     guards, so the tab and the refusal agree (T55's rule). `installed_clones()`
     keeps meaning "the folder is there" for the readers that need a folder.
     One directory listing per family and one small JSON read, on every reload.
+
+    A settings-only mod counts with a receipt (`module_answers.SETTINGS`), and
+    without one when it is among `manifests` and its conf still reads what an
+    install made before the receipt wrote (`settings_installed()`): one read of
+    each conf file those name.
     """
     found = {family: set(ids) for family, ids in installed_clones(server_dir).items()}
     for family, ids in recorded_modules(server_dir, relative).items():
         found.setdefault(family, set()).update(ids)
+    for family, ids in _by_family(module_answers.settings_keys(server_dir)).items():
+        found.setdefault(family, set()).update(ids)
+    texts: dict[str, str | None] = {}
+    for manifest in manifests:
+        if manifest.id in found.get(str(manifest.type), set()) or not settings_only(manifest):
+            continue
+        if _settings_still_written(server_dir, manifest, texts):
+            found.setdefault(str(manifest.type), set()).add(manifest.id)
     return {family: frozenset(ids) for family, ids in found.items()}
+
+
+def settings_only(manifest: Manifest) -> bool:
+    """Whether `manifest` is a mod that only changes settings: no repository, conf keys only (T380).
+
+    No source and no folder of its own, no SQL, no files deployed, nothing for the
+    client or the server's DBCs, no NPCs, and no patch inside a clone; at least one
+    conf key with a value to write into a `.conf`. Its install leaves no folder, so
+    a receipt is what says it is installed. The shipped ones are Experience Rates,
+    Message of the Day, Cross-Faction Play, All Flight Paths Known and Performance
+    Stats.
+    """
+    return (
+        manifest.source is None
+        and manifest.origin is None
+        and not manifest.sql
+        and not manifest.deploy
+        and not manifest.client
+        and not manifest.server_dbc
+        and not manifest.npcs
+        and not any(patch.in_clone for patch in manifest.patches)
+        and any(
+            key.default is not None for conf in _key_written_confs(manifest) for key in conf.keys
+        )
+    )
+
+
+def _key_written_confs(manifest: Manifest) -> tuple[ConfFile, ...]:
+    """The conf files whose keys `Applier._conf()` writes, in the manifest's order."""
+    return tuple(
+        conf
+        for conf in manifest.conf
+        if not _is_glob(conf.file) and conf.file.endswith(_CONF_KEY_WRITE_SUFFIXES)
+    )
+
+
+def settings_written(manifest: Manifest, vals: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """Conf file -> key -> the value an install with `vals` writes there (T380).
+
+    `Applier._conf()`'s own rendering. A value that cannot be rendered raises
+    `ApplyError`, as the install does.
+    """
+    return {
+        conf.file: {
+            key.key: _render(key.default, vals, f"conf {key.key}")
+            for key in conf.keys
+            if key.default is not None
+        }
+        for conf in _key_written_confs(manifest)
+        if any(key.default is not None for key in conf.keys)
+    }
+
+
+def settings_installed(server_dir: Path, manifest: Manifest) -> bool:
+    """Whether the settings-only mod `manifest` is installed on the install at `server_dir`.
+
+    The Modules tab's reading for one mod, and the Server rates card's question
+    "is Experience Rates installed" (T302). True with a receipt; without one, when
+    the conf still reads what an install from before the receipt wrote
+    (`_settings_still_written()`). False for any other manifest.
+    """
+    if not settings_only(manifest):
+        return False
+    if f"{manifest.type}/{manifest.id}" in module_answers.settings_keys(server_dir):
+        return True
+    return _settings_still_written(server_dir, manifest, {})
+
+
+def _settings_still_written(
+    server_dir: Path, manifest: Manifest, texts: dict[str, str | None]
+) -> bool:
+    """An install from before the receipt: its keys still read what it wrote, and Remove has
+    something to undo.
+
+    Three things, all of them needed:
+
+    1. Every question a key's value is built from has an answer saved for this
+       install. An install saves the answers it was given (T104) and nothing
+       else does, so a value set by hand or on the Server rates card that
+       happens to equal the mod's default is not taken for an install.
+    2. Every key reads exactly the value the install writes with those answers.
+    3. The remove patches would change the file: a conf already at what Remove
+       leaves has nothing to remove, whatever was installed once.
+
+    `texts` caches each conf file's text across the manifests of one reload.
+    """
+    remembered = module_answers.read_answers(server_dir, manifest)
+    confs = _key_written_confs(manifest)
+    needed = {
+        field
+        for conf in confs
+        for key in conf.keys
+        if key.default
+        for field in _fields(key.default)
+    }
+    if any(field not in remembered for field in needed):
+        return False
+    vals = {p.key: p.default for p in manifest.prompts if p.default is not None}
+    vals.update(remembered)
+    try:
+        written = settings_written(manifest, vals)
+    except ApplyError:
+        return False
+    for file, keys in written.items():
+        text = _conf_text(server_dir, file, texts)
+        if text is None:
+            return False
+        for key, value in keys.items():
+            if tuning.conf_value(text, key) != value.replace('"', "").strip():
+                return False
+    undone = False
+    for patch in manifest.patches:
+        if patch.when != "remove" or _is_glob(patch.file):
+            continue
+        text = _conf_text(server_dir, patch.file, texts)
+        if text is None:
+            continue
+        try:
+            replacement = _render(patch.replace, vals, f"patch {patch.file}")
+        except ApplyError:
+            return False
+        if patch.regex:
+            new = re.sub(patch.find, replacement, text, flags=re.MULTILINE)
+        else:
+            new = text.replace(patch.find, replacement)
+        undone = undone or new != text
+    return undone
+
+
+def _conf_text(server_dir: Path, file: str, texts: dict[str, str | None]) -> str | None:
+    """`file`'s text under `server_dir`, read once per reload; `None` when it cannot be read."""
+    if file not in texts:
+        try:
+            texts[file] = (server_dir / file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.debug(
+                f"could not read {file} to tell whether a settings mod is installed: {exc}"
+            )
+            texts[file] = None
+    return texts[file]
 
 
 def conflicting_installed(
@@ -2477,8 +2634,35 @@ class Applier:
             log.client_copies or previous_copies,
             release=release_tag,
         )
+        if folder is None:
+            self._record_settings(manifest, vals, log)
         self._remember(manifest, values, log)
         return self._report("install", manifest, log)
+
+    def _record_settings(self, manifest: Manifest, vals: Mapping[str, str], log: _Log) -> None:
+        """Write a settings-only mod's receipt, the one thing that says it is installed (T380).
+
+        Last, after every step that can raise, like `_finish_claim()`: a receipt
+        says the keys were written. Only the conf files that are there, because
+        `_conf()` writes nothing into a missing one and has said so. Never fatal:
+        the keys are written and the player is owed the report of it.
+        """
+        if not settings_only(manifest):
+            return
+        written = {
+            file: keys
+            for file, keys in settings_written(manifest, vals).items()
+            if (self.server_dir / file).is_file()
+        }
+        if not written:
+            return
+        problem = module_answers.record_settings(self.server_dir, manifest, written)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the settings were written, but the note that "
+                f"{manifest.name} is installed could not be saved ({problem}), so its row will "
+                "keep reading Not installed"
+            )
 
     def _finish_claim(
         self,
@@ -2955,6 +3139,17 @@ class Applier:
             self._require_own_clone(manifest, clone, "remove")
         self._patches(manifest, clone, vals, "remove", log)
         self._sql(manifest, clone, vals, "remove", log)
+        if settings_only(manifest):
+            # T380: the settings are back, so the receipt that said they were
+            # changed goes. A legacy install has none, and its conf no longer
+            # reads as installed once the remove patches ran.
+            problem = module_answers.record_settings(self.server_dir, manifest, None)
+            if problem:
+                log.skipped.append(
+                    f"{module_answers.ANSWERS_FILE}: the settings were put back, but the note "
+                    f"that {manifest.name} is installed could not be cleared ({problem}), so its "
+                    "row will keep reading Installed"
+                )
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
