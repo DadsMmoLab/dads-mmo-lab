@@ -42,21 +42,24 @@ _DEFAULT_HEADING = "New"
 RunGit = Callable[[list[str]], str]
 
 
-def parse_changelog(text: str) -> list[tuple[str, str]]:
-    """Every bullet in the file as (heading, bullet), in file order.
+def parse_sections(text: str) -> list[tuple[str, str, str]]:
+    """Every bullet in the file as (section, heading, bullet), in file order.
 
-    A `## ` line resets the heading to "New"; a `### ` line sets it. A bullet is
-    a line starting `- `; indented lines directly after it are its continuation.
-    Anything else (prose, blank lines) is not an entry and ends the bullet.
+    `section` is the title of the `## ` line the bullet sits under ("" above
+    the first one). A `## ` line resets the heading to "New"; a `### ` line
+    sets it. A bullet is a line starting `- `; indented lines directly after it
+    are its continuation. Anything else (prose, blank lines, an HTML comment)
+    is not an entry and ends the bullet.
     """
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, str]] = []
+    section = ""
     heading = _DEFAULT_HEADING
     bullet: list[str] | None = None
 
     def close() -> None:
         nonlocal bullet
         if bullet is not None:
-            entries.append((heading, "\n".join(bullet)))
+            entries.append((section, heading, "\n".join(bullet)))
             bullet = None
 
     for line in text.splitlines():
@@ -65,6 +68,7 @@ def parse_changelog(text: str) -> list[tuple[str, str]]:
             heading = line[4:].strip()
         elif line.startswith("## "):
             close()
+            section = line[3:].strip()
             heading = _DEFAULT_HEADING
         elif line.startswith("- "):
             close()
@@ -77,11 +81,28 @@ def parse_changelog(text: str) -> list[tuple[str, str]]:
     return entries
 
 
-def new_entries(old: str, new: str) -> str:
-    """Markdown of the bullets `new` has and `old` does not, under their headings."""
+def parse_changelog(text: str) -> list[tuple[str, str]]:
+    """Every bullet in the file as (heading, bullet), in file order."""
+    return [(heading, bullet) for _, heading, bullet in parse_sections(text)]
+
+
+def new_entries(old: str, new: str, previous: str | None = None) -> str:
+    """Markdown of the bullets `new` has and `old` does not, under their headings.
+
+    A bullet under a `## ` heading that names a version at or below `previous`
+    is history, whatever its wording: that release already announced it. T360
+    rewrote the bullets v0.8.0 to v0.8.90 had published under `## Unreleased`
+    into short lines and filed them under their own release headings, and
+    without this rule the next release would have announced all of them again
+    as new. `## Unreleased`, and a heading above `previous`, are read as before.
+    """
     seen = {bullet for _, bullet in parse_changelog(old)}
+    released = version_key(previous) if previous is not None else None
     grouped: dict[str, list[str]] = {}
-    for heading, bullet in parse_changelog(new):
+    for section, heading, bullet in parse_sections(new):
+        version = version_key(section)
+        if released is not None and version is not None and version <= released:
+            continue
         if bullet not in seen:
             grouped.setdefault(heading, []).append(bullet)
     blocks = [
@@ -184,7 +205,7 @@ def main(argv: Sequence[str] | None = None, *, run_git: RunGit = _git) -> int:
                 old = run_git(["show", f"{previous}:CHANGELOG.md"])
             except OSError:
                 old = ""
-        notes = new_entries(old, new)
+        notes = new_entries(old, new, previous)
         print(f"release notes: {args.tag} against {previous or 'nothing'}: {len(notes)} characters")
     # `Exception`, not `OSError`. The promise at the top of this file is that a
     # release is never refused over its notes, and an `except OSError` keeps it

@@ -1605,3 +1605,36 @@ def test_the_progress_dialog_hands_itself_back_to_qt_when_it_ends(qapp: object) 
         assert dialog not in parent.children(), "the dialog was left parked on the window"
     finally:
         parent.deleteLater()
+
+
+def test_the_changelog_as_released_renders_as_three_headed_lists() -> None:
+    """T360: the next release body, cut by the real cutter, in the real dialog.
+
+    `### New`, `### Fixed` and `### Changed` come out as heading blocks, every
+    Unreleased line as one list item, and no markdown is left showing.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
+    import release_notes
+
+    changelog = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+    body = release_notes.new_entries("", changelog, "v0.8.90-Public")
+    lines = [b for s, _, b in release_notes.parse_sections(changelog) if s == "Unreleased"]
+    dialog = UpdateDialog(
+        dataclasses.replace(RESULT, notes=(ReleaseNotes("v0.9.0-Public", body, False),))
+    )
+    document = _notes(dialog).document()
+
+    headings: list[str] = []
+    items: list[str] = []
+    block = document.begin()
+    while block.isValid():
+        if block.blockFormat().headingLevel() == 3:
+            headings.append(block.text())
+        elif block.textList() is not None:
+            items.append(block.text())
+        block = block.next()
+    assert headings == ["New", "Fixed", "Changed"]
+    assert len(items) == len(lines)
+    assert not [text for text in items if "**" in text or "#" in text]
