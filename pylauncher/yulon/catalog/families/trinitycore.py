@@ -2000,7 +2000,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield from self._staged((stage,), ctx)
         except BaseException as failure:
             told = self._put_the_old_map_data_back(data_dir)
-            if told == REEXTRACT_PUT_BACK and background:
+            if background:  # asked of `data/` as it is now: old data not back says 0
                 tiles = self._kept_for_the_next_run(server_dir, ident)
                 if tiles:
                     told = f"{told} {reextract_kept_tiles(tiles)}"

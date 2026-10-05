@@ -3862,3 +3862,26 @@ def test_a_tools_progress_bar_is_kept_out_of_the_run_log_and_its_last_words(
 )
 def test_what_is_progress_residue_and_what_is_said(line: str, said: str | None) -> None:
     assert extract.without_progress(line) == said
+
+
+def test_the_movement_map_generator_s_progress_bar_is_kept_out_too(tmp_path: Path) -> None:
+    """T263: `run_mmaps()` streams through the same filter as the extraction tools."""
+    run(PLAN, Runner(FULL), tmp_path)
+    logged: list[str] = []
+    runner = _Talks("/opt/bin/MoveMapGen", VMAP4_TAIL)
+
+    with pytest.raises(InstallerError) as failed:
+        list(
+            extract.run_mmaps(
+                MMAPS,
+                image_ref="yulon.local/x-server:1",
+                data_dir=tmp_path / "server" / "data",
+                run_container=runner,
+                user_args=("--user", "1000:1000"),
+                sink=logged.append,
+                cancel=None,
+            )
+        )
+
+    assert logged == VMAP4_SAID
+    assert str(failed.value).endswith("Its last words were: " + " / ".join(VMAP4_SAID))

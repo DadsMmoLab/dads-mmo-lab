@@ -1591,17 +1591,24 @@ def test_the_kept_tiles_say_how_many_and_what_continues_them() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("evidence", ""), ("evidence", "0" * 64), ("resumable", False)],
+    ids=["unknown map data", "other map data", "not resumable"],
+)
 def test_a_failed_reextract_says_nothing_of_kept_tiles_a_next_run_would_not_continue(
-    box: Box,
+    box: Box, field: str, value: object
 ) -> None:
-    """T263: only when the record is really kept for a resume. Here the run that crashed
-    could not tell which map data it was made from (an empty `evidence`), so the next run
-    starts from the beginning and the sentence would promise what does not happen."""
+    """T263: only when the record is really kept for a resume. Each case breaks one rule a
+    start applies (`mmaps._resume_or_clear()`): the run could not tell which map data it
+    was made from, it was made from other map data, or it kept nothing to continue from.
+    The next run then starts from the beginning, and the sentence would promise what does
+    not happen."""
     _a_run_that_crashed(box, 12)
     record = box.server_dir / mmaps.RECORD_FILE
     raw = json.loads(record.read_text("utf-8"))
     assert raw["resumable"] is True and raw["kept"] == 12 and raw["evidence"]
-    raw["evidence"] = ""
+    raw[field] = value
     record.write_text(json.dumps(raw), "utf-8")
     box.m.tools.fail_tool = "vmap4assembler"
     box.world.running = False
@@ -1610,7 +1617,25 @@ def test_a_failed_reextract_says_nothing_of_kept_tiles_a_next_run_would_not_cont
         list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
 
     assert str(failed.value).endswith(trinitycore.REEXTRACT_PUT_BACK)
-    assert box.engine().mmaps_status(box.server_dir).kept == 12, "the record itself is kept"
+
+
+def test_a_failed_reextract_whose_old_data_did_not_come_back_says_nothing_of_kept_tiles(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T263: tiles made from the old map data continue only once that data is back."""
+    _a_run_that_crashed(box, 12)
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    def stuck(data_dir: Path) -> tuple[str, ...]:
+        raise PermissionError("a file is held open")
+
+    monkeypatch.setattr(extract, "put_back", stuck)
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    assert "could not be put back (a file is held open)" in str(failed.value)
+    assert "finished tiles" not in str(failed.value)
 
 
 def test_the_flag_file_is_json_naming_what_changed(box: Box) -> None:
