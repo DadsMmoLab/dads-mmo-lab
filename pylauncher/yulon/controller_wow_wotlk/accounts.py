@@ -118,14 +118,14 @@ _ACCOUNTS_DB: Db = "auth"
 _USERNAME_OK = re.compile(r"\A[^\s\x00-\x1f\x7f]+\Z")
 
 
-_NAMES_ARE_NAMES: frozenset[str] = frozenset({"azerothcore", "trinitycore"})
-"""The schemes whose cores look an account argument up by name and nothing else (T301).
+_DIGITS_ARE_IDS: frozenset[str] = frozenset({"mangos_srp6", "mangos_sha"})
+"""The schemes whose cores read an all-digit account argument as an account id (T301).
 
-The scheme stands for the family here. The CMaNGOS trees -- both `mangos_*`
-schemes -- read an all-digit argument as an account id first in
+The scheme stands for the tree here: the CMaNGOS trees -- TBC and Vanilla on
+`mangos_srp6`, Tortoise on `mangos_sha` -- try the digits as an id first in
 `ExtractAccountId` (mangos-classic `src/game/Chat/Chat.cpp:3358`, mangos-tbc
 `:3420`, tortoise-wow `:3549`), so an account named `123` made here could only
-ever be reached by its number. A scheme not listed is treated that way too.
+ever be reached by its number. AzerothCore and TrinityCore look the name up.
 """
 
 
@@ -455,7 +455,7 @@ def create_account(
             contains the password.
     """
     name = _checked_username(username)
-    if name.isdigit() and scheme not in _NAMES_ARE_NAMES:
+    if name.isdigit() and scheme in _DIGITS_ARE_IDS:
         raise AccountError(
             f"{name} is made only of digits, and this server's account commands read digits as "
             "an account number, so the account could never be changed or deleted by its name. "
