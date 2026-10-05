@@ -751,3 +751,25 @@ def test_the_grace_ends_once_the_restored_world_holds_its_run(tmp_path: Path) ->
 
     assert verdicts[4].state == "up"
     assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_first_look_that_failed_is_no_evidence_that_docker_restarted(tmp_path: Path) -> None:
+    """With no run seen before the silence, a run after it cannot be called a new one.
+
+    Codex review, 2026-10-05: a dashboard whose very first read failed would take
+    any later answer for Docker's restore and forgive a crash loop already going.
+
+    Mutation: open the window when nothing was seen before, and the last tick reads `up`.
+    """
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), docker.ContainerState()),
+            (timedelta(seconds=5), _running(_stamp(NOW + timedelta(seconds=4)), 0)),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 3)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(3)]
+
+    assert verdicts[-1].state == "restart_loop"

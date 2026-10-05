@@ -104,8 +104,9 @@ covers one that takes a minute. A world that never holds a run is dying fast,
 spends most of its time `restarting`, and reads `restart_loop` on such a tick
 as soon as the window closes; its count starts over then. Only a read that
 failed opens the window, and only when the world's `StartedAt` changed across
-it, so `missing` (Docker answering) and a Docker that went quiet without
-restarting anything open none. The cost is that delay, never a loop called
+it, so `missing` (Docker answering), a Docker that went quiet without
+restarting anything, and a first look that failed (no run seen before it to
+compare with) open none. The cost is that delay, never a loop called
 steady: a server that was looping keeps `after_a_loop`.
 """
 
@@ -345,7 +346,7 @@ class Dashboard:
         now = self._now()
         if self._docker_away:
             self._docker_away = False
-            if state.started_at != self._last_started:
+            if self._last_started is not None and state.started_at != self._last_started:
                 self._restoring_until = now + DOCKER_RESTORE_GRACE
         elif state.status == "running" and state.started_at == self._last_started:
             self._restoring_until = None  # the run held from one tick to the next
