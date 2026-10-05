@@ -2474,8 +2474,9 @@ SOURCES_OFF_FILE = ".yulon-sources-off.json"
 """A rollback could not put a source folder back on the commit the running build came from.
 
 Written by the update route beside the install record (T217), read by every
-Start (`Controller.start()`), which warns and still starts the image it has
-(the owner's word, 2026-10-04: Start warns, Rebuild refuses). Forgotten once
+start (`Controller.refuse_start()`), which REFUSES while a folder it names is
+off its commit (the owner's decision on T217 (a), 2026-10-05; it warned until
+then), as Rebuild does. Forgotten once
 every folder it names is back on its commit, or by a Rebuild or update that
 succeeds. `{"version": 1, "sources": [{"repo", "dest", "commit"}]}`.
 """
@@ -2562,11 +2563,19 @@ def _a_commit(text: str) -> str | None:
     return text if _COMMIT_ID.fullmatch(text) else None
 
 
-def sources_off_warning(server_dir: Path) -> str | None:
-    """What a Start says while `SOURCES_OFF_FILE` names a folder still off its commit; else None.
+def sources_off_refusal(server_dir: Path) -> str | None:
+    """Why no start may run while `SOURCES_OFF_FILE` names a folder still off its commit; else None.
 
-    Never raises and never refuses. A folder back on its commit is not named,
-    and once none is left the record is forgotten.
+    The owner's decision on T217 (a), 2026-10-05: Start REFUSES (it warned until
+    then). The live proof showed the warned start's old world server apply the
+    database updates it found in the off-commit module folder and crash-loop.
+    Read by `Controller.refuse_start()`, so Start, Start and play, the launcher's
+    PLAY, Restart and Recreate all refuse; NOT by the engine's `start_refusal()`,
+    because "Return to the tested pin…" is one of the two ways out it names.
+
+    Never raises. Reads `.git/HEAD` (`read_head_file()`), no git run. A folder
+    back on its commit is not named, and once none is left the record is
+    forgotten.
     """
     path = server_dir / SOURCES_OFF_FILE
     try:
@@ -2574,27 +2583,31 @@ def sources_off_warning(server_dir: Path) -> str | None:
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
-        logger.warning(f"{path} could not be read ({exc}); not warning from it")
+        logger.warning(f"{path} could not be read ({exc}); not refusing from it")
         return None
     rows = raw.get("sources") if isinstance(raw, dict) else None
-    off: list[str] = []
+    off: list[tuple[str, Path, str]] = []
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
         dest, commit = Path(str(row.get("dest", ""))), str(row.get("commit", ""))
         if not commit or read_head_file(dest) == commit:
             continue
-        off.append(
-            f"{row.get('repo', dest.name)} in {dest} is not on {commit[:7]}, the commit this "
-            f"server was built from; put it back with "
-            f"`git -C {dest} checkout --detach --force {commit}`"
-        )
+        off.append((str(row.get("repo", dest.name)), dest, commit))
     if not off:
         forget_sources_off(server_dir)
         return None
+    named = "; ".join(f"{repo} in {dest} is not on {commit[:7]}" for repo, dest, commit in off)
+    fixes = " and ".join(
+        f"`git -C {dest} checkout --detach --force {commit}`" for _repo, dest, commit in off
+    )
+    back = server_build_presses.under_server_build(server_build_presses.RETURN_TO_PIN)
+    rebuild = server_build_presses.under_server_build(server_build_presses.REBUILD)
+    folders = "that folder" if len(off) == 1 else "those folders"
     return (
-        f"{'; '.join(off)}. The server runs the image it has, but its world server reads its "
-        "database updates from that folder."
+        f"{named}, the commit this server was built from, and its world server would apply the "
+        f"database updates in {folders}, so the server is not started: press {back}, or put "
+        f"the {'folder' if len(off) == 1 else 'folders'} back with {fixes} and press {rebuild}."
     )
 
 
@@ -7634,7 +7647,7 @@ class StagedInstaller:
         says what actually went wrong.
 
         Returns the sources that would not go back (T217), and remembers them in
-        `SOURCES_OFF_FILE` so every Start warns until they are back.
+        `SOURCES_OFF_FILE` so every start is refused until they are back.
         """
         failed = yield from self._put_sources_back(moved)
         if failed:

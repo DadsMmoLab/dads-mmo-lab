@@ -1448,6 +1448,7 @@ def test_pruning_a_folder_that_cannot_be_listed_removes_nothing_and_does_not_rai
 
     assert prune_older(tmp_path / "missing", ()) == ()
 
+
 # F1 (T195 final fix): the harness run without --server-dir installs where the
 # engine's default says, and that default must not build a second server beside
 # one under the former default name (`installer.default_server_dir`).

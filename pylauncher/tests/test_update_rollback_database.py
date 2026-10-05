@@ -791,7 +791,7 @@ def test_a_module_that_will_not_go_back_leaves_the_servers_stopped_and_names_the
     assert "agree again" not in text and "is running again" not in text
     # The copy still goes back: the database is ready for the folder once it is fixed.
     assert fake.put_back_calls == fake.taken
-    assert native.sources_off_warning(server_dir) is not None, "Start will warn"
+    assert native.sources_off_refusal(server_dir) is not None, "every start is refused"
 
 
 @pytest.mark.parametrize("when", ["rollback", "compile-failed"])
@@ -984,47 +984,75 @@ def test_rebuild_with_no_record_goes_on_and_says_the_sources_are_on_an_older_pin
     assert not any("checkout" in line for line in said), said
 
 
-def test_start_warns_while_a_source_is_off_its_commit_and_stops_once_it_is_back(
+def _off(server_dir: Path) -> Path:
+    """Case B as a failed update leaves it: the module on NEW, recorded as built from OLD."""
+    module = server_dir / MODULE
+    (module / ".git").mkdir(parents=True, exist_ok=True)
+    (module / ".git" / "HEAD").write_text(f"{NEW}\n", encoding="utf-8")
+    native.remember_sources_off(server_dir, [("mod-playerbots/mod-playerbots", module, OLD)])
+    return module
+
+
+def _refusal_for(module: Path) -> str:
+    """The owner's sentence (T217 (a), 2026-10-05): what is off, and what to press."""
+    return (
+        f"mod-playerbots/mod-playerbots in {module} is not on {OLD[:7]}, the commit this server "
+        "was built from, and its world server would apply the database updates in that folder, "
+        "so the server is not started: press \u201cReturn to the tested pin\u2026\u201d under "
+        "\u201cServer build \u25be\u201d on the Modules tab, or put the folder back with "
+        f"`git -C {module} checkout --detach --force {OLD}` and press \u201cRebuild the "
+        "server\u2026\u201d under \u201cServer build \u25be\u201d on the Modules tab."
+    )
+
+
+def test_a_start_is_refused_while_a_source_is_off_its_commit_and_allowed_once_it_is_back(
     tmp_path: Path,
 ) -> None:
-    """Owner: Start warns and still starts the image it has. Read off `.git/HEAD`, no git run."""
-    module = tmp_path / MODULE
-    (module / ".git").mkdir(parents=True)
-    (module / ".git" / "HEAD").write_text(f"{NEW}\n", encoding="utf-8")
-    native.remember_sources_off(tmp_path, [("mod-playerbots/mod-playerbots", module, OLD)])
-    said = native.sources_off_warning(tmp_path)
-    assert said is not None
-    assert f"git -C {module} checkout --detach --force {OLD}" in said
+    """Owner, T217 (a): Start REFUSES (it warned until 2026-10-05). Read off `.git/HEAD`."""
+    module = _off(tmp_path)
+    assert native.sources_off_refusal(tmp_path) == _refusal_for(module)
     (module / ".git" / "HEAD").write_text(f"{OLD}\n", encoding="utf-8")
-    assert native.sources_off_warning(tmp_path) is None
+    assert native.sources_off_refusal(tmp_path) is None
     assert not (tmp_path / native.SOURCES_OFF_FILE).exists(), "forgotten once it is back"
 
 
-def test_the_controllers_start_carries_the_warning_and_still_starts(
+def test_the_controllers_start_is_refused_while_a_source_is_off_its_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Current behaviour, documented: Start warns and still starts.
-
-    Waits for the owner's decision on T217 (a): the live proof (2026-10-05, item 3)
-    showed this warned Start lets the old world apply the off-commit module's SQL
-    and crash-loop. Do not change it, or this test, before that decision.
-    """
+    """Owner, T217 (a): the live proof (2026-10-05, item 3) showed the warned Start let the
+    old world apply the off-commit module's SQL and crash-loop. Start now refuses, through
+    `Controller.refuse_start()`, and starts nothing; once the folder is back it starts."""
     from yulon import docker
-    from yulon.controller import Controller
+    from yulon.controller import Controller, StartRefused
 
-    module = tmp_path / MODULE
-    (module / ".git").mkdir(parents=True)
-    (module / ".git" / "HEAD").write_text(f"{NEW}\n", encoding="utf-8")
-    native.remember_sources_off(tmp_path, [("mod-playerbots/mod-playerbots", module, OLD)])
+    module = _off(tmp_path)
     started: list[Path] = []
     monkeypatch.setattr(
         docker, "start_staged", lambda spec, where, **_kw: started.append(where) or True
     )
     controller = Controller(WOTLK.container_spec(), tmp_path)
     monkeypatch.setattr(controller, "port_conflicts", lambda: [])
+    with pytest.raises(StartRefused) as refused:
+        controller.refuse_start()
+    assert str(refused.value) == _refusal_for(module)
+    with pytest.raises(StartRefused):
+        controller.start()
+    assert started == []
+    (module / ".git" / "HEAD").write_text(f"{OLD}\n", encoding="utf-8")
     controller.start()
     assert started == [tmp_path]
-    assert controller.sources_problem is not None and OLD in controller.sources_problem
+
+
+def test_return_to_the_tested_pin_is_not_refused_by_a_source_off_its_commit(
+    tmp_path: Path,
+) -> None:
+    """It is one of the two ways out the refusal names, so it must still run."""
+    rec, server_dir, make = _spine(tmp_path, WOTLK)
+    _off(server_dir)
+    made = make()
+    made._snapshot = FakeSnapshot(rec)
+    list(made.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+    assert "build" in rec.calls and rec.calls.count("recreate") >= 1
 
 
 # -- Task 6: what the player is told before and as the press runs --------------
