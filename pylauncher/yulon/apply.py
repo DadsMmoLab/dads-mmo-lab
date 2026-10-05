@@ -351,8 +351,8 @@ def _settings_still_written(
        else does, so a value set by hand or on the Server rates card that
        happens to equal the mod's default is not taken for an install.
     2. Every key reads exactly the value the install writes with those answers.
-    3. The remove patches would change the file: a conf already at what Remove
-       leaves has nothing to remove, whatever was installed once.
+    3. The remove patches would change one of those keys' values: a conf already
+       at what Remove leaves has nothing to remove, whatever was installed once.
 
     `texts` caches each conf file's text across the manifests of one reload.
     """
@@ -380,11 +380,11 @@ def _settings_still_written(
         for key, value in keys.items():
             if tuning.conf_value(text, key) != value.replace('"', "").strip():
                 return False
-    undone = False
+    after: dict[str, str] = {}
     for patch in manifest.patches:
-        if patch.when != "remove" or _is_glob(patch.file):
+        if patch.when != "remove" or patch.file not in written:
             continue
-        text = _conf_text(server_dir, patch.file, texts)
+        text = after.get(patch.file, _conf_text(server_dir, patch.file, texts))
         if text is None:
             continue
         try:
@@ -392,11 +392,18 @@ def _settings_still_written(
         except ApplyError:
             return False
         if patch.regex:
-            new = re.sub(patch.find, replacement, text, flags=re.MULTILINE)
+            after[patch.file] = re.sub(patch.find, replacement, text, flags=re.MULTILINE)
         else:
-            new = text.replace(patch.find, replacement)
-        undone = undone or new != text
-    return undone
+            after[patch.file] = text.replace(patch.find, replacement)
+    # Compared key by key, as the server reads them, not as text: TBC's remove
+    # writes `Rate.XP.Kill    = 1` where the install wrote `Rate.XP.Kill = 1`.
+    return any(
+        tuning.conf_value(_conf_text(server_dir, file, texts) or "", key)
+        != tuning.conf_value(after.get(file, ""), key)
+        for file, keys in written.items()
+        if file in after
+        for key in keys
+    )
 
 
 def _conf_text(server_dir: Path, file: str, texts: dict[str, str | None]) -> str | None:

@@ -331,3 +331,89 @@ def test_no_conf_file_is_not_an_install(tmp_path: Path) -> None:
     _legacy(tmp_path, manifest, {"xp_rate": "3"})
 
     assert not apply_module.settings_installed(tmp_path, manifest)
+
+
+def test_keys_at_the_stock_values_spelled_another_way_are_not_an_install(
+    tmp_path: Path,
+) -> None:
+    """TBC's remove writes `Rate.XP.Kill    = 1`, the install `Rate.XP.Kill = 1`: the same
+    value, so Remove has nothing to undo, whatever the spacing.
+
+    Mutation: compare the conf's text before and after the remove patches instead
+    of each key's value, and an install at 1 reads Installed.
+    """
+    server_dir = _server(tmp_path, CMANGOS_CONF)
+    manifest = _manifest(tbc_modules.store())
+    _legacy(server_dir, manifest, {"kill": "1", "quest": "1", "explore": "1"})
+
+    assert not apply_module.settings_installed(server_dir, manifest)
+
+
+def test_a_receipt_keeps_the_mod_installed_after_its_keys_are_changed(tmp_path: Path) -> None:
+    """The receipt is what says installed: XP changed afterwards (by hand, or on the
+    Server rates card) does not make the row offer Install again.
+
+    Mutation: drop the receipt write, or stop reading it, and the keys at 5 against
+    the saved answer 3 read Not installed.
+    """
+    server_dir = _server(tmp_path, CMANGOS_CONF)
+    manifest = _manifest(tortoise_modules.store())
+    Applier(server_dir).install(manifest, {"xp_rate": "3"})
+    conf = server_dir / CMANGOS_CONF
+    conf.write_text(conf.read_text(encoding="utf-8").replace("= 3", "= 5"), encoding="utf-8")
+
+    assert apply_module.settings_installed(server_dir, manifest)
+    assert "xp-rates" in apply_module.installed_modules(server_dir, manifests=[manifest])["mod"]
+    assert "xp-rates" in apply_module.installed_modules(server_dir)["mod"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"sql": ({"db": "world", "statement": "SELECT 1;"},)},
+        {"deploy": ({"src": "a.lua", "dest": "lua_scripts/a.lua"},)},
+        {"client": ({"src": "Patch-Z.MPQ", "dest": "data"},)},
+        {"source": {"repo": "someone/xp-rates"}},
+        {"patches": ({"file": "x.conf", "find": "a", "replace": "b", "in_clone": True},)},
+        {"conf": ({"file": "etc/mangosd.conf", "keys": ({"key": "Rate.XP.Kill"},)},)},
+        {"conf": ({"file": "lua_scripts/xp.lua", "keys": ({"key": "Rate", "default": "1"},)},)},
+    ],
+    ids=["sql", "deploy", "client", "source", "patch-in-clone", "no-value", "not-a-conf"],
+)
+def test_anything_beyond_conf_keys_is_not_settings_only(change: dict[str, object]) -> None:
+    data = _manifest(tortoise_modules.store()).model_dump(mode="json", exclude_none=True)
+    data.update(json.loads(json.dumps(change)))
+    from yulon.manifest import parse_manifest
+
+    assert not apply_module.settings_only(parse_manifest(data))
+
+
+@pytest.mark.parametrize(
+    ("entry", "store", "conf", "answers"),
+    [
+        (WOTLK, wotlk_modules.store(), WOTLK_CONF, {"kill": "3", "quest": "3", "explore": "3"}),
+        (TORTOISE, tortoise_modules.store(), CMANGOS_CONF, {"xp_rate": "3"}),
+        (TBC, tbc_modules.store(), CMANGOS_CONF, {"kill": "3", "quest": "3", "explore": "3"}),
+        (
+            VANILLA,
+            vanilla_modules.store(),
+            CMANGOS_CONF,
+            {"kill": "3", "quest": "3", "explore": "3"},
+        ),
+    ],
+    ids=["wotlk", "tortoise", "tbc", "vanilla"],
+)
+def test_the_real_services_recognise_an_older_install(
+    tmp_path: Path, entry: CatalogEntry, store: object, conf: str, answers: dict[str, str]
+) -> None:
+    """The wiring, not a fixture: each game's reader is handed its settings-only mods.
+
+    Mutation: drop `manifests=` from one game's `installed_modules` and its older
+    install reads Not installed.
+    """
+    server_dir = _server(tmp_path, conf, STOCK_XP.replace("1", "3"))
+    _legacy(server_dir, _manifest(store), answers)
+    services = ControllerServices.for_entry(entry, server_dir)
+
+    assert services.installed_modules is not None
+    assert "xp-rates" in services.installed_modules()["mod"]
