@@ -6,7 +6,8 @@ leaves the container running; on yulon-win11 (2026-10-04) a clone's container
 went on for minutes as an orphan. This fake has the same shape: the CONTAINER
 is a file under `containers/`, the CLI only watches it, and killing the CLI
 leaves the file exactly where the daemon would leave the container. `rm -f
-<name>` removes it, and the CLI watching it then exits 137.
+<name>` removes it, and the CLI watching it then exits 137; with a file named
+`refuse-rm` in the state folder, `rm -f` is refused as a daemon would refuse it.
 
 Its argv0 is `fake-docker`, so `conftest`'s real-daemon guard lets it run: it
 is a script in the test's own folder and talks to nothing.
@@ -36,6 +37,9 @@ if args[:1] == ["run"]:
         time.sleep(0.05)
     sys.exit(137 if not box.exists() else 0)
 if args[:2] == ["rm", "-f"]:
+    if (state / "refuse-rm").exists():
+        sys.stderr.write("Error response from daemon: the daemon is shutting down\\n")
+        sys.exit(1)
     (state / "containers" / args[2]).unlink(missing_ok=True)
 sys.exit(0)
 """

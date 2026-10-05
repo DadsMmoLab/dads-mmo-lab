@@ -3345,6 +3345,47 @@ def test_a_stopped_containerized_clone_ends_its_container_and_never_falls_back(
     assert host == [], "a stopped clone was cloned again with host git"
 
 
+def test_a_stopped_clone_whose_container_will_not_go_says_so_in_the_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
+) -> None:
+    """T240, Codex adversarial review: a refused `rm -f` must not pass for a clean Stop.
+
+    The container may still be cloning into the folder, so the run says which
+    container it is and how to remove it, in a line of its own, before the Stop
+    ends the run as a Stop.
+    """
+    cli, state = fake_docker
+    (state / "refuse-rm").write_text("", encoding="utf-8")
+    container_git = _container_git(monkeypatch, cli)
+    dest = tmp_path / "core"
+    said: list[str] = []
+    outcome: list[BaseException] = []
+
+    def clone() -> None:
+        try:
+            for line in container_git.clone_lines(git.CloneSpec(url="https://x/y.git", dest=dest)):
+                said.append(line)
+        except BaseException as exc:  # noqa: BLE001 - the outcome is what is asserted
+            outcome.append(exc)
+
+    worker = threading.Thread(target=clone)
+    worker.start()
+    deadline = time.monotonic() + HANG_BOUND
+    while not fake_containers(state) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    (started,) = fake_containers(state)
+    assert worker.ident is not None
+    runner.end_streams_started_on(worker.ident)
+    worker.join(HANG_BOUND)
+
+    assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
+    assert fake_containers(state) == [started], "the ground: the daemon refused the removal"
+    assert said[-1] == git.container_left_line(
+        started, dest, "Error response from daemon: the daemon is shutting down"
+    ), said[-1]
+    assert f"docker rm -f {started}" in said[-1]
+
+
 def test_an_abandoned_containerized_clone_ends_its_container_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_docker: tuple[Path, Path]
 ) -> None:

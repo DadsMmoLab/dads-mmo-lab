@@ -1196,6 +1196,15 @@ def _falls_back(exc: GitError) -> bool:
     return not isinstance(exc, GitStopped)
 
 
+def container_left_line(name: str, dest: Path, reason: str) -> str:
+    """The log line for a stopped clone whose container could not be removed (T240)."""
+    return (
+        f"The clone's container {name} could not be removed after Stop ({reason}), so it may "
+        f"still be writing into {dest}. Remove it in Docker Desktop's Containers list, or run: "
+        f"docker rm -f {name}"
+    )
+
+
 _END_CONTAINER_TIMEOUT = 60.0
 """How long `docker rm -f` of a stopped clone's container may take before it is given up.
 
@@ -2972,7 +2981,17 @@ class ContainerGit:
         logger.info(f"containerized git (streamed): `{' '.join(argv[1:])}` into {dest}")
         try:
             yield from _streamed_git(argv, stage=stage)
-        except (GitStopped, GeneratorExit):
+        except GitStopped:
+            refused = self._end_container(launcher, name)
+            if refused is not None:
+                # The run still ends as a Stop, but not as a clean one: the
+                # container may still be writing into the folder, and this line
+                # is the only place the player can learn its name (Codex
+                # adversarial review).
+                yield container_left_line(name, dest, refused)
+            raise
+        except GeneratorExit:
+            # Nothing may be yielded on the way out of a closed generator.
             self._end_container(launcher, name)
             raise
         except GitError as exc:
@@ -2986,26 +3005,26 @@ class ContainerGit:
             raise
 
     @staticmethod
-    def _end_container(launcher: Sequence[str], name: str) -> None:
+    def _end_container(launcher: Sequence[str], name: str) -> str | None:
         """Kill the container `name` and remove it: `docker rm -f` (T240). Never raises.
 
-        Already gone is the usual answer and not a failure: `--rm` removes a
-        container whose git exited, and on Linux the CLI passes its own stop on.
-        Anything else is logged, because the Stop it serves has already happened
-        and the run must still end.
+        Returns None once it is gone, or why it could not be removed. Already gone
+        is the usual answer and not a failure: `--rm` removes a container whose
+        git exited, and on Linux the CLI passes its own stop on. A refusal is
+        logged and returned rather than raised, because the Stop it serves has
+        already happened and the run must still end.
         """
         try:
             done = runner.run([*launcher, "rm", "-f", name], timeout=_END_CONTAINER_TIMEOUT)
         except OSError as exc:
             logger.warning(f"could not remove the clone container {name}: {exc}")
-            return
+            return str(exc)
         if done.returncode != 0 and "no such container" not in done.stderr.lower():
-            logger.warning(
-                f"could not remove the clone container {name} "
-                f"(exit {done.returncode}): {done.stderr.strip()}"
-            )
-            return
+            reason = done.stderr.strip() or f"docker rm exited {done.returncode}"
+            logger.warning(f"could not remove the clone container {name}: {reason}")
+            return reason
         logger.info(f"the clone container {name} was ended and removed")
+        return None
 
     @staticmethod
     def _user_args() -> list[str]:
