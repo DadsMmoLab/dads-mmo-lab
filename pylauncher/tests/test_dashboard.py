@@ -507,3 +507,217 @@ def test_the_realm_poll_logs_a_silent_docker_once_not_every_tick(
         r for r in caplog.records if f"could not read the state of {SPEC.world}" in r.getMessage()
     ]
     assert len(said) == 1, [r.getMessage() for r in said]
+
+
+# ---------------------------------------------------------------- T306: Docker restarted itself
+
+
+def _stamp(at: datetime) -> str:
+    return at.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+
+
+def _clocked(
+    tmp_path: Path, script: list[tuple[timedelta, docker.ContainerState]]
+) -> tuple[dashboard.Dashboard, list[datetime]]:
+    """A dashboard ticked at the given offsets from NOW, one container state per tick."""
+    clock = [NOW]
+    remaining = list(script)
+
+    def state_of(_container: str) -> docker.ContainerState:
+        offset, state = remaining.pop(0)
+        clock[0] = NOW + offset
+        return state
+
+    watch = dashboard.Dashboard(
+        SPEC,
+        WOTLK,
+        _install(tmp_path),
+        sql=_FakeSql(),
+        state_of=state_of,
+        now=lambda: clock[0],
+    )
+    return watch, clock
+
+
+def test_restarts_while_docker_brings_itself_back_are_not_a_restart_loop(
+    tmp_path: Path,
+) -> None:
+    """T306, from the T248 live check on yulon-ubuntu (2026-10-05): "restart loop — 6 restarts".
+
+    docker.service was stopped and started; the world server never crashed on its
+    own. Measured with a busybox stand-in on yulon-ubuntu, Docker 29.1.3: a daemon
+    restart sets every container's `RestartCount` back to 0 and starts them all at
+    once, ignoring compose's `depends_on`, so a world whose database is not up yet
+    exits and is restarted by its policy until the database answers. The count went
+    1 → 5 (restarting, exit 1) → 5 (running) in the five seconds after `systemctl
+    start docker`, and the app's log shows Docker answering again at 16:38:59 while
+    the world still died until 16:39:02. The ticks below are that sequence.
+
+    Mutation: count restarts during the grace, and the third tick's four new
+    restarts make a loop that the last tick still reports.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    back = _stamp(NOW + timedelta(seconds=13))
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 0)),
+            (timedelta(seconds=5), docker.ContainerState()),  # Docker is away
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
+            (timedelta(seconds=15), _running(back, 5)),
+            (timedelta(seconds=45), _running(back, 5)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(5)]
+
+    assert [v.state for v in verdicts] == ["up", "unknown", "up", "up", "up"]
+    assert verdicts[-1].stable is True, "Docker restarting itself is not a crash"
+    assert "restart loop" not in dashboard.line(verdicts[-1])
+
+
+def test_a_world_docker_is_restarting_while_docker_comes_back_is_starting_not_looping(
+    tmp_path: Path,
+) -> None:
+    """The tick that lands in the world's back-off, right after Docker came back.
+
+    Measured: five seconds after the daemon started, the world read `restarting`,
+    exit 1, count 5. That is Docker bringing the stack back in the wrong order, and
+    the tab must not call it a restart loop. Nor `stopped`: that would open the
+    enable press (`_press_is_allowed`) under a world about to be running.
+
+    Mutation: let `restarting` win over the grace, and this reads `restart_loop`.
+    """
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=10), docker.ContainerState("restarting", "", 3)),
+        ],
+    )
+
+    watch.tick()
+    watch.tick()
+    verdict = watch.tick()
+
+    assert verdict.state == "starting"
+    assert verdict.stable is False
+    said = dashboard.line(verdict)
+    assert "restart loop" not in said
+    assert "Docker" in said
+
+
+def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: Path) -> None:
+    """The grace forgives Docker's own restart, not a world that keeps dying after it.
+
+    Measured with the same stand-in while the daemon stayed up: a container that
+    exits 3 after four seconds went 0 → 1 → 2 → 3 → 4 → 5 → 6 restarts in forty
+    seconds. Past the grace, its count growing three times is a loop again.
+
+    Mutation: make the grace never end, and the last tick reads `up`.
+    """
+    grace = dashboard.DOCKER_RESTORE_GRACE
+    later = grace + timedelta(seconds=15)
+    young = _stamp(NOW + later - timedelta(seconds=2))
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 2)),
+            (grace + timedelta(seconds=5), _running(young, 2)),
+            (later, _running(young, 5)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(5)]
+
+    assert verdicts[3].state == "up"
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_a_container_docker_said_was_missing_does_not_open_a_grace(tmp_path: Path) -> None:
+    """`missing` is Docker ANSWERING (T95); it did not go away, so nothing is forgiven.
+
+    Mutation: open the grace on any empty read, missing or not, and this reads `up`.
+    """
+    young = _stamp(NOW + timedelta(seconds=8))
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), docker.ContainerState(missing=True)),
+            (timedelta(seconds=10), _running(young, 0)),
+            (timedelta(seconds=15), _running(young, 3)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(4)]
+
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_the_starting_line_says_docker_restarted_and_names_no_restart_loop() -> None:
+    said = dashboard.line(dashboard.Verdict("starting", 4))
+    assert said.startswith("starting")
+    assert "Docker restarted" in said
+    assert "restart loop" not in said
+
+
+def test_strikes_from_before_docker_restarted_are_not_carried_into_the_new_run(
+    tmp_path: Path,
+) -> None:
+    """Docker restarting itself ends every run, and its count with it (measured: 5 → 3 → 5).
+
+    So two restarts seen before the outage are not two strikes against the run
+    Docker started afterwards, even when the new count happens to read no lower and
+    the drop `_restarted()` looks for never shows. One later restart is a hiccup.
+
+    Mutation: clear the strikes only on a falling count, and the last tick reads
+    `restart_loop` on one new restart.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    after = dashboard.DOCKER_RESTORE_GRACE + timedelta(seconds=30)
+    young = _stamp(NOW + after - timedelta(seconds=3))
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 0)),
+            (timedelta(seconds=5), _running(up, 2)),
+            (timedelta(seconds=10), docker.ContainerState()),
+            (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 2)),
+            (after, _running(young, 3)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(5)]
+
+    assert verdicts[-1].state == "up", "strikes from the run before Docker restarted counted"
+
+
+def test_docker_silent_without_restarting_the_world_opens_no_grace(tmp_path: Path) -> None:
+    """A Docker that went quiet and came back with the same run did not restart anything.
+
+    Docker restarting itself starts every container again (measured: every
+    container's `StartedAt` was new after `systemctl start docker`). A world whose
+    run is the one from before the silence was not restored, so its restarts after
+    are counted at once, and nothing reads "Docker restarted".
+
+    Mutation: open the grace on any return, and the last tick reads `up`.
+    """
+    up = _stamp(NOW - timedelta(hours=2))
+    young = _stamp(NOW + timedelta(seconds=18))
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(up, 0)),
+            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=10), _running(up, 0)),
+            (timedelta(seconds=20), _running(young, 3)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(4)]
+
+    assert verdicts[-1].state == "restart_loop"

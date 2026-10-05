@@ -34,7 +34,7 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-State = Literal["up", "stopped", "restart_loop", "unknown", "missing"]
+State = Literal["up", "stopped", "restart_loop", "starting", "unknown", "missing"]
 
 LOOP_RESTART_STRIKES = 3
 """How many restarts NEW SINCE THIS WATCHER FIRST LOOKED make a loop rather than a hiccup.
@@ -68,6 +68,38 @@ because a worldserver takes minutes to load its maps and a loop is therefore
 quiet between crashes. Ten minutes is past any first-boot load measured on these
 four trees and short enough that a server which really has settled stops being
 called unstable within one session.
+"""
+
+DOCKER_RESTORE_GRACE = timedelta(minutes=2)
+"""How long after Docker answers again its restarts are not counted as crashes (T306).
+
+Measured on yulon-ubuntu, 2026-10-05, Docker 29.1.3, with a busybox stand-in of
+the compose shape (a database that takes five seconds to listen, a world that
+exits 1 when it cannot reach it, both `restart: unless-stopped`). Stopping and
+starting docker.service:
+
+- sets every container's `RestartCount` back to 0; a container with no
+  dependency came back at 0 and stayed there;
+- starts every container at once, without compose's `depends_on` order, so the
+  world exited and was restarted by its policy until the database answered:
+  1 → 5 (`restarting`, exit 1) → 5 (`running`) within five seconds. The real
+  WotLK stack read `restart loop — 6 restarts` that way in the T248 live check,
+  and its log has Docker answering again three seconds before the world's last
+  exit, so forgetting only the count at the first answer is not enough.
+
+Those deaths are real exits, so neither the count, the exit code (0 again once
+it runs) nor `OOMKilled` tells them from a crash; only when they happened does.
+No daemon start time is reachable the same way on Linux, Docker Desktop and
+macOS, but the dashboard already sees Docker go away: its read fails. So the
+restarts in the window after Docker answers again are taken as Docker
+restoring the stack, and counting starts over when it closes.
+
+Two minutes, because Docker's back-off doubles from 100 ms, so a database that
+takes T seconds to come up ends the race by about 2T: this covers one that
+takes a minute. A world still dying after it is counted as before, so a real
+crash loop is called one at most this much later. A read that failed for any
+other reason opens the same window; the cost is the same delay, never a loop
+called steady (the interlock keeps `after_a_loop`).
 """
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
@@ -155,6 +187,8 @@ def line(verdict: Verdict) -> str:
     """
     if verdict.state == "stopped":
         return "stopped"
+    if verdict.state == "starting":
+        return "starting — Docker restarted and is bringing this server back up"
     if verdict.state == "unknown":
         return "could not be asked — docker did not answer about this container"
     if verdict.state == "missing":
@@ -243,6 +277,9 @@ class Dashboard:
         self._strikes = 0
         self._looping = False
         self._loop_is_current = False
+        self._docker_away = False
+        self._restoring_until: datetime | None = None
+        self._last_started: str | None = None
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -255,8 +292,11 @@ class Dashboard:
             # T95: docker's own "no such container" is an answer, not a silence,
             # and the player whose containers were deleted by hand must be told so.
             kind: State = "missing" if state.missing else "unknown"
+            if not state.missing:
+                self._docker_away = True
             return Verdict(kind, state.restart_count, state.started_at, uptime)
-        if self._restarted(state):
+        restoring = self._docker_is_restoring(state)
+        if self._restarted(state) or restoring:
             self._loop_is_current = False
             self._strikes = 0
         new_restarts = (
@@ -265,7 +305,7 @@ class Dashboard:
             else 0
         )
         self._last_restarts = state.restart_count
-        if new_restarts:
+        if new_restarts and not restoring:
             self._strikes += new_restarts
             if self._strikes >= LOOP_RESTART_STRIKES:
                 self._looping = True
@@ -274,6 +314,8 @@ class Dashboard:
             self._looping = False
             self._strikes = 0
 
+        if restoring and state.status == "restarting":
+            return Verdict("starting", state.restart_count, state.started_at, uptime)
         if state.status == "restarting" or (
             self._looping and self._loop_is_current and state.status == "running"
         ):
@@ -281,6 +323,25 @@ class Dashboard:
         if state.status != "running":
             return Verdict("stopped", state.restart_count, state.started_at, uptime)
         return self._with_population(state, uptime, after_a_loop=self._looping)
+
+    def _docker_is_restoring(self, state: docker.ContainerState) -> bool:
+        """Whether this answer falls in `DOCKER_RESTORE_GRACE` after Docker came back (T306).
+
+        Docker restarting itself starts every container again (measured: every
+        `StartedAt` was new), which ends the run the loop evidence was about, so
+        the first answer after a failed read clears it the way `_restarted()`
+        does, and only that: `_looping` stays, so a server that was looping
+        before is still not called steady. A world still on the run it had before
+        the silence was not restarted by anyone, so it opens no window: Docker
+        went quiet (a paused Docker Desktop, a slow WSL) without restarting it.
+        """
+        now = self._now()
+        if self._docker_away:
+            self._docker_away = False
+            if state.started_at != self._last_started:
+                self._restoring_until = now + DOCKER_RESTORE_GRACE
+        self._last_started = state.started_at
+        return self._restoring_until is not None and now < self._restoring_until
 
     def _restarted(self, state: docker.ContainerState) -> bool:
         """Whether the run the loop evidence is about has ended.
