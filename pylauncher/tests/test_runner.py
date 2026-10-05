@@ -2043,3 +2043,50 @@ def test_on_windows_a_cancelled_interact_closes_its_job_even_when_the_root_exite
 
     assert job.events[-1] == "close", job.events
     assert "release" not in job.events
+
+
+def test_on_windows_a_stop_reaches_a_stream_whose_root_exited_but_whose_job_is_unsettled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docker.exe gone, its tree still in the job and still writing: Stop ends the job.
+
+    From Codex's fourth adversarial review. Descendants inherit the output pipe,
+    so the stream reads on after its root exits, and a Stop that chose streams
+    by `poll()` alone skipped it. The job can end the tree without its root.
+
+    Mutations this catches: selection by `poll()` alone (0 streams ended); the
+    Stop thread gating `job.end()` on a live root (no "end").
+    """
+    job = _FakeJob()
+    spawned = _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True)"))
+    assert next(lines) == "first"
+    proc = spawned[0]["proc"]
+    assert isinstance(proc, _REAL_POPEN)
+    proc.wait(timeout=HANG_BOUND)
+    try:
+        assert runner.end_streams_started_on(threading.get_ident()) == 1
+        deadline = time.monotonic() + HANG_BOUND
+        while "end" not in job.events and time.monotonic() < deadline:
+            time.sleep(POLL_PACE)
+        assert "end" in job.events, job.events
+    finally:
+        lines.close()
+    assert job.events[-1] == "close", job.events
+
+
+def test_on_windows_a_stop_after_a_stream_let_its_job_go_ends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a finished stream has released its job, it is history: a later Stop leaves it alone.
+
+    Mutation this catches: selecting every child with a job, settled or not.
+    """
+    job = _FakeJob()
+    _windows_spawns(monkeypatch, job)
+    lines = stream(_python_cmd("print('first', flush=True)"))
+    assert list(lines) == ["first"]
+    assert job.events[-1] == "release"
+
+    assert runner.end_streams_started_on(threading.get_ident()) == 0
+    assert "end" not in job.events

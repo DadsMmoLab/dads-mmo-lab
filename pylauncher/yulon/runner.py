@@ -64,12 +64,14 @@ class _Child:
     whoever is blocked reading it.
     """
 
-    __slots__ = ("proc", "started_on", "ended", "job")
+    __slots__ = ("proc", "started_on", "ended", "job", "settled")
 
     def __init__(self) -> None:
         self.proc: _AnyPopen | None = None
         self.job: winjob.Job | None = None
         """The Windows Job object `proc` was started in, if it joined one (T299)."""
+        self.settled = False
+        """Set under `_LIVE_STREAMS_LOCK` when `_finish` lets `job` go; a Stop then skips it."""
         self.started_on: int | None = None
         self.ended = False
         """Set by `end_streams_started_on()` BEFORE it ends `proc` (T240): the exit is a Stop's."""
@@ -171,7 +173,13 @@ def _abandon_unread(proc: _AnyPopen, job: winjob.Job | None) -> None:
         job.close()
 
 
-def _finish(proc: _AnyPopen, job: winjob.Job | None, *, stopped: bool = False) -> None:
+def _finish(
+    proc: _AnyPopen,
+    job: winjob.Job | None,
+    *,
+    stopped: bool = False,
+    child: _Child | None = None,
+) -> None:
     """A stream's last word on its child: end it if it is running, then let its job go.
 
     A child that ran out by itself has its job RELEASED, so whatever it left
@@ -181,11 +189,14 @@ def _finish(proc: _AnyPopen, job: winjob.Job | None, *, stopped: bool = False) -
     The job is closed only after it was asked to end the tree, because a
     closed job's handle can no longer end anything.
 
-    `stopped` is `_Child.ended`, which `end_streams_started_on()` sets before it
-    starts the thread that ends the child. It overrides `poll()`: if docker.exe
-    exits before that thread runs, the thread finds nothing alive and ends
-    nothing, and a release here would leave the rest of the tree running after
-    a Stop (Codex's second adversarial review).
+    A Stop overrides `poll()`: if docker.exe exits before the Stop's thread
+    runs, a release here would leave the rest of the tree running (Codex's
+    second adversarial review). For a registered stream that Stop is
+    `child.ended`, read under `_LIVE_STREAMS_LOCK` at the moment of deciding,
+    and `child.settled` is set in the same breath, so `end_streams_started_on()`
+    either marks the child first (closed here) or finds it settled and leaves
+    it (Codex's fourth). `stopped` is the same for `interact()`, which is not
+    registered and whose cancel is its Stop.
     """
     ran_out = proc.poll() is not None
     try:
@@ -193,6 +204,10 @@ def _finish(proc: _AnyPopen, job: winjob.Job | None, *, stopped: bool = False) -
     finally:
         # Whatever `_end_child` did, the job is let go (Codex's third review).
         if job is not None:
+            if child is not None:
+                with _LIVE_STREAMS_LOCK:
+                    stopped = stopped or child.ended
+                    child.settled = True
             if ran_out and not stopped:
                 job.release()
             else:
@@ -414,16 +429,19 @@ def end_streams_started_on(ident: int) -> int:
         children = [
             child
             for child in _LIVE_STREAMS.values()
-            if child.started_on == ident and _still_running(child.proc)
+            if child.started_on == ident and (_still_running(child.proc) or _job_unsettled(child))
         ]
+        # Marked before the end is even asked for, so the reading thread can
+        # never see this child's exit before it can see why (T240). Under the
+        # lock, so `_finish` cannot decide between release and close in between
+        # (Codex's fourth adversarial review of T299).
+        for child in children:
+            child.ended = True
     for child in children:
         proc = child.proc
-        assert proc is not None  # `_still_running` filtered these; narrows for the type checker
-        # Marked before the end is even asked for, so the reading thread can
-        # never see this child's exit before it can see why (T240).
-        child.ended = True
+        assert proc is not None  # both filters need a started child; narrows for mypy
         threading.Thread(
-            target=_end_child,
+            target=_stop_child,
             args=(proc, child.job),
             daemon=True,
             name=f"yulon-end-stream-{proc.pid}",
@@ -431,6 +449,25 @@ def end_streams_started_on(ident: int) -> int:
     if children:
         logger.debug(f"ending {len(children)} stream child(ren) started on thread {ident}")
     return len(children)
+
+
+def _job_unsettled(child: _Child) -> bool:
+    """A child whose root may have exited but whose job its stream has not let go yet (T299).
+
+    The root's descendants inherit its output pipe, so a stream reads on after
+    docker.exe exits for as long as they write. That stream is still the job a
+    Stop means, and its job can end the tree without the root. Once `_finish`
+    has settled the job — released or closed — the stream is history.
+    """
+    return child.proc is not None and child.job is not None and not child.settled
+
+
+def _stop_child(proc: _AnyPopen, job: winjob.Job | None) -> None:
+    """A Stop's ending: `_end_child`, or the job alone when the root has already exited (T299)."""
+    if proc.poll() is None:
+        _end_child(proc, job)
+    elif job is not None:
+        job.end()
 
 
 def _cwd_arg(cwd: Path | None) -> str | None:
@@ -695,7 +732,7 @@ def _stream_lines(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        _finish(proc, job, stopped=child.ended)
+        _finish(proc, job, child=child)
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -866,7 +903,7 @@ def _progress_lines(
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader
         # thread stuck on a pipe.
-        _finish(proc, job, stopped=child.ended)
+        _finish(proc, job, child=child)
         for reader in readers:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for pipe in (proc.stdout, proc.stderr):
