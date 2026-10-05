@@ -1191,6 +1191,10 @@ class TrinityCoreInstaller(CmangosInstaller):
             return refused
         if owed_start_refusal(server_dir) is not None:
             return None  # reached by the Rebuild alone: any other press was refused above
+        return self.family_start_refusal(server_dir)
+
+    def family_start_refusal(self, server_dir: Path) -> str | None:
+        """A world update left unfinished (T179); the spine's question, answered (T223)."""
         return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
 
     def servers_down_work(
@@ -1358,10 +1362,17 @@ class TrinityCoreInstaller(CmangosInstaller):
                         required=frozenset((*changes.reimport, *changes.parts)),
                     )
                 except InstallerError as also:
+                    # T223: the clause about Start only when nothing else refuses one --
+                    # an untouched exit has already left the untested start refusal.
+                    stops = (
+                        ""
+                        if owed_start_refusal(server_dir) is not None
+                        else ", so nothing stops this server starting its new build on the "
+                        "old world tables"
+                    )
                     raise InstallerError(
                         f"{exc} The world tables the new build needs could not be recorded "
-                        f"either ({also.__cause__ or also}), so nothing stops this server "
-                        "starting its new build on the old world tables."
+                        f"either ({also.__cause__ or also}){stops}."
                     ) from exc
                 raise
 

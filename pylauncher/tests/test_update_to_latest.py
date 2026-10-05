@@ -40,7 +40,7 @@ from tests.support_stop import compile_until_stopped, stop_when
 from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
-from yulon import docker, git, resources, rmtree, runner
+from yulon import docker, git, resources, rmtree, runner, server_build_presses
 from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
@@ -2143,8 +2143,14 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
         "-rollback tags. The source folders were left on the new commits, because the image "
         "tags name the new build made from them. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up, and "
-        "its next Start runs the new build."
+        f"Start is refused until this is done: {native.UNTESTED_BUILD_REFUSAL}"
     )
+    # T223 (lead, under owner answer D1): the new build never started, so no Start
+    # may run it; this was "its next Start runs the new build" until then. This
+    # family's update route has no work of its own that refuses Start, so it is
+    # not exempt (lead ruling, option 1; the exemption is pinned in
+    # test_trinitycore_updates).
+    assert native.owed_start_refusal(server_dir) == native.UNTESTED_BUILD_REFUSAL
     assert set(_heads(rec, server_dir).values()) == {NEW}
     assert _recorded_builds(server_dir) == {NEW[:7]}
     assert raised.value.touched is False and raised.value.sources_kept is True
@@ -2152,8 +2158,7 @@ def test_a_rollback_that_stops_early_before_any_container_moved_leaves_the_new_s
 
 GIVEN_UP = (
     "The rebuild was cancelled while the world was still loading, so its containers were not "
-    "replaced -- the server you have is still the one that was running before this rebuild. "
-    "Nothing was touched."
+    "replaced -- the server you have is still the one that was running before this rebuild."
 )
 """`stage_recreate()`'s sentence for a recreate given up before its signal: nothing replaced."""
 
@@ -2353,7 +2358,11 @@ def test_a_rollback_that_put_the_tags_back_before_any_container_moved_puts_the_s
         _press(rec, server_dir)
     said = str(raised.value)
     assert not isinstance(raised.value, RollbackNotDone)
-    assert "The tags were put back to the build that is running" in said
+    assert "The build that had just finished was removed, and no container was replaced" in said
+    # T223 cold review: the press the player used, not "the next rebuild".
+    update = server_build_presses.under_server_build(server_build_presses.UPDATE_TO_LATEST)
+    assert f"pressing {update} again compiles it again" in said, said
+    assert "next rebuild" not in said, said
     assert set(_heads(rec, server_dir).values()) == {OLD}
     assert said.endswith(native.SOURCES_PUT_BACK_NOTE)
 
