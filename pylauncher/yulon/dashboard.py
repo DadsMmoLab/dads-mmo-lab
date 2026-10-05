@@ -94,12 +94,19 @@ macOS, but the dashboard already sees Docker go away: its read fails. So the
 restarts in the window after Docker answers again are taken as Docker
 restoring the stack, and counting starts over when it closes.
 
-Two minutes, because Docker's back-off doubles from 100 ms, so a database that
-takes T seconds to come up ends the race by about 2T: this covers one that
-takes a minute. A world still dying after it is counted as before, so a real
-crash loop is called one at most this much later. A read that failed for any
-other reason opens the same window; the cost is the same delay, never a loop
-called steady (the interlock keeps `after_a_loop`).
+The window closes early, at the first tick that finds the world running on
+the same run as the tick before: its database answered, the race is over, and
+every death from then on is the world's own (Codex adversarial review: a
+window that always ran its full length erased a slow loop's deaths inside it).
+Otherwise it lasts two minutes, because Docker's back-off doubles from 100 ms,
+so a database that takes T seconds to come up ends the race by about 2T: this
+covers one that takes a minute. A world that never holds a run is dying fast,
+spends most of its time `restarting`, and reads `restart_loop` on such a tick
+as soon as the window closes; its count starts over then. Only a read that
+failed opens the window, and only when the world's `StartedAt` changed across
+it, so `missing` (Docker answering) and a Docker that went quiet without
+restarting anything open none. The cost is that delay, never a loop called
+steady: a server that was looping keeps `after_a_loop`.
 """
 
 _DOCKER_FRACTION = re.compile(r"\.(\d{1,9})")
@@ -340,6 +347,8 @@ class Dashboard:
             self._docker_away = False
             if state.started_at != self._last_started:
                 self._restoring_until = now + DOCKER_RESTORE_GRACE
+        elif state.status == "running" and state.started_at == self._last_started:
+            self._restoring_until = None  # the run held from one tick to the next
         self._last_started = state.started_at
         return self._restoring_until is not None and now < self._restoring_until
 

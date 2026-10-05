@@ -619,21 +619,20 @@ def test_a_real_crash_loop_after_docker_came_back_is_still_called_one(tmp_path: 
     """
     grace = dashboard.DOCKER_RESTORE_GRACE
     later = grace + timedelta(seconds=15)
-    young = _stamp(NOW + later - timedelta(seconds=2))
     watch, _clock = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
             (timedelta(seconds=5), docker.ContainerState()),
             (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 2)),
-            (grace + timedelta(seconds=5), _running(young, 2)),
-            (later, _running(young, 5)),
+            (grace + timedelta(seconds=5), docker.ContainerState("restarting", "", 4)),
+            (later, _running(_stamp(NOW + later - timedelta(seconds=1)), 7)),
         ],
     )
 
     verdicts = [watch.tick() for _ in range(5)]
 
-    assert verdicts[3].state == "up"
+    assert verdicts[3].state == "starting", "still inside the window"
     assert verdicts[-1].state == "restart_loop"
 
 
@@ -642,14 +641,13 @@ def test_a_container_docker_said_was_missing_does_not_open_a_grace(tmp_path: Pat
 
     Mutation: open the grace on any empty read, missing or not, and this reads `up`.
     """
-    young = _stamp(NOW + timedelta(seconds=8))
     watch, _clock = _clocked(
         tmp_path,
         [
             (timedelta(0), _running(restarts=0)),
             (timedelta(seconds=5), docker.ContainerState(missing=True)),
-            (timedelta(seconds=10), _running(young, 0)),
-            (timedelta(seconds=15), _running(young, 3)),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=8)), 0)),
+            (timedelta(seconds=15), _running(_stamp(NOW + timedelta(seconds=14)), 3)),
         ],
     )
 
@@ -720,4 +718,36 @@ def test_docker_silent_without_restarting_the_world_opens_no_grace(tmp_path: Pat
 
     verdicts = [watch.tick() for _ in range(4)]
 
+    assert verdicts[-1].state == "restart_loop"
+
+
+def test_the_grace_ends_once_the_restored_world_holds_its_run(tmp_path: Path) -> None:
+    """Docker's restore race is over once one run of the world lasts from one tick to the next.
+
+    Codex adversarial review, 2026-10-05: a grace that runs its full two minutes
+    erases every death inside it, so a world that loads for a while and then dies
+    again after Docker came back would be counted from scratch only after the
+    window. The race measured on yulon-ubuntu ended within five seconds of the
+    daemon starting; once the world is seen running on the same `StartedAt` twice,
+    its database answered, and every later death is the world's own.
+
+    Mutation: let the grace run its full length, and the last tick reads `up`.
+    """
+    back = _stamp(NOW + timedelta(seconds=13))
+    young = _stamp(NOW + timedelta(seconds=38))
+    watch, _clock = _clocked(
+        tmp_path,
+        [
+            (timedelta(0), _running(restarts=0)),
+            (timedelta(seconds=5), docker.ContainerState()),
+            (timedelta(seconds=10), _running(_stamp(NOW + timedelta(seconds=9)), 1)),
+            (timedelta(seconds=15), _running(back, 5)),
+            (timedelta(seconds=20), _running(back, 5)),
+            (timedelta(seconds=40), _running(young, 8)),
+        ],
+    )
+
+    verdicts = [watch.tick() for _ in range(6)]
+
+    assert verdicts[4].state == "up"
     assert verdicts[-1].state == "restart_loop"
