@@ -59,7 +59,13 @@ CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def _assigned(function: ast.AST) -> dict[str, list[ast.expr]]:
-    """Every value a plain local name is given in `function` (not in functions nested in it)."""
+    """The value of every plain local name `function` assigns exactly ONCE (not in nested ones).
+
+    Once, because this walk does not follow control flow: a name assigned on
+    several branches (`message` in `rebuild()`, which carries a different sentence
+    on each exit) would lend every `raise X(message)` the words of all of them,
+    and the audit would flag raises whose sentence never says a Stop happened.
+    """
     found: dict[str, list[ast.expr]] = {}
     pending = list(ast.iter_child_nodes(function))
     while pending:
@@ -74,7 +80,7 @@ def _assigned(function: ast.AST) -> dict[str, list[ast.expr]]:
             if node.value is not None:
                 found.setdefault(node.target.id, []).append(node.value)
         pending.extend(ast.iter_child_nodes(node))
-    return found
+    return {name: values for name, values in found.items() if len(values) == 1}
 
 
 def _said(call: ast.Call, module: object, assigned: dict[str, list[ast.expr]] | None = None) -> str:

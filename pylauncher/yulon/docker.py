@@ -5150,6 +5150,23 @@ def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
     return None
 
 
+def image_id(ref: str, *, wsl_distro: str | None = None) -> str | None:
+    """The id of the image `ref` names, or None when there is none to read (T224, T225).
+
+    Asked the way `images_built()` asks, one ref at a time. None covers both
+    "no such image" and a daemon that did not answer, and the caller decides
+    what that means: a rebuild's Stop counts an unanswered id as a tag that
+    moved (putting back a tag that never moved costs nothing, and trusting the
+    silence would lose the old build), and a kept build is never used on one.
+    """
+    proc = _docker(["image", "inspect", "--format", "{{.Id}}", ref], wsl_distro=wsl_distro)
+    found = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not found:
+        logger.info(f"no image id for {ref}: {proc.stderr.strip() or 'empty answer'}")
+        return None
+    return found
+
+
 def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[str]:
     """`--security-opt label:disable` for the bind probe, and only when enforcing.
 

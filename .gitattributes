@@ -59,3 +59,4 @@ pyplan/upstream-cmangos-doodad-issue.md                       text eol=lf
 # split reads these bytes -- so a checkout that normalised them would leave the
 # fixture asserting the opposite of what it was recorded for.
 pylauncher/tests/fixtures/git-clone-progress.stderr           -text
+pylauncher/tests/data/centurion-rendered/**/*.yml  text eol=lf

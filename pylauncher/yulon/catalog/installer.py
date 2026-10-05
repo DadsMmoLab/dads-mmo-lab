@@ -478,7 +478,7 @@ about ten minutes" would be read as the likely case rather than the lucky one.
 """
 
 
-def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
+def rebuild_confirmation(entry: CatalogEntry, server_dir: Path, *, kept_build: bool = True) -> str:
     """The question asked before a rebuild starts. Nothing here is invented.
 
     A rebuild is the most expensive thing this app can be asked to do to an
@@ -499,6 +499,11 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
       is a question a person can say yes to without a spare evening -- and,
       since T170, what happens when there is no old one to keep, because the
       images are gone (`native.no_rollback_confirmation()`);
+    * *a kept build* (T224) -- when an earlier rebuild kept its finished build,
+      that this one uses it if the files have not changed and removes it first
+      otherwise. Read off `native.PARKED_BUILD_FILE` alone, never a
+      fingerprint, because this runs on the GUI thread; `kept_build` False (a
+      server inside a WSL distro, which keeps none) does not read it.
     * *what saying no costs* — nothing at all, said in as many words. A
       confirmation that does not say so is answered by the people who are
       unsure, and the unsure ones are the ones who most need to be able to
@@ -566,12 +571,25 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
         if native_block is not None and native_block.dockerfile_dir is not None
         else ""
     )
+    # T224: read off the record alone; no fingerprint is taken on the GUI thread.
+    # `kept_build` False is a server inside a WSL distro, which keeps none (D4) and
+    # whose folder a read would start (T133).
+    record = native.read_parked_build(server_dir) if kept_build else None
+    kept = (
+        f"A finished build from {record.when()} is kept from an earlier rebuild. If the files "
+        f"it was made from have not changed since, this rebuild uses it instead of compiling "
+        f"and goes straight to replacing the containers. If they have changed, it is removed "
+        f"first and the server is compiled as usual.\n\n"
+        if record is not None
+        else ""
+    )
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
         f"This compiles the server again from the source and modules in that folder. It is "
         f"the same compile an install does, and it has taken "
         f"{MEASURED_BUILD_TIMES}. Yours depends on your machine, and nothing here can "
         f"predict it better than that range does.\n\n"
+        f"{kept}"
         f"{recipe}"
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
         f"and it will be down until it reports ready. Your characters, accounts and databases "
@@ -1006,6 +1024,10 @@ class InstallEngine(Protocol):
 
     No `ask`, for `rebuild`'s reason: this route provisions nothing.
     """
+
+    def remove_kept_build(self, options: InstallOptions | None = None) -> str: ...
+
+    """Remove a kept build (`native.PARKED_TAG_SUFFIX`) now: the Server tab's press (T224)."""
 
     def base_compose_check(self, options: InstallOptions | None = None) -> native.ComposeCheck: ...
 
