@@ -84,7 +84,13 @@ each with its proof in the T230 plan §1:
   `.git`, and `genrev.cmake` runs `git describe --long --match 0.1 --dirty=+
   --abbrev=12 --always`, `git show -s --format=%ci` and `git rev-parse
   --abbrev-ref HEAD` there; no other CMake file at the pin, nor any of the 22
-  catalog modules, runs git. `modules/*/.git` is copied but read by no step.
+  catalog modules, runs git. Of what those three print, only HEAD and its commit
+  can change: the regex at genrev.cmake:78 strips `0.1-` and `N-g`, so whether a
+  `0.1` tag exists leaves the same hash; and `--dirty` always prints `+`, because
+  the container's work tree holds only the five copied paths, so `apps/` and
+  `data/`, which HEAD tracks, read as deleted whatever the index says.
+  `modules/*/.git` is copied, into the db-import image, but read by no step: the
+  db-import service bind-mounts `./modules` over that copy (`base.yml.tmpl`).
 
 What that leaves uncovered changes at most the world's version line: a git reader
 other than `genrev.cmake` after an update that leaves it unchanged, or a custom
