@@ -2757,3 +2757,38 @@ def test_the_kept_tiles_sentence_names_the_press_as_the_server_tab_spells_it(
     """One spelling of the press (T245's `START_PRESS`): a renamed button renames it here too."""
     monkeypatch.setattr(mmaps, "START_PRESS", "Build the pathfinding data")
     assert "“Build the pathfinding data”" in trinitycore.reextract_kept_tiles(3)
+
+
+def test_the_server_tab_polls_open_no_tile_until_the_tiles_folder_changes(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coordinator, before the cold review: a full set is thousands of tiles (~2.7 GB), so
+    the 5 s poll reads one listing of names, sizes and dates, and opens tiles only when
+    that changed. Re-extract's one-off sentence still counts fresh."""
+    _a_run_that_crashed(box, 12)
+    opened: list[Path] = []
+    real = mmaps._whole_tile
+
+    def spy(path: Path, header: object) -> bool:
+        opened.append(path)
+        return real(path, header)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mmaps, "_whole_tile", spy)
+    monkeypatch.setattr(mmaps, "_TILE_COUNTS", {})  # as a fresh process: no count yet
+    first = box.engine().mmaps_status(box.server_dir)
+    counted = len(opened)
+    opened.clear()
+
+    second = box.engine().mmaps_status(box.server_dir)
+    third = box.engine().mmaps_status(box.server_dir)
+
+    assert counted == 12 and first.kept == 12
+    assert opened == [], "a poll with nothing changed opened a tile"
+    assert second.kept == third.kept == 12
+    tile = sorted((box.server_dir / "data" / "mmaps").glob("*.mmtile"))[0]
+    tile.write_bytes(tile.read_bytes()[:-1])
+
+    fourth = box.engine().mmaps_status(box.server_dir)
+
+    assert len(opened) == 12, "a changed tile is a recount"
+    assert fourth.kept == 11

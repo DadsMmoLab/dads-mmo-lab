@@ -1246,7 +1246,7 @@ def continues_from(
     return 0 if begins_again_because else kept
 
 
-def _continuation(job: Job, record: Record) -> tuple[int, str]:
+def _continuation(job: Job, record: Record, *, polled: bool = False) -> tuple[int, str]:
     """`(tiles, why)`: the whole tiles a start keeps now, and why it would not (T245, T263).
 
     The ONE rule the Server tab's line (`_failed_status()`) and a failed Re-extract's
@@ -1256,14 +1256,65 @@ def _continuation(job: Job, record: Record) -> tuple[int, str]:
     of the tiles that are whole now (`_whole_tiles()`, not the record's `kept`, which
     a tile removed or cut off since makes stale), and `why` is
     `_why_it_begins_again()`'s map-data answer, empty when the start continues.
-    `(0, "")` when nothing would be kept at all.
+    `(0, "")` when nothing would be kept at all. `polled` (the Server tab's 5 s line)
+    counts through `_whole_tiles_polled()`, which opens no tile while the folder is
+    unchanged; Re-extract's one sentence counts fresh.
     """
     if not _resumable(job, record):
         return 0, ""
-    tiles = _whole_tiles(job)
+    tiles = _whole_tiles_polled(job) if polled else _whole_tiles(job)
     if not tiles:
         return 0, ""
     return tiles, _why_it_begins_again(job, record)
+
+
+_TILE_COUNTS: dict[tuple[Path, str], tuple[tuple[tuple[str, int, int], ...], int]] = {}
+"""`_whole_tiles_polled()`'s cache: per tiles folder and header, its fingerprint and count."""
+
+
+def _tile_fingerprint(out: Path) -> tuple[tuple[str, int, int], ...] | None:
+    """Every `.mmtile`'s name, size and modification time, from one `os.scandir`; no file opened.
+
+    None when the folder cannot be listed or a tile cannot be stat'ed: no cache then.
+    """
+    try:
+        with os.scandir(out) as entries:
+            return tuple(
+                sorted(
+                    (entry.name, info.st_size, info.st_mtime_ns)
+                    for entry in entries
+                    if entry.name.endswith(TILE_SUFFIX)
+                    for info in (entry.stat(follow_symlinks=False),)
+                )
+            )
+    except OSError:
+        return None
+
+
+def _whole_tiles_polled(job: Job) -> int:
+    """`_whole_tiles()` for the Server tab's poll: tiles opened only when the folder changed.
+
+    A full Centurion set is thousands of tiles (about 2.7 GB), and the line is asked
+    every 5 s while a failed run is shown. So the count is kept beside a fingerprint
+    of the folder (`_tile_fingerprint()`: names, sizes and dates, from the listing
+    alone), and the headers are read again only when that fingerprint differs. A
+    tile rewritten to the same size within the same nanosecond would not be seen;
+    the start (`_keep_finished()`) checks every header again regardless.
+    """
+    header = job.block.mmaps.tile_header
+    out = job.data_dir / MMAPS_DIR
+    if header is None or out.is_symlink():
+        return 0
+    fingerprint = _tile_fingerprint(out)
+    if fingerprint is None:
+        return _whole_tiles(job)
+    key = (out, header.model_dump_json())  # a header the catalog changed is a recount
+    cached = _TILE_COUNTS.get(key)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    count = _whole_tiles(job)
+    _TILE_COUNTS[key] = (fingerprint, count)
+    return count
 
 
 def _whole_tiles(job: Job) -> int:
@@ -1308,7 +1359,7 @@ def _failed_status(job: Job, record: Record) -> MmapsStatus:
     status = _status_of(record, pathfinding_on=_pathfinding_on(job))
     if not status.kept:
         return status
-    kept, why = _continuation(job, record)  # the Re-extract message's rule too (T263)
+    kept, why = _continuation(job, record, polled=True)  # Re-extract's rule too (T263)
     return replace(status, kept=kept, begins_again_because=why)
 
 
