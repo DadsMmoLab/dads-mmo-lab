@@ -59,7 +59,7 @@ from pathlib import Path, PurePosixPath
 from typing import ClassVar, Literal, cast
 
 from yulon import client_packs, docker, platform, play_client, server_build_presses
-from yulon.catalog import bot_count, world_data
+from yulon.catalog import bot_count
 from yulon.catalog.catalog import (
     CatalogEntry,
     ClientPack,
