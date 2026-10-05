@@ -70,6 +70,7 @@ from yulon.dbreads import SqlReader
 from yulon.git import Git
 from yulon.log import get_logger
 from yulon.manifest import Db, Manifest, When
+from yulon.said import SaidByYulon
 
 logger = get_logger(__name__)
 
@@ -109,7 +110,7 @@ MIGRATION_TABLE = "migrations"
 """`AutoUpdater::MigrationTable`, `AutoUpdater.cpp:30` — one per target database."""
 
 
-class AutoUpdateRefused(ApplyError):
+class AutoUpdateRefused(ApplyError, SaidByYulon):
     """This install would have handed work to the fork's own auto-updater.
 
     An `ApplyError` subclass so a caller that only knows the engine's vocabulary

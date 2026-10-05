@@ -537,9 +537,36 @@ def test_play_is_the_views_own_play_and_starts_the_game(
 
     assert len(launched) == 1, boxes
     assert window.progress_label.text() == view.play_label.text()
-    assert "World of Warcraft is starting" in window.progress_label.text()
+    assert "World of Warcraft was started at" in window.progress_label.text()
     assert play is not None
     assert not (play / "WTF" / "Config.wtf").exists(), "no picks, so nothing to write"
+
+
+def test_the_line_after_play_stays_true_once_the_game_has_exited(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    launched: list[object],
+    boxes: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T211 1: "World of Warcraft is starting…" was still on screen after the game exited.
+
+    The game is started detached and Yu'lon never hears it end, so the line
+    must not claim the game is doing anything now: it says when it was started.
+    """
+    from yulon.ui import controller_view as controller_view_module
+
+    monkeypatch.setattr(controller_view_module, "_clock", lambda: "20:14")
+    window, view, _play = _launcher(ps, tmp_path)
+    ps.names = WORLD_UP
+
+    window.play_button.click()
+
+    assert len(launched) == 1, boxes
+    for text in (view.play_label.text(), window.progress_label.text()):
+        assert text.startswith("World of Warcraft was started at 20:14."), text
+        assert "is starting" not in text
 
 
 def test_the_launchers_picks_reach_config_wtf_on_a_shipped_game_with_no_client_data(

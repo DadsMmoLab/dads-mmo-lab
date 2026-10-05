@@ -389,6 +389,9 @@ def stock_bytes(
             problems.append(f"{source.url} holds a Wow.exe that is not the stock one")
             continue
         _cache(data, patch.expect_sha256)
+        logger.info(
+            "client exe: fetched the stock Wow.exe (build %d) from %s", patch.build, source.url
+        )
         return data
     raise _no_stock(patch, problems)
 

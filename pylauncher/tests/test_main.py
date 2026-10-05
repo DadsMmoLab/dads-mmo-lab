@@ -4171,6 +4171,86 @@ def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
     assert gone.services.applier is not None and gone.services.applier.client_dir == client
 
 
+# -- T211 4: an install over a server Yu'lon forgot finds its ready-to-play client --
+
+
+def _marked_play_client(game: str, name: str, server_dir: Path, client: Path) -> Path:
+    """A ready-to-play client where Make… puts it, marked as `game` at `server_dir`'s."""
+    from yulon import play_client
+
+    play = play_client.default_target(client, name, server_dir)
+    (play / "Interface").mkdir(parents=True)
+    marker = play_client.Marker(
+        game=game, server_dir=server_dir, source_client_dir=client, created_at=play_client.utc_now()
+    )
+    (play / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+    return play
+
+
+def test_an_install_over_a_forgotten_server_links_its_ready_to_play_client_again(
+    window: Any, tmp_path: Path
+) -> None:
+    """T211 4: Remove from Yu'lon…, then Install into the same folder, offered Make… again.
+
+    The ready-to-play client was still on disk beside the player's own, marked
+    as this server's, but only `state.json` linked it and the removal had
+    dropped that entry. The install finds it where Make… put it.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    game = "wow-tortoise"
+    server_dir = tmp_path / "t211-reinstalled"
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface").mkdir(parents=True)
+    play = _marked_play_client(game, load_catalog().get(game).name, server_dir, client)
+
+    _catalog_view(window).installed.emit(game, server_dir, client)
+
+    view = _tab_for(window, server_dir)
+    assert view.services.play_client_dir == play
+    assert window.saved_states[-1].find(game, server_dir).play_client_dir == play
+
+
+@pytest.mark.parametrize(
+    "whose", ["another server", "another game", "another client folder", "no marker"]
+)
+def test_an_install_links_no_folder_that_is_not_this_servers_own(
+    window: Any, tmp_path: Path, whose: str
+) -> None:
+    """The marker is what makes a folder this server's; a name alone is not."""
+    from yulon import play_client
+    from yulon.catalog.catalog import load_catalog
+
+    game = "wow-tortoise"
+    name = load_catalog().get(game).name
+    server_dir = tmp_path / f"t211-{whose.replace(' ', '-')}"
+    client = tmp_path / f"TurtleWoW-{whose.replace(' ', '-')}"
+    (client / "Interface").mkdir(parents=True)
+    marked_as = {
+        "another server": (game, tmp_path / "elsewhere", client),
+        "another game": ("wow-wotlk", server_dir, client),
+        "another client folder": (game, server_dir, tmp_path / "SomeOtherWoW"),
+        "no marker": None,
+    }[whose]
+    if marked_as is None:
+        (play_client.default_target(client, name, server_dir) / "Interface").mkdir(parents=True)
+    else:
+        marked_game, marked_server, marked_client = marked_as
+        play = play_client.default_target(client, name, server_dir)
+        (play / "Interface").mkdir(parents=True)
+        marker = play_client.Marker(
+            game=marked_game,
+            server_dir=marked_server,
+            source_client_dir=marked_client,
+            created_at=play_client.utc_now(),
+        )
+        (play / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+
+    _catalog_view(window).installed.emit(game, server_dir, client)
+
+    assert _tab_for(window, server_dir).services.play_client_dir is None
+
+
 # -- T188 C6: the header's realm badge is the current server tab's ------------
 
 
@@ -4201,6 +4281,60 @@ def test_the_header_badge_follows_the_server_tab_on_screen(window: Any, tmp_path
 def test_a_window_opened_with_no_servers_hides_the_header_badge(window: Any) -> None:
     """T188 fix round 1 (M6): the Catalog was current before the header listened."""
     assert window.header_badge_hidden_at_start is True
+
+
+def test_a_window_opened_with_a_server_installed_follows_its_badge(
+    qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T210: the T179 live check opened Yu'lon onto a server already installed.
+
+    The header read REALM OFFLINE while the Server tab said REALM ONLINE. Every
+    other header test adds its tab to the shared window AFTER start-up; this one
+    is the start-up a returning player has: the tab comes from `state.json`.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon import update_state
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch.setenv("YULON_SMOKE_TEST", "1")  # no update check, no GitHub
+    scratch = tmp_path / "config"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    server_dir = tmp_path / "t210-server"
+    monkeypatch.setattr(
+        state,
+        "load_state",
+        lambda path=None, repair=True: state.AppState(
+            installs=[state.KnownInstall(game="wow-wotlk", server_dir=server_dir)]
+        ),
+    )
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: None)
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", lambda **kwargs: None)
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+
+    window = main.build_window()
+    try:
+        header = window.property("header")
+        view = _tab_for(window, server_dir)
+        assert window.property("tabs").currentWidget() is view
+        assert header._badge.isHidden() is False, "the header hid the badge of the tab on screen"
+
+        view.realm_badge.set_status("running")
+
+        assert header._badge.status == "running"
+        assert "REALM ONLINE" in header._badge._label.text()
+    finally:
+        main._stop_background_threads(window)
+        QApplication.processEvents()
 
 
 def test_the_header_says_unknown_when_docker_cannot_be_asked(
@@ -5105,6 +5239,51 @@ def test_the_next_tab_bumper_from_the_last_server_lands_on_the_catalog(
 
     assert tabs.currentIndex() == 0
     assert pins.buttons[0].isChecked()
+
+
+# -- T221: R and L in a list are letters, on every game's server page ----------------
+
+
+@pytest.mark.parametrize(
+    "game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"]
+)
+def test_r_and_l_in_every_list_of_a_server_page_stay_in_the_list(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str
+) -> None:
+    """T221: R in Centurion's Characters list switched the server page to Bots.
+
+    Through the window's own keyboard filter, with each list of each sub-tab as
+    the focus: the filter must hand R and L to the list (False) and leave the
+    sub-tab where it is. The focus is answered by patch for the reason the
+    bumper test above gives: offscreen, the shared window is never active again.
+    """
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QAbstractItemView
+
+    from yulon.ui import gamepad
+
+    server_dir = tmp_path / f"t221-{game}"
+    _catalog_view(window).installed.emit(game, server_dir, None)
+    view = _tab_for(window, server_dir)
+    sub = view._tabs
+    keyboard = window.yulon_keyboard
+    asked: list[str] = []
+    for index in range(sub.count()):
+        sub.setCurrentIndex(index)
+        page = sub.widget(index)
+        for rows in page.findChildren(QAbstractItemView):
+            monkeypatch.setattr(gamepad.QApplication, "focusWidget", staticmethod(lambda r=rows: r))
+            for key, letter in ((Qt.Key.Key_R, "r"), (Qt.Key.Key_L, "l")):
+                press = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, letter)
+                where = f"{sub.tabText(index)}: {type(rows).__name__} {rows.objectName()!r}"
+                assert keyboard.eventFilter(rows, press) is False, f"{letter} was taken in {where}"
+                assert sub.currentIndex() == index, f"{letter} switched sub-tab from {where}"
+            if rows.isVisibleTo(page):
+                asked.append(sub.tabText(index))
+    if game == "wow-centurion":
+        assert "Characters" in asked, "the Characters list was not asked"
+    assert asked, "no list on any sub-tab was asked"
 
 
 # -- T192: a status dot on each server tab; the server's name in the header -----------

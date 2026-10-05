@@ -7330,7 +7330,10 @@ def test_the_report_says_per_file_what_was_done_with_it(tmp_path: Path) -> None:
     """
     plan = _two_route_plan(tmp_path)
     applied = apply_module.module_sql_report(
-        plan, service="ac-db-import", applied=frozenset({"one.sql"})
+        plan,
+        service="ac-db-import",
+        applied=frozenset({"one.sql"}),
+        ledger={"characters": frozenset({"one.sql"})},
     )
     assert (
         f"sql {ARAC_SQL} -> world: not handed to the updater: this app applies it itself at "
@@ -7350,7 +7353,16 @@ def test_the_report_says_per_file_what_was_done_with_it(tmp_path: Path) -> None:
         applied=frozenset(),
         refusal="Could not update the World database",
     )
-    assert f"sql {CHAR_SQL} -> characters: refused: Could not update the World database" in refused
+    # T214: the refusal is no longer printed against each file, and with no
+    # ledger read nothing is said to be in the database.
+    assert (
+        f"sql {CHAR_SQL} -> characters: not known: ac-db-import stopped, and its updates "
+        "ledger could not be read" in refused
+    )
+    unread = apply_module.module_sql_report(
+        plan, service="ac-db-import", applied=frozenset({"one.sql"})
+    )
+    assert f"sql {CHAR_SQL} -> characters: applied" not in unread, "no ledger, no applied"
     # The file this app owns reads the same whatever the updater did with the
     # rest: it was never handed over, so no verdict of the run applies to it.
     assert [line for line in refused if ARAC_SQL in line] == [
@@ -7555,6 +7567,10 @@ def test_a_direct_file_outside_the_updaters_directories_keeps_its_module_in_the_
         plan,
         service="ac-db-import",
         applied=frozenset(PurePosixPath(p).name for p in (CITY_AUTH, CITY_CHAR, CITY_WORLD)),
+        ledger={
+            db: frozenset({PurePosixPath(p).name})
+            for db, p in (("auth", CITY_AUTH), ("characters", CITY_CHAR), ("world", CITY_WORLD))
+        },
     )
     assert f"sql {CITY_AUTH} -> auth: applied" in said, said
     assert f"sql {CITY_CHAR} -> characters: applied" in said, said
