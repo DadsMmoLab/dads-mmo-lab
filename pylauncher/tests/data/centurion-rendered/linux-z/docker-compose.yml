@@ -13,11 +13,11 @@
 #   * docker-compose.build.yml      build: blocks only, never auto-loaded, so a
 #     post-install `up` can never start a multi-hour rebuild.
 #
-# SERVICES ARE NAMED AFTER THEIR CONTAINERS ({{CONTAINER_PREFIX}}db,
-# {{CONTAINER_PREFIX}}authserver, {{CONTAINER_PREFIX}}worldserver), the
+# SERVICES ARE NAMED AFTER THEIR CONTAINERS (centurion-db,
+# centurion-authserver, centurion-worldserver), the
 # convention `docker.start_database()`'s `compose up -d --no-deps <db>` relies
 # on. The servers' confs reach the database by its container name
-# ({{DB_HOST}}).
+# (centurion-db).
 #
 # THE PASSWORD IS NEVER IN THIS FILE. The family generates one per install,
 # keeps it in `.db_password` (0600) and hands it to compose through `.env` as
@@ -27,11 +27,11 @@
 # THE IMAGE TAG IS WRITTEN IN, NOT INTERPOLATED, for the reason WotLK's base
 # template gives: nothing writes IMAGE_TAG into .env, and a wrapper with no
 # writer only lets a hand edit desynchronise the build from the resume check.
-name: {{PROJECT_NAME}}
+name: yulon-wow-centurion-fa9644fb
 
 services:
-  {{CONTAINER_PREFIX}}db:
-    container_name: {{DB_HOST}}
+  centurion-db:
+    container_name: centurion-db
     # MySQL, not MariaDB: the snapshot's tables use utf8mb4_0900_ai_ci, which
     # MariaDB does not have (centurion/sql/import.sh:9-11). 8.4 imported the
     # whole snapshot with the same tables, rows, triggers, views and procedures
@@ -40,14 +40,14 @@ services:
     # the import must run as root: a non-SUPER importer fails on the first
     # trigger (ERROR 1419, same proof), and the triggers' definer is whoever
     # imported, so that account is never dropped.
-    image: {{DB_IMAGE}}
-    networks: [{{CONTAINER_PREFIX}}net]
+    image: mysql:8.4
+    networks: [centurion-net]
     ports:
       # Loopback ONLY: nothing off this machine has business reaching the
       # database. The variable name is a contract with the port-conflict
       # remedy, which appends DOCKER_DB_EXTERNAL_PORT=13306 to .env when 3306
       # is taken.
-      - "127.0.0.1:${DOCKER_DB_EXTERNAL_PORT:-{{DB_PORT}}}:3306"
+      - "127.0.0.1:${DOCKER_DB_EXTERNAL_PORT:-3306}:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Yu'lon .env is missing}
     volumes:
@@ -132,38 +132,39 @@ services:
       retries: 40
       start_period: 60s
 
-  {{CONTAINER_PREFIX}}authserver:
-    container_name: {{CONTAINER_PREFIX}}authserver
-    image: {{IMAGE_PREFIX}}server:{{IMAGE_TAG}}
-    networks: [{{CONTAINER_PREFIX}}net]
+  centurion-authserver:
+    container_name: centurion-authserver
+    image: yulon.local/trinitycore-centurion-server:native-fa9644fb
+    networks: [centurion-net]
     # One image serves both servers, the extractors and the conf source; the
-    # binaries sit in {{CORE_DIR}}/bin and read their conf from
-    # {{CORE_DIR}}/etc, the compiled-in CONF_DIR -- which is why ./etc is
+    # binaries sit in /opt/trinitycore/bin and read their conf from
+    # /opt/trinitycore/etc, the compiled-in CONF_DIR -- which is why ./etc is
     # bound THERE and not somewhere a `-c` flag would have to name
     # (playerbots.conf is found only beside worldserver.conf, facts §4).
-    working_dir: {{CORE_DIR}}/bin
+    working_dir: /opt/trinitycore/bin
     command: ["./authserver"]
     restart: unless-stopped
     ports:
       # The game client connects to this from the LAN, so it is deliberately
       # NOT loopback-pinned (unlike the DB port).
-      - "${DOCKER_AUTH_EXTERNAL_PORT:-{{AUTH_PORT}}}:3724"
+      - "${DOCKER_AUTH_EXTERNAL_PORT:-3724}:3724"
     # The AUTHSERVER_FOLDERS token after ./etc adds a bind for every folder
     # authserver.conf's catalog table says the server writes into (LogsDir),
     # from the server folder's own folder of the same name, label included
     # (T165's rule, composegen.server_folders()).
     volumes:
-      - ./etc:{{CORE_DIR}}/etc{{BIND_LABEL}}{{AUTHSERVER_FOLDERS}}
+      - ./etc:/opt/trinitycore/etc:z
+      - ./logs:/opt/trinitycore/logs:z
     depends_on:
-      {{CONTAINER_PREFIX}}db:
+      centurion-db:
         condition: service_healthy
 
-  {{CONTAINER_PREFIX}}worldserver:
-    container_name: {{CONTAINER_PREFIX}}worldserver
-    image: {{IMAGE_PREFIX}}server:{{IMAGE_TAG}}
-    networks: [{{CONTAINER_PREFIX}}net]
-    working_dir: {{CORE_DIR}}/bin
-    command: ["./worldserver"]{{WORLD_DATA_ENTRYPOINT}}
+  centurion-worldserver:
+    container_name: centurion-worldserver
+    image: yulon.local/trinitycore-centurion-server:native-fa9644fb
+    networks: [centurion-net]
+    working_dir: /opt/trinitycore/bin
+    command: ["./worldserver"]
     # stdin HELD OPEN, and not only for the console: the worldserver STOPS
     # when its stdin reaches end of file (CommandLine/CliRunnable.cpp:183-186,
     # `feof(stdin)` -> World::StopNow), so without these two it shuts itself
@@ -178,25 +179,26 @@ services:
     stop_grace_period: 5m
     ports:
       # Container-side port equals the host port: the conf sets
-      # WorldServerPort to the same {{WORLD_PORT}}, so one number is the truth
+      # WorldServerPort to the same 8085, so one number is the truth
       # for the realmlist row, the conf and this mapping. The command
       # channel's port (SOAP) is not here: the override publishes it, on
       # loopback only.
-      - "${DOCKER_WORLD_EXTERNAL_PORT:-{{WORLD_PORT}}}:{{WORLD_PORT}}"
+      - "${DOCKER_WORLD_EXTERNAL_PORT:-8085}:8085"
     volumes:
       # ./etc is where the conf stage writes and the user edits
       # (worldserver.conf, playerbots.conf beside it); ./data is what the
       # client-data and mmaps stages produce, and what DataDir points at. The
       # WORLDSERVER_FOLDERS token after ./data is the same folder rule over
       # worldserver.conf's table: its LogsDir.
-      - ./etc:{{CORE_DIR}}/etc{{BIND_LABEL}}
-      - {{WORLD_DATA_MOUNTS}}{{WORLDSERVER_FOLDERS}}
+      - ./etc:/opt/trinitycore/etc:z
+      - ./data:/opt/trinitycore/data:z
+      - ./logs:/opt/trinitycore/logs:z
     depends_on:
-      {{CONTAINER_PREFIX}}db:
+      centurion-db:
         condition: service_healthy
 
 networks:
-  {{CONTAINER_PREFIX}}net:
+  centurion-net:
 
 volumes:
-  db-data:{{WORLD_DATA_VOLUME}}
+  db-data:

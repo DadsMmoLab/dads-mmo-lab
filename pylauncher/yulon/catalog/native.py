@@ -97,6 +97,7 @@ from yulon.catalog import (
     snapshot,
     time_zone,
     upstream,
+    world_data,
 )
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -835,6 +836,11 @@ class ComposeCheck:
     repair sets so the server writes into a folder it binds (`LogsDir =
     "../logs" in etc/mangosd.conf`), and why a folder setting is left as the
     player has it. The confirmation names both.
+
+    `world_data_gb` is T219's, and only on `stale`: non-zero when the repair adds
+    the `world-data` volume a Windows Centurion world reads its map data from, the
+    room it takes on Docker's disk; the confirmation then says the first start
+    after the recreate copies the map data into it.
     """
 
     state: ComposeState
@@ -843,6 +849,7 @@ class ComposeCheck:
     removed: int = 0
     settings: tuple[str, ...] = ()
     kept: tuple[str, ...] = ()
+    world_data_gb: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -7044,6 +7051,9 @@ class StagedInstaller:
         warned = self._put_back_the_zone_file(ctx.server_dir)
         if warned is not None:
             yield warned
+        warned = self._refresh_world_data(ctx.server_dir)
+        if warned is not None:
+            yield warned
         spec = self.entry.container_spec()
         # The replace begins with a stop, and a world still loading cannot hear
         # it (T158). `recreate_staged()` waits for it right before that stop --
@@ -10889,6 +10899,18 @@ class StagedInstaller:
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
 
+    def _refresh_world_data(self, server_dir: Path) -> str | None:
+        """T219: the map-data fingerprint before this engine's own starts; the warning if any.
+
+        Raises:
+            InstallerError: it could be neither written nor removed, so the world would
+                read map data the server folder no longer holds; nothing was started.
+        """
+        try:
+            return world_data.refresh(self.entry, server_dir)
+        except world_data.FingerprintNotRecorded as exc:
+            raise InstallerError(str(exc)) from exc
+
     def _put_back_the_zone_file(self, server_dir: Path) -> str | None:
         """T171: the zone file `Controller.start()` puts back, before this engine's own starts.
 
@@ -11131,8 +11153,22 @@ class StagedInstaller:
             logger.info(f"{self.entry.id}: {why}")
         added, removed = _lines_changed(text, fresh)
         settings = tuple(line for edit in edits for line in edit.settings)
-        check = ComposeCheck("stale", added=added, removed=removed, settings=settings, kept=kept)
+        check = ComposeCheck(
+            "stale",
+            added=added,
+            removed=removed,
+            settings=settings,
+            kept=kept,
+            world_data_gb=self._world_data_added(text, fresh),
+        )
         return check, fresh, text, edits
+
+    def _world_data_added(self, text: str, fresh: str) -> float:
+        """T219: the room the volume takes, when this repair is the one that adds it; else 0."""
+        if not world_data.declares(fresh) or world_data.declares(text):
+            return 0.0
+        trinitycore = self._native().trinitycore
+        return (trinitycore.world_data_gb or 0.0) if trinitycore is not None else 0.0
 
     def _conf_edits(
         self, server_dir: Path, text: str
@@ -11896,6 +11932,9 @@ class StagedInstaller:
             raise InstallerError(f"{refused} The server was not started.")
         yield "Starting the server."
         warned = self._put_back_the_zone_file(ctx.server_dir)
+        if warned is not None:
+            yield warned
+        warned = self._refresh_world_data(ctx.server_dir)
         if warned is not None:
             yield warned
         try:

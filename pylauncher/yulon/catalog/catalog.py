@@ -1260,6 +1260,33 @@ class TrinityCoreData(_Strict):
             "§3) -- 0 and 1, and 530 with `Expansion = 2`."
         ),
     )
+    world_data_dirs: tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")], ...] = Field(
+        default=(),
+        description=(
+            "T219: the folders under `data/` the world server opens, which on Windows are copied "
+            "into the install's `world-data` volume before every start and read from there "
+            "instead of over Docker Desktop's file share (about 12 ms per file opened; the "
+            "first rebalance took 58.9 s over the share and 1.81 s from a volume, yulon-win11 "
+            "2026-10-04). Read off the pin's source: `GetDataPath()` + `dbc/`, `maps/`, "
+            "`vmaps`, `mmaps`, and `Cameras` (LoadM2Cameras); `Buildings` is the extractor's "
+            "and no data path names it. Empty: the world server binds `data/` on every "
+            "platform, as before. Linux, a WSL-distro install and macOS always bind it."
+        ),
+    )
+    world_data_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "T219: what the `world-data` volume adds to Docker's disk on Windows, where it is a "
+            "second copy of those folders; preflight adds it to the Docker's-disk floors there "
+            "and nowhere else. Required when `world_data_dirs` names any. Centurion's 5, from the "
+            "live proof on yulon-win11 (2026-10-05): the folders are 1.12 GB; the pathfinding "
+            "data, 644 tiles / "
+            "439 MB part-way, comes to about 2.6-2.8 GB once whole; and a folder copied again sits "
+            "beside its old copy until it is swapped in (vmaps, 0.7 GB). About 3.9 GB in all, 5.4 "
+            "at the outside."
+        ),
+    )
     updates: TrinityCoreUpdates | None = Field(
         default=None,
         description=(
@@ -1344,6 +1371,25 @@ class TrinityCoreData(_Strict):
                     f"sparse_exclude holds a git pattern character {special} in {path!r}; "
                     "name plain paths only"
                 )
+        return value
+
+    @model_validator(mode="after")
+    def _a_volume_says_its_size(self) -> TrinityCoreData:
+        """Folders copied into a volume need the room they take named, for preflight."""
+        if self.world_data_dirs and self.world_data_gb is None:
+            raise ValueError(
+                "world_data_dirs names folders to copy into a volume on Windows, so "
+                "world_data_gb must say how much room that copy takes on Docker's disk"
+            )
+        return self
+
+    @field_validator("world_data_dirs")
+    @classmethod
+    def _each_world_folder_once(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Each folder once: the fingerprint has one line per folder, and the copy one pass."""
+        twice = sorted({name for name in value if value.count(name) > 1})
+        if twice:
+            raise ValueError(f"world_data_dirs names {twice} more than once")
         return value
 
 
