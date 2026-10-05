@@ -7054,7 +7054,7 @@ class ControllerView(QWidget):
         self._pathfinding_pending = False
         self._pathfinding_pressing = False
         # T245: the sentence the last press put in `problem_label`, and the job's
-        # states it stays true in; None once it was replaced or taken down.
+        # states it stays true in; None before the first press.
         self._pathfinding_said: tuple[str, frozenset[mmaps.State]] | None = None
         self._pathfinding_holds: frozenset[mmaps.State] = frozenset()
         # Bumped by every read and every press: a read whose generation is not
@@ -7804,13 +7804,7 @@ class ControllerView(QWidget):
         another press's, and stays.
         """
         said = self._pathfinding_said
-        if said is None:
-            return
-        text, holds = said
-        if self.problem_label.text() != text:
-            self._pathfinding_said = None
-        elif state not in holds:
-            self._pathfinding_said = None
+        if said is not None and self.problem_label.text() == said[0] and state not in said[1]:
             self.problem_label.setText("")
 
     @Slot(object)
