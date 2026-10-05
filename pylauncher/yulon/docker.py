@@ -4380,6 +4380,46 @@ CE on Linux and stated as a guarantee.
 
 _EXIT_CODE = re.compile(r"exit(?:ed with)? code:? (\d+)")
 
+_BUILDER_GONE = re.compile(
+    r"rpc error: code = Unavailable\b"
+    r"|failed to solve: Unavailable:"
+    r"|failed to (?:solve|receive status): error reading from server: EOF\b"
+)
+"""The build's client losing BuildKit: gRPC's `Unavailable`, the transport gone (T202).
+
+Measured twice on one Windows test VM (Docker Desktop 29.7.2, 2026-10-03, the
+T179 live check): `failed to receive status: rpc error: code = Unavailable
+desc = error reading from server: EOF`, once after 53 silent minutes that
+followed a finished compile, once mid-compile at 99% on a VM whose memory was
+then raised and whose next build passed. The `desc` after the code is the
+transport's to word (`error reading from server: EOF`, `closing transport due
+to: ...`), so the code is what is matched. No build step prints this, so a
+compiler's line cannot be read as it.
+
+BuildKit words the same event a second way. The m910q live test of PR 294
+(Docker 29.7.2, 2026-10-04) restarted Docker under a build at [459/1848], and
+the build ended on `target ac-db-import: failed to solve: Unavailable: error
+reading from server: EOF` -- the code spelled as `Unavailable:` after `failed
+to solve:`, with no `rpc error`. The third form is the transport's own EOF with
+no code in front of it. All three are Docker's own lines, never a step's: a
+step's output arrives as `#<n> <seconds> ...` and is not read at all
+(`builder_connection_lost()`), and a registry's `503 Service Unavailable`,
+`429 Too Many Requests`, `not found` or a pull's `unexpected EOF` matches none.
+"""
+
+_STEP_OUTPUT = re.compile(r"^\s*#\d+\s")
+"""A line BuildKit's plain progress prints for a step: `#25 213.5 ...`, `#9 ERROR: ...`."""
+
+
+def builder_connection_lost(tail: Sequence[str]) -> bool:
+    """Did this build end because its client lost Docker's builder? (T202)
+
+    The whole tail is read: the line is the last one Docker prints, but blank
+    lines may follow it. A step's own output lines are skipped: what a RUN step
+    prints is that program's, not Docker's word on its builder.
+    """
+    return any(_BUILDER_GONE.search(line) and not _STEP_OUTPUT.match(line) for line in tail)
+
 
 def _build_log_elsewhere(said: list[str]) -> str:
     """The URL Docker Desktop printed instead of the build's output, or `""`.
@@ -4798,6 +4838,71 @@ def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool 
     # compare against `len(refs)` could only ever equal it here, which read as
     # if a partial count could reach this line (review, 2026-08-24).
     return True
+
+
+BUILD_CACHE_TIMEOUT_SECONDS = 60.0
+"""How long each build-cache question gets. `system df` sizes every image and volume."""
+
+_DECIMAL_SIZE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kMGTP]?)B$")
+_DECIMAL_UNITS = {"": 1, "k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
+_BUILDX_TOTAL = re.compile(r"^Total:\s+(\S+)\s*$")
+
+
+def _decimal_bytes(size: str) -> int | None:
+    """Docker's own size spelling (`12.91GB`, `441.6kB`, `0B`, decimal units) as bytes."""
+    found = _DECIMAL_SIZE.match(size.strip())
+    if found is None:
+        return None
+    return round(float(found.group(1)) * _DECIMAL_UNITS[found.group(2)])
+
+
+def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
+    """How much build cache Docker holds, in bytes; `None` when it would not say (T203).
+
+    `docker buildx du` first: it sizes the cache and nothing else, and it asks
+    the builder a build would use. Its summary ends `Total:\t\t4.79GB`, which on
+    a Linux test box (Docker 29.7.2, buildx v0.36.1, 2026-10-04) was the same
+    figure `docker system df` gave for `Build Cache` that minute, in 0.1 s
+    against 0.34 s. A Docker without the buildx plugin answers `'buildx' is not
+    a docker command` and a non-zero exit; that, or a summary with no readable
+    `Total:`, falls back to the `Build Cache` row's `Size` in `docker system df
+    --format '{{json .}}'`, which every Docker since 1.13 has.
+
+    `None` is not 0, in either direction: a daemon that would not answer, a
+    missing row or a size this cannot read credits nothing, and a real 0 is the
+    answer "nothing to reuse".
+    """
+    proc = _docker(["buildx", "du"], timeout=BUILD_CACHE_TIMEOUT_SECONDS, wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        for line in reversed(proc.stdout.splitlines()):
+            found = _BUILDX_TOTAL.match(line.strip())
+            if found is not None:
+                total = _decimal_bytes(found.group(1))
+                if total is not None:
+                    return total
+                break
+    logger.info("`docker buildx du` gave no total; asking `docker system df`")
+    proc = _docker(
+        ["system", "df", "--format", "{{json .}}"],
+        timeout=BUILD_CACHE_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not ask Docker how much build cache it holds: {proc.stderr.strip()}")
+        return None
+    for line in proc.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("Type") != "Build Cache":
+            continue
+        size = _decimal_bytes(str(row.get("Size", "")))
+        if size is None:
+            logger.info(f"could not read Docker's build cache size: {row.get('Size')!r}")
+        return size
+    logger.info("`docker system df` printed no Build Cache row")
+    return None
 
 
 def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[str]:
