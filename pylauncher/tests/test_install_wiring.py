@@ -12,13 +12,15 @@ import ast
 import io
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
 import traceback
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from functools import partial
 from pathlib import Path
+from typing import IO
 
 import pytest
 
@@ -1182,6 +1184,141 @@ def test_the_copy_starts_a_stopped_database_alone_and_leaves_it_running(
     assert census.up, "left running: nothing here stops the database again"
 
 
+def _dump_of(database: str, tables: Sequence[str]) -> bytes:
+    """A dump shaped like mysqldump's: banner, CREATE DATABASE/USE, a DROP/CREATE per table."""
+    raw = database.encode()
+    parts = [
+        b"-- MySQL dump 10.13  Distrib 8.4.0, for Linux (x86_64)\n--\n",
+        b"CREATE DATABASE /*!32312 IF NOT EXISTS*/ `" + raw + b"`;\n",
+        b"USE `" + raw + b"`;\n",
+    ]
+    for table in tables:
+        name = table.encode()
+        parts.append(b"DROP TABLE IF EXISTS `" + name + b"`;\n")
+        parts.append(b"CREATE TABLE `" + name + b"` (\n  `id` int\n) ENGINE=InnoDB;\n")
+    parts.append(b"-- Dump completed on 2026-10-04 21:00:00\n")
+    return b"".join(parts)
+
+
+def _a_copy(path: Path, database: str, tables: Sequence[str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_dump_of(database, tables))
+    return path
+
+
+class _TableServer:
+    """A database container that keeps tables per schema and speaks just enough SQL.
+
+    It answers `maintenance`'s real `backup()`/`plan_restore()`/`restore()` and
+    T217's `tables()`/`execute()`, so the update copy's put-back runs its real
+    path end to end, down to the statements a real client would be sent.
+    """
+
+    def __init__(self, schemas: dict[str, set[str]]) -> None:
+        self.schemas = {name: set(tables) for name, tables in schemas.items()}
+        self.statements: list[str] = []
+
+    def databases(self) -> tuple[str, ...]:
+        return tuple(self.schemas)
+
+    def dump_into(self, database: str, sink: IO[bytes]) -> None:
+        sink.write(_dump_of(database, sorted(self.schemas[database])))
+
+    def tables(self, database: str) -> tuple[tuple[str, str], ...]:
+        return tuple((name, "BASE TABLE") for name in sorted(self.schemas.get(database, ())))
+
+    def execute(self, sql: str) -> None:
+        self._run(sql.encode())
+
+    def load_from(self, source: IO[bytes]) -> None:
+        self._run(source.read())
+
+    def _run(self, script: bytes) -> None:
+        current = None
+        for line in script.decode().splitlines():
+            self.statements.append(line)
+            if m := re.match(r"CREATE DATABASE [^`]*`([^`]+)`", line):
+                self.schemas.setdefault(m.group(1), set())
+            elif m := re.match(r"USE `([^`]+)`", line):
+                current = m.group(1)
+            elif m := re.match(r"DROP TABLE IF EXISTS `([^`]+)`\.`([^`]+)`;", line):
+                self.schemas[m.group(1)].discard(m.group(2))
+            elif m := re.match(r"DROP TABLE IF EXISTS `([^`]+)`;", line):
+                assert current is not None
+                self.schemas[current].discard(m.group(1))
+            elif m := re.match(r"CREATE TABLE `([^`]+)`", line):
+                assert current is not None
+                self.schemas[current].add(m.group(1))
+
+
+def _real_put_back(
+    monkeypatch: pytest.MonkeyPatch, server: _TableServer
+) -> install_wiring.DatabaseSnapshot:
+    """The WotLK copy over the real `maintenance`, talking to `server`."""
+    from yulon.controller_wow_wotlk import docker_ctl
+
+    _census(monkeypatch, up=True)
+    monkeypatch.setattr(
+        docker_ctl, "status", lambda *, wsl_distro=None: [WOTLK.container_spec().db]
+    )
+    monkeypatch.setattr(
+        install_wiring._MaintenanceSnapshot, "_mysql", lambda self, server_dir: server
+    )
+    copy = install_wiring.database_snapshot_for(WOTLK)
+    assert copy is not None
+    return copy
+
+
+def test_a_table_the_new_build_made_is_gone_after_the_copy_goes_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The copy goes back as a replacement, not the Maintenance tab's merge (Codex + cold review).
+
+    The player's case: the new mod-playerbots made `playerbots_speech` and wrote
+    its row into `updates`. A merge put `updates` back and kept the table, and the
+    next update stopped on "already exists". What the new build left is kept in
+    the rollback's own safety copy.
+    """
+    from yulon.catalog.snapshot import ROLLBACK_SAFETY_LABEL
+
+    server = _TableServer(
+        {"acore_playerbots": {"playerbots_random_bots", "updates"}, "acore_world": {"creature"}}
+    )
+    copy = _real_put_back(monkeypatch, server)
+    taken = copy.take(tmp_path, ("acore_playerbots",))
+    server.schemas["acore_playerbots"].add("playerbots_speech")  # the new build's first start
+
+    put = copy.put_back(tmp_path, taken)
+
+    assert server.schemas == {
+        "acore_playerbots": {"playerbots_random_bots", "updates"},
+        "acore_world": {"creature"},
+    }
+    assert put.restored == ("acore_playerbots",)
+    assert len(put.safety) == 1 and f"_{ROLLBACK_SAFETY_LABEL}_" in put.safety[0].name
+    assert b"CREATE TABLE `playerbots_speech`" in put.safety[0].read_bytes()
+
+
+def test_a_copy_cut_short_drops_nothing_and_names_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yulon.catalog.snapshot import CopyNotUsable, Snapshot
+
+    server = _TableServer({"acore_playerbots": {"updates", "playerbots_speech"}})
+    copy = _real_put_back(monkeypatch, server)
+    cut = _a_copy(
+        tmp_path / "sql_scripts/backups/x_before-new-build_acore_playerbots.sql",
+        "acore_playerbots",
+        ("updates",),
+    )
+    cut.write_bytes(cut.read_bytes().replace(b"-- Dump completed on 2026-10-04 21:00:00\n", b""))
+    with pytest.raises(CopyNotUsable) as raised:
+        copy.put_back(tmp_path, Snapshot(cut.parent, (cut,), ("acore_playerbots",)))
+    assert str(cut) in str(raised.value) and "nothing was dropped" in str(raised.value)
+    assert server.schemas == {"acore_playerbots": {"updates", "playerbots_speech"}}
+    assert server.statements == [], "nothing was sent to the database"
+
+
 def test_put_back_plans_and_restores_each_file_with_its_own_token_under_the_lease(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1190,7 +1327,9 @@ def test_put_back_plans_and_restores_each_file_with_its_own_token_under_the_leas
     from yulon.controller_wow_wotlk import maintenance
 
     _census(monkeypatch, up=True)
-    files = (tmp_path / "a_before-new-build_acore_playerbots.sql",)
+    files = (
+        _a_copy(tmp_path / "a_before-new-build_acore_playerbots.sql", "acore_playerbots", ("t",)),
+    )
     restored: list[tuple[Path, str]] = []
 
     def plan_restore(path: Path, server_dir: Path, **_kwargs: object) -> maintenance.RestorePlan:
@@ -1235,8 +1374,9 @@ def test_a_restore_the_plan_refuses_is_an_installer_error_naming_why(
     monkeypatch.setattr(maintenance, "restore", restore)
     copy = install_wiring.database_snapshot_for(WOTLK)
     assert copy is not None
+    path = _a_copy(tmp_path / "f.sql", "acore_playerbots", ("t",))
     with pytest.raises(InstallerError, match="ac-worldserver is up"):
-        copy.put_back(tmp_path, Snapshot(tmp_path, (tmp_path / "f.sql",), ("acore_playerbots",)))
+        copy.put_back(tmp_path, Snapshot(tmp_path, (path,), ("acore_playerbots",)))
 
 
 def test_a_dump_that_fails_is_an_installer_error_and_lets_the_lease_go(
@@ -1275,9 +1415,132 @@ def test_pruning_keeps_the_last_copy_and_every_backup_the_player_took(tmp_path: 
     )
 
 
+def test_pruning_keeps_only_the_newest_rollback_safety_copy_per_database(tmp_path: Path) -> None:
+    """The rollback's own safety copies are pruned like its copies: the last one per database.
+
+    A Maintenance-tab restore's `pre-restore` copy is the player's undo, and is
+    never touched.
+    """
+    from yulon.catalog.snapshot import ROLLBACK_SAFETY_LABEL, prune_older
+
+    def at(stamp: str, label: str, database: str) -> Path:
+        path = tmp_path / f"{stamp}_{label}_{database}.sql"
+        path.write_text("-- dump\n", encoding="utf-8")
+        return path
+
+    old_bots = at("20261003_204310", ROLLBACK_SAFETY_LABEL, "acore_playerbots")
+    new_bots = at("20261004_101700", ROLLBACK_SAFETY_LABEL, "acore_playerbots")
+    old_world = at("20261003_204320", ROLLBACK_SAFETY_LABEL, "acore_world")
+    new_world = at("20261004_101730", ROLLBACK_SAFETY_LABEL, "acore_world")
+    players_undo = at("20261002_090000", "pre-restore", "acore_characters")
+    copy = at("20261004_101500", "before-new-build", "acore_playerbots")
+
+    assert sorted(prune_older(tmp_path, (copy,))) == sorted((old_bots, old_world))
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        p.name for p in (new_bots, new_world, players_undo, copy)
+    )
+
+
 def test_pruning_a_folder_that_cannot_be_listed_removes_nothing_and_does_not_raise(
     tmp_path: Path,
 ) -> None:
     from yulon.catalog.snapshot import prune_older
 
     assert prune_older(tmp_path / "missing", ()) == ()
+
+
+# F1 (T195 final fix): the harness run without --server-dir installs where the
+# engine's default says, and that default must not build a second server beside
+# one under the former default name (`installer.default_server_dir`).
+
+
+def _cli_default(monkeypatch: pytest.MonkeyPatch, home: Path) -> Path:
+    from yulon.catalog.installer import installer_for
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    entry = load_catalog().get("wow-wotlk")
+    engine = installer_for(entry, platform_id=lambda: "linux")
+    return engine.server_dir(InstallOptions())
+
+
+def _holding_install(folder: Path) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+
+def test_the_harness_default_is_the_new_folder_when_no_server_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_the_harness_default_is_the_former_folder_when_only_it_holds_a_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _holding_install(tmp_path / "wow-server-playerbots")
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+def test_the_harness_default_ignores_a_former_folder_with_no_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "wow-server-playerbots").mkdir()
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_the_harness_default_prefers_the_new_folder_when_both_hold_a_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _holding_install(tmp_path / "wow-server-playerbots")
+    _holding_install(tmp_path / "yulon-wotlk")
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "yulon-wotlk"
+
+
+def test_the_harness_default_keeps_the_former_folder_when_the_new_one_is_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _holding_install(tmp_path / "wow-server-playerbots")
+    (tmp_path / "yulon-wotlk").mkdir()
+    assert _cli_default(monkeypatch, tmp_path) == tmp_path / "wow-server-playerbots"
+
+
+# R1 follow-up (T194): the database's own refusal must reach the install and repair messages.
+ACCESS_DENIED = (
+    b"ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)"
+)
+
+
+def _mysql_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `docker exec` into the database answers rc 1 with the server's refusal."""
+
+    def fake_run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 1, b"", ACCESS_DENIED)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def test_an_install_probe_the_database_refuses_carries_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _mysql_refuses(monkeypatch)
+    probe, _reset = install_wiring.import_gate_for(WOTLK)
+    assert probe is not None
+    with caplog.at_level(logging.DEBUG):
+        state = probe()
+    assert state.state == "unreadable"
+    assert "ERROR 1045" in state.detail and "Access denied" in state.detail
+    assert any("ERROR 1045" in r.getMessage() for r in caplog.records), "never logged"
+
+
+def test_a_repair_reset_the_database_refuses_carries_the_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+
+    _mysql_refuses(monkeypatch)
+    _probe, reset = install_wiring.import_gate_for(WOTLK)
+    assert reset is not None
+    with pytest.raises(MaintenanceError) as caught:
+        reset()
+    assert "ERROR 1045" in str(caught.value)

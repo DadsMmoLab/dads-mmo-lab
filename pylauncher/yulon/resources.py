@@ -50,3 +50,14 @@ def lua_dir() -> Path:
     scripts stay comparable file for file.
     """
     return bundle_root() / "lua"
+
+
+def theme_images_dir() -> Path:
+    """`<bundle_root>/yulon/ui/theme_images` -- the SVGs the theme's sheet names (T193).
+
+    The checkbox tick, the radio dot, the combo arrow and the spin box's − and +.
+    Qt's style sheets draw a sub-control's glyph only from an `image:` URL, so
+    these are files on disk rather than painted code, and they ship as a data
+    tree in `build/pylauncher.spec` like `lua/`.
+    """
+    return bundle_root() / "yulon" / "ui" / "theme_images"

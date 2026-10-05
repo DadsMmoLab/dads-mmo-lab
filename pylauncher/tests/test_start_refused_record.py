@@ -129,7 +129,7 @@ def test_restart_and_recreate_stop_and_remove_nothing(
     _owed(tmp_path)
     since = len(ps.calls)
     view.restart_server() if press == "restart" else view.recreate_containers()
-    assert view.tuning_report.toPlainText() == f"FAILED: {REFUSED}"
+    assert view.tuning_report.toPlainText() == REFUSED, "Yu'lon's refusal, as written (T214)"
     assert _touched(ps, since) == []
 
 

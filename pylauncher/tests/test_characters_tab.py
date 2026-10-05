@@ -387,6 +387,53 @@ def test_the_list_refresh_after_an_action_is_bounded_rather_than_a_single_guess(
     assert view.character_list.count() == 2, "a late older refresh emptied the list"
 
 
+@pytest.mark.parametrize(
+    ("shut_down", "delete"),
+    [(True, True), (False, True), (True, False)],
+    ids=["shutdown-then-delete", "delete-only", "shutdown-only"],
+)
+def test_the_re_reads_after_an_action_stop_when_the_tab_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shut_down: bool, delete: bool
+) -> None:
+    """T213's sibling: the bounded re-read after an action re-arms itself too.
+
+    `_refresh_until_it_changes` schedules up to `_ROW_SETTLE_TRIES` reads, one
+    every `_ROW_SETTLE_MS`, through a lambda on `self` with no context object
+    and no `_closed` check. A server removed in that window (main.py's
+    `drop_controller`: `shutdown()`, then `deleteLater()`) got a read anyway,
+    whose answer then cleared a deleted list: `RuntimeError` in a Qt slot.
+
+    Mutation: drop the context object from the two arms and the delete-only
+    case raises; drop the `_closed` check and the shutdown-only case reads the
+    list again after `shutdown()`.
+    """
+    import sys
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from tests.conftest import process_events
+
+    hooked: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda _t, value, _tb: hooked.append(value))
+    monkeypatch.setattr(controller_view_module, "_ROW_SETTLE_MS", 1)
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+
+    view.revive_character()  # schedules the re-reads; the list never changes here
+    play.calls.clear()
+    if shut_down:
+        view.shutdown()
+    if delete:
+        view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    process_events(100)
+
+    assert hooked == [], f"a re-read reached a deleted tab: {hooked!r}"
+    assert [name for name, _ in play.calls if name == "listing"] == [], play.calls
+
+
 def test_the_character_list_is_written_on_the_gui_thread_by_a_real_threaded_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -619,7 +666,9 @@ def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
 
     assert with_control, "no tree drew the control, so one direction proved nothing"
     assert without_control, "no tree withheld it, so the other direction proved nothing"
-    assert withheld == ["wow-centurion"], withheld
+    # Centurion withheld it until T208's live check watched it work (2026-10-04); since
+    # then no shipped tree withholds it, and the branch above stays for the next one.
+    assert withheld == [], withheld
 
 
 def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(
@@ -665,18 +714,17 @@ def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(
 
     said = view.set_level_absent.text()
 
-    assert "reset level" in said, said
-    assert "logged in" in said, said
-    assert "configured starting level" in said, said
+    # T194 (I2): what each console route does, in the player's words; the
+    # commands themselves (`.reset level`, `.rndbot create level=<n>`) are not drawn.
+    assert "reset a logged-in character to the starting level" in said, said
     assert "level 1" not in said, said
     # The route the review found, and the reason the sentence is narrower than
     # it was: `rndbot` IS console-allowed (`Chat.cpp:1012`) and
     # `rndbot create level=<n>` reaches `CreateBot`, which parses `level=` and
     # calls `SetLevel` (`PlayerbotMgr.cpp:2389`, `:2497-2510`). What it cannot
     # do is move a character that already exists, and that is the true clause.
-    assert "rndbot create level=" in said, said
-    assert "existing character" in said, said
-    assert "NEW character" in said, said
+    assert "can't move a character to a level you pick" in said, said
+    assert "make a new bot at the level you name" in said, said
     assert _in_the_layout(view.set_level_absent) is True
     assert _shown(view.set_level_absent) is True
     assert _in_the_layout(view.set_level_button) is False
@@ -1244,3 +1292,117 @@ def test_an_action_landing_first_does_not_take_the_level_of_one_still_out(
     assert row.data(level_role) == 78, "Revive's answer stored a level it never sent"
     jobs.deliver(view._character_done, 0)  # Set level's answer
     assert row.data(level_role) == 80
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800)], ids=["960x640", "1280x800"])
+def test_the_characters_tab_is_whole_and_its_labels_sit_beside_their_boxes(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """T191 A13: nothing on the tab cut or overlapped, and "Level" reads level with its box.
+
+    Before the page, ten form rows at 960x640 were drawn over each other (the
+    spin boxes over the buttons under them). The label is held to the box's
+    middle, not its top edge: a label beside the top of a taller box reads as
+    belonging to the row above.
+    """
+    from tests.conftest import process_events
+    from tests.test_controller_view import (
+        _at,
+        _controller_in_the_real_window,
+        _page_faults,
+    )
+
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    window, _tab = _controller_in_the_real_window(view, "Characters")
+    _at(window, size)
+    view.refresh_characters()
+    process_events()
+    view.character_list.setCurrentRow(0)
+    process_events()
+    page = view._tabs.currentWidget()
+
+    assert view.new_level.isVisible(), "the fixture's tree has no Level row to check"
+    assert _page_faults(page) == [], f"the Characters tab at {size}: {_page_faults(page)}"
+    form = view.new_level.parentWidget().layout()
+    label = form.labelForField(view.new_level)
+    label_middle = label.mapTo(window, label.rect().center()).y()
+    box_middle = view.new_level.mapTo(window, view.new_level.rect().center()).y()
+    assert (
+        abs(label_middle - box_middle) <= 2
+    ), f"'Level' is centred at {label_middle}, its box at {box_middle}"
+
+
+def test_the_character_roster_takes_the_height_a_1080p_window_has(tmp_path: Path) -> None:
+    """A13: the roster is the column that grows; at 1080p it is not a strip over empty space."""
+    from tests.conftest import process_events
+    from tests.test_controller_view import _at, _controller_in_the_real_window
+
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    window, _tab = _controller_in_the_real_window(view, "Characters")
+    _at(window, (1920, 1080))
+    view.refresh_characters()
+    process_events()
+    page = view._tabs.currentWidget()
+
+    assert view.character_list.count() == 2
+    assert (
+        view.character_list.height() >= page.viewport().height() // 2
+    ), f"the roster is {view.character_list.height()}px of a {page.viewport().height()}px page"
+
+
+# -- T195: a greyed press says why (I3) and an empty list says what to do ----------------
+
+
+CHOOSE_ONE = "Choose a character in the list first."
+
+
+def test_with_no_character_chosen_every_action_says_to_choose_one(tmp_path: Path) -> None:
+    """I3: six greyed presses beside a list, and nothing on the tab said why.
+
+    Mutation: grey them with a bare `setEnabled(False)` and every tooltip is empty.
+    """
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    view.refresh_characters()
+    assert view.character_list.count() == 2
+    assert view.character_list.currentRow() < 0
+
+    for button in view.character_buttons():
+        assert not button.isEnabled(), button.text()
+        assert button.toolTip() == CHOOSE_ONE, button.text()
+    assert not view.character_reasons.isHidden()
+    assert view.character_reasons.text() == CHOOSE_ONE
+
+    view.character_list.setCurrentRow(0)  # Guglu, online
+
+    for button in view.character_buttons():
+        assert button.isEnabled(), button.text()
+        assert button.toolTip() == "", button.text()
+    assert view.character_reasons.isHidden(), view.character_reasons.text()
+
+
+def test_an_offline_character_s_revive_says_why_on_the_tab(tmp_path: Path) -> None:
+    view = _view(tmp_path, play=_Play(characters=_people()))
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(1)  # Ganaar, offline
+
+    assert not view.revive_button.isEnabled()
+    reason = view.revive_button.toolTip()
+    assert reason == "Ganaar has to be logged in to be revived.", reason
+    assert reason in view.character_reasons.text().splitlines()
+
+
+def test_an_empty_character_list_says_to_make_one_in_the_game(tmp_path: Path) -> None:
+    """A23: an empty list read the same as a list that failed to load."""
+    view = _view(tmp_path, play=_Play(characters=()))
+
+    view.refresh_characters()
+
+    said = view.character_report.text()
+    assert "no characters" in said and "in the game" in said, said
+    assert "Refresh the list" in said, said
+
+    view.services.play.characters = _people()
+    view.refresh_characters()
+
+    assert view.character_report.text() == ""

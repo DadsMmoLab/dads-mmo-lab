@@ -57,6 +57,14 @@ timeout first and reported as "timed out". Measured on m910q 2026-09-05, the
 two tests that spawn a driver reported `0.07s call` and `0.26s call`.
 """
 
+GIVE_UP = 0.3
+"""The `timeout` handed to a `run()` that is MEANT to give up: its child sleeps 60 s.
+
+A deadline the test wants to pass, not one it is judged by, so a loaded box
+only makes it pass more surely. Its number is in the runner's own words
+("timed out after 0.3s"), which the timeout tests read back.
+"""
+
 POLL_PACE = 0.01
 """How often a poll loop re-reads `gi_running` or `/proc`. NOT a deadline.
 
@@ -427,6 +435,28 @@ def test_end_streams_started_on_ends_the_child_a_worker_thread_is_blocked_readin
         blocked.close()
 
 
+def test_a_stream_a_stop_ended_says_so_by_type_and_one_killed_otherwise_does_not() -> None:
+    """T240: `StreamEnded` is the exit `end_streams_started_on()` caused, and only that one.
+
+    Still a `CalledProcessError` either way (the reason is in the test above). The
+    type is what lets a caller tell the Stop from the command failing: the
+    containerized clone answered a Stop-killed docker CLI with a host-git clone.
+    The second stream's child is killed from outside, with the same signal, and
+    exits the same way; only who ended it differs.
+    """
+    stopped = _BlockedStream("test-stream-ended-worker")
+    try:
+        assert runner.end_streams_started_on(stopped.worker.ident) == 1
+        stopped.worker.join(timeout=HANG_BOUND)
+        assert isinstance(stopped.outcome[0], runner.StreamEnded), stopped.outcome
+    finally:
+        stopped.close()
+    killed = _BlockedStream("test-stream-killed-worker")
+    killed.close()
+    assert isinstance(killed.outcome[0], subprocess.CalledProcessError), killed.outcome
+    assert not isinstance(killed.outcome[0], runner.StreamEnded), "nobody pressed Stop"
+
+
 def test_end_streams_started_on_returns_before_the_reap_it_asked_for_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -769,6 +799,7 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
         "HANG_BOUND",
         "DRIVER_BOUND",
         "POLL_PACE",
+        "GIVE_UP",
         "time.monotonic()",
     }
 
@@ -1161,3 +1192,62 @@ def test_stream_progress_hands_the_child_the_environment_it_was_given(
     list(runner.stream_progress(["git", "clone", "x"], env={"GIT_TERMINAL_PROMPT": "0"}))
 
     assert asked.get("env") == {"GIT_TERMINAL_PROMPT": "0"}
+
+
+# ------------------------------------- a timeout logged once per change (PR 291 fix round 2)
+
+
+def _sometimes_hangs(flag: Path) -> list[str]:
+    """One command line that hangs while `flag` exists and answers at once when it does not."""
+    script = "import os, sys, time; time.sleep(60 if os.path.exists(sys.argv[1]) else 0)"
+    return [sys.executable, "-c", script, str(flag)]
+
+
+def _said(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == runner.logger.name]
+
+
+def test_a_command_that_keeps_timing_out_is_logged_once_per_change(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """The Windows live test of PR 291: "docker did not answer within 30.0s; giving up" every
+    35 s for the five minutes Docker's engine was away (9 identical lines)."""
+    flag = tmp_path / "hang"
+    command = _sometimes_hangs(flag)
+    other = _sometimes_hangs(tmp_path / "other")
+    (tmp_path / "other").touch()
+    caplog.set_level("INFO", logger=runner.logger.name)
+
+    flag.touch()
+    first = run(command, timeout=GIVE_UP)
+    second = run(command, timeout=GIVE_UP)
+    assert (first.returncode, second.stderr) == (124, f"timed out after {GIVE_UP}s")
+    assert runner.timed_out(first) and runner.timed_out(second)
+    gave_up = [r for r in caplog.records if "did not answer within" in r.getMessage()]
+    assert len(gave_up) == 1, _said(caplog)
+    assert gave_up[0].levelname == "WARNING"
+
+    caplog.clear()
+    run(other, timeout=GIVE_UP)
+    assert (
+        sum("did not answer within" in m for m in _said(caplog)) == 1
+    ), "another command line timing out is news, and was not logged"
+
+    caplog.clear()
+    flag.unlink()
+    assert run(command, timeout=HANG_BOUND).returncode == 0
+    run(command, timeout=HANG_BOUND)
+    assert sum("answers again" in m for m in _said(caplog)) == 1, _said(caplog)
+
+    caplog.clear()
+    flag.touch()
+    run(command, timeout=GIVE_UP)
+    assert (
+        sum("did not answer within" in m for m in _said(caplog)) == 1
+    ), "timing out again after it answered is a change, and was not logged"
+
+
+def test_a_command_exiting_124_on_its_own_did_not_time_out() -> None:
+    proc = run([sys.executable, "-c", "import sys; sys.exit(124)"], timeout=HANG_BOUND)
+    assert proc.returncode == 124
+    assert not runner.timed_out(proc)

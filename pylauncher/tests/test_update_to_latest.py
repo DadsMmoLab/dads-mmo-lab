@@ -18,14 +18,18 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Callable, Iterator
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
 
+from tests.conftest import HANG_BOUND
 from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
+from tests.support_player_text import text_faults
+from tests.support_stop import compile_until_stopped, stop_when
 
 # The CMaNGOS half of this file drives a REAL TBC install, and the machinery
 # that lays the SQL a CMaNGOS plan names -- and the import gate it needs --
@@ -49,6 +53,7 @@ from yulon.catalog.installer import (
 )
 from yulon.controller import Controller, StartRefused
 from yulon.docker import AttachedRun
+from yulon.ui.widgets.log_panel import STOPPED_THEN_FAILED, LogPanel
 
 PINNED = ENTRY.emulator.sources[0].rev or ""
 """The commit `catalog.json` pins the WotLK core to — the one every gate ran on."""
@@ -2187,8 +2192,9 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
     assert str(raised.value) == (
         f"{GIVEN_UP} Putting the build from before this rebuild back failed part-way "
         f"({REFUSED}) and undoing it failed too, so the tags are MIXED: {refs[0]} name the old "
-        "build and the rest name the new one. Do not start this server until they agree; the "
-        "old images are under their -rollback tags. The source folders were put back on the "
+        "build and the rest name the new one. Do not start this server until they agree. The "
+        "old images are on the daemon under their -rollback tags. The source folders were put "
+        "back on the "
         "commits they were on before this update. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up. Its "
         "image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
@@ -2374,6 +2380,302 @@ def test_a_rollback_that_stops_early_on_a_plain_rebuild_adds_nothing_about_sourc
     assert said.endswith(f"under their {native.ROLLBACK_TAG_SUFFIX} tags.")
     assert raised.value.sources_kept is False
     assert set(_heads(rec, server_dir).values()) == {OLD}, "Rebuild never moved them"
+
+
+def _stopped_in_the_ready_wait(
+    rec: Recorder, server_dir: Path, **overrides: object
+) -> tuple[LogPanel, list[tuple[bool, str]]]:
+    """An update press run in a real `LogPanel`, with Stop pressed while it waits for ready (T228).
+
+    The new build's ready wait blocks until the panel's Stop sets the press's
+    cancel, then answers "not ready", which is the order the m910q check met
+    (P9): build, recreate, ready wait, Stop. What the rollback then does is the
+    test's `overrides`; `answers` are the ready waits' answers in turn.
+    """
+    waiting = threading.Event()
+    gate: list[threading.Event] = []
+    answers = list(overrides.pop("answers", [False]))  # type: ignore[call-overload]
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        if not waiting.is_set():
+            waiting.set()
+            gate[0].wait(HANG_BOUND)
+        return bool(answers.pop(0) if len(answers) > 1 else answers[0])
+
+    rebuild = bool(overrides.pop("rebuild", False))
+    made = engine(rec, wait_ready=wait_ready, **overrides)
+    options = InstallOptions(server_dir=server_dir)
+
+    def press(cancel: threading.Event) -> Iterator[str]:
+        gate.append(cancel)
+        if rebuild:
+            return made.rebuild(options, cancel=cancel)
+        return made.update_to_latest(options, cancel=cancel)
+
+    return stop_when(press, waiting, "the press reached the new build's ready wait")
+
+
+def _failure_class_names() -> set[str]:
+    """Every failure type an install, rebuild or update can raise, by class name."""
+    found: set[str] = set()
+    pending: list[type] = [InstallerError]
+    while pending:
+        kind = pending.pop()
+        found.add(kind.__name__)
+        pending.extend(kind.__subclasses__())
+    return found
+
+
+def _no_class_name_on_screen(panel: LogPanel, finished: list[tuple[bool, str]]) -> None:
+    """T194/T195's rule after a Stop: the header, the strip, the failure line and the message
+    the tab shows in its own popup carry no exception class name (the m910q check read
+    "Stopped. FAILED: RollbackNotDone: ...")."""
+    shown = {
+        "header": panel.status_text(),
+        "step": panel.step_text(),
+        "progress": panel.progress_text(),
+        "failure line": panel.failure_label.text(),
+        "run_finished": " ".join(message for _ok, message in finished),
+    }
+    names = _failure_class_names()
+    for where, text in shown.items():
+        assert not text_faults(text), (where, text_faults(text), text)
+        assert not [name for name in names if name in text], (where, text)
+
+
+def _rollback_tags_gone(rec: Recorder) -> dict[str, object]:
+    """The first retag back is refused because its `-rollback` image is no longer there.
+
+    The m910q check (P9): the rollback names had been removed out of band, and
+    Docker answered "No such image: ...-rollback".
+    """
+    asked = rec.images_built
+
+    def images_built(refs: Sequence[str]) -> bool | None:
+        if any(ref.endswith(native.ROLLBACK_TAG_SUFFIX) for ref in refs):
+            return False
+        return asked(refs)
+
+    def tag(src: str, dst: str) -> str:
+        rec.calls.append(f"tag:{src}->{dst}")
+        if src.endswith(native.ROLLBACK_TAG_SUFFIX):
+            return f"Error response from daemon: No such image: {src}"
+        return ""
+
+    return {"tag_image": tag, "images_built": images_built}
+
+
+def test_a_rollback_whose_old_images_are_gone_does_not_say_they_are_there(
+    qapp: object, tmp_path: Path
+) -> None:
+    """m910q P9: "No such image: ...-rollback", then "The old images are on the daemon"."""
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, **_rollback_tags_gone(rec))
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "The old images are on the daemon" not in header, header
+    assert "Docker no longer has" in header and native.ROLLBACK_TAG_SUFFIX in header, header
+    assert "cannot be put back from them" in header, header
+    _no_class_name_on_screen(panel, finished)
+
+
+@pytest.mark.parametrize("how", sorted(EARLY_RETURNS))
+def test_every_early_return_asks_whether_the_old_images_are_there_before_saying_so(
+    tmp_path: Path, how: str
+) -> None:
+    """m910q P9, at each of `_restore_rollback()`'s four early returns.
+
+    Each one closed by saying where the old images are. With the `-rollback`
+    names gone from the daemon, none of them may say they are there.
+    """
+    rec, server_dir = _ready(tmp_path)
+    rec.ready = False
+    overrides = EARLY_RETURNS[how](rec)
+    asked = rec.images_built
+
+    def images_built(refs: Sequence[str]) -> bool | None:
+        if any(ref.endswith(native.ROLLBACK_TAG_SUFFIX) for ref in refs):
+            return False
+        return asked(refs)
+
+    made = engine(rec, images_built=images_built, **overrides)
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert EARLY_SENTENCES[how] in said, said
+    assert "The old images are on the daemon" not in said, said
+    assert "Docker no longer has" in said and "cannot be put back from them" in said, said
+
+
+def test_an_early_return_that_cannot_ask_docker_says_it_could_not_ask(tmp_path: Path) -> None:
+    """The third answer: the daemon would not say whether the `-rollback` names are there."""
+    rec, server_dir = _ready(tmp_path)
+    rec.ready = False
+    overrides = _retag_refused(rec)
+    asked = rec.images_built
+
+    def images_built(refs: Sequence[str]) -> bool | None:
+        if any(ref.endswith(native.ROLLBACK_TAG_SUFFIX) for ref in refs):
+            return None
+        return asked(refs)
+
+    made = engine(rec, images_built=images_built, **overrides)
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "could not ask Docker whether the old images are still under" in said, said
+    assert "The old images are on the daemon" not in said, said
+
+
+def test_a_stop_whose_rollback_stopped_early_shows_what_the_press_left(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228: the sentence that says what state the server is in survives the Stop.
+
+    The m910q check (P9): Stop in the ready wait, then the rollback's first retag
+    failed. The press ended with "Putting ... back failed" and "The source
+    folders were left on the new commits", and the panel said only "cancelled".
+    """
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, **_retag_refused(rec))
+
+    assert panel.cancelled is True
+    _no_class_name_on_screen(panel, finished)
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert EARLY_SENTENCES["retag-refused"] in header, header
+    assert header.endswith(native.SOURCES_LEFT_NOTE), header
+    assert len(finished) == 1 and finished[0][0] is False, finished
+    assert native.SOURCES_LEFT_NOTE in finished[0][1], "the tab's refusal gets the sentence too"
+    assert set(_heads(rec, server_dir).values()) == {NEW}, "the ground: the sources stayed moved"
+
+
+def test_a_stop_whose_new_build_was_kept_says_the_build_and_sources_were_kept(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228: the build came up and then stopped, so it was KEPT, and so were its sources."""
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(
+        rec, server_dir, answers=[True], world_output=lambda spec: ABORTED_AFTER_READY
+    )
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert header.endswith(native.SOURCES_KEPT_NOTE), header
+    assert finished and finished[0][0] is False, finished
+    assert set(_heads(rec, server_dir).values()) == {NEW}
+
+
+def test_a_stopped_rebuild_whose_rollback_left_the_servers_stopped_says_start_is_refused(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228: a start refusal now in force is said after a Stop, with what to press."""
+    rec, server_dir = _ready(tmp_path)
+    assert native.owe_start(server_dir) == ""
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, rebuild=True)
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "its servers were left STOPPED: " + MIXED_REFUSAL in header, header
+    assert finished and finished[0][0] is False, finished
+    assert rec.calls.count("start") == 0, "the ground: nothing was started"
+
+
+def test_a_stop_whose_rollback_put_the_old_build_back_says_what_the_database_holds(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228 cold review: "put back and is running" carries a note a Stop must not hide.
+
+    The old build is back and running, but on the database as the new build left
+    it, and the sources went back under it. Every word of that is true after a
+    Stop, so it is shown under "Stopped".
+    """
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, answers=[False, True])
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "put back and is running again" in header, header
+    assert "is NOT put back by this" in header, header
+    assert header.endswith(native.SOURCES_PUT_BACK_NOTE), header
+    assert finished and finished[0][0] is False, finished
+    assert set(_heads(rec, server_dir).values()) == {OLD}, "the ground: the sources went back"
+
+
+def test_a_stop_whose_old_build_did_not_come_up_either_says_so(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T228 cold review: the old build was put back and did not report ready either."""
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, answers=[False, False])
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "did not report ready either" in header, header
+    assert header.endswith(native.SOURCES_PUT_BACK_NOT_UP_NOTE), header
+    assert native.SOURCES_PUT_BACK_NOTE not in header, "the server is not up to agree with"
+    assert finished and finished[0][0] is False, finished
+
+
+def test_a_stop_in_the_replace_before_any_container_moved_says_only_cancelled(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The rollback's untouched return: the tags went back, no container moved, sources back.
+
+    The replace waits on the world's load until Stop, then gives up before its
+    signal. Nothing that runs was changed, so this is a clean cancel. Since T217
+    the update route's load wait is in its own stop (the one before the copy of
+    the databases), so the give-up is armed there, as `_recreate_given_up()` does.
+    """
+    rec, server_dir = _ready(tmp_path)
+    reached = threading.Event()
+    gate: list[threading.Event] = []
+
+    def give_up(control: object) -> None:
+        reached.set()
+        gate[0].wait(HANG_BOUND)
+        raise docker.StopAbandoned("the world was still loading")
+
+    rec.on_recreate = give_up
+    rec.on_stop_servers = give_up
+    made = engine(rec)
+    options = InstallOptions(server_dir=server_dir)
+
+    def press(cancel: threading.Event) -> Iterator[str]:
+        gate.append(cancel)
+        return made.update_to_latest(options, cancel=cancel)
+
+    panel, finished = stop_when(press, reached, "the replace was waiting on the world")
+
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+    assert "recreate" not in rec.calls, "the ground: no container was replaced"
+    assert set(_heads(rec, server_dir).values()) == {OLD}
+
+
+def test_a_stop_during_the_compile_puts_everything_back_and_says_only_cancelled(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The clean cancel T228 keeps: stopped before any container moved, nothing left behind.
+
+    The compile is killed, the rollback names are released, the sources go back,
+    and the server runs the build it had. The failure is a plain `InstallerError`
+    as long as the others, so the panel tells them apart by type alone.
+    """
+    rec, server_dir = _ready(tmp_path)
+    compiling = threading.Event()
+    made = engine(rec, build=compile_until_stopped(compiling))
+    options = InstallOptions(server_dir=server_dir)
+    panel, finished = stop_when(
+        lambda cancel: made.update_to_latest(options, cancel=cancel), compiling, "compiling"
+    )
+
+    assert panel.cancelled is True
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
+    assert "recreate" not in rec.calls, "the ground: no container was replaced"
+    assert set(_heads(rec, server_dir).values()) == {OLD}, "the ground: the sources went back"
 
 
 def test_a_shallow_checkout_says_which_files_changed_between_the_commit_it_left_and_its_new_one(

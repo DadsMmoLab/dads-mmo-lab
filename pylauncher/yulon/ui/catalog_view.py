@@ -10,6 +10,7 @@ into the `LogPanel`. No Docker, no subprocess, no business logic here
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable, Mapping
 from enum import Enum
@@ -34,10 +35,12 @@ from PySide6.QtWidgets import (
 from yulon import docker, platform, wsl
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
+    FORMER_DEFAULT_DIRS,
     InstallEngine,
     InstallOptions,
     cancelled_install_message,
     compose_file,
+    default_server_dir,
     platform_names,
     unsupported_platform_message,
 )
@@ -53,6 +56,9 @@ from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
 
 logger = get_logger(__name__)
+
+QWIDGETSIZE_MAX = 16777215
+"""Qt's "no maximum" for a widget dimension (`QWIDGETSIZE_MAX` in C++)."""
 
 InstallerFactory = Callable[[CatalogEntry], InstallEngine]
 """What builds the engine for one entry.
@@ -73,7 +79,7 @@ def _existing_ancestor(start: Path | None) -> Path | None:
     found. Please verify the correct directory name was given."
 
     That is a dead end on the first install, and it is the one every new user
-    meets: the suggestion is `~/wow-server-playerbots`, which by definition does
+    meets: the suggestion (then `~/wow-server-playerbots`) by definition did
     not exist yet. The app proposed a folder and then refused its own proposal;
     the only way forward was the New Folder button, which nothing pointed at.
     Measured on a clean Arch box, 2026-08-24.
@@ -102,12 +108,43 @@ def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | No
     return pick_folder(parent, title, _existing_ancestor(start))
 
 
-SuggestionAsker = Callable[[QWidget, str, Path], bool]
-"""Offer a folder that does not exist yet: True to take it, False to open the picker."""
+SuggestionAsker = Callable[[QWidget, str, Path], "bool | None"]
+"""Offer the default folder, new or already there: True to take it, False to open the picker,
+None when the question was closed (Cancel, Escape, the window's X) and nothing is to start."""
+
+USE_THIS_FOLDER_LABEL = "Use this folder"
+CHOOSE_ANOTHER_FOLDER_LABEL = "Choose another folder\u2026"
+CANCEL_LABEL = "Cancel"
+"""The Install question's three presses, named once for the dialog and its tests."""
 
 
-def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
-    """ "Install into this folder?" - Yes takes it, No opens the picker.
+def _suggestion_question(game: str, suggested: Path) -> str:
+    """The Install dialog's words for `suggested`: a new folder, an empty one, or a server's.
+
+    `default_server_dir()` offers a former default folder only when it holds a
+    server, and the dialog said "into this new folder" and "Yu'lon makes the
+    folder" about it all the same (PR 291 Linux live test).
+    """
+    elsewhere = "Choose another folder if you would rather put it somewhere else."
+    if compose_file(suggested) is not None:
+        return (
+            f"Install {game} into this existing server folder?\n\n{suggested}\n\n"
+            f"A server from an earlier install is already in this folder, and Yu'lon uses it. "
+            f"{elsewhere}"
+        )
+    if suggested.is_dir():
+        return (
+            f"Install {game} into this folder?\n\n{suggested}\n\n"
+            f"The folder is already there. {elsewhere}"
+        )
+    return (
+        f"Install {game} into this new folder?\n\n{suggested}\n\n"
+        f"Yu'lon makes the folder when the install starts. {elsewhere}"
+    )
+
+
+def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool | None:
+    """ "Install into this folder?" - Yes takes it, No opens the picker, Cancel closes it.
 
     **This exists because a file picker cannot say "make this one".** The
     suggestion is a folder that by definition does not exist on a first install,
@@ -130,25 +167,36 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
     Default is Yes. The suggestion is right for nearly every install, and the
     one it is wrong for - a second install of the same game - is a folder the
     user is already thinking about.
+
+    Cancel is the Escape button, named. With only Yes and No, Qt made No the
+    escape button, so Escape opened the folder picker instead of closing the
+    question (PR 291's Windows live test, 2026-10-04).
     """
     box = FittedMessageBox(
         QMessageBox.Icon.Question,
         f"Install {game}",
-        f"Install {game} into this new folder?\n\n{suggested}\n\n"
-        "It will be created when the install starts. Choose another folder if "
-        "you would rather put it somewhere else.",
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        _suggestion_question(game, suggested),
+        QMessageBox.StandardButton.Yes
+        | QMessageBox.StandardButton.No
+        | QMessageBox.StandardButton.Cancel,
         parent,
     )
     box.setDefaultButton(QMessageBox.StandardButton.Yes)
-    yes_btn = box.button(QMessageBox.StandardButton.Yes)
-    if yes_btn is not None:
-        yes_btn.setText("Yes, default location")
-    no_btn = box.button(QMessageBox.StandardButton.No)
-    if no_btn is not None:
-        no_btn.setText("No, custom location")
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    for which, label in (
+        (QMessageBox.StandardButton.Yes, USE_THIS_FOLDER_LABEL),
+        (QMessageBox.StandardButton.No, CHOOSE_ANOTHER_FOLDER_LABEL),
+        (QMessageBox.StandardButton.Cancel, CANCEL_LABEL),
+    ):
+        button = box.button(which)
+        if button is not None:
+            button.setText(label)
     answer = box.exec()
-    return said_yes(answer)
+    if said_yes(answer):
+        return True
+    if answer == QMessageBox.StandardButton.No:
+        return False
+    return None
 
 
 def _pin_compose_project(server_dir: Path) -> None:
@@ -190,6 +238,10 @@ def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer
     if not ok or choice not in labels:
         return None
     return found[labels.index(choice)]
+
+
+INSTALL_STOPPED_TITLE = "Install stopped"
+"""The popup's title when a stopped install ended on a failure that says what it left (T228)."""
 
 
 class Identification(Enum):
@@ -292,12 +344,44 @@ _CAMPAIGN_GLYPHS = {
 }
 
 _CAMPAIGN_SUBTITLES = {
-    "wow-wotlk": "Wrath of the Lich King (3.3.5a)",
-    "wow-tbc": "The Burning Crusade (2.4.3)",
-    "wow-vanilla": "Classic Vanilla (1.12.1)",
-    "wow-tortoise": "Turtle WoW Solo (1.17.2)",
-    "wow-centurion": "Level-60 PvP with bots (3.3.5a)",
+    "wow-wotlk": "Wrath of the Lich King",
+    "wow-tbc": "The Burning Crusade",
+    "wow-vanilla": "Classic Vanilla",
+    "wow-tortoise": "Turtle WoW Solo",
+    "wow-centurion": "Level-60 PvP with bots",
 }
+"""The tile's second line; the client version in brackets comes from the entry (T194 C18).
+
+Typed here, the Tortoise tile said 1.17.2 for a server whose client must be 1.18.1.
+"""
+
+_SERVER_SOFTWARE = {
+    "wow-wotlk": "AzerothCore with mod-playerbots",
+    "wow-tbc": "CMaNGOS TBC with playerbots",
+    "wow-vanilla": "CMaNGOS Classic with playerbots",
+    "wow-tortoise": "the Tortoise WoW core with TortoiseBots",
+    "wow-centurion": "Centurion, a TrinityCore with its own playerbots",
+}
+"""What a tile's tooltip names as its server software (T194 F8).
+
+In words, not the entry's emulator name: that carries repositories and a
+branch ("tortoise-wow/tortoise-wow @ 1181dev"), which a player has no use for.
+"""
+
+
+def _server_software(entry: CatalogEntry) -> str:
+    """The tile's "Server software:" words; an entry not listed gets its name without a branch."""
+    return _SERVER_SOFTWARE.get(entry.id) or re.sub(r"\s*@\s*\S+", "", entry.emulator.name)
+
+
+RECOMMENDED = "wow-wotlk"
+"""The one tile marked "Recommended" (T195 C23): where a first-time player should start."""
+
+WELCOME = (
+    "Yu'lon downloads and builds the server for you. Nothing changes on this "
+    "computer until you press Install."
+)
+"""The line under the Catalog heading (T195 C23)."""
 
 
 class CatalogView(QWidget):
@@ -359,15 +443,22 @@ class CatalogView(QWidget):
         self._prompter: InputPrompter | None = None
 
         header_row = QHBoxLayout()
-        header_label = QLabel("Select a Server Emulator", self)
+        header_label = QLabel("Choose a game to install", self)
         header_label.setObjectName("section-title")
         header_row.addWidget(header_label)
         header_row.addStretch(1)
 
-        self.toggle_console_button = QPushButton("▼ Hide Console", self)
+        # Hidden until the window shows the install log for the first time
+        # (`main.build_catalog_tab`): before any install there is no log to show.
+        self.toggle_console_button = QPushButton("▼ Hide install log", self)
         self.toggle_console_button.setObjectName("toggle-console-btn")
         self.toggle_console_button.setIcon(dadcraft_icon("console", COLOR_TEXT_GOLD, 14))
+        self.toggle_console_button.setVisible(False)
         header_row.addWidget(self.toggle_console_button)
+
+        welcome = QLabel(WELCOME, self)
+        welcome.setObjectName("catalog-welcome")
+        welcome.setWordWrap(True)
 
         grid = QGridLayout()
         grid.setSpacing(12)
@@ -379,10 +470,16 @@ class CatalogView(QWidget):
         # enough for its buttons, and lets the grid grow downward, where the
         # vertical scrollbar belongs.
         columns = 2
+        # Top-aligned, with the spare height in an empty row under the last
+        # one: a tile is as tall as its own text at any width, never stretched
+        # to its row neighbour or to the shelf (T195 C24).
         for index, entry in enumerate(catalog.games):
-            grid.addWidget(self._tile(entry), index // columns, index % columns)
+            grid.addWidget(
+                self._tile(entry), index // columns, index % columns, Qt.AlignmentFlag.AlignTop
+            )
         for col in range(columns):
             grid.setColumnStretch(col, 1)
+        grid.setRowStretch((len(catalog.games) + columns - 1) // columns, 1)
 
         inner = QWidget()
         inner.setLayout(grid)
@@ -395,6 +492,7 @@ class CatalogView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addLayout(header_row)
+        layout.addWidget(welcome)
         layout.addWidget(scroll, 1)
         self._log.run_finished.connect(self._on_run_finished)
 
@@ -435,6 +533,12 @@ class CatalogView(QWidget):
         frame.customContextMenuRequested.connect(
             lambda pos, e=entry, f=frame: self._show_tile_context_menu(pos, e, f)
         )
+        # As tall as its own text (T195 C24). The card fixes itself at 370 px,
+        # which made a one-line description a tall, mostly empty tile.
+        frame.setMinimumHeight(0)
+        frame.setMaximumHeight(QWIDGETSIZE_MAX)
+        # The emulator is for the curious, so it is on hover (T195 C23).
+        frame.setToolTip(f"Server software: {_server_software(entry)}")
         box = QVBoxLayout(frame)
         box.setSpacing(6)
         box.setContentsMargins(14, 14, 14, 14)
@@ -453,7 +557,9 @@ class CatalogView(QWidget):
                 role="tile-title",
             )
         )
-        sub_title = QLabel(_CAMPAIGN_SUBTITLES.get(entry.id, entry.emulator.name), frame)
+        sub_title = QLabel(
+            f"{_CAMPAIGN_SUBTITLES.get(entry.id, entry.name)} ({entry.client.version})", frame
+        )
         sub_title.setObjectName("tile-subtitle")
         title_col.addWidget(sub_title)
         header_box.addLayout(title_col, 1)
@@ -465,7 +571,8 @@ class CatalogView(QWidget):
         desc_scroll.setFrameShape(QFrame.Shape.NoFrame)
         desc_label = self._tile_text(entry.description, desc_scroll, role="tile-desc")
         desc_scroll.setWidget(desc_label)
-        box.addWidget(desc_scroll, 1)
+        # No stretch: a one-line description made a ~370 px tile (T195 C24).
+        box.addWidget(desc_scroll)
 
         meta_box = QHBoxLayout()
         meta_box.setSpacing(6)
@@ -476,7 +583,8 @@ class CatalogView(QWidget):
                 role="tile-meta",
             )
         )
-        meta_box.addWidget(self._tile_text(f"{entry.emulator.name}", frame, role="tile-meta"))
+        if entry.id == RECOMMENDED:
+            meta_box.addWidget(self._tile_text("Recommended", frame, role="tile-meta"))
         meta_box.addStretch(1)
         box.addLayout(meta_box)
 
@@ -657,10 +765,12 @@ class CatalogView(QWidget):
         WSL (2026-08-26): the rule existed and simply was not wired to the
         button they pressed.
         """
+        start = self._home / entry.install.default_server_dir
+        former = FORMER_DEFAULT_DIRS.get(entry.id)
+        if not start.is_dir() and former is not None and (self._home / former).is_dir():
+            start = self._home / former
         server_dir = self._pick_dir(
-            self,
-            f"Select the folder where {entry.name} is installed",
-            self._home / entry.install.default_server_dir,
+            self, f"Select the folder where {entry.name} is installed", start
         )
         if server_dir is None:
             return False
@@ -874,8 +984,11 @@ class CatalogView(QWidget):
         # used to live in the dialog's title - unclickable, and truncated by the
         # window manager at 91 characters before it reached the name itself
         # (owner, Fedora 44, 2026-09-03). Here it is body text and one button.
-        suggested = self._home / entry.install.default_server_dir
-        if self._ask_suggestion(self, entry.name, suggested):
+        suggested = default_server_dir(entry, self._home)
+        taken = self._ask_suggestion(self, entry.name, suggested)
+        if taken is None:
+            return False
+        if taken:
             server_dir: Path | None = suggested
         else:
             server_dir = self._pick_dir(
@@ -933,6 +1046,16 @@ class CatalogView(QWidget):
         game_id, server_dir, client_dir = self._current
         self._current = None
         self._set_buttons_enabled(True)
+        if self._log.cancelled and not ok:
+            # T228 cold review: Stop was pressed and the job still FAILED, with a
+            # sentence about what it left (`TrueAfterStop`, a kept build). The
+            # header reads "Stopped. FAILED: ..."; the popup says exactly that,
+            # rather than the plain-cancel copy beside it. Not remembered either.
+            said = self._log.status_text()
+            logger.info(f"install of {game_id} was stopped and left something: {message}")
+            QMessageBox.warning(self, INSTALL_STOPPED_TITLE, said)
+            self.install_finished.emit(game_id, False, said)
+            return
         if self._log.cancelled:
             # A cancelled install reaches here as a SUCCESS: `runner.interact()`
             # returns rather than raising when its cancel event is set, so the

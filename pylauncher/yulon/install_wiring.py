@@ -25,7 +25,8 @@ import getpass
 import logging
 import sys
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,10 +63,13 @@ from yulon.catalog.native import (
     return_to_pin_confirmation,
     rewritten_line,
     source_version,
+    sources_still_off,
     update_to_latest_confirmation,
 )
 from yulon.catalog.snapshot import (
+    ROLLBACK_SAFETY_LABEL,
     SNAPSHOT_LABEL,
+    CopyNotUsable,
     DatabaseSnapshot,
     PutBack,
     Snapshot,
@@ -248,6 +252,18 @@ class _MaintenanceSnapshot:
         restored: list[str] = []
         safety: list[Path] = []
         try:
+            # Every file is checked before anything is dropped or loaded: a copy
+            # cut short, or one holding no table list, drops nothing (cold review
+            # of 23361ca3, the lead's decision of 2026-10-04).
+            holds: dict[Path, dict[str, tuple[str, ...]]] = {}
+            for path in snapshot.files:
+                try:
+                    holds[path] = maintenance.tables_in_copy(path)
+                except maintenance.MaintenanceError as exc:
+                    raise CopyNotUsable(
+                        f"the copy {path} is not complete ({exc}), so nothing was dropped or "
+                        "put back"
+                    ) from exc
             with docker.maintenance_lease(server_dir, SNAPSHOT_LEASE_REASON):
                 self._database_up(server_dir)
                 mysql = self._mysql(server_dir)
@@ -257,6 +273,10 @@ class _MaintenanceSnapshot:
                     )
                     if plan.refusals:
                         raise maintenance.MaintenanceError(" ".join(plan.refusals))
+                    # A replacement, not the Maintenance tab's merge: the tables
+                    # the copy does not hold -- made by the new build or by its
+                    # database updates -- are dropped before the copy loads.
+                    tables = holds[path]
                     report = maintenance.restore(
                         plan,
                         mysql,
@@ -264,6 +284,8 @@ class _MaintenanceSnapshot:
                         spec=spec,
                         core_databases=self.entry.core_databases(),
                         wsl_distro=self.wsl_distro,
+                        safety_label=ROLLBACK_SAFETY_LABEL,
+                        before_load=partial(_drop_what_the_copy_lacks, mysql, tables),
                     )
                     restored.extend(report.databases)
                     safety.extend(report.safety_backup)
@@ -279,6 +301,16 @@ class _MaintenanceSnapshot:
 
     def prune(self, server_dir: Path, snapshot: Snapshot) -> tuple[Path, ...]:
         return prune_older(snapshot.directory, snapshot.files)
+
+
+def _drop_what_the_copy_lacks(
+    mysql: wotlk_maintenance.SchemaMysql, tables: Mapping[str, Sequence[str]]
+) -> None:
+    """`restore()`'s `before_load` for the update copy: each database loses what the copy lacks."""
+    from yulon.controller_wow_wotlk import maintenance
+
+    for database, keep in tables.items():
+        maintenance.drop_tables_not_in(mysql, database, keep)
 
 
 def database_snapshot_for(
@@ -424,6 +456,32 @@ def rebuild_for_app(
     return rebuild
 
 
+def rebuild_refusal_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    engine: Callable[[], InstallEngine] | None = None,
+) -> Callable[[], str | None]:
+    """What the Rebuild press would refuse before compiling, asked before its question (T217).
+
+    `StagedInstaller.rebuild_refusal_before_asking()`, on an engine built per
+    ask (`engine`, for a test's seams; else `installer_for(entry)`). A server
+    inside a WSL distro answers None: reading its checkout from Windows goes
+    through `\\\\wsl.localhost`, and the press still makes its own check there.
+    """
+
+    def ask() -> str | None:
+        if wsl_distro is not None:
+            return None
+        made = engine() if engine is not None else installer_for(entry)
+        if not isinstance(made, StagedInstaller):
+            return None
+        return made.rebuild_refusal_before_asking(server_dir)
+
+    return ask
+
+
 def update_to_latest_for_app(
     entry: CatalogEntry,
     server_dir: Path,
@@ -527,7 +585,7 @@ def update_to_latest_for_app(
     def version() -> SourceVersion:
         if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
             return SourceVersion(line="", past_the_pin=False)
-        return source_version(read_state(server_dir, valid=()))
+        return source_version(read_state(server_dir, valid=()), sources_still_off(server_dir))
 
     def news() -> upstream.UpstreamNews:
         # T124. Built per call like the presses: it is asked off the GUI thread

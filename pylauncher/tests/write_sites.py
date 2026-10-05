@@ -56,7 +56,7 @@ _PATH_METHODS = {
     "symlink_to",
     "chmod",
 }
-_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker", "record_phases"}
+_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker", "record_phases", "execute"}
 _WINDOWS_ACL_WRITES = {"SetNamedSecurityInfoW"}
 """A `ctypes` call that changes who may read a path: Windows' `chmod` (T151, `winacl`)."""
 _QUALIFIED = {
@@ -191,6 +191,11 @@ def _argv_prefix(node: ast.expr) -> list[str]:
     for element in node.elts:
         if isinstance(element, ast.Constant) and isinstance(element.value, str):
             lead.append(element.value)
+        elif isinstance(element, ast.Starred) and not lead:
+            # The docker PROGRAM, spread in ahead of the verb (T240):
+            # `[*launcher, "rm", "-f", name]`, where a WSL distro's docker is
+            # three words. Only before the verb has started.
+            continue
         else:
             break
     return lead

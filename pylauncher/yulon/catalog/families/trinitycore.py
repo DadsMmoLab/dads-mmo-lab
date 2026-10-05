@@ -127,6 +127,18 @@ rewrite that record, and Uninstall removes it with the folder.
 REEXTRACT_BUTTON = "Re-extract map data"
 """The Server tab's press for `reextract()`, named in the sentences that ask for it."""
 
+REEXTRACT_PUT_BACK = (
+    "The map data from before this press was put back as it was, with its pathfinding data if "
+    "it had finished, so the server runs on it as before."
+)
+"""What a failed `reextract()` ends with once the old map data is back in place (T241)."""
+
+REEXTRACT_CANCEL_NOTE = (
+    "A Stop puts the map data from before this press back as it was. The temporary copy of "
+    "your client is removed either way."
+)
+"""What a Stop costs in the re-extraction: nothing, the old map data comes back (T241)."""
+
 WORLD_REIMPORT_FILE = ".yulon-world-reimport.json"
 """In the server folder: world table files an update still has to import again (fix round 1).
 
@@ -494,7 +506,15 @@ class TrinityCoreInstaller(CmangosInstaller):
         """
         tc = self._tc()
         temp = extraction_client_dir(original, ctx.server_dir)
-        left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id, also=temp)
+        lost: list[play_client.LostFlag] = (
+            []
+        )  # the player's files whose read-only flag stayed cleared (T198)
+        left = remove_leftover_extraction_client(
+            ctx.server_dir, self.entry.id, also=temp, flags_lost=lost
+        )
+        if lost:
+            yield f"warning: {play_client.flags_lost_warning(lost)}"
+            lost.clear()
         if left is not None and left.kind == "foreign":
             raise InstallerError(
                 f"{left.path} is in the way of this install's temporary copy of your client, and "
@@ -539,12 +559,21 @@ class TrinityCoreInstaller(CmangosInstaller):
                 stage="client-data",
             )
             self._check_cancel(ctx.cancel)
-        except BaseException:
-            left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id)
+        except BaseException as failure:
+            left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id, flags_lost=lost)
             if left is not None:
                 logger.warning(left.for_install())
+            if lost:
+                told = play_client.flags_lost_warning(lost)
+                logger.warning(told)
+                if not isinstance(failure, GeneratorExit):  # a closed stream takes no line
+                    yield f"warning: {told}"  # the install panel shows it whatever ends this
+                if isinstance(failure, InstallerError):  # its words are what the person reads
+                    failure.args = (f"{failure} {told}",)  # same object: its type is kept
             raise
-        left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id)
+        left = remove_leftover_extraction_client(ctx.server_dir, self.entry.id, flags_lost=lost)
+        if lost:
+            yield f"warning: {play_client.flags_lost_warning(lost)}"
         if left is None:
             yield "Removed the temporary copy of your client."
         elif left.kind == "ours":
@@ -578,6 +607,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         except play_client.PlayClientError as exc:
             raise InstallerError(_no_copy_beside(original, temp, exc)) from exc
         left_out = self._drop_unlisted_archives(temp)
+        self._spell_archives_as_the_extractors_open_them(temp)
         if left_out:
             yield (
                 "Left out of the copy, because this server's map data is made from the stock "
@@ -637,11 +667,57 @@ class TrinityCoreInstaller(CmangosInstaller):
             left_out.append(rel.as_posix())
         return sorted(left_out)
 
+    def _spell_archives_as_the_extractors_open_them(self, temp: Path) -> None:
+        """Rename each kept archive in the copy to the catalog's spelling (T227).
+
+        The extractors open every archive by a fixed name (map_extractor
+        System.cpp:114-124, :1152-1218; vmapexport.cpp:295-331), and on a
+        case-sensitive disk `Data/lichking.mpq` is not `Data/lichking.MPQ`: a client
+        named in lower case would give them nothing to read. The copy is Yu'lon's,
+        so the rename happens there; the player's client keeps its own names.
+
+        A name the catalog's spelling already reaches is left alone: on a disk that
+        does not tell cases apart that is the same file, and on one that does it is
+        the catalog's own archive. A locale folder follows the retail `xxYY`
+        spelling (`enus` becomes `enUS`).
+
+        A rename and never a link: one name per archive, so the extractors see what
+        they would see in a retail client. On a case-sensitive disk the player's
+        file at the old name is never asked for its flag (an unlink there needs
+        only the folder's write bit), which is what `play_client.remove_folder()`
+        would otherwise put back.
+        """
+        kept = self._tc().extract.client_archives
+        data = temp / "Data"
+        moves: list[tuple[Path, Path]] = []
+        for folder, _dirs, files in os.walk(data):
+            for name in files:
+                path = Path(folder) / name
+                canonical = _canonical_archive(path.relative_to(data).as_posix(), kept)
+                if canonical is not None and canonical != path.relative_to(data).as_posix():
+                    moves.append((path, data.joinpath(*canonical.split("/"))))
+        for path, target in moves:
+            if os.path.lexists(target):
+                continue
+            try:
+                target.parent.mkdir(exist_ok=True)
+                os.rename(path, target)
+            except OSError as exc:
+                remedy = _close_and_press(exc, "Install")
+                raise InstallerError(
+                    f"{path} could not be renamed to {target.name} in the temporary copy of your "
+                    f"client ({exc}), so the map data was not extracted: the extractors open it "
+                    f"only by that name. Your own client was not changed.{remedy}"
+                ) from exc
+
     def _refuse_missing_map_data(self, data_dir: Path, original: Path) -> None:
         """Refuse before `up` when the start check would fail, and make the next press extract.
 
         The evidence file is removed with the refusal, so pressing Install again
-        runs this step's extraction again rather than finding it vouched for.
+        runs this step's extraction again rather than finding it vouched for. Not
+        said during "Re-extract map data" (its old data kept in
+        `extract.PREVIOUS_DIR`): that press puts the old map data and its record
+        back and says so itself (T241).
         """
         tc = self._tc()
         missing = extract.missing_map_data(data_dir, tc.required_maps)
@@ -650,17 +726,20 @@ class TrinityCoreInstaller(CmangosInstaller):
         evidence = data_dir / extract.EVIDENCE_FILE
         try:
             evidence.unlink(missing_ok=True)
-            cleared = "Its record was cleared, so pressing Install again runs client-data again."
         except OSError as exc:
             cleared = (
-                f"Its record {evidence} could not be cleared ({exc}); delete it, then press "
+                f" Its record {evidence} could not be cleared ({exc}); delete it, then press "
                 "Install again to run client-data again."
             )
+        else:
+            cleared = " Its record was cleared, so pressing Install again runs client-data again."
+        if os.path.lexists(data_dir / extract.PREVIOUS_DIR):
+            cleared = ""
         raise InstallerError(
             f"The map data the world server needs at start is not all there "
             f"({'; '.join(missing)}), and without it the server stops with 'Unable to load "
             f"critical files'. The client-data step made it from {original}: check that it is "
-            f"a complete {self.entry.client.version} client. Nothing was started. {cleared}"
+            f"a complete {self.entry.client.version} client. Nothing was started.{cleared}"
         )
 
     # -- conf ------------------------------------------------------------------
@@ -765,11 +844,18 @@ class TrinityCoreInstaller(CmangosInstaller):
     def before_rebuild(
         self, server_dir: Path, route: str, press: str = server_build_presses.REBUILD
     ) -> Iterator[str]:
-        """Stop a running movement-map job before `route`; pathfinding stays off (spec §3)."""
+        """Stop a running movement-map job before `route`; pathfinding stays off (spec §3).
+
+        T209 (owner, 2026-10-04): a Rebuild keeps the server's code, so the job's
+        finished tiles stay and the run started once it is ready continues from
+        them; every other press (Update to latest, Return to the tested pin) may
+        change the generator, so its tiles go and the next run starts from 0 %.
+        """
         said = mmaps.stop_for_route(
             server_dir,
             self.entry,
             route,
+            clear=press != server_build_presses.REBUILD,
             press=press,
             runner=self._mmaps_runner,
             install_id=self._install_id(server_dir),
@@ -798,7 +884,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
     def stop_mmaps(self, server_dir: Path) -> str:
-        """Stop the job and remove its partial output: `mmaps.stop_mmaps()`."""
+        """Stop the job and keep its finished tiles (T209): `mmaps.stop_mmaps()`."""
         return mmaps.stop_mmaps(
             server_dir,
             self.entry,
@@ -1803,14 +1889,25 @@ class TrinityCoreInstaller(CmangosInstaller):
         """Run the client-data stage again, from a new temporary client; the movement maps go.
 
         The press `needs_reextract()` asks for. With the world server stopped (it
-        reads its map files while it runs): the movement-map job is stopped and its
-        set thrown away through `mmaps.discard()` -- pathfinding off, since the set
-        was made from the map data being replaced -- the extraction's evidence is
-        removed so nothing is vouched for, and `client-data` runs as the install
-        runs it: the same temporary extraction client, the same DBC overlay, the
-        same start check. Then the flag goes and the movement maps start again in
-        the background. The player's own client is the folder given, or the one
-        the map data was last made from.
+        reads its map files while it runs) and any movement-map job stopped, the
+        map data it replaces -- every extraction tool's folders and the record --
+        is moved aside within `data/` (`extract.set_aside()`, T241), so the tools
+        start into empty folders: `vmap4extractor` refuses a `Buildings/` holding
+        the `dir_bin` every finished extraction leaves. Then `client-data` runs as
+        the install runs it: the same temporary extraction client, the same DBC
+        overlay, the same start check.
+
+        Nothing old goes before the new data is in. Only then are the movement
+        maps thrown away through `mmaps.discard()` (they describe the old maps),
+        the set-aside data deleted, the flag removed, and the movement maps started
+        again in the background. A failure, a Stop or a closed stream puts the old
+        map data back with its record (`extract.put_back()`), and the movement maps
+        and pathfinding are as they were. A press that died harder than that (a
+        crash) leaves the old data aside, and the next press puts it back first;
+        only a press whose new data is in marks the old as superseded
+        (`extract.supersede()`), and only that is ever deleted.
+        The player's own client is the folder given, or the one the map data was
+        last made from.
 
         Raises:
             InstallerError: the folder is not one this app installed, no client
@@ -1832,6 +1929,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         if client is None:
             evidence = extract.read_evidence(data_dir)
             client = Path(evidence.client_path) if evidence and evidence.client_path else None
+            if client is None:
+                kept = extract.read_evidence(data_dir / extract.PREVIOUS_DIR)
+                client = Path(kept.client_path) if kept and kept.client_path else None
         if client is None:
             raise InstallerError(
                 f"Yu'lon does not know which game client {self.entry.name}'s map data was made "
@@ -1840,34 +1940,75 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
         self._refuse_a_running_world_for_maps()
         yield f"Extracting {self.entry.name}'s map data again into {data_dir}, from {client}."
-        if mmaps.background_block(self.entry) is not None:
-            ident = self._install_id(server_dir)
+        background = mmaps.background_block(self.entry) is not None
+        ident = self._install_id(server_dir) if background else ""
+        if background:
             stopped = mmaps.stop_for_route(
                 server_dir,
                 self.entry,
                 "the extraction",
+                # Not cleared (T241): the old map data comes back unchanged if the
+                # extraction does not finish, and the tiles made from it with it;
+                # `mmaps.discard()` below throws them away once the new data is in.
+                clear=False,
                 press=REEXTRACT_BUTTON,
                 runner=self._mmaps_runner,
                 install_id=ident,
+                kept_note=(
+                    "If the extraction does not finish, the run continues from them; once it "
+                    "has, they are removed with the old map data."
+                ),
             )
             if stopped is not None:
                 yield stopped
-            mmaps.discard(server_dir, self.entry, install_id=ident)
-            yield (
-                "The pathfinding data made from the old map data was removed, and pathfinding "
-                "is off until it has been made again."
-            )
-        evidence_file = data_dir / extract.EVIDENCE_FILE
-        try:
-            evidence_file.unlink(missing_ok=True)
-        except OSError as exc:
-            raise InstallerError(
-                f"{evidence_file} could not be removed ({exc}), so the extraction would be "
-                f"skipped as done. Delete it, then press “{REEXTRACT_BUTTON}” again."
-            ) from exc
+        yield from self._settle_an_earlier_press(server_dir, data_dir)
+        plan = self._tc().extract
+        extract.set_aside(data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
         ctx = replace(probe, client_dir=client)
-        stage = replace(self.stage_named("client-data"), recorded=False)
-        yield from self._staged((stage,), ctx)
+        stage = replace(
+            self.stage_named("client-data"), recorded=False, cancel_note=REEXTRACT_CANCEL_NOTE
+        )
+        try:
+            # Inside the `try`: a stream closed at this very line is a way out too.
+            yield (
+                f"The map data in {data_dir} was moved aside, so the tools start into empty "
+                "folders; it is put back if this extraction does not finish."
+            )
+            yield from self._staged((stage,), ctx)
+        except BaseException as failure:
+            told = self._put_the_old_map_data_back(data_dir)
+            if isinstance(failure, InstallerError):  # its words are what the person reads
+                failure.args = (f"{failure} {told}",)  # same object: its type is kept
+            raise
+        try:
+            extract.supersede(data_dir)
+        except OSError as exc:
+            yield (
+                f"warning: the map data from before this press, in "
+                f"{data_dir / extract.PREVIOUS_DIR}, could not be deleted ({exc}). It takes "
+                "space; delete that folder when the server is stopped. Until it is gone, a "
+                f"later “{REEXTRACT_BUTTON}” may put it back if the map data in place no longer "
+                "matches the server's files by then."
+            )
+        if background:
+            # After the new map data is in, so a failure here must not fail the press
+            # (scoped re-review of e457b29e): the map data is done; this is said.
+            try:
+                mmaps.discard(server_dir, self.entry, install_id=ident)
+            except mmaps.MmapsError as exc:
+                logger.warning(f"the old pathfinding data could not be removed: {exc}")
+                yield (
+                    "warning: the pathfinding data made from the old map data could not be "
+                    f"removed ({exc}), and the server may go on using it. Stop the server and "
+                    f"delete {data_dir / mmaps.MMAPS_DIR}; Yu'lon then switches pathfinding off, "
+                    "and “Make the pathfinding data” on the Server tab makes it again from the "
+                    "new map data."
+                )
+            else:
+                yield (
+                    "The pathfinding data made from the old map data was removed, and "
+                    "pathfinding is off until it has been made again."
+                )
         try:
             (server_dir / REEXTRACT_FILE).unlink(missing_ok=True)
         except OSError as exc:
@@ -1880,6 +2021,85 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"{self.entry.name}'s map data was extracted again. Press Start on the Server tab "
             "to run the server on it."
         )
+
+    def _settle_an_earlier_press(self, server_dir: Path, data_dir: Path) -> Iterator[str]:
+        """What an earlier press left under `data/`: replaced data deleted, kept data put back.
+
+        `extract.PREVIOUS_DIR` is deleted when it is marked replaced
+        (`extract.SUPERSEDED_MARK`), or when it is not but still holds its own
+        record while the map data in place is whole (`_map_data_whole()`): that
+        press finished and could not make the mark (cold review of 4d672a26), and
+        putting the old data back would throw the new away. Otherwise it is old
+        map data a press set aside and never settled -- it died part way, in the
+        extraction or in putting the data back -- so it is the last whole map
+        data, and it is put back over whatever is in place. Never decided from
+        the record in `data/` alone: a put-back restores the record first
+        (`extract.put_back()`), and an old record put back says nothing about the
+        folders still aside (Codex adversarial review, T241).
+        """
+        aside = data_dir / extract.PREVIOUS_DIR
+        try:
+            if extract.drop_superseded(data_dir) or not os.path.lexists(aside):
+                return
+            if os.path.lexists(aside / extract.EVIDENCE_FILE) and self._map_data_whole(
+                server_dir, data_dir
+            ):
+                extract.supersede(data_dir)
+                yield (
+                    f"An earlier “{REEXTRACT_BUTTON}” finished but left the map data from before "
+                    "it; that was deleted first."
+                )
+                return
+            extract.put_back(data_dir)
+        except OSError as exc:
+            raise InstallerError(
+                f"An earlier “{REEXTRACT_BUTTON}” left map data in {aside}, and it could not be "
+                f"settled ({exc}), so nothing was extracted. Close whatever is using that "
+                f"folder, then press “{REEXTRACT_BUTTON}” again."
+            ) from exc
+        yield (
+            f"An earlier “{REEXTRACT_BUTTON}” did not finish; the map data from before it was "
+            "put back first."
+        )
+
+    def _map_data_whole(self, server_dir: Path, data_dir: Path) -> bool:
+        """Is the map data in `data/` what a finished client-data stage leaves? (T241)
+
+        Every tool recorded for its argv with its counts met, the server's own
+        DBCs laid over the extracted ones (`extract.overlaid()`), and the start
+        check's maps and vmaps there -- the three things the stage does, each
+        read off the disk. Anything unread answers False, and the old data comes
+        back.
+        """
+        tc = self._tc()
+        current = extract.read_evidence(data_dir)
+        if current is None:
+            return False
+        if not all(
+            extract.satisfied(tool.name, tool.argv, tool.produces, data_dir, current, current)
+            for tool in tc.extract.tools
+        ):
+            return False
+        if extract.missing_map_data(data_dir, tc.required_maps):
+            return False
+        return extract.overlaid(
+            server_dir / tc.checkout / tc.extract.dbc_overlay_from,
+            data_dir / tc.extract.dbc_overlay_to,
+        )
+
+    def _put_the_old_map_data_back(self, data_dir: Path) -> str:
+        """After a failed, stopped or closed extraction: the old map data back; what to say."""
+        try:
+            extract.put_back(data_dir)
+        except OSError as exc:
+            logger.warning(f"the map data set aside in {data_dir} could not be put back: {exc}")
+            return (
+                f"The map data from before this press could not be put back ({exc}); it is kept "
+                f"in {data_dir / extract.PREVIOUS_DIR}, and pressing “{REEXTRACT_BUTTON}” again "
+                "settles it first: it keeps the new map data if that is whole, and puts this "
+                "back otherwise."
+            )
+        return REEXTRACT_PUT_BACK
 
     def _refuse_a_running_world_for_maps(self) -> None:
         """A world server that is or may be running reads the map files about to be replaced."""
@@ -2480,7 +2700,11 @@ class LeftoverProblem:
 
 
 def remove_leftover_extraction_client(
-    server_dir: Path, game: str, *, also: Path | None = None
+    server_dir: Path,
+    game: str,
+    *,
+    also: Path | None = None,
+    flags_lost: list[play_client.LostFlag] | None = None,
 ) -> LeftoverProblem | None:
     """Remove the temporary extraction client this install left anywhere; None when none is left.
 
@@ -2491,7 +2715,9 @@ def remove_leftover_extraction_client(
     record goes last, once nothing it names is left.
 
     Returns what was left and why rather than raising: the stage refuses on `ours`
-    and `foreign`, Uninstall reports each in its own words and goes on.
+    and `foreign`, Uninstall reports each in its own words and goes on. A file of
+    the player's client whose read-only flag could not be put back is appended to
+    `flags_lost` (`play_client.remove_folder()`, T198), for the caller to say.
     """
     recorded = _recorded_target(server_dir)
     noted: LeftoverProblem | None = None
@@ -2504,8 +2730,9 @@ def remove_leftover_extraction_client(
             noted = LeftoverProblem("record", target)
             continue
         targets.append(target)
+    lost = flags_lost if flags_lost is not None else []
     for target in targets:
-        problem = _remove_target(target, game, server_dir)
+        problem = _remove_target(target, game, server_dir, flags_lost=lost)
         if problem is not None:
             return problem
     try:
@@ -2515,7 +2742,9 @@ def remove_leftover_extraction_client(
     return noted
 
 
-def _remove_target(target: Path, game: str, server_dir: Path) -> LeftoverProblem | None:
+def _remove_target(
+    target: Path, game: str, server_dir: Path, *, flags_lost: list[play_client.LostFlag]
+) -> LeftoverProblem | None:
     """Remove one extraction client and its `.yulon-partial`; None when neither is left.
 
     Each only when it is ours (`_is_ours()`: its marker names this game and this
@@ -2540,7 +2769,9 @@ def _remove_target(target: Path, game: str, server_dir: Path) -> LeftoverProblem
             # it cannot map to the player's file and leave it cleared there.
             return put_back
         try:
-            play_client.remove_folder(folder, original=marker.source_client_dir)
+            play_client.remove_folder(
+                folder, original=marker.source_client_dir, flags_lost=flags_lost
+            )
         except OSError as exc:
             return LeftoverProblem("ours", folder, str(exc), _held_open(exc))
     return None
@@ -2641,9 +2872,11 @@ def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None
             written (or the list could not be read): the server folder must be kept.
     """
     recorded = _recorded_target(server_dir)
-    left = remove_leftover_extraction_client(server_dir, game)
+    lost: list[play_client.LostFlag] = []
+    left = remove_leftover_extraction_client(server_dir, game, flags_lost=lost)
+    told = play_client.flags_lost_warning(lost)  # T198: "" when every flag went back
     if left is None:
-        return ""
+        return told
     if left.kind == "ours" and recorded is not None:
         path = _leftovers_path(config_dir)
         entry = {"target": os.fspath(recorded), "game": game, "server_dir": os.fspath(server_dir)}
@@ -2657,9 +2890,9 @@ def remove_for_uninstall(server_dir: Path, game: str, *, config_dir: Path | None
                 f"it anywhere else ({exc}), so the note in that folder is the only way to remove "
                 "it safely. The containers and images are already gone. Close World of Warcraft "
                 f"and any other program using the client's files, then press Uninstall again; "
-                f"{_DO_NOT_DELETE}."
+                f"{_DO_NOT_DELETE}. {told}".rstrip()
             ) from exc
-    return left.for_uninstall()
+    return f"{left.for_uninstall()} {told}".rstrip()
 
 
 def recorded_leftover_targets(*, config_dir: Path | None = None) -> list[str] | None:
@@ -2670,14 +2903,18 @@ def recorded_leftover_targets(*, config_dir: Path | None = None) -> list[str] | 
         return None
 
 
-def remove_recorded_leftovers(*, config_dir: Path | None = None) -> list[str]:
+def remove_recorded_leftovers(
+    *, config_dir: Path | None = None, flags_lost: list[play_client.LostFlag] | None = None
+) -> list[str]:
     """Retry every copy Uninstall could not remove; drop the ones now gone; the warnings left.
 
     Called once at the app's start (`main.sweep_leftover_client_copies`). The same
     `_remove_target()` every other route uses, so the same checks hold: a folder
     that is not ours at its place is never touched, and stays listed with a warning
     rather than being forgotten. A list that cannot be read is left exactly as it
-    is, with one warning; it is never rewritten from nothing.
+    is, with one warning; it is never rewritten from nothing. A file of the player's
+    client whose read-only flag could not be put back is said in one warning and
+    appended to `flags_lost`, for the start-up notice (T198).
     """
     path = _leftovers_path(config_dir)
     try:
@@ -2689,13 +2926,14 @@ def remove_recorded_leftovers(*, config_dir: Path | None = None) -> list[str]:
         ]
     kept: list[dict[str, str]] = []
     warnings: list[str] = []
+    lost = flags_lost if flags_lost is not None else []
     for entry in entries:
         target = Path(entry["target"])
         if not target.name:
             warnings.append(LeftoverProblem("record", target).for_uninstall())
             kept.append(entry)
             continue
-        problem = _remove_target(target, entry["game"], Path(entry["server_dir"]))
+        problem = _remove_target(target, entry["game"], Path(entry["server_dir"]), flags_lost=lost)
         if problem is None:
             continue
         kept.append(entry)
@@ -2703,6 +2941,8 @@ def remove_recorded_leftovers(*, config_dir: Path | None = None) -> list[str]:
             warnings.append(problem.for_uninstall())
         else:
             logger.info(f"the temporary client copy {target} is still there: {problem.why}")
+    if lost:
+        warnings.append(play_client.flags_lost_warning(lost))  # T198
     try:
         _write_leftovers(path, kept)
     except OSError as exc:
@@ -2825,6 +3065,8 @@ def _no_copy_beside(original: Path, target: Path, exc: play_client.PlayClientErr
         f"{original.parent}, whose game files are shared with your client rather than copied"
     )
     tail = "Nothing was extracted and your client was not changed."
+    if exc.flags_lost:  # T198: removing the unfinished copy cleared a flag of the player's
+        tail = f"Nothing was extracted. {play_client.flags_lost_warning(exc.flags_lost)}"
     if not isinstance(cause, OSError):
         return f"{head}, and that copy could not be made: {exc} {tail}"
     if cause.errno == errno.ENOSPC:
@@ -2845,6 +3087,17 @@ def _no_copy_beside(original: Path, target: Path, exc: play_client.PlayClientErr
             "beside it, then press Install again."
         )
     return f"{head}, and that copy could not be made ({cause}). {tail} Fix that, then try again."
+
+
+def _canonical_archive(rel: str, kept: Sequence[str]) -> str | None:
+    """`rel`'s spelling in `kept`, `{locale}` as the retail `xxYY` (T227); None when not kept."""
+    folded = rel.casefold()
+    locale = rel.split("/", 1)[0] if "/" in rel else ""
+    spelled = locale[:2].lower() + locale[2:].upper() if len(locale) == 4 else locale
+    for entry in kept:
+        if entry.replace("{locale}", locale).casefold() == folded:
+            return entry.replace("{locale}", spelled)
+    return None
 
 
 def _kept_archive(rel: str, kept: Sequence[str]) -> bool:
