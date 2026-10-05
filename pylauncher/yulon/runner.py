@@ -62,11 +62,34 @@ class _Child:
     whoever is blocked reading it.
     """
 
-    __slots__ = ("proc", "started_on")
+    __slots__ = ("proc", "started_on", "ended")
 
     def __init__(self) -> None:
         self.proc: _AnyPopen | None = None
         self.started_on: int | None = None
+        self.ended = False
+        """Set by `end_streams_started_on()` BEFORE it ends `proc` (T240): the exit is a Stop's."""
+
+
+class StreamEnded(subprocess.CalledProcessError):
+    """A stream's child exited non-zero because `end_streams_started_on()` ended it (T240).
+
+    A `CalledProcessError`, so every caller that already treats a non-zero exit
+    as a failure still does. Its own type for the caller that must not answer a
+    Stop as if the command had failed on its own: `git.py`'s containerized clone
+    fell back to host git when the Stop killed its docker CLI, and cloned the
+    whole repository again after the player had pressed Stop (yulon-win11,
+    2026-10-04).
+    """
+
+
+def _exit_failure(
+    child: _Child, returncode: int, command: list[str]
+) -> subprocess.CalledProcessError:
+    """The error for a child that exited `returncode`: `StreamEnded` if a Stop ended it."""
+    if child.ended:
+        return StreamEnded(returncode, command)
+    return subprocess.CalledProcessError(returncode, command)
 
 
 # Every `stream()` generator handed out and not yet collected, with the child
@@ -257,6 +280,9 @@ def end_streams_started_on(ident: int) -> int:
     for child in children:
         proc = child.proc
         assert proc is not None  # `_still_running` filtered these; narrows for the type checker
+        # Marked before the end is even asked for, so the reading thread can
+        # never see this child's exit before it can see why (T240).
+        child.ended = True
         threading.Thread(
             target=_end_child, args=(proc,), daemon=True, name=f"yulon-end-stream-{proc.pid}"
         ).start()
@@ -422,6 +448,7 @@ def stream(
     Raises:
         subprocess.CalledProcessError: If the command exits non-zero (only
             raised if the generator is fully exhausted normally).
+            `StreamEnded`, a subclass, when `end_streams_started_on()` ended it.
         OSError: If `command`'s executable cannot be found/started (propagates
             directly from `subprocess.Popen`).
     """
@@ -474,7 +501,7 @@ def _stream_lines(
         yield from stderr_lines
 
         if proc.returncode:
-            raise subprocess.CalledProcessError(proc.returncode, command)
+            raise _exit_failure(child, proc.returncode, command)
     finally:
         # Runs on normal completion (all no-ops below, since the process has
         # already exited and the reader thread has already finished) AND on
@@ -560,6 +587,7 @@ def stream_progress(
         subprocess.CalledProcessError: if the command exits non-zero, AFTER
             everything it wrote has been yielded — the tail of git's stderr is
             what says why a clone failed.
+            `StreamEnded`, a subclass, when `end_streams_started_on()` ended it.
         OSError: if `command` cannot be started (propagates from `Popen`).
 
     Registered in `_LIVE_STREAMS` exactly as `stream()` is, so
@@ -638,7 +666,7 @@ def _progress_lines(
             reader.join()
         proc.wait()
         if proc.returncode:
-            raise subprocess.CalledProcessError(proc.returncode, command)
+            raise _exit_failure(child, proc.returncode, command)
     finally:
         # `stream()`'s teardown, for `stream()`'s reasons: a caller that
         # abandoned this generator must not leave a clone running or a reader

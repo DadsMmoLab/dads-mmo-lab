@@ -7901,7 +7901,7 @@ class ControllerView(QWidget):
 
     @Slot()
     def stop_pathfinding(self) -> None:
-        """Stop a running job: its container and its partial output go, nothing is switched on."""
+        """Stop a running job: its container goes, its finished tiles stay, nothing switches on."""
         seam = self.services.pathfinding
         if seam is None or self._pathfinding_pressing:
             return

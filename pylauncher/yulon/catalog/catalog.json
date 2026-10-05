@@ -1441,6 +1441,7 @@
             "checkout": "src/centurion",
             "client": {
               "required_file": "Data/lichking.MPQ",
+              "archives_any_case": true,
               "min_mpq": 6,
               "mpq_depth": "recursive",
               "locale_mpq_required": true,
@@ -1531,7 +1532,12 @@
                 "{{THREADS}}"
               ],
               "min_files": 500,
-              "background": true
+              "background": true,
+              "tile_header": {
+                "length": 20,
+                "magic": 1296908624,
+                "size_offset": 12
+              }
             },
             "conf": {
               "source_dir": "/opt/trinitycore/etc",

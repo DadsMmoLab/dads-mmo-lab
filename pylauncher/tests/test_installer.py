@@ -193,6 +193,9 @@ MODULE_SURFACE_AFTER_7_2 = {
     # was back, so the update route leaves its sources with the new one. An
     # exception type, not machinery.
     "RollbackNotDone",
+    # Added deliberately with T228: the mark two of this module's failure types
+    # carry so the log panel shows them after a Stop. A marker class, imported.
+    "TrueAfterStop",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",
