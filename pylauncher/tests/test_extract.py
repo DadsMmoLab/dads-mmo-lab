@@ -3714,3 +3714,20 @@ def test_no_data_folder_at_all_is_every_half_missing(tmp_path: Path) -> None:
         "map 530: no maps/530????.map",
         "map 530: no vmaps/530.vmtree",
     )
+
+
+def test_a_lowercase_required_file_still_identifies_the_client(tmp_path: Path) -> None:
+    """T227: `Data/expansion.mpq` on a case-sensitive disk is the required file.
+
+    Read exactly, its `stat()` raised, the facts were marked incomplete, and no
+    resume could ever skip a tool: every Install press extracted again.
+    """
+    folder = tmp_path / "client"
+    (folder / "Data").mkdir(parents=True)
+    (folder / "Data" / "expansion.mpq").write_bytes(b"MPQ" * 77)
+
+    expected = extract.expected_evidence(PLAN, folder, REQUIRED)
+
+    assert expected.client_facts_complete is True
+    assert expected.required_file_size == 231
+    assert expected.required_file_mtime == int((folder / "Data" / "expansion.mpq").stat().st_mtime)

@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from tests.support_case import needs_case_sensitive_disk
 from yulon import client_packs, play_client
 
 WHEN = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
@@ -2562,3 +2563,32 @@ def test_a_refresh_that_ends_in_an_unexpected_error_still_names_the_flag_it_lost
 
     assert str(src) in str(info.value) and "no longer read-only" in str(info.value)
     assert (play / "Data" / "common.MPQ").read_bytes() == b"MPQ patched", "the earlier pass done"
+
+
+# -- T227: a client whose archives are named in lower case -------------------
+
+
+@needs_case_sensitive_disk
+def test_a_lowercase_client_s_archives_are_shared_under_their_own_names(tmp_path: Path) -> None:
+    """T227: the ready-to-play copy finds `*.mpq` whatever its case and keeps the name.
+
+    Read-only, as T196/T198's clients are: removing the copy leaves the player's
+    flag where it was.
+    """
+    orig = tmp_path / "WoW"
+    (orig / "Data" / "enus").mkdir(parents=True)
+    (orig / "Data" / "lichking.mpq").write_bytes(b"mpq" * 100)
+    (orig / "Data" / "enus" / "locale-enus.mpq").write_bytes(b"loc" * 100)
+    (orig / "Wow.exe").write_bytes(b"MZexe")
+    for archive in (orig / "Data" / "lichking.mpq", orig / "Data" / "enus" / "locale-enus.mpq"):
+        archive.chmod(0o444)
+    target = tmp_path / "WoW (Yu'lon)"
+
+    build(orig, target, tmp_path)
+
+    for rel in ("Data/lichking.mpq", "Data/enus/locale-enus.mpq"):
+        assert os.path.samefile(orig / rel, target / rel), rel
+    assert not (target / "Data" / "lichking.MPQ").exists()
+    play_client.remove_folder(target, original=orig)
+    assert not target.exists()
+    assert (orig / "Data" / "lichking.mpq").stat().st_mode & 0o777 == 0o444

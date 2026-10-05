@@ -128,6 +128,7 @@ TRINITYCORE: dict[str, Any] = {
     "checkout": CHECKOUT,
     "client": {
         "required_file": "Data/lichking.MPQ",
+        "archives_any_case": True,
         "min_mpq": 6,
         "mpq_depth": "recursive",
         "locale_mpq_required": True,

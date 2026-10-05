@@ -1441,6 +1441,7 @@
             "checkout": "src/centurion",
             "client": {
               "required_file": "Data/lichking.MPQ",
+              "archives_any_case": true,
               "min_mpq": 6,
               "mpq_depth": "recursive",
               "locale_mpq_required": true,
