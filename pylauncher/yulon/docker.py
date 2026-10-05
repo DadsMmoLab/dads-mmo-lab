@@ -1111,6 +1111,55 @@ def volume_exists(name: str, *, wsl_distro: str | None = None) -> bool:
     raise DockerCommandError(f"docker volume inspect {name} exited {proc.returncode}: {said}")
 
 
+DATABASE_FILES = "/var/lib/mysql"
+"""Where a MySQL or MariaDB image keeps its data files: both images, every family (T377)."""
+
+
+def database_volume(
+    spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
+) -> str | None:
+    """The named volume compose mounts at the database service's `DATABASE_FILES`, or None.
+
+    Asked of `compose config`, never built from a folder name (`project_volumes()`'s
+    reason): compose prints each volume's full name under `volumes.<key>.name`, so
+    an adopted install whose compose file names its volume `ac-database` is read
+    as rightly as one this app wrote. None when compose could not be asked, the
+    database service is not there, or its files are not in a named volume (a bind
+    mount, say): the caller then knows nothing, and must say nothing.
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    services = parsed.get("services")
+    service = services.get(spec.compose_services()[0]) if isinstance(services, dict) else None
+    mounts = service.get("volumes") if isinstance(service, dict) else None
+    volumes = parsed.get("volumes")
+    if not isinstance(mounts, list) or not isinstance(volumes, dict):
+        return None
+    for mount in mounts:
+        if not isinstance(mount, dict) or mount.get("type") != "volume":
+            continue
+        if str(mount.get("target", "")).rstrip("/") != DATABASE_FILES:
+            continue
+        key = mount.get("source")
+        declared = volumes.get(key) if isinstance(key, str) else None
+        name = declared.get("name") if isinstance(declared, dict) else None
+        return name if isinstance(name, str) and name else None
+    return None
+
+
 def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list[str]:
     """The argv of the one `compose up` this app runs, with and without the rebuild's force.
 

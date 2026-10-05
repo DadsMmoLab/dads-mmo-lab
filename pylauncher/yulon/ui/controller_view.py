@@ -76,6 +76,7 @@ from yulon import (
     client_exe,
     client_packs,
     commands,
+    database_presence,
     dbreads,
     docker,
     docker_advice,
@@ -120,7 +121,7 @@ from yulon.catalog.installer import (
     WorldStoppedAfterReadyError,
     rebuild_confirmation,
 )
-from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller import Controller, DatabaseMissing, InstallStatus, PortConflictError
 from yulon.controller_wow_centurion import accounts as centurion_accounts
 from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
@@ -2063,6 +2064,14 @@ class ControllerServices:
 
     `install_wiring.kept_build_for_app()` answers: every native install, never a
     server inside a WSL distro (owner, D4). `None` means no banner and no check.
+    """
+
+    repair_database: Callable[[threading.Event | None], Iterator[str]] | None = None
+    """T377's Repair for a server whose database Docker no longer has; None where not offered.
+
+    `install_wiring.repair_database_for_app()` answers: the install's own import
+    run again on a database that is missing or empty, then the server started.
+    Offered on the Server tab only after a Start or Rebuild refused for that reason.
     """
 
     corrections: native.CorrectionRoute | None = None
@@ -4426,6 +4435,15 @@ START_FAILED_DOCKER_MISSING = (
 """A failed Start off a Deck with no docker CLI; the banner says how to install it (T194)."""
 
 START_FAILED_BROKE = "The server did not start. Details below says why."
+REPAIR_DATABASE_LABEL = "Repair the database…"
+RESTORE_BACKUP_LABEL = "Restore a backup…"
+REPAIR_DATABASE_CONFIRM = (
+    "Docker no longer has this server's database. Repair makes it again from the server files, "
+    "the way the install did, and then starts the server.\n\n"
+    "Your accounts and characters are not in the server files, so they do not come back. If you "
+    "have a backup, restore it on the Maintenance tab once the repair has finished.\n\n"
+    "This can take several minutes. Repair now?"
+)
 """A Start that broke rather than being refused by Yu'lon; the error is in Details (T214)."""
 
 STOP_FAILED_BROKE = "The server did not stop. Details below says why."
@@ -7287,6 +7305,14 @@ class ControllerView(QWidget):
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
         self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
+        # T377: hidden until a Start or Rebuild is refused because Docker no
+        # longer has the database. Nothing is imported until Repair is pressed:
+        # the player may have meant to restore a backup instead.
+        self.repair_database_button = QPushButton(REPAIR_DATABASE_LABEL, tab)
+        self.repair_database_button.setProperty("primary", True)
+        self.repair_database_button.setVisible(False)
+        self.restore_backup_button = QPushButton(RESTORE_BACKUP_LABEL, tab)
+        self.restore_backup_button.setVisible(False)
         # T160. Hidden unless this is a Steam Deck whose `docker` command is
         # gone, which is what a SteamOS update leaves behind. The press runs the
         # upstream fix script's repair through the app's own questions; the
@@ -7410,6 +7436,8 @@ class ControllerView(QWidget):
         self.repair_button.clicked.connect(self.repair_import)
         self.arm_cancel_button.clicked.connect(self.cancel_armed)
         self.stop_other_button.clicked.connect(self.stop_other_and_start)
+        self.repair_database_button.clicked.connect(self.repair_database)
+        self.restore_backup_button.clicked.connect(self.go_to_the_backups)
         self.reinstall_docker_button.clicked.connect(self.reinstall_docker)
         self.stop_anyway_button.clicked.connect(self.stop_now_anyway)
         # Start is the tab's gold press only where no Play is shown: Play is the
@@ -7460,6 +7488,9 @@ class ControllerView(QWidget):
         realm_column.addWidget(self.problem_label)
         realm_column.addWidget(self.problem_details)
         realm_column.addWidget(_bar(realm, self.stop_anyway_button, self.stop_other_button))
+        realm_column.addWidget(
+            _bar(realm, self.repair_database_button, self.restore_backup_button)
+        )
         box.addWidget(realm)
 
         play, play_column = section("Play", tab)
@@ -8976,6 +9007,7 @@ class ControllerView(QWidget):
         self._nothing_to_remove = False
         self._update_forget_visibility()
         self.problem_label.setText("")
+        self._withdraw_the_database_offer()
         self._set_busy(True, "Start")
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
@@ -8994,6 +9026,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
+        self._withdraw_the_database_offer()
         self._say_zone_problem()
         self.refresh_status()
         self._settle_the_channel()
@@ -9216,6 +9249,8 @@ class ControllerView(QWidget):
             self._offer_to_stop_the_other_server(exc)
             return
         self._hide_stop_other()
+        if isinstance(exc, DatabaseMissing):
+            self._offer_to_repair_the_database()
         raw = str(exc)
         msg = raw
         why = ""
@@ -9324,6 +9359,70 @@ class ControllerView(QWidget):
     def _hide_stop_other(self) -> None:
         """The offer only stands while the collision does."""
         self.stop_other_button.setVisible(False)
+
+    def _offer_to_repair_the_database(self) -> None:
+        """T377: Repair, and the backups when there are any, beside the refusal that names them.
+
+        The refusal's own sentence is the problem line; these are its two ways
+        out. A tab with no Repair route offers none, and the backups button is
+        shown only when the backups folder holds a dump to restore.
+        """
+        self.repair_database_button.setVisible(self.services.repair_database is not None)
+        self.repair_database_button.setEnabled(True)
+        self.restore_backup_button.setVisible(self._has_backups())
+
+    def _withdraw_the_database_offer(self) -> None:
+        """A Start that worked, or a new press, takes the T377 offer down."""
+        self.repair_database_button.setVisible(False)
+        self.restore_backup_button.setVisible(False)
+
+    def _has_backups(self) -> bool:
+        try:
+            return any(self.services.backups_dir().glob("*.sql"))
+        except OSError:
+            return False
+
+    @Slot()
+    def go_to_the_backups(self) -> None:
+        """The Maintenance tab's backup list, brought forward (T377)."""
+        self.refresh_backups()
+        self._show_page_of(self.backup_list)
+
+    @Slot()
+    def repair_database(self) -> bool:
+        """Ask, then make a missing database again from the server files, in the panel (T377).
+
+        The owner's rule for every repair: the player chooses when, and the
+        question says what comes back and what does not. False if nothing ran.
+        """
+        route = self.services.repair_database
+        if route is None:
+            return False
+        if self.rebuild_log.running or self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        if not ask_yes_no(self, f"Repair {self.entry.name}'s database?", REPAIR_DATABASE_CONFIRM):
+            return False
+        self._withdraw_the_database_offer()
+        self.problem_label.setText("")
+        self.problem_details.set_text("")
+        cancel = self._rebuild_cancel()
+        self._rebuild_is_compile = False
+        self._rebuild_moves_sources = False
+        started = self.rebuild_log.run(
+            lambda: self._watch_for_load_wait(route(cancel)),
+            title=f"Repairing {self.entry.name}'s database",
+            cancel=cancel,
+            record_as=self._run_record_kind(),
+        )
+        if started:
+            self._show_page_of(self.rebuild_log)
+        return started
 
     def _offer_docker_repair(self) -> bool:
         """Show the SteamOS Docker repair when this Deck's `docker` is gone; say if it is (T160).
@@ -16887,6 +16986,12 @@ class ControllerView(QWidget):
             self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
+            if database_presence.MISSING in message:
+                # T377: a Rebuild refused because Docker no longer has the
+                # database. Its sentence is in the panel; its ways out go on
+                # the Server tab, where a refused Start puts them.
+                self.problem_label.setText(database_presence.MISSING)
+                self._offer_to_repair_the_database()
         # T144. Taken on EVERY finish, so a move is offered once and never by a
         # later job; offered only after a press that succeeded and was not
         # stopped (`LogPanel` reports a stop as ok=True, hence `cancelled`).

@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import docker, wsl
+from yulon import database_presence, docker, wsl
 from yulon.catalog import composegen, native, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
@@ -116,6 +116,15 @@ class StartRefused(RuntimeError, SaidByYulon):
 
     T179: a Centurion server whose last update did not finish importing its world
     tables. The message is the sentence the player reads; nothing was started or stopped.
+    """
+
+
+class DatabaseMissing(StartRefused):
+    """Raised by `Controller.start()` when Docker no longer has this server's database (T377).
+
+    Its volume is gone, or holds no login database: starting would put the
+    server on an empty one. The message is `database_presence.MISSING`; nothing
+    was started, and nothing is imported until the player presses Repair.
     """
 
 
@@ -307,12 +316,17 @@ class Controller:
                 already binds one of `spec.ports`. Nothing is started.
             docker.DockerCommandError: The `docker` CLI itself failed.
             StartRefused: `start_guard` gave a reason. Nothing is started.
+            DatabaseMissing: Docker no longer has this server's database
+                (T377). Nothing is started, and a database started to ask is
+                stopped again.
         """
         self.refuse_start()
         conflicts = self.port_conflicts()
         if conflicts:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
+        self.refuse_a_missing_database()
+        self._before_the_servers_start()
         self.zone_problem = self._put_back_the_zone_file()
         # The map-data fingerprint was written by `refuse_start()` above (T219).
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
@@ -325,6 +339,33 @@ class Controller:
             # would otherwise stop 15-25 s after this app's last call into it,
             # killing the server it just started (T132, `wsl.hold()`).
             self._hold = wsl.hold(self.wsl_distro, self.spec.world)
+
+    def refuse_a_missing_database(self) -> None:
+        """Raise `DatabaseMissing` when Docker says this server's database is gone or empty (T377).
+
+        After the port check and before anything starts: the volume is asked of
+        Docker first, and only a volume that is there gets its database started
+        to be asked whether it holds a login database (`database_presence.read()`).
+        A reading Docker could not give is `unknown` and starts the server as
+        before -- a slow database is not an empty one. A game this catalogue does
+        not know is not asked.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return
+        reading = database_presence.read(
+            entry, self.server_dir, self.wsl_distro, keep_running=True
+        )
+        if reading.refuses:
+            logger.warning(f"start() refused: the database is {reading.presence} ({reading.why})")
+            raise DatabaseMissing(database_presence.MISSING)
+
+    def _before_the_servers_start(self) -> None:
+        """What a game does once every refusal has passed and before its servers start.
+
+        Nothing here. Tortoise brings its bot dashboard up (T127), at this point
+        so that a refused start -- a missing database included -- starts nothing.
+        """
 
     def _put_back_the_zone_file(self) -> str | None:
         """T171: a CMaNGOS server's zone file, put back before every start; the warning if not.

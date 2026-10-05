@@ -200,7 +200,8 @@ def test_a_database_with_no_account_table_reads_empty_and_is_put_back_down(
     db.tables = {}
     reading = database_presence.read(WOTLK, tmp_path)
     assert reading.presence == "empty"
-    assert ["docker", "stop", SPEC.db] in db.calls, "the database it started is stopped again"
+    stops = [c for c in db.calls if c[:2] == ["docker", "stop"]]
+    assert [c[-1] for c in stops] == [SPEC.db], "the database it started is stopped again"
     assert SPEC.db not in db.names.split()
 
 
