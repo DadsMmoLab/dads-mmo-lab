@@ -1112,6 +1112,23 @@ def test_a_reextract_closed_part_way_puts_the_old_map_data_back(box: Box) -> Non
     assert box.engine().mmaps_status(box.server_dir).state == "done"
 
 
+def test_a_reextract_closed_at_the_line_saying_the_data_was_moved_aside_puts_it_back(
+    box: Box,
+) -> None:
+    """Codex review: the line after the move is inside the put-back's reach too."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    before = data_files(box)
+    box.world.running = False
+    press = box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None)
+    for line in press:
+        if "was moved aside" in line:
+            break
+    assert not (box.server_dir / "data" / "maps").exists(), "the old map data was moved"
+    press.close()
+    assert data_files(box) == before
+
+
 def test_reextract_says_a_stop_brings_the_old_map_data_back(box: Box) -> None:
     flagged(box)
     box.world.running = False

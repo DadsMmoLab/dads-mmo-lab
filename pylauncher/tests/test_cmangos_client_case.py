@@ -357,3 +357,20 @@ def test_a_lowercase_data_folder_alone_is_named_in_the_line(tmp_path: Path) -> N
     (client / "data").mkdir(parents=True)
     (client / "data" / "common.MPQ").write_bytes(b"common")
     assert extract.renamed_in_view(client) == [("data", "Data")]
+
+
+@needs_case_sensitive_disk
+def test_an_extraction_closed_at_the_line_about_the_view_takes_the_view_with_it(
+    tmp_path: Path,
+) -> None:
+    """Codex review: the view is the stage's to remove from the moment it is laid."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = players_client(tmp_path, TBC_CLIENT)
+    stage = engine(Recorder())._extract(context(server_dir, client))
+    for line in stage:
+        if "named in another case" in line:
+            break
+    assert (server_dir / extract.CASE_VIEW_DIR).is_dir()
+    stage.close()
+    assert not (server_dir / extract.CASE_VIEW_DIR).exists()

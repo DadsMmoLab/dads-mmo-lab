@@ -1086,8 +1086,11 @@ class CmangosInstaller(StagedInstaller):
         user_args = self._user_args()
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
         view = ctx.server_dir / extract.CASE_VIEW_DIR
-        read_from = yield from self._case_view(client_dir, view)
+        read_from = client_dir
         try:
+            # Inside the `try`: `_case_view()` yields after laying the view, and a
+            # stream closed there must take the view with it.
+            read_from = yield from self._case_view(client_dir, view)
             yield from self._stream(
                 lambda sink: extract.run_plan(
                     data.extract,
@@ -1108,11 +1111,10 @@ class CmangosInstaller(StagedInstaller):
                 stage="extract",
             )
         finally:
-            if read_from != client_dir:
-                try:
-                    extract.remove_case_view(view)
-                except OSError as exc:
-                    logger.warning(f"the links in {view} could not be removed: {exc}")
+            try:
+                extract.remove_case_view(view)
+            except OSError as exc:
+                logger.warning(f"the links in {view} could not be removed: {exc}")
         self._check_cancel(ctx.cancel)
         # Option C of `pyplan/upstream-cmangos-doodad-drop.md`, built as the
         # gate that proves `patch-sources` took rather than as a shipped

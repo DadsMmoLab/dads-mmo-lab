@@ -1922,15 +1922,16 @@ class TrinityCoreInstaller(CmangosInstaller):
         yield from self._settle_an_earlier_press(data_dir)
         plan = self._tc().extract
         extract.set_aside(data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
-        yield (
-            f"The map data in {data_dir} was moved aside, so the tools start into empty folders; "
-            "it is put back if this extraction does not finish."
-        )
         ctx = replace(probe, client_dir=client)
         stage = replace(
             self.stage_named("client-data"), recorded=False, cancel_note=REEXTRACT_CANCEL_NOTE
         )
         try:
+            # Inside the `try`: a stream closed at this very line is a way out too.
+            yield (
+                f"The map data in {data_dir} was moved aside, so the tools start into empty "
+                "folders; it is put back if this extraction does not finish."
+            )
             yield from self._staged((stage,), ctx)
         except BaseException as failure:
             told = self._put_the_old_map_data_back(data_dir)
