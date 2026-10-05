@@ -1260,6 +1260,80 @@ def test_old_map_data_that_cannot_be_marked_superseded_is_kept_and_named(
     assert (data / extract.PREVIOUS_DIR / "maps" / "0003232.map").read_bytes() == old_maps
     warning = next(line for line in said if line.startswith("warning: the map data from before"))
     assert str(data / extract.PREVIOUS_DIR) in warning
+    assert (
+        "delete that folder" in warning and trinitycore.REEXTRACT_BUTTON not in warning
+    ), "the press is no longer offered, so the warning cannot promise it (cold review)"
+    assert needs_reextract(box.server_dir, ENTRY) is None
+    monkeypatch.undo()
+
+    # The FOLLOWING press (cold review of 4d672a26): the unmarked old data must not come
+    # back over the new, whether that press finishes or fails.
+    new = visible(data_files(box))
+    assert new["maps/0003232.map"] == b"MAPS"
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == new
+
+
+@pytest.mark.parametrize("unfinished", ["dbc overlay", "a tool's record", "start check"])
+def test_old_map_data_aside_beside_new_data_that_is_not_whole_is_put_back(
+    box: Box, unfinished: str
+) -> None:
+    """The other half of the rule above: new map data a server could not use -- one thing
+    the client-data stage does left undone, each fixture breaking exactly one -- means the
+    press died, and the old data comes back."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    old = data_files(box)
+    data = box.server_dir / "data"
+    box.world.running = False
+    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    # The state of a press that died in the DBC overlay: the old data aside, unmarked, with
+    # its own record; the new data in place, every tool recorded and counted and the start
+    # check met -- and the extractor's Spell.dbc still where the server's goes.
+    for name, body in old.items():
+        (data / extract.PREVIOUS_DIR / name).parent.mkdir(parents=True, exist_ok=True)
+        (data / extract.PREVIOUS_DIR / name).write_bytes(body)
+    if unfinished == "dbc overlay":
+        (data / "dbc" / "Spell.dbc").write_bytes(b"the client's Spell.dbc")
+    elif unfinished == "a tool's record":
+        record = extract.read_evidence(data)
+        assert record is not None
+        extract.write_evidence(data, replace(record, tools=record.tools[:-1]))
+    else:
+        (data / "vmaps" / "530.vmtree").unlink()
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert visible(data_files(box)) == old
+
+
+def test_a_put_back_cut_short_that_left_whole_looking_data_is_still_finished(box: Box) -> None:
+    """The record decides which half of the rule applies: a put-back restores it FIRST, so an
+    aside without its record is a put-back cut short, even when what is in place -- old record,
+    old maps, the new run's other folders -- would pass for whole map data."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    old = data_files(box)
+    data = box.server_dir / "data"
+    box.world.running = False
+    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    for name, body in old.items():
+        top = name.split("/", 1)[0]
+        if top in ("Buildings", "vmaps", "dbc"):
+            (data / extract.PREVIOUS_DIR / name).parent.mkdir(parents=True, exist_ok=True)
+            (data / extract.PREVIOUS_DIR / name).write_bytes(body)
+        elif top in ("maps", extract.EVIDENCE_FILE):
+            (data / name).write_bytes(body)
+    assert box.engine()._map_data_whole(box.server_dir, data), "it passes for whole"
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    folders = ("Buildings/", "vmaps/", "dbc/", "maps/", extract.EVIDENCE_FILE)
+    assert {n: b for n, b in data_files(box).items() if n.startswith(folders)} == {
+        n: b for n, b in old.items() if n.startswith(folders)
+    }, "the old map data, whole: never the new run's folders under the old record"
 
 
 def test_a_put_back_cut_short_after_the_record_is_finished_by_the_next_press(box: Box) -> None:

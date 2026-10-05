@@ -2110,7 +2110,13 @@ def put_back(data_dir: Path) -> tuple[str, ...]:
     """
     aside = data_dir / PREVIOUS_DIR
     try:
-        names = sorted(entry.name for entry in aside.iterdir())
+        # The record first, deliberately: once it is back, `PREVIOUS_DIR` no longer
+        # holds it, which is how a later press tells a put-back cut short from a
+        # finished press that could not mark its old data (T241).
+        names = sorted(
+            (entry.name for entry in aside.iterdir()),
+            key=lambda name: (name != EVIDENCE_FILE, name),
+        )
     except FileNotFoundError:
         return ()
     for name in names:
@@ -2231,6 +2237,26 @@ def overlay_files(source: Path, target: Path) -> int:
             ) from exc
         copied += 1
     return copied
+
+
+def overlaid(source: Path, target: Path) -> bool:
+    """Has `overlay_files(source, target)` finished: every file there, same size and date?
+
+    The same rule `overlay_files()` skips a file on, read without writing; False
+    for a folder that cannot be read or holds no file (T241).
+    """
+    try:
+        files = [path for path in source.rglob("*") if path.is_file()]
+        if not files:
+            return False
+        for path in files:
+            dest = target / path.relative_to(source)
+            have, want = dest.stat(), path.stat()
+            if (have.st_size, have.st_mtime_ns) != (want.st_size, want.st_mtime_ns):
+                return False
+    except OSError:
+        return False
+    return True
 
 
 _GRID_SUFFIX = re.compile(r"\d{4}\.map")

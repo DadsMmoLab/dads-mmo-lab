@@ -1934,7 +1934,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             )
             if stopped is not None:
                 yield stopped
-        yield from self._settle_an_earlier_press(data_dir)
+        yield from self._settle_an_earlier_press(server_dir, data_dir)
         plan = self._tc().extract
         extract.set_aside(data_dir, extract.replaced_names(plan, also=(plan.dbc_overlay_to,)))
         ctx = replace(probe, client_dir=client)
@@ -1959,8 +1959,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             yield (
                 f"warning: the map data from before this press, in "
                 f"{data_dir / extract.PREVIOUS_DIR}, could not be deleted ({exc}). It takes "
-                "space but is not used; delete that folder when the server is stopped, or the "
-                f"next “{REEXTRACT_BUTTON}” tries again."
+                "space and is never used again: delete that folder when the server is stopped."
             )
         if background:
             mmaps.discard(server_dir, self.entry, install_id=ident)
@@ -1981,21 +1980,33 @@ class TrinityCoreInstaller(CmangosInstaller):
             "to run the server on it."
         )
 
-    def _settle_an_earlier_press(self, data_dir: Path) -> Iterator[str]:
+    def _settle_an_earlier_press(self, server_dir: Path, data_dir: Path) -> Iterator[str]:
         """What an earlier press left under `data/`: replaced data deleted, kept data put back.
 
-        `extract.PREVIOUS_DIR` with `extract.SUPERSEDED_MARK` beside it is old map
-        data a press finished replacing and did not finish deleting; it goes.
-        Without the mark it is old map data a press set aside and never settled
-        -- it died part way, in the extraction or in putting the data back -- so
-        it is the last whole map data, and it is put back over whatever is in
-        place. Never decided from the record in `data/`: an old record put back
-        first says nothing about the folders still aside (Codex adversarial
-        review, T241).
+        `extract.PREVIOUS_DIR` is deleted when it is marked replaced
+        (`extract.SUPERSEDED_MARK`), or when it is not but still holds its own
+        record while the map data in place is whole (`_map_data_whole()`): that
+        press finished and could not make the mark (cold review of 4d672a26), and
+        putting the old data back would throw the new away. Otherwise it is old
+        map data a press set aside and never settled -- it died part way, in the
+        extraction or in putting the data back -- so it is the last whole map
+        data, and it is put back over whatever is in place. Never decided from
+        the record in `data/` alone: a put-back restores the record first
+        (`extract.put_back()`), and an old record put back says nothing about the
+        folders still aside (Codex adversarial review, T241).
         """
         aside = data_dir / extract.PREVIOUS_DIR
         try:
             if extract.drop_superseded(data_dir) or not os.path.lexists(aside):
+                return
+            if os.path.lexists(aside / extract.EVIDENCE_FILE) and self._map_data_whole(
+                server_dir, data_dir
+            ):
+                extract.supersede(data_dir)
+                yield (
+                    f"An earlier “{REEXTRACT_BUTTON}” finished but left the map data from before "
+                    "it; that was deleted first."
+                )
                 return
             extract.put_back(data_dir)
         except OSError as exc:
@@ -2007,6 +2018,31 @@ class TrinityCoreInstaller(CmangosInstaller):
         yield (
             f"An earlier “{REEXTRACT_BUTTON}” did not finish; the map data from before it was "
             "put back first."
+        )
+
+    def _map_data_whole(self, server_dir: Path, data_dir: Path) -> bool:
+        """Is the map data in `data/` what a finished client-data stage leaves? (T241)
+
+        Every tool recorded for its argv with its counts met, the server's own
+        DBCs laid over the extracted ones (`extract.overlaid()`), and the start
+        check's maps and vmaps there -- the three things the stage does, each
+        read off the disk. Anything unread answers False, and the old data comes
+        back.
+        """
+        tc = self._tc()
+        current = extract.read_evidence(data_dir)
+        if current is None:
+            return False
+        if not all(
+            extract.satisfied(tool.name, tool.argv, tool.produces, data_dir, current, current)
+            for tool in tc.extract.tools
+        ):
+            return False
+        if extract.missing_map_data(data_dir, tc.required_maps):
+            return False
+        return extract.overlaid(
+            server_dir / tc.checkout / tc.extract.dbc_overlay_from,
+            data_dir / tc.extract.dbc_overlay_to,
         )
 
     def _put_the_old_map_data_back(self, data_dir: Path) -> str:

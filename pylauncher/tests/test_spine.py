@@ -2849,6 +2849,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the server folder's `.yulon-client-view`, and a listing that fails is an OSError "
         "the extract stage refuses on, saying nothing was extracted"
     ),
+    ("catalog/families/extract.py", "overlaid"): (
+        "T241. Lists the server's own checkout folder `dbc_overlay_from` to ask whether each "
+        "file is already under `data/dbc` with the same size and date, which is how a "
+        "re-extraction tells new map data that finished from a press that died. Read-only; "
+        "a folder that cannot be read answers False, which puts the old map data back"
+    ),
     ("catalog/families/extract.py", "put_back"): (
         "T241. Lists `data/.yulon-previous`, which only a re-extraction makes, to move each "
         "folder of the old map data back over the new extraction's partial output. It "
