@@ -596,3 +596,45 @@ def test_reset_to_default_still_keeps_the_xp_an_installed_mod_set(
     editors = _rates_card(view).editors
     assert editors["Rate.XP.Kill"].value() == "2", "the mod's key was carried over"
     assert editors["Rate.Drop.Money"].value() == "1", "the card's own key went back"
+
+
+def test_tortoise_says_its_slow_and_steady_characters_get_no_kill_xp_boost(
+    tmp_path: Path,
+) -> None:
+    """`Formulas.h:140-166` at the pin: the challenge skips `Rate.XP.Kill`."""
+    _lay(tmp_path, "wow-tortoise")
+    rows = {r.key: r for r in server_rates.rows(_entry("wow-tortoise"), tmp_path)}
+    assert "Slow and Steady" in (rows["Rate.XP.Kill"].explain or "")
+    assert "Slow and Steady" not in (rows["Rate.XP.Quest"].explain or "")
+    tbc = {r.key: r for r in server_rates.rows(_entry("wow-tbc"), _lay_dir(tmp_path, "wow-tbc"))}
+    assert "Slow and Steady" not in (tbc["Rate.XP.Kill"].explain or "")
+
+
+def _lay_dir(tmp_path: Path, game: str) -> Path:
+    server = tmp_path / game
+    _lay(server, game)
+    return server
+
+
+def test_a_key_a_game_does_not_have_gets_no_row_on_that_game(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No fork lacks one of the eleven today; the day one does, its row is left out."""
+    from dataclasses import replace
+
+    tbc = server_rates._GAMES["wow-tbc"]
+    fewer = tuple(key for key in tbc.keys if key != "Rate.Honor")
+    monkeypatch.setitem(server_rates._GAMES, "wow-tbc", replace(tbc, keys=fewer))
+    _lay(tmp_path, "wow-tbc")
+    keys = [r.key for r in server_rates.rows(_entry("wow-tbc"), tmp_path)]
+    assert keys == [key for key, _label, _value in SHOWN if key != "Rate.Honor"]
+    assert "Rate.Honor" not in server_rates.conf_keys(_entry("wow-tbc"))
+
+
+def test_the_raw_editor_still_lists_the_world_conf_the_xp_mod_named(
+    qapp: object, ps: Any, tmp_path: Path
+) -> None:
+    """The mod's rows are read-only only on screen: its file stays one the editor opens."""
+    _lay(tmp_path, "wow-tbc")
+    view = _view(ps, tmp_path, "wow-tbc", mods=frozenset({"xp-rates"}))
+    assert "etc/mangosd.conf" in view._tuning_files()
