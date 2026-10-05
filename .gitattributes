@@ -59,6 +59,7 @@ pyplan/upstream-cmangos-doodad-issue.md                       text eol=lf
 # split reads these bytes -- so a checkout that normalised them would leave the
 # fixture asserting the opposite of what it was recorded for.
 pylauncher/tests/fixtures/git-clone-progress.stderr           -text
+pylauncher/tests/data/centurion-rendered/**/*.yml  text eol=lf
 
 # mod-playerbots/azerothcore-wotlk's recipe files at the catalog pin, vendored byte for
 # byte: `test_build_context.py` checks their sha256 against the table `build_context`

@@ -2453,6 +2453,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "keg emptied the folder. A listing that comes back empty records nothing, which at "
         "remove time reads as 'no record of copying it' and LEAVES the file alone"
     ),
+    ("catalog/world_data.py", "_folder_hash"): (
+        "T219. Lists the server folder's map-data folders (`dbc`, `maps`, ...) to hash each "
+        "file's path, size and modification time into the fingerprint a Windows world "
+        "server's volume copy is compared by. It decides no write by itself: what it answers "
+        "is a line in `data/.yulon-world-data`, and the copy inside the container is what "
+        "acts on it. A folder that is not there answers `-` (the server sees it empty); one "
+        "that cannot be listed raises, and `refresh()` then writes nothing and says so, so "
+        "the copy keeps following the last fingerprint written"
+    ),
     ("catalog/native.py", "folder_bytes"): (
         "T203 fix round 3. Adds up the sizes of the files under a server folder for "
         "preflight's credit to a resumed install; it never writes, never enters a link or a "

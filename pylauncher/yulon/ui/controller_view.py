@@ -5963,7 +5963,8 @@ REPAIR_FILES_CONFIRM = (
     "Yu'lon writes for this server, either because another version wrote it or because it was "
     "edited by hand. Yu'lon writes it again the way this version installs it, with this "
     "install's own project name, ports and SELinux labels{counts}. Any hand edits in it are "
-    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}\n\n"
+    "replaced; the file as it is now is kept beside it as a backup ({backup}).{confs}{volume}"
+    "\n\n"
     "Nothing else changes: not your characters, not {others}, not docker-compose.override.yml "
     "or .env. The running containers keep the old file until they are recreated, which Yu'lon "
     "offers next."
@@ -5975,6 +5976,16 @@ REPAIR_FILES_CONFS = (
     "is kept beside itself as a backup too."
 )
 """T169's paragraph in the question, when the same repair sets a conf's folder setting."""
+
+REPAIR_FILES_WORLD_DATA = (
+    "\n\nIt also gives the world server a Docker volume of its own for the map data it reads, "
+    "so it no longer reads every map file through Windows' file share, which slowed the world "
+    "server's start. The first start after Recreate containers… copies the map data from the "
+    "server folder into it, which takes a few minutes, and once the pathfinding data is made "
+    "the copy takes up to about {gb:g} GB on Docker's disk. The server folder's data folder "
+    "stays where it is."
+)
+"""T219's paragraph in the question, when the same repair adds the `world-data` volume."""
 
 REPAIR_FILES_DONE = (
     "docker-compose.yml was repaired; the old one is kept as {backup}. The containers still run "
@@ -6772,6 +6783,9 @@ class ControllerView(QWidget):
         self._busy = False
         # T195: what `_set_busy()` was last told is running, for "Wait: Start is running.".
         self._busy_job = ""
+        # T219 (#309's live proof): the running Restart or Recreate was pressed on the
+        # Server tab's compose banner, so its outcome is said on the Server tab too.
+        self._tuning_from_banner = False
         # T188 C4/C5: the word the realm badge holds while a Start, Stop or
         # Restart of ours runs. A poll mid-stop used to flip the badge between
         # OFFLINE and "starting".
@@ -8972,9 +8986,17 @@ class ControllerView(QWidget):
         goes through, and it never refuses over the zone file: the server runs
         on UTC, and this line says so and names the presses that fix it.
         """
-        said = getattr(self.services.controller, "zone_problem", None)
-        if isinstance(said, str) and said:
-            text = f"The server started, but {said}"
+        said = [
+            problem
+            for problem in (
+                getattr(self.services.controller, "zone_problem", None),
+                # T219: a Windows Centurion world's map-data copy, said the same way.
+                getattr(self.services.controller, "world_data_problem", None),
+            )
+            if isinstance(problem, str) and problem
+        ]
+        if said:
+            text = "The server started, but " + " Also, ".join(said)
             self.problem_label.setText(text)
             return text
         return None
@@ -17364,13 +17386,22 @@ class ControllerView(QWidget):
 
     @Slot()
     def _compose_banner_pressed(self) -> None:
-        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart."""
+        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart.
+
+        A Recreate or Restart pressed here says how it ended here as well, not only in
+        the Tuning tab's report (T219: a refused Recreate left this tab saying "The
+        server is already running.").
+        """
         if self.compose_banner_button.text() == TUNING_RECREATE_LABEL:
+            self._tuning_from_banner = True
             self.recreate_containers()
         elif self.compose_banner_button.text() == TUNING_RESTART_LABEL:
+            self._tuning_from_banner = True
             self.restart_server()
         else:
             self.repair_server_files()
+        if not self._busy:
+            self._tuning_from_banner = False  # declined, or done inline: nothing pending
 
     @Slot()
     def repair_server_files(self) -> None:
@@ -17415,7 +17446,12 @@ class ControllerView(QWidget):
             if last is not None and last.state == "upstream"
             else REPAIR_FILES_CONFIRM
         )
-        question = confirm.format(backup=backup, counts=counts, confs=confs, others=others)
+        # T219: a Windows Centurion's file from before the map-data volume.
+        gb = last.world_data_gb if last is not None and last.state == "stale" else 0.0
+        volume = REPAIR_FILES_WORLD_DATA.format(gb=gb) if gb else ""
+        question = confirm.format(
+            backup=backup, counts=counts, confs=confs, others=others, volume=volume
+        )
         if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
@@ -17617,6 +17653,9 @@ class ControllerView(QWidget):
             self._tuning_owed.pop("recreate", None)
         self._refresh_tuning_owed()
         zone = self._say_zone_problem()
+        if self._tuning_from_banner and zone is None:
+            self.problem_label.setText("")  # what this tab said before the press is past
+        self._tuning_from_banner = False
         self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
         self.refresh_status()
 
@@ -17631,6 +17670,9 @@ class ControllerView(QWidget):
         else:
             self.tuning_report.setPlainText(TUNING_JOB_BROKE.format(job=job))
             self.tuning_details.set_text(str(exc))
+        if self._tuning_from_banner:
+            self.problem_label.setText(self.tuning_report.toPlainText())
+        self._tuning_from_banner = False
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default

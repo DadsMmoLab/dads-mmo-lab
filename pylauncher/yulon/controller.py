@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import docker, wsl
-from yulon.catalog import composegen, native, time_zone
+from yulon.catalog import composegen, native, time_zone, world_data
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.log import get_logger
 from yulon.said import SaidByYulon
@@ -185,6 +185,10 @@ class Controller:
         # starts, since `start()` is the one door every Start, Restart and
         # recreate goes through.
         self.zone_problem: str | None = None
+        # What the last `start()` could not do about a Windows Centurion world's copy of
+        # the map data (T219, `world_data.refresh()`): `None` when nothing. Read by the
+        # tab beside `zone_problem`.
+        self.world_data_problem: str | None = None
         # The catalog entry this install is, where the subclass knows it (T179).
         # `None` reads it off the shipped catalog by container names
         # (`_entry_for`), which every game but one in the making can answer.
@@ -310,6 +314,7 @@ class Controller:
             logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
             raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
         self.zone_problem = self._put_back_the_zone_file()
+        # The map-data fingerprint was written by `refuse_start()` above (T219).
         # No `wait_healthy` closure: `start_staged()` deleted the argument on
         # entry, so the lambda that used to be built here was dead code reading
         # like a health wait that no longer happens. Compose does the waiting
@@ -343,6 +348,22 @@ class Controller:
         except (OSError, UnicodeDecodeError):
             return None  # no override to name a zone; compose says what is wrong with it
         return time_zone.refresh(entry, self.server_dir, override)
+
+    def _refresh_world_data(self) -> str | None:
+        """T219: the map-data fingerprint a Windows Centurion world copies by, before every start.
+
+        `world_data.refresh()` writes it only on an install whose compose file declares
+        the `world-data` volume, and only when it changed. A failure never stops the
+        Start; its sentence is returned for the tab to show -- except one that leaves a
+        stale fingerprint in place, which refuses the Start (`StartRefused`).
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return None
+        try:
+            return world_data.refresh(entry, self.server_dir)
+        except world_data.FingerprintNotRecorded as exc:
+            raise StartRefused(str(exc)) from exc
 
     def _owners_of(self, containers: list[str]) -> dict[str, str | None]:
         """Where each blocking container came from, best effort and never fatal."""
@@ -432,6 +453,11 @@ class Controller:
         if reason:
             logger.warning(f"start() refused: {reason}")
             raise StartRefused(reason)
+        # T219: here and not in `start()`, so a fingerprint that can be neither written
+        # nor removed refuses BEFORE a Restart's stop, a Recreate's removal or "stop the
+        # other server" (cold review of 2a70b82c). Safe while the world runs: a running
+        # Windows world reads the volume, never this file. Written only when it changed.
+        self.world_data_problem = self._refresh_world_data()
 
     def stop_conflicting_and_start(self) -> list[str]:
         """Stop the server holding our ports, then start this one."""
