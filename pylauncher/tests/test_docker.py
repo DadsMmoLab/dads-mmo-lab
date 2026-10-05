@@ -858,8 +858,12 @@ def test_the_rebuilds_recreate_stops_the_servers_before_it_replaces_the_database
     assert docker.recreate_staged(SPEC, Path("/tmp/wow")) is True
     stop = ["docker", "compose", "stop", "-t", _GRACE, SPEC.world, SPEC.auth]
     up = ["docker", *docker.recreate_argv(SPEC)]
-    assert calls[:2] == [stop, up], calls
-    assert SPEC.db not in calls[0], "the database is stopped by the recreate, after the servers"
+    # T384: the world is asked to stop on its own first, and saves before `stop` reaches it.
+    assert calls[0] == ["docker", "kill", "-s", "TERM", SPEC.world], calls
+    composed = [call for call in calls if call[1:2] == ["compose"]]
+    assert composed[:2] == [stop, up], calls
+    assert calls.index(stop) < calls.index(up)
+    assert SPEC.db not in stop, "the database is stopped by the recreate, after the servers"
 
 
 def test_start_staged_never_starts_a_container_by_global_name(

@@ -1292,3 +1292,20 @@ def the_compose_project_is_not_pinned(monkeypatch: pytest.MonkeyPatch) -> list[P
         docker, "pin_project_name", lambda server_dir, **_kw: pinned.append(server_dir)
     )
     return pinned
+
+
+@pytest.fixture(autouse=True)
+def _no_save_wait_runs_on_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop's wait for a saving world never sleeps, and its clock moves 2 s a look (T384).
+
+    `docker.save_then_stop_the_world()` waits up to `WORLD_SAVE_CEILING_SECONDS` (30 minutes)
+    for a world it has seen running and cannot read the traffic of. A test's fake docker that
+    answers "running" to every inspect and nothing to every exec is exactly that world, and on
+    the real clock it would hold the run for half an hour instead of failing on its argv. The
+    tests of the wait itself (`test_stop_saves_before_exit.py`) set their own clock.
+    """
+    from yulon import docker
+
+    ticks = iter(range(0, 10**9, 2))
+    monkeypatch.setattr(docker, "_save_clock", lambda: float(next(ticks)))
+    monkeypatch.setattr(docker, "_SAVE_POLL_SECONDS", 0.0)
