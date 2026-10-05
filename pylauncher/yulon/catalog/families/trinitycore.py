@@ -73,7 +73,6 @@ from yulon.catalog.families import conf, extract, mmaps, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, UpdateRefused
 from yulon.catalog.native import (
-    BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     InstallState,
     Seams,
@@ -82,11 +81,15 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
+    build_cancel_note,
+    folder_start_refusal,
     owed_start_refusal,
     past_the_tested_pin,
     read_state,
 )
+from yulon.catalog.snapshot import DatabaseSnapshot
 from yulon.log import get_logger
+from yulon.manifest import Db
 
 logger = get_logger(__name__)
 
@@ -261,6 +264,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         reset_unfinished: docker.ResetUnfinished | None = None,
         seams: Seams | None = None,
         mmaps_runner: mmaps.Runner | None = None,
+        database_snapshot: DatabaseSnapshot | None = None,
     ) -> None:
         """The spine's constructor, plus the Docker seam of the movement-map job (Task 4).
 
@@ -275,6 +279,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             import_probe=import_probe,
             reset_unfinished=reset_unfinished,
             seams=seams,
+            database_snapshot=database_snapshot,
         )
         self._mmaps_runner = (
             mmaps_runner
@@ -289,7 +294,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
-            Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
+            Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=CLIENT_DATA_CANCEL_NOTE),
             Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),
@@ -1160,6 +1165,18 @@ class TrinityCoreInstaller(CmangosInstaller):
             f"that into {whose} safely yet. Nothing was changed."
         )
 
+    def databases_a_new_build_changes(self) -> tuple[Db, ...]:
+        """Nothing: this tree's world server applies no update of its own at start (T217).
+
+        `Updates.EnableDatabases` is 0 in its conf table, and the catalog refuses
+        any other value for this family
+        (`catalog.TrinityCoreConf._the_database_updater_stays_off`). The world
+        tables an update changes are imported with the servers stopped by
+        `servers_down_work()`, whose own `back()` imports them again from the old
+        checkout; the characters and accounts layouts are refused outright.
+        """
+        return ()
+
     def start_refusal(self, server_dir: Path, *, rebuilding: bool = False) -> str | None:
         """The spine's refusal, then a world update left unfinished (T179).
 
@@ -1175,6 +1192,10 @@ class TrinityCoreInstaller(CmangosInstaller):
             return refused
         if owed_start_refusal(server_dir) is not None:
             return None  # reached by the Rebuild alone: any other press was refused above
+        return self.family_start_refusal(server_dir)
+
+    def family_start_refusal(self, server_dir: Path) -> str | None:
+        """A world update left unfinished (T179); the spine's question, answered (T223)."""
         return world_update_start_refusal(server_dir, press_here=self._seams.distro is None)
 
     def servers_down_work(
@@ -1342,10 +1363,17 @@ class TrinityCoreInstaller(CmangosInstaller):
                         required=frozenset((*changes.reimport, *changes.parts)),
                     )
                 except InstallerError as also:
+                    # T223: the clause about Start only when nothing else refuses one --
+                    # an untouched exit has already left the untested start refusal.
+                    stops = (
+                        ""
+                        if owed_start_refusal(server_dir) is not None
+                        else ", so nothing stops this server starting its new build on the "
+                        "old world tables"
+                    )
                     raise InstallerError(
                         f"{exc} The world tables the new build needs could not be recorded "
-                        f"either ({also.__cause__ or also}), so nothing stops this server "
-                        "starting its new build on the old world tables."
+                        f"either ({also.__cause__ or also}){stops}."
                     ) from exc
                 raise
 
@@ -1430,7 +1458,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         # T197 fix round 8: the finish ends in a start, and mixed image tags refuse every
         # start but the Rebuild's, which goes first (`start_refusal()`). Cannot happen
         # today: a TrinityCore server builds one image, so its tags are never mixed.
-        mixed = owed_start_refusal(server_dir)
+        mixed = folder_start_refusal(server_dir, self._seams.image_id)
         if mixed is not None:
             raise InstallerError(f"{mixed} Nothing was changed.")
         self._refuse_unless_the_checkout_is_built(server_dir, state)
@@ -1497,7 +1525,7 @@ class TrinityCoreInstaller(CmangosInstaller):
         Asks the mixed-tags record again (T197 fix round 8), the belt under the finish's
         own refusal of it: this start must not run two builds side by side either.
         """
-        mixed = owed_start_refusal(ctx.server_dir)
+        mixed = folder_start_refusal(ctx.server_dir, self._seams.image_id)
         if mixed is not None:
             raise InstallerError(
                 f"The world update is finished, but {mixed} The server was not started."

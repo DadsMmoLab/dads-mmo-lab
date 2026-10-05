@@ -22,6 +22,7 @@ import inspect
 import json
 import subprocess
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -286,6 +287,8 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "install_id": "the id the install RECORDED (`recorded_install_id`), tested on its own",
     "host_zone": "a new install's zone (T171); a rebuild or update of an installed server "
     "carries its own off the override, and Windows is the computer the player sits at",
+    "context_fingerprint": "answered None: a server inside WSL keeps no finished build (T224, "
+    "owner D4), because a host walk of \\\\wsl.localhost boots the distro (T133)",
     "distro": "not a seam but the distro's own name, so a sentence can say where a press is "
     "(T179); asserted equal to it below",
 }
@@ -565,6 +568,20 @@ def test_a_rebuild_runs_every_command_in_the_distro(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     distro, server_dir = _through_the_distro(monkeypatch, tmp_path)
+    # T217: a plain Rebuild refuses sources off the commit the running build came
+    # from; the record says `OLD`, which is what the distro's git answers.
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    native.write_state(
+        server_dir,
+        replace(
+            state,
+            source_revs=tuple(
+                native.SourceRev(repo=source.repo, built=f"{OLD[:7]} · 2026-09-16")
+                for source in ENTRY.emulator.sources
+            ),
+        ),
+    )
     with pytest.raises(InstallerError):
         list(install_wiring.rebuild_for_app(ENTRY, server_dir, wsl_distro=DISTRO)(None))
     _only_the_distro(distro)

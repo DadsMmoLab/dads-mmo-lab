@@ -2410,6 +2410,22 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/gamepad.py", "walk"): (
         "the same generator calling itself on each child widget, for the reason above"
     ),
+    ("catalog/snapshot.py", "prune_older"): (
+        "T217. Lists this server's own `sql_scripts/backups/` to find the older copies "
+        '"Update the server to latest…" took of the databases its new build can change, '
+        "and removes those. It decides a DELETE, bounded twice: only files whose names carry "
+        "the update's own `_before-new-build_` label, and never the copy just taken, so a "
+        "backup the player took and a restore's safety copy are never touched. An OSError "
+        "listing it removes nothing and is logged; the copies stay, which costs disk and "
+        "nothing else"
+    ),
+    ("catalog/snapshot.py", "older_copies"): (
+        "T217. Lists this server's own `sql_scripts/backups/` to NAME the older update copies "
+        "in the sentence a rollback says when the old build did not come up, newest first. It "
+        "decides no write: only files carrying the update's own `_before-new-build_` label, "
+        "never the copy just taken, so a backup the player took is never named as one. An "
+        "OSError listing it names none, and the sentence then says nothing about older copies"
+    ),
     ("ui/folder_picker.py", "removable_volumes"): (
         "T215. `os.scandir` of the Linux mount roots -- `/run/media/<user>`, `/run/media`, "
         "`/media/<user>` -- to find the SD cards and USB drives mounted there, each of which "
@@ -2471,6 +2487,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "lists the `Buildings/` this app's own extractor just filled, to count how many of the "
         "models the index places; its `except OSError` logs and answers None, which is 'no "
         "check ran' and warns about nothing - nothing is written on the strength of it"
+    ),
+    ("catalog/build_context.py", "_sorted_entries"): (
+        "T224. Lists the build context, the server folder, the way Docker's own walk "
+        "filters it, to fingerprint the files a finished build was made from. It decides no "
+        "write: it decides whether a kept build may be reused instead of compiling. Every "
+        "OSError, like every other fact it cannot read, answers None, and None never matches, "
+        "so the server is then compiled"
     ),
     ("catalog/families/sqlplan.py", "_listing"): (
         "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "

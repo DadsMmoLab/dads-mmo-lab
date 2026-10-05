@@ -439,7 +439,15 @@ class Controller:
         """
         # T197 fix round 2: a press left this folder in a state no start may run on
         # (`native.START_REFUSED_FILE`), on every family, before the family's own guard.
-        reason = native.owed_start_refusal(self.server_dir)
+        # T225 (live): and a stopped rebuild whose build may have landed since, which
+        # asks Docker only while the folder records such a stop.
+        reason = native.folder_start_refusal(
+            self.server_dir, lambda ref: docker.image_id(ref, wsl_distro=self.wsl_distro)
+        )
+        if not reason:
+            # T217 (a), the owner's decision of 2026-10-05: a source folder a failed
+            # update could not put back refuses every start (`native.SOURCES_OFF_FILE`).
+            reason = native.sources_off_refusal(self.server_dir)
         if not reason and self.start_guard is not None:
             reason = self.start_guard()
         if reason:
