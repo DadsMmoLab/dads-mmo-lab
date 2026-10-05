@@ -14979,15 +14979,49 @@ def _body_of(page: Any) -> Any:
     return page.widget() if isinstance(page, ScrollPage) else page
 
 
+_SETTLED_ROUNDS = 3
+"""Pumps in a row with every widget where it was, before a resized window counts as settled."""
+
+
+def _layout_of(window: Any) -> tuple[tuple[int, int, int, int, bool], ...]:
+    """Where every widget in `window` is, and whether it shows."""
+    from PySide6.QtWidgets import QWidget
+
+    return tuple(
+        (*child.geometry().getRect(), child.isVisible()) for child in window.findChildren(QWidget)
+    )
+
+
 def _at(window: Any, size: tuple[int, int]) -> None:
-    """Put the window at `size`, restyle as the app does, and let it settle."""
+    """Put the window at `size`, restyle as the app does, and let it settle.
+
+    Settled is a condition, not a time: the layout unchanged over
+    `_SETTLED_ROUNDS` pumps. A fixed 50 ms pump measured the Modules tab
+    mid-layout under the suite's parallel run (CI since T229, and the VM's six
+    workers): its list read 107 px, one row (PR 291 fix round 2). The same
+    happened with no load at all with the pump cut to nothing.
+    """
     from yulon.ui.theme import apply_dadcraft_theme
 
     window.resize(*size)
     # `main._Window._restyle_for_width`, which is what makes the fonts -- and so
     # every height measured here -- a function of the window's width.
     apply_dadcraft_theme(window, width=window.width())
-    process_events()
+    seen: list[object] = [None]
+    same = [0]
+
+    def settled() -> bool:
+        process_events(_SETTLE_PUMP_MS)
+        now = _layout_of(window)
+        same[0] = same[0] + 1 if now == seen[0] else 0
+        seen[0] = now
+        return same[0] >= _SETTLED_ROUNDS
+
+    pump_until(settled, f"the window to settle at {size}")
+
+
+_SETTLE_PUMP_MS = 10
+"""One pump of `_at()`'s settle loop. Short on purpose: the loop, not this, waits."""
 
 
 def _whole_rows_on_screen(panel: modules_panel.ModulesPanel) -> int:
