@@ -549,10 +549,7 @@ def password_digits_are_ids(entry: CatalogEntry) -> bool:
     return entry.id not in _NAMES_ARE_NAMES | {"wow-tortoise"}
 
 
-_NAMES_ARE_NAMES = frozenset({"wow-wotlk", "wow-centurion"})
-"""`AccountMgr::GetId(accountName)` and nothing else: AzerothCore `cs_account.cpp:347`
-(7f12e89e), TrinityCore112 `cs_account.cpp:303` (faac5fc9). The CMaNGOS trees try
-the digits as an id first: `commands.digits_read_as_an_id()`."""
+_NAMES_ARE_NAMES = commands.NAME_LOOKUP_TREES
 
 
 def _not_ours_to_delete(account: str, app_account: str, *, digits_are_ids: bool) -> str:

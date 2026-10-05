@@ -74,6 +74,15 @@ def valid_character_name(name: str) -> bool:
     return bool(_CHARACTER_NAME.fullmatch(name))
 
 
+NAME_LOOKUP_TREES = frozenset({"wow-wotlk", "wow-centurion"})
+"""The catalog entries whose servers look an account argument up by name and nothing else.
+
+`AccountMgr::GetId(accountName)`: AzerothCore 7f12e89e `cs_account.cpp:347`,
+TrinityCore112 faac5fc9 `cs_account.cpp:303`. Every other tree -- the CMaNGOS
+ones, and any added later until it is measured -- is treated as reading an
+all-digit argument as an account id (T301).
+"""
+
 DELETE_BY_ID = ("delete it", "account delete ID")
 GM_LEVEL_BY_ID = ("change its GM level", "account set gmlevel ID LEVEL")
 PASSWORD_BY_ID = ("change its password", "account set password ID NEWPASSWORD NEWPASSWORD")

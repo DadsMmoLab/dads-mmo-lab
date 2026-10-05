@@ -2931,6 +2931,7 @@ def _for_wotlk(
             pw,
             gm_level=level,
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
+            names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
         # The repair seam, and the reason it is a different function from
         # `create`: `create_account` deliberately refuses to re-salt a row that
@@ -3113,6 +3114,7 @@ def _for_wotlk(
             # The tab disables its button for an entry that declares no scheme;
             # this is the seam under it refusing rather than guessing (T12).
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
+            names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
         store=wotlk_modules.store() if entry.has_manifests else None,
         applier=module_applier,

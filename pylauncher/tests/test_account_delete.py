@@ -839,38 +839,98 @@ def test_a_name_with_a_trailing_line_break_is_not_a_name() -> None:
     assert commands.valid_character_name("Guglu\n") is False
 
 
-@pytest.mark.parametrize(
-    ("scheme", "refused"),
-    [("mangos_srp6", True), ("mangos_sha", True), ("azerothcore", False), ("trinitycore", False)],
-)
-def test_yulon_makes_no_all_digit_account_on_a_tree_that_reads_digits_as_an_id(
-    scheme: str, refused: bool
-) -> None:
-    """Such an account could never be named in a later account command there."""
+class _Stop(Exception):
+    """The writer got past the name rules and reached the database."""
+
+
+def _writer_reaches_the_database(monkeypatch: pytest.MonkeyPatch) -> None:
     from yulon.controller_wow_wotlk import accounts as writer
 
-    class _NoSql:
-        asked: list[str] = []
+    def first_write(*_args: object, **_kwargs: object) -> object:
+        raise _Stop
 
-        def query(self, db: str, statement: str) -> str:
-            self.asked.append(statement)
-            raise _Stop
+    monkeypatch.setattr(writer, "_account_row", first_write)
 
-        def run_statement(self, db: str, statement: str) -> None:
-            self.asked.append(statement)
-            raise _Stop
 
-    class _Stop(Exception):
-        """The writer got past the name rules."""
+@pytest.mark.parametrize("game", FAMILIES)
+def test_yulon_makes_an_all_digit_account_only_where_the_server_looks_names_up(
+    game: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through each game's own create seam: such an account elsewhere could never be named."""
+    from yulon.controller_wow_wotlk import accounts as writer
 
-    sql = _NoSql()
-    if refused:
-        with pytest.raises(writer.AccountError, match="only of digits"):
-            writer.create_account(sql, "123", "pw1234", scheme=scheme)  # type: ignore[arg-type]
-        assert sql.asked == []
-    else:
+    _writer_reaches_the_database(monkeypatch)
+    services = ControllerServices.for_entry(CATALOG.get(game), tmp_path / game)
+
+    if game in NAME_ONLY:
         with pytest.raises(_Stop):
-            writer.create_account(sql, "123", "pw1234", scheme=scheme)  # type: ignore[arg-type]
+            services.create_account("123", "pw1234", 0)
+    else:
+        with pytest.raises(writer.AccountError, match="only of digits"):
+            services.create_account("123", "pw1234", 0)
+
+
+@pytest.mark.parametrize("scheme", ["azerothcore", "trinitycore", "mangos_srp6", "mangos_sha"])
+def test_a_caller_that_does_not_say_the_tree_looks_names_up_gets_a_refusal(
+    scheme: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse by default, whatever the scheme: a future tree on any scheme starts safe."""
+    from yulon.controller_wow_wotlk import accounts as writer
+
+    _writer_reaches_the_database(monkeypatch)
+
+    with pytest.raises(writer.AccountError, match="only of digits"):
+        writer.create_account(object(), "123", "pw1234", scheme=scheme)  # type: ignore[arg-type]
+    with pytest.raises(_Stop):
+        writer.create_account(
+            object(), "123", "pw1234", scheme=scheme, names_are_names=True  # type: ignore[arg-type]
+        )
+    with pytest.raises(_Stop):
+        writer.create_account(object(), "ALICE1", "pw1234", scheme=scheme)  # type: ignore[arg-type]
+
+
+def test_every_new_sentence_passes_the_player_text_rules(wotlk: _Server) -> None:
+    """T248's and T194's rules, read off the sentences themselves rather than by hand."""
+    from tests.support_player_text import command_faults, text_faults
+    from yulon import commands
+
+    wotlk.sql.account(21, "ZED")
+    wotlk.sql.register_bot(21)
+    said = [
+        commands.digits_read_as_an_id("123", commands.DELETE_BY_ID),
+        commands.digits_read_as_an_id("123", commands.GM_LEVEL_BY_ID),
+        commands.digits_read_as_an_id("123", commands.PASSWORD_BY_ID),
+        controller_view_module.delete_account_question("ALICE", ("Ganaar", "Guglu")),
+        controller_view_module.delete_account_question("ALICE", ("Guglu",)),
+        controller_view_module.delete_account_question("CAROL", ()),
+        controller_view_module.DELETE_ACCOUNT_LABEL,
+        wotlk.admin.delete_plan(APP_ACCOUNT).problem,
+        wotlk.admin.delete_plan("YULON_FFFFFFFF").problem,
+        wotlk.admin.delete_plan("AHBOT").problem,
+        wotlk.admin.delete_plan("RNDBOT1").problem,
+        wotlk.admin.delete_plan("ZED").problem,
+        wotlk.admin.delete_plan("BOB").problem,
+        wotlk.admin.delete_plan("NOBODY").problem,
+    ]
+    plan = wotlk.admin.delete_plan("ALICE")
+    wotlk.sql.conn.execute(f"INSERT INTO {wotlk.sql.chars}.characters VALUES (1, 7, 'Newbie', 0)")
+    said.append(wotlk.admin.delete_account(plan).problem)
+    wotlk.sql.conn.execute(f"DELETE FROM {wotlk.sql.chars}.characters WHERE guid = 1")
+    wotlk.wire.mode = "fault"
+    wotlk.wire.text = ""
+    said.append(wotlk.admin.delete_account(wotlk.admin.delete_plan("ALICE")).problem)
+    wotlk.wire.mode = "result"
+    said.append(wotlk.admin.delete_account(wotlk.admin.delete_plan("ALICE")).text)
+    said.append(wotlk.admin.delete_account(wotlk.admin.delete_plan("CAROL")).text)
+
+    assert all(said), said
+    for text in said:
+        assert text_faults(text) == [], text
+        assert command_faults(text) == [], text
+    # The one command a player types stays on its own line (T296's rule).
+    for refusal in said[:3]:
+        *words, command = refusal.splitlines()
+        assert command.startswith("account ") and command not in "\n".join(words)
 
 
 def test_the_line_itself_refuses_an_all_digit_name_where_digits_are_ids() -> None:
