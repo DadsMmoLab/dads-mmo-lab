@@ -144,10 +144,11 @@ def test_a_stop_after_the_swap_counts_an_unanswered_id_as_moved(tmp_path: Path) 
     assert ON_THE_OLD_BUILD in str(failed), failed
 
 
-def test_a_stop_before_compose_tagged_anything_still_releases_the_rollback_names(
+def test_a_stop_before_compose_tagged_anything_restores_nothing_and_keeps_the_rollback(
     tmp_path: Path,
 ) -> None:
-    """The control: no tag moved, so the `-rollback` names are duplicates and go, as before."""
+    """The control: no tag moved, so nothing is put back -- but the `-rollback` names stay,
+    because a stopped compile can still land later (live, yulon-win11; `test_stop_mid_compile`)."""
     rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
     daemon = _daemon_for(server_dir)
@@ -165,7 +166,7 @@ def test_a_stop_before_compose_tagged_anything_still_releases_the_rollback_names
             )
         )
     assert _all_on(daemon, server_dir, "before"), daemon.names
-    assert daemon.transient() == [], daemon.transient()
+    assert sorted(daemon.transient()) == _rollback_names(server_dir), daemon.transient()
     # No restore ran: nothing was named `-failed` and nothing was moved back.
     assert ON_THE_OLD_BUILD not in str(raised.value), raised.value
 

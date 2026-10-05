@@ -371,6 +371,7 @@ def test_the_snapshot_is_first_and_the_record_is_forgotten_last(tmp_path: Path) 
         f"remove_volume:{project}_client-data",
         *[f"remove_image:{ref}" for ref in _images(rec.server_dir)],
         *[f"remove_image:{ref}{native.PARKED_TAG_SUFFIX}" for ref in _images(rec.server_dir)],
+        *[f"remove_image:{ref}{native.ROLLBACK_TAG_SUFFIX}" for ref in _images(rec.server_dir)],
         f"remove_folder:{rec.server_dir}",
         "forget",
     ], rec.order
@@ -469,7 +470,11 @@ def test_only_this_installs_own_four_image_refs_are_removed(tmp_path: Path) -> N
     rec = _recorder(tmp_path)
     rec.uninstaller().run(keep_characters=False)
     own = list(_images(rec.server_dir))
-    assert rec.removed_images == own + [ref + native.PARKED_TAG_SUFFIX for ref in own]
+    assert rec.removed_images == (
+        own
+        + [ref + native.PARKED_TAG_SUFFIX for ref in own]
+        + [ref + native.ROLLBACK_TAG_SUFFIX for ref in own]
+    )
     assert not any("mysql" in ref for ref in rec.removed_images)
     assert not any("alpine" in ref for ref in rec.removed_images)
 
@@ -506,6 +511,17 @@ def test_uninstall_keeps_the_kept_build_record_while_docker_keeps_a_name(tmp_pat
     report = rec.uninstaller().run(keep_characters=False)
     assert record.exists()
     assert [line for line in report.warnings if "(a kept build) was left behind" in line]
+
+
+def test_uninstall_removes_a_stopped_builds_rollback_names_and_record(tmp_path: Path) -> None:
+    """T225 (live): a stopped compile keeps `-rollback` names past its press; Uninstall too."""
+    rec = _recorder(tmp_path)
+    record = rec.server_dir / native.STOPPED_BUILD_FILE
+    record.write_text('{"version": 1}\n', encoding="utf-8")
+    rec.uninstaller().run(keep_characters=False)
+    rollback = [ref + native.ROLLBACK_TAG_SUFFIX for ref in _images(rec.server_dir)]
+    assert set(rollback) <= set(rec.removed_images), rec.removed_images
+    assert not record.exists()
 
 
 def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_images(
