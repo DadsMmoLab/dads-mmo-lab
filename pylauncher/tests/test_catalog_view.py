@@ -30,6 +30,7 @@ from tests.conftest import (
     spelled_bounds,
     wait_for_panel,
 )
+from tests.support_player_text import text_faults
 from yulon import platform, runner, wsl
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -873,6 +874,8 @@ def test_a_stopped_install_that_left_a_kept_build_says_so_in_the_popup_too(
     assert header.startswith(STOPPED_THEN_FAILED) and "KEPT" in header, header
     assert told == [], "a stop that left a kept build is not announced as a plain cancel"
     assert warned == [(INSTALL_STOPPED_TITLE, header)], warned
+    # T194/T195: no exception class name in the header, and so none in the popup.
+    assert "WorldStoppedAfterReadyError" not in header and not text_faults(header), header
     assert events == [("wow-wotlk", False, header)], events
 
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -28,6 +28,7 @@ import pytest
 
 from tests.conftest import HANG_BOUND
 from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
+from tests.support_player_text import text_faults
 from tests.support_stop import compile_until_stopped, stop_when
 
 # The CMaNGOS half of this file drives a REAL TBC install, and the machinery
@@ -2172,8 +2173,9 @@ def test_a_rollback_that_leaves_the_tags_mixed_says_a_rebuild_is_needed_and_reco
     assert str(raised.value) == (
         f"{GIVEN_UP} Putting the build from before this rebuild back failed part-way "
         f"({REFUSED}) and undoing it failed too, so the tags are MIXED: {refs[0]} name the old "
-        "build and the rest name the new one. Do not start this server until they agree; the "
-        "old images are under their -rollback tags. The source folders were put back on the "
+        "build and the rest name the new one. Do not start this server until they agree. The "
+        "old images are on the daemon under their -rollback tags. The source folders were put "
+        "back on the "
         "commits they were on before this update. None of your server's containers was "
         "replaced, so it is still running the build from before this update if it is up. Its "
         "image tags are mixed, so it must be rebuilt before it can start, and Start is refused "
@@ -2369,6 +2371,119 @@ def _stopped_in_the_ready_wait(
     return stop_when(press, waiting, "the press reached the new build's ready wait")
 
 
+def _failure_class_names() -> set[str]:
+    """Every failure type an install, rebuild or update can raise, by class name."""
+    found: set[str] = set()
+    pending: list[type] = [InstallerError]
+    while pending:
+        kind = pending.pop()
+        found.add(kind.__name__)
+        pending.extend(kind.__subclasses__())
+    return found
+
+
+def _no_class_name_on_screen(panel: LogPanel, finished: list[tuple[bool, str]]) -> None:
+    """T194/T195's rule after a Stop: the header, the strip, the failure line and the message
+    the tab shows in its own popup carry no exception class name (the m910q check read
+    "Stopped. FAILED: RollbackNotDone: ...")."""
+    shown = {
+        "header": panel.status_text(),
+        "step": panel.step_text(),
+        "progress": panel.progress_text(),
+        "failure line": panel.failure_label.text(),
+        "run_finished": " ".join(message for _ok, message in finished),
+    }
+    names = _failure_class_names()
+    for where, text in shown.items():
+        assert not text_faults(text), (where, text_faults(text), text)
+        assert not [name for name in names if name in text], (where, text)
+
+
+def _rollback_tags_gone(rec: Recorder) -> dict[str, object]:
+    """The first retag back is refused because its `-rollback` image is no longer there.
+
+    The m910q check (P9): the rollback names had been removed out of band, and
+    Docker answered "No such image: ...-rollback".
+    """
+    asked = rec.images_built
+
+    def images_built(refs: Sequence[str]) -> bool | None:
+        if any(ref.endswith(native.ROLLBACK_TAG_SUFFIX) for ref in refs):
+            return False
+        return asked(refs)
+
+    def tag(src: str, dst: str) -> str:
+        rec.calls.append(f"tag:{src}->{dst}")
+        if src.endswith(native.ROLLBACK_TAG_SUFFIX):
+            return f"Error response from daemon: No such image: {src}"
+        return ""
+
+    return {"tag_image": tag, "images_built": images_built}
+
+
+def test_a_rollback_whose_old_images_are_gone_does_not_say_they_are_there(
+    qapp: object, tmp_path: Path
+) -> None:
+    """m910q P9: "No such image: ...-rollback", then "The old images are on the daemon"."""
+    rec, server_dir = _ready(tmp_path)
+    panel, finished = _stopped_in_the_ready_wait(rec, server_dir, **_rollback_tags_gone(rec))
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED), header
+    assert "The old images are on the daemon" not in header, header
+    assert "Docker no longer has" in header and native.ROLLBACK_TAG_SUFFIX in header, header
+    assert "cannot be put back from them" in header, header
+    _no_class_name_on_screen(panel, finished)
+
+
+@pytest.mark.parametrize("how", sorted(EARLY_RETURNS))
+def test_every_early_return_asks_whether_the_old_images_are_there_before_saying_so(
+    tmp_path: Path, how: str
+) -> None:
+    """m910q P9, at each of `_restore_rollback()`'s four early returns.
+
+    Each one closed by saying where the old images are. With the `-rollback`
+    names gone from the daemon, none of them may say they are there.
+    """
+    rec, server_dir = _ready(tmp_path)
+    rec.ready = False
+    overrides = EARLY_RETURNS[how](rec)
+    asked = rec.images_built
+
+    def images_built(refs: Sequence[str]) -> bool | None:
+        if any(ref.endswith(native.ROLLBACK_TAG_SUFFIX) for ref in refs):
+            return False
+        return asked(refs)
+
+    made = engine(rec, images_built=images_built, **overrides)
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert EARLY_SENTENCES[how] in said, said
+    assert "The old images are on the daemon" not in said, said
+    assert "Docker no longer has" in said and "cannot be put back from them" in said, said
+
+
+def test_an_early_return_that_cannot_ask_docker_says_it_could_not_ask(tmp_path: Path) -> None:
+    """The third answer: the daemon would not say whether the `-rollback` names are there."""
+    rec, server_dir = _ready(tmp_path)
+    rec.ready = False
+    overrides = _retag_refused(rec)
+    asked = rec.images_built
+
+    def images_built(refs: Sequence[str]) -> bool | None:
+        if any(ref.endswith(native.ROLLBACK_TAG_SUFFIX) for ref in refs):
+            return None
+        return asked(refs)
+
+    made = engine(rec, images_built=images_built, **overrides)
+    with pytest.raises(RollbackNotDone) as raised:
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "could not ask Docker whether the old images are still under" in said, said
+    assert "The old images are on the daemon" not in said, said
+
+
 def test_a_stop_whose_rollback_stopped_early_shows_what_the_press_left(
     qapp: object, tmp_path: Path
 ) -> None:
@@ -2382,6 +2497,7 @@ def test_a_stop_whose_rollback_stopped_early_shows_what_the_press_left(
     panel, finished = _stopped_in_the_ready_wait(rec, server_dir, **_retag_refused(rec))
 
     assert panel.cancelled is True
+    _no_class_name_on_screen(panel, finished)
     header = panel.status_text()
     assert header.startswith(STOPPED_THEN_FAILED), header
     assert EARLY_SENTENCES["retag-refused"] in header, header

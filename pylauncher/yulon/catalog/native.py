@@ -7358,8 +7358,7 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build's servers could not be stopped ({exc}); "
-                    f"the tags still name the new build, all of them. The old images are on "
-                    f"the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"the tags still name the new build, all of them. {self._old_images(kept)}",
                     touched=touched,
                 )
         else:
@@ -7376,8 +7375,8 @@ class StagedInstaller:
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
-                    f"onto ({problem}); the tags still name the new build, all of them. The "
-                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"onto ({problem}); the tags still name the new build, all of them. "
+                    f"{self._old_images(kept)}",
                     touched=touched,
                 )
             named.append(name)
@@ -7393,16 +7392,16 @@ class StagedInstaller:
                         f"{failure} Putting the build from before this rebuild back failed "
                         f"part-way ({problem}) and undoing it failed too, so the tags are "
                         f"MIXED: {', '.join(mixed)} name the old build and the rest name the "
-                        f"new one. Do not start this server until they agree; the old images "
-                        f"are under their {ROLLBACK_TAG_SUFFIX} tags.",
+                        f"new one. Do not start this server until they agree. "
+                        f"{self._old_images(kept)}",
                         touched=touched,
                         mixed=True,
                     )
                 return _NotPutBack(
                     f"{failure} Putting the build from before this rebuild back failed "
                     f"({problem}), and the {len(undone)} tag(s) already moved were moved back, "
-                    f"so the tags still name the new build, all of them. The old images are "
-                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags.",
+                    f"so the tags still name the new build, all of them. "
+                    f"{self._old_images(kept)}",
                     touched=touched,
                 )
             moved.append(ref)
@@ -7488,6 +7487,27 @@ class StagedInstaller:
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
+
+    def _old_images(self, kept: Sequence[str]) -> str:
+        """Where the build from before is, ASKED rather than assumed (m910q P9).
+
+        A rollback that stopped early said "the old images are on the daemon
+        under their -rollback tags" right after Docker had answered "No such
+        image: ...-rollback": the names had been removed out of band. So the
+        daemon is asked, and the sentence says what it answered.
+        """
+        gone = [ref for ref in kept if self._seams.images_built([ref]) is False]
+        if gone:
+            return (
+                f"Docker no longer has {', '.join(gone)}, so the build from before this "
+                f"rebuild cannot be put back from them."
+            )
+        if any(self._seams.images_built([ref]) is None for ref in kept):
+            return (
+                f"Yu'lon could not ask Docker whether the old images are still under their "
+                f"{ROLLBACK_TAG_SUFFIX} tags."
+            )
+        return f"The old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
 
     def _let_go(self, kept: Sequence[str]) -> tuple[str, ...]:
         """Take the transient names off the daemon. Returns the ones still there.
