@@ -271,6 +271,7 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "ensure_docker": "install-only: provisioning Docker is not something an existing server asks",
     "dir_problem": "install-only preflight",
     "gather": "install-only preflight",
+    "folder_bytes": "install-only preflight: sizes the folder for a resumed install's credit",
     "upstream_get": "plain HTTPS from the app to GitHub; no daemon is involved",
     "monotonic": "a clock",
     "sleep": "a clock",

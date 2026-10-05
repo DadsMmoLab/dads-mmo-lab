@@ -2437,6 +2437,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "keg emptied the folder. A listing that comes back empty records nothing, which at "
         "remove time reads as 'no record of copying it' and LEAVES the file alone"
     ),
+    ("catalog/native.py", "folder_bytes"): (
+        "T203 fix round 3. Adds up the sizes of the files under a server folder for "
+        "preflight's credit to a resumed install; it never writes, never enters a link or a "
+        "Windows reparse point, and an entry it cannot look at counts short (less credit, a "
+        "higher floor). A top folder it cannot list answers None, which credits nothing"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"

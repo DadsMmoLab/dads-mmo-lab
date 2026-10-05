@@ -7274,3 +7274,109 @@ def test_project_container_images_says_none_rather_than_guess(
 ) -> None:
     _answer_with(monkeypatch, {"ps": _volume_proc(0, stdout="tbc-mangosd\n"), "inspect": inspect})
     assert docker.project_container_images("yulon-wow-tbc-1") is None
+
+
+# -- T203: how much build cache Docker holds -------------------------------------
+
+_BUILDX_DU = (
+    "ID                           RECLAIMABLE   SIZE       LAST ACCESSED\n"
+    "c5d2rdjfaz5epontrnlmdyjd8    true          4.096kB*   11 days ago\n"
+    "75k0887kpwwsgg4pelbvwg0r8*   true          2.08GB*    11 days ago\n"
+    "Shared:\t\t4.496GB\n"
+    "Private:\t294.1MB\n"
+    "Reclaimable:\t4.79GB\n"
+    "Total:\t\t4.79GB\n"
+)
+"""`docker buildx du`, from a Linux test box (Docker 29.7.2, buildx v0.36.1, 2026-10-04).
+
+Rows trimmed; the summary lines are verbatim, tabs included. Its `Total` is the
+same 4.79GB `docker system df` gave for Build Cache on the same box that minute.
+"""
+
+_SYSTEM_DF = (
+    '{"Active":"9","Reclaimable":"1.404GB (23%)","Size":"6.08GB","TotalCount":"14",'
+    '"Type":"Images"}\n'
+    '{"Active":"0","Reclaimable":"1.393MB (100%)","Size":"1.393MB","TotalCount":"13",'
+    '"Type":"Containers"}\n'
+    '{"Active":"5","Reclaimable":"467.6MB (5%)","Size":"7.875GB","TotalCount":"7",'
+    '"Type":"Local Volumes"}\n'
+    '{"Active":"0","Reclaimable":"294.1MB","Size":"4.79GB","TotalCount":"20",'
+    '"Type":"Build Cache"}\n'
+)
+"""`docker system df --format '{{json .}}'`, verbatim from the same box and minute."""
+
+
+def _answers(
+    buildx: subprocess.CompletedProcess[str], system_df: subprocess.CompletedProcess[str]
+) -> tuple[list[list[str]], object]:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> object:
+        seen.append(argv[1:])
+        return buildx if argv[1:3] == ["buildx", "du"] else system_df
+
+    return seen, run
+
+
+def test_build_cache_bytes_asks_buildx_du_first_and_reads_its_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`buildx du` sizes only the cache, and only the builder a build would use."""
+    seen, run = _answers(_completed(stdout=_BUILDX_DU), _completed(stdout=""))
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == 4_790_000_000
+    assert seen == [["buildx", "du"]], "system df, which sizes every volume, is not asked"
+
+
+@pytest.mark.parametrize(
+    "buildx",
+    [
+        _completed(returncode=1, stderr="docker: 'buildx' is not a docker command."),
+        _completed(stdout="ID   RECLAIMABLE   SIZE   LAST ACCESSED\n"),
+        _completed(stdout="Total:\t\tlots\n"),
+    ],
+    ids=["no-buildx-plugin", "no-total-line", "unreadable-total"],
+)
+def test_build_cache_bytes_falls_back_to_system_df(
+    buildx: subprocess.CompletedProcess[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen, run = _answers(buildx, _completed(stdout=_SYSTEM_DF))
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == 4_790_000_000
+    assert seen == [["buildx", "du"], ["system", "df", "--format", "{{json .}}"]]
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [("0B", 0), ("12.91GB", 12_910_000_000), ("441.6kB", 441_600), ("1.2TB", 1_200_000_000_000)],
+)
+def test_build_cache_bytes_reads_docker_s_decimal_units(
+    size: str, expected: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, run = _answers(_completed(stdout=f"Total:\t\t{size}\n"), _completed(returncode=1))
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == expected
+    _, run = _answers(
+        _completed(returncode=1), _completed(stdout=f'{{"Size":"{size}","Type":"Build Cache"}}')
+    )
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() == expected
+
+
+@pytest.mark.parametrize(
+    "proc",
+    [
+        _completed(returncode=1, stderr="Cannot connect to the Docker daemon"),
+        _completed(stdout='{"Size":"6.08GB","Type":"Images"}'),
+        _completed(stdout='{"Size":"lots","Type":"Build Cache"}'),
+        _completed(stdout="not json"),
+    ],
+    ids=["daemon-down", "no-build-cache-row", "unreadable-size", "not-json"],
+)
+def test_build_cache_bytes_says_unknown_rather_than_zero(
+    proc: subprocess.CompletedProcess[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None`, never 0: "could not ask" must not read as "nothing to reuse", nor the reverse."""
+    _, run = _answers(_completed(returncode=1, stderr="no buildx"), proc)
+    monkeypatch.setattr(docker.runner, "run", run)
+    assert docker.build_cache_bytes() is None

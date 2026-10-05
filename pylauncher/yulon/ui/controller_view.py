@@ -1597,6 +1597,7 @@ class _Compared:
 
     stale: tuple[Path, ...]
     left_out: tuple[Path, ...]
+    flags_lost: str = ""  # T198: `play_client.flags_lost_warning()` of the Refresh
 
 
 @dataclass(frozen=True)
@@ -1610,10 +1611,11 @@ class _UninstallOutcome:
 def _delete_with_the_server(play: Path, *, game: str, server_dir: Path) -> str:
     """Delete a removed server's ready-to-play client; the sentence that says how it went."""
     try:
-        play_client.delete(play, game=game, server_dir=server_dir, can_try_again=False)
+        lost = play_client.delete(play, game=game, server_dir=server_dir, can_try_again=False)
     except play_client.PlayClientError as exc:
         return str(exc)
-    return f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
+    done = f"Its ready-to-play client at {play} was deleted; your own client keeps all its files."
+    return f"{done} {lost}" if lost else done  # T198: a read-only flag it could not put back
 
 
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
@@ -11098,6 +11100,7 @@ class ControllerView(QWidget):
         source = marker.source_client_dir
 
         def work() -> _Compared:
+            lost: list[play_client.LostFlag] = []
             done = play_client.refresh(
                 play,
                 source,
@@ -11106,8 +11109,10 @@ class ControllerView(QWidget):
                 keep=module_kept_files(server_dir, play, client_dir),
                 exe_patch=self.entry.client.exe_patch,
                 catalog_always=_catalog_always(self.entry.client.config_wtf),
+                flags_lost=lost,
             )
-            return _Compared(done, archives_left_out(server_dir, play, source, client_dir))
+            left_out = archives_left_out(server_dir, play, source, client_dir)
+            return _Compared(done, left_out, play_client.flags_lost_warning(lost))
 
         self._run(work, self._play_client_refreshed, self._play_client_job_failed)
         return True
@@ -11123,6 +11128,9 @@ class ControllerView(QWidget):
             said = "Nothing needed refreshing: it matches your own client."
         if compared.left_out:
             said += " " + left_out_sentence(compared.left_out)
+        if compared.flags_lost:  # T198: on the label and in front of the player
+            said += " " + compared.flags_lost
+            QMessageBox.warning(self._play_parent(), self.entry.name, compared.flags_lost)
         self._say_play(said)
         if self._play_after_refresh:
             self._play_after_refresh = False
@@ -11165,8 +11173,10 @@ class ControllerView(QWidget):
         )
 
     @Slot(object)
-    def _play_client_deleted(self, _result: object) -> None:
+    def _play_client_deleted(self, result: object) -> None:
         self._release_play_client()
+        if isinstance(result, str) and result:  # T198: a read-only flag it could not put back
+            self._play_refused(result)
         setter = self.services.set_play_client_dir
         if setter is None:  # pragma: no cover - the menu is not built without it
             return
