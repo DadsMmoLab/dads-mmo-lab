@@ -10,6 +10,7 @@ rule the test names (ten-ways item 1: one fixture, one rule).
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import sys
@@ -722,3 +723,317 @@ def test_the_walk_does_not_enter_a_folder_no_exception_can_reach(tmp_path: Path)
         assert fingerprint(root) == before
     finally:
         patches.chmod(0o755)
+
+
+# --- T230: a recipe recognised by its bytes is walked only where its stages read -------------
+
+WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-7f12e89e"
+"""mod-playerbots/azerothcore-wotlk at the catalog pin, byte for byte: `apps/docker/Dockerfile`,
+`src/cmake/genrev.cmake` and the root `.dockerignore` (read 2026-10-05, T230 plan §1)."""
+WOTLK_RECIPE_SHA = "e87bc1bd18f94bbf1705b81438b0caf7a1c8c8c8a0330cdaf08511f0f3ae7964"
+GENREV_SHA = "a27f319585605516ed82601d87a7785a135ae3b3d0b725d1bf4f24615b6d342b"
+WOTLK_READS = (".git", "CMakeLists.txt", "apps", "conf", "data", "deps", "modules", "src")
+"""What the stages Yu'lon builds COPY or bind from the context, read by hand (plan §1)."""
+WOTLK_RECIPE = "apps/docker/Dockerfile"
+GENREV = "src/cmake/genrev.cmake"
+MODULE = "modules/mod-playerbots"
+ROOT_COMMIT = "1" * 40
+MODULE_COMMIT = "2" * 40
+OTHER_COMMIT = "3" * 40
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_the_vendored_wotlk_recipe_is_known() -> None:
+    assert _sha256(WOTLK_DATA / "Dockerfile") == WOTLK_RECIPE_SHA, "the vendored copy drifted"
+    assert _sha256(WOTLK_DATA / "genrev.cmake") == GENREV_SHA, "the vendored copy drifted"
+    known = build_context.KNOWN_RECIPES[WOTLK_RECIPE_SHA]
+    assert known.reads == WOTLK_READS
+    assert known.git_reader == (GENREV, GENREV_SHA)
+
+
+def test_the_vendored_wotlk_recipe_is_the_catalog_pins() -> None:
+    """A pin bump fails here until someone reads the new Dockerfile and genrev again (plan §1)."""
+    entry = load_catalog().get("wow-wotlk")
+    assert entry is not None
+    core = next(source for source in entry.emulator.sources if source.dest == ".")
+    assert core.rev is not None
+    assert core.rev.startswith(WOTLK_DATA.name.rsplit("-", 1)[1]), core.rev
+
+
+def _wotlk_server(root: Path) -> Path:
+    """A WotLK server folder with upstream's recipe files and something under every read."""
+    _write(root / WOTLK_RECIPE, (WOTLK_DATA / "Dockerfile").read_bytes())
+    _write(root / ".dockerignore", (WOTLK_DATA / "dockerignore").read_bytes())
+    _write(root / GENREV, (WOTLK_DATA / "genrev.cmake").read_bytes())
+    _write(
+        root / composegen.BUILD_FILE,
+        _rendered("wow-wotlk/native/build.yml.tmpl", {"BUILD_CONTEXT": "."}),
+    )
+    _write(root / composegen.BASE_FILE, "services:\n  ac-worldserver:\n    image: ac:local\n")
+    _write(root / composegen.OVERRIDE_FILE, "services: {}\n")
+    _write(root / "CMakeLists.txt", "project(AzerothCore)\n")
+    _write(root / "apps/docker/entrypoint.sh", "#!/bin/sh\n")
+    _write(root / "conf/dist/config.sh", "CTYPE=Release\n")
+    _write(root / "data/sql/base/db_world/creature.sql", "CREATE TABLE creature;\n")
+    _write(root / "deps/boost/config.h", "#define BOOST 1\n")
+    _write(root / "src/server/game/World.cpp", "void World::Update() {}\n")
+    _write(root / MODULE / "src/Bot.cpp", "void Bot() {}\n")
+    # The root `.git`, detached, as `checkout --detach` leaves it.
+    _write(root / ".git/HEAD", f"{ROOT_COMMIT}\n")
+    _write(root / ".git/objects/pack/pack-1.pack", b"PACK1")
+    _write(root / ".git/index", b"DIRC1")
+    _write(root / ".git/FETCH_HEAD", f"{ROOT_COMMIT}\t\tbranch 'Playerbot'\n")
+    # The module's `.git`, on a branch whose ref is only in packed-refs.
+    _write(root / MODULE / ".git/HEAD", "ref: refs/heads/master\n")
+    _write(root / MODULE / ".git/packed-refs", f"{MODULE_COMMIT} refs/heads/master\n")
+    _write(root / MODULE / ".git/index", b"DIRC2")
+    # Outside every read.
+    _write(root / "sql_scripts/backups/20261005_010000_acore_characters.sql", "-- dump\n")
+    _write(root / "sql_scripts/clones/m/x.sql", "-- clone\n")
+    _write(root / "ale_scripts/x.lua", "-- ale\n")
+    return root
+
+
+def _off_by_a_byte(root: Path, name: str) -> None:
+    target = root / name
+    target.write_bytes(target.read_bytes() + b"\n")
+
+
+@pytest.mark.parametrize(
+    "unread",
+    [
+        "sql_scripts/backups/20261005_010000_acore_characters.sql",
+        "sql_scripts/backups/20261005_020000_before-new-build_acore_world.sql",
+        "sql_scripts/backups/restore-in-progress.json",
+        "sql_scripts/clones/m/x.sql",
+        "ale_scripts/x.lua",
+        composegen.OVERRIDE_FILE,
+        composegen.BASE_FILE,
+        "PreLoad.cmake",
+        "tools/x",
+        "datadump/x",
+        "src-old/x",
+    ],
+)
+def test_on_a_known_recipe_what_no_stage_reads_does_not_count(tmp_path: Path, unread: str) -> None:
+    root = _wotlk_server(tmp_path)
+    rules = parse_dockerignore((root / ".dockerignore").read_text(encoding="utf-8"))
+    # The one rule that leaves it out is the reads: upstream's .dockerignore admits it.
+    assert rules is not None and rules.excludes(unread) is False
+    before = _fp(root)
+    target = root / unread
+    _write(target, (target.read_bytes() if target.exists() else b"") + b"# changed\n")
+    assert _fp(root) == before
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        "CMakeLists.txt",
+        "apps/docker/entrypoint.sh",
+        "conf/dist/config.sh",
+        "data/sql/base/db_world/creature.sql",
+        "deps/boost/config.h",
+        f"{MODULE}/src/Bot.cpp",
+        "src/server/game/World.cpp",
+    ],
+)
+def test_on_a_known_recipe_every_path_a_stage_reads_counts(tmp_path: Path, read: str) -> None:
+    root = _wotlk_server(tmp_path)
+    before = _fp(root)
+    _off_by_a_byte(root, read)
+    assert _fp(root) != before
+
+
+def test_on_a_known_recipe_the_dockerignore_still_applies_inside_what_is_read(
+    tmp_path: Path,
+) -> None:
+    root = _wotlk_server(tmp_path)
+    _off_by_a_byte(root, ".dockerignore")
+    with (root / ".dockerignore").open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write("src/generated\n")
+    _write(root / "src/generated/x.h", "one")
+    _write(root / "src/other/x.h", "one")
+    before = _fp(root)
+    _write(root / "src/generated/x.h", "two")
+    assert _fp(root) == before
+    _write(root / "src/other/x.h", "two")
+    assert _fp(root) != before
+
+
+@pytest.mark.parametrize("unread", ["sql_scripts", "sql_scripts/backups"])
+def test_on_a_known_recipe_an_unreadable_backup_is_not_read(tmp_path: Path, unread: str) -> None:
+    """Mirrors `test_an_unreadable_file_docker_does_not_send_is_not_read`: nothing is listed.
+
+    `sql_scripts` is the case that shows the filter comes before a folder is
+    listed: the backups folder sits one level under a path no stage reads.
+    """
+    root = _wotlk_server(tmp_path)
+    before = _fp(root)
+    folder = root / unread
+    _unreadable(folder)
+    try:
+        assert fingerprint(root) == before
+    finally:
+        folder.chmod(0o755)
+
+
+def test_a_recipe_one_byte_off_walks_the_whole_context_as_before(tmp_path: Path) -> None:
+    root = _wotlk_server(tmp_path)
+    _off_by_a_byte(root, WOTLK_RECIPE)
+    before = _fp(root)
+    _write(root / "sql_scripts/backups/new.sql", "-- dump\n")
+    assert _fp(root) != before
+
+
+@POSIX_MODES
+def test_an_unknown_recipe_gives_the_same_fingerprint_as_before(tmp_path: Path) -> None:
+    """Centurion, TBC, Vanilla and Tortoise keep their kept builds across T230.
+
+    The digest was taken at 5e8da91a (T224, before T230) over this very tree, so
+    a whole-walk stream that changed by one byte fails here. Modes are set
+    explicitly, because they are hashed and a umask would otherwise decide them.
+    """
+    root = tmp_path / "server"
+    _write(root / ".dockerignore", "build\n")
+    _write(root / "Dockerfile", "FROM ubuntu:24.04\nCOPY . /src\n")
+    _write(
+        root / composegen.BUILD_FILE,
+        "services:\n  s:\n    build:\n      context: .\n      dockerfile: Dockerfile\n",
+    )
+    _write(root / "src/main.c", "int main;\n")
+    _write(root / ".git/HEAD", "a" * 40 + "\n")
+    _write(root / ".git/FETCH_HEAD", "x\n")
+    _write(root / "sql_scripts/backups/x.sql", "-- dump\n")
+    _write(root / "build/x.o", "o")
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames:
+            os.chmod(os.path.join(dirpath, name), 0o755)
+        for name in filenames:
+            os.chmod(os.path.join(dirpath, name), 0o644)
+    assert fingerprint(root, refs=["ac-worldserver:local"]) == (
+        "bdf9978b63f95fb5afd126dfa52a2634af5a455e50bd604f87ab1902f8b382b1"
+    )
+
+
+# --- T230: a `.git` folder inside what is read counts as HEAD and its commit ------------------
+
+_HOUSEKEEPING = {
+    "FETCH_HEAD": ("FETCH_HEAD", b"feedface\t\tbranch 'x'\n"),
+    "index": ("index", b"DIRC-refreshed"),
+    "pack": ("objects/pack/pack-2.pack", b"PACK2"),
+    "remote ref": ("refs/remotes/origin/master", f"{OTHER_COMMIT}\n".encode()),
+    "ORIG_HEAD": ("ORIG_HEAD", f"{OTHER_COMMIT}\n".encode()),
+    "logs": ("logs/HEAD", b"0000 1111 fetch\n"),
+    "packed-refs line": ("packed-refs", f"{OTHER_COMMIT} refs/remotes/origin/x\n".encode()),
+}
+
+
+@pytest.mark.parametrize("gitdir", [".git", f"{MODULE}/.git"], ids=["root", "module"])
+@pytest.mark.parametrize("kind", sorted(_HOUSEKEEPING))
+def test_on_a_known_recipe_git_housekeeping_does_not_count(
+    tmp_path: Path, gitdir: str, kind: str
+) -> None:
+    name, data = _HOUSEKEEPING[kind]
+    root = _wotlk_server(tmp_path / "known")
+    before = _fp(root)
+    target = root / gitdir / name
+    _write(target, (target.read_bytes() if target.exists() else b"") + data)
+    assert _fp(root) == before
+    # The neighbour: a byte walk of the same folder would have counted it.
+    whole = _wotlk_server(tmp_path / "whole")
+    _off_by_a_byte(whole, WOTLK_RECIPE)
+    before = _fp(whole)
+    target = whole / gitdir / name
+    _write(target, (target.read_bytes() if target.exists() else b"") + data)
+    assert _fp(whole) != before
+
+
+def test_on_a_known_recipe_head_moving_to_another_commit_counts(tmp_path: Path) -> None:
+    """Same files, same branch name, another commit: only the resolved commit differs."""
+    root = _wotlk_server(tmp_path)
+    _write(root / ".git/HEAD", "ref: refs/heads/Playerbot\n")
+    _write(root / ".git/refs/heads/Playerbot", f"{ROOT_COMMIT}\n")
+    before = _fp(root)
+    _write(root / ".git/refs/heads/Playerbot", f"{OTHER_COMMIT}\n")
+    assert _fp(root) != before
+
+
+def test_on_a_known_recipe_the_branch_name_counts(tmp_path: Path) -> None:
+    """One commit, two branch names: genrev bakes the name into the version line."""
+    root = _wotlk_server(tmp_path)
+    _write(root / ".git/refs/heads/a", f"{ROOT_COMMIT}\n")
+    _write(root / ".git/refs/heads/b", f"{ROOT_COMMIT}\n")
+    _write(root / ".git/HEAD", "ref: refs/heads/a\n")
+    before = _fp(root)
+    _write(root / ".git/HEAD", "ref: refs/heads/b\n")
+    assert _fp(root) != before
+
+
+def test_on_a_known_recipe_a_branch_head_resolves_through_packed_refs(tmp_path: Path) -> None:
+    root = _wotlk_server(tmp_path)
+    before = _fp(root)
+    # Resolved, so housekeeping does not count: the HEAD digest is what is in use here.
+    _write(root / MODULE / ".git/FETCH_HEAD", "x\n")
+    assert _fp(root) == before
+    _write(root / MODULE / ".git/packed-refs", f"{OTHER_COMMIT} refs/heads/master\n")
+    assert _fp(root) != before
+
+
+@pytest.mark.parametrize(
+    "unresolvable",
+    [
+        {"HEAD": "ref: refs/heads/gone\n"},
+        {"HEAD": "ref: refs/heads/main\n", "refs/heads/main": "ref: refs/heads/other\n"},
+        {"commondir": "../..\n"},
+        {"reftable/tables.list": "0x01.ref\n"},
+    ],
+    ids=["missing ref", "symref chain", "worktree commondir", "reftable"],
+)
+def test_a_git_folder_whose_head_cannot_be_read_is_hashed_byte_for_byte(
+    tmp_path: Path, unresolvable: dict[str, str]
+) -> None:
+    root = _wotlk_server(tmp_path)
+    for name, text in unresolvable.items():
+        _write(root / ".git" / name, text)
+    before = _fp(root)
+    _write(root / ".git/FETCH_HEAD", "fetched again\n")
+    assert _fp(root) != before
+
+
+def test_a_changed_git_reader_hashes_git_byte_for_byte(tmp_path: Path) -> None:
+    root = _wotlk_server(tmp_path)
+    _off_by_a_byte(root, GENREV)
+    before = _fp(root)
+    _write(root / "sql_scripts/backups/new.sql", "-- dump\n")
+    assert _fp(root) == before, "the recipe is still known: backups still do not count"
+    _write(root / ".git/FETCH_HEAD", "fetched again\n")
+    assert _fp(root) != before
+
+
+def test_a_missing_git_reader_hashes_git_byte_for_byte(tmp_path: Path) -> None:
+    root = _wotlk_server(tmp_path)
+    (root / GENREV).unlink()
+    before = _fp(root)
+    _write(root / ".git/FETCH_HEAD", "fetched again\n")
+    assert _fp(root) != before
+
+
+def test_a_git_file_inside_what_is_read_counts_by_its_bytes(tmp_path: Path) -> None:
+    """A submodule leaves a `.git` FILE; it is a file like any other, not a git folder."""
+    root = _wotlk_server(tmp_path)
+    _write(root / "modules/mod-ale/.git", "gitdir: ../../.git/modules/mod-ale\n")
+    before = _fp(root)
+    _write(root / "modules/mod-ale/.git", "gitdir: ../../.git/modules/mod-ale-2\n")
+    assert _fp(root) != before
+
+
+def test_an_unknown_recipe_still_hashes_git_byte_for_byte(tmp_path: Path) -> None:
+    root = _wotlk_server(tmp_path)
+    _off_by_a_byte(root, WOTLK_RECIPE)
+    before = _fp(root)
+    _write(root / ".git/FETCH_HEAD", "fetched again\n")
+    assert _fp(root) != before
