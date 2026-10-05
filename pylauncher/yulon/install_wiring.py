@@ -63,6 +63,7 @@ from yulon.catalog.native import (
     update_to_latest_confirmation,
 )
 from yulon.log import configure, get_logger, use_utf8_streams
+from yulon.said import with_details
 from yulon.ui import lines
 
 logger = get_logger(__name__)
@@ -749,8 +750,11 @@ def main(argv: list[str] | None = None) -> int:
         # write is what reaches whatever `sys.stderr` is at this moment —
         # a handler binds its stream when it is constructed, at import, which
         # is before any redirection a caller or a test does.
-        logger.error(f"install failed: {exc}")
-        sys.stderr.write(f"install failed: {exc}\n")
+        # T248: and its Details (`InstallerError.detail`) under it, which a
+        # terminal has no fold for.
+        said = with_details(exc)
+        logger.error(f"install failed: {said}")
+        sys.stderr.write(f"install failed: {said}\n")
         return 1
     except KeyboardInterrupt:
         # Ctrl+C, in either of the two places it can land. Measured on m910q
