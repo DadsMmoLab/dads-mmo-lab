@@ -1022,11 +1022,13 @@ def finished_with_pathfinding(box: Box) -> None:
     box.m.mmaps.finish(0, tiles=MIN_FILES)
     assert box.engine().mmaps_status(box.server_dir).state == "done"
     assert "mmap.enablePathFinding = 1" in world_conf(box)
-    assert (
-        box.server_dir / "data" / "Buildings" / extract.DIR_BIN
-    ).is_file(), (
-        "a finished extraction leaves the marker vmap4extractor refuses to start over (T241)"
-    )
+    data = box.server_dir / "data"
+    assert (data / "Buildings" / extract.DIR_BIN).is_file(), "the marker vmap4extractor refuses"
+    # Old map data a new extraction does not write byte for byte, so a test comparing
+    # `data/` before and after can tell the old data put back from the new data left.
+    (data / "maps" / "0003232.map").write_bytes(b"OLD")
+    for folder in ("Buildings", "vmaps", "dbc"):
+        (data / folder / "from-the-old-run").write_bytes(b"OLD")
 
 
 def test_reextract_over_a_finished_extraction_replaces_buildings_and_vmaps(box: Box) -> None:
@@ -1174,43 +1176,80 @@ def test_a_reextract_after_one_that_crashed_finishes_and_leaves_nothing_aside(bo
     assert (box.server_dir / "data" / "maps" / "0003232.map").read_bytes() == b"MAPS"
 
 
+def visible(files: dict[str, bytes]) -> dict[str, bytes]:
+    """The map data the server reads: everything but what a re-extraction keeps aside."""
+    return {name: body for name, body in files.items() if not name.startswith(".yulon-previous")}
+
+
 def test_map_data_superseded_by_a_press_that_finished_is_dropped_not_put_back(box: Box) -> None:
     """A press whose new map data was in, and that could not delete the old: never put back."""
     finished_with_pathfinding(box)
     flagged(box)
     data = box.server_dir / "data"
-    (data / extract.SUPERSEDED_DIR / "maps").mkdir(parents=True)
-    (data / extract.SUPERSEDED_DIR / "maps" / "0003232.map").write_bytes(b"STALE")
+    (data / extract.PREVIOUS_DIR / "maps").mkdir(parents=True)
+    (data / extract.PREVIOUS_DIR / "maps" / "0003232.map").write_bytes(b"STALE")
+    (data / extract.SUPERSEDED_MARK).mkdir()
     current = data_files(box)
     box.m.tools.fail_tool = "vmap4assembler"
     box.world.running = False
     with pytest.raises(InstallerError):
         list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
-    assert data_files(box) == {
-        name: body for name, body in current.items() if not name.startswith(extract.SUPERSEDED_DIR)
-    }
+    assert data_files(box) == visible(current)
 
 
-def test_old_map_data_that_cannot_be_marked_superseded_is_deleted_outright(
+def test_old_map_data_deleted_part_way_after_the_new_is_in_is_never_put_back(
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex review: left under its kept-aside name, the next press would put it back over the
-    new map data. So a rename that fails is followed by deleting it where it is."""
+    """Codex adversarial review: a deletion of the old data that stops half way (a locked
+    file, a crash) must leave nothing a later press would put back over the new map data."""
     finished_with_pathfinding(box)
     flagged(box)
     data = box.server_dir / "data"
-    real = os.rename
+    real = extract._remove_tree
+    cut: list[Path] = []
 
-    def refuse_the_mark(src: object, dst: object) -> None:
-        if Path(str(dst)).name == extract.SUPERSEDED_DIR:
+    def stops_half_way(path: Path) -> bool:
+        if path == data / extract.PREVIOUS_DIR and not cut:
+            first = sorted(path.iterdir())[0]
+            real(first) if first.is_dir() else first.unlink()
+            cut.append(first)
             raise PermissionError(13, "Permission denied")
-        real(src, dst)  # type: ignore[arg-type]
+        return real(path)
 
-    monkeypatch.setattr(extract.os, "rename", refuse_the_mark)
+    monkeypatch.setattr(extract, "_remove_tree", stops_half_way)
+    (data / "maps" / "0003232.map").write_bytes(b"OLD")  # so old and new data differ
     box.world.running = False
-    list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
-    assert not (data / extract.PREVIOUS_DIR).exists()
-    assert not (data / extract.SUPERSEDED_DIR).exists()
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert cut and any(line.startswith("warning: the map data from before") for line in said)
+    new = visible(data_files(box))
+    assert new["maps/0003232.map"] == b"MAPS"
+    box.m.tools.fail_tool = "vmap4assembler"
+    with pytest.raises(InstallerError):
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert data_files(box) == new, "the press-one map data, with nothing of the half-deleted old"
+
+
+def test_old_map_data_that_cannot_be_marked_superseded_is_kept_and_named(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No mark, no deletion: deleting what may be the only copy is never the fallback."""
+    finished_with_pathfinding(box)
+    flagged(box)
+    data = box.server_dir / "data"
+    old_maps = (data / "maps" / "0003232.map").read_bytes()
+    real = Path.mkdir
+
+    def refuse_the_mark(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == extract.SUPERSEDED_MARK:
+            raise PermissionError(13, "Permission denied")
+        real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "mkdir", refuse_the_mark)
+    box.world.running = False
+    said = list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+    assert (data / extract.PREVIOUS_DIR / "maps" / "0003232.map").read_bytes() == old_maps
+    warning = next(line for line in said if line.startswith("warning: the map data from before"))
+    assert str(data / extract.PREVIOUS_DIR) in warning
 
 
 def test_a_put_back_cut_short_after_the_record_is_finished_by_the_next_press(box: Box) -> None:

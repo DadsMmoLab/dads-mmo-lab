@@ -1943,10 +1943,9 @@ class TrinityCoreInstaller(CmangosInstaller):
         except OSError as exc:
             yield (
                 f"warning: the map data from before this press, in "
-                f"{data_dir / extract.SUPERSEDED_DIR} or {data_dir / extract.PREVIOUS_DIR}, "
-                f"could not be deleted ({exc}). Delete that folder before the next "
-                f"“{REEXTRACT_BUTTON}”: a {extract.PREVIOUS_DIR} folder left there would be put "
-                "back over this map data."
+                f"{data_dir / extract.PREVIOUS_DIR}, could not be deleted ({exc}). It takes "
+                "space but is not used; delete that folder when the server is stopped, or the "
+                f"next “{REEXTRACT_BUTTON}” tries again."
             )
         if background:
             mmaps.discard(server_dir, self.entry, install_id=ident)
@@ -1968,28 +1967,27 @@ class TrinityCoreInstaller(CmangosInstaller):
         )
 
     def _settle_an_earlier_press(self, data_dir: Path) -> Iterator[str]:
-        """What an earlier press left under `data/`: superseded data deleted, kept data put back.
+        """What an earlier press left under `data/`: replaced data deleted, kept data put back.
 
-        `extract.SUPERSEDED_DIR` is old map data a press finished replacing and
-        could not delete; it goes. `extract.PREVIOUS_DIR` is old map data a press
-        set aside and never settled -- it died part way, in the extraction or in
-        putting the data back -- so it is the last whole map data, and it is put
-        back over whatever is in place. Never decided from the record in
-        `data/`: an old record put back first says nothing about the folders
-        still aside (Codex adversarial review, T241).
+        `extract.PREVIOUS_DIR` with `extract.SUPERSEDED_MARK` beside it is old map
+        data a press finished replacing and did not finish deleting; it goes.
+        Without the mark it is old map data a press set aside and never settled
+        -- it died part way, in the extraction or in putting the data back -- so
+        it is the last whole map data, and it is put back over whatever is in
+        place. Never decided from the record in `data/`: an old record put back
+        first says nothing about the folders still aside (Codex adversarial
+        review, T241).
         """
-        superseded = data_dir / extract.SUPERSEDED_DIR
         aside = data_dir / extract.PREVIOUS_DIR
         try:
-            extract.drop_superseded(data_dir)
-            if not os.path.lexists(aside):
+            if extract.drop_superseded(data_dir) or not os.path.lexists(aside):
                 return
             extract.put_back(data_dir)
         except OSError as exc:
             raise InstallerError(
-                f"An earlier “{REEXTRACT_BUTTON}” left map data in {superseded} or {aside}, and "
-                f"it could not be settled ({exc}), so nothing was extracted. Close whatever is "
-                f"using that folder, then press “{REEXTRACT_BUTTON}” again."
+                f"An earlier “{REEXTRACT_BUTTON}” left map data in {aside}, and it could not be "
+                f"settled ({exc}), so nothing was extracted. Close whatever is using that "
+                f"folder, then press “{REEXTRACT_BUTTON}” again."
             ) from exc
         yield (
             f"An earlier “{REEXTRACT_BUTTON}” did not finish; the map data from before it was "

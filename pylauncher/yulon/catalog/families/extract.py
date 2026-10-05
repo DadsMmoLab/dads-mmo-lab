@@ -2128,50 +2128,49 @@ def put_back(data_dir: Path) -> tuple[str, ...]:
     return tuple(names)
 
 
-SUPERSEDED_DIR = ".yulon-previous-superseded"
-"""Under `data/`: `PREVIOUS_DIR` once the map data that replaces it is in, only to be deleted.
+SUPERSEDED_MARK = ".yulon-previous-superseded"
+"""Under `data/`: an empty folder saying the map data in `PREVIOUS_DIR` is replaced, to delete.
 
-The one fact that makes the old data safe to delete, recorded by a rename rather
-than inferred: an old record back in `data/` says nothing about whether every
-folder came back with it (`put_back()` may have been cut short), and a new
-record says nothing about whether the stage after the tools finished. Anything
-still in `PREVIOUS_DIR` is put back; only this name is ever deleted.
+The one fact that makes the old data safe to delete, made in one atomic step
+(`mkdir`) once the new map data is in, and removed only after `PREVIOUS_DIR` is
+gone -- so a deletion stopped half way by a locked file or a crash is finished
+by the next press, never put back over the new data. Never inferred: an old
+record back in `data/` says nothing about whether every folder came back with
+it, and a new record says nothing about whether the stage after the tools
+finished (Codex reviews, T241). Without the mark, whatever is in `PREVIOUS_DIR`
+is put back.
 """
 
 
 def supersede(data_dir: Path) -> None:
-    """The new map data is in: rename `PREVIOUS_DIR` to `SUPERSEDED_DIR`, then delete it.
-
-    A rename that fails is followed by deleting `PREVIOUS_DIR` where it is (Codex
-    review): left under that name, the next re-extraction would put it back over
-    the new map data.
+    """The new map data is in: mark `PREVIOUS_DIR` replaced, then delete it and the mark.
 
     Raises:
-        OSError: it could not be deleted. Renamed, the next re-extraction
-            deletes it; not renamed, it is still `PREVIOUS_DIR`, and the caller
-            has to say so.
+        OSError: the mark could not be made -- nothing was deleted, and the
+            caller has to say that `PREVIOUS_DIR` is still there -- or the
+            deletion stopped part way, which the next `drop_superseded()`
+            finishes.
     """
-    aside = data_dir / PREVIOUS_DIR
-    gone = data_dir / SUPERSEDED_DIR
-    _remove_tree(gone)
-    try:
-        os.rename(aside, gone)
-    except FileNotFoundError:
+    if not os.path.lexists(data_dir / PREVIOUS_DIR):
         return
-    except OSError as exc:
-        logger.warning(f"{aside} could not be renamed to {gone} ({exc}); deleting it where it is")
-        _remove_tree(aside)
-        return
-    _remove_tree(gone)
+    (data_dir / SUPERSEDED_MARK).mkdir(exist_ok=True)
+    drop_superseded(data_dir)
 
 
 def drop_superseded(data_dir: Path) -> bool:
-    """Delete what an earlier press superseded and could not delete; False when there was none.
+    """Delete a `PREVIOUS_DIR` that `SUPERSEDED_MARK` says is replaced; False when unmarked.
+
+    The mark goes last, so a deletion cut short is still marked.
 
     Raises:
         OSError: it would not go.
     """
-    return _remove_tree(data_dir / SUPERSEDED_DIR)
+    mark = data_dir / SUPERSEDED_MARK
+    if not os.path.lexists(mark):
+        return False
+    _remove_tree(data_dir / PREVIOUS_DIR)
+    mark.rmdir()
+    return True
 
 
 # ------------------------------------- T179: the tree's own DBCs, and the start check
