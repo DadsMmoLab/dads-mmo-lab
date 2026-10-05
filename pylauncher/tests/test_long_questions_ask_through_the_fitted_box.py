@@ -40,6 +40,9 @@ from yulon.ui.widgets.job import run_inline
 
 SB = QMessageBox.StandardButton
 
+QT_QUESTION = QMessageBox.question
+"""Qt's own static `question()`, read at import: before any test or guard patched it."""
+
 
 @pytest.fixture
 def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
@@ -321,8 +324,153 @@ def test_the_suites_guard_never_hands_a_box_to_qts_own_question(
 ) -> None:
     """Codex (adversarial): a test that put the real static `question()` back must not have the
     guard open a real modal through it; the box is answered No instead."""
-    from tests import conftest
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
 
-    (real,) = conftest._REAL_QUESTION
-    monkeypatch.setattr(QMessageBox, "question", real)
-    assert ask_yes_no(None, "t", "q") is False
+    monkeypatch.setattr(QMessageBox, "question", QT_QUESTION)
+    opened: list[str] = []
+
+    def watchdog() -> None:  # a real modal would otherwise hold this test for ever
+        box = QApplication.activeModalWidget()
+        if box is not None:
+            opened.append(box.windowTitle())
+            box.close()
+
+    # A timer object, stopped below: a pending single shot outlives this test and
+    # closes the next test's open box (it emptied test_message_box_buttons_fit's).
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(watchdog)
+    timer.start(1500)
+    try:
+        assert ask_yes_no(None, "Real modal?", "q") is False
+    finally:
+        timer.stop()
+    assert opened == [], "the guard opened a real modal through Qt's own question()"
+
+
+def test_the_suites_guard_holds_whatever_order_the_tests_run_in() -> None:
+    """Cold review: test A patches `question`; B runs under the guard; C puts Qt's own
+    `question()` back and asks. On the guard that took its own leftover fake for Qt's, C opened
+    a real modal. Run in a child pytest, in that order (`tests/guard_order_probe.py` says why)."""
+    import os
+    import subprocess
+    import sys
+
+    pylauncher = Path(__file__).resolve().parents[1]
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:randomly",
+            "-p",
+            "no:xdist",
+            "-p",
+            "no:cacheprovider",
+            "tests/guard_order_probe.py",
+        ],
+        cwd=pylauncher,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0 and "3 passed" in done.stdout, done.stdout + done.stderr
+
+
+LONG = "\n\n".join(["The server is rebuilt from its sources. " * 30] * 6)
+"""Six long paragraphs: taller than the suite's 800×800 offscreen screen."""
+
+
+def _set_icon_pixmap(box: QMessageBox) -> None:
+    from PySide6.QtGui import QPixmap
+
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.red)
+    box.setIconPixmap(pixmap)
+
+
+def _set_check_box(box: QMessageBox) -> None:
+    from PySide6.QtWidgets import QCheckBox
+
+    box.setCheckBox(QCheckBox("Do not ask again"))
+
+
+LATER_SETTERS = {
+    "informative-text": lambda box: box.setInformativeText("And one more thing."),
+    "icon": lambda box: box.setIcon(QMessageBox.Icon.Warning),
+    "icon-pixmap": _set_icon_pixmap,
+    "check-box": _set_check_box,
+    "detailed-text": lambda box: box.setDetailedText("Details."),
+    "text": lambda box: box.setText(LONG.replace("server", "world")),
+}
+
+
+@pytest.mark.parametrize("change", sorted(LATER_SETTERS))
+def test_a_later_setter_keeps_the_question_scrolled_and_shown(qapp: object, change: str) -> None:
+    """Cold review: Qt lays its box out again on these setters (`setupLayout()`), which dropped
+    the scroll area while Qt's own label stayed hidden -- the question vanished. The question is
+    put back in its place, still scrolled, still the box's own text, and the box still fits."""
+    from PySide6.QtWidgets import QLabel, QScrollArea
+
+    from tests.conftest import process_events
+    from yulon.ui.message_box import QUESTION_SCROLL
+    from yulon.ui.theme import QUESTION_PARAGRAPH
+
+    box = FittedMessageBox(QMessageBox.Icon.Question, "t", LONG, SB.Yes | SB.No)
+    try:
+        LATER_SETTERS[change](box)
+        box.show()
+        process_events()
+        scroll = box.findChild(QScrollArea, QUESTION_SCROLL)
+        assert scroll is not None and scroll.isVisible()
+        assert box.layout().indexOf(scroll) >= 0, "the question is no longer in the box's layout"
+        own = box.findChild(QLabel, "qt_msgbox_label")
+        assert own is not None and not own.isVisible()
+        shown = [p for p in box.findChildren(QLabel, QUESTION_PARAGRAPH) if p.isVisibleTo(box)]
+        assert " ".join(p.text() for p in shown) == " ".join(box.text().split("\n\n"))
+        room = box.screen().availableGeometry()
+        assert room.contains(box.frameGeometry()), (box.frameGeometry(), room)
+    finally:
+        box.hide()
+        box.deleteLater()
+
+
+def test_enter_on_a_paragraph_presses_no_button(qapp: object) -> None:
+    """Cold review: the install-folder question's default is Yes, and Enter on a focused
+    paragraph pressed it. A paragraph is a place to read; Enter there does nothing."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QLabel
+
+    from tests.conftest import process_events
+    from yulon.ui.theme import QUESTION_PARAGRAPH
+
+    box = FittedMessageBox(QMessageBox.Icon.Question, "t", LONG, SB.Yes | SB.No)
+    box.setDefaultButton(SB.Yes)
+    clicked: list[object] = []
+    box.buttonClicked.connect(clicked.append)
+    try:
+        box.show()
+        process_events()
+        paragraph = box.findChildren(QLabel, QUESTION_PARAGRAPH)[1]
+        paragraph.setFocus()
+        process_events()
+        assert paragraph.hasFocus()
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            QTest.keyClick(paragraph, key)
+            process_events()
+        assert clicked == [] and box.isVisible(), "Enter on a paragraph pressed a button"
+        # Control: Enter where it belongs still presses.
+        yes = box.button(SB.Yes)
+        assert yes is not None
+        yes.setFocus()
+        QTest.keyClick(yes, Qt.Key.Key_Return)
+        process_events()
+        assert clicked == [yes]
+    finally:
+        box.hide()
+        box.deleteLater()

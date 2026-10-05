@@ -60,9 +60,11 @@ from __future__ import annotations
 
 from typing import cast
 
-from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtCore import QEvent, QObject, QRect, Qt
+from PySide6.QtGui import QImage, QKeyEvent, QPixmap
 from PySide6.QtGui import Qt as GuiQt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QGridLayout,
     QLabel,
@@ -108,18 +110,62 @@ class FittedMessageBox(QMessageBox):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[call-overload]
         self._paragraphs: list[QLabel] = []
+        self._scroll: QScrollArea | None = None
+        self._scrolled_text: str | None = None
         # Now, not at the first show: a widget added to a box that is already
         # being shown is shown a turn of the event loop later, and `QMessageBox`
         # sizes itself without a widget that is not shown yet.
-        # The text is the constructor's: every caller passes it there, and nothing
-        # here follows a later `setText()`.
-        self._scroll: QScrollArea | None = self._question_scroll()
+        self._place_question()
 
     def event(self, event: QEvent) -> bool:
         if event.type() in _REFIT_ON:
             fit_buttons_to_labels(self)
             self._fit_question_to_screen()
         return bool(super().event(event))
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt's name
+        """Enter on a paragraph does nothing: it is a place to read, not a press.
+
+        `QDialog` hands Enter to the default button wherever the focus is, and the
+        install-folder question's default is Yes (cold review).
+        """
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and watched in self._paragraphs
+            and isinstance(event, QKeyEvent)
+            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        ):
+            return True
+        return bool(super().eventFilter(watched, event))
+
+    # Qt lays the box out again (`setupLayout()`) on each of these, from a fresh
+    # grid that holds its own label and not the scroll area: the question would
+    # vanish, Qt's label staying hidden (cold review). So the question is put
+    # back in its place after each, and made again after a new text.
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt's name
+        super().setText(text)
+        self._place_question()
+
+    def setIcon(self, icon: QMessageBox.Icon) -> None:  # noqa: N802 - Qt's name
+        super().setIcon(icon)
+        self._place_question()
+
+    def setIconPixmap(self, pixmap: QPixmap | QImage) -> None:  # noqa: N802 - Qt's name
+        super().setIconPixmap(pixmap)
+        self._place_question()
+
+    def setInformativeText(self, text: str) -> None:  # noqa: N802 - Qt's name
+        super().setInformativeText(text)
+        self._place_question()
+
+    def setDetailedText(self, text: str) -> None:  # noqa: N802 - Qt's name
+        super().setDetailedText(text)
+        self._place_question()
+
+    def setCheckBox(self, cb: QCheckBox) -> None:  # noqa: N802 - Qt's name
+        super().setCheckBox(cb)
+        self._place_question()
 
     # -- the question, in a scroll area --------------------------------------
 
@@ -153,8 +199,12 @@ class FittedMessageBox(QMessageBox):
                 policy = Qt.FocusPolicy(policy & ~Qt.FocusPolicy.TabFocus)
             paragraph.setFocusPolicy(policy)
 
-    def _question_scroll(self) -> QScrollArea | None:
-        """A scroll area holding the question, put in place of Qt's label; None if it cannot be."""
+    def _place_question(self) -> None:
+        """Show the question in a scroll area in Qt's label's cell, hiding Qt's label.
+
+        Made again when the text is not the one it shows; put back in the grid
+        when Qt has laid the box out without it.
+        """
         label = self.findChild(QLabel, _QT_MESSAGE_LABEL)
         grid = self.layout()
         if label is None or not isinstance(grid, QGridLayout) or grid.indexOf(label) < 0:
@@ -166,9 +216,29 @@ class FittedMessageBox(QMessageBox):
                 f"T243: this Qt's QMessageBox has no {_QT_MESSAGE_LABEL} in a grid layout; "
                 f"the question {self.windowTitle()!r} is shown unscrolled"
             )
-            return None
-        index = grid.indexOf(label)
-        row, column, rows, columns = cast("tuple[int, int, int, int]", grid.getItemPosition(index))
+            return
+        if self._scroll is not None and self._scrolled_text != self.text():
+            grid.removeWidget(self._scroll)
+            self._scroll.hide()
+            self._scroll.setParent(None)  # out of `findChildren()` at once, not at deletion
+            self._scroll.deleteLater()
+            self._scroll, self._paragraphs = None, []
+        if self._scroll is None:
+            self._scroll = self._question_scroll(label)
+            self._scrolled_text = self.text()
+            if self._scroll is None:
+                label.show()
+                return
+        if grid.indexOf(self._scroll) < 0:
+            index = grid.indexOf(label)
+            row, column, rows, columns = cast(
+                "tuple[int, int, int, int]", grid.getItemPosition(index)
+            )
+            grid.addWidget(self._scroll, row, column, rows, columns)
+        label.hide()
+
+    def _question_scroll(self, label: QLabel) -> QScrollArea | None:
+        """A scroll area holding the question, a label per paragraph; None for no text."""
         text = self.text()
         rich = self.textFormat() == Qt.TextFormat.RichText or (
             self.textFormat() == Qt.TextFormat.AutoText and GuiQt.mightBeRichText(text)
@@ -188,6 +258,7 @@ class FittedMessageBox(QMessageBox):
             paragraph.setWordWrap(True)
             paragraph.setTextInteractionFlags(flags)
             paragraph.setOpenExternalLinks(label.openExternalLinks())
+            paragraph.installEventFilter(self)
             lines.addWidget(paragraph)
             self._paragraphs.append(paragraph)
         lines.addStretch(1)
@@ -198,8 +269,6 @@ class FittedMessageBox(QMessageBox):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setWidget(body)
-        label.hide()
-        grid.addWidget(scroll, row, column, rows, columns)
         return scroll
 
     def _room(self) -> QRect:

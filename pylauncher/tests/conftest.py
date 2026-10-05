@@ -863,16 +863,28 @@ def _no_modal_dialogs() -> Iterator[None]:
         yield
         return
     with pytest.MonkeyPatch.context() as guard:
-        _REAL_QUESTION.append(QMessageBox.question)
         _disarm_modals(guard, QMessageBox)
-        try:
-            yield
-        finally:
-            _REAL_QUESTION.clear()
+        yield
 
 
-_REAL_QUESTION: list[Any] = []
-"""Qt's own static `question()`, held while the guard is up (`_answer_like_the_static_question`)."""
+def _qts_own_question() -> object:
+    """Qt's own static `QMessageBox.question`, read once, when this module is imported.
+
+    Before any test or this guard has patched it -- and it has to be then. A test's
+    `monkeypatch` is set up before the guard (`_no_forced_exit` asks for it first),
+    so it is undone after the guard has put Qt's back, and leaves the guard's fake
+    on `QMessageBox` for good. Read at each test's start, "Qt's own" was that fake
+    from the second test on (cold review, T243: `tests/guard_order_probe.py`).
+    """
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except ImportError:  # pragma: no cover - Qt-less environments skip UI tests anyway
+        return None
+    return QMessageBox.question
+
+
+QT_QUESTION = _qts_own_question()
+"""Qt's own static `question()`; see `_qts_own_question`."""
 
 
 def _disarm_modals(monkeypatch: pytest.MonkeyPatch, QMessageBox: Any) -> None:  # noqa: N803
@@ -929,7 +941,7 @@ def _answer_like_the_static_question(box: Any) -> object:
     from PySide6.QtWidgets import QMessageBox
 
     yes_no = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-    if box.standardButtons() != yes_no or QMessageBox.question in _REAL_QUESTION:
+    if box.standardButtons() != yes_no or QMessageBox.question is QT_QUESTION:
         # Not the static call's shape, or a test has put Qt's own `question()` back:
         # handing the box to that would open a real modal, the one thing this guards.
         return QMessageBox.StandardButton.No
