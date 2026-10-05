@@ -38,6 +38,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - On WotLK, **Update the server to latest…** applies the new code's database updates, so the new build starts.
 - When a failed update cannot put the old build back, the message says honestly which build the server is on.
 - A rebuild waits for a slow Docker instead of throwing away the build it just finished.
+- On WotLK, a kept build is no longer thrown away by a backup, a module update check or a settings save.
 - **Stop** during a download or build now ends it at once instead of letting it run on.
 - When **Stop** cannot put everything back, the log says what state the server is in and what to press.
 - **Restore** on the Maintenance tab works with the server stopped, and leaves it stopped.
