@@ -411,7 +411,7 @@ def test_installer_for_refuses_an_entry_with_no_native_block(
     assert no_native.install.native is None
     with pytest.raises(InstallerError, match="cannot be installed yet") as caught:
         installer_for(no_native)
-    assert "no `install.native` section" in str(caught.value)
+    assert "no native install section" in str(caught.value)
     assert reached == [], "the refusal was deferred to family_for() instead of raised here"
 
 
@@ -910,7 +910,7 @@ def test_the_refusal_gives_the_reason_the_engine_actually_refuses_on(tmp_path: P
     (checkout / ".git").mkdir(parents=True)
     (checkout / "src").mkdir()
     git_note = cancelled_install_message(WOTLK, checkout)
-    assert "git fetch" in git_note and "git reset --hard" in git_note, git_note
+    assert "reset your work to a fresh copy of the repository" in git_note, git_note
     assert "no record here of an install this app made" in git_note, git_note
 
 

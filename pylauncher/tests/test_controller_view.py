@@ -417,7 +417,10 @@ def test_a_refused_stop_is_readable_on_screen_not_just_emitted(
     assert "do not belong to the install" in shown, f"the refusal was not shown: {shown!r}"
     assert "somebody-elses-install" in shown, "did not name the project that does own them"
     assert "COMPOSE_PROJECT_NAME=somebody-elses-install" in shown, "did not name the remedy"
-    assert failures and failures[0] == shown
+    # T248: the command that lists the projects is under Details, and the log keeps both.
+    assert "docker compose ls" not in shown
+    assert "docker compose ls" in view.problem_details.text()
+    assert failures and failures[0] == f"{shown}\n{view.problem_details.text()}"
     assert ["docker", "compose", "stop"] not in ps.calls
     assert not any(c[:2] == ["docker", "stop"] for c in ps.calls), "stopped a foreign server"
 
@@ -1902,6 +1905,224 @@ def test_a_repair_whose_import_died_says_so_with_its_last_words_under_details(
     view._say_under_the_presses("the next press's line")
 
     assert view.danger_details.isHidden(), "old Details stood under a new line"
+
+
+@pytest.mark.parametrize(
+    ("after", "in_words"),
+    [
+        (None, "The database import ran, but the databases still read as absent"),
+        (
+            docker.ImportState("populated", "400 rows, but acore_world holds no tables"),
+            "The database import ran and wrote some rows, but did not finish",
+        ),
+    ],
+)
+def test_a_repair_that_did_not_finish_says_so_in_words_and_puts_the_command_under_details(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after: docker.ImportState | None,
+    in_words: str,
+) -> None:
+    """T248: no `docker compose logs ac-db-import` on the line; it is under Details instead."""
+    from tests.support_player_text import command_faults
+    from tests.test_docker import SPEC, UNIMPORTED, _probe, _repair_doubles
+
+    _repair_doubles(
+        monkeypatch, [], running={SPEC.db}, import_exit=1, import_output=lambda: ("ERROR 1698",)
+    )
+    probe = _probe(UNIMPORTED) if after is None else _probe(UNIMPORTED, after)
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.repair_import(SPEC, tmp_path, probe)
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._repair_failed(raised.value)
+
+    said = view.danger_label.text()
+    assert said.startswith(in_words), said
+    assert command_faults(said) == [], said
+    assert "under Details" in said, "the line does not say where the rest is"
+    details = view.danger_details.text()
+    assert "ERROR 1698" in details
+    assert f"docker compose logs {SPEC.import_service}" in details, details
+    assert str(tmp_path) in details, "the command does not say where to run it"
+
+
+def test_a_repair_whose_database_never_came_up_names_no_command_on_the_line(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T248: the database half of Repair; its log command goes under Details too."""
+    from tests.support_player_text import command_faults
+    from tests.test_docker import SPEC, UNIMPORTED, _probe, _repair_doubles
+
+    _repair_doubles(monkeypatch, [], running=set(), health="starting")
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED), db_timeout=0)
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._repair_failed(raised.value)
+
+    said = view.danger_label.text()
+    assert f"{SPEC.db} did not report healthy" in said, said
+    assert command_faults(said) == [], said
+    assert f"docker compose logs {SPEC.service_for(SPEC.db)}" in view.danger_details.text()
+
+
+def test_a_refused_uninstall_puts_the_command_under_details_and_in_the_log(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T248 review: Uninstall reaches `remove_staged()`; its refusals keep their command below."""
+    from tests.support_player_text import command_faults
+    from tests.test_docker import SPEC
+
+    refusal = docker._stranger_refusal(((SPEC.world, "install-b"),), "ours", tmp_path)
+    view = _uninstall_view(ps, tmp_path, _FakeUninstall(tmp_path))
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._uninstall_failed(refusal)
+
+    said = view.uninstall_label.text()
+    assert "do not belong to the install" in said
+    assert command_faults(said) == [], said
+    assert "docker compose ls" in view.uninstall_details.text()
+    assert failures and "docker compose ls" in failures[0], "the log lost the Details"
+
+    view.uninstall_label.setText("Working out what would be removed…")
+
+    assert view.uninstall_details.isHidden(), "old Details stood under a new line"
+
+
+def test_a_stop_before_a_removal_that_was_refused_keeps_its_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T248 review: Remove from Yu'lon stops first; its refusal's command goes under Details."""
+    from tests.test_docker import SPEC
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    refusal = docker._stranger_refusal(((SPEC.world, "install-b"),), "ours", tmp_path)
+
+    def refuse() -> bool:
+        raise refusal
+
+    view.services.controller.stop = refuse  # type: ignore[method-assign]
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.stop_for_removal()
+
+    assert "docker compose ls" not in view.problem_label.text()
+    assert "docker compose ls" in view.problem_details.text()
+    assert failures and "docker compose ls" in failures[0]
+
+
+def test_a_stop_docker_would_not_do_says_so_in_words_with_dockers_words_below(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T248 review: `docker stop X failed: …` reached the Stop line raw."""
+    from tests.support_player_text import command_faults
+
+    def refused(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", "Error response from daemon: tried")
+
+    monkeypatch.setattr(docker, "_docker", refused)
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker._run_docker_stop("ac-worldserver")
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._stop_failed(raised.value)
+
+    said = view.problem_label.text()
+    assert said == controller_view_module.STOP_FAILED_BROKE
+    assert command_faults(said) == [], said
+    assert "docker stop ac-worldserver" in view.problem_details.text()
+    assert "Error response from daemon: tried" in view.problem_details.text()
+
+
+def test_a_view_closed_before_its_scroll_timer_fires_is_not_called_back(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T248 CI: `_say_under_the_presses()` scrolls on the next loop turn; a view gone by then
+    must not be called. The timer had no context object, so it called into a deleted view
+    and crashed the next test's Qt wait on py3.11."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    called: list[object] = []
+    monkeypatch.setattr(
+        ControllerView, "_bring_the_danger_label_on_screen", lambda self: called.append(self)
+    )
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._say_under_the_presses("a line said just before the view closed")
+    view.close()
+    view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    process_events(50)
+
+    assert called == [], "the scroll was asked of a view that is gone"
+
+
+def test_a_start_whose_containers_did_not_stay_up_puts_the_log_command_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T248: through the real `start_staged()`; compose said yes and the world is not up."""
+    from tests.support_player_text import command_faults
+    from tests.test_docker import SPEC
+
+    monkeypatch.setattr(docker, "_run", lambda *_a, **_k: None)
+    monkeypatch.setattr(docker, "_status_safe", lambda **_k: [SPEC.db, SPEC.auth])
+    with pytest.raises(docker.DockerRefusal) as raised:
+        docker.start_staged(SPEC, tmp_path)
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._start_failed(raised.value)
+
+    said = view.problem_label.text()
+    assert f"{SPEC.world} is not running" in said, said
+    assert command_faults(said) == [], said
+    command = f"docker compose logs {SPEC.service_for(SPEC.world)}"
+    assert command in view.problem_details.text()
+    assert failures and command in failures[0], "the log lost the Details"
+
+
+def test_a_stop_refused_over_another_project_lists_the_command_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T248: "Docker can list each running project" on the line, `docker compose ls` below."""
+    from tests.support_player_text import command_faults
+    from tests.test_docker import SPEC
+
+    refusal = docker._stranger_refusal(((SPEC.world, "install-b"),), "ours", tmp_path)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._stop_failed(refusal)
+
+    said = view.problem_label.text()
+    assert "Docker can list each running project" in said, said
+    assert command_faults(said) == [], said
+    assert "docker compose ls" in view.problem_details.text()
+
+
+def test_a_remove_that_cannot_be_confirmed_names_its_command_only_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T248: the Remove line says what to look at in words; `docker ps -a` is under Details."""
+    from tests.support_player_text import command_faults
+
+    refusal = docker.DockerRefusal("the removal cannot be confirmed.", detail="docker ps -a")
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._remove_failed(refusal)
+
+    assert command_faults(view.danger_label.text()) == []
+    assert view.danger_details.text() == "docker ps -a"
 
 
 def test_the_refusal_that_makes_this_not_a_button_that_always_works(
@@ -6527,8 +6748,10 @@ class _FakeUninstall:
         report: object | None = None,
         while_running: object | None = None,
         forget_error: OSError | None = None,
+        crash: Exception | None = None,
     ) -> None:
         self.server_dir = server_dir
+        self.crash = crash
         self.refusal = refusal
         self.failure = failure
         self.plans = 0
@@ -6570,8 +6793,10 @@ class _FakeUninstall:
         self.runs.append(keep_characters)
         if self._while_running is not None:
             self.busy_seen.append(self._while_running())
+        if self.crash is not None:
+            raise self.crash
         if self.failure:
-            raise purge.PurgeError(self.failure)
+            raise purge.PurgeRefusal(self.failure)
         return self._report or purge.PurgeReport(
             removed_containers=True,
             removed_volumes=("yulon-wow-wotlk-deadbeef_client-data",),
@@ -6837,6 +7062,33 @@ def test_an_uninstall_that_failed_says_so_and_signals_nothing(
     assert seen == []
     assert "could not be deleted" in view.uninstall_label.text()
     assert failures and "could not be deleted" in failures[0]
+
+
+def test_an_uninstall_docker_broke_says_so_in_words_with_dockers_words_below(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T248 review: purge's volume step raised Docker's own line, and it reached the line raw.
+
+    Through the press: plan shown, Uninstall pressed, the job fails.
+    """
+    from tests.support_player_text import command_faults
+
+    raw = (
+        "docker volume inspect yulon-wow-wotlk-deadbeef_db-data exited 1: Error response from "
+        "daemon: get yulon-wow-wotlk-deadbeef_db-data: no such volume"
+    )
+    fake = _FakeUninstall(tmp_path, crash=docker.DockerCommandError(raw))
+    view = _uninstall_view(ps, tmp_path, fake)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+
+    said = view.uninstall_label.text()
+    assert said == controller_view_module.UNINSTALL_FAILED_BROKE
+    assert command_faults(said) == [], said
+    assert view.uninstall_details.text_box.toPlainText() == raw
+    assert failures and raw in failures[0], "the log lost Docker's words"
 
 
 def test_a_failed_uninstall_makes_the_user_ask_for_a_fresh_plan(
@@ -7133,7 +7385,7 @@ def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
     def refuse() -> bool:
-        raise docker.DockerCommandError("Docker would not say which project owns ac-worldserver")
+        raise docker.DockerRefusal("Docker would not say which project owns ac-worldserver")
 
     view.services.controller.stop = refuse  # type: ignore[method-assign]
     seen: list[tuple[object, ...]] = []

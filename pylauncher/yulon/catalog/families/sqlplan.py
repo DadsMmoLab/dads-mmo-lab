@@ -486,7 +486,7 @@ def _check_plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> None:
         for value in values:
             if value not in schemas:
                 raise InstallerError(
-                    f"the SQL plan's `{field}` names {value!r}, which is not one of this "
+                    f"the SQL plan's {field} setting names {value!r}, which is not one of this "
                     f"game's databases ({', '.join(schemas)}). {_CATALOG_ERROR}"
                 )
 
@@ -865,7 +865,8 @@ def create_schemas(
     if not _IDENTIFIER.fullmatch(charset):
         raise InstallerError(
             f"the database charset {charset!r} is not a plain identifier, and it is written "
-            f"into `CREATE DATABASE ... CHARACTER SET` with nothing around it. {_CATALOG_ERROR}"
+            f"into the statement that creates the databases with nothing around it. "
+            f"{_CATALOG_ERROR}"
         )
     names = [schemas[name] for name in plan.create]
     lines = [f"CREATE DATABASE IF NOT EXISTS `{name}` CHARACTER SET {charset};" for name in names]

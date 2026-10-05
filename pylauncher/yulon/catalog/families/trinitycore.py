@@ -315,8 +315,8 @@ class TrinityCoreInstaller(CmangosInstaller):
         data = self._native().trinitycore
         if data is None:
             raise InstallerError(
-                f"{self.entry.name} says its family is trinitycore but carries no `trinitycore` "
-                f"block. {CATALOG_ERROR_TAIL}"
+                f"{self.entry.name} says its family is trinitycore but carries no trinitycore "
+                f"settings. {CATALOG_ERROR_TAIL}"
             )
         return data
 
