@@ -50,8 +50,14 @@ YULON = PYLAUNCHER / "yulon"
 LABEL_MODULES: tuple[Path, ...] = (
     *sorted((YULON / "ui").rglob("*.py")),
     YULON / "docker_advice.py",
+    YULON / "networking.py",
 )
-"""Where player-facing label constants live."""
+"""Where player-facing label constants live. networking.py is here because its warnings
+and refusals are constants the Networking tab shows through `NetworkPlan.warnings`
+(T248 live check: `UFW_ENABLE_WITHHELD` reached the Warnings line unread)."""
+
+SHOWN_LISTS = frozenset({"warnings", "refusals", "notes", "manual_steps"})
+"""Lists whose items a tab shows line by line: `warnings.append(UFW_ENABLE_WITHHELD)`."""
 
 NOT_LABELS: frozenset[str] = frozenset({"yulon/ui/theme.py"})
 """Modules under `yulon/ui` whose capital-named strings are not words: Qt style sheets."""
@@ -198,6 +204,52 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         )
         for owner, commands in _FIREWALLD.items()
     },
+    ("yulon/networking.py", "UFW_ENABLE_WITHHELD"): (
+        f"allowing SSH in ufw before turning it on: {_TYPED}",
+        frozenset({"sudo ufw allow <your ssh port>/tcp", "sudo ufw enable"}),
+    ),
+    ("yulon/networking.py", "_guard_the_way_back_in"): (
+        f"UFW_ENABLE_WITHHELD and firewalld_start_withheld, on the Warnings line: {_TYPED}",
+        frozenset(
+            _FIREWALLD["firewalld_start_withheld"]
+            | {"sudo ufw allow <your ssh port>/tcp", "sudo ufw enable"}
+        ),
+    ),
+    ("yulon/networking.py", "plan"): (
+        f"settling firewalld's zones by hand, on the Warnings line: {_TYPED}",
+        frozenset(
+            {
+                "sudo firewall-cmd --permanent --zone=<zone> --change-interface=<interface>",
+                "sudo firewall-cmd --set-default-zone=<zone>",
+                "sudo firewall-offline-cmd --list-all-zones",
+                "sudo firewall-cmd --permanent --get-zone-of-interface=<interface>",
+                "sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp",
+            }
+        ),
+    ),
+    **{
+        ("yulon/networking.py", name): (
+            f"taking a game port back out of a zone it was written to: {_TYPED}",
+            frozenset(commands),
+        )
+        for name, commands in (
+            (
+                "_TAKE_BACK",
+                (
+                    "sudo firewall-cmd --permanent --zone=<zone> --remove-port=<port>/tcp",
+                    "sudo firewall-cmd --reload",
+                ),
+            ),
+            (
+                "_TAKE_BACK_OFFLINE",
+                ("sudo firewall-offline-cmd --zone=<zone> --remove-port=<port>/tcp",),
+            ),
+        )
+    },
+    ("yulon/controller_wow_wotlk/maintenance.py", "plan_restore"): (
+        f"unpacking a compressed backup so it can be restored: {_TYPED}",
+        frozenset({"gunzip -k {…}"}),
+    ),
     ("yulon/networking.py", "_zone_breadth_note"): (
         f"taking a game port back out of a zone it was written to: {_TYPED}",
         frozenset(
@@ -248,7 +300,7 @@ lines listed: a new command in the same function is not excepted
 def owner_of(line: Line) -> tuple[str, str]:
     """The exception key a line belongs to: its module and its function or constant."""
     what = line.what
-    for marker in ("() in ", "yield in "):
+    for marker in ("() in ", "yield in ", *(f"{name} in " for name in sorted(SHOWN_LISTS))):
         if marker in what:
             return line.where, what.split(marker, 1)[1]
     return line.where, what.removesuffix("()")
@@ -577,7 +629,12 @@ def _label_constants(module: _Module) -> Iterator[Line]:
         if isinstance(value, ast.Dict):
             values = list(value.values)
         elif isinstance(value, ast.Tuple | ast.List):
-            values = list(value.elts)
+            # An argv (`("firewall-cmd", "--state")`) is a command Yu'lon runs, not words.
+            values = [
+                item
+                for item in value.elts
+                if not (isinstance(item, ast.Constant) and " " not in str(item.value))
+            ]
         for item in values:
             for text in module.texts(item):
                 yield Line(module.rel, name, text)
@@ -648,6 +705,28 @@ def _named_texts(module: _Module) -> Iterator[Line]:
                 yield Line(module.rel, f"{name}()", text)
 
 
+def _list_items(module: _Module) -> Iterator[Line]:
+    """What is appended to a list a tab shows line by line (`SHOWN_LISTS`), wherever it is built."""
+    for node in ast.walk(module.tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("append", "extend")
+            and _name_of(node.func.value) in SHOWN_LISTS
+            and node.args
+        ):
+            continue
+        function = module.enclosing(node)
+        where = f"{_name_of(node.func.value)} in {function.name if function else '<module>'}"
+        items = (
+            [text for texts in module._elements(node.args[0], 0) for text in texts]
+            if node.func.attr == "extend"
+            else module.texts(node.args[0])
+        )
+        for text in items:
+            yield Line(module.rel, where, text)
+
+
 def _log_lines(module: _Module) -> Iterator[Line]:
     """What a job yields: the lines its log panel shows the player as it runs (T296)."""
     for node in ast.walk(module.tree):
@@ -692,6 +771,7 @@ def player_lines() -> list[Line]:
         found += _shown_messages(module, shown_types)
         found += _log_lines(module)
         found += _named_texts(module)
+        found += _list_items(module)
     return found
 
 
@@ -753,6 +833,8 @@ def test_the_reader_finds_each_kind_of_player_line() -> None:
     assert ("yulon/docker.py", "DockerRefusal() in verify_import") in whats
     assert ("yulon/catalog/native.py", "build_stalled_notice()") in whats, "a notice a job yields"
     assert ("yulon/networking.py", "_zone_refusal()") in whats, "a refusal the Networking tab shows"
+    assert ("yulon/networking.py", "UFW_ENABLE_WITHHELD") in whats, "a warning constant"
+    assert ("yulon/networking.py", "warnings in plan") in whats, "a line the Warnings list shows"
     assert ("yulon/apply.py", "ApplyRefusal() in _require_own_clone") in whats
     assert ("yulon/catalog/native.py", "InstallerError() in stage_ready") in whats
     assert ("yulon/platform.py", "manual_steps() in ensure_wsl2") in whats

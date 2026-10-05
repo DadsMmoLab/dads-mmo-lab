@@ -740,59 +740,59 @@ THIS_MACHINE = "this-machine"
 
 READ_ELSEWHERE = {
     "other-network-namespace": (
-        "the socket table belongs to another network namespace — `ss` listed the sockets of "
+        "the socket table belongs to another network namespace — ss listed the sockets of "
         "the namespace this process is in, and the firewall configuration these commands "
         "write is the one pid 1's namespace is governed by. Measured on m910q, 2026-09-05: "
-        "inside `sudo unshare --net` with one listener of its own, `/proc/self/ns/net` was "
-        "4026533453 against pid 1's 4026531840, while `/proc/self/ns/mnt` WAS pid 1's and "
-        "`/etc/ufw` was there to write. Run the LAN step from the host's own shell — not "
-        "from inside `unshare --net`, `ip netns exec`, or a container with a network "
+        "inside sudo unshare --net with one listener of its own, /proc/self/ns/net was "
+        "4026533453 against pid 1's 4026531840, while /proc/self/ns/mnt WAS pid 1's and "
+        "/etc/ufw was there to write. Run the LAN step from the host's own shell — not "
+        "from inside unshare --net, ip netns exec, or a container with a network "
         "namespace of its own; if the rules are meant for that namespace, apply them with "
         "the firewall tool inside it"
     ),
     "no-backend-config-here": (
         "the directory this backend writes its rules to does not exist on the filesystem "
         "this process can see, so the rules would be written somewhere the machine whose "
-        "sockets were just read never reads. Measured on m910q, 2026-09-05: `docker run "
-        "--privileged --pid=host --network=host` of a Fedora image on an Ubuntu host named "
-        "the host's sshd on port 22 while `/etc/ufw` was absent from its own filesystem. Run "
+        "sockets were just read never reads. Measured on m910q, 2026-09-05: a privileged "
+        "Fedora container that shared an Ubuntu host's processes and networking named "
+        "the host's sshd on port 22 while /etc/ufw was absent from its own filesystem. Run "
         "the LAN step on the machine that owns the firewall, or install that firewall's "
         "package here"
     ),
     "other-mount-namespace": (
         "the socket table was read in this machine's network namespace but the filesystem "
         "these rules would be written to is not pid 1's — a sandbox with a mount namespace "
-        "of its own (a unit with `PrivateTmp=yes`, a flatpak, a container started "
-        "`--network=host --pid=host`) writes its own `/etc`, and the policy the rules were "
+        "of its own (a unit with PrivateTmp=yes, a flatpak, a container started "
+        "--network=host --pid=host) writes its own /etc, and the policy the rules were "
         "meant to change is the host's. Run the LAN step outside the sandbox. A Yu'lon "
         "AppImage is NOT a sandbox for this purpose: measured on m910q, 2026-09-05, an "
-        "appimagetool build's `/proc/self/ns/mnt` was pid 1's"
+        "appimagetool build's /proc/self/ns/mnt was pid 1's"
     ),
     "other-pid-namespace": (
         "this process is in a pid namespace of its own, so neither namespace question could "
-        "be trusted: both are answered by comparing against `/proc/1`, and whether `/proc/1` "
+        "be trusted: both are answered by comparing against /proc/1, and whether /proc/1 "
         "here is this machine's init or the namespace's own depends on something this probe "
         "cannot read without privilege. Both shapes were measured on m910q, 2026-09-05. "
-        "Inside a container (`docker run --rm busybox`) `/proc` is remounted, `/proc/1` is "
-        "the container's own `sh`, and its `/proc/1/ns/net` (4026533514) is this process's "
-        "own — comparing them compares the namespace with itself and answers `same` about a "
-        "machine that was never touched. Under `sudo unshare --pid --fork`, which does not "
-        "remount `/proc`, `/proc/1` is still this machine's `systemd` with the host's "
+        "Inside a container (a throwaway busybox one) /proc is remounted, /proc/1 is "
+        "the container's own sh, and its /proc/1/ns/net (4026533514) is this process's "
+        "own — comparing them compares the namespace with itself and answers same about a "
+        "machine that was never touched. Under sudo unshare --pid --fork, which does not "
+        "remount /proc, /proc/1 is still this machine's systemd with the host's "
         "4026531840 and 4026531841 — there the comparisons would have been right, and this "
-        "refusal is a false one. `/proc/self/ns/pid` reads a non-initial inode in both, and "
-        "`/proc/1/ns/pid`, which would tell them apart, was `EACCES` at uid 1000 alongside "
-        "the other two. Run the LAN step from the host's own shell, outside `unshare --pid` "
-        "and outside the container. If it has to run from a container, add `--pid=host` so "
-        "`/proc/1` is this machine's — the probe can answer then, and will still refuse a "
-        "container that writes its own `/etc`"
+        "refusal is a false one. /proc/self/ns/pid reads a non-initial inode in both, and "
+        "/proc/1/ns/pid, which would tell them apart, was EACCES at uid 1000 alongside "
+        "the other two. Run the LAN step from the host's own shell, outside unshare --pid "
+        "and outside the container. If it has to run from a container, add --pid=host so "
+        "/proc/1 is this machine's — the probe can answer then, and will still refuse a "
+        "container that writes its own /etc"
     ),
     "unknown": (
         "whether the socket table came from this machine could not be established — pid 1's "
         "namespaces are unreadable to an unprivileged probe (EACCES on m910q, measured "
         "2026-09-04; on yulon-ubuntu 2026-09-16 the same read answered a placeholder inode "
         "that names no namespace) and no elevation prefix was available to ask with. Give "
-        "the launcher a passwordless `sudo` (or run it as root) so the probe can "
-        "read `/proc/1/ns/net`, or open the ports by hand with the commands below"
+        "the launcher a passwordless sudo (or run it as root) so the probe can "
+        "read /proc/1/ns/net, or open the ports by hand with the commands below"
     ),
 }
 """Why a reading was not accepted as this machine's, keyed by what failed.
@@ -2381,12 +2381,13 @@ def _can_lock_out(command: Iterable[str]) -> bool:
 
 
 UFW_ENABLE_WITHHELD = (
-    "Yu'lon opened the game ports in ufw's rule list but did NOT run `ufw enable`: turning a "
+    "Yu'lon opened the game ports in ufw's rule list but did NOT turn ufw on: turning a "
     "firewall on can only take reachability away, it is no part of making a server reachable, "
-    "and on a machine you reach over SSH it takes away your own way in — which is exactly what "
-    "it did to the box that found this (bug-checklist §39). ufw is left as you had it. To turn "
-    "it on yourself, allow your SSH port FIRST: `sudo ufw allow <your ssh port>/tcp`, then "
-    "`sudo ufw enable`."
+    "and on a machine you reach over SSH it takes away your own way in. ufw is left as you "
+    "had it. To turn it on yourself, allow your SSH port FIRST with this:\n"
+    "sudo ufw allow <your ssh port>/tcp\n"
+    "Then turn it on:\n"
+    "sudo ufw enable"
 )
 """Said on every ufw plan, because a command in the guide's block was not run.
 
@@ -3891,18 +3892,18 @@ def plan(
             reloads_here = any(_reloads_firewalld(c) for c in fw_cmds)
             settled = (
                 (
-                    "and `FlushAllOnReload=yes` in /etc/firewalld/firewalld.conf means the reload "
+                    "and FlushAllOnReload=yes in /etc/firewalld/firewalld.conf means the reload "
                     "this plan runs WILL undo that move"
                     if reloads_here
-                    else "and `FlushAllOnReload=yes` in /etc/firewalld/firewalld.conf means the "
-                    "next `firewall-cmd --reload` WILL undo that move (this plan runs none)"
+                    else "and FlushAllOnReload=yes in /etc/firewalld/firewalld.conf means the "
+                    "next reload WILL undo that move (this plan runs none)"
                 )
                 if zoning.flush_all_on_reload is not False
                 else (
-                    "and `FlushAllOnReload=no` in /etc/firewalld/firewalld.conf means the "
+                    "and FlushAllOnReload=no in /etc/firewalld/firewalld.conf means the "
                     "reload will leave that move in place"
                     if reloads_here
-                    else "and `FlushAllOnReload=no` in /etc/firewalld/firewalld.conf means a "
+                    else "and FlushAllOnReload=no in /etc/firewalld/firewalld.conf means a "
                     "reload would leave that move in place (this plan runs none)"
                 )
             )
@@ -3911,11 +3912,10 @@ def plan(
                 f"{moved} {'is' if len(zoning.moved_at_runtime) == 1 else 'are'} in use now "
                 f"but not in the saved zone bindings ({', '.join(zoning.permanent or ())}), "
                 f"{settled}. Measured on firewalld 2.2.3 (fedora:41, 2026-09-04): an "
-                "interface moved with `--change-interface` and no `--permanent` was back in "
-                f"its saved zone after `firewall-cmd --reload`. Every port here {placed} "
-                "both sets of zones so it is allowed either way; make the move permanent with "
-                "`sudo firewall-cmd --permanent --zone=<zone> --change-interface=<interface>` "
-                "if it was meant to last."
+                "interface moved without the permanent flag was back in its saved zone after "
+                f"a reload. Every port here {placed} both sets of zones so it is allowed "
+                "either way. If the move was meant to last, make it permanent with this:\n"
+                "sudo firewall-cmd --permanent --zone=<zone> --change-interface=<interface>"
             )
         if zoning is not None and zoning.default_zone_moves:
             # The blocker's own state, said out loud. Like the runtime/permanent
@@ -3930,19 +3930,20 @@ def plan(
                 else "the next reload (this plan runs none)"
             )
             warnings.append(
-                f"firewalld's running default zone is `{zoning.default_zone}` but "
-                f"`DefaultZone={zoning.configured_default_zone}` is what {_FIREWALLD_CONF} "
-                "says, and the file is what `firewall-cmd --reload` installs — so after "
+                f"firewalld's running default zone is {zoning.default_zone} but "
+                f"DefaultZone={zoning.configured_default_zone} is what {_FIREWALLD_CONF} "
+                "says, and the file is what a reload installs — so after "
                 f"{after} every interface with no zone of its own is in "
-                f"`{zoning.configured_default_zone}`, not `{zoning.default_zone}`. Every "
-                "`firewall-cmd` listing tags the RUNNING one `(default)`, which is why no "
-                "other reading here can see this; `sudo firewall-offline-cmd "
-                "--list-all-zones` tags the file's. Measured on firewalld 2.2.3 (fedora:41, "
-                "2026-09-05): three ports written to the running default, apply 4/4 with no "
-                'refusal and no warning, and after the reload ssh answered "No route to '
-                f'host". Every port here {placed} both zones so it is allowed either '
-                "way; settle it with `sudo firewall-cmd --set-default-zone=<zone>`, which "
-                "writes the file and the daemon together."
+                f"{zoning.configured_default_zone}, not {zoning.default_zone}. firewalld's "
+                "own listing marks the RUNNING one as the default, which is why no other "
+                "reading here can see this. This lists the zones as the file has them:\n"
+                "sudo firewall-offline-cmd --list-all-zones\n"
+                "Measured on firewalld 2.2.3 (fedora:41, 2026-09-05): three ports written to "
+                "the running default, apply 4/4 with no refusal and no warning, and after the "
+                f'reload ssh answered "No route to host". Every port here {placed} both '
+                "zones so it is allowed either way. Settle it with this, which writes the "
+                "file and the daemon together:\n"
+                "sudo firewall-cmd --set-default-zone=<zone>"
             )
         if firewalld_zones is None:
             # The ports are still written — they are the request — but to the
@@ -3951,11 +3952,11 @@ def plan(
             # `internal` (see `detect_firewalld_zones()`), so it is said.
             warnings.append(
                 "firewalld's zones could not be read, so the game ports were written to the "
-                "DEFAULT zone. If this machine's network interface is bound to another zone "
-                "(`sudo firewall-cmd --permanent --get-zone-of-interface=<interface>` names "
-                "the one a reload restores) they are not in effect there: allow them in that "
-                "zone with `sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp` "
-                "and reload."
+                "DEFAULT zone. If this machine's network interface is bound to another zone, "
+                "they are not in effect there. This names the zone a reload restores:\n"
+                "sudo firewall-cmd --permanent --get-zone-of-interface=<interface>\n"
+                "Allow them in that zone with this, then reload:\n"
+                "sudo firewall-cmd --permanent --zone=<zone> --add-port=<port>/tcp"
             )
         if admitted_note is not None:
             warnings.append(admitted_note)
@@ -4180,11 +4181,11 @@ def apply(
             # rule instead of the mismatch, and only after the user has watched
             # every allow fail. Named here instead, once.
             refusal = (
-                f"REFUSED to run `{' '.join(cmd)}`: this plan read the machine with "
-                f"`{' '.join(platform.elevation_policy(network_plan.firewall).prefix)}` and "
+                "REFUSED to run the command below: this plan read the machine with "
+                f"{' '.join(platform.elevation_policy(network_plan.firewall).prefix)} and "
                 "these commands are being run without it, so the rule that keeps SSH "
-                "reachable cannot be written. Re-plan with `elevate=False` to get a plan an "
-                "unelevated run can carry out, or apply this one elevated."
+                "reachable cannot be written. Plan again for a run without it, or apply this "
+                f"plan with it.\n{' '.join(cmd)}"
             )
             refusals.append(refusal)
             skipped.append(refusal)
@@ -4200,9 +4201,9 @@ def apply(
             # is the runtime-only allow gone with nothing to replace it.
             unapplied = "; ".join(missing)
             refusal = (
-                f"REFUSED to run `{' '.join(cmd)}`: the rule that keeps SSH reachable "
+                f"REFUSED to run the command below: the rule that keeps SSH reachable "
                 f"({unapplied}) did not apply, so running it could have cut the way back "
-                "into this machine."
+                f"into this machine.\n{' '.join(cmd)}"
             )
             refusals.append(refusal)
             skipped.append(refusal)

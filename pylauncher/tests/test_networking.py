@@ -3517,7 +3517,7 @@ def test_a_reading_taken_with_authority_may_not_be_applied_without_it() -> None:
     assert ["ufw", "--force", "enable"] not in seen, "the enable must not have run"
     assert ["ufw", "allow", "3724/tcp"] in seen, "the ports the user asked for still go in"
     refusal = next(r for r in report.refusals if "--force enable" in r)
-    assert "sudo -n" in refusal and "elevate=False" in refusal
+    assert "sudo -n" in refusal and "Plan again for a run without it" in refusal
     assert refusal in report.skipped
 
 
