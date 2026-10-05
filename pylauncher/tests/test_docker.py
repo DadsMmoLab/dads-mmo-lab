@@ -2185,21 +2185,26 @@ def test_the_polls_say_why_and_stop_when_this_host_has_no_docker_cli(
     at the time: `wait_ready('a','w','h',1,timeout=1.0,interval=0.1)` returned
     False after 1.00s, 10 polls, zero records at WARNING or above.
 
-    The grace window is shortened here, not removed. Giving up on the first
-    miss is the other wrong answer — `docker_program()` deliberately never
-    caches one so that Docker arriving mid-run is picked up — so both loops are
-    also asserted to have polled more than once.
+    The grace window is the real one, run on a clock that moves only when the
+    poll sleeps: a 0.2 s window in wall time flaked under xdist, because one
+    slow first poll outlasted the whole window and there was no second (T315).
+    Giving up on the first miss is the other wrong answer —
+    `docker_program()` deliberately never caches one so that Docker arriving
+    mid-run is picked up — so both loops are also asserted to have polled more
+    than once, and to have given up at the end of the window, not of the timeout.
     """
-    monkeypatch.setattr(docker, "_CLI_MISSING_GRACE_SECONDS", 0.2)
+    grace = docker._CLI_MISSING_GRACE_SECONDS
     for label, poll in (
         (
             "wait_ready()",
             lambda: docker.wait_ready(
-                "a", "w", docker.azerothcore_ready("h", 1, timeout=60.0, interval=0.02)
+                "a", "w", docker.azerothcore_ready("h", 1, timeout=480.0, interval=2.0)
             ),
         ),
-        ("wait_db_healthy()", lambda: docker.wait_db_healthy("db", timeout=60.0, interval=0.02)),
+        ("wait_db_healthy()", lambda: docker.wait_db_healthy("db", timeout=480.0, interval=2.0)),
     ):
+        clock = _PollClock()
+        monkeypatch.setattr(docker, "time", clock)
         caplog.clear()
         with caplog.at_level("DEBUG", logger="yulon.docker"):
             assert poll() is False
@@ -2210,7 +2215,30 @@ def test_the_polls_say_why_and_stop_when_this_host_has_no_docker_cli(
         assert all(label in line for line in loud), loud
         waited = [r for r in caplog.records if "still no docker CLI" in r.getMessage()]
         assert waited, f"{label}: gave up on the first miss; a mid-run install is now locked out"
+        assert grace <= clock.now < grace + 2.0, f"{label}: gave up at {clock.now}s"
     assert no_docker == [], "a command was spawned on a host with no docker binary"
+
+
+class _PollClock:
+    """`docker.time` on a clock that moves only when a poll sleeps (T315).
+
+    `wait_ready()` and `wait_db_healthy()` read `time.monotonic()` and wait with
+    `time.sleep()`, so this is the whole of their time: a poll that is slow in
+    wall time is still one interval on this clock. Any other `time` attribute
+    is the real one.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
 
 
 def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
@@ -2237,6 +2265,8 @@ def test_a_readiness_poll_still_rides_out_a_docker_that_only_stumbles(
         return _completed(stdout="realm.example:3724 ready...")
 
     monkeypatch.setattr(docker.runner, "run", fake_run)
+    # Two polls on the poll's own clock, not two inside five seconds of wall time.
+    monkeypatch.setattr(docker, "time", _PollClock())
     ready = docker.azerothcore_ready("realm.example", 3724, timeout=5.0, interval=0.01)
     assert docker.wait_ready(SPEC.auth, SPEC.world, ready) is True
 
