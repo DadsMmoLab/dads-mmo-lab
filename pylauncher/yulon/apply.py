@@ -1082,10 +1082,43 @@ def write_clone_claim(
     tmp = Path(name)
     try:
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        # On disk before the rename, and the rename on disk after it: since T262 this
+        # record is written BEFORE a player's file is moved, and a power cut must not
+        # leave the file moved and the record still in the page cache.
+        _fsync_file(tmp)
         os.replace(tmp, clone / CLAIM_FILE)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+    _fsync_folder(clone)
+
+
+def _fsync_file(path: Path) -> None:
+    """Flush a file Yu'lon just wrote to disk. Raises OSError, as the write would have."""
+    fd = os.open(path, os.O_RDWR)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_folder(folder: Path) -> None:
+    """Flush a folder's entries (a rename into it) to disk; POSIX only, best effort.
+
+    Windows has no folder handle to flush this way, and NTFS journals the rename.
+    """
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 _CLIENT_NAMES: dict[str, tuple[str, ...]] = {
@@ -1745,7 +1778,7 @@ class _Log:
     """The receipts this item's claim held before this install: its own files in the client."""
     current_copies: dict[str, ClientCopy] = field(default_factory=dict)
     """This install's receipts so far, by path: a file landed, or a player's file set aside."""
-    new_asides: set[str] = field(default_factory=set)
+    new_asides: dict[str, str] = field(default_factory=dict)
     """The paths whose player's file THIS install set aside: what a failure puts back."""
     persist: Callable[[Sequence[ClientCopy]], None] | None = None
     """Writes the claim with the receipts handed to it; None when this item has no claim."""
@@ -2703,8 +2736,17 @@ class Applier:
             # The player's files this run set aside go back before the failure is
             # told (cold review of T262); what could not is in the claim and named.
             left = self._put_asides_back(log)
+            told = " ".join(left)
             if left and isinstance(failure, ApplyError):
-                failure.args = (f"{failure} {' '.join(left)}",)
+                failure.args = (f"{failure} {told}",)
+            elif left and isinstance(failure, OSError):
+                # Its own type and number kept, so whatever reads them still can, and
+                # the player's file named in the words the person reads.
+                raise type(failure)(
+                    failure.errno, f"{failure.strerror or failure}. {told}", failure.filename
+                ) from failure
+            elif left:
+                logger.warning(f"after a failed install of {manifest.id}: {told}")
             raise
         if log.client_ran:
             # An update that no longer ships a file takes it back, with the player's
@@ -4708,13 +4750,37 @@ class Applier:
                 "Yu'lon has no record of this install to note where it would move yours, so it "
                 "was not moved and nothing was copied over it."
             )
-        log.current_copies[str(dest)] = planned
-        log.persist(self._claim_copies(log))
-        os.rename(dest, aside)
-        if not copy.aside:
-            log.new_asides.add(str(dest))
+        key = str(dest)
+        prior = log.current_copies.get(key)
+        log.current_copies[key] = planned
+        try:
+            log.persist(self._claim_copies(log))
+            os.rename(dest, aside)
+        except BaseException:
+            # Nothing moved (the record could not be written, or the rename was
+            # refused): the receipt as it was, so no claim holds an aside that is
+            # not there (second scoped re-review of T262).
+            self._unplan(log, key, prior)
+            raise
+        log.new_asides[key] = str(aside)  # the primary aside, or one more kept copy
         log.done.append(said)
         return planned
+
+    def _unplan(self, log: _Log, key: str, prior: ClientCopy | None) -> None:
+        """The receipt for `key` back as it was before a move that did not happen; rewritten."""
+        if prior is None:
+            log.current_copies.pop(key, None)
+        else:
+            log.current_copies[key] = prior
+        if log.persist is None:
+            return
+        try:
+            log.persist(self._claim_copies(log))
+        except OSError as exc:
+            # The write that failed was atomic, so the claim on disk is still the
+            # one before the plan; only a rename refused AFTER a written plan can
+            # leave that plan behind, and the next write replaces it.
+            logger.warning(f"the client-file record could not be rewritten: {exc}")
 
     def _claim_copies(self, log: _Log) -> list[ClientCopy]:
         """The receipts the claim holds mid-install: the earlier ones this run has not replaced."""
@@ -4730,15 +4796,17 @@ class Applier:
         the claim, so Remove names or restores it; the sentences say which.
         """
         left: list[str] = []
-        for path in sorted(log.new_asides):
+        for path, moved in sorted(log.new_asides.items()):
             copy = log.current_copies.get(path)
-            if copy is None or not copy.aside:
+            if copy is None:
                 continue
             undo = _Log()
-            take_back_file(Path(path), copy.sha256, undo, Path(copy.aside))
-            if os.path.lexists(copy.aside):
+            take_back_file(Path(path), copy.sha256, undo, Path(moved))
+            if os.path.lexists(moved):
                 left.extend(undo.client_left_behind)
                 continue
+            # Back as before this run: the claim's earlier receipt for the name, if any,
+            # holds again (`_claim_copies()`), with its own aside and no kept copy.
             del log.current_copies[path]
         log.new_asides.clear()
         if log.persist is not None:

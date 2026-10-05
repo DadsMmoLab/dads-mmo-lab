@@ -2767,13 +2767,13 @@ def test_the_server_tab_polls_open_no_tile_until_the_tiles_folder_changes(
     that changed. Re-extract's one-off sentence still counts fresh."""
     _a_run_that_crashed(box, 12)
     opened: list[Path] = []
-    real = mmaps._whole_tile
+    real = mmaps._tile_state
 
-    def spy(path: Path, header: object) -> bool:
+    def spy(path: Path, header: object) -> bool | None:
         opened.append(path)
         return real(path, header)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(mmaps, "_whole_tile", spy)
+    monkeypatch.setattr(mmaps, "_tile_state", spy)
     monkeypatch.setattr(mmaps, "_TILE_COUNTS", {})  # as a fresh process: no count yet
     first = box.engine().mmaps_status(box.server_dir)
     counted = len(opened)
@@ -2822,3 +2822,30 @@ def test_the_finish_and_its_start_are_refused_once_a_stopped_build_landed(box: B
         list(box.engine()._start_after_finish(context(box.m)))
     assert str(also.value).startswith("The world update is finished, but "), also.value
     assert native.STOPPED_BUILD_LANDED_REFUSAL in str(also.value)
+
+
+def test_a_poll_that_could_not_open_a_tile_keeps_no_count(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second scoped re-review: an unreadable tile is not known cut off, so the count it
+    gave is not kept; the next poll opens the tiles again."""
+    _a_run_that_crashed(box, 12)
+    monkeypatch.setattr(mmaps, "_TILE_COUNTS", {})
+    real = mmaps._tile_state
+    opened: list[Path] = []
+    busy = sorted((box.server_dir / "data" / "mmaps").glob("*.mmtile"))[0]
+    state = {"busy": True}
+
+    def flaky(path: Path, header: object) -> bool | None:
+        opened.append(path)
+        if path == busy and state["busy"]:
+            return None
+        return real(path, header)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mmaps, "_tile_state", flaky)
+    assert box.engine().mmaps_status(box.server_dir).kept == 11
+    state["busy"] = False
+    opened.clear()
+
+    assert box.engine().mmaps_status(box.server_dir).kept == 12
+    assert len(opened) == 12, "asked again, not served from a count that could not see a tile"

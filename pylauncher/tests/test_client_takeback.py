@@ -1037,6 +1037,7 @@ def test_a_crash_during_the_install_leaves_a_record_remove_acts_on(
 
     monkeypatch.setattr(apply_module.os, "rename", rename)
     monkeypatch.setattr(Applier, "_put_asides_back", lambda self, log: [])  # no process left
+    monkeypatch.setattr(Applier, "_unplan", lambda self, log, key, prior: None)
     with pytest.raises(Died):
         applier.install(manifest)
     monkeypatch.setattr(apply_module.os, "rename", real_rename)
@@ -1238,3 +1239,88 @@ def test_uninstall_puts_back_an_aside_no_receipt_records(
     assert _names(data) == ["Patch-A.MPQ"]
     assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
     assert left == []
+
+
+# ------------- T262 second scoped re-review: kept moves and a failed record write
+
+
+def test_a_failed_update_puts_back_the_players_changed_file_it_kept(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hole 1: the move into `kept` (a reinstall over a file the player changed) is this
+    run's too, so a failure after it puts the player's changed file back at its name."""
+    from yulon import apply as apply_module
+
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    data = tmp_path / "client" / "Data"
+    (data / "Patch-A.MPQ").write_bytes(b"the player's change")
+
+    def dbc(*_a: object, **_k: object) -> None:
+        raise apply_module.ApplyError("the DBC copy failed")
+
+    monkeypatch.setattr(applier, "_dbc", dbc)
+    with pytest.raises(apply_module.ApplyError):
+        _update(applier, manifest, monkeypatch)
+
+    assert _names(data) == ["Patch-A.MPQ", "Patch-A.MPQ" + ASIDE]
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's change"
+    assert (data / ("Patch-A.MPQ" + ASIDE)).read_bytes() == b"the player's own"
+    (copy,) = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
+    assert copy.kept == () and copy.aside == str(data / ("Patch-A.MPQ" + ASIDE))
+
+
+def test_a_record_write_that_fails_moves_nothing_and_records_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hole 2: the first aside write raises (disk full). Nothing was moved, so the claim
+    must not hold an aside that does not exist; Remove then leaves the player's file."""
+    from yulon import apply as apply_module
+
+    players, server = _player_and_clone(tmp_path)
+    manifest = _manifest(ARAC)
+    _compose_run_double(monkeypatch, _volume(tmp_path))
+    applier, _sql = _the_app_s_applier(monkeypatch, server, tmp_path / "client", manifest)
+    real = apply_module.write_clone_claim
+    failed_once: list[bool] = []
+
+    def full(clone: Path, **kw: Any) -> None:
+        if not failed_once and any(c.aside for c in kw.get("client_files", ())):
+            failed_once.append(True)
+            raise OSError(28, "No space left on device")
+        real(clone, **kw)
+
+    monkeypatch.setattr(apply_module, "write_clone_claim", full)
+    with pytest.raises(OSError):
+        applier.install(manifest)
+
+    assert _names(players.parent) == ["Patch-A.MPQ"]
+    assert players.read_bytes() == b"the player's own"
+    copies = read_client_copies(_clone_of(applier, manifest), item_id=manifest.id)
+    assert not [copy for copy in copies if copy.aside], copies
+    report = applier.remove(manifest)
+    assert players.read_bytes() == b"the player's own"
+    assert not any("has changed since" in line for line in report.left_behind)
+
+
+def test_a_disk_full_copy_whose_put_back_fails_names_the_players_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Should 5: the failure is an OSError, not Yu'lon's own; it still names the file."""
+    from yulon import apply as apply_module
+
+    players, _server = _player_and_clone(tmp_path)
+    aside = players.with_name("Patch-A.MPQ" + ASIDE)
+    real_rename = os.rename
+
+    def no_way_back(src: object, dst: object) -> None:
+        if Path(str(src)) == aside:
+            raise PermissionError(13, "held open")
+        real_rename(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_module.os, "rename", no_way_back)
+    _applier, failed = _install_failing(monkeypatch, tmp_path, "the copy")
+
+    assert isinstance(failed.value, OSError) and failed.value.errno == 28
+    assert str(aside) in str(failed.value)
+    assert aside.read_bytes() == b"the player's own"

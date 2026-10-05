@@ -1335,8 +1335,16 @@ def _whole_tiles_polled(job: Job) -> int:
     cached = _TILE_COUNTS.get(key)
     if cached is not None and cached[0] == fingerprint:
         return cached[1]
-    count = _whole_tiles(job)
-    _TILE_COUNTS[key] = (fingerprint, count)
+    try:
+        tiles = [path for path in out.iterdir() if path.name.endswith(TILE_SUFFIX)]
+    except OSError:
+        return 0
+    states = [_tile_state(path, header) for path in tiles]
+    count = sum(1 for state in states if state is True)
+    if None not in states:  # a tile that could not be opened is asked again next poll
+        _TILE_COUNTS[key] = (fingerprint, count)
+    else:
+        _TILE_COUNTS.pop(key, None)
     return count
 
 
@@ -1455,6 +1463,11 @@ def _keep_finished(job: Job) -> int:
 
 def _whole_tile(path: Path, header: MmapTileHeader) -> bool:
     """Does `path` start with the magic and run to exactly the header plus its `size`?"""
+    return _tile_state(path, header) is True
+
+
+def _tile_state(path: Path, header: MmapTileHeader) -> bool | None:
+    """Is `path` whole (magic, and exactly the header plus its `size`); None: unreadable."""
     try:
         if not path.is_file() or path.is_symlink():
             return False
@@ -1462,7 +1475,7 @@ def _whole_tile(path: Path, header: MmapTileHeader) -> bool:
         with path.open("rb") as tile:
             head = tile.read(header.length)
     except OSError:
-        return False
+        return None  # could not be read: neither whole nor known cut off
     if len(head) < header.length:
         return False
     if int.from_bytes(head[:4], "little") != header.magic:

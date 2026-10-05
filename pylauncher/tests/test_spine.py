@@ -2940,6 +2940,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "changed. Read-only; a listing that fails means no cache, and the count is taken "
         "the long way"
     ),
+    ("catalog/families/mmaps.py", "_whole_tiles_polled"): (
+        "T245/T263 poll cache. Lists `data/mmaps` to read each `.mmtile`'s header when the "
+        "folder's fingerprint changed, for the count the Server tab's line shows. Read-only; "
+        "a tile that cannot be opened keeps no count, and a listing that fails counts 0"
+    ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "
         "or `data/` is a link -- to remove each `.mmtile` that is not whole (the tile the "
