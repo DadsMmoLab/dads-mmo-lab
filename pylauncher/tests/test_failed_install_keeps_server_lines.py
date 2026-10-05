@@ -443,6 +443,53 @@ def test_the_run_started_last_and_the_run_written_last_are_both_kept(tmp_path: P
     assert f"runs/{long_job.name}" in report.included
 
 
+def test_the_newest_failed_run_is_kept_when_it_is_neither_started_nor_written_last(
+    tmp_path: Path,
+) -> None:
+    """Codex T249 adversarial review, round three: three overlapping jobs.
+
+    A build started first and written last, the failed install in the middle,
+    a job started last. The install ended on the panel's `--- FAILED:` verdict,
+    and that is what keeps it.
+    """
+    config = tmp_path / "config"
+    runs = runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    oldest = runs / "rebuild-wow-tbc-20261004T100000Z.log"
+    long_job = runs / "rebuild-wow-tbc-20261004T120000Z.log"
+    failed = runs / "install-wow-tortoise-20261004T140000Z.log"
+    last_started = runs / "rebuild-wow-vanilla-20261004T160000Z.log"
+    verdict = "--- FAILED: The server started but never reported ready\nDetails:\nmore\n"
+    timeline = (
+        (oldest, 1_000_000, ""),
+        (failed, 2_000_000, f"{WORLD} | {CRASH}\n{verdict}"),
+        (last_started, 2_500_000, "--- finished: done\n"),
+        (long_job, 3_000_000, "--- finished: done\n"),
+    )
+    for path, mtime, end in timeline:
+        path.write_text(_noise(150_000) + end, encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+    dest = tmp_path / "support.zip"
+
+    report = bundle.build(
+        dest,
+        Sources(config_dir=config, app_log=None, installs=()),
+        Redactor.build([]),
+        seams=bundle.Seams(
+            live_logs=lambda install, silent: [],
+            docker_version=lambda distro: None,
+            now=lambda: datetime(2026, 10, 4, 16, 52, tzinfo=UTC),
+        ),
+        cap_bytes=200_000,
+    )
+
+    assert os.path.getsize(dest) <= 200_000
+    assert report.dropped == (f"runs/{oldest.name}",)
+    with zipfile.ZipFile(dest) as archive:
+        kept = archive.read(f"runs/{failed.name}").decode("utf-8")
+    assert f"{WORLD} | {CRASH}" in kept
+
+
 def test_the_newest_run_is_cut_only_after_the_app_log(tmp_path: Path) -> None:
     """Last of all: Yu'lon's own log gives way first, and here that alone fits the cap."""
     config = tmp_path / "config"

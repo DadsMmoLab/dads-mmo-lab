@@ -16,8 +16,8 @@ every install's `collect_live_logs` and then to `system_info`, so a daemon that
 ran into a bound is not asked again by a later install or for its version.
 **It stays under 8 MB** (Discord's free limit is 10): each file keeps its last
 2 MiB, and over the cap the oldest snapshots go first, then the oldest runs
-but never the newest two (started last, written last -- T249: a failed install's
-only record of its servers); then what is left is cut shorter, its END kept --
+but never the newest (started last, written last, failed last -- T249: a failed
+install's only record of its servers); then what is left is cut shorter, its END kept --
 the container logs first, then the app log's rotations, the app log, the confs,
 and last those newest runs -- halving the largest of the earliest kind each
 time, never below `MIN_TAIL` (Codex T93 review: dropping alone left a zip twice
@@ -487,18 +487,28 @@ def _written(member: _Member) -> tuple[float, str, int, float]:
     return (member.mtime, *_started(member))
 
 
+_FAILED_VERDICT = re.compile(r"(?m)^--- (?:Stopped\. )?FAILED: ")
+"""The verdict `LogPanel._on_finished` closes a failed run's record with."""
+
+
 def _newest_runs(runs: Sequence[_Member]) -> frozenset[str]:
-    """The run started last and the run written last: one file, or two (T249).
+    """The run started last, the run written last, and the failed run written last (T249).
 
     "Newest" has two meanings and the run a player is asking about can be
     either (Codex T249 reviews): a long install that failed last may have
     started before a short rebuild, and a long build in another tab may be
     written after an install that started later and failed. Never left to the
-    order the folder happened to list.
+    order the folder happened to list. And a failed install can be neither
+    when jobs overlap (round three), so the newest run that ended FAILED is kept
+    too: it is the one that holds a failure's servers' lines.
     """
     if not runs:
         return frozenset()
-    return frozenset({max(runs, key=_started).name, max(runs, key=_written).name})
+    newest = {max(runs, key=_started).name, max(runs, key=_written).name}
+    failed = [run for run in runs if run.raw is not None and _FAILED_VERDICT.search(run.raw)]
+    if failed:
+        newest.add(max(failed, key=_written).name)
+    return frozenset(newest)
 
 
 def _fit(
@@ -510,7 +520,7 @@ def _fit(
     """Leave out the oldest snapshots, then the oldest runs, then cut the rest shorter,
     until the zip fits `cap` or nothing can give any more.
 
-    The NEWEST runs -- started last, and written last (`_newest_runs`) -- are
+    The NEWEST runs -- started, written and failed last (`_newest_runs`) -- are
     never left out, only cut, END kept, after everything else (T249). One of
     them is the job the player is most likely asking about, and for an install
     that failed it is the only copy of its servers' last lines: a failed install
