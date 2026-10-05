@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
+from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from tests.support_native import (
     ENTRY,
     IMPORTED,
@@ -60,6 +62,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.ui import lines as log_lines
+from yulon.ui.widgets.log_panel import LogPanel
 
 STAGE_NAMES = AzerothCoreInstaller.STAGE_NAMES
 
@@ -415,6 +418,74 @@ def test_a_state_file_claiming_a_build_that_docker_cannot_confirm_rebuilds(
     lines = install(unknown, server_dir)
     assert "build" in unknown.calls
     assert any("would not say whether" in line for line in lines)
+
+
+# -- T240: Stop during the clone ends the clone's container -------------------
+
+
+@pytest.fixture
+def fake_docker(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
+    """`support_fake_docker`'s CLI and state folder; every container left is ended after."""
+    cli, state = lay_fake_docker(tmp_path)
+    yield cli, state
+    end_fake_containers(state)
+
+
+def test_stop_during_the_clone_ends_its_container_and_tries_no_other_clone(
+    qapp: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_docker: tuple[Path, Path],
+) -> None:
+    """T240: Stop mid-clone left the clone container running and fell back to host git.
+
+    Seen on yulon-win11 (2026-10-04): Stop killed the docker CLI, the container
+    went on cloning as an orphan, the engine read the dead CLI as a failed
+    containerized clone and cloned again with host git, and the run ended "---
+    cancelled" six and a half minutes later with the orphan still running.
+
+    Driven through the real install, the real `ContainerGit` on the clone seam
+    and a real `LogPanel` Stop. Host git is AVAILABLE here, so the fallback is
+    reachable and its absence means something.
+    """
+    cli, state = fake_docker
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    monkeypatch.setattr(git, "git_available", lambda: True)
+    host_clones: list[git.CloneSpec] = []
+
+    def host_clone(
+        self: git.RunnerGit, spec: git.CloneSpec, *, stage: str = "clone"
+    ) -> Iterator[str]:
+        host_clones.append(spec)
+        yield "host git cloned it"
+
+    monkeypatch.setattr(git.RunnerGit, "clone_lines", host_clone)
+    container_git = git.ContainerGit(
+        selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"
+    )
+    made = engine(Recorder(), clone=container_git.clone)
+    cancel = threading.Event()
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, message: finished.append((ok, message)))
+    panel.run(
+        lambda: made.run(InstallOptions(server_dir=tmp_path / "wow"), cancel=cancel),
+        title="Installing",
+        cancel=cancel,
+    )
+    pump_until(lambda: any((state / "containers").iterdir()), "the clone's container was started")
+    (started,) = list((state / "containers").iterdir())
+    panel.stop()
+    wait_for_panel(panel, timeout=HANG_BOUND)
+    process_events()
+
+    assert list((state / "containers").iterdir()) == [], "the clone's container is still there"
+    calls = (state / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert f"rm -f {started.name}" in calls, calls
+    assert host_clones == [], "a stopped clone was cloned again with host git"
+    assert len([call for call in calls if call.startswith("run ")]) == 1, calls
+    assert panel.status_text() == "cancelled"
+    assert finished == [(True, "stopped")], finished
 
 
 # -- what a resume does to the source it already cloned (D5) ----------------

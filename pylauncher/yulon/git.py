@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing
@@ -388,6 +389,16 @@ MISSING_GIT_HELP = {
 
 class GitError(RuntimeError):
     """A git operation failed. The message carries git's own last words."""
+
+
+class GitStopped(GitError):
+    """A streamed git command was ended by a Stop, and did not fail on its own (T240).
+
+    A `GitError`, so everything that stops on a failed clone stops on it too. Its
+    own type because a failure is answered with another way to clone -- host git,
+    when the containerized clone fails -- and a Stop must never be: the player
+    asked for the clone to end, not to be tried again by other means.
+    """
 
 
 @dataclass(frozen=True)
@@ -1172,11 +1183,25 @@ def _streamed_git(argv: list[str], *, stage: str, cwd: Path | None = None) -> It
             for fragment in fragments:
                 tail.append(fragment)
                 yield progress_line(fragment, stage)
+    except runner.StreamEnded as exc:
+        raise GitStopped(f"{' '.join(argv)} was stopped.") from exc
     except subprocess.CalledProcessError as exc:
         raise GitError(f"{' '.join(argv)} exited {exc.returncode}: {' / '.join(tail)}") from exc
     except OSError as exc:
         raise GitError(f"{argv[0]} could not be started: {exc}") from exc
 
+
+def _falls_back(exc: GitError) -> bool:
+    """May a failed containerized git be answered with host git? Never after a Stop (T240)."""
+    return not isinstance(exc, GitStopped)
+
+
+_END_CONTAINER_TIMEOUT = 60.0
+"""How long `docker rm -f` of a stopped clone's container may take before it is given up.
+
+A deadlock breaker: the kill and the removal take a second or two on a healthy
+daemon, and a daemon that does not answer must not hold a Stop's run open.
+"""
 
 _KEEP_FRAGMENTS = 5
 """How many of git's last fragments go into a `GitError`.
@@ -2741,7 +2766,13 @@ class ContainerGit:
         return proc
 
     def _argv(
-        self, program: str | Sequence[str], dest: Path, git_args: list[str], *, writes: bool
+        self,
+        program: str | Sequence[str],
+        dest: Path,
+        git_args: list[str],
+        *,
+        writes: bool,
+        name: str | None = None,
     ) -> list[str]:
         """The one docker argv every containerized git call here runs.
 
@@ -2774,6 +2805,7 @@ class ContainerGit:
             *launcher,
             "run",
             "--rm",
+            *(["--name", name] if name is not None else []),
             *hardening,
             "-v",
             f"{mount}:/git{label}",
@@ -2830,7 +2862,11 @@ class ContainerGit:
                 if _resets_to_the_tip(spec):
                     self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
             except GitError as exc:
-                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                if (
+                    _falls_back(exc)
+                    and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
+                    and git_available()
+                ):
                     logger.warning(
                         f"containerized git update failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -2847,7 +2883,11 @@ class ContainerGit:
                     spec, [*_excluding_clone_args(spec, progress=True), spec.url, "."], stage=stage
                 )
             except GitError as exc:
-                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                if (
+                    _falls_back(exc)
+                    and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
+                    and git_available()
+                ):
                     logger.warning(
                         f"containerized git clone failed in {spec.dest} ({exc}); "
                         "falling back to host git"
@@ -2883,7 +2923,11 @@ class ContainerGit:
                 spec, [*argv, spec.url, "."], stage=stage
             )
         except GitError as exc:
-            if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+            if (
+                _falls_back(exc)
+                and platform.DOCKER_CLI_MISSING_HELP not in str(exc)
+                and git_available()
+            ):
                 logger.warning(
                     f"containerized git clone failed in {spec.dest} ({exc}); "
                     "falling back to host git"
@@ -2913,11 +2957,24 @@ class ContainerGit:
             yield from self._streamed_capture(spec.dest, git_args, stage=stage)
 
     def _streamed_capture(self, dest: Path, git_args: list[str], *, stage: str) -> Iterator[str]:
-        """One containerized `git` invocation, read live. `_capture()`'s writer container."""
-        argv = self._argv(self._launcher(), dest, git_args, writes=True)
+        """One containerized `git` invocation, read live. `_capture()`'s writer container.
+
+        **Named, so a Stop can end the container and not only the CLI (T240).**
+        A Stop ends the docker CLI this thread started (`runner.end_streams_started_on()`),
+        and on Docker Desktop nothing passes that on: the container went on
+        cloning as an orphan for minutes after the run had moved on (yulon-win11,
+        2026-10-04). So when the stream was stopped, or abandoned, the container
+        is killed and removed by its name (`_end_container()`).
+        """
+        launcher = self._launcher()
+        name = f"yulon-git-{uuid.uuid4().hex[:12]}"
+        argv = self._argv(launcher, dest, git_args, writes=True, name=name)
         logger.info(f"containerized git (streamed): `{' '.join(argv[1:])}` into {dest}")
         try:
             yield from _streamed_git(argv, stage=stage)
+        except (GitStopped, GeneratorExit):
+            self._end_container(launcher, name)
+            raise
         except GitError as exc:
             # The docker CLI's own absence, arriving from `Popen` rather than
             # from `docker_program()`: the resolution cache pins a hit for the
@@ -2927,6 +2984,28 @@ class ContainerGit:
             if "could not be started" in str(exc):
                 raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
             raise
+
+    @staticmethod
+    def _end_container(launcher: Sequence[str], name: str) -> None:
+        """Kill the container `name` and remove it: `docker rm -f` (T240). Never raises.
+
+        Already gone is the usual answer and not a failure: `--rm` removes a
+        container whose git exited, and on Linux the CLI passes its own stop on.
+        Anything else is logged, because the Stop it serves has already happened
+        and the run must still end.
+        """
+        try:
+            done = runner.run([*launcher, "rm", "-f", name], timeout=_END_CONTAINER_TIMEOUT)
+        except OSError as exc:
+            logger.warning(f"could not remove the clone container {name}: {exc}")
+            return
+        if done.returncode != 0 and "no such container" not in done.stderr.lower():
+            logger.warning(
+                f"could not remove the clone container {name} "
+                f"(exit {done.returncode}): {done.stderr.strip()}"
+            )
+            return
+        logger.info(f"the clone container {name} was ended and removed")
 
     @staticmethod
     def _user_args() -> list[str]:

@@ -427,6 +427,28 @@ def test_end_streams_started_on_ends_the_child_a_worker_thread_is_blocked_readin
         blocked.close()
 
 
+def test_a_stream_a_stop_ended_says_so_by_type_and_one_killed_otherwise_does_not() -> None:
+    """T240: `StreamEnded` is the exit `end_streams_started_on()` caused, and only that one.
+
+    Still a `CalledProcessError` either way (the reason is in the test above). The
+    type is what lets a caller tell the Stop from the command failing: the
+    containerized clone answered a Stop-killed docker CLI with a host-git clone.
+    The second stream's child is killed from outside, with the same signal, and
+    exits the same way; only who ended it differs.
+    """
+    stopped = _BlockedStream("test-stream-ended-worker")
+    try:
+        assert runner.end_streams_started_on(stopped.worker.ident) == 1
+        stopped.worker.join(timeout=HANG_BOUND)
+        assert isinstance(stopped.outcome[0], runner.StreamEnded), stopped.outcome
+    finally:
+        stopped.close()
+    killed = _BlockedStream("test-stream-killed-worker")
+    killed.close()
+    assert isinstance(killed.outcome[0], subprocess.CalledProcessError), killed.outcome
+    assert not isinstance(killed.outcome[0], runner.StreamEnded), "nobody pressed Stop"
+
+
 def test_end_streams_started_on_returns_before_the_reap_it_asked_for_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
