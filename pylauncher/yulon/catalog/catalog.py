@@ -1279,11 +1279,12 @@ class TrinityCoreData(_Strict):
         description=(
             "T219: what the `world-data` volume adds to Docker's disk on Windows, where it is a "
             "second copy of those folders; preflight adds it to the Docker's-disk floors there "
-            "and nowhere else. Required when `world_data_dirs` names any. Centurion's 4: the "
-            "folders measured 1.05 GiB without pathfinding data (yulon-win11, 2026-10-04), a "
-            "folder copied again sits beside its old copy until it is swapped in (vmaps, 0.7 "
-            "GB), and the pathfinding data comes on top once made -- not measured, since no "
-            "Centurion run had finished then (T209)."
+            "and nowhere else. Required when `world_data_dirs` names any. Centurion's 5, from the "
+            "live proof on yulon-win11 (2026-10-05): the folders are 1.12 GB; the pathfinding "
+            "data, 644 tiles / "
+            "439 MB part-way, comes to about 2.6-2.8 GB once whole; and a folder copied again sits "
+            "beside its old copy until it is swapped in (vmaps, 0.7 GB). About 3.9 GB in all, 5.4 "
+            "at the outside."
         ),
     )
     updates: TrinityCoreUpdates | None = Field(

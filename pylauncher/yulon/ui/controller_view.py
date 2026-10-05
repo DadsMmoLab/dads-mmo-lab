@@ -5981,8 +5981,9 @@ REPAIR_FILES_WORLD_DATA = (
     "\n\nIt also gives the world server a Docker volume of its own for the map data it reads, "
     "so it no longer reads every map file through Windows' file share, which slowed the world "
     "server's start. The first start after Recreate containers… copies the map data from the "
-    "server folder into it, which takes a few minutes, and the copy takes about {gb:g} GB on "
-    "Docker's disk. The server folder's data folder stays where it is."
+    "server folder into it, which takes a few minutes, and once the pathfinding data is made "
+    "the copy takes up to about {gb:g} GB on Docker's disk. The server folder's data folder "
+    "stays where it is."
 )
 """T219's paragraph in the question, when the same repair adds the `world-data` volume."""
 
@@ -6782,6 +6783,9 @@ class ControllerView(QWidget):
         self._busy = False
         # T195: what `_set_busy()` was last told is running, for "Wait: Start is running.".
         self._busy_job = ""
+        # T219 (#309's live proof): the running Restart or Recreate was pressed on the
+        # Server tab's compose banner, so its outcome is said on the Server tab too.
+        self._tuning_from_banner = False
         # T188 C4/C5: the word the realm badge holds while a Start, Stop or
         # Restart of ours runs. A poll mid-stop used to flip the badge between
         # OFFLINE and "starting".
@@ -17382,13 +17386,22 @@ class ControllerView(QWidget):
 
     @Slot()
     def _compose_banner_pressed(self) -> None:
-        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart."""
+        """The banner's press: Repair, or -- once repaired -- the Tuning tab's Recreate/Restart.
+
+        A Recreate or Restart pressed here says how it ended here as well, not only in
+        the Tuning tab's report (T219: a refused Recreate left this tab saying "The
+        server is already running.").
+        """
         if self.compose_banner_button.text() == TUNING_RECREATE_LABEL:
+            self._tuning_from_banner = True
             self.recreate_containers()
         elif self.compose_banner_button.text() == TUNING_RESTART_LABEL:
+            self._tuning_from_banner = True
             self.restart_server()
         else:
             self.repair_server_files()
+        if not self._busy:
+            self._tuning_from_banner = False  # declined, or done inline: nothing pending
 
     @Slot()
     def repair_server_files(self) -> None:
@@ -17640,6 +17653,9 @@ class ControllerView(QWidget):
             self._tuning_owed.pop("recreate", None)
         self._refresh_tuning_owed()
         zone = self._say_zone_problem()
+        if self._tuning_from_banner and zone is None:
+            self.problem_label.setText("")  # what this tab said before the press is past
+        self._tuning_from_banner = False
         self.tuning_report.setPlainText(f"{job}: done." + (f"\n{zone}" if zone else ""))
         self.refresh_status()
 
@@ -17654,6 +17670,9 @@ class ControllerView(QWidget):
         else:
             self.tuning_report.setPlainText(TUNING_JOB_BROKE.format(job=job))
             self.tuning_details.set_text(str(exc))
+        if self._tuning_from_banner:
+            self.problem_label.setText(self.tuning_report.toPlainText())
+        self._tuning_from_banner = False
         self.action_failed.emit(_for_the_log(exc))
 
     # -- T94: Reset to default

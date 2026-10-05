@@ -1752,7 +1752,7 @@
               "mmaps",
               "Cameras"
             ],
-            "world_data_gb": 4,
+            "world_data_gb": 5,
             "updates": {
               "reimport_phases": [
                 "world routines",

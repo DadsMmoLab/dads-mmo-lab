@@ -636,13 +636,13 @@ class _VolumeRoute(_Route):
 def test_the_repair_that_adds_the_map_data_volume_names_the_copy_and_its_size(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    view = _view(ps, tmp_path, _VolumeRoute(4))
+    view = _view(ps, tmp_path, _VolumeRoute(5))
     asked = _answer(monkeypatch, yes=False)
     view.compose_banner_button.click()
     [question] = asked
     assert "first start after Recreate containers…" in question, question
-    assert "about 4 GB on Docker's disk" in question, question
-    assert question.index("about 4 GB") < question.index("Nothing else changes"), question
+    assert "up to about 5 GB on Docker's disk" in question, question
+    assert question.index("about 5 GB") < question.index("Nothing else changes"), question
 
 
 def test_every_other_repair_question_is_word_for_word_as_before(
@@ -675,3 +675,34 @@ def test_the_server_tab_says_when_a_start_could_not_bring_the_map_data_copy_up_t
     view.services.controller.world_data_problem = said  # type: ignore[attr-defined]
     view._server_action_done(None)
     assert view.problem_label.text() == f"The server started, but {said}"
+
+
+def test_a_recreate_from_the_server_tab_banner_says_its_refusal_on_the_server_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#309's live proof: Recreate containers... on the Server tab's banner was refused (a
+    map-data fingerprint that could be neither written nor removed), and the Server tab
+    went on saying "The server is already running." -- the sentence was only on the
+    Tuning tab. The refusal is said where the press was made, and nothing was removed."""
+    from yulon.controller import StartRefused
+
+    route = _Route("stale")
+    view = _view(ps, tmp_path, route)
+    _answer(monkeypatch, yes=True)
+    view.compose_banner_button.click()
+    assert view.compose_banner_button.text() == TUNING_RECREATE_LABEL
+    view.problem_label.setText("The server is already running.")
+    said = (
+        "Yu'lon could not record which map data the server should use, so it does not start: "
+        "data/.yulon-world-data could not be written (denied)."
+    )
+
+    def refuse() -> None:
+        raise StartRefused(said)
+
+    removed: list[int] = []
+    view.services.controller.refuse_start = refuse  # type: ignore[method-assign]
+    view.services.controller.remove = lambda: removed.append(1) or True  # type: ignore
+    view.compose_banner_button.click()
+    assert removed == []
+    assert view.problem_label.text() == said

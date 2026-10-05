@@ -567,6 +567,14 @@ def test_centurion_copies_the_five_folders_its_world_server_opens() -> None:
     assert block.world_data_dirs == ("dbc", "maps", "vmaps", "mmaps", "Cameras")
 
 
+def test_centurions_volume_asks_for_the_room_the_live_proof_measured() -> None:
+    """#309's live proof (yulon-win11, 2026-10-05): the folders are 1.12 GB; pathfinding was
+    644 tiles / 439 MB part-way, about 2.6-2.8 GB for the whole set; a folder copied again
+    sits beside its old copy (vmaps, 0.7 GB). About 3.9 GB in all, 5.4 at the outside."""
+    block = load_catalog().get("wow-centurion").install.native.trinitycore  # type: ignore[union-attr]
+    assert block.world_data_gb == 5
+
+
 def test_a_world_data_folder_named_twice_is_refused() -> None:
     with pytest.raises(ValidationError, match=r"world_data_dirs names \['maps'\] more than once"):
         NativeInstall.model_validate(

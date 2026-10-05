@@ -524,7 +524,7 @@ def test_a_windows_install_on_the_old_bind_file_is_offered_the_repair_and_its_co
         InstallOptions(server_dir=tc.server_dir)
     )
     assert check.state == "stale"
-    assert check.world_data_gb == 4
+    assert check.world_data_gb == 5
 
 
 def test_a_repair_that_adds_nothing_about_the_volume_says_nothing_about_it(tc: Machine) -> None:
