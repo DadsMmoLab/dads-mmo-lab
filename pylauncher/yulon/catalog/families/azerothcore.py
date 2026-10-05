@@ -27,7 +27,6 @@ from yulon import git
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
-    BUILD_CANCEL_NOTE,
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     OUR_OWN_FILES,
@@ -38,6 +37,7 @@ from yulon.catalog.native import (
     StageContext,
     StagedInstaller,
     _listing,
+    build_cancel_note,
 )
 from yulon.log import get_logger
 
@@ -264,7 +264,7 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("clone-core", self._clone_core),
             Stage("clone-modules", self._clone_modules),
             Stage("generate-compose", self.stage_generate_compose),
-            Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
+            Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
             Stage("start-db", self._start_db, recorded=False),
             Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),

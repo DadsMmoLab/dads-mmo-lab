@@ -300,3 +300,45 @@ def test_only_the_build_stage_is_watched(tmp_path: Path, monkeypatch: pytest.Mon
     assert "build" in watched and len(watched) > 1, watched
     assert isinstance(watched.pop("build"), native.QuietWatch)
     assert all(watch is None for watch in watched.values()), watched
+
+
+# -- what a Stop during the build costs, per platform (T246) ----------------------
+#
+# On Windows a Stop now ends docker.exe's whole tree, and the yulon-win11 probe
+# (2026-10-05) saw the build end in the engine as `Error` at once. On Linux and
+# macOS a Stop still ends the docker CLI alone, and whether the build stops with
+# it is T298's open question, so the old sentence stays there.
+
+
+def test_on_windows_the_build_cancel_note_says_the_build_ends_and_the_cache_is_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native.sys, "platform", "win32")
+    note = native.build_cancel_note()
+    assert note == native.BUILD_CANCEL_NOTE_WINDOWS
+    assert "ends the build at once" in note
+    assert "kept in Docker's build cache" in note
+    assert "in the background" not in note, "the Windows note still says the build runs on"
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_off_windows_the_build_cancel_note_still_says_docker_finishes_the_step(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    monkeypatch.setattr(native.sys, "platform", platform)
+    note = native.build_cancel_note()
+    assert note == native.BUILD_CANCEL_NOTE
+    assert "finishing the build step it is already on, in the background" in note
+
+
+def test_the_azerothcore_build_stage_says_this_platforms_cancel_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asked of the stage the spine reads, not of the function: a family holding the old constant
+    would say "Docker finishes the step in the background" on Windows, where it does not."""
+    monkeypatch.setattr(native.sys, "platform", "win32")
+    by_name = {stage.name: stage for stage in engine(Recorder()).stages()}
+    assert by_name["build"].cancel_note == native.BUILD_CANCEL_NOTE_WINDOWS
+    monkeypatch.setattr(native.sys, "platform", "linux")
+    by_name = {stage.name: stage for stage in engine(Recorder()).stages()}
+    assert by_name["build"].cancel_note == native.BUILD_CANCEL_NOTE

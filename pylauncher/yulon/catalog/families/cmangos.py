@@ -84,7 +84,6 @@ from yulon.catalog.catalog import (
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
-    BUILD_CANCEL_NOTE,
     CORRECTIONS_BUTTON_LABEL,
     CORRECTIONS_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
@@ -101,6 +100,7 @@ from yulon.catalog.native import (
     _put_all,
     _speaking,
     _stop_control,
+    build_cancel_note,
     import_reads_as_finished,
     rerunnable_phases,
     secret_token_name,
@@ -258,7 +258,7 @@ class CmangosInstaller(StagedInstaller):
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
-            Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
+            Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("extract", self._extract, cancel_note=extract.EXTRACT_CANCEL_NOTE),
             Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
             Stage("conf", self._conf),

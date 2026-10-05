@@ -176,8 +176,8 @@ def _end_tree(proc: _AnyPopen) -> None:
     Popen holds docker.exe's handle until it is reaped, so `proc.pid` cannot be
     another process's pid while this runs.
     """
-    command = [_taskkill(), "/T", "/F", "/PID", str(proc.pid)]
     try:
+        command = [_taskkill(), "/T", "/F", "/PID", str(proc.pid)]
         done = subprocess.run(
             command,
             capture_output=True,
@@ -190,8 +190,11 @@ def _end_tree(proc: _AnyPopen) -> None:
             creationflags=creationflags(),
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning(f"could not end the process tree of pid {proc.pid}: {exc}")
+    except Exception as exc:  # noqa: BLE001 - a Stop must reach terminate() whatever went wrong
+        # Not only `OSError` and `TimeoutExpired`, the two `subprocess.run`
+        # documents: an error of any kind escaping here would skip the
+        # `terminate()`/`kill()` after it and lose the Stop (cold review N2).
+        logger.warning(f"could not end the process tree of pid {proc.pid}: {exc!r}")
         return
     said = " ".join((done.stdout + done.stderr).split())
     if done.returncode:

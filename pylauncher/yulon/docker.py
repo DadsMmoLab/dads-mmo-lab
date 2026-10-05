@@ -4701,13 +4701,17 @@ def run_attached(
     as an exception — the callers here already have to handle a failed run.
 
     `cancel`, when set mid-run, stops reading and lets `runner.stream()`'s
-    generator-abandonment path terminate the compose client. The result comes
-    back as `CANCELLED_RETURNCODE`. What it does NOT do is stop work already
-    handed to the daemon: BuildKit finishes the build step it is on, and a
-    one-shot container keeps running to completion. That is desirable (the
-    layer cache keeps the work, and a resumed install re-probes the databases)
-    and it is the caller's job to say so, per stage — see
-    `native.BUILD_CANCEL_NOTE` and its neighbours. `repair_import()`
+    generator-abandonment path end the compose client. The result comes
+    back as `CANCELLED_RETURNCODE`. What a Stop does to work already handed to
+    the daemon differs by platform. A one-shot container keeps running to
+    completion everywhere. A build goes on to finish its current step on Linux
+    and macOS, where only the docker CLI is ended (T298 asks whether that
+    holds). On Windows the client's whole process tree is ended (T246), and the
+    yulon-win11 probe of 2026-10-05 saw BuildKit's build end at once as `Error`.
+    Either way the layer cache keeps every finished step and a resumed install
+    re-probes the databases, and it is the caller's job to say what a Stop
+    costs, per stage — see `native.build_cancel_note()` and its neighbours.
+    `repair_import()`
     deliberately passes no cancel at all; see there.
 
     `merge_stderr` is for the build, whose entire progress output is stderr;

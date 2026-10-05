@@ -73,7 +73,6 @@ from yulon.catalog.families import conf, extract, mmaps, sqlplan
 from yulon.catalog.families.cmangos import CATALOG_ERROR_TAIL, ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, UpdateRefused
 from yulon.catalog.native import (
-    BUILD_CANCEL_NOTE,
     IMPORT_STAGE_CANCEL_NOTE,
     InstallState,
     Seams,
@@ -82,6 +81,7 @@ from yulon.catalog.native import (
     StageContext,
     _speaking,
     _stop_control,
+    build_cancel_note,
     owed_start_refusal,
     past_the_tested_pin,
     read_state,
@@ -277,7 +277,7 @@ class TrinityCoreInstaller(CmangosInstaller):
             Stage("db-password", self._db_password, recorded=False),
             Stage("write-dockerfile", self._write_dockerfile),
             Stage("generate-compose", self.stage_generate_compose),
-            Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
+            Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=CLIENT_DATA_CANCEL_NOTE),
             Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),

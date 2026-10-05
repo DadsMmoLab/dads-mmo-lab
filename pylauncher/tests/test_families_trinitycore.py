@@ -546,6 +546,18 @@ STAGES = (
 )
 
 
+def test_the_trinitycore_build_stage_says_this_platforms_cancel_note(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows a Stop ends the build at once (T246); elsewhere Docker finishes the step."""
+    monkeypatch.setattr(native.sys, "platform", "win32")
+    notes = {s.name: s.cancel_note for s in engine(machine).stages()}
+    assert notes["build"] == native.BUILD_CANCEL_NOTE_WINDOWS
+    monkeypatch.setattr(native.sys, "platform", "linux")
+    notes = {s.name: s.cancel_note for s in engine(machine).stages()}
+    assert notes["build"] == native.BUILD_CANCEL_NOTE
+
+
 def test_the_stage_tuple_is_the_specs_and_the_names_agree(machine: Machine) -> None:
     """T179 spec §1 steps 1-9; mmaps (step 10) is a background job after ready (Task 4)."""
     assert TrinityCoreInstaller.STAGE_NAMES == STAGES

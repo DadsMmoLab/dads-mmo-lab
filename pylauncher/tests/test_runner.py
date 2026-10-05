@@ -1403,6 +1403,53 @@ def test_on_windows_a_taskkill_that_fails_falls_back_to_terminate(
     assert not root.alive
 
 
+def test_on_windows_without_systemroot_the_tree_kill_uses_the_default_windows_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset `SystemRoot` must not cost the Stop: taskkill is looked for under C:\\Windows.
+
+    Mutation this catches (cold review N2): dropping the `C:\\Windows` default,
+    after which `ntpath.join(None, ...)` raised a TypeError that no taskkill was
+    ever run for.
+    """
+    _as_windows(monkeypatch)
+    monkeypatch.delenv("SystemRoot", raising=False)
+    events: list[object] = []
+    root = _TreeRoot(events)
+    calls = _taskkill_double(monkeypatch, root)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert [call["argv"] for call in calls] == [
+        [r"C:\Windows\System32\taskkill.exe", "/T", "/F", "/PID", "4242"]
+    ]
+
+
+def test_on_windows_any_error_in_the_tree_kill_still_ends_the_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not only the two exceptions `subprocess.run` documents: nothing may cost a Stop its ending.
+
+    Mutation this catches (cold review N2): catching only `OSError` and
+    `TimeoutExpired`, so any other error escapes `_end_child` before
+    `terminate()` and the Stop ends nothing at all.
+    """
+    _as_windows(monkeypatch)
+    events: list[object] = []
+    root = _TreeRoot(events)
+
+    def broken_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        events.append("taskkill")
+        raise RuntimeError("something nobody expected")
+
+    monkeypatch.setattr(runner.subprocess, "run", broken_run)
+
+    runner._end_child(root)  # type: ignore[arg-type]
+
+    assert events[:2] == ["taskkill", "terminate"], events
+    assert not root.alive
+
+
 def test_on_windows_a_root_that_outlives_terminate_is_still_killed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

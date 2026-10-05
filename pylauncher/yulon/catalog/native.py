@@ -1572,13 +1572,37 @@ BUILD_CANCEL_NOTE = (
     "That is deliberate: the work it has done is kept, and starting this install again picks up "
     "from there instead of compiling it all a second time."
 )
-"""What a Stop does DURING THE BUILD, said just before the build starts.
+"""What a Stop does DURING THE BUILD on Linux and macOS, said just before the build starts.
 
 Abandoning the compose client does not abandon the daemon's work, and the
 layer cache is precisely what makes a resume cheap — a user told "cancelled"
 without this sentence reaches for `docker builder prune` and throws away the
 thing that would have saved them three hours.
+
+Off Windows a Stop still ends the docker CLI alone, and whether the build ends
+with it there is T298's open question, so this sentence stays until a probe
+answers it. Windows says `BUILD_CANCEL_NOTE_WINDOWS`; ask `build_cancel_note()`.
 """
+
+BUILD_CANCEL_NOTE_WINDOWS = (
+    "Stopping now ends the build at once. The steps it has already finished are kept in Docker's "
+    "build cache, so starting this install again picks up from there instead of compiling it all "
+    "a second time."
+)
+"""`BUILD_CANCEL_NOTE` on Windows, where a Stop ends the build's whole process tree (T246).
+
+Measured on yulon-win11 2026-10-05: with the tree ended, BuildKit's build went
+to `Error` within seconds and no image tag moved; before T246 the orphaned
+compose and buildx processes finished it and moved the live tag 10 min 38 s
+after Stop. The cache half is said for the same reason as on Linux: the
+finished steps are what makes the next press cheap.
+"""
+
+
+def build_cancel_note() -> str:
+    """The build stage's cancel note for THIS platform, asked when the stages are built."""
+    return BUILD_CANCEL_NOTE_WINDOWS if sys.platform == "win32" else BUILD_CANCEL_NOTE
+
 
 BUILDER_LOST = (
     "because it lost its connection to Docker's builder part-way through: Docker closed it. "
