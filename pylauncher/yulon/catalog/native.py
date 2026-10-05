@@ -1628,12 +1628,13 @@ Thirty times the longest quiet stretch measured, and still well short of the
 53 minutes the T179 stall sat silent before Docker ended it with an EOF.
 
 **Nothing is ended here, by the lead's ruling on review (2026-10-04).** A slow
-image export can be quiet for long on a slow disk, and on Windows ending the
-client is not even possible from here: `proc.terminate()` reaches docker.exe
-only, and the docker-compose.exe and docker-buildx.exe it started run on. So
-the player is told how to check and what to do, and restarting Docker -- which
-the sentence asks for -- is what ends a hung build: the client then fails with
-the EOF that `BUILDER_LOST` explains.
+image export can be quiet for long on a slow disk, so silence alone is not
+proof of a hang. The ruling also cited that on Windows `proc.terminate()`
+reached docker.exe only, leaving docker-compose.exe and docker-buildx.exe
+running; T246 (2026-10-05) made a Stop end that whole tree, but the first reason
+stands. So the player is told how to check and what to do, and restarting
+Docker -- which the sentence asks for -- is what ends a hung build: the client
+then fails with the EOF that `BUILDER_LOST` explains.
 """
 
 

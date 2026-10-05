@@ -166,10 +166,10 @@ def test_a_step_s_own_failure_or_a_registry_error_is_not_a_lost_builder(
 # -- a build that prints nothing -------------------------------------------------
 #
 # Lead ruling on review (2026-10-04): never stop a build for silence alone. A
-# slow export can be quiet for long, and on Windows `proc.terminate()` would end
-# only docker.exe while docker-compose.exe and docker-buildx.exe ran on. So a
-# silent build is TOLD -- at 10 minutes, and as looking stalled at 30 with how
-# to check and what to do -- and nothing is ended.
+# slow export can be quiet for long (the ruling also cited that on Windows
+# `proc.terminate()` then ended only docker.exe; T246 made a Stop end the whole
+# tree). So a silent build is TOLD -- at 10 minutes, and as looking stalled at
+# 30 with how to check and what to do -- and nothing is ended.
 
 
 def test_the_quiet_thresholds_are_generous_against_what_was_measured() -> None:

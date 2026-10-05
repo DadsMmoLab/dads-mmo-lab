@@ -16,6 +16,7 @@ from __future__ import annotations
 import atexit
 import errno
 import importlib
+import ntpath
 import os
 import queue
 import re
@@ -110,14 +111,87 @@ def _register(generator: Generator[str, None, None], child: _Child) -> None:
 
 
 def _end_child(proc: _AnyPopen) -> None:
-    """Terminate `proc` if it is still running, and kill it if terminate is not enough."""
+    """End `proc` if it is still running: on Windows its tree first, then terminate, then kill.
+
+    **On Windows `terminate()` ends one process, and a Stop has to end a tree
+    (T246).** Measured on yulon-win11 2026-10-05: a rebuild's child was
+    docker.exe, which had started docker-compose.exe, which had started
+    `docker-buildx.exe bake`. Stop ended docker.exe alone; the other two ran on
+    as orphans for 12.5 minutes, BuildKit finished the build, and the live image
+    tag moved 10 min 38 s after Stop. `taskkill /T /F` on docker.exe ended all
+    three, the build ended in the engine as `Error`, and no tag moved. So the
+    tree goes first, while docker.exe is still alive to anchor it: taskkill
+    finds descendants by their parent's pid, and once docker.exe has been
+    terminated its children's parent is gone.
+
+    `terminate()`/`kill()` stay after it as the fallback, and are what a
+    taskkill that failed, timed out or could not start leaves in charge. Off
+    Windows nothing changes; T298 is the follow-up that asks whether Linux and
+    macOS need a process group.
+    """
     if proc.poll() is None:
+        if sys.platform == "win32":
+            _end_tree(proc)
         proc.terminate()
         try:
             proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+def _taskkill() -> str:
+    """The system's own taskkill.exe, by its full path rather than whatever PATH finds first."""
+    return ntpath.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "taskkill.exe")
+
+
+def _end_tree(proc: _AnyPopen) -> None:
+    """`taskkill /T /F` the tree under `proc`, bounded, never raising (T246; see `_end_child`).
+
+    **Why taskkill and not a Job object**, which is the sturdier tool in
+    principle (every descendant is in the job however late it was started, and
+    the job still holds orphans whose parent has died):
+
+    * taskkill is what the live probe PROVED ends the build. A job object would
+      be new ctypes structure layouts that no test on the Linux CI can run.
+    * a job has to be assigned after `Popen` returns, so docker.exe could have
+      started its plugin before it joined: the race just moves to the start.
+    * a job holds a descendant for good, whatever it is. Anything a streamed
+      command starts to outlive it (a helper, or Docker Desktop itself) would
+      be ended by the next Stop or by closing the job; taskkill only reaches
+      what is still a descendant of a live docker.exe at the moment of Stop.
+
+    What taskkill cannot do, and is accepted: a process started between its
+    snapshot and its kill (compose starts `buildx bake` once, right at the
+    start of a build) survives, and so does one whose parent had already exited.
+    Popen holds docker.exe's handle until it is reaped, so `proc.pid` cannot be
+    another process's pid while this runs.
+    """
+    command = [_taskkill(), "/T", "/F", "/PID", str(proc.pid)]
+    try:
+        done = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            env=child_env(),
+            timeout=_SHUTDOWN_TIMEOUT_SECONDS,
+            creationflags=creationflags(),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(f"could not end the process tree of pid {proc.pid}: {exc}")
+        return
+    said = " ".join((done.stdout + done.stderr).split())
+    if done.returncode:
+        logger.warning(
+            f"taskkill could not end the process tree of pid {proc.pid} "
+            f"(exit {done.returncode}): {said}"
+        )
+    else:
+        logger.debug(f"ended the process tree of pid {proc.pid}: {said}")
 
 
 def _close_abandoned_streams() -> None:
@@ -1207,13 +1281,9 @@ def interact(
             if proc.returncode:
                 raise subprocess.CalledProcessError(proc.returncode, command)
     finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+        # `stream()`'s ending, so a cancelled child's whole tree ends on Windows
+        # too (T246); until then this was a copy of it that ended the root alone.
+        _end_child(proc)
         reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         for handle in (proc.stdin, proc.stdout):
             if handle is not None:
