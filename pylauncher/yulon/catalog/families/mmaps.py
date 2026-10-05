@@ -69,6 +69,7 @@ import json
 import os
 import re
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -352,6 +353,9 @@ class MmapsStatus:
     """Docker could not be asked this time; the state is the record's last word."""
     kept: int = 0
     """T209: a failed or stopped run's finished tiles, which the next run continues from."""
+    begins_again_because: str = ""
+    """T245: why the next start throws the `kept` tiles away (`_why_it_begins_again()`);
+    empty when it continues from them."""
 
     @property
     def can_start(self) -> bool:
@@ -379,6 +383,12 @@ class MmapsStatus:
             if self.percent is not None
             else ""
         )
+        if self.state == "failed" and self.kept and self.begins_again_because:
+            return (
+                f"Pathfinding data stopped part-way{reached}: {self.error} Its {self.kept} "
+                f"finished tiles cannot be continued from, because {self.begins_again_because}, "
+                f"so \u201c{START_PRESS}\u201d starts it again from the beginning."
+            )
         if self.state == "failed" and self.kept:
             return (
                 f"Pathfinding data stopped part-way{reached}: {self.error} Its {self.kept} "
@@ -664,6 +674,14 @@ def stop_mmaps(
         if state == "done":
             return "Pathfinding data is already made; there was nothing to stop."
         kept = _stop(job, run, keep="you stopped it.")
+        stopped = read_record(server_dir) if kept else None
+        why = _why_it_begins_again(job, stopped) if stopped is not None else ""
+        if why:
+            return (
+                f"Stopped making the pathfinding data. Its {kept} finished tiles are kept, but "
+                f"{why}, so the next run starts again from the beginning. Pathfinding stays off "
+                "until a run finishes."
+            )
         if kept:
             return (
                 f"Stopped making the pathfinding data. Its {kept} finished tiles are kept, and "
@@ -865,7 +883,7 @@ def _reconcile(job: Job, run: Runner, now: Clock) -> MmapsStatus:
         return _reconcile_live(job, record, run, now)
     if record.state == "done":
         return _done_status(job, record, run, now)
-    return _status_of(record, pathfinding_on=_pathfinding_on(job))
+    return _failed_status(job, record)
 
 
 def _reconcile_live(job: Job, record: Record, run: Runner, now: Clock) -> MmapsStatus:
@@ -1035,7 +1053,7 @@ def _fail(
     )
     _write_record(job.server_dir, failed)
     logger.warning(f"{job.container} failed: {failed.error}")
-    return _status_of(failed, pathfinding_on=_pathfinding_on(job))
+    return _failed_status(job, failed)
 
 
 def _stop(job: Job, run: Runner, *, keep: str | None) -> int:
@@ -1183,6 +1201,46 @@ def _file_facts(folder: Path, prefix: str) -> list[str]:
             info = entry.stat(follow_symlinks=False)
             facts.append(f"{name}\0{info.st_size}\0{info.st_mtime_ns}\n")
     return facts
+
+
+RESUME_CHECK_SECONDS = 60.0
+"""How long `_why_it_begins_again()`'s answer for a failed run is reused (T245).
+
+The Server tab polls a failed run every few seconds for as long as it is open, and
+the answer hashes every map file (`_evidence()`): one walk a minute, not twelve. A
+map file changed by hand inside that minute shows on the next one; `start_mmaps()`
+hashes again itself, so what a start does never rests on this cache."""
+
+_monotonic: Callable[[], float] = time.monotonic
+
+_RESUME_CHECKS: dict[Path, tuple[float, str, str]] = {}
+"""Server folder -> (when it was asked, the record's `evidence`, the answer)."""
+
+
+def _why_it_begins_again(job: Job, record: Record) -> str:
+    """Why a start would throw away the tiles `record` kept, in words; "" when it continues.
+
+    The rule `_resume_or_clear()` starts by: a run whose map data could not be told
+    is never continued, nor one whose map data has changed since. Asked under `_LOCK`.
+    """
+    if not record.evidence:
+        return "Yu'lon could not tell which map data it was made from"
+    asked = _monotonic()
+    cached = _RESUME_CHECKS.get(job.server_dir)
+    if cached is not None and cached[1] == record.evidence:
+        if asked - cached[0] < RESUME_CHECK_SECONDS:
+            return cached[2]
+    why = "" if _evidence(job) == record.evidence else "the map data has changed since it began"
+    _RESUME_CHECKS[job.server_dir] = (asked, record.evidence, why)
+    return why
+
+
+def _failed_status(job: Job, record: Record) -> MmapsStatus:
+    """A failed record's status, saying whether the next start continues from its tiles."""
+    status = _status_of(record, pathfinding_on=_pathfinding_on(job))
+    if not status.kept:
+        return status
+    return replace(status, begins_again_because=_why_it_begins_again(job, record))
 
 
 def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:

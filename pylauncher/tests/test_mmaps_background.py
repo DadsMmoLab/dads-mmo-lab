@@ -73,6 +73,33 @@ class Clock:
         return self.now
 
 
+class Monotonic:
+    """`mmaps._monotonic`, moved by the test: how old a cached resume check is (T245)."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def later(self) -> None:
+        self.now += mmaps.RESUME_CHECK_SECONDS + 1
+
+
+@pytest.fixture
+def monotonic(monkeypatch: pytest.MonkeyPatch) -> Monotonic:
+    ticking = Monotonic()
+    monkeypatch.setattr(mmaps, "_monotonic", ticking)
+    return ticking
+
+
+CHANGED = (
+    "Its 3 finished tiles cannot be continued from, because the map data has changed since it "
+    "began, so “Make the pathfinding data” starts it again from the beginning."
+)
+"""T245: the line's end for kept tiles a start would throw away."""
+
+
 @pytest.fixture
 def box(machine: Machine) -> Machine:  # noqa: F811 - the fixture imported above
     return machine
@@ -1103,7 +1130,7 @@ def test_a_crash_keeps_three_tiles_removes_the_cut_one_and_the_retry_continues_f
 
 
 def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
-    server: Path, caplog: pytest.LogCaptureFixture
+    server: Path, caplog: pytest.LogCaptureFixture, monotonic: Monotonic
 ) -> None:
     fake = FakeMmapsDocker()
     start(server, fake)
@@ -1111,6 +1138,9 @@ def test_changed_map_data_between_the_runs_clears_everything_and_says_why(
     fake.finish(139)
     status(server, fake)
     (server / "data" / extract.EVIDENCE_FILE).write_text('{"plan_hash": "second"}\n', "utf-8")
+    monotonic.later()
+    now = status(server, fake)
+    assert now.kept == 3 and now.line().endswith(CHANGED), "the line says what Start will do"
     with caplog.at_level("WARNING"):
         start(server, fake)
     assert fake.mmaps_at_run[-1] == [], "tiles made from other map data are not continued"
@@ -1160,7 +1190,7 @@ def _add_a_file(path: Path) -> None:
     ids=("a-map-file-of-another-size", "a-dbc-file-rewritten", "a-vmap-file-added"),
 )
 def test_map_data_changed_behind_an_unchanged_evidence_file_clears_the_tiles(
-    server: Path, folder: str, change: Callable[[Path], None]
+    server: Path, folder: str, change: Callable[[Path], None], monotonic: Monotonic
 ) -> None:
     """Codex adversarial review: the evidence file alone does not prove the maps are the same.
     Each fixture changes ONE fact of ONE file the generator reads; the evidence file stays."""
@@ -1168,8 +1198,10 @@ def test_map_data_changed_behind_an_unchanged_evidence_file_clears_the_tiles(
     start(server, fake)
     fake.write_tiles(3)
     fake.finish(139)
-    status(server, fake)
+    assert "continues from there" in status(server, fake).line()
     change(next(iter(sorted((server / "data" / folder).iterdir()))))
+    monotonic.later()
+    assert status(server, fake).line().endswith(CHANGED), "T245: the line says what Start does"
     start(server, fake)
     assert fake.mmaps_at_run[-1] == []
 
@@ -1181,7 +1213,57 @@ def test_a_run_whose_map_data_had_no_evidence_is_never_continued(server: Path) -
     start(server, fake)
     fake.write_tiles(3)
     fake.finish(139)
-    status(server, fake)
+    line = status(server, fake).line()
+    assert line.endswith(
+        "Its 3 finished tiles cannot be continued from, because Yu'lon could not tell which "
+        "map data it was made from, so “Make the pathfinding data” starts it again from the "
+        "beginning."
+    )
+    start(server, fake)
+    assert fake.mmaps_at_run[-1] == []
+
+
+def test_a_failed_runs_map_data_is_hashed_again_only_once_its_answer_is_old(
+    server: Path, monotonic: Monotonic, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T245: a failed run is polled every few seconds for as long as the tab is open, and the
+    hash walks every map file. The fixture's map data changes after the FIRST hash, so a
+    second hash inside the window would say so."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    hashed: list[str] = []
+    real = mmaps._evidence
+
+    def counted(job: mmaps.Job) -> str:
+        hashed.append(job.container)
+        return real(job)
+
+    monkeypatch.setattr(mmaps, "_evidence", counted)
+    assert "continues from there" in status(server, fake).line()
+    _change_size_only(next(iter(sorted((server / "data" / "maps").iterdir()))))
+    assert "continues from there" in status(server, fake).line()
+    assert len(hashed) == 1
+    monotonic.later()
+    assert status(server, fake).line().endswith(CHANGED)
+    assert len(hashed) == 2
+
+
+def test_a_stop_over_changed_map_data_says_the_next_run_begins_again(server: Path) -> None:
+    """T245: Stop's sentence stays on the tab while the run is stopped, so it must agree with
+    what the next start does."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    _change_size_only(next(iter(sorted((server / "data" / "maps").iterdir()))))
+    said = mmaps.stop_mmaps(server, ENTRY, runner=fake, install_id=INSTALL_ID)
+    assert said == (
+        "Stopped making the pathfinding data. Its 3 finished tiles are kept, but the map data "
+        "has changed since it began, so the next run starts again from the beginning. "
+        "Pathfinding stays off until a run finishes."
+    )
+    assert status(server, fake).line().endswith(CHANGED)
     start(server, fake)
     assert fake.mmaps_at_run[-1] == []
 
@@ -1428,3 +1510,28 @@ def test_every_failed_exit_keeps_the_tiles_and_the_usual_threads(server: Path, c
     start(server, fake)
     assert len(fake.mmaps_at_run[-1]) == 3
     assert fake.started[-1].argv[-2:] == ("--threads", "4")
+
+
+def test_a_new_runs_failure_is_never_answered_from_the_last_runs_check(
+    server: Path, monotonic: Monotonic
+) -> None:
+    """T245: the cached answer belongs to one run's map data. A run started over the changed
+    map data and failed within the minute keeps tiles made from THAT data, and continues."""
+    fake = FakeMmapsDocker()
+    start(server, fake)
+    fake.write_tiles(3)
+    fake.finish(139)
+    status(server, fake)
+    (server / "data" / extract.EVIDENCE_FILE).write_text('{"plan_hash": "second"}\n', "utf-8")
+    monotonic.later()
+    assert status(server, fake).line().endswith(CHANGED)
+    start(server, fake)  # from the beginning, over the new map data
+    fake.write_tiles(3)
+    fake.finish(139)
+    assert (
+        status(server, fake)
+        .line()
+        .endswith(
+            "Its 3 finished tiles are kept, and “Make the pathfinding data” continues from there."
+        )
+    )

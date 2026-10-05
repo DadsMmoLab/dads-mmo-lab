@@ -921,3 +921,26 @@ def test_another_actions_sentence_is_never_cleared_by_the_job_ending(
     view.refresh_pathfinding()
 
     assert view.problem_label.text() == "A backup was written."
+
+
+def test_kept_tiles_over_changed_map_data_say_start_begins_again_and_it_does(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex adversarial review of T245: the line promised a resume `start_mmaps()` refuses."""
+    clock = mm.Monotonic()
+    monkeypatch.setattr(mmaps, "_monotonic", clock)
+    view, job = _real_job_view(tmp_path)
+    _running_at_16(view, job, 3)
+    job.docker.finish(139)
+    view.refresh_pathfinding()
+    assert "continues from there" in view.pathfinding_label.text()
+    path = next(iter(sorted((job.server / "data" / "maps").iterdir())))
+    path.write_bytes(path.read_bytes() + b"!")  # a map file changed by hand
+    clock.later()
+
+    view.refresh_pathfinding()
+
+    assert view.pathfinding_label.text().endswith(mm.CHANGED)
+    view.start_pathfinding()
+    assert job.docker.mmaps_at_run[-1] == []
+    assert view.problem_label.text() == MAKING
