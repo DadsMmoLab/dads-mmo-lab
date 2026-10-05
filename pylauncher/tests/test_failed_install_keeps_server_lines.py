@@ -433,6 +433,27 @@ def test_what_a_container_wrote_to_stderr_is_kept_too(
     assert "Could not connect to MySQL database" in text
 
 
+def test_a_long_stderr_never_pushes_the_end_of_stdout_out_of_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex T249 review: the streams come back apart and stderr follows stdout.
+
+    Cut together to the cap's end, a stderr of 256 KiB or more left nothing of
+    stdout, wherever the crash reason was. Each stream keeps its own end.
+    """
+    cli, state = lay_fake_docker(tmp_path)
+    monkeypatch.setattr(platform, "docker_program", lambda: str(cli))
+    noisy = "".join(f"warning {n:04d} {'w' * 700}\n" for n in range(native.FAILURE_TAIL_LINES))
+    set_fake_log(state, WORLD, stdout=WORLD_LOG, stderr=noisy)
+
+    text = native.Seams().container_tail(WORLD)
+
+    assert text is not None
+    assert CRASH in text, "the end of stdout"
+    assert text.endswith(f"warning {native.FAILURE_TAIL_LINES - 1:04d} {'w' * 700}\n")
+    assert len(text.encode("utf-8")) <= native.FAILURE_TAIL_BYTES
+
+
 def test_a_container_docker_does_not_know_is_no_lines_at_all(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

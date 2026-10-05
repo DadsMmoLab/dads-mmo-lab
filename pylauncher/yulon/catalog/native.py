@@ -5112,7 +5112,11 @@ FAILURE_TAIL_TIMEOUT_S = 20.0
 def _container_tail(container: str, *, wsl_distro: str | None = None) -> str | None:
     """`docker.last_lines()` of one container, for a failed `ready` (T249). `None`: unread."""
     return docker.last_lines(
-        container, FAILURE_TAIL_LINES, wsl_distro=wsl_distro, timeout=FAILURE_TAIL_TIMEOUT_S
+        container,
+        FAILURE_TAIL_LINES,
+        wsl_distro=wsl_distro,
+        timeout=FAILURE_TAIL_TIMEOUT_S,
+        max_bytes=FAILURE_TAIL_BYTES,
     )
 
 
