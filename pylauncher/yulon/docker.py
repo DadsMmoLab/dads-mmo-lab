@@ -5665,7 +5665,7 @@ def tool_container_left_line(name: str, reason: str) -> str:
     return (
         f"The extraction tool's container {name} could not be removed after Stop ({reason}), "
         "so it may still be writing into the server's data folder. Remove it in Docker "
-        f"Desktop's Containers list, or run: docker rm -f {name}"
+        f"Desktop's Containers list, or run this:\ndocker rm -f {name}"
     )
 
 

@@ -1046,7 +1046,7 @@ def _left_running(what: str, run: docker.AttachedRun, data_dir: Path) -> None:
         raise ContainerLeftRunning(
             f"{what} was stopped, but its container {name} could not be removed, so it may "
             f"still be writing into {data_dir}. Remove it in Docker Desktop's Containers "
-            f"list, or run: docker rm -f {name}"
+            "list; the log above also gives the command that removes it."
         )
 
 

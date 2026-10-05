@@ -157,7 +157,7 @@ def test_a_tool_container_that_will_not_go_is_named_in_the_run_log(
     assert said[-1] == docker.tool_container_left_line(
         name, "Error response from daemon: the daemon is shutting down"
     ), said[-1]
-    assert f"docker rm -f {name}" in said[-1]
+    assert said[-1].endswith(f"\ndocker rm -f {name}"), "the command on a line of its own"
     assert got[0].container_left == name, "the caller must know the tool may still write"
 
 
@@ -301,7 +301,7 @@ def test_a_stopped_tool_whose_container_was_not_removed_is_a_refusal_true_after_
     assert isinstance(left.value, TrueAfterStop), "said under Stopped, not swallowed by it"
     said = str(left.value)
     assert "yulon-extract-0123456789ab" in said and str(tmp_path / "server" / "data") in said
-    assert "docker rm -f yulon-extract-0123456789ab" in said
+    assert "docker rm" not in said, "a command goes in the log, not on the player's line (T248)"
     assert runner.names() == ["ad"], "nothing after it"
 
 

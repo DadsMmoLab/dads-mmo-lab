@@ -1313,7 +1313,7 @@ def test_a_stopped_reextract_whose_tool_container_will_not_go_leaves_the_old_dat
         assert len(outcome) == 1 and isinstance(outcome[0], extract.ContainerLeftRunning)
         (name,) = fake_containers(state)
         said = str(outcome[0])
-        assert f"docker rm -f {name}" in said
+        assert name in said and "docker rm" not in said, said
         assert said.endswith(trinitycore.REEXTRACT_KEPT_ASIDE), said
         assert seen_at_put_back == [], "the old data was put back under a running tool"
         assert (box.server_dir / "data" / extract.PREVIOUS_DIR / extract.EVIDENCE_FILE).is_file()
