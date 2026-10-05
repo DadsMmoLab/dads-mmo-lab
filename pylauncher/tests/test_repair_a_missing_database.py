@@ -125,3 +125,27 @@ def test_the_engine_asks_docker_by_default() -> None:
     """The real reading, not a stand-in, unless a test says otherwise."""
     assert native.Seams().read_database is database_presence.read
     assert ENTRY.install.native is not None
+
+
+# -- the wiring ----------------------------------------------------------------------------
+
+
+def test_every_game_s_tab_is_wired_the_repair_and_it_drives_that_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import install_wiring
+    from yulon.catalog.catalog import load_catalog
+
+    rec = Recorder(images=True)
+    server_dir = _finished(rec, tmp_path)
+    rec.db_started = False
+    rec.probe_answers = [ABSENT, IMPORTED]
+    built = engine(rec, read_database=_reads("missing"))
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **kw: built)
+    for game in load_catalog().games:
+        assert install_wiring.repair_database_for_app(game, server_dir) is not None, game.id
+    repair = install_wiring.repair_database_for_app(ENTRY, server_dir)
+    assert repair is not None
+    said = list(repair(None))
+    assert f"Repairing {ENTRY.name}'s database in {server_dir}" in said
+    assert "start" in rec.calls

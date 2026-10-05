@@ -368,3 +368,13 @@ def test_a_start_that_works_takes_the_offer_down(
     view.start_server()
     assert not view.repair_database_button.isVisibleTo(view)
     assert not view.restore_backup_button.isVisibleTo(view)
+
+
+def test_a_rebuild_refused_for_the_database_puts_the_same_offer_on_the_server_tab(
+    qapp: object, db: _DbDocker, tmp_path: Path
+) -> None:
+    """The Rebuild's refusal is in its panel; its ways out go where a refused Start puts them."""
+    view = _view(db, tmp_path, [])
+    view._rebuild_finished(False, f"{database_presence.MISSING} Nothing was changed.")
+    assert view.problem_label.text() == database_presence.MISSING
+    assert view.repair_database_button.isVisibleTo(view)

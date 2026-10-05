@@ -2769,6 +2769,11 @@ def _assemble(
         # T129. Here for the same reason: which steps may be offered again is a
         # fact of `catalog.json`, and the distro one of the install.
         corrections=install_wiring.corrections_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # T377. Here for the rebuild's reason: every native install can make its
+        # database again with its own stages, and the distro is the install's.
+        repair_database=install_wiring.repair_database_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
         # T224. Here for T106's reason: every native install can keep a build, and
         # the distro (D4) is a fact of the install, answered in `install_wiring`.
         kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
