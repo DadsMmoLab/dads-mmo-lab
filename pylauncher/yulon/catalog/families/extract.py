@@ -735,11 +735,14 @@ def remove_case_view(view_dir: Path) -> bool:
 _BAR = re.compile(r"[\[\]# ]*")
 """A line that is nothing but a progress bar or a piece of one: `[####]`, `###]`, `#`, `[`."""
 
-_GLUED_BAR = re.compile(r"\[?#+(?=[^\s#\]])")
+_GLUED_BAR = re.compile(r"\[?(?:#{3,}(?=[^\s#\]])|#{1,2}(?=[A-Z]))")
 """A bar's `#` run glued onto the front of the next line: `[###Extracting ...`, `#Extracting ...`.
 
-Only `#` directly followed by a word: `# a sentence` is a sentence, and a `#` inside
-a line (`a#b.wmo`) is part of it.
+Residue only (cold review of T263): a run of three or more `#`, or one or two
+directly before a capital letter, which is how the bar's last cells meet the
+tool's next `Extracting`/`Processing` line. A `#` before a digit, a small
+letter or a space is the line's own (`#1 error`, `#define X`, `[#1] x`,
+`# a sentence`), and a `#` inside a line (`a#b.wmo`) is part of it.
 """
 
 

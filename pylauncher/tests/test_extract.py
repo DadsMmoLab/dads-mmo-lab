@@ -3858,6 +3858,13 @@ def test_a_tools_progress_bar_is_kept_out_of_the_run_log_and_its_last_words(
         ("# not a bar: a sentence after a hash", "# not a bar: a sentence after a hash"),
         ("Extracting a.wmo", "Extracting a.wmo"),
         ("ERROR: Can't open a#b.wmo", "ERROR: Can't open a#b.wmo"),
+        # Cold review of T263: a real leading `#` is kept; only bar residue goes.
+        ("#1 error", "#1 error"),
+        ("#define X", "#define X"),
+        ("[#1] x", "[#1] x"),
+        ("##Extracting a.wmo", "Extracting a.wmo"),
+        ("[#Extracting a.wmo", "Extracting a.wmo"),
+        ("####1 tile", "1 tile"),
     ],
 )
 def test_what_is_progress_residue_and_what_is_said(line: str, said: str | None) -> None:

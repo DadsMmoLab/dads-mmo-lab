@@ -552,7 +552,7 @@ def _arac_over(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, files: dict[str,
     server_dir = tmp_path / "server"
     server_dir.mkdir()
     client_dir = tmp_path / "client"
-    client_dir.mkdir()
+    client_dir.mkdir(exist_ok=True)
     for rel, blob in files.items():
         _write(client_dir / rel, blob)
     _compose_run_double(monkeypatch, _volume(tmp_path))
@@ -565,26 +565,138 @@ def _names(folder: Path) -> list[str]:
     return sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*"))
 
 
-@needs_case_sensitive_disk
-def test_a_patch_lands_on_the_name_already_in_the_client_in_another_case(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """T262: `Data/patch-a.mpq` beside a new `Data/Patch-A.MPQ` is two archives of one name
-    to the game (Wine is case-blind), and the receipt named the new one only."""
-    manifest = _manifest(ARAC)
-    applier = _arac_over(monkeypatch, tmp_path, {"Data/patch-a.mpq": b"an older ARAC patch"})
-    client = tmp_path / "client"
+ASIDE = ".yulon-module-old"
+"""The suffix the player's own file is set aside under while a module's file has its name."""
 
-    assert _names(client) == ["Data", "Data/patch-a.mpq"]
-    assert (client / "Data" / "patch-a.mpq").read_bytes() == MPQ
-    landed = client / "Data" / "patch-a.mpq"
+
+@pytest.mark.parametrize(
+    "theirs",
+    [
+        pytest.param("Data/Patch-A.MPQ", id="same case"),
+        pytest.param("Data/patch-a.mpq", id="another case", marks=needs_case_sensitive_disk),
+    ],
+)
+def test_a_players_own_file_under_the_patchs_name_is_set_aside_and_put_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, theirs: str
+) -> None:
+    """Owner's decision on the cold review of T262: "set aside, put back".
+
+    The player's `Data/patch-a.mpq` (from another mod) used to be overwritten, and
+    Remove then deleted it, its hash being the one Yu'lon wrote: data loss. Now it
+    is moved aside under a Yu'lon-named sibling, the receipt records that, and
+    Remove puts it back byte for byte with its read-only flag.
+    """
+    manifest = _manifest(ARAC)
+    client = tmp_path / "client"
+    _write(client / theirs, b"another mod's patch-a")
+    os.chmod(client / theirs, 0o444)  # note 3: a read-only file no longer stops Install
+    before = (client / theirs).stat()
+    applier = _arac_over(monkeypatch, tmp_path, {})
+    landed = client / theirs
+    aside = landed.with_name(landed.name + ASIDE)
+
+    assert _names(client) == sorted(["Data", theirs, theirs + ASIDE])
+    assert landed.read_bytes() == MPQ, "the patch landed on the name already there"
+    assert aside.read_bytes() == b"another mod's patch-a"
     copies = read_client_copies(_clone_of(applier, manifest), item_id="mod-arac")
-    assert copies == (ClientCopy(step="Patch-A.MPQ", path=str(landed), sha256=sha256_of(landed)),)
+    assert copies == (
+        ClientCopy(
+            step="Patch-A.MPQ", path=str(landed), sha256=sha256_of(landed), aside=str(aside)
+        ),
+    )
 
     report = applier.remove(manifest)
 
-    assert _names(client) == ["Data"], "the patch was not taken back from the name it landed on"
-    assert f"took back patch-a.mpq from {client / 'Data'}" in report.done
+    assert _names(client) == ["Data", theirs]
+    assert landed.read_bytes() == b"another mod's patch-a"
+    after = landed.stat()
+    assert (after.st_mode, after.st_mtime_ns) == (before.st_mode, before.st_mtime_ns)
+    assert f"took back {landed.name} from {client / 'Data'}" in report.done
+    assert f"put your own {landed.name} back in {client / 'Data'}" in report.done
+
+
+def test_a_players_file_with_the_same_bytes_is_not_set_aside(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only a file whose bytes differ is the player's to keep; the same bytes are the patch."""
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": MPQ})
+
+    assert _names(tmp_path / "client") == ["Data", "Data/Patch-A.MPQ"]
+    applier.remove(_manifest(ARAC))
+    assert _names(tmp_path / "client") == ["Data"]
+
+
+def test_a_reinstall_keeps_the_players_file_aside_rather_than_its_own_first_copy(
+    tmp_path: Path,
+) -> None:
+    """The second install finds ITS OWN file at the name: that is not the player's to keep,
+    and setting it aside would put Yu'lon's patch back where the player's belongs.
+
+    Through `_client()` twice, the second time with the first install's receipts as the
+    claim holds them (`previous_copies`), as `install()` hands them over on an update.
+    """
+    from yulon import apply as apply_module
+
+    manifest = _manifest(ARAC)
+    clone = tmp_path / "clone"
+    _write(clone / "Patch-A.MPQ", MPQ)
+    data = tmp_path / "client" / "Data"
+    _write(data / "Patch-A.MPQ", b"the player's own")
+    applier = Applier(tmp_path / "server", client_dir=tmp_path / "client")
+    first = apply_module._Log()
+    applier._client(manifest, clone, first)
+    _write(clone / "Patch-A.MPQ", MPQ + b" v2")
+    second = apply_module._Log(previous_copies=tuple(first.client_copies))
+
+    applier._client(manifest, clone, second)
+
+    assert _names(data) == ["Patch-A.MPQ", "Patch-A.MPQ" + ASIDE]
+    assert (data / ("Patch-A.MPQ" + ASIDE)).read_bytes() == b"the player's own"
+    (copy,) = second.client_copies
+    assert copy.aside == str(data / ("Patch-A.MPQ" + ASIDE)), "the first aside is carried"
+    applier._take_back(copy, (gone := apply_module._Log()))
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == b"the player's own"
+    assert f"put your own Patch-A.MPQ back in {data}" in gone.done
+
+
+def test_a_put_back_that_fails_keeps_the_aside_file_and_names_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yulon import apply as apply_module
+
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    data = tmp_path / "client" / "Data"
+    aside = data / ("Patch-A.MPQ" + ASIDE)
+    real_rename = os.rename
+
+    def refuse(src: object, dst: object) -> None:
+        if Path(str(src)) == aside:
+            raise PermissionError("the file is held open")
+        real_rename(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_module.os, "rename", refuse)
+    report = applier.remove(manifest)
+
+    assert aside.read_bytes() == b"the player's own", "the player's file was not kept"
+    assert any(str(aside) in line and "held open" in line for line in report.left_behind)
+    assert not any("put your own" in line for line in report.done)
+
+
+def test_a_changed_patch_keeps_the_players_file_aside_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Our file is left (it changed since), so the name is not free: the aside stays, named."""
+    manifest = _manifest(ARAC)
+    applier = _arac_over(monkeypatch, tmp_path, {"Data/Patch-A.MPQ": b"the player's own"})
+    data = tmp_path / "client" / "Data"
+    (data / "Patch-A.MPQ").write_bytes(MPQ + b" edited")
+
+    report = applier.remove(manifest)
+
+    assert (data / ("Patch-A.MPQ" + ASIDE)).read_bytes() == b"the player's own"
+    assert any(str(data / ("Patch-A.MPQ" + ASIDE)) in line for line in report.left_behind)
 
 
 @needs_case_sensitive_disk
@@ -631,6 +743,7 @@ def test_a_folder_of_client_files_lands_on_the_folders_and_files_already_there(
         "Interface/patch-Z.MPQ",  # the keg's second step, `dest: interface`
         "data",
         "data/PATCH-4.MPQ",
+        "data/PATCH-4.MPQ" + ASIDE,
         "data/enus",
         "data/enus/locale-enus.mpq",
         "data/enus/patch-enUS-4.MPQ",
@@ -645,9 +758,11 @@ def test_a_folder_of_client_files_lands_on_the_folders_and_files_already_there(
         "Interface",
         "Interface/patch-Z.MPQ",
         "data",
+        "data/PATCH-4.MPQ",
         "data/enus",
         "data/enus/locale-enus.mpq",
     ]
+    assert (client / "data" / "PATCH-4.MPQ").read_bytes() == b"an older keg patch"
     assert f"took back PATCH-4.MPQ from {client / 'data'}" in report.done
 
 
@@ -707,3 +822,26 @@ def test_a_folder_copy_never_writes_through_a_file_shared_by_hard_link(tmp_path:
 
     assert (target / "patch-4.MPQ").read_bytes() == b"the keg's patch-4"
     assert players.read_bytes() == b"the player's own patch-4"
+
+
+def test_a_hard_linked_archive_is_replaced_as_before_and_not_set_aside(tmp_path: Path) -> None:
+    """The owner's decision keeps T181's rule: a shared archive (a ready-to-play client's
+    and the player's) is replaced by a file of its own; the player's inode is untouched."""
+    from yulon import apply as apply_module
+
+    manifest = _manifest(ARAC)
+    clone = tmp_path / "clone"
+    _write(clone / "Patch-A.MPQ", MPQ)
+    players = tmp_path / "original" / "Data" / "Patch-A.MPQ"
+    _write(players, b"the player's own")
+    data = tmp_path / "play" / "Data"
+    data.mkdir(parents=True)
+    os.link(players, data / "Patch-A.MPQ")
+    log = apply_module._Log()
+
+    Applier(tmp_path / "server", client_dir=tmp_path / "play")._client(manifest, clone, log)
+
+    assert _names(data) == ["Patch-A.MPQ"]
+    assert (data / "Patch-A.MPQ").read_bytes() == MPQ
+    assert players.read_bytes() == b"the player's own"
+    assert [copy.aside for copy in log.client_copies] == [""]

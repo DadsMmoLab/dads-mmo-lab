@@ -520,9 +520,29 @@ class ClientCopy:
     step: str
     path: str
     sha256: str
+    aside: str = ""
+    """Where the player's own file of that name was set aside, absolute; empty: none was.
+
+    The owner's decision on the cold review of T262 ("set aside, put back"): a
+    module's file that lands on a file of the player's with other bytes moves that
+    file to `<name>` + `ASIDE_SUFFIX` first, and Remove puts it back. Written to
+    the claim only when set, so a receipt without one reads as it always did.
+    """
 
     def as_json(self) -> dict[str, str]:
-        return {"step": self.step, "path": self.path, "sha256": self.sha256}
+        out = {"step": self.step, "path": self.path, "sha256": self.sha256}
+        if self.aside:
+            out["aside"] = self.aside
+        return out
+
+
+ASIDE_SUFFIX = ".yulon-module-old"
+"""Appended to the name of a player's file a module's client file takes the place of.
+
+Not an `.MPQ` any more, so the game loads no archive under it, and a name of
+Yu'lon's own, as `client_packs`' `.yulon-pack-old` is. `.1`, `.2`, ... follow when
+that name is taken already.
+"""
 
 
 def sha256_of(path: Path) -> str:
@@ -560,8 +580,14 @@ def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
         if not isinstance(entry, dict):
             continue
         step, path, digest = entry.get("step"), entry.get("path"), entry.get("sha256")
-        if isinstance(step, str) and isinstance(path, str) and isinstance(digest, str):
-            out.append(ClientCopy(step=step, path=path, sha256=digest))
+        aside = entry.get("aside", "")
+        if (
+            isinstance(step, str)
+            and isinstance(path, str)
+            and isinstance(digest, str)
+            and isinstance(aside, str)
+        ):
+            out.append(ClientCopy(step=step, path=path, sha256=digest, aside=aside))
     return tuple(out)
 
 
@@ -621,7 +647,9 @@ def _copy_unshared(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> 
     return dst
 
 
-def _copy_onto(src: Path, target: Path) -> list[Path]:
+def _copy_onto(
+    src: Path, target: Path, place: Callable[[Path, Path], object] = _copy_unshared
+) -> list[Path]:
     """Copy the tree at `src` into `target`, onto the names already there; what was written.
 
     `shutil.copytree(dirs_exist_ok=True)` made every folder and file under the
@@ -635,8 +663,9 @@ def _copy_onto(src: Path, target: Path) -> list[Path]:
     Each destination folder is listed once, before anything is copied into it, and
     every name copied joins that listing, so two source names that differ only in
     case land on one name rather than making the twin this function exists to avoid.
-    Copies go through `_copy_unshared()`, so a hard-linked archive is replaced,
-    never written through; `_NOT_FOR_THE_CLIENT` is left in the clone, as
+    Copies go through `place`, `_copy_unshared()` unless the caller sets a file of
+    the player's aside first (`Applier._placer()`), so a hard-linked archive is
+    replaced, never written through; `_NOT_FOR_THE_CLIENT` is left in the clone, as
     `copytree`'s `ignore` left it; and the source is walked in name order,
     following its links as `copytree` did.
 
@@ -660,7 +689,7 @@ def _copy_onto(src: Path, target: Path) -> list[Path]:
         for name in sorted(name for name in files if name not in ignored):
             onto = client_names.match(names, name) or name
             names.append(onto)
-            _copy_unshared(here / name, dest / onto)
+            place(here / name, dest / onto)
             if dest / onto not in written:  # one receipt per name, of what is there last
                 written.append(dest / onto)
     return written
@@ -1641,21 +1670,29 @@ class _Log:
     # claim) and by `_unclient()` on a remove (the client lines of `left_behind`,
     # which on a remove replace the ones `_left_behind()` reads off the manifest).
     client_copies: list[ClientCopy] = field(default_factory=list)
+    previous_copies: tuple[ClientCopy, ...] = ()
+    """The receipts this item's claim held before this install: its own files in the client."""
     client_left_behind: list[str] = field(default_factory=list)
     # T130. Set by `_sql()` when the running-world guard's own reading was an
     # explicit "not running"; see `ApplyReport.world_stopped`.
     world_stopped: bool = False
 
 
-def take_back_file(path: Path, sha256: str, log: _Log) -> None:
+def take_back_file(path: Path, sha256: str, log: _Log, aside: Path | None = None) -> None:
     """Delete `path` if it still holds the bytes a receipt recorded; else say why not (T67).
 
     The one place a client file this app copied is deleted, for a module's
     Remove (`Applier._take_back()`) and for the ready-to-play client's "Also
     remove them from your original client" (`take_back_files()`, T181).
+
+    `aside` is the player's own file that was at `path` before (`ClientCopy.aside`):
+    once `path` is free it is renamed back, which keeps its bytes, date and
+    read-only flag. While `path` holds a file that is not deleted, or when the
+    rename fails, it stays where it is and is named; it is never deleted.
     """
-    if not path.exists():
+    if not os.path.lexists(path):
         log.skipped.append(f"client {path.name}: already gone from {path.parent}")
+        _put_back(aside, path, log)
         return
     try:
         same = sha256_of(path) == sha256
@@ -1664,12 +1701,14 @@ def take_back_file(path: Path, sha256: str, log: _Log) -> None:
             f"{path.name} in your game client's Data folder (Yu'lon could not read it to "
             f"check whether it is still the file it copied: {exc})"
         )
+        _aside_kept(aside, path, "that name still holds the file above", log)
         return
     if not same:
         log.client_left_behind.append(
             f"{path.name} in your game client's Data folder (it has changed since Yu'lon "
             f"copied it, so it left it alone)"
         )
+        _aside_kept(aside, path, "that name still holds the changed file above", log)
         return
     try:
         path.unlink()
@@ -1678,8 +1717,36 @@ def take_back_file(path: Path, sha256: str, log: _Log) -> None:
             f"{path.name} in your game client's Data folder (Yu'lon could not delete it: "
             f"{exc} — close the game and delete it by hand)"
         )
+        _aside_kept(aside, path, "that name still holds the file above", log)
         return
     log.done.append(f"took back {path.name} from {path.parent}")
+    _put_back(aside, path, log)
+
+
+def _put_back(aside: Path | None, path: Path, log: _Log) -> None:
+    """Rename the player's file set aside at install back to `path`, which is free."""
+    if aside is None:
+        return
+    if not os.path.lexists(aside):
+        log.client_left_behind.append(
+            f"your own {path.name}, which Yu'lon set aside as {aside} when it installed this, "
+            "is no longer there, so it could not be put back"
+        )
+        return
+    try:
+        os.rename(aside, path)
+    except OSError as exc:
+        _aside_kept(aside, path, f"it could not be put back: {exc}", log)
+        return
+    log.done.append(f"put your own {path.name} back in {path.parent}")
+
+
+def _aside_kept(aside: Path | None, path: Path, why: str, log: _Log) -> None:
+    if aside is not None and os.path.lexists(aside):
+        log.client_left_behind.append(
+            f"your own {path.name}, which Yu'lon set aside as {aside} when it installed this "
+            f"({why}); rename it back to {path.name} when you want it again"
+        )
 
 
 def _record_taken_back(play_dir: Path, rel: Path, *, game: str, server_dir: Path) -> None:
@@ -1700,7 +1767,7 @@ def take_back_files(copies: Iterable[ClientCopy]) -> tuple[tuple[str, ...], tupl
     """
     log = _Log()
     for copy in copies:
-        take_back_file(Path(copy.path), copy.sha256, log)
+        take_back_file(Path(copy.path), copy.sha256, log, Path(copy.aside) if copy.aside else None)
     return tuple(log.done), (*log.skipped, *log.client_left_behind)
 
 
@@ -2384,6 +2451,7 @@ class Applier:
         # them "no record", i.e. never taken back, if any later step raised
         # before `_record_client_copies()` wrote the new ones (round 1 review).
         previous_copies = read_client_copies(clone, item_id=manifest.id)
+        log.previous_copies = previous_copies
         if folder is not None and manifest.source is not None:
             raise ApplyRefusal(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -4283,21 +4351,100 @@ class Applier:
             # The client's own folders, whatever their case (T261/T262): `data/` and
             # `interface/addons/` are those folders on a disk that tells cases apart.
             target = self.client_dir.joinpath(*client_names.on_disk(self.client_dir, where).parts)
+            asides: dict[Path, Path] = {}
+            place = self._placer(log, asides) if step.dest == "data" else _copy_unshared
             if src.is_dir():
-                written = _copy_onto(src, target)
+                written = _copy_onto(src, target, place)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 landed = target / (client_names.match(os.listdir(target), src.name) or src.name)
-                _copy_unshared(src, landed)
+                place(src, landed)
                 written = [landed]
             else:
                 raise ApplyError(f"client source missing in clone: {src}")
             if step.dest == "data":
-                log.client_copies += self._receipts(step.src, written)
+                log.client_copies += self._receipts(step.src, written, asides)
             log.done.append(f"client {step.src} → {step.dest}")
 
+    def _placer(self, log: _Log, asides: dict[Path, Path]) -> Callable[[Path, Path], None]:
+        """`_copy_unshared()`, after setting aside a file of the player's at the name.
+
+        The owner's decision on the cold review of T262 ("set aside, put back"):
+        overwriting the player's `Data/patch-a.mpq` of another mod, then deleting it at
+        Remove because its hash was the one Yu'lon wrote, lost it. So a file there
+        whose bytes differ from the module's moves to a free `<name>` +
+        `ASIDE_SUFFIX` sibling first (`asides`, for the receipt), whatever case
+        brought the name here, exact included, and a read-only one too: a rename
+        clears no flag and needs none cleared. Not set aside:
+
+        * the same bytes: that file is the module's patch already;
+        * a file this item put there itself, by its earlier receipt with the bytes
+          that receipt recorded: a reinstall replaces its own copy, and the
+          player's file set aside the first time stays recorded (carried over);
+        * a file shared through a hard link (a ready-to-play client's archive and
+          the player's own): replaced as before, its inode untouched;
+        * anything but a plain file, which is left to `_copy_unshared()` (T300).
+
+        A file written by this same step is overwritten, so two source names that
+        land on one name set nothing aside twice.
+        """
+        ours: dict[Path, ClientCopy] = {}
+        for copy in log.previous_copies:
+            path = Path(copy.path)
+            if self.client_dir is not None:
+                path = rebased(path, self.client_dir, self.client_origins)
+            ours[path] = copy
+        fresh: set[Path] = set()
+
+        def place(src: Path, dest: Path) -> None:
+            previous = ours.get(dest)
+            if previous is not None and previous.aside:
+                asides[dest] = Path(previous.aside)
+            if dest not in fresh:
+                self._set_aside(src, dest, previous, log, asides)
+            fresh.add(dest)
+            _copy_unshared(src, dest)
+
+        return place
+
     @staticmethod
-    def _receipts(step: str, written: Sequence[Path]) -> list[ClientCopy]:
+    def _set_aside(
+        src: Path, dest: Path, previous: ClientCopy | None, log: _Log, asides: dict[Path, Path]
+    ) -> None:
+        """Move the player's `dest` to a free aside name when `_placer()`'s rule says so."""
+        try:
+            st = os.lstat(dest)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return
+        here = sha256_of(dest)
+        if here == sha256_of(src):
+            return
+        if previous is not None and here == previous.sha256:
+            return  # this item's own copy from an earlier install
+        aside = dest.with_name(dest.name + ASIDE_SUFFIX)
+        number = 0
+        while os.path.lexists(aside):
+            number += 1
+            aside = dest.with_name(f"{dest.name}{ASIDE_SUFFIX}.{number}")
+        os.rename(dest, aside)
+        if dest in asides:
+            # An aside is already recorded for this name (a reinstall over a file the
+            # player changed since): that one is the player's original and stays the one
+            # Remove puts back. This one is named now, and kept.
+            log.done.append(
+                f"kept your changed {dest.name} as {aside.name} in {dest.parent}; "
+                "Yu'lon will not delete it"
+            )
+            return
+        asides[dest] = aside
+        log.done.append(f"set your own {dest.name} aside as {aside.name} in {dest.parent}")
+
+    @staticmethod
+    def _receipts(
+        step: str, written: Sequence[Path], asides: Mapping[Path, Path]
+    ) -> list[ClientCopy]:
         """Hash what a `dest: data` step just put in the client, for `remove()` to check.
 
         Only `dest: data`. An addon folder is never taken back (the owner's
@@ -4334,8 +4481,11 @@ class Applier:
         """
         out: list[ClientCopy] = []
         for path in written:
+            aside = str(asides[path]) if path in asides else ""
             try:
-                out.append(ClientCopy(step=step, path=str(path), sha256=sha256_of(path)))
+                out.append(
+                    ClientCopy(step=step, path=str(path), sha256=sha256_of(path), aside=aside)
+                )
             except OSError as exc:
                 logger.warning(
                     f"could not hash {path} after copying it, so it is not recorded: {exc}"
@@ -4407,8 +4557,11 @@ class Applier:
         the original's copy as left out of it (T181a).
         """
         path = Path(copy.path)
+        aside = Path(copy.aside) if copy.aside else None
         if self.client_dir is not None:
             path = rebased(path, self.client_dir, self.client_origins)
+            if aside is not None:
+                aside = rebased(aside, self.client_dir, self.client_origins)
             if path != Path(copy.path) and path.is_relative_to(self.client_dir):
                 _record_taken_back(
                     self.client_dir,
@@ -4416,7 +4569,7 @@ class Applier:
                     game=self.client_game,
                     server_dir=self.server_dir,
                 )
-        take_back_file(path, copy.sha256, log)
+        take_back_file(path, copy.sha256, log, aside)
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         for step in manifest.server_dbc:
