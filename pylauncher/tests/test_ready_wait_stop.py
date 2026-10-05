@@ -219,6 +219,46 @@ def test_a_crash_after_the_stop_takes_the_normal_crash_path(qapp: object, tmp_pa
     assert rec.calls.count("recreate") == 2, "the build from before was not put back"
 
 
+def test_a_crash_in_the_watch_while_a_stop_is_pending_puts_the_old_build_back(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The lead's ruling (2026-10-05): Stop pending, the world reports ready, then crashes
+    inside the watch. Without a Stop that keeps the build (T71); with one, both the Stop and the
+    crash point back, so the build from before goes back, and the sentence says both."""
+    rec, server_dir = _ready(tmp_path)
+    reached = threading.Event()
+    banner = threading.Event()
+
+    def came_up(ready: docker.ReadySpec) -> bool:
+        banner.set()
+        return True
+
+    def world(spec: object) -> native.WorldOutput:
+        if banner.is_set() and rec.calls.count("recreate") == 1:
+            return native.WorldOutput(
+                text="ready...\nWorld server is up and running\n>> ABORTED",
+                restarts=0,
+                status="exited",
+            )
+        return native.WorldOutput(
+            text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
+            restarts=0,
+            status="running",
+        )
+
+    waits = _Waits(_until_stop(reached), came_up, _answers(True))
+    panel, finished = _update(rec, server_dir, waits, reached, world_output=world)
+
+    header = panel.status_text()
+    assert header.startswith(STOPPED_THEN_FAILED + native.READY_CRASHED_AFTER_STOP), header
+    assert "KEPT" not in header, header
+    assert "put back and is running again" in header, header
+    assert finished and finished[0][0] is False, finished
+    assert rec.calls.count("recreate") == 2, "the build from before was not put back"
+    assert _forced_stops(rec) == [], rec.calls
+    assert set(_heads(rec, server_dir).values()) == {OLD}, "the sources stayed with a crashed build"
+
+
 def test_the_rollbacks_own_wait_announces_that_stop_cannot_end_it(
     qapp: object, tmp_path: Path
 ) -> None:

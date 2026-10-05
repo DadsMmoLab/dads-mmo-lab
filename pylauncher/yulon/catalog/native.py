@@ -2105,6 +2105,15 @@ class RebuildChangedTheServer(InstallerError, TrueAfterStop):
         self.up = up
 
 
+class CrashedAfterStop(InstallerError, TrueAfterStop):
+    """A crash in the watch after the banner while a Stop was pending (`READY_CRASHED_AFTER_STOP`).
+
+    NOT a `WorldStoppedAfterReadyError`, so `rebuild()` rolls back on it as on a
+    crashed wait. A real failure, so not `StopTookEffect`; `TrueAfterStop`,
+    because it says what the press does about the Stop, which is shown after one.
+    """
+
+
 class StoppedInTheWatch(ReadyWaitStopped):
     """`ReadyWaitStopped` inside the watch after the banner: the world had reported ready (T247).
 
@@ -3272,6 +3281,14 @@ READY_STOP_TOO_LATE = (
 )
 """Stop in the watch's last pause: the build met T71's proof first, so it is a Stop after
 success (T247 review). Said before "The server is up."."""
+
+READY_CRASHED_AFTER_STOP = (
+    "Stop was pressed, and the new build then crashed: its world server reported ready and "
+    "stopped again inside the minute it is watched, so the build from before goes back."
+)
+"""A rebuild whose Stop waited out the load, after which the world crashed in the watch (the
+lead's ruling, 2026-10-05). Without a Stop that crash keeps the build (T71's
+`WorldStoppedAfterReadyError`); with one, the press and the crash both point back."""
 
 ROLLBACK_WAIT_UNSTOPPABLE = (
     "Putting the build from before back, and waiting for it to come up. Stop cannot end this "
@@ -10007,8 +10024,9 @@ class StagedInstaller:
           world. The Stop is said (`docker.STOP_WAITS_FOR_THE_LOAD`) and the
           wait goes on until the world is ready, crashes or runs out; ready and
           watched, it still raises (`READY_STOPPED_AFTER_LOADING`), because the
-          player asked to stop. "Stop now anyway" ends it early
-          (`READY_WAIT_STOPPED_ANYWAY`);
+          player asked to stop; crashed in the watch, it raises
+          `CrashedAfterStop`, which rolls back where T71 would keep the build.
+          "Stop now anyway" ends it early (`READY_WAIT_STOPPED_ANYWAY`);
         * inside the watch after the banner, before its minute is over:
           `READY_STOPPED_IN_THE_WATCH`. In its last pause: the build met its
           proof first, so it is kept (`READY_STOP_TOO_LATE`).
@@ -10087,6 +10105,11 @@ class StagedInstaller:
                     # every run the container has had.
                     else " What it said as it went is in the log of the run before this one."
                 )
+                if pending:
+                    # The lead's ruling (2026-10-05): the player asked to stop and
+                    # the build then crashed -- both point back, so this is a crashed
+                    # wait's rollback, not T71's keep.
+                    raise CrashedAfterStop(f"{READY_CRASHED_AFTER_STOP} {logs} has the rest.{said}")
                 raise WorldStoppedAfterReadyError(
                     f"The world server came up and then stopped. {container} printed its "
                     f"ready marker and was gone again inside "
