@@ -1619,6 +1619,24 @@ def test_a_failed_reextract_says_nothing_of_kept_tiles_a_next_run_would_not_cont
     assert str(failed.value).endswith(trinitycore.REEXTRACT_PUT_BACK)
 
 
+def test_a_failed_reextract_counts_the_tiles_that_are_whole_now(box: Box) -> None:
+    """Codex review of T263: the record's count is the failure's; a tile removed or cut
+    off since (by hand) is not one the next run continues from, so it is not counted."""
+    _a_run_that_crashed(box, 12)
+    out = box.server_dir / "data" / "mmaps"
+    tiles = sorted(out.glob("*.mmtile"))
+    tiles[0].unlink()
+    tiles[1].write_bytes(tiles[1].read_bytes()[:-1])
+    box.m.tools.fail_tool = "vmap4assembler"
+    box.world.running = False
+
+    with pytest.raises(InstallerError) as failed:
+        list(box.engine().reextract(InstallOptions(server_dir=box.server_dir), cancel=None))
+
+    assert str(failed.value).endswith(trinitycore.reextract_kept_tiles(10))
+    assert tiles[1].is_file(), "counted, never removed: the next start decides that"
+
+
 def test_a_failed_reextract_whose_old_data_did_not_come_back_says_nothing_of_kept_tiles(
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:

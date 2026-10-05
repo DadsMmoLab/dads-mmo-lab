@@ -1195,10 +1195,11 @@ def continues_from(
 
     Asked of the record and the map data as they are now, by the same rule a
     start applies (`_resume_or_clear()`): a readable record of a failed run that
-    kept tiles, made from the map data `data/` holds now (`_evidence()`). For a
-    sentence that promises the continuation, so it is said only when a start
-    would keep it. Never raises: a record or map data that cannot be read
-    answers 0, which says nothing.
+    kept tiles, made from the map data `data/` holds now (`_evidence()`), and of
+    those tiles the ones that are whole now (`_whole_tiles()`). For a sentence
+    that promises the continuation, so it is said only when a start would keep
+    it. Never raises: a record or map data that cannot be read answers 0, which
+    says nothing.
     """
     if background_block(entry) is None:
         return 0
@@ -1206,7 +1207,26 @@ def continues_from(
     job = job_for(server_dir, entry, install_id or _install_id(server_dir, platform_id))
     if before is None or not _resumable(job, before) or not before.evidence:
         return 0
-    return before.kept if before.evidence == _evidence(job) else 0
+    return _whole_tiles(job) if before.evidence == _evidence(job) else 0
+
+
+def _whole_tiles(job: Job) -> int:
+    """How many `.mmtile` in `data/mmaps` are whole now (`_whole_tile()`); nothing removed.
+
+    The count a start's `_keep_finished()` would keep, without its removals: the
+    record's `kept` is the count at the failure, and a tile removed or cut off since
+    is not one the next run continues from (Codex review of T263). 0 when the folder
+    cannot be read or the entry cannot tell a whole tile.
+    """
+    header = job.block.mmaps.tile_header
+    out = job.data_dir / MMAPS_DIR
+    if header is None or out.is_symlink():
+        return 0
+    try:
+        tiles = [path for path in out.iterdir() if path.name.endswith(TILE_SUFFIX)]
+    except OSError:
+        return 0
+    return sum(1 for path in tiles if _whole_tile(path, header))
 
 
 def _resume_or_clear(job: Job, before: Record | None, evidence: str) -> int:

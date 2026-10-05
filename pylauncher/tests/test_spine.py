@@ -2886,6 +2886,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "tiles are removed and the run starts from the beginning -- never a resume over "
         "map data nobody could read"
     ),
+    ("catalog/families/mmaps.py", "_whole_tiles"): (
+        "T263. Lists `data/mmaps` -- never through a link -- to count the `.mmtile` files "
+        "that are whole now, for the sentence a failed Re-extract adds about the tiles the "
+        "next run continues from. Read-only: nothing is removed or written, and a listing "
+        "that fails counts 0, which says nothing rather than promising tiles"
+    ),
     ("catalog/families/mmaps.py", "_keep_finished"): (
         "T209. Lists `data/mmaps` -- the pathfinding job's own output folder, refused when it "
         "or `data/` is a link -- to remove each `.mmtile` that is not whole (the tile the "
