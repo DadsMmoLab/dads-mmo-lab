@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import runner
+from yulon.after_stop import TrueAfterStop
 from yulon.log import get_logger
 from yulon.support import runlog
 from yulon.ui import lines
@@ -76,7 +77,21 @@ class Seams:
     """
 
 
+STOPPED_THEN_FAILED = "Stopped. FAILED: "
+"""The header's opening when a stopped job ended on a failure that says what it left (T228).
+
+Stop was pressed, so "Stopped" comes first; the failure's own sentence follows
+because it says what state the server is in and what to press. Which failures
+those are is decided by type (`yulon.after_stop.TrueAfterStop`), never by words.
+"""
+
 _MAX_BLOCKS = 5000
+
+UNDESCRIBED_FAILURE = "It stopped on an error it did not describe; the Logs tab has the details."
+"""What a failed run says when its error carried no words of its own (T194 C8)."""
+
+_SHORTEST_ELAPSED_S = 1.0
+"""A failed run shorter than this shows no elapsed time: `0:00:00` is not a duration."""
 
 _STICK_SLACK_PX = 4
 """How far off the bottom still counts as "at the bottom".
@@ -157,11 +172,14 @@ def tone_colour(tone: Tone, palette: QPalette) -> QColor | None:
     return QColor(hue) if hue else None
 
 
-def _line_format(kind: str, palette: QPalette) -> QTextCharFormat:
+def line_format(kind: str, palette: QPalette) -> QTextCharFormat:
     """The character format for one kind of line, built fresh on every append.
 
     Every kind gets one, `sentence` included, and its format is the default —
     which is how the panel says "no colour" without a second code path.
+
+    Public because the Logs tab paints its WARNING and ERROR lines through it
+    (T195 C33): one spelling of what a warning looks like, in both places.
     """
     fmt = QTextCharFormat()
     tone = PALETTE.get(kind, PALETTE["sentence"])  # an unknown kind is an ordinary sentence
@@ -199,6 +217,14 @@ def _bar_style(palette: QPalette) -> str:
 _BAR_WIDTH_PX = 120
 _STEP_WIDTH_PX = 200
 _PROGRESS_WIDTH_PX = 230
+_SHARES_FROM_PX = 1280
+"""From this window width up, the step and progress fields drop their caps and
+take their stretch shares of the row (T195 C31).
+
+At 1920 the 200 px cap cut "Step 7 of 9 · Compiling the world server" with half
+the row empty. Below it the caps stay, so the status field keeps the room its
+refusals need on a narrow window.
+"""
 _STATUS_WIDTH_PX = 16777215
 """And the status field's, which is `QWIDGETSIZE_MAX`: no cap at all.
 
@@ -380,8 +406,18 @@ class _StreamWorker(QObject):
                 self.line.emit(text)
         except Exception as exc:  # boundary: anything the job raises becomes a UI message
             ok = False
-            message = f"{type(exc).__name__}: {exc}"
-            if self._stop:
+            # The reason alone (T194 C8): the class name is for the log line
+            # below, not for the screen and not for `run_finished`'s readers.
+            message = str(exc) or UNDESCRIBED_FAILURE
+            raised = f"{type(exc).__name__}: {exc}"
+            if self._stop and isinstance(exc, TrueAfterStop):
+                # T228: NOT the Stop taking effect. What the route did after the
+                # Stop -- a rollback that stopped early, sources left on the new
+                # commits, a start now refused -- left the server in a state its
+                # sentence describes, and that sentence is the one the player
+                # needs. Kept as a failure; `_on_finished` puts "Stopped" first.
+                logger.warning(f"log panel job failed after a stop: {raised}")
+            elif self._stop:
                 # A SOURCE THAT RAISES AFTER A STOP IS THE STOP TAKING EFFECT.
                 # `request_stop()` ends the job's children, and a terminated
                 # child exits non-zero, so `runner.stream()` raises
@@ -392,16 +428,18 @@ class _StreamWorker(QObject):
                 # `_on_finished` exists to fix. The text is kept in the log, at
                 # debug, so a genuine failure that happened to land in the same
                 # millisecond is not lost.
-                logger.debug(f"log panel job ended after a stop was asked for: {message}")
+                logger.debug(f"log panel job ended after a stop was asked for: {raised}")
                 ok, message = True, "stopped"
             else:
-                logger.warning(f"log panel job failed: {message}")
-        if self._stop:
+                logger.warning(f"log panel job failed: {raised}")
+        if self._stop and ok:
             # Said HERE and not only in the loop above, so all three ways out
             # agree. The break reports a stop; a source that returned on its own
             # cancel (`runner.interact()`) reached the end of its iterator and
             # would otherwise have reported "done"; and a source killed with it
-            # came through the `except`.
+            # came through the `except`. Only when `ok`: a failure still standing
+            # here is one the `except` kept on purpose (T228), and its sentence
+            # is what the panel shows.
             message = "stopped"
         self.finished.emit(ok, message)
         self._quit_own_thread()
@@ -556,11 +594,20 @@ class LogPanel(QWidget):
     collapse_toggled = Signal(bool)
     """Emitted with True when the text pane has just been folded away (T80)."""
 
-    def __init__(self, parent: QWidget | None = None, *, seams: Seams | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        seams: Seams | None = None,
+        shows_failure: bool = True,
+    ) -> None:
         super().__init__(parent)
         # Keyword-only and defaulted, because every caller in the app builds a
         # panel with the real clock and only a test ever hands one over.
         self._seams = seams if seams is not None else Seams()
+        # False where the owning tab writes a failed run's reason on its own
+        # report line, so it is not said again under the strip (T194 F6).
+        self._shows_failure = shows_failure
         self._text = QPlainTextEdit(self)
         self._text.setReadOnly(True)
         # Non-focusable on purpose: a read-only log is a D-pad dead-end (arrow
@@ -656,14 +703,28 @@ class LogPanel(QWidget):
         header.addWidget(self._progress_label, 2)
         header.addWidget(self._elapsed_label)
         header.addWidget(self._stop_button)
+        # T194 C8: the whole reason a run failed, wrapped, under the strip. The
+        # header above elides it to one line for T32/T83's reasons; this line
+        # is where it is read in full. Hidden until a run fails, and taken down
+        # by the next `run()`.
+        self.failure_label = QLabel("", self)
+        self.failure_label.setWordWrap(True)
+        self.failure_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.failure_label.setVisible(False)
         layout = QVBoxLayout(self)
         layout.addLayout(header)
+        layout.addWidget(self.failure_label)
         layout.addWidget(self._text, 1)
 
         self._cancel: threading.Event | None = None
         self._ended: str | None = None
         self._job_label = "log panel (no job yet)"
         self._started_at: float | None = None
+        # The last stage line that parsed, so a failure can say where it stopped.
+        self._step: lines.Step | None = None
         # One second, because the field it drives has a seconds place; a faster
         # tick repaints a label that cannot have changed.
         self._ticker = QTimer(self)
@@ -679,6 +740,13 @@ class LogPanel(QWidget):
         # and closed ONLY on the GUI thread -- from `append()`, `run()` and
         # `_on_finished()` -- because `RunLog` has no lock.
         self._record: runlog.RunLog | None = None
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        # `_STATUS_WIDTH_PX` is QWIDGETSIZE_MAX: no cap, only the stretch share.
+        wide = self.window().width() >= _SHARES_FROM_PX
+        self._step_label.setMaximumWidth(_STATUS_WIDTH_PX if wide else _STEP_WIDTH_PX)
+        self._progress_label.setMaximumWidth(_STATUS_WIDTH_PX if wide else _PROGRESS_WIDTH_PX)
 
     # -- public ---------------------------------------------------------
 
@@ -705,6 +773,11 @@ class LogPanel(QWidget):
         always describes the current job — see `stop()`.
         """
         return self._stop_requested
+
+    @property
+    def stop_button(self) -> QPushButton:
+        """The panel's Stop, greyed while nothing runs: a tab may say why beside it (T195)."""
+        return self._stop_button
 
     @property
     def collapsed(self) -> bool:
@@ -854,7 +927,7 @@ class LogPanel(QWidget):
         cursor = QTextCursor(block)
         cursor.setPosition(block.position())
         cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
-        cursor.setCharFormat(_line_format(kind, self._text.palette()))
+        cursor.setCharFormat(line_format(kind, self._text.palette()))
 
     def _show_step(self, line: str) -> None:
         """Put this stage line's own three fields on the strip.
@@ -868,6 +941,7 @@ class LogPanel(QWidget):
         step = lines.parse_step(line)
         if step is None:
             return
+        self._step = step
         self._step_label.say(f"Step {step.number} of {step.total} · {step.name}")
 
     def _show_progress(self, parsed: lines.Parsed) -> None:
@@ -888,7 +962,10 @@ class LogPanel(QWidget):
 
     def _clear_strip(self) -> None:
         """Take the last run's strip down. Called by `run()`, for the elapsed field's reason."""
+        self._step = None
         self._step_label.say("")
+        self.failure_label.setText("")
+        self.failure_label.setVisible(False)
         self._progress_label.say("")
         self._bar.setStyleSheet("")
         self._bar.setRange(0, 100)
@@ -1066,7 +1143,10 @@ class LogPanel(QWidget):
         # panel does not know whether it was following a log or building a
         # server.
         if self._stop_requested:
-            verdict = "cancelled"
+            # T228: a stopped job that still FAILED carries a sentence about what
+            # it left (`TrueAfterStop`; the worker decides by type), shown under
+            # "Stopped". Every other stopped job is a clean cancel.
+            verdict = "cancelled" if ok else STOPPED_THEN_FAILED + message
         elif ok and self._ended is not None:
             verdict = self._ended
         else:
@@ -1080,12 +1160,34 @@ class LogPanel(QWidget):
         # the next `run()` resets it.
         self._ticker.stop()
         self._show_elapsed()
+        if not ok and self._lasted() < _SHORTEST_ELAPSED_S:
+            # A refusal before the job got going (a preflight) read `0:00:00`
+            # beside FAILED, which is not a duration of anything (T194 C8).
+            self._elapsed_label.setText("")
         # The strip is LEFT STANDING, and the bar goes red on a refusal. Which
         # of the nine stages an install died in is the first thing anybody asks
         # of a failed run, and it is already on screen — clearing it would
         # throw away the one field that answers before the log is scrolled.
+        #
+        # T194 C8: kept, but said as where the run STOPPED, and the progress
+        # reading beside it goes: "Receiving objects: 42%" after a failure
+        # claims work that is no longer happening. The whole reason goes on its
+        # own wrapped line under the strip.
         if not ok:
             self._bar.setStyleSheet(_bar_style(self._text.palette()))
+            if self._bar.maximum() == 0:
+                # Qt's busy bar (a reading with no percent) never stops moving:
+                # left up, it went on sweeping in red after the run had died.
+                # It says nothing about how far the run got, so it goes.
+                self._bar.setRange(0, 100)
+                self._bar.setVisible(False)
+            if self._step is not None:
+                step = self._step
+                self._step_label.say(f"Stopped at step {step.number} of {step.total} · {step.name}")
+            self._progress_label.say("")
+            if self._shows_failure:
+                self.failure_label.setText(message)
+                self.failure_label.setVisible(True)
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
 
@@ -1105,6 +1207,12 @@ class LogPanel(QWidget):
         # The same clock the zero was taken from, necessarily: a difference
         # between two different clocks is not a duration of anything.
         self._elapsed_label.setText(_elapsed(self._seams.monotonic() - self._started_at))
+
+    def _lasted(self) -> float:
+        """How long the current or last run has been going, in seconds."""
+        if self._started_at is None:
+            return 0.0
+        return self._seams.monotonic() - self._started_at
 
     def elapsed_text(self) -> str:
         """What the header's elapsed field says (tests / accessibility)."""

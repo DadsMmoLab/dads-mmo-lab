@@ -26,6 +26,7 @@ import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -353,11 +354,14 @@ def test_prompter_carries_the_answer_from_the_gui_thread_to_the_worker(
 
     seen: list[tuple[str, bool]] = []
 
-    def fake_dialog(_parent, _title, label, echo, _text):  # type: ignore[no-untyped-def]
-        seen.append((label, echo == prompt_module.QLineEdit.EchoMode.Password))
-        return "hunter2", True
+    def fake_exec(dialog):  # type: ignore[no-untyped-def]
+        seen.append(
+            (dialog.labelText(), dialog.textEchoMode() == prompt_module.QLineEdit.EchoMode.Password)
+        )
+        dialog.setTextValue("hunter2")
+        return prompt_module.QDialog.DialogCode.Accepted
 
-    monkeypatch.setattr(prompt_module.QInputDialog, "getText", staticmethod(fake_dialog))
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", fake_exec)
 
     prompter = InputPrompter()
     answer: list[str | None] = []
@@ -368,7 +372,9 @@ def test_prompter_carries_the_answer_from_the_gui_thread_to_the_worker(
     worker.join(timeout=HANG_BOUND)
 
     assert answer == ["hunter2"]
-    assert seen == [("[sudo] password for pk:", True)], "a password must be masked"
+    ((label, masked),) = seen
+    assert masked, "a password must be masked"
+    assert label.endswith("[sudo] password for pk:"), label
 
 
 def test_prompter_stops_waiting_when_the_job_is_cancelled(
@@ -379,8 +385,8 @@ def test_prompter_stops_waiting_when_the_job_is_cancelled(
 
     monkeypatch.setattr(
         prompt_module.QInputDialog,
-        "getText",
-        staticmethod(lambda *a, **k: ("", False)),
+        "exec",
+        lambda dialog: prompt_module.QDialog.DialogCode.Rejected,
     )
     cancel = threading.Event()
     prompter = InputPrompter()
@@ -431,9 +437,11 @@ def test_the_prompter_does_not_keep_the_answer_after_handing_it_over(
     """
     from yulon.ui.widgets import prompt as prompt_module
 
-    monkeypatch.setattr(
-        prompt_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("hunter2", True))
-    )
+    def answers(dialog):  # type: ignore[no-untyped-def]
+        dialog.setTextValue("hunter2")
+        return prompt_module.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", answers)
     prompter = InputPrompter()
     answer: list[str | None] = []
 
@@ -459,8 +467,11 @@ def test_no_dialog_opens_for_a_job_that_was_already_cancelled(
     opened: list[str] = []
     monkeypatch.setattr(
         prompt_module.QInputDialog,
-        "getText",
-        staticmethod(lambda *a, **k: (opened.append(a[2] if len(a) > 2 else ""), ("", False))[1]),
+        "exec",
+        lambda dialog: (
+            opened.append(dialog.labelText()),
+            prompt_module.QDialog.DialogCode.Rejected,
+        )[1],
     )
     cancel = threading.Event()
     cancel.set()  # already cancelled before anything is asked
@@ -1092,11 +1103,88 @@ def test_a_prompter_can_name_its_own_dialog_title(
 
     titles: list[str] = []
 
-    def get_text(_parent: object, title: str, *_a: object, **_k: object) -> tuple[str, bool]:
-        titles.append(title)
-        return "y", True
+    def answers(dialog: Any) -> object:
+        titles.append(dialog.windowTitle())
+        dialog.setTextValue("y")
+        return prompt_module.QDialog.DialogCode.Accepted
 
-    monkeypatch.setattr(prompt_module.QInputDialog, "getText", staticmethod(get_text))
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", answers)
     prompt_module.InputPrompter(None, title="Reinstalling Docker")._show("Go on? (y/n): ", False)
     prompt_module.InputPrompter(None)._show("Go on? (y/n): ", False)
     assert titles == ["Reinstalling Docker", prompt_module.INSTALLER_TITLE]
+
+
+# -- T194 C29: the sudo question says whose password and why ------------------
+#
+# Installs and the Deck repair ask through `platform.SudoSession`, which runs
+# `sudo -S -p ""` (sudo prints no prompt of its own) and puts a fixed question
+# to the prompter. These drive that session through a real `InputPrompter` and
+# read the dialog it shows.
+
+
+def _ask_through_the_dialog(
+    monkeypatch: pytest.MonkeyPatch, question: str | None
+) -> tuple[list[tuple[str, bool]], list[tuple[list[str], str]]]:
+    """Run `SudoSession(prompter.ask, ...).verify()` on a worker; return what was shown and fed."""
+    from yulon.ui.widgets import prompt as prompt_module
+
+    shown: list[tuple[str, bool]] = []
+
+    def answers(dialog: Any) -> object:
+        echo = dialog.textEchoMode() == prompt_module.QLineEdit.EchoMode.Password
+        shown.append((dialog.labelText(), echo))
+        dialog.setTextValue("hunter 2!")
+        return prompt_module.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(prompt_module.QInputDialog, "exec", answers)
+    fed: list[tuple[list[str], str]] = []
+
+    def run_input(argv: list[str], text: str) -> subprocess.CompletedProcess[str]:
+        fed.append((argv, text))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    prompter = InputPrompter()
+    session = (
+        platform.SudoSession(prompter.ask, run_input)
+        if question is None
+        else platform.SudoSession(prompter.ask, run_input, question=question)
+    )
+    verified: list[bool] = []
+    worker = threading.Thread(target=lambda: verified.append(session.verify()))
+    worker.start()
+    pump_until(lambda: not worker.is_alive(), "verify() returned")
+    worker.join(timeout=HANG_BOUND)
+    assert verified == [True]
+    return shown, fed
+
+
+def test_the_install_asks_for_this_computers_password_and_says_why(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install's question, as the dialog shows it; the answer reaches sudo unchanged."""
+    shown, fed = _ask_through_the_dialog(monkeypatch, None)
+
+    ((label, masked),) = shown
+    assert label.startswith(
+        "Yu'lon needs this computer's password (the one you log in with) to set up Docker "
+        "for the install."
+    ), label
+    assert "It goes to sudo and is never saved." in label, label
+    assert "Leave it empty to skip the steps that need it." in label, label
+    assert masked, "the password was echoed"
+    assert fed == [(["sudo", "-S", "-p", "", "-v"], "hunter 2!\n")]
+
+
+def test_the_deck_repair_asks_for_the_password_to_reinstall_docker(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair's own question, through the same dialog."""
+    shown, fed = _ask_through_the_dialog(monkeypatch, platform.SUDO_REPAIR_PASSWORD_QUESTION)
+
+    ((label, masked),) = shown
+    assert label.startswith(
+        "Yu'lon needs this computer's password (the one you log in with) to reinstall Docker."
+    ), label
+    assert "It goes to sudo and is never saved." in label, label
+    assert masked
+    assert fed == [(["sudo", "-S", "-p", "", "-v"], "hunter 2!\n")]

@@ -116,6 +116,12 @@ class Recorder:
     images: bool | None = True
     images_asked: list[tuple[str, ...]] = field(default_factory=list)
     """Every ref tuple `images_built()` was asked about, in order (T112: what preflight checks)."""
+    build_cache: int | None = None
+    """What `docker.build_cache_bytes()` answers (T203). `None`, "could not ask", by default."""
+    build_cache_asked: int = 0
+    folder_size: int | None = None
+    """What `native.folder_bytes()` answers (T203 fix round 3). `None`, "could not measure"."""
+    folder_asked: list[Path] = field(default_factory=list)
     build_result: docker.AttachedRun = docker.AttachedRun(0, ("built",))
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
@@ -774,6 +780,8 @@ class Recorder:
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
+            build_cache_bytes=self.build_cache_bytes,
+            folder_bytes=self.folder_bytes,
             build=build,
             one_shot=one_shot,
             verify_import=verify,
@@ -831,6 +839,16 @@ class Recorder:
         """Answer `self.ready`, and KEEP the pattern that was asked about."""
         self.ready_specs.append(ready)
         return self.ready
+
+    def build_cache_bytes(self) -> int | None:
+        """`docker.build_cache_bytes()`: answers `self.build_cache`, and counts the asks."""
+        self.build_cache_asked += 1
+        return self.build_cache
+
+    def folder_bytes(self, folder: Path) -> int | None:
+        """`native.folder_bytes()`: answers `self.folder_size`, and keeps what it was asked."""
+        self.folder_asked.append(folder)
+        return self.folder_size
 
     def images_built(self, refs: Sequence[str]) -> bool | None:
         """`docker.images_built()`: answers `self.images`, and keeps what it was asked about."""

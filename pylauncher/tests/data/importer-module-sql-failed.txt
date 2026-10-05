@@ -1,0 +1,79 @@
+Starting dbimport...
+[36mAzerothCore rev. 413bea61a85e+ 2026-09-04 09:03:49 -0700 (Playerbot branch) (Unix, RelWithDebInfo, Static) (dbimport)
+[0m[36m<Ctrl-C> to stop.
+[0m[36m   █████╗ ███████╗███████╗██████╗  ██████╗ ████████╗██╗  ██╗
+[0m[36m  ██╔══██╗╚══███╔╝██╔════╝██╔══██╗██╔═══██╗╚══██╔══╝██║  ██║
+[0m[36m  ███████║  ███╔╝ █████╗  ██████╔╝██║   ██║   ██║   ███████║
+[0m[36m  ██╔══██║ ███╔╝  ██╔══╝  ██╔══██╗██║   ██║   ██║   ██╔══██║
+[0m[36m  ██║  ██║███████╗███████╗██║  ██║╚██████╔╝   ██║   ██║  ██║
+[0m[36m  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝
+[0m[36m                                 ██████╗ ██████╗ ██████╗ ███████╗
+[0m[36m                                ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+[0m[36m                                ██║     ██║   ██║██████╔╝█████╗
+[0m[36m                                ██║     ██║   ██║██╔══██╗██╔══╝
+[0m[36m                                ╚██████╗╚██████╔╝██║  ██║███████╗
+[0m[36m                                 ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
+[0m[36m     AzerothCore 3.3.5a  -  www.azerothcore.org
+[0m[36m> Using configuration file:       /azerothcore/env/dist/etc/dbimport.conf
+[0m[36m> Using SSL version:              OpenSSL 3.0.13 30 Jan 2024 (library: OpenSSL 3.0.13 30 Jan 2024)
+[0m[36m> Using Boost version:            1.83.0
+[0m[36m
+[0m[36mConfiguration field WorldDatabaseInfo was overridden with environment variable.
+[0m[36mConfiguration field CharacterDatabaseInfo was overridden with environment variable.
+[0m[36mConfiguration field LoginDatabaseInfo was overridden with environment variable.
+[0m[36mConfiguration field Updates.AllowedModules was overridden with environment variable.
+[0m[36mConfiguration field LogsDir was overridden with environment variable.
+[0m[36mLoading modules: mod-1v1-arena,mod-ale,mod-npc-beastmaster,mod-playerbots
+[0m[36mOpening DatabasePool 'acore_auth'. Asynchronous connections: 1, synchronous connections: 1.
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mDatabasePool 'acore_auth' opened successfully. 2 total connections running.
+[0m[36m
+[0m[36mOpening DatabasePool 'acore_characters'. Asynchronous connections: 1, synchronous connections: 1.
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mDatabasePool 'acore_characters' opened successfully. 2 total connections running.
+[0m[36m
+[0m[36mOpening DatabasePool 'acore_world'. Asynchronous connections: 1, synchronous connections: 1.
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mMySQL client library: 8.0.46
+[0m[36mMySQL server ver: 8.4.11
+[0m[36mConnected to MySQL database at ac-database
+[0m[36mDatabasePool 'acore_world' opened successfully. 2 total connections running.
+[0m[36m
+[0m[36mUpdating Auth database...
+[0m[36m>> Auth database is up-to-date! Containing 13 new and 10 archived updates.
+[0m[36m
+[0m[36mUpdating Character database...
+[0m[36m>> Character database is up-to-date! Containing 10 new and 22 archived updates.
+[0m[36m
+[0m[36mUpdating World database...
+[0m[36m>> Applying update "zz_gate305_broken.sql" 'BFA2D84'...
+[0m> Config: Missing property Updates.ExceptionShutdownDelay in config file /azerothcore/env/dist/etc/dbimport.conf, add "Updates.ExceptionShutdownDelay = 10000" to this file or define 'AC_UPDATES_EXCEPTION_SHUTDOWN_DELAY' as an environment variable.
+[33m> Config: Missing property Updates.ExceptionShutdownDelay in config file /azerothcore/env/dist/etc/dbimport.conf, add "Updates.ExceptionShutdownDelay = 10000" to this file or define 'AC_UPDATES_EXCEPTION_SHUTDOWN_DELAY' as an environment variable.
+[0m[36mClosing down DatabasePool 'acore_world'. Waiting for 0 queries to finish...
+[0m[36mAsynchronous connections on DatabasePool 'acore_world' terminated. Proceeding with synchronous connections.
+[0m[36mAll connections on DatabasePool 'acore_world' closed.
+[0m[36mClosing down DatabasePool 'acore_characters'. Waiting for 0 queries to finish...
+[0m[36mAsynchronous connections on DatabasePool 'acore_characters' terminated. Proceeding with synchronous connections.
+[0m[36mAll connections on DatabasePool 'acore_characters' closed.
+[0m[36mClosing down DatabasePool 'acore_auth'. Waiting for 0 queries to finish...
+[0m[36mAsynchronous connections on DatabasePool 'acore_auth' terminated. Proceeding with synchronous connections.
+[0m[36mAll connections on DatabasePool 'acore_auth' closed.
+[0m
+cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+[31;1mERROR 1064 (42000) at line 2: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'THIS IS NOT SQL AT ALL' at line 1
+[0m[31mApplying of file '/azerothcore/modules/mod-npc-beastmaster/data/sql/db-world/zz_gate305_broken.sql' to database 'acore_world' failed! If you are a user, please pull the latest revision from the repository. Also make sure you have not applied any of the databases with your sql client. You cannot use auto-update system and import sql files from AzerothCore repository with your sql client. If you are a developer, please fix your sql query.
+[0m[31;1mCould not update the World database, see log for details.
+[0m

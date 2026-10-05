@@ -254,7 +254,15 @@ def _basic(endpoint: Endpoint) -> str:
 
 
 _FAULT = re.compile(r"<faultstring>(.*?)</faultstring>", re.DOTALL)
-_RESULT = re.compile(r"<result>(.*?)</result>", re.DOTALL)
+_RESULT = re.compile(r"<result(?:\s[^>]*)?>(.*?)</result>", re.DOTALL)
+_EMPTY_RESULT = re.compile(r"<result(?:\s[^>]*)?/>")
+"""`<result/>`: a command that ran and printed nothing (T226).
+
+Measured on the Centurion proof (2026-10-04): `revive` of an offline character
+came back HTTP 200 with `<ns1:executeCommandResponse><result/></ns1:executeCommandResponse>`,
+and the server had run it. An empty print buffer is still a result; read as
+`unreadable`, it told the player the command channel was off.
+"""
 
 
 def _classify(status: int, body: str) -> Reply:
@@ -273,5 +281,7 @@ def _classify(status: int, body: str) -> Reply:
     result = _RESULT.search(body)
     if result:
         return Reply("answered", unescape(result.group(1)), status)
+    if _EMPTY_RESULT.search(body):
+        return Reply("answered", "", status)
     logger.warning(f"a SOAP reply carried neither a result nor a fault (HTTP {status})")
     return Reply("unreadable", body.strip()[:400], status)

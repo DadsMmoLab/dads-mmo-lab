@@ -1424,15 +1424,19 @@ def test_two_installs_under_different_parents_do_not_get_the_same_tab_title(
 
 
 def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_path: Any) -> None:
-    """The rail is narrow, so a long install name elides — the full server dir
-    must stay reachable on hover, or elision becomes information loss."""
+    """The rail shows the short game name (T192) — the full server dir must stay
+    reachable on hover, or the short title becomes information loss.
+
+    T192 changed the tooltip from the bare path to "WoW WotLK — <path>", so the
+    whole game name is on it too; the path is still all of it.
+    """
     server_dir = tmp_path / "DadsMmoLab"
     catalog = _catalog_view(window)
     catalog.installed.emit("wow-wotlk", server_dir, None)
 
     tabs = window.property("tabs")
     index = tabs.indexOf(_tab_for(window, server_dir))
-    assert tabs.tabToolTip(index) == str(server_dir)
+    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
 
 
 def test_the_logs_tab_sits_under_the_catalog_and_stays_there(window: Any, tmp_path: Any) -> None:
@@ -2176,11 +2180,15 @@ def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
     assert [title for title, _, _ in asked] == [forgetting.TITLE], "not the same dialog"
     assert tabs.indexOf(view) != -1, "answered No, yet the tab went"
 
-    catalog = window.yulon_tab_menu(bar.tabRect(0).center())
-    assert catalog.actions(), "not the Catalog's menu"
-    assert forgetting.BUTTON_LABEL not in [
-        a.text() for a in catalog.actions()
-    ], "the Catalog's menu offers a removal"
+    # T192: the Catalog is pinned above the rail, no longer a tab in it, so
+    # there is nothing of it in the bar to right-click (its menu offered one
+    # disabled caption and nothing else).
+    assert not bar.isTabVisible(0) and bar.tabRect(0).isEmpty()
+    # And should a point ever answer the Catalog's index, it has no menu.
+    from PySide6.QtCore import QPoint
+
+    monkeypatch.setattr(bar, "tabAt", lambda _pos: 0)
+    assert window.yulon_tab_menu(QPoint(1, 1)) is None, "the Catalog has a bar menu"
 
 
 def test_the_tab_menu_answered_yes_removes_the_server(
@@ -4163,6 +4171,86 @@ def test_a_made_or_deleted_play_client_rebuilds_the_tab_with_the_new_wiring(
     assert gone.services.applier is not None and gone.services.applier.client_dir == client
 
 
+# -- T211 4: an install over a server Yu'lon forgot finds its ready-to-play client --
+
+
+def _marked_play_client(game: str, name: str, server_dir: Path, client: Path) -> Path:
+    """A ready-to-play client where Make… puts it, marked as `game` at `server_dir`'s."""
+    from yulon import play_client
+
+    play = play_client.default_target(client, name, server_dir)
+    (play / "Interface").mkdir(parents=True)
+    marker = play_client.Marker(
+        game=game, server_dir=server_dir, source_client_dir=client, created_at=play_client.utc_now()
+    )
+    (play / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+    return play
+
+
+def test_an_install_over_a_forgotten_server_links_its_ready_to_play_client_again(
+    window: Any, tmp_path: Path
+) -> None:
+    """T211 4: Remove from Yu'lon…, then Install into the same folder, offered Make… again.
+
+    The ready-to-play client was still on disk beside the player's own, marked
+    as this server's, but only `state.json` linked it and the removal had
+    dropped that entry. The install finds it where Make… put it.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    game = "wow-tortoise"
+    server_dir = tmp_path / "t211-reinstalled"
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface").mkdir(parents=True)
+    play = _marked_play_client(game, load_catalog().get(game).name, server_dir, client)
+
+    _catalog_view(window).installed.emit(game, server_dir, client)
+
+    view = _tab_for(window, server_dir)
+    assert view.services.play_client_dir == play
+    assert window.saved_states[-1].find(game, server_dir).play_client_dir == play
+
+
+@pytest.mark.parametrize(
+    "whose", ["another server", "another game", "another client folder", "no marker"]
+)
+def test_an_install_links_no_folder_that_is_not_this_servers_own(
+    window: Any, tmp_path: Path, whose: str
+) -> None:
+    """The marker is what makes a folder this server's; a name alone is not."""
+    from yulon import play_client
+    from yulon.catalog.catalog import load_catalog
+
+    game = "wow-tortoise"
+    name = load_catalog().get(game).name
+    server_dir = tmp_path / f"t211-{whose.replace(' ', '-')}"
+    client = tmp_path / f"TurtleWoW-{whose.replace(' ', '-')}"
+    (client / "Interface").mkdir(parents=True)
+    marked_as = {
+        "another server": (game, tmp_path / "elsewhere", client),
+        "another game": ("wow-wotlk", server_dir, client),
+        "another client folder": (game, server_dir, tmp_path / "SomeOtherWoW"),
+        "no marker": None,
+    }[whose]
+    if marked_as is None:
+        (play_client.default_target(client, name, server_dir) / "Interface").mkdir(parents=True)
+    else:
+        marked_game, marked_server, marked_client = marked_as
+        play = play_client.default_target(client, name, server_dir)
+        (play / "Interface").mkdir(parents=True)
+        marker = play_client.Marker(
+            game=marked_game,
+            server_dir=marked_server,
+            source_client_dir=marked_client,
+            created_at=play_client.utc_now(),
+        )
+        (play / play_client.MARKER).write_text(marker.model_dump_json(), encoding="utf-8")
+
+    _catalog_view(window).installed.emit(game, server_dir, client)
+
+    assert _tab_for(window, server_dir).services.play_client_dir is None
+
+
 # -- T188 C6: the header's realm badge is the current server tab's ------------
 
 
@@ -4193,6 +4281,60 @@ def test_the_header_badge_follows_the_server_tab_on_screen(window: Any, tmp_path
 def test_a_window_opened_with_no_servers_hides_the_header_badge(window: Any) -> None:
     """T188 fix round 1 (M6): the Catalog was current before the header listened."""
     assert window.header_badge_hidden_at_start is True
+
+
+def test_a_window_opened_with_a_server_installed_follows_its_badge(
+    qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T210: the T179 live check opened Yu'lon onto a server already installed.
+
+    The header read REALM OFFLINE while the Server tab said REALM ONLINE. Every
+    other header test adds its tab to the shared window AFTER start-up; this one
+    is the start-up a returning player has: the tab comes from `state.json`.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon import update_state
+    from yulon.ui.controller_view import ControllerView
+
+    monkeypatch.setenv("YULON_SMOKE_TEST", "1")  # no update check, no GitHub
+    scratch = tmp_path / "config"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    server_dir = tmp_path / "t210-server"
+    monkeypatch.setattr(
+        state,
+        "load_state",
+        lambda path=None, repair=True: state.AppState(
+            installs=[state.KnownInstall(game="wow-wotlk", server_dir=server_dir)]
+        ),
+    )
+    monkeypatch.setattr(state, "save_state", lambda app_state, path=None: None)
+    monkeypatch.setattr(main, "sweep_leftover_client_copies", lambda **kwargs: None)
+    real_init = ControllerView.__init__
+
+    def _no_polling(self: Any, entry: Any, services: Any, **kwargs: Any) -> None:
+        kwargs["status_poll_ms"] = 0
+        real_init(self, entry, services, **kwargs)
+
+    monkeypatch.setattr(ControllerView, "__init__", _no_polling)
+
+    window = main.build_window()
+    try:
+        header = window.property("header")
+        view = _tab_for(window, server_dir)
+        assert window.property("tabs").currentWidget() is view
+        assert header._badge.isHidden() is False, "the header hid the badge of the tab on screen"
+
+        view.realm_badge.set_status("running")
+
+        assert header._badge.status == "running"
+        assert "REALM ONLINE" in header._badge._label.text()
+    finally:
+        main._stop_background_threads(window)
+        QApplication.processEvents()
 
 
 def test_the_header_says_unknown_when_docker_cannot_be_asked(
@@ -4305,15 +4447,25 @@ def test_a_server_folder_with_an_ampersand_keeps_it_on_its_tab(window: Any, tmp_
     from PySide6.QtGui import QKeySequence
 
     server_dir = tmp_path / "Raids & Dungeons"
+    # T192: the folder is on the tab only when another tab has the same game,
+    # so a second WotLK puts "Raids & Dungeons" on this one's second line.
+    other = tmp_path / "Other WotLK"
     _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
-    view = _tab_for(window, server_dir)
-    tabs = window.property("tabs")
-    index = tabs.indexOf(view)
+    _catalog_view(window).installed.emit("wow-wotlk", other, None)
+    try:
+        view = _tab_for(window, server_dir)
+        tabs = window.property("tabs")
+        index = tabs.indexOf(view)
 
-    title = tabs.tabText(index)
-    assert QKeySequence.mnemonic(title).isEmpty(), title
-    assert "Raids & Dungeons" in title.replace("&&", "&"), title
-    assert tabs.tabToolTip(index) == str(server_dir)
+        title = tabs.tabText(index)
+        assert "\n" in title, ("the folder is not on the tab", title)
+        assert QKeySequence.mnemonic(title).isEmpty(), title
+        assert "Raids & Dungeons" in title.replace("&&", "&"), title
+        assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
+    finally:
+        for folder in (server_dir, other):
+            _tab_for(window, folder).uninstalled.emit("wow-wotlk", folder)
+        process_events(10)
 
 
 def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
@@ -4848,3 +5000,913 @@ def test_a_notice_is_remembered_only_once_it_was_shown(
     notice = _REAL_SWEEP(config_dir=tmp_path)
     assert notice is not None and notice.folders == (str(other),)
     assert "a temporary copy of a game client" in notice.text
+
+
+# -- T193 A20: "Check for updates" is a real button, whole at every width -----------
+
+
+@pytest.fixture
+def shown_window(window: Any) -> Iterator[Any]:
+    """The shared window shown on the Catalog, put back hidden at its size afterwards."""
+    tabs = window.property("tabs")
+    size, current = window.size(), tabs.currentIndex()
+    tabs.setCurrentIndex(0)
+    window.show()
+    process_events(50)
+    yield window
+    window.hide()
+    window.resize(size)
+    window._restyle_for_width()
+    tabs.setCurrentIndex(current)
+    process_events(20)
+
+
+def _at_width(window: Any, size: tuple[int, int]) -> None:
+    """Resize the window and restyle it the way its settle timer does."""
+    window.resize(*size)
+    process_events(20)
+    window._restyle_for_width()
+    process_events(50)
+
+
+def test_the_header_check_button_has_an_opaque_brass_edge(shown_window: Any) -> None:
+    """A20: the header's selector-less sheet stripped the button's border and fill.
+
+    `background: transparent; border: none;` with no selector reaches every
+    child (T188 C1's mechanism), and the button was also flat: it read as a
+    caption on the ember glow. Four pixels down the middle of its left edge are
+    the theme's hairline, which is opaque, so the glow animating behind it
+    cannot change them.
+
+    Mutation: give the header its selector-less sheet back and the edge is the
+    glow, not `COLOR_BRASS_DARK`.
+    """
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.theme import COLOR_BRASS_DARK
+
+    button = shown_window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    button.clearFocus()
+    image = button.grab().toImage()
+    middle = image.height() // 2
+    edge = [image.pixelColor(0, y).name() for y in range(middle - 2, middle + 2)]
+    assert edge == [QColor(COLOR_BRASS_DARK).name()] * 4, edge
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800), (1920, 1080)])
+def test_the_header_check_button_is_never_cut_off(shown_window: Any, size: tuple[int, int]) -> None:
+    """T188's renders showed "Check for updates" cut at 1280 on the Catalog.
+
+    Measured for T193: a harness artefact, not the app. The shot was taken 0.2 s
+    after the resize, and the 120 ms restyle had grown the font but the header's
+    relayout had not landed yet; at a 1 s settle the button is whole at every
+    size. Kept as the guard on that answer: reached from 960, the way a window
+    is dragged wider, the button is as wide as it asks to be, wider than its words.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.theme import TOUCH_TARGET_PX
+
+    button = shown_window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    _at_width(shown_window, (960, 640))
+    _at_width(shown_window, size)
+
+    words = button.fontMetrics().horizontalAdvance(button.text())
+    assert button.width() >= button.sizeHint().width(), (button.width(), button.sizeHint())
+    assert button.width() > words, (button.width(), words)
+    # And inside the header, top to bottom: at the theme's 8px padding it was
+    # 50px tall in a 44px row and stood out over the header's bottom edge.
+    header = shown_window.property("header")
+    inside = header.contentsRect().marginsRemoved(header.layout().contentsMargins())
+    assert inside.contains(button.geometry()), (button.geometry(), inside)
+    assert button.height() >= TOUCH_TARGET_PX
+
+
+# -- T192: whole short names on the rail; Catalog and Logs pinned above it -----------
+
+
+@pytest.fixture
+def five_servers(shown_window: Any, tmp_path: Any) -> Iterator[list[Any]]:
+    """Five server tabs, the second WotLK on another disk with the same folder name.
+
+    Removed again afterwards through the tab's own `uninstalled`, as every test
+    on the shared window must.
+    """
+    made = [
+        ("wow-tbc", tmp_path / "WoW TBC"),
+        ("wow-vanilla", tmp_path / "WoW Vanilla"),
+        ("wow-tortoise", tmp_path / "WoW Tortoise"),
+        ("wow-centurion", tmp_path / "WoW Centurion"),
+        ("wow-wotlk", tmp_path / "disk2" / "WoW WotLK"),
+    ]
+    catalog = _catalog_view(shown_window)
+    for game, folder in made:
+        catalog.installed.emit(game, folder, None)
+    process_events(30)
+    yield [_tab_for(shown_window, folder) for _, folder in made]
+    for game, folder in made:
+        view = _tab_for(shown_window, folder)
+        view.uninstalled.emit(game, folder)
+    process_events(20)
+
+
+SIZES = [(960, 640), (1280, 800), (1920, 1080)]
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_every_server_tab_shows_its_whole_short_name(
+    shown_window: Any, five_servers: list[Any], size: tuple[int, int]
+) -> None:
+    """A3/B5/C9: with more tabs than fit, every tab shrank to "WoW…" / "Cata…".
+
+    Short names ("TBC", not "WoW TBC — WoW TBC"), never elided: the rail
+    scrolls instead, so each tab is at least as long as its text asks.
+
+    Mutation: `ElideRight` back and the 960 tabs are shorter than their hints.
+    """
+    _at_width(shown_window, size)
+    tabs = shown_window.property("tabs")
+    bar = tabs.tabBar()
+    for view in five_servers:
+        index = tabs.indexOf(view)
+        assert (
+            bar.tabRect(index).height() >= bar.tabSizeHint(index).height()
+        ), f"{bar.tabText(index)!r} at {size}: {bar.tabRect(index)} < {bar.tabSizeHint(index)}"
+        assert not bar.tabText(index).startswith("WoW "), bar.tabText(index)
+    # Its first line, whatever other TBC tab an earlier test on the shared
+    # window left open (that one would add the folder as a second line).
+    assert bar.tabText(tabs.indexOf(five_servers[0])).split("\n")[0] == "TBC"
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_catalog_and_logs_are_pinned_above_the_rail_at_every_size(
+    shown_window: Any, five_servers: list[Any], size: tuple[int, int]
+) -> None:
+    """The Catalog was tab 0 of a scrolling bar, so with a few servers it scrolled away.
+
+    Both are pinned buttons above the bar, inside the tab widget, each at least
+    its own size hint, and the bar starts below them -- after the restyle at
+    each size, which is what moves the bar.
+
+    Mutation: drop the `::tab-bar` offset and the bar starts at the top, under
+    the pins.
+    """
+    _at_width(shown_window, size)
+    tabs = shown_window.property("tabs")
+    bar = tabs.tabBar()
+    pins = shown_window.yulon_sidebar_pins
+    assert pins.isVisible()
+    assert tabs.rect().contains(pins.geometry()), (pins.geometry(), tabs.rect())
+    assert pins.geometry().bottom() < bar.geometry().top(), (pins.geometry(), bar.geometry())
+    for button in pins.buttons.values():
+        assert button.isVisible()
+        assert button.width() >= button.sizeHint().width(), (button.size(), button.sizeHint())
+        assert button.height() >= button.sizeHint().height(), (button.size(), button.sizeHint())
+    assert not bar.isTabVisible(0) and not bar.isTabVisible(1)
+
+
+def test_the_catalog_pin_stays_put_and_visible_with_the_last_server_current(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    _at_width(shown_window, (960, 640))
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    catalog = pins.buttons[0]
+    tabs.setCurrentIndex(0)
+    process_events(20)
+    where = catalog.mapTo(shown_window, catalog.rect().topLeft())
+
+    tabs.setCurrentWidget(five_servers[-1])
+    process_events(20)
+
+    assert catalog.isVisible()
+    assert catalog.mapTo(shown_window, catalog.rect().topLeft()) == where
+    assert not catalog.isChecked() and not pins.buttons[1].isChecked()
+
+
+def test_pressing_the_catalog_pin_shows_the_catalog(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    """The pin is the Catalog's tab now: it shows tab 0, is checked, and the header
+    hides the realm badge as it does on the Catalog (T188 C6)."""
+    tabs = shown_window.property("tabs")
+    header = shown_window.property("header")
+    pins = shown_window.yulon_sidebar_pins
+    tabs.setCurrentWidget(five_servers[-1])
+    process_events(10)
+    assert header._badge.isHidden() is False
+
+    pins.buttons[0].click()
+    process_events(10)
+
+    assert tabs.currentIndex() == 0
+    assert pins.buttons[0].isChecked() and not pins.buttons[1].isChecked()
+    assert header._badge.isHidden() is True
+
+    pins.buttons[1].click()
+    process_events(10)
+    assert tabs.currentIndex() == 1
+    assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+
+
+def test_the_next_tab_bumper_from_the_last_server_lands_on_the_catalog(
+    shown_window: Any, five_servers: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LB/RB still walk tabs 0..n (they stayed tabs), and the pin follows them.
+
+    The bumper acts on the tab widget around the FOCUSED widget. On the shared
+    window, after the module's earlier tests, offscreen Qt will not make this
+    window active again (measured: `requestActivate()` never lands), so the
+    focus is answered as the rail's bar -- what a pad user on the rail has.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui import gamepad
+    from yulon.ui.gamepad import Action
+
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    tabs.setCurrentIndex(tabs.count() - 1)
+    monkeypatch.setattr(gamepad.QApplication, "focusWidget", staticmethod(tabs.tabBar))
+    assert QApplication.focusWidget() is tabs.tabBar()
+    process_events(10)
+
+    shown_window.yulon_keyboard._navigator.perform(Action.CYCLE_NEXT)
+    process_events(10)
+
+    assert tabs.currentIndex() == 0
+    assert pins.buttons[0].isChecked()
+
+
+# -- T221: R and L in a list are letters, on every game's server page ----------------
+
+
+@pytest.mark.parametrize(
+    "game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"]
+)
+def test_r_and_l_in_every_list_of_a_server_page_stay_in_the_list(
+    window: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str
+) -> None:
+    """T221: R in Centurion's Characters list switched the server page to Bots.
+
+    Through the window's own keyboard filter, with each list of each sub-tab as
+    the focus: the filter must hand R and L to the list (False) and leave the
+    sub-tab where it is. The focus is answered by patch for the reason the
+    bumper test above gives: offscreen, the shared window is never active again.
+    """
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QAbstractItemView
+
+    from yulon.ui import gamepad
+
+    server_dir = tmp_path / f"t221-{game}"
+    _catalog_view(window).installed.emit(game, server_dir, None)
+    view = _tab_for(window, server_dir)
+    sub = view._tabs
+    keyboard = window.yulon_keyboard
+    asked: list[str] = []
+    for index in range(sub.count()):
+        sub.setCurrentIndex(index)
+        page = sub.widget(index)
+        for rows in page.findChildren(QAbstractItemView):
+            monkeypatch.setattr(gamepad.QApplication, "focusWidget", staticmethod(lambda r=rows: r))
+            for key, letter in ((Qt.Key.Key_R, "r"), (Qt.Key.Key_L, "l")):
+                press = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, letter)
+                where = f"{sub.tabText(index)}: {type(rows).__name__} {rows.objectName()!r}"
+                assert keyboard.eventFilter(rows, press) is False, f"{letter} was taken in {where}"
+                assert sub.currentIndex() == index, f"{letter} switched sub-tab from {where}"
+            if rows.isVisibleTo(page):
+                asked.append(sub.tabText(index))
+    if game == "wow-centurion":
+        assert "Characters" in asked, "the Characters list was not asked"
+    assert asked, "no list on any sub-tab was asked"
+
+
+# -- T192: a status dot on each server tab; the server's name in the header -----------
+
+
+def _tab_dot(window: Any, view: Any) -> Any:
+    """The tab's icon as the rail draws it, at the rail's icon size."""
+    tabs = window.property("tabs")
+    size = tabs.iconSize()
+    return tabs.tabIcon(tabs.indexOf(view)).pixmap(size).toImage()
+
+
+def _dot_is(image: Any, hex_colour: str) -> bool:
+    """The dot's centre pixel is `hex_colour` (within 24 a channel), opaque."""
+    from PySide6.QtGui import QColor
+
+    from yulon.ui.sidebar import status_dot_geometry
+
+    centre, _radius, _halo = status_dot_geometry(image.width())
+    got, want = image.pixelColor(int(centre.x()), int(centre.y())), QColor(hex_colour)
+    return got.alpha() > 200 and all(
+        abs(a - b) <= 24 for a, b in zip(got.getRgb()[:3], want.getRgb()[:3], strict=True)
+    )
+
+
+def _drop(window: Any, game: str, server_dir: Path) -> None:
+    for view in list(window.yulon_controllers):
+        if view.services.controller.server_dir == server_dir:
+            view.uninstalled.emit(game, server_dir)
+    process_events(10)
+
+
+def test_a_server_tab_carries_a_dot_that_follows_its_realm_badge(
+    window: Any, tmp_path: Any
+) -> None:
+    """C28: every server tab had the same icon, so the rail said nothing about which were up.
+
+    Mutation: leave `status_changed` unconnected and the dot stays at the
+    status the tab was built with.
+    """
+    from yulon.ui.icons import get_tab_icon
+    from yulon.ui.theme import COLOR_GOLD_BRIGHT, COLOR_RARE, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-dot"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        view.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, view), COLOR_UNCOMMON)
+        view.realm_badge.set_status("restarting")
+        assert _dot_is(_tab_dot(window, view), COLOR_RARE)
+        view.realm_badge.set_status("partial")
+        assert _dot_is(_tab_dot(window, view), COLOR_GOLD_BRIGHT)
+
+        # T188: Docker did not answer. No dot -- a ring would claim it is offline.
+        view.realm_badge.set_status("unknown")
+        plain = get_tab_icon("server").pixmap(window.property("tabs").iconSize()).toImage()
+        dot = _tab_dot(window, view)
+        assert dot.convertToFormat(plain.format()) == plain, "an unknown realm shows a dot"
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_a_new_server_tab_starts_with_the_dot_of_its_badge(window: Any, tmp_path: Any) -> None:
+    """Read at `add_controller`, not only on the first change: the badge starts stopped."""
+    from yulon.ui.theme import COLOR_TEXT_MUTED, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-first-dot"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        assert view.realm_badge.status == "stopped"
+        image = _tab_dot(window, view)
+        assert not _dot_is(image, COLOR_UNCOMMON)
+        from PySide6.QtGui import QColor
+
+        from yulon.ui.sidebar import status_dot_geometry
+
+        centre, radius, _halo = status_dot_geometry(image.width())
+        muted = QColor(COLOR_TEXT_MUTED).getRgb()[:3]
+        ring = [
+            image.pixelColor(x, y)
+            for y in range(image.height())
+            for x in range(image.width())
+            if abs(((x + 0.5 - centre.x()) ** 2 + (y + 0.5 - centre.y()) ** 2) ** 0.5 - radius)
+            < 1.5
+        ]
+        assert any(
+            c.alpha() > 200
+            and all(abs(a - b) <= 24 for a, b in zip(c.getRgb()[:3], muted, strict=True))
+            for c in ring
+        ), "a new tab shows no stopped ring"
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_the_dot_shows_the_badge_held_while_our_stop_runs(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T188 holds the badge at "stopping" while our own Stop runs; the dot holds with it."""
+    from yulon.ui.theme import COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-held"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        view.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, view), COLOR_UNCOMMON)
+        monkeypatch.setattr(view, "_run", lambda *_args, **_kwargs: None)
+
+        view.stop_server()
+
+        assert view.realm_badge.status == "stopping"
+        assert _dot_is(_tab_dot(window, view), COLOR_GOLD_BRIGHT)
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_a_rebuilt_tab_gets_its_new_badge_s_dot_and_the_old_badge_lets_go(
+    window: Any, tmp_path: Any
+) -> None:
+    """A new client folder rebuilds the tab (`on_client_dir_changed`): a new view, a new badge.
+
+    The old badge must not keep a line to the tab: nothing is left listening
+    to it, and what it says no longer reaches the rail.
+
+    Mutation: leave the old badge connected and it still has a receiver.
+    """
+    from PySide6.QtCore import SIGNAL
+
+    from yulon.ui.theme import COLOR_RARE, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-rebuilt"
+    client = tmp_path / "t192-client"
+    (client / "Data").mkdir(parents=True)
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    old = _tab_for(window, server_dir)
+    try:
+        old.client_dir_changed.emit("wow-wotlk", server_dir, client)
+        made = _tab_for(window, server_dir)
+        assert made is not old
+
+        made.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, made), COLOR_UNCOMMON)
+        assert old.realm_badge.receivers(SIGNAL("status_changed(QString)")) == 0
+        old.realm_badge.set_status("restarting")  # still alive until its deferred delete
+        assert not _dot_is(_tab_dot(window, made), COLOR_RARE)
+        process_events()  # the old view's deferred delete
+        made.realm_badge.set_status("restarting")
+        assert _dot_is(_tab_dot(window, made), COLOR_RARE)
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_the_header_names_the_server_on_screen_and_nothing_on_the_catalog(
+    shown_window: Any, tmp_path: Any
+) -> None:
+    """The game strip: "WoW WotLK — <folder>" beside the badge, clear of both header controls.
+
+    Mutation: stop passing `title=` and the header names nothing.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    header = shown_window.property("header")
+    tabs = shown_window.property("tabs")
+    server_dir = tmp_path / "Hdr Realm"
+    _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(shown_window, server_dir)
+    try:
+        tabs.setCurrentWidget(view)
+        _at_width(shown_window, (960, 640))
+        title = header._realm_title
+        check = shown_window.findChild(QPushButton, "check-for-updates")
+        assert title.isVisible()
+        assert title.text().startswith("WoW WotLK"), title.text()
+        assert title.toolTip() == f"WoW WotLK — {server_dir}"
+        assert not title.geometry().intersects(check.geometry()), (
+            title.geometry(),
+            check.geometry(),
+        )
+        assert not title.geometry().intersects(header._badge.geometry())
+        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
+
+        tabs.setCurrentIndex(0)
+        process_events(10)
+        assert title.isHidden(), "the Catalog names a server"
+        tabs.setCurrentIndex(1)
+        process_events(10)
+        assert title.isHidden(), "Logs names a server"
+    finally:
+        _drop(shown_window, "wow-wotlk", server_dir)
+
+
+def test_the_header_title_shortens_when_the_tab_that_needed_the_longer_one_goes(
+    window: Any, tmp_path: Any
+) -> None:
+    """Two "Hdr Twin" folders need a parent folder each to tell apart; one alone does not.
+
+    Removing a tab that is not on screen moves no selection, so it is the
+    retitle after the removal that has to refresh the header.
+    """
+    header = window.property("header")
+    tabs = window.property("tabs")
+    first, second = tmp_path / "d1" / "Hdr Twin", tmp_path / "d2" / "Hdr Twin"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", first, None)
+    catalog.installed.emit("wow-wotlk", second, None)
+    try:
+        tabs.setCurrentWidget(_tab_for(window, first))
+        assert header._realm_title.text() == f"WoW WotLK — {Path('d1') / 'Hdr Twin'}"
+
+        _drop(window, "wow-wotlk", second)
+
+        assert header._realm_title.text() == "WoW WotLK — Hdr Twin"
+    finally:
+        _drop(window, "wow-wotlk", first)
+        _drop(window, "wow-wotlk", second)
+
+
+def test_ctrl_tab_reaches_the_catalog_and_logs_from_the_rail_and_from_them(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    """The changelog's claim, in the real window (T192 final review).
+
+    From the rail, the Catalog or Logs, Ctrl+Tab and Ctrl+Shift+Tab walk the
+    same ring as the bumpers, pinned tabs included, and the pins follow. Inside
+    a server page its own sub-tabs take the keys first and the rail does not
+    move: cycling a server's sub-tabs is that page's natural Ctrl+Tab.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QTabWidget
+
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    last = tabs.count() - 1
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    back = ctrl | Qt.KeyboardModifier.ShiftModifier
+
+    def press(widget: Any, key: Qt.Key, modifiers: Qt.KeyboardModifier) -> int:
+        assert widget.isVisible(), widget
+        QTest.keyClick(widget, key, modifiers)
+        process_events(10)
+        return tabs.currentIndex()
+
+    tabs.setCurrentIndex(last)
+    process_events(10)
+    assert press(tabs.tabBar(), Qt.Key.Key_Tab, ctrl) == 0, "the rail skipped the Catalog"
+    assert pins.buttons[0].isChecked()
+    catalog = _catalog_view(shown_window)
+    assert press(catalog, Qt.Key.Key_Tab, ctrl) == 1, "the Catalog skipped Logs"
+    assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+    assert press(shown_window.yulon_logs_view, Qt.Key.Key_Backtab, back) == 0
+    assert pins.buttons[0].isChecked()
+    assert press(catalog, Qt.Key.Key_Backtab, back) == last, "Ctrl+Shift+Tab did not wrap"
+    assert not any(button.isChecked() for button in pins.buttons.values())
+
+    server = five_servers[-1]
+    tabs.setCurrentWidget(server)
+    process_events(10)
+    inner = server.findChild(QTabWidget)
+    assert inner is not None
+    before = inner.currentIndex()
+    assert press(inner.currentWidget(), Qt.Key.Key_Tab, ctrl) == tabs.indexOf(server)
+    assert (
+        inner.currentIndex() == (before + 1) % inner.count()
+    ), "the server's sub-tabs did not move"
+
+
+def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wider(
+    shown_window: Any, tmp_path: Any
+) -> None:
+    """The header's name gives way before the update check and the badge, and comes back.
+
+    Task 2's lesson: a label whose size hint is what it shows never asks for
+    its room back, so a name cut at 960 stayed cut at 1920.
+
+    Mutation: answer `_RealmTitle.sizeHint` from the text on screen and the
+    name is still shortened at 1920.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    header = shown_window.property("header")
+    tabs = shown_window.property("tabs")
+    server_dir = tmp_path / "A very long server folder name that cannot fit beside the badge"
+    _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(shown_window, server_dir)
+    try:
+        tabs.setCurrentWidget(view)
+        title = header._realm_title
+        check = shown_window.findChild(QPushButton, "check-for-updates")
+        _at_width(shown_window, (960, 640))
+        whole = title.full_text
+        assert whole == f"WoW WotLK — {server_dir.name}"
+        assert title.text() != whole and title.text().endswith("…"), title.text()
+        assert title.text().startswith("WoW"), title.text()
+        assert not title.geometry().intersects(check.geometry())
+        assert not title.geometry().intersects(header._badge.geometry())
+        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
+
+        _at_width(shown_window, (1920, 1080))
+        assert title.text() == whole, f"still cut at 1920: {title.text()!r}"
+        assert not title.geometry().intersects(check.geometry())
+        assert not title.geometry().intersects(header._badge.geometry())
+    finally:
+        _drop(shown_window, "wow-wotlk", server_dir)
+
+
+# ------------------------------------------------- what a player reads (T194)
+
+_FIVE_GAMES = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion")
+
+
+@pytest.mark.parametrize(
+    ("text", "rule"),
+    [
+        ("Pressed live on the test box (T86).", "ticket number"),
+        ("Scope is an owner decision, 2026-09-06.", "owner decision"),
+        ("Module management is Manifest-driven.", "manifest"),
+        ("It carries the headless bot sessions.", "headless"),
+        ("RuntimeError: port in use", "exception class"),
+        ("Traceback (most recent call last):", "traceback"),
+        ("open //./pipe/dockerDesktopLinuxEngine failed", "pipe path"),
+        ("the npipe transport is closed", "npipe"),
+    ],
+)
+def test_the_sweep_names_each_kind_of_developer_note(qapp: object, text: str, rule: str) -> None:
+    """Each sentence breaks exactly one rule, and the fault names it and the widget."""
+    from PySide6.QtWidgets import QLabel, QWidget
+
+    from tests.support_player_text import player_text_faults
+
+    root = QWidget()
+    QLabel(text, root).setObjectName("probe")
+
+    assert player_text_faults(root) == [f"probe text [{rule}]: {text!r}"]
+
+
+def test_the_sweep_reads_every_place_text_is_shown_and_skips_what_is_not(qapp: object) -> None:
+    """T1-T7 are read where a player sees them; T8-T11 are not text Yu'lon shows them.
+
+    T8 is typed by the player, T9 is on a hidden widget, T10 is in the install
+    console and T11 is a line of a log file in the Logs viewer.
+    """
+    import re
+
+    from PySide6.QtWidgets import (
+        QGroupBox,
+        QLabel,
+        QPlainTextEdit,
+        QPushButton,
+        QTabWidget,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    from tests.support_player_text import player_text_faults
+    from yulon.catalog.catalog import load_catalog
+    from yulon.ui.logs_view import LogsView
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    root = QWidget()
+    lay = QVBoxLayout(root)
+    lay.addWidget(QPushButton("T1 on a button"))
+    tipped = QPushButton("Start")
+    tipped.setToolTip("T2 in a tooltip")
+    lay.addWidget(tipped)
+    lay.addWidget(QGroupBox("T3 as a group title"))
+    tabs = QTabWidget()
+    tabs.addTab(QWidget(), "T4 on a tab")
+    tabs.tabBar().setTabToolTip(0, "T5 on a tab's tooltip")
+    lay.addWidget(tabs)
+    shown = QPlainTextEdit("T6 in a read-only box")
+    shown.setReadOnly(True)
+    lay.addWidget(shown)
+    hint = QPlainTextEdit()
+    hint.setReadOnly(True)
+    hint.setPlaceholderText("T7 as a placeholder")
+    lay.addWidget(hint)
+    lay.addWidget(QPlainTextEdit("T8 typed by the player"))
+    hidden = QLabel("T9 on a hidden label")
+    lay.addWidget(hidden)
+    hidden.setVisible(False)
+    console = LogPanel()
+    QLabel("T10 inside the install console", console)
+    lay.addWidget(console)
+    logs = LogsView(lambda: (), load_catalog(), jobs=lambda *_a: None)
+    logs.viewer.setPlainText("T11 a line of a log file")
+    lay.addWidget(logs)
+
+    found = {
+        match.group(0)
+        for fault in player_text_faults(root)
+        if (match := re.search(r"T\d+", fault)) is not None
+    }
+
+    assert found == {"T1", "T2", "T3", "T4", "T5", "T6", "T7"}
+
+
+@pytest.fixture
+def one_of_each_game(window: Any, tmp_path: Any) -> Iterator[dict[str, Any]]:
+    """A tab for each of the five games, dropped again afterwards."""
+    dirs = {game: tmp_path / f"t194-{game}" for game in _FIVE_GAMES}
+    for game, server_dir in dirs.items():
+        _catalog_view(window).installed.emit(game, server_dir, None)
+    tabs = window.property("tabs")
+    current = tabs.currentIndex()
+    try:
+        yield {game: _tab_for(window, server_dir) for game, server_dir in dirs.items()}
+    finally:
+        tabs.setCurrentIndex(current)
+        for game, server_dir in dirs.items():
+            _drop(window, game, server_dir)
+
+
+def _every_screen(window: Any, views: dict[str, Any]) -> Iterator[str]:
+    """Make each screen current in turn: the Catalog, the Logs, every server's every sub-tab."""
+    tabs = window.property("tabs")
+    logs_view = window.yulon_logs_view
+    for index in range(tabs.count()):
+        page = tabs.widget(index)
+        if page is logs_view or page.isAncestorOf(logs_view):
+            tabs.setCurrentIndex(index)
+            yield "Logs"
+    tabs.setCurrentWidget(_catalog_view(window))
+    if tabs.currentWidget() is not _catalog_view(window):
+        tabs.setCurrentIndex(0)
+    yield "Catalog"
+    for game, view in views.items():
+        tabs.setCurrentWidget(view)
+        for index in range(view._tabs.count()):
+            view._tabs.setCurrentIndex(index)
+            yield f"{game} {view._tabs.tabText(index)}"
+
+
+def test_no_screen_shows_a_player_a_developer_note(window: Any, one_of_each_game: Any) -> None:
+    """A17/I1, I2, C19, C25, A25, C20 (T194): every screen, all five games, read in full.
+
+    Ticket numbers, owner decisions, "manifest", "headless", exception class
+    names, tracebacks and Docker pipe paths are notes to ourselves. They live in
+    comments, docstrings and `CatalogEntry.notes`, never on screen.
+    """
+    from tests.support_player_text import player_text_faults
+
+    faults: list[str] = []
+    for screen in _every_screen(window, one_of_each_game):
+        process_events(5)
+        faults += [f"{screen}: {fault}" for fault in player_text_faults(window)]
+
+    faults = list(dict.fromkeys(faults))
+    assert faults == [], "\n".join(faults)
+
+
+def test_the_catalogs_developer_notes_load_and_are_never_drawn(
+    window: Any, one_of_each_game: Any
+) -> None:
+    """C19 (T194): what moved out of the descriptions is kept beside the entry, not shown."""
+    from tests.support_player_text import visible_texts
+    from yulon.catalog.catalog import CATALOG_FILE, load_catalog
+
+    written = {
+        game["id"]: tuple(game.get("notes", ()))
+        for game in json.loads(CATALOG_FILE.read_text(encoding="utf-8"))["games"]
+    }
+    loaded = {entry.id: entry.notes for entry in load_catalog().games}
+    assert loaded == written
+    assert written["wow-tortoise"], "the Tortoise description's history was not kept"
+
+    shown: list[str] = []
+    for _screen in _every_screen(window, one_of_each_game):
+        shown += [text for _name, _where, text in visible_texts(window)]
+    drawn = [
+        (game, note)
+        for game, notes in loaded.items()
+        for note in notes
+        if any(note[:60] in text for text in shown)
+    ]
+    assert drawn == []
+
+
+def test_the_bot_party_sentence_on_tortoise_names_wotlk_and_no_decision(
+    one_of_each_game: Any,
+) -> None:
+    """A17/I1 (T194): the reason is the player's, not the meeting that settled it."""
+    absent = one_of_each_game["wow-tortoise"].my_party_absent
+
+    assert not absent.isHidden()
+    assert "WoW WotLK" in absent.text(), absent.text()
+    assert "owner decision" not in absent.text(), absent.text()
+    assert "mod-ale" not in absent.text(), absent.text()
+
+
+def test_the_tortoise_set_level_sentence_is_short_and_plain(one_of_each_game: Any) -> None:
+    """I2 (T194): it was 470 characters of console commands in backticks."""
+    said = one_of_each_game["wow-tortoise"].set_level_absent
+
+    assert not said.isHidden()
+    assert said.text(), "the sentence is gone, not shortened"
+    assert len(said.text()) < 200, len(said.text())
+    assert "`" not in said.text(), said.text()
+
+
+# -- T195 C23/C24/C31: the first run, the tiles, the strip --------------------------
+
+
+def _catalog_console(window: Any) -> tuple[Any, Any, Any]:
+    """The Catalog's install-log tabs, its toggle, and the splitter between them."""
+    from PySide6.QtWidgets import QSplitter, QTabWidget
+
+    console = window.findChild(QTabWidget, "catalog-console-tabs")
+    splitter = window.findChild(QSplitter, "catalog-splitter")
+    assert console is not None and splitter is not None
+    return console, _catalog_view(window).toggle_console_button, splitter
+
+
+def test_the_first_run_catalog_says_what_to_do_and_hides_the_empty_log(
+    shown_window: Any,
+) -> None:
+    """C23 (T195): a heading that asks, a line that promises, and no empty console.
+
+    The console was open at start with nothing in it, its tab text clipped to
+    "and Ins", and it took the room the Install buttons needed at 960.
+    Mutation: leave the console visible at start and `isHidden()` is False.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    view = _catalog_view(shown_window)
+    heading = view.findChild(QLabel, "section-title")
+    welcome = view.findChild(QLabel, "catalog-welcome")
+    assert heading is not None and heading.text() == "Choose a game to install"
+    assert welcome is not None and welcome.isVisibleTo(shown_window)
+    assert welcome.text() == (
+        "Yu'lon downloads and builds the server for you. Nothing changes on this "
+        "computer until you press Install."
+    )
+    console, toggle, _splitter = _catalog_console(shown_window)
+    assert console.isHidden() and toggle.isHidden()
+
+
+def test_an_install_start_opens_the_log_at_a_readable_height(shown_window: Any) -> None:
+    """C23/C31 (T195): the first `run_started` shows the log and its toggle, 55/45.
+
+    The console used to open 170 px tall whatever the window, under a strip that
+    then had no room to say anything.
+    Mutation: the old `setSizes([h - 170, 170])` leaves it under 40% at 1280x800.
+    """
+    console, toggle, splitter = _catalog_console(shown_window)
+    panel = shown_window.yulon_log_panels[0]
+    was_hidden = console.isHidden(), toggle.isHidden()
+    _at_width(shown_window, (1280, 800))
+    try:
+        panel.run_started.emit()
+        process_events(30)
+        assert not console.isHidden() and not toggle.isHidden()
+        assert console.tabText(0) == "Install log"
+        top, bottom = splitter.sizes()
+        assert bottom >= 0.4 * (top + bottom), splitter.sizes()
+        assert toggle.text() == "▼ Hide install log"
+    finally:
+        # Put back as the app had them, not forced hidden: a forced hide would
+        # give the next test the first-run state whatever the app does.
+        console.setHidden(was_hidden[0])
+        toggle.setHidden(was_hidden[1])
+        process_events(10)
+
+
+def test_at_960_the_first_rows_install_buttons_are_in_view(shown_window: Any) -> None:
+    """C23 (T195): at the smallest window, Install is on the first frame, not below it.
+
+    The window as the app leaves it with no install run yet: with the empty
+    console open under the shelf (the old layout), WotLK's Install sat below
+    the fold at 960x640. Mutation: show the console at start and this fails.
+    """
+    from PySide6.QtWidgets import QScrollArea
+
+    view = _catalog_view(shown_window)
+    _at_width(shown_window, (960, 640))
+    assert (shown_window.width(), shown_window.height()) == (960, 640)
+    viewport = view.findChild(QScrollArea, "catalog-shelf-scroll").viewport()
+    below = []
+    for game in ("wow-wotlk", "wow-tbc"):
+        button = view.button_for(game)
+        bottom = button.mapTo(viewport, button.rect().bottomLeft()).y()
+        if bottom > viewport.height():
+            below.append(f"{game}: bottom {bottom} of {viewport.height()}")
+    assert below == []
+
+
+def test_at_1920_no_tile_is_taller_than_it_asks_to_be(shown_window: Any) -> None:
+    """C24 (T195): a one-line description made a ~370 px tile (its box had stretch 1)."""
+    from PySide6.QtWidgets import QWidget
+
+    from yulon.catalog.catalog import load_catalog
+
+    view = _catalog_view(shown_window)
+    _at_width(shown_window, (1920, 1080))
+    tall = []
+    for entry in load_catalog().games:
+        tile = view.findChild(QWidget, f"catalog-tile-{entry.id}")
+        assert tile is not None, entry.id
+        if tile.height() > tile.sizeHint().height() + 1:
+            tall.append(f"{entry.id}: {tile.height()} > {tile.sizeHint().height()}")
+    assert tall == []
+
+
+def test_at_1920_the_strip_says_the_whole_step(shown_window: Any) -> None:
+    """C31 (T195): the step field was capped at 200 px and cut "Compiling the wor…"."""
+    from PySide6.QtWidgets import QLabel
+
+    console, toggle, _splitter = _catalog_console(shown_window)
+    panel = shown_window.yulon_log_panels[0]
+    said = "Step 7 of 9 · Compiling the world server"
+    was_hidden = console.isHidden(), toggle.isHidden()
+    try:
+        console.setVisible(True)
+        _at_width(shown_window, (1920, 1080))
+        panel.append("Step 7 of 9 (77%): Compiling the world server")
+        process_events(20)
+        (label,) = [w for w in panel.findChildren(QLabel) if w.toolTip() == said]
+        assert label.text() == said, label.text()
+    finally:
+        panel.clear()
+        panel._clear_strip()
+        console.setHidden(was_hidden[0])
+        toggle.setHidden(was_hidden[1])
+        process_events(10)

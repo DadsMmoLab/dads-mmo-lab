@@ -73,6 +73,11 @@ jobs:
     # runner - until 2026-10-03, when the py3.11 leg reached 23-25 minutes on
     # several branches and a T189 branch was cancelled three times with no test
     # failing (one attempt: "9955 passed" in 23:46). 40 is the new ceiling.
+    # It was reached too (T229): over 30 runs on 2026-10-04 the pytest step
+    # alone took 19-37 minutes per leg, py3.11 and py3.13 alike, and every other
+    # step together about 80 seconds. A raised limit only waits for the next
+    # one, so the tests now run in parallel (`-n auto` below) and the limit
+    # stays where it is, as room for a runner that is having a bad night.
     timeout-minutes: 40
     # Two versions, not one. Pinning only 3.11 hid a red suite for a day:
     # `shutil.which` grew a `_winapi` call in 3.12, so tests that fake
@@ -130,8 +135,16 @@ jobs:
         run: python -m mypy --platform darwin yulon main.py
 
       # `not integration` is the whole point of the split - see the header.
+      #
+      # `-n auto` (pytest-xdist, T229): one worker per core - four on a
+      # standard runner for a public repository - with tests dealt one at a
+      # time (`--dist load`, xdist's default), the same distribution the
+      # project's six-worker local runner has used for the full suite since
+      # 2026-10-01. Every test still runs in both legs; only the wall clock
+      # changes. `loadfile` is not used: it pins a whole file to one worker,
+      # and the biggest file alone is a large share of the suite.
       - name: pytest (tests)
-        run: python -m pytest -q -m "not integration"
+        run: python -m pytest -q -m "not integration" -n auto
 
   # The live-Docker suite, on its own runner so it blocks nothing else.
   integration:

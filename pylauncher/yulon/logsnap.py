@@ -93,9 +93,13 @@ def capture(
     identically: asking by name on a machine with two installs of one game can
     save the wrong server's log under this server's name.
     """
-    container = docker.compose_container_id(
+    container, said = docker.compose_container_lookup(
         spec.service_for(spec.world), server_dir, wsl_distro=wsl_distro
     )
+    if said:
+        # Not "could not find": Docker did not answer, which says nothing about
+        # whether the container is there (T211 5: it timed out mid-stop).
+        return Snapshot(problem=f"Docker did not say which container is {spec.world}: {said}")
     if not container:
         return Snapshot(problem=f"could not find {spec.world} in the compose project here")
     raw = docker.log_tail(container, wsl_distro=wsl_distro)

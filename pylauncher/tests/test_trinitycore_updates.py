@@ -1106,6 +1106,28 @@ def test_a_named_file_must_be_one_the_plan_imports(
         centurion_like()
 
 
+def test_reextract_stops_a_running_job_and_says_its_tiles_were_removed(box: Box) -> None:
+    """T209: a stop for the extraction never keeps tiles, and never says it did."""
+    fake: FakeMmapsDocker = box.m.mmaps
+    flagged(box)
+    assert not fake.jobs, "the update stopped it, and the flag holds the restart"
+    box.engine().start_mmaps(box.server_dir)
+    fake.write_tiles(30)
+    box.world.running = False
+    said = list(
+        box.engine().reextract(
+            InstallOptions(server_dir=box.server_dir, client_dir=box.m.client), cancel=None
+        )
+    )
+    assert (
+        "Stopped making the pathfinding data before the extraction; what it had made so far "
+        "was removed and pathfinding stays off. It starts again from the beginning once the "
+        "server has been rebuilt, or from the Server tab."
+    ) in said
+    assert not [line for line in said if "tiles are kept" in line]
+    assert len(fake.mmaps_at_run[-1]) == 0, "the new run starts from an empty folder"
+
+
 def test_the_flag_file_is_json_naming_what_changed(box: Box) -> None:
     flagged(box)
     raw = json.loads((box.server_dir / trinitycore.REEXTRACT_FILE).read_text("utf-8"))
@@ -1128,6 +1150,7 @@ def test_a_failed_job_whose_container_is_already_gone_stops_nothing(tmp_path: Pa
             ENTRY,
             "the rebuild",
             press="Rebuild the server…",
+            clear=False,
             runner=fake,
             install_id="0123abcd",
         )
@@ -1154,6 +1177,7 @@ def test_a_route_the_job_holds_up_says_to_check_docker_and_press_it_again(
             ENTRY,
             "the update to the newest code",
             press="Update the server to latest…",
+            clear=True,
             runner=fake,
             install_id="0123abcd",
         )

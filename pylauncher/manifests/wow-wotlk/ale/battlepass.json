@@ -63,7 +63,7 @@
   "prompts": [
     {
       "key": "enabled",
-      "question": "Enabled?",
+      "question": "Turn the battle pass on? (1 = on, 0 = off)",
       "kind": "int",
       "default": "1"
     },

@@ -70,21 +70,45 @@ def controller_tab_titles(installs: Sequence[tuple[str, Path]]) -> list[str]:
     return [f"{name} — {label}" for (name, _), label in zip(installs, labels, strict=True)]
 
 
+def sidebar_titles(installs: Sequence[tuple[str, Path]]) -> list[str]:
+    """The rail's tab text per (game name, server dir): short, a folder only when needed (T192).
+
+    "WoW WotLK — DadsMmoLab" is ~235px and the rail is 64: every tab drew as
+    "WoW…". So a tab says the short game name ("WotLK", `short_game_name`), and
+    only when another open tab has the SAME game does it add a second line, the
+    folder label that tells the two apart -- worked out among that game's tabs
+    alone, so a TBC beside them never lengthens a WotLK's label. On the West
+    rail the text runs along the tab, so a second line costs width across the
+    rail, and two lines fit its 64px.
+
+    Ready for `setTabText`: a lone "&" is doubled, because Qt reads it in a tab
+    title as a shortcut marker -- "Raids & Dungeons" drew as "Raids _Dungeons"
+    (T188 B7).
+    """
+    from yulon.ui.sidebar import short_game_name
+
+    by_game: dict[str, list[int]] = {}
+    for position, (name, _) in enumerate(installs):
+        by_game.setdefault(name, []).append(position)
+    titles = [short_game_name(name) for name, _ in installs]
+    for positions in by_game.values():
+        if len(positions) < 2:
+            continue
+        labels = folder_labels([installs[position][1] for position in positions])
+        for position, label in zip(positions, labels, strict=True):
+            titles[position] = f"{titles[position]}\n{label}"
+    return [title.replace("&", "&&") for title in titles]
+
+
 def retitle_controller_tabs(tabs: QTabWidget, views: Iterable[ControllerView]) -> None:
     """Re-title every controller tab from the set of them, leaving other tabs alone."""
     open_views = list(views)
-    titles = controller_tab_titles(
-        [(view.entry.name, view.services.controller.server_dir) for view in open_views]
-    )
-    for view, title in zip(open_views, titles, strict=True):
+    installs = [(view.entry.name, view.services.controller.server_dir) for view in open_views]
+    for view, title in zip(open_views, sidebar_titles(installs), strict=True):
         index = tabs.indexOf(view)
         if index != -1:
-            # "&&": the title is a folder name, and Qt reads a lone "&" in a tab
-            # title as a shortcut marker -- "Raids & Dungeons" drew as
-            # "Raids _Dungeons" (T188 B7).
-            tabs.setTabText(index, title.replace("&", "&&"))
-            # The rail is narrow (theme's `QTabBar::tab:west` max-width), so the
-            # title elides for longer install names. The full server dir is the
-            # one thing the short title leaves out, and the tooltip carries it
-            # so a hover recovers what elision hides.
-            tabs.setTabToolTip(index, str(view.services.controller.server_dir))
+            tabs.setTabText(index, title)
+            # The short title leaves out the "WoW " and the folder, so the
+            # tooltip carries both: the whole game name and the whole path.
+            # A tooltip is not read for shortcuts, so its "&" stays single.
+            tabs.setTabToolTip(index, f"{view.entry.name} — {view.services.controller.server_dir}")

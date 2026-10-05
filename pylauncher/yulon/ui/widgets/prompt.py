@@ -22,7 +22,7 @@ import re
 import threading
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtWidgets import QInputDialog, QLineEdit, QWidget
+from PySide6.QtWidgets import QDialog, QInputDialog, QLineEdit, QWidget
 
 from yulon.log import get_logger
 
@@ -60,13 +60,13 @@ def is_secret(prompt: str) -> bool:
 
 
 def tidy(prompt: str) -> str:
-    """The child's raw prompt as a question worth showing a person.
+    """A question as it is shown: trimmed, never truncated.
 
-    Scripts colour their output and rarely end a prompt with a newline, so what
-    arrives is a fragment like `[sudo] password for pk:`. That is already the
-    clearest possible description of what is wanted, so it is shown as-is —
-    only trimmed, and never truncated, because the tail is usually the part
-    that says what is being asked.
+    The questions that arrive are Yu'lon's own sentences -- the docker-group
+    consent, `platform.SUDO_PASSWORD_QUESTION` and the Deck repair's questions
+    -- and passwd's lines on the Deck, all relayed whole. Trimmed because a
+    trailing space or newline would only pad the dialog; never cut, because the
+    tail is the part that says what is being asked.
     """
     return prompt.strip()
 
@@ -137,13 +137,24 @@ class InputPrompter(QObject):
         if self._cancel is not None and self._cancel.is_set():
             self._answered.set()
             return
-        parent = self.parent()
-        text, ok = QInputDialog.getText(
-            parent if isinstance(parent, QWidget) else None,
-            self._title,
-            prompt,
-            QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal,
-            "",
-        )
+        dialog = self._dialog_for(prompt, secret)
+        try:
+            ok = dialog.exec() == QDialog.DialogCode.Accepted
+            text = dialog.textValue()
+        finally:
+            # The typed text is not left on a dialog waiting for deletion.
+            dialog.setTextValue("")
+            dialog.deleteLater()
         self._answer = text if ok else None
         self._answered.set()
+
+    def _dialog_for(self, prompt: str, secret: bool) -> QInputDialog:
+        """The dialog `_show` puts up for this prompt, built but not yet shown."""
+        parent = self.parent()
+        dialog = QInputDialog(parent if isinstance(parent, QWidget) else None)
+        dialog.setWindowTitle(self._title)
+        dialog.setInputMode(QInputDialog.InputMode.TextInput)
+        dialog.setLabelText(tidy(prompt))
+        dialog.setTextEchoMode(QLineEdit.EchoMode.Password if secret else QLineEdit.EchoMode.Normal)
+        dialog.setTextValue("")
+        return dialog

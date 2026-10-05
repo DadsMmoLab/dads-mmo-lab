@@ -508,6 +508,26 @@ def test_a_non_stock_exe_is_never_patched_and_the_clean_one_is_fetched_then_cach
     )
 
 
+def test_fetching_the_clean_exe_is_a_line_in_the_log(
+    tmp_path: Path,
+    stock: bytes,
+    patch: ExePatch,
+    _cache_in_tmp: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T211 2: the T179 live check found no line in yulon.log for the clean-exe fetch."""
+    import logging
+
+    bad = _off_by_one(stock)
+    play, orig = _clients(tmp_path, bad, bad)
+    site = _Archive(_Bytes(_small_zip({MEMBER: stock})))
+    with caplog.at_level(logging.INFO, logger="yulon"):
+        client_exe.stock_bytes(play, orig, patch, opener=site)
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    url = patch.clean_sources[0].url
+    assert any("fetched" in line and url in line for line in said), said
+
+
 def test_a_source_that_serves_a_non_stock_exe_is_refused_and_nothing_is_cached(
     tmp_path: Path, stock: bytes, patch: ExePatch, _cache_in_tmp: Path
 ) -> None:

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 
 import pytest
+from PySide6.QtCore import QObject, Signal
 
 from tests import test_stop_waits_for_the_world as stop_world
 from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, wait_for_panel
@@ -52,7 +53,14 @@ from yulon import (
     useraccounts,
 )
 from yulon import platform as yulon_platform
-from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
+from yulon.apply import (
+    Applier,
+    ApplyError,
+    ApplyRefusal,
+    ApplyReport,
+    DockerSql,
+    required_prompts,
+)
 from yulon.catalog import composegen, native, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -64,7 +72,7 @@ from yulon.catalog.catalog import (
 )
 from yulon.catalog.families import decisions, sqlplan
 from yulon.catalog.installer import InstallerError, RollbackNotDone, WorldStoppedAfterReadyError
-from yulon.controller import Controller
+from yulon.controller import Controller, StartRefused
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
 from yulon.controller_wow_tortoise import console as tortoise_console
@@ -81,7 +89,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.git import Behind, RunnerGit, git_available
+from yulon.git import Behind, GitError, RunnerGit, git_available
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
@@ -349,7 +357,9 @@ def test_server_tab_status_start_and_port_conflict_message(
     view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
     ps.names = "ac-database\n"
     view.refresh_status()
-    assert "db up, auth down, world down" in view.status_label.text()
+    assert (
+        "Database running · Login server stopped · World server stopped" in view.status_label.text()
+    )
     assert view.start_button.isEnabled() and view.stop_button.isEnabled()
 
     # A foreign container on 3724 → README §12 message, compose up never runs.
@@ -952,7 +962,7 @@ def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
     view._module_pending = "install mod-ah-bot"
     view._module_failed(RuntimeError("the SQL step raised after the clone"))
     assert not view.modules_panel.row("mod-ah-bot-plus").data.installable
-    assert "install mod-ah-bot FAILED" in view.module_report.toPlainText()
+    assert "Install mod-ah-bot did not finish" in view.module_report.toPlainText()
 
     # A remove of it that took the clone away and then raised.
     on_disk["module"] = frozenset()
@@ -960,7 +970,250 @@ def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
     view._module_pending = "remove mod-ah-bot"
     view._module_failed(RuntimeError("a later step raised after the rmtree"))
     assert view.modules_panel.row("mod-ah-bot-plus").data.installable
-    assert "remove mod-ah-bot FAILED" in view.module_report.toPlainText()
+    assert "Remove mod-ah-bot did not finish" in view.module_report.toPlainText()
+
+
+# -- T214: the Modules and Tuning reports say a failure in words ---------------------
+
+_GIT_SAID = "git fetch origin exited 128: fatal: unable to access 'https://github.com/x/y/'"
+
+
+def test_a_module_job_that_broke_says_so_with_what_broke_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T214: the Modules report said "install mod-ah-bot FAILED: <git's own words>"."""
+    from tests.support_player_text import text_faults
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view._module_pending = "install mod-ah-bot"
+
+    view._module_failed(GitError(_GIT_SAID))
+
+    said = view.module_report.toPlainText()
+    assert said == "Install mod-ah-bot did not finish. Details below says why."
+    assert text_faults(said) == [], said
+    assert view.module_details.text() == _GIT_SAID
+    assert view.module_details.collapsed
+    assert any(_GIT_SAID in line for line in failures), "the log lost it"
+
+    view.module_report.setPlainText("the next job's report")
+
+    assert view.module_details.isHidden(), "old Details stood under a new report"
+
+
+def test_a_module_job_yulon_refused_says_its_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-ah-bot-plus"
+    refusal = "conf AuctionHouseBot.GUIDs needs a value, and none was given. Nothing was changed."
+
+    view._module_failed(ApplyRefusal(refusal))
+
+    assert view.module_report.toPlainText() == f"Install mod-ah-bot-plus did not finish: {refusal}"
+    assert view.module_details.isHidden()
+
+
+def _sql_said_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """`_check_sql` on mysql's own refusal, as a module's SQL file gets it at Install."""
+    proc = subprocess.CompletedProcess(
+        ["mysql"], 1, "", "ERROR 1146 (42S02) at line 3: Table 'acore_world.x' doesn't exist"
+    )
+    try:
+        apply_module._check_sql(proc, "x.sql → acore_world")
+    except Exception as exc:
+        return exc
+    raise AssertionError("_check_sql passed a failed run")
+
+
+def _dbc_copy_said_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """`ComposeDbc.copy_dbc_dir` when `docker exec` itself failed, which says so on stdout."""
+
+    def refused(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        said = 'OCI runtime exec failed: exec failed: unable to start container process: "sh"'
+        return subprocess.CompletedProcess(["docker"], 126, said, "")
+
+    monkeypatch.setattr(docker, "compose_run_stdin", refused)
+    src = tmp_path / "dbc"
+    src.mkdir()
+    (src / "CharBaseInfo.dbc").write_bytes(b"x")
+    try:
+        apply_module.ComposeDbc(tmp_path, "ac-worldserver", "/data").copy_dbc_dir(src)
+    except Exception as exc:
+        return exc
+    raise AssertionError("the copy passed a failed docker exec")
+
+
+def _inline_sql_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Exception:
+    """An Install whose inline SQL failed part-way: "the SQL failed (<mysql's words>), …"."""
+    from tests.test_mob_multiplier_rerun import _all, _Db, _mob
+
+    server = tmp_path / "srv"
+    server.mkdir()
+    try:
+        Applier(server, sql=_Db(fail=True)).install(_mob(), _all("3"))
+    except Exception as exc:
+        assert "the SQL failed" in str(exc), exc
+        return exc
+    raise AssertionError("the install passed a failed SQL run")
+
+
+@pytest.mark.parametrize(
+    "make",
+    [_sql_said_an_error, _dbc_copy_said_an_error, _inline_sql_failed],
+    ids=lambda f: f.__name__,
+)
+def test_a_module_job_whose_tool_refused_says_so_in_words_with_its_words_under_details(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make: Callable[[Path, pytest.MonkeyPatch], Exception],
+) -> None:
+    """T214 review: an `ApplyError` carrying mysql's or Docker's own words is not Yu'lon's.
+
+    Shown as written while the rule was "no `… exited N:` in it", so a module
+    whose SQL failed at Install put `ERROR 1146 (42S02) …` on the Modules line.
+    """
+    exc = make(tmp_path, monkeypatch)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-x"
+
+    view._module_failed(exc)
+
+    assert (
+        view.module_report.toPlainText() == "Install mod-x did not finish. Details below says why."
+    )
+    assert view.module_details.text() == str(exc)
+
+
+def test_yulons_git_advice_stays_on_the_modules_line(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """T214 review: the sentence that says to install Git is the player's, not Details'."""
+    from tests.test_apply import OWNED_ITEM, OWNED_URL, _Origins
+
+    class _NoGitAtAll:
+        def clone(self, spec: object) -> None:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    server = tmp_path / "srv"
+    server.mkdir()
+    applier = Applier(server, git=_NoGitAtAll(), remote_url=_Origins(OWNED_URL))
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(OWNED_ITEM))
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._module_pending = "install mod-ah-bot"
+
+    view._module_failed(caught.value)
+
+    said = view.module_report.toPlainText()
+    assert said == f"Install mod-ah-bot did not finish: {caught.value}"
+    assert "Install Git" in said
+    assert view.module_details.isHidden()
+
+
+def test_a_module_update_check_that_broke_says_so_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._module_updates_failed(GitError(_GIT_SAID))
+
+    assert view.module_report.toPlainText() == controller_view_module.MODULE_UPDATES_BROKE
+    assert view.module_details.text() == _GIT_SAID
+
+
+@pytest.mark.parametrize("ours", [True, False])
+def test_a_module_sql_run_that_failed_keeps_what_it_printed_and_says_why_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path, ours: bool
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.module_report.setPlainText("ac-db-import: applying mod-ah-bot…")
+    refusal = (
+        "The world server is running, and the importer must not run beside it. Press Stop "
+        "on the Server tab, then run the SQL again."
+    )
+    raw = "docker compose run --rm ac-db-import exited 1: Error response from daemon: no such image"
+
+    view._module_sql_failed(
+        docker.DockerRefusal(refusal) if ours else docker.DockerCommandError(raw)
+    )
+
+    lines = view.module_report.toPlainText().splitlines()
+    assert lines[0] == "ac-db-import: applying mod-ah-bot…", "what it printed was lost"
+    if ours:
+        assert lines[-1] == f"The SQL run did not finish: {refusal}"
+        assert view.module_details.isHidden()
+    else:
+        assert lines[-1] == controller_view_module.MODULE_SQL_BROKE
+        assert view.module_details.text() == raw
+
+
+def test_a_module_sql_run_docker_did_not_answer_in_time_says_it_broke(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A timeout is something that broke (T214): its words are Docker's command line, not ours."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    raw = "docker compose run --rm ac-db-import exited 124: timed out after 600.0s"
+
+    view._module_sql_failed(docker.DockerTimedOutError(raw))
+
+    assert view.module_report.toPlainText().splitlines()[-1] == (
+        controller_view_module.MODULE_SQL_BROKE
+    )
+    assert view.module_details.text() == raw
+
+
+def test_a_tuning_restart_that_broke_says_which_press_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214: the Tuning report said "FAILED: docker compose … exited 1: …"."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(view, "_confirm", lambda title, question: True)
+    raw = "docker compose up -d --no-deps ac-worldserver exited 1: OCI runtime create failed"
+
+    def broke() -> NoReturn:
+        raise docker.DockerCommandError(raw)
+
+    monkeypatch.setattr(view, "_do_restart", broke)
+
+    view.restart_server()
+
+    assert view.tuning_report.toPlainText() == "The restart did not finish. Details below says why."
+    assert view.tuning_details.text() == raw
+
+
+@pytest.mark.parametrize("ours", [True, False])
+def test_a_time_zone_that_was_not_changed_says_why_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path, ours: bool
+) -> None:
+    """T214: a bug's words were the Tuning report's; a refusal's still are."""
+    from yulon import server_time_zone
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    refusal = "docker-compose.override.yml sets TZ twice, so Yu'lon left it as it is."
+    exc = server_time_zone.TimeZoneSettingError(refusal) if ours else KeyError("TZ")
+
+    view._time_zone_failed(exc)
+
+    if ours:
+        assert view.tuning_report.toPlainText() == f"The time zone was not changed: {refusal}"
+        assert view.tuning_details.isHidden()
+    else:
+        assert view.tuning_report.toPlainText() == controller_view_module.TIME_ZONE_BROKE
+        assert view.tuning_details.text() == "'TZ'"
+
+
+def test_settings_files_that_cannot_be_read_are_said_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view._press_facts_failed(OSError(13, "Permission denied", "worldserver.conf"))
+
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_RESET_UNREADABLE
+    assert "Permission denied" in view.tuning_details.text()
 
 
 def test_installing_a_manifest_with_defaults_still_asks(
@@ -1579,6 +1832,78 @@ def test_the_modules_tab_can_apply_the_module_sql_nothing_else_applies(
     assert ">> Applying update aoe_loot_module_string.sql" in view.module_report.toPlainText()
 
 
+def test_the_importers_last_words_go_under_details_and_yulons_sentence_stays_on_the_line(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214 review: "Its last words were: ERROR 1054 …" put the importer's own text on the line.
+
+    Through the real `docker.apply_module_sql()` with the importer exiting 1:
+    Yu'lon's sentence (it exited, the SQL may be part-applied) is the report,
+    and what the importer printed last is under Details and in the log.
+    """
+    from tests.test_docker import SPEC, _repair_doubles
+
+    (tmp_path / "modules" / "mod-aoe-loot").mkdir(parents=True)
+    _repair_doubles(
+        monkeypatch,
+        [],
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: ("applying mod-aoe-loot", "ERROR 1054 (42S22): Unknown column 'x'"),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.apply_module_sql(SPEC, tmp_path)
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.module_report.setPlainText("ac-db-import: applying mod-aoe-loot…")
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._module_sql_failed(raised.value)
+
+    report = view.module_report.toPlainText()
+    assert "The SQL run did not finish: the database importer stopped with an error" in report
+    assert "ERROR 1054" not in report, "the importer's own words are on the line"
+    assert "ERROR 1054" in view.module_details.text()
+    assert failures and "ERROR 1054" in failures[0], "the log lost them"
+
+
+def test_a_repair_whose_import_died_says_so_with_its_last_words_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T214 review: the same for Repair's post-check, under the Danger zone's presses."""
+    from tests.test_docker import SPEC, UNIMPORTED, _probe, _repair_doubles
+
+    _repair_doubles(
+        monkeypatch,
+        [],
+        running={SPEC.db},
+        import_exit=1,
+        import_output=lambda: (
+            "applying acore_auth",
+            "ERROR 1698 (28000): Access denied for user 'root'@'localhost'",
+        ),
+    )
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.repair_import(SPEC, tmp_path, _probe(UNIMPORTED))
+    monkeypatch.undo()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view._repair_failed(raised.value)
+
+    said = view.danger_label.text()
+    assert "still read as absent" in said, said
+    assert "ERROR 1698" not in said, "the import's own words are on the line"
+    assert "ERROR 1698" in view.danger_details.text()
+    assert failures and "ERROR 1698" in failures[0], "the log lost them"
+
+    view._say_under_the_presses("the next press's line")
+
+    assert view.danger_details.isHidden(), "old Details stood under a new line"
+
+
 def test_the_refusal_that_makes_this_not_a_button_that_always_works(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -1589,7 +1914,7 @@ def test_the_refusal_that_makes_this_not_a_button_that_always_works(
     second copy of it. What the tab owes is that the refusal arrives on screen
     intact and that nothing is claimed to have been applied.
     """
-    refusal = docker.DockerCommandError(
+    refusal = docker.DockerRefusal(
         "ac-worldserver is running. The importer writes to the databases underneath them, and "
         "a running worldserver holds characters in memory and saves them back over whatever it "
         "finds. Press Stop first, then try again."
@@ -1603,7 +1928,8 @@ def test_the_refusal_that_makes_this_not_a_button_that_always_works(
 
     report = view.module_report.toPlainText()
     assert "Press Stop first" in report
-    assert "FAILED" in report
+    assert "The SQL run did not finish: ac-worldserver is running." in report  # T214
+    assert view.module_details.isHidden(), "Yu'lon's own refusal is the report, as written"
     assert "applied" not in report.lower(), report
     assert failures and "Press Stop first" in failures[0]
 
@@ -2274,8 +2600,8 @@ def test_networking_tab_plans_and_applies(qapp: object, ps: _Ps, tmp_path: Path)
     assert "allow inbound TCP 3724, 8085 by hand" in text  # firewall=none → manual step
     assert view.apply_button.isEnabled() is True
     view.apply_network_plan()
-    assert "realmlist → 192.168.1.25" in view.network_text.toPlainText()
-    assert "restart the server" in view.network_text.toPlainText()
+    assert "The realm list now gives players 192.168.1.25." in view.network_text.toPlainText()
+    assert "Restart the server" in view.network_text.toPlainText()
 
 
 def test_the_networking_tab_offers_the_loopback_and_a_real_click_selects_it(
@@ -2345,7 +2671,7 @@ def test_the_loopback_plan_shown_in_the_tab_says_what_it_costs(
     view.loopback_radio.setChecked(True)
     view.show_network_plan()
     text = view.network_text.toPlainText()
-    assert "Mode: loopback" in text, text
+    assert "Playing: Only this computer (127.0.0.1)" in text, text
     assert "Players set realmlist to: 127.0.0.1" in text, text
     assert "no other machine" in text, text
     assert view.apply_button.isEnabled() is True, "a loopback plan could not be applied"
@@ -2409,11 +2735,12 @@ def test_a_firewalld_that_already_admits_the_ports_is_said_in_the_tab_without_a_
     view.internet_radio.setChecked(True)
     view.show_network_plan()
     text = view.network_text.toPlainText()
-    assert "Mode: internet" in text, text
-    assert "firewall-cmd --permanent --zone=docker --add-port=3724/tcp" in text, text
-    assert "\n  firewall-cmd --zone=docker --add-port=3724/tcp\n" in text, text
-    assert "\n  firewall-cmd --zone=public --add-port=8085/tcp\n" in text, text
-    assert "firewall-cmd --reload" not in text, text
+    commands = view.network_details.text() + "\n"
+    assert "Playing: Internet play (friends elsewhere)" in text, text
+    assert "firewall-cmd --permanent --zone=docker --add-port=3724/tcp" in commands, commands
+    assert "\n  firewall-cmd --zone=docker --add-port=3724/tcp\n" in commands, commands
+    assert "\n  firewall-cmd --zone=public --add-port=8085/tcp\n" in commands, commands
+    assert "firewall-cmd --reload" not in commands + text, commands
     assert "REFUSED" not in text, text
     assert (
         "firewalld already admits 3724/tcp and 8085/tcp in zones docker and public right now "
@@ -2452,15 +2779,16 @@ def test_the_loopback_plan_in_the_tab_offers_to_open_no_ports(
     view.loopback_radio.setChecked(True)
     view.show_network_plan()
     quiet = view.network_text.toPlainText()
-    assert "Mode: loopback" in quiet, quiet
-    assert "Firewall commands:" not in quiet, quiet
-    assert "ufw allow" not in quiet, quiet
+    assert "Playing: Only this computer (127.0.0.1)" in quiet, quiet
+    assert "open the game ports" not in quiet, quiet
+    assert "ufw allow" not in quiet + view.network_details.text(), view.network_details.text()
 
     view.lan_radio.setChecked(True)
     view.show_network_plan()
     loud = view.network_text.toPlainText()
-    assert "Mode: lan" in loud, loud
-    assert "ufw allow 3724/tcp" in loud, loud
+    assert "Playing: LAN (same Wi-Fi)" in loud, loud
+    assert "Apply will open the game ports in ufw" in loud, loud
+    assert "ufw allow 3724/tcp" in view.network_details.text(), view.network_details.text()
     view.close()
 
 
@@ -2525,10 +2853,10 @@ def test_the_armed_warning_says_the_characters_are_kept(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     _watch_remove(view)
     view.remove_containers()
-    said = view.problem_label.text()
+    said = view.danger_label.text()
     assert "NOT" in said and "characters" in said
     assert "volume" in said
-    assert "Refresh" in said, "no way out was offered"
+    assert "Cancel" in said, "no way out was offered"
 
 
 def test_refresh_cancels_an_armed_remove(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -2563,7 +2891,7 @@ def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: P
     _watch_remove(view, result=False)
     view.remove_containers()
     view.remove_containers()
-    assert "no containers to remove" in view.problem_label.text()
+    assert "no containers to remove" in view.danger_label.text()
 
 
 def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
@@ -2583,9 +2911,20 @@ def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
     view.remove_containers()
     view.remove_containers()
 
-    assert "no containers to remove" in view.problem_label.text()
-    assert controller_view_module.REMOVE_FROM_YULON in view.problem_label.text()
+    said = view.danger_label.text()
+    assert "no containers to remove" in said
+    assert f'"{controller_view_module.REMOVE_FROM_YULON}" in the row above' in said, said
     assert _highlighted(view.forget_install_button)
+    # T189: "the row above" is true where it is said -- the label is the
+    # Danger zone's next item after the row that holds the button.
+    column = view.danger_label.parentWidget().layout()
+    at = column.indexOf(view.danger_label)
+    row = column.itemAt(at - 1).widget()
+    assert row is not None and row.isAncestorOf(view.forget_install_button)
+    assert not view.danger_label.isHidden()
+    assert "no containers" not in view.problem_label.text(), "said a page away as well"
+    view._show_repair()  # what every import probe's answer ends in
+    assert "no containers to remove" in view.danger_label.text(), "a probe answer wiped it"
 
 
 def test_a_removal_that_removed_something_does_not_highlight_it(
@@ -2686,7 +3025,7 @@ def test_a_removal_that_finds_containers_after_one_that_did_not_takes_it_back(
     view.remove_containers()
     view.remove_containers()
     assert not _highlighted(view.forget_install_button)
-    assert "Containers removed" in view.problem_label.text()
+    assert "Containers removed" in view.danger_label.text()
 
 
 UNIMPORTED = docker.ImportState(
@@ -2789,10 +3128,10 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
     view.repair_import()
     assert calls == [], "the first press imported something"
     assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
-    said = view.problem_label.text()
+    said = view.danger_label.text()
     assert "OVERWRITTEN" in said, said
     assert "restore a backup" in said, "no way out was offered"
-    assert "Refresh" in said, "no way to cancel was offered"
+    assert "Cancel" in said, "no way to cancel was offered"
 
     view.repair_import()
     assert len(calls) == 1
@@ -2802,7 +3141,7 @@ def test_the_repair_takes_two_presses_and_says_what_is_overwritten(
 def test_the_two_destructive_buttons_are_never_armed_together(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Both write their warning into the same label, so one has to disarm the other.
+    """Both write their warning into the same label (`danger_label`), so one disarms the other.
 
     Two loaded buttons under one paragraph is a second press that does whichever
     of them the user had forgotten about.
@@ -2813,9 +3152,14 @@ def test_the_two_destructive_buttons_are_never_armed_together(
     _db_up(view, ps)
 
     view.remove_containers()
+    # The repair offer withdrawn (`_show_repair`) disarms a repair that is not
+    # armed: the teardown's warning stays with the teardown's armed press.
+    view._disarm_repair()
+    assert "characters are NOT" in view.danger_label.text()
     view.repair_import()
     assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
     assert view.repair_button.text() == controller_view_module.REPAIR_ARMED
+    assert "OVERWRITTEN" in view.danger_label.text(), "the warning is the teardown's"
 
     view.remove_containers()
     assert repairs == [], "arming the teardown left the import armed and it ran"
@@ -2858,7 +3202,7 @@ def test_the_import_shows_its_own_output_instead_of_one_frozen_sentence(
         assert output is not None, "the import was run with nowhere to say anything"
         for line in printed:
             output(line)
-            shown.append(view.problem_label.text())
+            shown.append(view.danger_label.text())
         return True
 
     view.services.controller.import_state = lambda: UNIMPORTED  # type: ignore[method-assign]
@@ -2920,7 +3264,7 @@ def test_neither_the_armed_copy_nor_the_running_one_offers_a_stop(
     view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
     _db_up(view, ps)
     view.repair_import()
-    armed = view.problem_label.text()
+    armed = view.danger_label.text()
     assert "cannot be stopped" in armed, armed
     view.repair_import()
     assert disabled == [True], "a button was live while the import it cannot stop was running"
@@ -2938,7 +3282,10 @@ def test_a_finished_repair_stops_offering_itself(qapp: object, ps: _Ps, tmp_path
     )
     view.repair_import()
     view.repair_import()
-    assert "import finished" in view.problem_label.text()
+    # Said under the presses and still there: the offer withdrawn after the
+    # run (`_show_repair`) disarms a press that is no longer armed.
+    assert "import finished" in view.danger_label.text()
+    assert not view.danger_label.isHidden()
     assert view.repair_button.isHidden(), "still offering to import an install it just imported"
 
 
@@ -2959,7 +3306,8 @@ def test_a_refused_repair_is_readable_on_screen(qapp: object, ps: _Ps, tmp_path:
     view.action_failed.connect(failures.append)
     view.repair_import()
     view.repair_import()
-    assert "651 rows in acore_auth.account" in view.problem_label.text()
+    assert "651 rows in acore_auth.account" in view.danger_label.text()
+    assert not view.danger_label.isHidden()
     assert failures and "player data" in failures[0]
 
 
@@ -3009,13 +3357,13 @@ def test_the_status_line_holds_still_while_an_action_of_ours_is_running(
     ps.names = "\n".join([WOTLK.container_spec().db, WOTLK.container_spec().world])
 
     view._set_busy(True)
-    view.status_label.setText("status: stopping…")
+    view.status_label.setText("Stopping…")
     view.refresh_status()
-    assert view.status_label.text() == "status: stopping…", "the poll overwrote a live action"
+    assert view.status_label.text() == "Stopping…", "the poll overwrote a live action"
 
     view._set_busy(False)
     view.refresh_status()
-    assert "db up" in view.status_label.text(), "the label never came back"
+    assert "Database running" in view.status_label.text(), "the label never came back"
 
 
 def test_every_action_button_is_locked_while_an_action_runs(
@@ -3164,7 +3512,7 @@ def test_the_armed_paragraph_does_not_offer_a_cancel_it_cannot_honour(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     view.services.controller.repair_import = lambda sink=None: True  # type: ignore[method-assign]
     view.repair_import()
-    said = view.problem_label.text()
+    said = view.danger_label.text()
     assert "Press Refresh to cancel." not in said
     assert "while nothing has happened yet" in said, said
     assert "cannot be stopped" in said
@@ -4231,7 +4579,7 @@ def test_the_tab_reads_its_status_at_once_instead_of_a_poll_interval_later(
     )
 
     assert "unknown" not in view.status_label.text()
-    assert "world up" in view.status_label.text()
+    assert "World server running" in view.status_label.text()
 
 
 def test_polling_that_is_switched_off_stays_off_including_the_first_read(
@@ -4242,7 +4590,7 @@ def test_polling_that_is_switched_off_stays_off_including_the_first_read(
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
-    assert view.status_label.text() == "status: unknown"
+    assert view.status_label.text() == "Status unknown"
 
 
 def test_the_verdict_line_says_the_population_above_the_three_words(
@@ -4297,10 +4645,11 @@ def test_a_verdict_that_raises_leaves_the_tab_working(
 
     view.refresh_verdict()
 
-    assert "could not" in view.verdict_label.text()
+    assert "couldn't read this server's dashboard" in view.verdict_label.text()
+    assert "daemon went away" not in view.verdict_label.text()  # T194 F7: the log has it
     ps.names = "ac-database\n"
     view.refresh_status()
-    assert "db up" in view.status_label.text()
+    assert "Database running" in view.status_label.text()
 
 
 def test_a_stop_names_the_file_the_servers_log_was_saved_to(
@@ -4328,7 +4677,29 @@ def test_a_stop_whose_snapshot_failed_says_so_rather_than_naming_no_file(
 
     view.stop_server()
 
-    assert "wedged" in view.problem_label.text()
+    # T211 5: a plain sentence on the line, what went wrong under Details.
+    assert view.problem_label.text() == controller_view_module.STOP_LOG_NOT_SAVED
+    assert "wedged" not in view.problem_label.text()
+    assert _shown(view, view.problem_details)
+    assert view.problem_details.collapsed
+    assert view.problem_details.text() == "the log driver is wedged"
+
+
+def test_the_next_line_on_the_server_tab_takes_the_last_details_down(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Details belongs to the line above it; a new line must not stand over old Details."""
+    services = _services(ps, tmp_path, [])
+    services.log_snapshot = _StubRecorder(logsnap.Snapshot(problem="the log driver is wedged"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+    view.stop_server()
+    assert view.problem_details.text()
+
+    view.problem_label.setText("Something else entirely.")
+
+    assert view.problem_details.isHidden()
+    assert view.problem_details.text() == ""
 
 
 def test_the_wotlk_tab_is_wired_with_a_dashboard_and_a_pre_stop_snapshot(
@@ -4903,10 +5274,31 @@ def test_a_start_that_fails_for_another_reason_leaves_the_channel_alone(
         WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
     )
 
-    view._start_failed(docker.DockerCommandError("ac-database exited with code 1"))
+    view._start_failed(
+        _compose_up_said("dependency failed to start: container ac-database exited (1)")
+    )
 
     assert stub.rollbacks == 0
-    assert "exited with code 1" in view.problem_label.text()
+    assert view.problem_label.text() == controller_view_module.START_FAILED_BROKE
+    assert "container ac-database exited (1)" in view.problem_details.text()
+
+
+def _compose_up_said(stderr: str) -> Exception:
+    """What a failed `docker compose up` raises at Start: `docker._run`'s own wording (T214)."""
+    import yulon.docker as docker_module
+
+    def failed(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", stderr)
+
+    real = docker_module._docker
+    docker_module._docker = failed  # type: ignore[assignment]
+    try:
+        docker_module._run(["compose", "up", "-d", "--no-deps", "ac-database"])
+    except docker.DockerCommandError as exc:
+        return exc
+    finally:
+        docker_module._docker = real  # type: ignore[assignment]
+    raise AssertionError("a failed compose up passed")
 
 
 def test_a_channel_that_gave_up_shows_the_reason_rather_than_a_spinner(
@@ -5606,12 +5998,10 @@ def test_a_game_with_no_party_route_says_why_rather_than_showing_a_dead_panel(
     assert view.party_panel is None
     # The shipped games keep the wording they had before T179 (lead ruling, T179
     # Task 5 fix round 1); only a trinitycore tab says the registry's note.
+    # T194: the decision's date and the module names left the screen for the docstring.
     assert view.my_party_absent.text() == (
-        "Building a bot party from the launcher works on WoW WotLK only (owner decision, "
-        "2026-09-06). The route is a pair of AzerothCore modules — the mod-ale Lua bridge, "
-        "and mod-playerbots' own addclass — so WoW TBC would need a route of its own before "
-        "there could be a control here. One that sent these commands at it would be a "
-        "button that cannot work."
+        "Building a bot party from the launcher works on WoW WotLK only. It needs two modules "
+        "that only the WotLK server has, so WoW TBC has no party control here."
     )
     assert view.my_party_absent.text() != decisions.PARTY_REASON
 
@@ -6215,6 +6605,36 @@ def test_the_uninstall_button_will_not_act_until_its_plan_is_on_screen(
     assert "Show the uninstall plan first" in view.uninstall_label.text()
 
 
+def test_the_uninstall_plan_can_be_put_away_with_cancel(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """PR 291's Windows live test: the plan, its two boxes and its red press stayed open for
+    good; a second Uninstall… press and a tab switch left them there."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    cancel = view.uninstall_cancel_button
+    assert cancel.isHidden(), "a Cancel with nothing to cancel"
+
+    view.show_uninstall_plan()
+    assert not cancel.isHidden() and cancel.text() == controller_view_module.ARM_CANCEL
+    assert cancel in view._server_presses(), "a job of ours would leave it live"
+    cancel.click()
+
+    for widget in (
+        view.uninstall_confirm_button,
+        view.keep_characters_check,
+        view.delete_play_client_check,
+        cancel,
+    ):
+        assert widget.isHidden(), widget.text()
+    assert view.uninstall_label.text() == ""
+    view.run_uninstall()
+    assert fake.runs == [], "the plan put away was still armed"
+
+    view.show_uninstall_plan()
+    assert not view.uninstall_confirm_button.isHidden() and not cancel.isHidden()
+
+
 def test_a_plan_that_refuses_shows_the_refusal_and_offers_no_uninstall(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -6299,7 +6719,10 @@ def test_keep_my_characters_sits_between_the_plan_and_the_confirm_button(
 
     keep = _server_box_index(view, view.keep_characters_check)
     assert _server_box_index(view, view.uninstall_label) < keep
-    assert keep < _server_box_index(view, view.uninstall_confirm_button)
+    # The confirm button shares a row with its Cancel (PR 291 Windows live test).
+    row = view.uninstall_confirm_button.parentWidget()
+    assert view.uninstall_cancel_button.parentWidget() is row
+    assert keep < _server_box_index(view, row)
 
 
 def test_the_confirm_button_names_what_happens_to_the_characters(
@@ -6700,7 +7123,7 @@ def test_a_stop_before_a_removal_leaves_no_stopping_words_behind_when_it_succeed
 
     ((status, problem),) = at_the_emit
     assert status != controller_view_module.STOPPING_FOR_REMOVAL
-    assert "world down" in status, "the status was not asked again"
+    assert "World server stopped" in status, "the status was not asked again"
     assert problem != controller_view_module.STOPPING_FOR_REMOVAL_WAIT
 
 
@@ -6746,7 +7169,7 @@ def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
 
     status = view.status_label.text()
     assert status == controller_view_module.STOPPING_FOR_REMOVAL
-    assert "stopping the server first" in status
+    assert "Stopping the server first" in status
     said = view.problem_label.text()
     assert "still loading" in said and "few minutes" in said
     assert not view.refresh_button.isEnabled(), "the stop is running"
@@ -7321,9 +7744,7 @@ def test_a_rebuild_refused_on_its_worker_thread_reaches_the_view_with_its_messag
     pump_until(lambda: bool(heard), "the refusal to reach the view")
 
     assert len(ran_on) == 1 and ran_on[0] is not threading.main_thread(), "ran on the GUI thread"
-    assert heard == [
-        ("InstallerError: that compose file was not written by Yu'lon", threading.main_thread())
-    ]
+    assert heard == [("that compose file was not written by Yu'lon", threading.main_thread())]
     view.refresh_status()
     assert view.rebuild_action.isEnabled() is True
 
@@ -9501,8 +9922,10 @@ def test_the_add_to_steam_button_says_what_it_wrote(qapp: object, ps: _Ps, tmp_p
 
     said = view.steam_label.text()
     assert "Turtle WoW" in said and "Turtle WoW Server" in said
-    assert "shortcuts.vdf" in said and "yulon-bak-20260910-200500" in said
-    assert "GE-Proton11-6-x86_64" in said
+    # T194 C34: the files and the tool are in the Details fold under the sentence.
+    details = view.steam_details.text()
+    assert "shortcuts.vdf" in details and "yulon-bak-20260910-200500" in details
+    assert "GE-Proton11-6-x86_64" in details
     assert view.steam_button.isEnabled()
 
 
@@ -9591,7 +10014,7 @@ def test_neither_one_line_sink_can_show_a_control_character(
     view._import_line(log_lines.TOOL + ">> Applying update 2026_01_01_00.sql")
     view._module_sql_line(log_lines.TOOL + ">> Applying mod-playerbots.sql")
 
-    assert view.problem_label.text().splitlines()[-1] == ">> Applying update 2026_01_01_00.sql"
+    assert view.danger_label.text().splitlines()[-1] == ">> Applying update 2026_01_01_00.sql"
     assert view.module_report.toPlainText().splitlines()[-1] == ">> Applying mod-playerbots.sql"
 
 
@@ -9830,7 +10253,8 @@ def test_the_forget_button_is_highlighted_even_when_the_status_poll_cannot_reach
         view.forget_install_button
     ), "the poll failed, so the user is told to press a button they cannot see"
     # The failure is still reported — this must not paper over Docker being gone.
-    assert "Docker not reachable" in view.status_label.text()
+    assert not view.docker_banner.isHidden()
+    assert view.status_label.text() == controller_view_module.STATUS_SEE_THE_BANNER
 
 
 def _steam_deck_without_docker(monkeypatch: pytest.MonkeyPatch, *, steamos: bool = True) -> None:
@@ -9855,17 +10279,21 @@ def test_a_steam_deck_that_lost_docker_is_offered_the_reinstall_on_the_server_ta
     view.services.controller.status = _docker_gone  # type: ignore[method-assign]
     view.refresh_status()
     assert not view.reinstall_docker_button.isHidden(), "the Deck was not offered the repair"
+    # T194: the press lives in the Docker banner, which must be up with it.
+    assert view.reinstall_docker_button.isVisibleTo(view), "offered inside a hidden banner"
 
     view.services.controller.status = real_status  # type: ignore[method-assign]
     view.refresh_status()
     assert view.reinstall_docker_button.isHidden(), "the offer outlived Docker coming back"
 
 
+@pytest.mark.parametrize("host", ["linux", "windows"])
 def test_off_steamos_a_missing_docker_is_not_offered_the_steamos_repair(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
 ) -> None:
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     _steam_deck_without_docker(monkeypatch, steamos=False)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: host)
     view.services.controller.status = _docker_gone  # type: ignore[method-assign]
     view.services.controller.start = _docker_gone  # type: ignore[method-assign]
 
@@ -9873,7 +10301,19 @@ def test_off_steamos_a_missing_docker_is_not_offered_the_steamos_repair(
     view.start_server()
 
     assert view.reinstall_docker_button.isHidden()
-    assert view.problem_label.text() == yulon_platform.DOCKER_CLI_MISSING_HELP
+    # T194 (lead rulings R2, fix round 2): this machine's half of the sentence is the
+    # banner's, said once; the Start's line points at it.
+    halves = {
+        "linux": yulon_platform.DOCKER_MISSING_ON_LINUX,
+        "windows": yulon_platform.DOCKER_MISSING_ON_DESKTOP,
+    }
+    said = view.problem_label.text()
+    body = view.docker_banner.body_label.text()
+    assert view.docker_banner.isVisibleTo(view)
+    assert body == halves[host]
+    assert said == controller_view_module.START_FAILED_DOCKER_MISSING
+    assert body not in said and said != body
+    assert "Docker Desktop" not in said
 
 
 def test_a_start_with_no_docker_on_a_deck_names_the_update_not_docker_desktop(
@@ -9887,9 +10327,16 @@ def test_a_start_with_no_docker_on_a_deck_names_the_update_not_docker_desktop(
 
     view.start_server()
 
-    assert view.problem_label.text() == yulon_platform.STEAMOS_DOCKER_GONE_HELP
-    assert "Docker Desktop" not in view.problem_label.text()
+    # T194 (lead ruling R1): the Start names the cause and points at the press;
+    # the banner above it carries the press and the whole sentence, once.
+    said = view.problem_label.text()
+    assert said == controller_view_module.START_FAILED_DOCKER_GONE
+    assert "SteamOS update" in said and yulon_platform.STEAMOS_DOCKER_REPAIR_LABEL in said
+    assert yulon_platform.STEAMOS_DOCKER_GONE_HELP not in said
+    assert "Docker Desktop" not in said
     assert not view.reinstall_docker_button.isHidden()
+    assert view.reinstall_docker_button.isVisibleTo(view)
+    assert view.docker_banner.body_label.text() == yulon_platform.STEAMOS_DOCKER_GONE_HELP
 
 
 def test_pressing_the_reinstall_runs_the_repair_with_a_prompter_and_shows_its_report(
@@ -10039,6 +10486,676 @@ def test_a_running_docker_this_session_cannot_reach_offers_the_restart(
     assert "reexec" in restarted[0], "restarted without the argv the offer asked once"
     assert warned and warned[0][1] == "Reinstalling Docker"
     assert not view.reinstall_docker_button.isHidden(), "Docker is still unreachable here"
+
+
+# ------------------------------------------ one Docker banner (T194 C7, T185)
+
+NPIPE_DOWN = (
+    'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/'
+    'containers/json": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the '
+    "file specified."
+)
+"""What Docker's CLI says on Windows while Docker Desktop's engine is down."""
+
+
+class _DockerDesktopDown(_Ps):
+    """`_Ps`, with every docker command failing as Windows does while Desktop is down."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.down = True
+        self.started: list[list[str]] = []
+        self.found = ""
+
+    def __call__(
+        self,
+        cmd: list[str],
+        cwd: Path | None = None,
+        timeout: float | None = None,
+        **_kw: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:1] == ["powershell.exe"]:
+            self.calls.append(cmd)
+            if any("Start-Process" in part for part in cmd):
+                self.started.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            # Windows' answer to "where is Docker Desktop".
+            return subprocess.CompletedProcess(cmd, 0, self.found + "\n", "")
+        if self.down and cmd[:1] == ["docker"]:
+            self.calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", NPIPE_DOWN)
+        return super().__call__(cmd, cwd, timeout)
+
+
+def _windows_with_docker_desktop_down(monkeypatch: pytest.MonkeyPatch) -> _DockerDesktopDown:
+    down = _DockerDesktopDown()
+    monkeypatch.setattr(runner, "run", down)
+    monkeypatch.setattr(yulon_platform, "_resolved_docker_cli", "docker")
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "windows")
+    monkeypatch.setattr(yulon_platform, "is_steamos", lambda: False)
+    for var in yulon_platform._DOCKER_DESKTOP_ROOT_VARS:
+        monkeypatch.delenv(var, raising=False)
+    return down
+
+
+def _dashboard_down() -> dashboard.Verdict:
+    raise docker.DockerCommandError(f"docker exec ac-database mysql exited 1: {NPIPE_DOWN}")
+
+
+def _shown(view: ControllerView, widget: Any) -> bool:
+    return bool(widget.isVisibleTo(view))
+
+
+def test_docker_desktop_down_is_one_banner_in_words_with_open_and_try_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C7: the npipe error was on screen twice and a third way on the badge, with no press."""
+    from tests.support_player_text import player_text_faults, visible_texts
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = _dashboard_down
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    _windows_with_docker_desktop_down(monkeypatch)
+
+    view.refresh_status()
+    view.refresh_verdict()
+
+    banner = view.docker_banner
+    assert _shown(view, banner)
+    assert banner.title_label.text() == "Yu'lon can't ask Docker about this server right now"
+    assert banner.body_label.text().startswith("Docker Desktop isn't running.")
+    assert _shown(view, banner.open_button) and banner.open_button.text() == "Open Docker Desktop"
+    assert _shown(view, banner.retry_button) and banner.retry_button.text() == "Try again"
+    assert not _shown(view, view.reinstall_docker_button)
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    for raw in ("pipe", "docker ps", "exited"):
+        assert raw not in said, f"{raw!r} on screen: {said}"
+    assert view.verdict_label.isHidden(), "the failure is said twice again"
+    assert view.status_label.wordWrap()
+    assert view.status_label.text() == "Status unknown (see above)"
+    assert view.realm_badge.status == "unknown"
+    assert player_text_faults(view) == []
+
+
+ENGINE_KILLED = {
+    "timeout": (124, "timed out after 30.0s"),
+    "502": (
+        1,
+        "request returned 502 Bad Gateway for API route and version "
+        "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.55/containers/json, check if the "
+        "server supports the requested API version",
+    ),
+}
+"""How Docker answered once its engine VM was killed on PR 291's Windows live test: the poll
+hung past its 30 s (the runner's own words for that), or Docker 29 said 502 Bad Gateway."""
+
+
+@pytest.mark.parametrize("answer", sorted(ENGINE_KILLED))
+def test_a_killed_engine_is_docker_desktop_not_running_with_its_open_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    """Fix round 2, 8b: the box said "an error Yu'lon doesn't recognise" with only Try again."""
+    services = _services(ps, tmp_path, [])
+    services.dashboard = _dashboard_down
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    code, said = ENGINE_KILLED[answer]
+
+    def killed(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None, **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:1] == ["docker"]:
+            if code == 124:
+                assert timeout is not None, "the poll waits on Docker with no deadline"
+            return subprocess.CompletedProcess(cmd, code, "", said)
+        return down(cmd, cwd, timeout)
+
+    monkeypatch.setattr(runner, "run", killed)
+
+    view.refresh_status()
+
+    banner = view.docker_banner
+    assert _shown(view, banner)
+    assert banner.body_label.text().startswith(
+        "Docker Desktop isn't running."
+    ), banner.body_label.text()
+    assert _shown(view, banner.open_button) and banner.open_button.text() == "Open Docker Desktop"
+    assert _shown(view, banner.retry_button)
+
+
+def test_the_banner_sits_in_realm_above_the_status_line(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+
+    column = view.status_label.parentWidget().layout()
+    at = {column.indexOf(w): w for w in (view.docker_banner, view.status_label)}
+    assert column.indexOf(view.docker_banner) >= 0, at
+    assert column.indexOf(view.docker_banner) < column.indexOf(view.status_label)
+    assert view.docker_banner.objectName() == "docker-banner"
+    assert "#docker-banner" in view.docker_banner.styleSheet()
+
+
+def _logged_raw(caplog: Any) -> list[str]:
+    """Every record, from every logger, that carries Docker's own words."""
+    return [r.getMessage() for r in caplog.records if "dockerDesktopLinuxEngine" in r.getMessage()]
+
+
+def test_the_raw_docker_error_goes_to_the_log_once_per_change(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """On the real threaded runner, with the dashboard failing too: one line per change.
+
+    The runner's worker logs every job that raises, so a poll that raised its
+    Docker error put Docker's words in the log every five seconds, twice (status
+    and verdict), however carefully the view logged its own once.
+    """
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    services = _services(ps, tmp_path, [])
+    services.dashboard = _dashboard_down
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+
+    def poll() -> None:
+        view.refresh_status()
+        view.refresh_verdict()
+        pump_until(
+            lambda: not view._status_pending and not view._verdict_pending, "the poll's answers"
+        )
+
+    with caplog.at_level(logging.DEBUG):
+        poll()
+        poll()
+        poll()
+    assert _shown(view, view.docker_banner)
+    assert len(_logged_raw(caplog)) == 1, _logged_raw(caplog)
+
+    caplog.clear()
+    down.down = False
+    with caplog.at_level(logging.DEBUG):
+        view.refresh_status()
+        pump_until(lambda: not view._status_pending, "the good poll")
+    assert view.docker_banner.isHidden()
+    down.down = True
+    with caplog.at_level(logging.DEBUG):
+        poll()
+    assert len(_logged_raw(caplog)) == 1, "Docker coming back and going again is a change"
+    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+
+
+UNRECOGNISED_DOCKER = (
+    "docker ps --format {{.Names}} exited 1: tls: failed to verify certificate: x509: "
+    "certificate signed by unknown authority"
+)
+"""A `docker ps` failure Docker answered, which `docker_advice.unreachable()` does not know."""
+
+
+def _docker_says_something_else() -> NoReturn:
+    raise docker.DockerCommandError(UNRECOGNISED_DOCKER)
+
+
+@pytest.mark.parametrize("host", ["windows", "linux"])
+def test_a_docker_error_yulon_does_not_recognise_is_not_told_as_docker_down(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """F2 (T194 final fix): a bad context or TLS error said "Docker Desktop isn't running"."""
+    from tests.support_player_text import visible_texts
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: host)
+    monkeypatch.setattr(yulon_platform, "is_steamos", lambda: False)
+    view.services.controller.status = _docker_says_something_else  # type: ignore[method-assign]
+
+    view.refresh_status()
+
+    banner = view.docker_banner
+    assert _shown(view, banner)
+    assert banner.body_label.text() == (
+        "Docker answered with an error Yu'lon doesn't recognise. The Logs tab has what it "
+        "said; press Try again once it's sorted."
+    )
+    assert not _shown(view, banner.open_button), "a press for a Docker Desktop that is running"
+    assert _shown(view, banner.retry_button)
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    assert "isn't running" not in said and "not running" not in said.replace(
+        "server isn't", ""
+    ), said
+    assert "x509" not in said and "docker ps" not in said, said
+
+
+def test_a_docker_error_yulon_does_not_recognise_reaches_the_log(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """F2: not silenced -- the job runner logs it like any job that raised."""
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "windows")
+    monkeypatch.setattr(yulon_platform, "is_steamos", lambda: False)
+    view.services.controller.status = _docker_says_something_else  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):
+            view.refresh_status()
+            pump_until(lambda: not view._status_pending, "the poll's answer")
+
+    # R2: once per change, from every logger -- the job runner logged it each poll.
+    logged = [r.getMessage() for r in caplog.records if "x509" in r.getMessage()]
+    assert len(logged) == 1, logged
+    assert logged[0].startswith("WoW WotLK: Docker answered the status poll with an error:")
+    assert _shown(view, view.docker_banner)
+    assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+
+
+def test_try_again_asks_docker_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+    asked: list[bool] = []
+    monkeypatch.setattr(view, "refresh_status", lambda: asked.append(True))
+
+    view.docker_banner.retry_button.click()
+
+    assert asked == [True]
+
+
+def test_open_docker_desktop_starts_it_from_a_job_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asking Windows where Desktop is takes ~0.6 s of PowerShell: never on the GUI thread."""
+    jobs: list[tuple[Callable[[], object], Any, Any]] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        job_runner=lambda work, ok, err: jobs.append((work, ok, err)),
+    )
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    exe = tmp_path / "Docker" / "Docker Desktop.exe"
+    exe.parent.mkdir()
+    exe.write_text("")
+    down.found = str(exe)
+    view._status_failed(docker.DockerCommandError(NPIPE_DOWN))
+    banner = view.docker_banner
+    jobs.clear()  # what building the tab asked for
+
+    banner.open_button.click()
+
+    assert down.started == [], "Docker Desktop was looked for on the GUI thread"
+    assert len(jobs) == 1, "the press did not go to the job runner"
+    assert not banner.open_button.isEnabled(), "a second press while the first is out"
+    work, ok, err = jobs.pop()
+    run_inline(work, ok, err)
+    assert len(down.started) == 1 and str(exe) in down.started[0][-1]
+    assert banner.note_label.text() == controller_view_module.DOCKER_DESKTOP_OPENING
+    assert banner.open_button.isEnabled()
+
+
+def test_open_docker_desktop_where_it_is_not_installed_says_where_to_get_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+
+    view.docker_banner.open_button.click()
+
+    assert down.started == []
+    assert view.docker_banner.note_label.text() == yulon_platform._MANUAL_START_DOCKER_DESKTOP
+    assert _shown(view, view.docker_banner.note_label)
+
+
+def test_a_deck_that_lost_docker_has_the_reinstall_in_the_banner_and_no_docker_desktop(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T185: the Deck's status line named Docker Desktop and never offered the reinstall."""
+    from tests.support_player_text import visible_texts
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+
+    view.refresh_status()
+
+    banner = view.docker_banner
+    assert _shown(view, banner)
+    assert banner.body_label.text() == yulon_platform.STEAMOS_DOCKER_GONE_HELP
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    assert "Docker Desktop" not in said, said
+    assert "Docker Desktop" not in view.status_label.text()
+    assert banner.isAncestorOf(view.reinstall_docker_button)
+    assert _shown(view, view.reinstall_docker_button)
+    assert view.reinstall_docker_button.isEnabled()
+    assert _shown(view, banner.retry_button)
+    assert not _shown(view, banner.open_button)
+
+
+def test_a_linux_daemon_that_is_down_offers_only_try_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
+    monkeypatch.setattr(yulon_platform, "is_steamos", lambda: False)
+
+    def stopped() -> NoReturn:
+        raise docker.DockerCommandError(
+            "docker ps exited 1: failed to connect to the docker API at "
+            "unix:///var/run/docker.sock: connect: no such file or directory"
+        )
+
+    view.services.controller.status = stopped  # type: ignore[method-assign]
+    view.refresh_status()
+
+    banner = view.docker_banner
+    assert "sudo systemctl start docker" in banner.body_label.text()
+    assert not _shown(view, banner.open_button)
+    assert not _shown(view, view.reinstall_docker_button)
+    assert _shown(view, banner.retry_button)
+
+
+def test_the_next_good_poll_takes_the_banner_down(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+    view.docker_banner.open_button.click()
+    assert _shown(view, view.docker_banner)
+
+    down.down = False
+    down.names = "ac-database\n"
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert "Database running" in view.status_label.text()
+    assert view.realm_badge.status != "unknown"
+
+    down.down = True
+    view.refresh_status()
+    assert view.docker_banner.note_label.text() == "", "an old press's answer under a new failure"
+
+
+def test_a_failed_poll_during_our_own_start_leaves_the_held_badge_and_shows_no_banner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T188's hold: a poll asked before the Start ended says nothing about after it."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._hold_badge("starting")
+    view._set_busy(True)
+
+    view._status_failed(docker.DockerCommandError(NPIPE_DOWN))
+
+    assert view.realm_badge.status == "starting"
+    assert view.docker_banner.isHidden()
+
+
+def test_a_deck_poll_failing_under_the_hold_offers_no_press_in_a_hidden_banner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reinstall was switched on inside the banner the hold kept down (fix round 1, I2)."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch)
+    view._hold_badge("starting")
+    view._set_busy(True)
+
+    view._status_failed(docker.DockerCliMissingError("no docker"))
+
+    assert view.docker_banner.isHidden()
+    assert view.reinstall_docker_button.isHidden(), "on, inside a banner nobody can see"
+
+    # The job's own follow-up read ends the hold: banner and press go up together.
+    view._set_busy(False)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    view.refresh_status()
+    assert _shown(view, view.docker_banner)
+    assert _shown(view, view.reinstall_docker_button)
+
+
+def test_a_verdict_that_fails_first_on_docker_says_nothing_even_under_the_hold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Verdict before status: the dashboard line printed Docker's pipe error (fix round 1, I3)."""
+    from tests.support_player_text import visible_texts
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = _dashboard_down
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view._hold_badge("starting")
+
+    view.refresh_verdict()
+
+    assert view.docker_banner.isHidden(), "the hold keeps the banner down"
+    assert view.verdict_label.isHidden()
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    assert "pipe" not in said and "exited" not in said, said
+
+
+def test_a_verdict_already_on_screen_goes_when_the_docker_box_goes_up(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C7: a world reading from before Docker went away is not left under the box.
+
+    The next dashboard read clears it as well, but a status poll that fails
+    first left "up — 3 players, 497 bots" beside "Status unknown (see above)"
+    until then. Found by the Task 6 mutation pass: dropping the clear from
+    `_put_the_docker_banner_up` failed no test.
+    """
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("up", players=3, bots=497)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view.refresh_verdict()
+    assert view.verdict_label.text() == "up — 3 players, 497 bots"
+    assert not view.verdict_label.isHidden()
+
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+
+    assert _shown(view, view.docker_banner)
+    assert view.verdict_label.isHidden(), "an old world reading stands under the Docker box"
+    assert view.verdict_label.text() == ""
+
+
+def test_a_missing_docker_cli_in_a_verdict_that_lands_first_is_the_banners_to_say(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 2, O2: a missing CLI is not "unreachable", and the dashboard printed it whole."""
+    from tests.support_player_text import visible_texts
+
+    def no_cli() -> dashboard.Verdict:
+        raise docker.DockerCliMissingError(yulon_platform.DOCKER_CLI_MISSING_HELP)
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = no_cli
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view._hold_badge("starting")
+
+    view.refresh_verdict()
+
+    assert view.verdict_label.isHidden()
+    said = " ".join(text for _name, _where, text in visible_texts(view))
+    assert "could not be found" not in said, said
+
+
+def test_a_dashboard_failure_is_logged_again_after_the_dashboard_recovered(
+    qapp: object, ps: _Ps, tmp_path: Path, caplog: Any
+) -> None:
+    """Fix round 2, O3: fail, fail, answer, fail is two log lines, not one."""
+    answers: list[object] = []
+
+    def dashboard_read() -> dashboard.Verdict:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return cast(dashboard.Verdict, answer)
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = dashboard_read
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    broken = "docker exec ac-database mysql exited 1: ERROR 1146 (42S02): Table missing"
+    answers += [
+        docker.DockerCommandError(broken),
+        docker.DockerCommandError(broken),
+        dashboard.Verdict("up", players=1, bots=2),
+        docker.DockerCommandError(broken),
+    ]
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(4):
+            view.refresh_verdict()
+
+    logged = [r.getMessage() for r in caplog.records if "ERROR 1146" in r.getMessage()]
+    assert len(logged) == 2, logged
+
+
+def test_a_new_failure_drops_the_last_presss_answer_and_a_repeat_keeps_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M4: "Docker Desktop is starting" under a Deck's reinstall advice is an old answer."""
+    from yulon import docker_advice
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.refresh_status()
+    banner = view.docker_banner
+    banner.say(controller_view_module.DOCKER_DESKTOP_OPENING)
+
+    view.refresh_status()
+    assert (
+        banner.note_label.text() == controller_view_module.DOCKER_DESKTOP_OPENING
+    ), "the next poll of the same failure wiped the press's answer"
+
+    banner.show_advice(docker_advice.advise("permission", "windows"))
+    assert banner.note_label.text() == ""
+    assert banner.note_label.isHidden()
+
+
+def _near_duplicates(texts: Sequence[str]) -> list[tuple[str, str]]:
+    """Each pair of lines that say nearly the same thing (F5): mostly the same words."""
+    import difflib
+
+    pairs: list[tuple[str, str]] = []
+    for i, first in enumerate(texts):
+        for second in texts[i + 1 :]:
+            a, b = set(first.lower().split()), set(second.lower().split())
+            shared = len(a & b) / max(1, min(len(a), len(b)))
+            ratio = difflib.SequenceMatcher(None, first.lower(), second.lower()).ratio()
+            if ratio > 0.6 or shared > 0.6:
+                pairs.append((first, second))
+    return pairs
+
+
+def test_a_start_docker_could_not_hear_says_so_once_and_leaves_the_advice_to_the_banner(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Start's line said the npipe error; the banner above already says what to do."""
+    from tests.support_player_text import visible_texts
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _windows_with_docker_desktop_down(monkeypatch)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.start_server()
+
+    assert view.problem_label.text() == controller_view_module.START_FAILED_NO_DOCKER
+    assert failures == [controller_view_module.START_FAILED_NO_DOCKER]
+    assert _shown(view, view.docker_banner), "the follow-up poll failed too"
+    body = view.docker_banner.body_label.text()
+    said = [text for _name, _where, text in visible_texts(view)]
+    assert said.count(body) == 1, "the advice is on screen twice"
+    assert not any("pipe" in text or "exited" in text for text in said), said
+    assert view.realm_badge.status == "unknown"
+    # F5 (T194 final fix): title, "see above", a reason repeating the title and
+    # pointing again, and the Start's line -- one sentence per job, no echoes.
+    assert view.server_reasons.text() == "Start and Stop come back when Docker answers."
+    title = view.docker_banner.title_label.text()
+    assert [text for text in said if "can't ask Docker" in text] == [title], said
+    assert len([text for text in said if "above" in text]) == 1, said
+    docker_lines = [
+        title,
+        body,
+        view.status_label.text(),
+        view.server_reasons.text(),
+        view.problem_label.text(),
+    ]
+    assert _near_duplicates(docker_lines) == [], docker_lines
+
+
+def test_a_start_that_failed_for_another_reason_is_the_starts_to_say(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Only Docker not answering is the banner's; a compose refusal is the Start's to say."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    said = _compose_up_said("no such service: ac-worldserver")
+
+    def refused() -> NoReturn:
+        raise said
+
+    view.services.controller.start = refused  # type: ignore[method-assign]
+    view.start_server()
+
+    assert view.problem_label.text() == controller_view_module.START_FAILED_BROKE
+    assert view.problem_details.text() == str(said)
+    assert view.docker_banner.isHidden()
+
+
+def test_the_longest_advice_fits_960_without_scrolling_sideways(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T185: the Deck's status line ran off the right edge at 960."""
+    from yulon import docker_advice, wsl
+
+    view = _server_view(WOTLK, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    view.refresh_status()
+    distro = "a-distro-with-a-long-name"
+    gone = wsl.missing_distro_problem(
+        distro, wsl._DISTRO_NOT_FOUND_RETURNCODE, wsl._DISTRO_NOT_FOUND_CODE
+    )
+    assert gone is not None
+    pool = [
+        docker_advice.advise(problem, host, distro=distro)
+        for host in ("windows", "macos", "linux", "deck")
+        for problem in ("missing", "not-running", "permission", "removed", "wsl")
+    ]
+    pool.append(
+        docker_advice.advice_for(
+            docker.DockerCommandError(gone),
+            distro=distro,
+            host="windows",
+            deck_docker_removed=False,
+        )
+    )
+    longest = max(pool, key=lambda advice: len(advice.body))
+    view.docker_banner.show_advice(replace(longest, action="open-desktop"))
+    view.docker_banner.say(yulon_platform._MANUAL_START_DOCKER_DESKTOP)
+    _at(window, (960, 640))
+    page = view._tabs.currentWidget()
+
+    assert view.docker_banner.isVisible()
+    assert view.docker_banner.note_label.isVisible(), "the press's answer is not on screen"
+    assert view.reinstall_docker_button.isVisible() and view.docker_banner.open_button.isVisible()
+    assert page.horizontalScrollBar().maximum() == 0
+    assert _page_faults(page) == []
+    window.close()
 
 
 def test_the_drawn_row_for_a_keg_clone_is_marked_installed_and_appears_once(
@@ -12404,6 +13521,40 @@ def test_a_backup_that_fails_stops_the_update_in_dmls_own_words(
     assert failures and failures[0] == warned[0]
 
 
+def test_a_backup_before_an_update_keeps_the_databases_words_in_details_and_the_log(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 follow-up (T194): the update's backup refusal dropped `MaintenanceError.detail`."""
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text, *a, **k: warned.append(text),
+    )
+    made = _FakeMaintenance()
+    denied = "ERROR 1045 (28000): Access denied for user 'root'@'localhost'"
+
+    def refuse() -> BackupReport:
+        raise MaintenanceError("Yu'lon could not list this server's databases.", detail=denied)
+
+    made.back_up = refuse  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.update_to_latest()
+    pump_until(lambda: bool(warned), "the failed backup was reported")
+
+    assert spy.presses == []
+    assert warned[0].startswith("Backup failed — the update was not started")
+    assert denied not in view.maintenance_report.toPlainText()
+    assert denied in view.maintenance_details.text()
+    assert failures and denied in failures[0], "the database's words never reached the log"
+
+
 def test_a_backup_that_answers_with_something_else_is_treated_as_a_failure(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -14251,18 +15402,59 @@ def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tupl
     view._tabs.setCurrentIndex(index)
     window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
     window.show()
-    return window, view._tabs.widget(index)
+    return window, _body_of(view._tabs.widget(index))
+
+
+def _body_of(page: Any) -> Any:
+    """The sub-tab's own widget: the body of its `ScrollPage` (T191), or the page itself."""
+    from yulon.ui.widgets.page import ScrollPage
+
+    return page.widget() if isinstance(page, ScrollPage) else page
+
+
+_SETTLED_ROUNDS = 3
+"""Pumps in a row with every widget where it was, before a resized window counts as settled."""
+
+
+def _layout_of(window: Any) -> tuple[tuple[int, int, int, int, bool], ...]:
+    """Where every widget in `window` is, and whether it shows."""
+    from PySide6.QtWidgets import QWidget
+
+    return tuple(
+        (*child.geometry().getRect(), child.isVisible()) for child in window.findChildren(QWidget)
+    )
 
 
 def _at(window: Any, size: tuple[int, int]) -> None:
-    """Put the window at `size`, restyle as the app does, and let it settle."""
+    """Put the window at `size`, restyle as the app does, and let it settle.
+
+    Settled is a condition, not a time: the layout unchanged over
+    `_SETTLED_ROUNDS` pumps. A fixed 50 ms pump measured the Modules tab
+    mid-layout under the suite's parallel run (CI since T229, and the VM's six
+    workers): its list read 107 px, one row (PR 291 fix round 2). The same
+    happened with no load at all with the pump cut to nothing.
+    """
     from yulon.ui.theme import apply_dadcraft_theme
 
     window.resize(*size)
     # `main._Window._restyle_for_width`, which is what makes the fonts -- and so
     # every height measured here -- a function of the window's width.
     apply_dadcraft_theme(window, width=window.width())
-    process_events()
+    seen: list[object] = [None]
+    same = [0]
+
+    def settled() -> bool:
+        process_events(_SETTLE_PUMP_MS)
+        now = _layout_of(window)
+        same[0] = same[0] + 1 if now == seen[0] else 0
+        seen[0] = now
+        return same[0] >= _SETTLED_ROUNDS
+
+    pump_until(settled, f"the window to settle at {size}")
+
+
+_SETTLE_PUMP_MS = 10
+"""One pump of `_at()`'s settle loop. Short on purpose: the loop, not this, waits."""
 
 
 def _whole_rows_on_screen(panel: modules_panel.ModulesPanel) -> int:
@@ -14360,10 +15552,9 @@ def test_the_module_list_gets_the_height_on_a_maximised_1080p_window(
     assert (
         whole >= ROWS_VISIBLE_AT_1080P
     ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
-    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
-        f"the idle log is CLIPPED at {view.rebuild_log.height()}px, not merely small: "
-        f"it says it needs {view.rebuild_log.minimumSizeHint().height()}"
-    )
+    # Not drawn at all before a job since T191 (I8), rather than an idle strip
+    # whose height could quietly be made unusable.
+    assert view.rebuild_log.isHidden(), "an idle job row is drawn before any job ran"
     assert _lines_readable_without_scrolling(view.module_report, READABLE_REPORT_LINES), (
         f"the report cannot show {READABLE_REPORT_LINES} lines: "
         f"it is {view.module_report.height()}px"
@@ -14526,10 +15717,10 @@ def test_the_rebuild_log_takes_its_height_back_when_a_job_starts(
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, (1920, 1080))
-    idle = view.rebuild_log.height()
-    assert (
-        idle == view.rebuild_log.minimumSizeHint().height()
-    ), f"an empty log is not at its smallest: {idle}px"
+    # Before a job it is not drawn at all (T191, I8); the smallest it is ever
+    # drawn is its strip.
+    assert view.rebuild_log.isHidden(), "an empty log is drawn before any job ran"
+    idle = view.rebuild_log.folded_minimum()
 
     assert view.rebuild_log.run(lambda: iter(["compiling"]), title="rebuild") is True
     pump_until(lambda: not view.rebuild_log.running, "the job finished")
@@ -14637,15 +15828,29 @@ def _two_modules_on_disk(server_dir: Path) -> None:
         path.write_text("-- x\n", encoding="utf-8")
 
 
+class _UpdatesLedger:
+    """The `updates` tables: `SELECT name FROM updates ...` answered from `rows` (T214)."""
+
+    def __init__(self, rows: dict[str, set[str]] | None = None) -> None:
+        self.rows = rows or {}
+
+    def query(self, db: str, statement: str) -> str:
+        return "".join(f"{n}\n" for n in sorted(self.rows.get(db, ())) if f"'{n}'" in statement)
+
+
 def _real_module_sql(
     ps: _Ps,
     tmp_path: Path,
     fake: Callable[..., docker.AttachedRun],
     monkeypatch: pytest.MonkeyPatch,
+    ledger: _UpdatesLedger | None = None,
 ) -> ControllerView:
     monkeypatch.setattr(docker, "apply_module_sql", fake)
     services = _services(ps, tmp_path, [])
-    services.module_sql = lambda output: modules.apply_module_sql(tmp_path, output=output)
+    held = ledger if ledger is not None else _UpdatesLedger()
+    services.module_sql = lambda output: modules.apply_module_sql(
+        tmp_path, output=output, ledger=held
+    )
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
@@ -14674,7 +15879,8 @@ def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
         output(APPLYING_AOE)
         return docker.AttachedRun(0, (APPLYING_AOE,))
 
-    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    ledger = _UpdatesLedger({"world": {"aoe_loot_module_string.sql"}})
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch, ledger)
     view.apply_module_sql()
 
     assert handed == ["mod-aoe-loot"]
@@ -14715,7 +15921,7 @@ def test_a_refused_import_still_says_which_file_this_app_owns(
     view.apply_module_sql()
 
     text = view.module_report.toPlainText()
-    assert f"aoe_loot_module_string.sql -> world: refused: {words}" in text
+    assert "aoe_loot_module_string.sql -> world: not applied: ac-db-import did not run" in text
     assert "arac.sql -> world: not handed to the updater: this app applies it itself" in text
     assert "arac.sql -> world: refused" not in text
     assert failures and words in failures[0]
@@ -14869,7 +16075,13 @@ def test_the_module_sql_press_hands_over_city_bots_and_withholds_only_arac(
             output(line)
         return docker.AttachedRun(0, tuple(applying))
 
-    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    ledger = _UpdatesLedger(
+        {
+            db: {Path(rel).name}
+            for rel, db in zip(CITY_BOTS_FILES[:3], ("auth", "characters", "world"), strict=True)
+        }
+    )
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch, ledger)
     view.apply_module_sql()
 
     assert handed == ["mod-city-bots"], handed
@@ -16613,6 +17825,1347 @@ def _drawn_under_their_minimum(tab: Any) -> list[str]:
     ]
 
 
+T191_SIZES = [(960, 640), (1280, 800), (1920, 1080)]
+"""The three windows T191's sub-tabs are proved at: the smallest, the Steam Deck's, 1080p."""
+
+
+def _laid_out_in(parent: Any) -> list[Any]:
+    """The visible widgets `parent`'s own layout places, through its nested layouts.
+
+    Not into a child widget's layout: those are placed in that child's
+    coordinates, and are `parent`'s grandchildren.
+    """
+    found: list[Any] = []
+    pending = [] if parent.layout() is None else [parent.layout()]
+    while pending:
+        layout = pending.pop()
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is None:
+                continue
+            if item.widget() is not None:
+                if item.widget().isVisible():
+                    found.append(item)
+            elif item.layout() is not None:
+                pending.append(item.layout())
+    return found
+
+
+def _squeezed_or_overlapping(page: Any) -> list[str]:
+    """Every widget on `page` drawn under the minimum its layout gives it, or over another.
+
+    Qt's proportional cut shows as both. Every widget under the body is held to
+    it, and the overlap is asked across EVERY widget one parent lays out,
+    through its nested layouts: a button in a row's layout drawn over a label
+    in the column around that row is two items of two layouts, and the same
+    picture on screen.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    body = page.widget()
+    faults: list[str] = []
+    for parent in [body, *body.findChildren(QWidget)]:
+        if not parent.isVisible():
+            continue
+        items = _laid_out_in(parent)
+        for item in items:
+            widget = item.widget()
+            need = item.minimumSize()
+            need_height = need.height()
+            if item.hasHeightForWidth():
+                need_height = max(need_height, item.minimumHeightForWidth(widget.width()))
+            if widget.width() < need.width() or widget.height() < need_height:
+                faults.append(
+                    f"{type(widget).__name__} {widget.objectName()!r} drawn "
+                    f"{widget.width()}x{widget.height()} under its {need.width()}x{need_height}"
+                )
+        drawn = [item.widget() for item in items]
+        for first, widget in enumerate(drawn):
+            for other in drawn[first + 1 :]:
+                if widget.geometry().intersects(other.geometry()):
+                    faults.append(
+                        f"{type(widget).__name__} {widget.objectName()!r} drawn over "
+                        f"{type(other).__name__} {other.objectName()!r}"
+                    )
+    return faults
+
+
+def _page_faults(page: Any) -> list[str]:
+    """Everything wrong with how `page` (a sub-tab's `ScrollPage`) is drawn now (T191).
+
+    Asked of the widgets as they are on screen, and each kind of fault is a
+    different way a squeezed tab shows: a widget cut or drawn over another
+    (`_squeezed_or_overlapping`), a button whose label does not fit it, and a
+    page that scrolls sideways.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    body = page.widget()
+    faults: list[str] = []
+    if page.horizontalScrollBar().maximum() > 0:
+        faults.append(f"scrolls sideways by {page.horizontalScrollBar().maximum()}px")
+    faults += _squeezed_or_overlapping(page)
+    for button in body.findChildren(QPushButton):
+        # A module row's chip draws as much of its label as its width holds
+        # (`_ChipButton`, T83): elided on purpose, with the rest behind the "…".
+        if hasattr(button, "drawn_text"):
+            continue
+        if button.isVisible() and (why := _clipped(button)):
+            faults.append(why)
+    return faults
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_sub_tab_but_tuning_scrolls_instead_of_squeezing(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Each sub-tab is in a page that scrolls, and none of it is cut, overlapped or sideways.
+
+    Tuning is the one left out, and on purpose: T190 is fitting that tab
+    itself, so its widget goes into the sub-tab bar bare.
+    """
+    from yulon.ui.widgets.page import ScrollPage
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    faults: dict[str, list[str]] = {}
+    titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
+    assert "Tuning" in titles and len(titles) > 5, f"not the tabs this test is about: {titles}"
+    for index, title in enumerate(titles):
+        page = view._tabs.widget(index)
+        if title == "Tuning":
+            assert not isinstance(page, ScrollPage), "Tuning is T190's to fit, not a page's"
+            continue
+        assert isinstance(page, ScrollPage), f"the {title} sub-tab is not in a page that scrolls"
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        if found := _page_faults(page):
+            faults[title] = found
+    assert faults == {}, f"sub-tabs drawn squeezed at {size}: {faults}"
+
+
+def _server_with_the_plan_up(
+    tmp_path: Path, size: tuple[int, int] = T191_SIZES[0]
+) -> tuple[ControllerView, Any, Any]:
+    """WotLK's Server tab in the real window at `size`, with Uninstall… pressed.
+
+    The factory's wiring, as the app builds it (the client folder row, the
+    command channel), with only the plan's answer fixed. Returns the view, the
+    window and the tab's `ScrollPage`.
+    """
+
+    class _WholePlan(_PlanOnlyUninstall):
+        def plan(self) -> purge.PurgePlan:
+            return purge.PurgePlan(
+                game="wow-wotlk",
+                server_dir=self.server_dir,
+                project="t-project",
+                containers=("ac-database", "ac-authserver", "ac-worldserver"),
+                volumes=("t-project_ac-database",),
+                character_volume="t-project_ac-database",
+            )
+
+    services = ControllerServices.for_entry(
+        WOTLK, tmp_path, client_dir=_game_client(tmp_path / "clients" / "WoW")
+    )
+    services.set_client_dir = _FakeClientDir()
+    services.uninstall = _WholePlan(tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    assert view.uninstall_button is not None
+    view.uninstall_button.click()
+    process_events()
+    return view, window, view._tabs.currentWidget()
+
+
+SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Danger zone"]
+"""T189's Server tab, top to bottom, for a game with every part wired."""
+
+
+def _server_view(entry: CatalogEntry, tmp_path: Path, **wired: Any) -> ControllerView:
+    """`entry`'s Server tab over the factory's wiring, with the client-folder write seam.
+
+    `wired` replaces services fields after the factory, one fact per fixture.
+    """
+    services = ControllerServices.for_entry(
+        entry, tmp_path / entry.id, client_dir=_game_client(tmp_path / "clients" / "WoW")
+    )
+    services.set_client_dir = _FakeClientDir()
+    services.set_play_client_dir = _FakeClientDir()
+    for name, value in wired.items():
+        setattr(services, name, value)
+    return ControllerView(entry, services, status_poll_ms=0)
+
+
+def _sections(view: ControllerView) -> list[Any]:
+    """The group boxes the Server tab's own column holds, shown, top to bottom."""
+    from PySide6.QtWidgets import QGroupBox
+
+    box = view._server_body.layout()
+    found = []
+    for index in range(box.count()):
+        widget = box.itemAt(index).widget()
+        if isinstance(widget, QGroupBox) and not widget.isHidden():
+            found.append(widget)
+    return found
+
+
+def _section_of(view: ControllerView, widget: Any) -> str | None:
+    """The title of the Server section `widget` is in, or None."""
+    return next((s.title() for s in _sections(view) if s.isAncestorOf(widget)), None)
+
+
+def _named(widget: Any) -> str:
+    text = getattr(widget, "text", None)
+    return text() if callable(text) else type(widget).__name__
+
+
+def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T189: Realm, Play, Client, Command channel, Danger zone -- and what is in each."""
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    assert view.play_button is not None and view.steam_button is not None
+    assert view.services.channel_setup is not None, "the fixture has no channel to section"
+
+    assert [s.title() for s in _sections(view)] == SERVER_SECTIONS
+    expected = {
+        "Realm": [
+            view.start_button,
+            view.stop_button,
+            view.refresh_button,
+            view.stop_anyway_button,
+            view.stop_other_button,
+            view.reinstall_docker_button,
+            view.problem_label,
+            view.status_label,
+        ],
+        "Play": [
+            view.play_button,
+            view.play_menu_button,
+            view.play_cancel_button,
+            view.steam_button,
+            view.play_label,
+            view.steam_label,
+        ],
+        "Client": [
+            view.client_dir_label,
+            view.set_client_dir_button,
+            view.forget_client_dir_button,
+        ],
+        "Command channel": [
+            view.channel_label,
+            view.test_console_button,
+            view.enable_channel_button,
+            view.repair_channel_button,
+        ],
+        "Danger zone": [
+            view.remove_button,
+            view.repair_button,
+            view.forget_install_button,
+            view.uninstall_button,
+            view.repair_label,
+            view.uninstall_label,
+            view.keep_characters_check,
+            view.delete_play_client_check,
+            view.uninstall_confirm_button,
+        ],
+    }
+    misplaced = [
+        f"{_named(w)!r} in {_section_of(view, w)}"
+        for title, widgets in expected.items()
+        for w in widgets
+        if _section_of(view, w) != title
+    ]
+    assert misplaced == [], misplaced
+
+
+@pytest.mark.parametrize("entry", [TBC, TORTOISE], ids=["tbc", "tortoise"])
+def test_a_game_without_a_command_channel_has_no_command_channel_section(
+    qapp: object, ps: _Ps, tmp_path: Path, entry: CatalogEntry
+) -> None:
+    view = _server_view(entry, tmp_path, channel_setup=None, console_probe=None)
+    if controller_view_module._is_console_channel(entry):
+        pytest.skip(f"{entry.name}'s channel is its console, which the section explains")
+    titles = [s.title() for s in _sections(view)]
+    assert "Command channel" not in titles, titles
+    assert titles[0] == "Realm" and titles[-1] == "Danger zone"
+
+
+def test_play_is_the_one_gold_button_and_start_is_gold_only_without_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T189 A21: one primary on the tab. With Play wired it is Play; without, Start."""
+    view = _server_view(WOTLK, tmp_path)
+    assert view.play_button is not None
+    assert view.play_button.property("primary") is True
+    assert not view.start_button.property("primary")
+    assert "launcher" in view.play_button.toolTip() or view.services.play_client_dir is None
+
+    without = _server_view(WOTLK, tmp_path / "other", set_play_client_dir=None)
+    assert without.play_button is None
+    assert without.start_button.property("primary") is True
+
+
+def test_play_without_a_client_folder_says_where_to_set_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The button is hidden (T181); the Play section says why and where, not nothing."""
+    services = ControllerServices.for_entry(WOTLK, tmp_path / "w", client_dir=None)
+    services.set_client_dir = _FakeClientDir()
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.play_button is not None and view.play_button.isHidden()
+    assert not view.play_label.isHidden()
+    assert view.play_label.text() == controller_view_module.PLAY_NEEDS_A_CLIENT_FOLDER
+    assert "Client" in view.play_label.text()
+
+
+def _gold_on_screen(view: ControllerView) -> list[str]:
+    """The Server tab's `primary` presses that its page would draw: the gold ones."""
+    from PySide6.QtWidgets import QPushButton
+
+    body = view._server_body
+    return [
+        b.text()
+        for b in body.findChildren(QPushButton)
+        if b.property("primary") and b.isVisibleTo(body)
+    ]
+
+
+def test_start_is_gold_while_play_is_hidden_and_play_is_gold_once_shown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Exactly one gold press on screen: a fresh install has no client folder, so no Play.
+
+    Play's visibility is settled when the tab is built -- setting or forgetting
+    the folder rebuilds it (`client_dir_changed`) -- so both states are built.
+    """
+    (tmp_path / "w").mkdir()
+    services = ControllerServices.for_entry(WOTLK, tmp_path / "w", client_dir=None)
+    services.set_client_dir = _FakeClientDir()
+    services.set_play_client_dir = _FakeClientDir()
+    hidden = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert hidden.play_button is not None and hidden.play_button.isHidden()
+    assert hidden.start_button.property("primary") is True, "a fresh install has no gold press"
+    assert _gold_on_screen(hidden) == [hidden.start_button.text()]
+
+    (tmp_path / "s").mkdir()
+    shown = _server_view(WOTLK, tmp_path / "s")
+    assert shown.play_button is not None and not shown.play_button.isHidden()
+    assert not shown.start_button.property("primary")
+    assert _gold_on_screen(shown) == [shown.play_button.text()]
+
+
+def test_the_play_button_says_it_opens_the_launcher(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """T187 made the tab's Play open the launcher; its tooltip still said it starts WoW."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    services = replace(
+        _services(ps, tmp_path, []), client_dir=original, play_client_dir=_built(original, tmp_path)
+    )
+    services.set_play_client_dir = _FakeClientDir()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.play_button is not None
+    tip = view.play_button.toolTip()
+    assert "launcher" in tip and "Start World of Warcraft" not in tip, tip
+
+
+def _pixel_near(widget: Any, x: int, y: int) -> Any:
+    from PySide6.QtGui import QColor
+
+    return QColor(widget.grab().toImage().pixelColor(x, y))
+
+
+def _close(a: Any, b: Any, slack: int = 24) -> bool:
+    return all(abs(p - q) <= slack for p, q in zip(a.getRgb()[:3], b.getRgb()[:3], strict=True))
+
+
+def test_the_danger_zone_is_bordered_red_and_its_buttons_keep_the_windows_style(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The border is the theme's danger red; the sheet that draws it restyles nothing inside."""
+    from PySide6.QtGui import QColor
+
+    from yulon.ui.theme import COLOR_DANGER
+
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[1])
+    zone = next(s for s in _sections(view) if s.title() == "Danger zone")
+    realm = next(s for s in _sections(view) if s.title() == "Realm")
+    middle = zone.height() // 2
+    assert _close(
+        _pixel_near(zone, 0, middle), QColor(COLOR_DANGER)
+    ), f"the Danger zone's left edge is {_pixel_near(zone, 0, middle).name()}"
+    assert not _close(
+        _pixel_near(realm, 0, realm.height() // 2), QColor(COLOR_DANGER)
+    ), "the Realm section is red too: the sheet is not scoped to the Danger zone"
+    view.stop_button.setEnabled(True)
+    view.remove_button.setEnabled(True)
+    process_events()
+    # Its edge and its fill, for a danger button and a plain one, each against
+    # its twin outside the zone: a sheet that reached the buttons shows first
+    # in their borders.
+    for inside_button, outside_button in (
+        (view.remove_button, view.stop_button),
+        (view.forget_install_button, view.refresh_button),
+    ):
+        for x in (0, 4):
+            inside = _pixel_near(inside_button, x, inside_button.height() // 2)
+            outside = _pixel_near(outside_button, x, outside_button.height() // 2)
+            assert _close(inside, outside, slack=4), (
+                f"{inside_button.text()!r} in the zone is {inside.name()} at x={x}; "
+                f"{outside_button.text()!r} outside is {outside.name()}"
+            )
+
+
+def test_a_game_with_no_uninstall_says_so_in_the_danger_zone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A27: Tortoise has no Uninstall; the zone says what it has instead."""
+    view = _server_view(TORTOISE, tmp_path, uninstall=None)
+    assert view.uninstall_button is None
+    label = view.uninstall_absent_label
+    assert not label.isHidden()
+    assert _section_of(view, label) == "Danger zone"
+    assert "Remove from Yu'lon" in label.text() and TORTOISE.name in label.text()
+    assert str(view.services.controller.server_dir) in label.text()
+
+    wotlk = _server_view(WOTLK, tmp_path / "w", uninstall=_PlanOnlyUninstall(tmp_path))
+    assert wotlk.uninstall_absent_label.isHidden()
+
+
+def test_the_armed_warning_shows_in_the_danger_zone_under_its_press(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 960 Realm's `problem_label` is a page away from the press that arms.
+
+    The page starts at its top, where `problem_label` is, and the press is then
+    brought on screen as the pad brings it (`_scroll_into_view`). The warning
+    has to be there, in the Danger zone, directly under the presses; and
+    Realm's label keeps what it said before.
+    """
+    from yulon.ui.gamepad import _scroll_into_view
+
+    view, _window, page = _server_with_the_plan_up(tmp_path)
+    page.verticalScrollBar().setValue(0)
+    view.problem_label.setText("A message from before the press.")
+    process_events()
+    assert not _whole_in_the_page(view.remove_button, page), "the press was on screen already"
+    label = view.danger_label
+    assert label.isHidden(), "a warning before anything was armed"
+
+    view.remove_button.click()
+    _scroll_into_view(view.remove_button)
+    process_events()
+    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+    assert _section_of(view, label) == "Danger zone"
+    assert not label.isHidden() and "characters are NOT" in label.text(), label.text()
+    assert _whole_in_the_page(view.remove_button, page)
+    assert _whole_in_the_page(label, page), "the warning is off screen under its press"
+    row = view.remove_button.parentWidget()
+    assert label.y() >= row.geometry().bottom(), "the warning is not under the presses"
+    assert view.problem_label.text() == "A message from before the press."
+
+    view.recheck()
+    process_events()
+    assert label.isHidden() and label.text() == "", "the warning outlived the cancel"
+
+    view.services.controller.remove = lambda: True  # type: ignore[method-assign]
+    view.remove_button.click()
+    assert not label.isHidden()
+    view.remove_button.click()
+    pump_until(lambda: "Containers removed" in label.text(), "the remove to finish")
+    assert "characters are NOT" not in label.text(), "the warning outlived the press it armed"
+    assert not label.isHidden(), "how the remove went is said where it was pressed"
+
+
+def test_a_press_at_the_bottom_edge_brings_its_warning_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A mouse press on a remove button the window's bottom edge cuts under.
+
+    Nothing moves the focus, so the pad's scroll does not run: the warning
+    would open under the edge unless the page is asked to show it.
+    """
+    view, _window, page = _server_with_the_plan_up(tmp_path)
+    body = page.widget()
+    button = view.remove_button
+    bottom = button.mapTo(body, button.rect().bottomLeft()).y()
+    page.verticalScrollBar().setValue(bottom + 1 - page.viewport().height())
+    process_events()
+    assert _whole_in_the_page(button, page), "the fixture put the press off screen"
+    below = button.mapTo(page.viewport(), button.rect().bottomLeft()).y()
+    assert page.viewport().height() - below < 8, "the press is not at the bottom edge"
+
+    button.click()
+    process_events()
+    assert _whole_in_the_page(view.danger_label, page), "the warning opened under the edge"
+    assert _whole_in_the_page(button, page), "the press it warns about scrolled away"
+
+
+@pytest.mark.parametrize("outcome", ["done", "refused"])
+def test_the_running_repair_says_how_it_goes_under_its_press_at_960(
+    qapp: object, ps: _Ps, tmp_path: Path, outcome: str
+) -> None:
+    """Ten to thirty minutes that cannot be stopped, told where the press was (T189).
+
+    Pressed as the pad presses it (`_scroll_into_view`, then a click), twice.
+    The running text, each line of progress and the end are under the Repair
+    press, on screen with it; Realm's `problem_label`, a page above at 960,
+    carries none of it.
+    """
+    from yulon.ui.gamepad import _scroll_into_view
+
+    view = _server_view(WOTLK, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, (960, 640))
+    page = view._tabs.currentWidget()
+    label = view.danger_label
+    refusal = docker.DockerCommandError("this install's databases hold player data (651 rows).")
+    seen: list[tuple[str, bool, bool, bool, str]] = []
+
+    def look() -> None:
+        process_events()
+        seen.append(
+            (
+                label.text(),
+                label.isVisible(),
+                _whole_in_the_page(label, page),
+                _whole_in_the_page(view.repair_button, page),
+                view.problem_label.text(),
+            )
+        )
+
+    def fake_repair(output: docker.OutputSink | None = None) -> bool:
+        # Jobs run inline here (`_inline_jobs`), so this is mid-import on screen.
+        assert output is not None
+        look()
+        output("applying acore_world")
+        look()
+        if outcome == "refused":
+            raise refusal
+        return True
+
+    view.services.controller.import_state = lambda: UNIMPORTED  # type: ignore[method-assign]
+    view.services.controller.repair_import = fake_repair  # type: ignore[method-assign]
+    _db_up(view, ps)
+    process_events()
+    assert view.repair_button.isVisible(), "the repair is not offered"
+    page.verticalScrollBar().setValue(0)
+    process_events()
+    assert not _whole_in_the_page(view.repair_button, page), "the press was on screen already"
+
+    for _press in range(2):
+        _scroll_into_view(view.repair_button)
+        process_events()
+        view.repair_button.click()
+        process_events()
+    assert len(seen) == 2, "the import did not run"
+    running, progress = seen
+    assert running[0] == controller_view_module.IMPORT_RUNNING, running[0]
+    assert "applying acore_world" in progress[0], progress[0]
+    assert controller_view_module.IMPORT_RUNNING in progress[0], progress[0]
+    for text, visible, whole, press_whole, realm in seen:
+        assert visible and whole, f"the running import is off screen: {text!r}"
+        assert press_whole, "the press scrolled away"
+        assert "import" not in realm, "said a page away as well"
+    assert _section_of(view, label) == "Danger zone"
+    end = "import finished" if outcome == "done" else "651 rows"
+    assert end in label.text(), label.text()
+    assert label.isVisible(), "the end was said and then wiped"
+    assert _whole_in_the_page(label, page), "the end is off screen"
+    assert end not in view.problem_label.text()
+
+
+def test_a_remove_that_ends_on_another_tab_leaves_the_server_page_where_it_was(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The line under the presses is brought on screen only while the page is on screen.
+
+    The player confirms, then goes to the Console tab while the containers go;
+    the page they left keeps its scroll for when they come back.
+    """
+    view, window, page = _server_with_the_plan_up(tmp_path)
+    titles = [view._tabs.tabText(i) for i in range(view._tabs.count())]
+
+    def remove_while_away() -> bool:
+        # Jobs run inline here (`_inline_jobs`): the player leaves mid-remove.
+        view._tabs.setCurrentIndex(titles.index("Console"))
+        process_events()
+        page.verticalScrollBar().setValue(0)
+        process_events()
+        return True
+
+    view.services.controller.remove = remove_while_away  # type: ignore[method-assign]
+    view.remove_button.click()
+    process_events()
+    view.remove_button.click()
+    process_events()
+    assert "Containers removed" in view.danger_label.text(), view.danger_label.text()
+    assert view._tabs.tabText(view._tabs.currentIndex()) == "Console"
+    assert page.verticalScrollBar().value() == 0, "the page the player left was scrolled"
+
+
+def _space_under_the_last_row(section: Any) -> int:
+    """Pixels from the bottom of `section`'s last drawn row to the bottom of the box.
+
+    A row is a visible widget with something in it: a label with text, or any
+    other widget taller than nothing.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    bottom = 0
+    for item in _laid_out_in(section):
+        widget = item.widget()
+        if isinstance(widget, QLabel) and not widget.text():
+            continue
+        if widget.height() > 0:
+            bottom = max(bottom, widget.geometry().bottom() + 1)
+    return int(section.height() - bottom)
+
+
+def test_realm_and_play_end_at_their_last_row_when_nothing_is_said(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The after-render left ~45 px under Realm's and Play's presses: empty lines and rows.
+
+    An empty label, or a row whose presses are all hidden, took its height and
+    a spacing. With nothing to say, each box ends at its frame and margin (and
+    one spacing of slack); a problem then shows, whole.
+    """
+    view = _server_view(WOTLK, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, (960, 640))
+    page = view._tabs.currentWidget()
+    sections = {s.title(): s for s in _sections(view)}
+    for title in ("Realm", "Play"):
+        section = sections[title]
+        layout = section.layout()
+        frame = section.height() - (section.contentsRect().bottom() + 1)
+        slack = frame + layout.contentsMargins().bottom() + layout.spacing()
+        under = _space_under_the_last_row(section)
+        assert under <= slack, f"{title}: {under}px under its last row, over {slack}"
+
+    view.problem_label.setText("The server refused to stop because of a reason.")
+    process_events()
+    assert view.problem_label.isVisible(), "a problem was said and not shown"
+    assert _page_faults(page) == []
+    view.problem_label.setText("")
+    process_events()
+    assert view.problem_label.isHidden()
+
+
+def _server_states(view: ControllerView) -> Iterator[str]:
+    """Put the Server tab through the states that grow it; yield each one's name."""
+    yield "idle"
+    assert view.uninstall_button is not None
+    view.uninstall_button.click()
+    process_events()
+    yield "plan up"
+    view.remove_button.click()
+    process_events()
+    assert view.remove_button.text() == controller_view_module.REMOVE_ARMED
+    yield "remove armed"
+    view._disarm_actions()
+    view.problem_label.setText(" ".join(["The server refused to stop because of a reason."] * 12))
+    process_events()
+    yield "long problem"
+    view.stop_anyway_button.setVisible(True)
+    view.stop_other_button.setVisible(True)
+    process_events()
+    yield "stop now anyway shown"
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_the_server_tab_is_whole_in_every_state_at_every_size(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Nothing cut, overlapped or sideways: idle, plan up, armed, a long refusal, the stop offers.
+
+    The plan-up state at 960x640 is T188's after-render: "Refresh", "Stop and
+    remove containers…", "Remove from Yu'lon…" and "Add to Steam…" cut short in
+    one row of ten.
+    """
+    from yulon.ui.gamepad import _scroll_into_view
+
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    page = view._tabs.currentWidget()
+    faults = {}
+    for shown in _server_states(view):
+        process_events()
+        if found := _page_faults(page):
+            faults[shown] = found
+        if shown == "remove armed":
+            # The warning is next to the press that armed it, on screen with it.
+            _scroll_into_view(view.remove_button)
+            process_events()
+            label = view.danger_label
+            assert _section_of(view, label) == "Danger zone", size
+            assert not label.isHidden() and "characters are NOT" in label.text(), size
+            assert _whole_in_the_page(view.remove_button, page), size
+            assert _whole_in_the_page(label, page), f"the armed warning is off screen at {size}"
+    assert faults == {}, f"the Server tab at {size}: {faults}"
+
+
+def test_the_server_tabs_buttons_keep_their_own_width_at_1080p(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I6/I7: "Forget client folder" was a 1,780 px bar at 1920; every press is its own width.
+
+    Except the uninstall confirm, which is the one press drawn the width of its
+    section on purpose.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[2])
+    view.uninstall_button.click()
+    process_events()
+    wide = [
+        f"{b.text()!r}: {b.width()} for a hint of {b.sizeHint().width()}"
+        for b in tab.findChildren(QPushButton)
+        if b.isVisible()
+        and b is not view.uninstall_confirm_button
+        and b.width() > b.sizeHint().width() + 1
+    ]
+    assert wide == [], wide
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_the_pad_reaches_every_server_control_and_walks_down_the_sections_in_order(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """From the sub-tab bar: every shown control is reachable, and Down goes section by section.
+
+    Down from the bar, pressed again and again, never goes back to an earlier
+    section, and it reaches the Danger zone with the plan up.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, _iter_focusable, install_gamepad_navigation
+
+    view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
+    window, tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    view.uninstall_button.click()
+    process_events()
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        bar = view._tabs.tabBar()
+        reached = set(_pad_routes(nav, bar))
+        missed = [_pad_describe(w, window) for w in _iter_focusable(tab) if w not in reached]
+        assert missed == [], f"the pad cannot reach {missed} at {size}"
+
+        order = [s.title() for s in _sections(view)]
+        bar.setFocus()
+        process_events()
+        seen: list[str] = []
+        for _press in range(60):
+            nav.navigate(Direction.DOWN)
+            process_events()
+            title = _section_of(view, QApplication.focusWidget())
+            if title is not None and (not seen or seen[-1] != title):
+                seen.append(title)
+            if title == "Danger zone":
+                break
+        assert seen and seen[-1] == "Danger zone", f"Down went through {seen} at {size}"
+        indexes = [order.index(t) for t in seen]
+        assert indexes == sorted(indexes), f"Down went back up: {seen} at {size}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def _whole_in_the_page(widget: Any, page: Any) -> bool:
+    """Whether every pixel of `widget` is inside `page`'s viewport now."""
+    top = widget.mapTo(page.viewport(), widget.rect().topLeft()).y()
+    return 0 <= top and top + widget.height() <= page.viewport().height()
+
+
+def test_the_server_tab_with_the_uninstall_plan_up_scrolls_to_its_last_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C3: the plan's page needs more than 960x640 has, so it scrolls, whole, to its end."""
+    view, _window, page = _server_with_the_plan_up(tmp_path)
+    tab = page.widget()
+    confirm = view.uninstall_confirm_button
+    assert confirm.isVisible(), "the plan is not on screen, so there is nothing to scroll to"
+    assert page.verticalScrollBar().maximum() > 0, "the plan fitted: this proves nothing"
+    assert tab.height() >= tab.minimumSizeHint().height()
+    assert confirm.height() >= confirm.minimumSizeHint().height()
+    page.ensureWidgetVisible(confirm)
+    process_events()
+    assert _whole_in_the_page(
+        confirm, page
+    ), "scrolled to its end, the uninstall button is still not whole on screen"
+
+
+def _overflowing_page(which: str, ps: _Ps, tmp_path: Path) -> tuple[Any, Any]:
+    """A sub-tab at 960x640 whose content needs more height than the page has: (window, page).
+
+    The window comes back too: dropped, it takes the page with it.
+    """
+    from tests.test_characters_tab import _people, _Play
+
+    if which == "Server, uninstall plan up":
+        _view, window, page = _server_with_the_plan_up(tmp_path)
+        return window, page
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    title = which
+    if which == "Characters":
+        services.play = _Play(characters=_people())
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, title)
+    _at(window, T191_SIZES[0])
+    if which == "Characters":
+        view.refresh_characters()
+        process_events()
+    return window, view._tabs.currentWidget()
+
+
+@pytest.mark.parametrize("which", ["Server, uninstall plan up", "Characters", "Bots"])
+def test_a_page_too_tall_for_the_window_scrolls_and_cuts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, which: str
+) -> None:
+    """The pages that really overflow at 960x640: a scroll bar, and nothing squeezed or overlapped.
+
+    The sweep above runs at sizes where every page's minimum fits its
+    viewport, so it passes as well with the body held at the viewport's
+    height; these are the pages where the two differ. The horizontal half
+    (the Server row's cut labels) is Task 4's: this asks the vertical one.
+    """
+    _window, page = _overflowing_page(which, ps, tmp_path)
+    assert page.verticalScrollBar().maximum() > 0, f"{which} fits at 960x640: this proves nothing"
+    assert _squeezed_or_overlapping(page) == [], f"{which}: {_squeezed_or_overlapping(page)}"
+
+
+def test_a_widget_drawn_over_one_in_another_layout_of_the_same_parent_is_a_fault(
+    qapp: object,
+) -> None:
+    """A row's button over the label in the column around it: two layouts, one picture.
+
+    The one rule broken is the overlap -- both widgets keep their size.
+    """
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+
+    from yulon.ui.widgets.page import ScrollPage
+
+    body = QWidget()
+    column = QVBoxLayout(body)
+    label = QLabel("a sentence over the row", body)
+    column.addWidget(label)
+    row = QHBoxLayout()
+    button = QPushButton("Press", body)
+    row.addWidget(button)
+    column.addLayout(row)
+    page = ScrollPage(body)
+    page.resize(400, 300)
+    page.show()
+    process_events()
+    assert _squeezed_or_overlapping(page) == [], "the fixture is broken before it is broken"
+
+    button.move(label.pos())
+    assert button.geometry().intersects(label.geometry())
+    assert any("drawn over" in fault for fault in _squeezed_or_overlapping(page))
+
+
+@pytest.mark.slow
+def test_the_pad_walks_the_plan_page_from_the_sub_tab_bar_to_its_last_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Down from the sub-tab bar enters the page at its top row; Down again reaches the end.
+
+    The page scrolls under the focus (`_scroll_into_view`) until the uninstall
+    button is whole on screen, and the page itself is never a stop.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+    from yulon.ui.widgets.page import ScrollPage
+
+    view, window, page = _server_with_the_plan_up(tmp_path)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        view._tabs.tabBar().setFocus()
+        process_events()
+        nav.navigate(Direction.DOWN)
+        process_events()
+        landed = QApplication.focusWidget()
+        # The page's top row, which since T189 is the Realm section's presses
+        # (the pathfinding and world-upkeep rows above it are hidden on a
+        # server that owes neither): nothing on the page the pad can stop on
+        # starts above it. The sub-tab bar is one stop as wide as the page, and
+        # Down takes the best centred press of the row under it
+        # (`_pick`): of Start, Stop and Refresh, Refresh.
+        top = min(_edges_in(w, window)[1] for w in _in_page(page.widget()))
+        assert landed is view.refresh_button, (
+            f"Down from the sub-tab bar went to {_pad_describe(landed, window)}, "
+            "not Refresh, the best centred press of Realm's top row"
+        )
+        assert _section_of(view, landed) == "Realm" and _edges_in(landed, window)[1] == top
+        stops = [landed]
+        # The plan's last row is the uninstall press and its Cancel (PR 291's
+        # Windows live test). Down lands on whichever is best centred under the
+        # boxes above, Cancel; the uninstall press is one Left from it.
+        last_row = (view.uninstall_confirm_button, view.uninstall_cancel_button)
+        for _press in range(40):
+            if landed in last_row:
+                break
+            nav.navigate(Direction.DOWN)
+            process_events()
+            landed = QApplication.focusWidget()
+            assert not isinstance(landed, ScrollPage), "the page itself took the focus"
+            stops.append(landed)
+        if landed is view.uninstall_cancel_button:
+            nav.navigate(Direction.LEFT)
+            process_events()
+            landed = QApplication.focusWidget()
+            stops.append(landed)
+        assert (
+            landed is view.uninstall_confirm_button
+        ), "Down never reached the uninstall button: " + ", ".join(
+            _pad_describe(w, window) for w in stops
+        )
+        assert page.verticalScrollBar().value() > 0, "the page did not scroll under the focus"
+        assert _whole_in_the_page(landed, page), "the uninstall button is focused but cut off"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def test_a_job_pressed_on_the_server_tab_opens_the_page_its_log_is_on(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Finish the world update, pressed on the Server tab, shows the Modules tab's log."""
+    finished: list[object] = []
+
+    def finish(cancel: object = None) -> Iterator[str]:
+        finished.append(cancel)
+        yield "Importing 1 world tables again"
+
+    services = replace(
+        _services(ps, tmp_path, []),
+        world_upkeep=controller_view_module.WorldUpkeep(
+            read=lambda: (None, "the last update did not finish importing its world tables"),
+            reextract=None,
+            finish_world=finish,
+        ),
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, (960, 640))
+    view.refresh_world_upkeep()
+    pump_until(lambda: view.finish_world_button.isVisible(), "the press is offered")
+    view.finish_world_button.click()
+    wait_for_panel(view.rebuild_log)
+    process_events()
+
+    assert finished, "the press did not run"
+    assert view._tabs.currentWidget().isAncestorOf(view.rebuild_log), (
+        f"the job ran on {view._tabs.tabText(view._tabs.currentIndex())!r}, "
+        "not on the tab its log is on"
+    )
+    page = view._tabs.currentWidget()
+    top = view.rebuild_log.mapTo(page.viewport(), view.rebuild_log.rect().topLeft()).y()
+    assert 0 <= top < page.viewport().height(), "the log's page opened with the log out of sight"
+
+
+def _whole_rows_in(listing: Any, page: Any) -> int:
+    """How many of `listing`'s rows are wholly inside both its own viewport and the page's."""
+    viewport = listing.viewport()
+    seen = page.viewport()
+    whole = 0
+    for row in range(listing.count()):
+        rect = listing.visualItemRect(listing.item(row))
+        top = viewport.mapTo(seen, rect.topLeft()).y()
+        if (
+            rect.top() >= 0
+            and rect.bottom() < viewport.height()
+            and top >= 0
+            and top + rect.height() <= seen.height()
+        ):
+            whole += 1
+    return whole
+
+
+def test_the_account_list_takes_the_height_the_accounts_tab_has(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A16/B13: at 1080p the list is half the page, not a strip over empty space.
+
+    And at 960x640, scrolled to, it still shows three whole rows: the height a
+    taller window gives it is not taken from a short one.
+    """
+    accounts = _StubAccounts(
+        useraccounts.Listing(
+            accounts=[
+                useraccounts.Account(id=row, username=f"PLAYER{row}", gm_level=0)
+                for row in range(5)
+            ]
+        )
+    )
+    services = replace(_services(ps, tmp_path, []), accounts=accounts)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Accounts")
+    _at(window, T191_SIZES[2])
+    view.refresh_accounts()
+    process_events()
+    page = view._tabs.currentWidget()
+    listing = view.account_list
+
+    assert listing.count() == 5
+    assert (
+        listing.height() >= page.viewport().height() // 2
+    ), f"the list is {listing.height()}px of a {page.viewport().height()}px page"
+    _at(window, T191_SIZES[0])
+    page.ensureWidgetVisible(listing)
+    process_events()
+    assert _whole_rows_in(listing, page) >= 3
+
+
+@pytest.mark.parametrize("entry", [WOTLK, TORTOISE], ids=["wotlk", "tortoise"])
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_the_bots_tab_scrolls_instead_of_squeezing(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int], entry: CatalogEntry
+) -> None:
+    """B1/A2: WotLK's My Party and Tortoise's bot count and dashboard, whole at every size.
+
+    The factory's wiring, as the app builds it: My Party for WotLK, the
+    random-bot count and the bot dashboard for Tortoise.
+    """
+    services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+    view = ControllerView(entry, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, size)
+    page = view._tabs.currentWidget()
+    if entry is WOTLK:
+        assert view.party_panel is not None and view.party_panel.isVisible()
+    else:
+        assert view.bot_count_group.isVisible(), "the fixture has no bot count to squeeze"
+    assert _page_faults(page) == [], f"the {entry.name} Bots tab at {size}: {_page_faults(page)}"
+
+
+@pytest.mark.slow
+def test_the_pad_reaches_every_button_on_the_stacked_bots_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 960x640 My Party is stacked under the bot list (T191); the pad still reaches all of it.
+
+    The real navigator, walked breadth-first from the sub-tab bar: every
+    visible, enabled button on the page is among the stops it reaches.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, T191_SIZES[0])
+    party = view.party_panel
+    assert party is not None
+    browse = view.bot_list.parentWidget()
+    assert (
+        party.mapTo(tab, party.rect().topLeft()).y() > browse.geometry().bottom()
+    ), "My Party is not stacked under the bot list at 960x640: this is not the stacked mode"
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        bar = view._tabs.tabBar()
+        reached = set(_pad_routes(nav, bar))
+        buttons = [
+            button
+            for button in tab.findChildren(QPushButton)
+            if button.isVisible() and button.isEnabled()
+        ]
+        assert buttons, "no button to reach"
+        missed = [button.text() for button in buttons if button not in reached]
+        assert missed == [], f"the pad cannot reach {missed} on the stacked Bots tab"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_my_party_shows_its_first_three_rows_without_scrolling(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """B1: Character, Class and Level are on screen in My Party's own box, at every size.
+
+    The box scrolls (the panel is long), and before T191 it had no floor of
+    its own, so a short window left it a sliver with the Level row under it.
+    """
+    services = ControllerServices.for_entry(WOTLK, tmp_path / WOTLK.id)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, size)
+    panel = view.party_panel
+    assert panel is not None
+    viewport = panel.parentWidget()
+    box = viewport.parentWidget()
+    box.verticalScrollBar().setValue(0)
+    process_events()
+    third = panel.layout().itemAt(2).geometry()
+    assert third.height() > 0, "the third row is not laid out"
+    assert (
+        third.bottom() < viewport.height()
+    ), f"My Party's box is {viewport.height()}px; its third row ends at {third.bottom()}"
+
+
+def _scroll_arrows_over(bar: Any, rect: Any) -> list[str]:
+    """The sub-tab bar's visible scroll arrows that cover any of `rect`."""
+    from PySide6.QtWidgets import QToolButton
+
+    return [
+        arrow.objectName() or "arrow"
+        for arrow in bar.findChildren(QToolButton)
+        if arrow.isVisible() and arrow.geometry().intersects(rect)
+    ]
+
+
+def _tab_name_cut(bar: Any, index: int) -> str | None:
+    """Why tab `index`'s name does not fit the room its tab gives it, or None.
+
+    Qt's own question, asked the way `QTabBar::initStyleOption()` asks it
+    before it elides: the text rect the STYLE gives the tab, against the bar's
+    font. A tab's width alone is not it -- the theme's padding is inside that
+    width, and a tab wider than its name can still draw "Charact…".
+    """
+    from PySide6.QtWidgets import QStyle, QStyleOptionTab
+
+    option = QStyleOptionTab()
+    option.initFrom(bar)
+    option.rect = bar.tabRect(index)
+    option.text = bar.tabText(index)
+    option.icon = bar.tabIcon(index)
+    option.iconSize = bar.iconSize()
+    option.shape = bar.shape()
+    option.documentMode = bar.documentMode()
+    room = bar.style().subElementRect(QStyle.SubElement.SE_TabBarTabText, option, bar)
+    need = bar.fontMetrics().horizontalAdvance(bar.tabText(index))
+    if need <= room.width():
+        return None
+    return f"{bar.tabText(index)!r}: {room.width()}px of room for {need}px"
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_sub_tab_name_is_whole_and_the_open_one_is_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """A19/B10/C11: "Charact…", "Mainte…", "Networ…" at 960x640, and stretched tabs at 1080p.
+
+    Each tab is as wide as its icon and its whole name in the bar's own font;
+    at 960 the bar scrolls (its arrows) instead of cutting, and a tab opened
+    from either end is whole on screen, clear of the arrows; at 1920 the tabs
+    keep their own width rather than being spread across the bar.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    bar = view._tabs.tabBar()
+    cut = [why for why in (_tab_name_cut(bar, i) for i in range(bar.count())) if why]
+    assert cut == [], f"sub-tab names cut at {size}: {cut}"
+    for index in (bar.count() - 1, 0, bar.count() // 2):
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        rect = bar.tabRect(index)
+        assert bar.rect().contains(
+            rect
+        ), f"{bar.tabText(index)!r} at {rect.getRect()} is not whole in a {bar.width()}px bar"
+        assert _scroll_arrows_over(bar, rect) == [], f"{bar.tabText(index)!r} is under an arrow"
+    if size == T191_SIZES[2]:
+        last = bar.tabRect(bar.count() - 1)
+        assert (
+            last.right() < bar.width() - 100
+        ), f"the tabs are spread across the bar: the last ends at {last.right()} of {bar.width()}"
+
+
+def _overflowing_tab_bar(tmp_path: Path) -> tuple[ControllerView, Any]:
+    """Tortoise's nine sub-tabs at 960x640, which need more than the bar: (view, window)."""
+    services = ControllerServices.for_entry(TORTOISE, tmp_path / TORTOISE.id)
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[0])
+    return view, window
+
+
+def test_a_tab_bar_too_narrow_for_its_names_scrolls_them_whole(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 960x640 Tortoise's names need more than the bar: it scrolls, and none is cut.
+
+    The sweep above runs WotLK, whose eight tabs fit at 960, so there the bar
+    never scrolls and "whole, clear of the arrows" holds whatever the bar does.
+    """
+    from PySide6.QtWidgets import QToolButton
+
+    view, _window = _overflowing_tab_bar(tmp_path)
+    bar = view._tabs.tabBar()
+    arrows = [a for a in bar.findChildren(QToolButton) if a.isVisible()]
+    assert arrows, "the bar does not scroll at 960x640: this fixture proves nothing"
+    cut = [why for why in (_tab_name_cut(bar, i) for i in range(bar.count())) if why]
+    assert cut == [], f"sub-tab names cut on a scrolling bar: {cut}"
+    for index in (bar.count() - 1, 0):
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        rect = bar.tabRect(index)
+        assert bar.rect().contains(rect), f"{bar.tabText(index)!r} is not whole in the bar"
+        assert _scroll_arrows_over(bar, rect) == [], f"{bar.tabText(index)!r} is under an arrow"
+
+
+def test_a_scrolling_tab_bars_arrows_are_touch_sized_and_draw_their_glyph_whole(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """PR 291's Windows live test at 960x640: the two arrows were 16 px slivers at the bar's
+    end, the right one's glyph cut by its own edge; the sheet's touch floor never reached
+    them, because QTabBar sizes its scroll buttons itself (`QTabBar::scroller`)."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QToolButton
+
+    from yulon.ui import theme
+
+    view, _window = _overflowing_tab_bar(tmp_path)
+    bar = view._tabs.tabBar()
+    arrows = [a for a in bar.findChildren(QToolButton) if a.isVisible()]
+    assert len(arrows) == 2, "the bar does not scroll at 960x640: this proves nothing"
+
+    def glyph_columns(arrow: QToolButton) -> list[int]:
+        image = arrow.grab().toImage()
+        inks = [QColor(theme.COLOR_TEXT_PRIMARY), QColor(theme.COLOR_TEXT_MUTED)]
+
+        def ink(colour: QColor) -> bool:
+            return any(
+                abs(colour.red() - want.red()) <= 24
+                and abs(colour.green() - want.green()) <= 24
+                and abs(colour.blue() - want.blue()) <= 24
+                for want in inks
+            )
+
+        return sorted(
+            {
+                x
+                for x in range(image.width())
+                for y in range(image.height())
+                if ink(image.pixelColor(x, y))
+            }
+        )
+
+    for arrow in arrows:
+        name = arrow.arrowType().name
+        assert arrow.width() >= theme.TOUCH_TARGET_PX, f"{name} is {arrow.width()} px wide"
+        assert arrow.geometry().right() < bar.width(), f"{name} runs past the bar"
+        columns = glyph_columns(arrow)
+        assert columns, f"{name} draws no glyph"
+        assert columns[0] > 1 and columns[-1] < arrow.width() - 2, (
+            f"{name}'s glyph is cut by its edge: columns {columns[0]}..{columns[-1]} "
+            f"of {arrow.width()}"
+        )
+
+
+def test_down_from_a_scrolling_tab_bar_goes_into_the_page_not_to_an_arrow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The bar's arrows are a mouse's; the pad's Down from the bar enters the page."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QToolButton
+
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    view, window = _overflowing_tab_bar(tmp_path)
+    bar = view._tabs.tabBar()
+    arrows = [a for a in bar.findChildren(QToolButton) if a.isVisible()]
+    assert arrows, "the bar does not scroll at 960x640: this fixture proves nothing"
+    assert all(a.focusPolicy() == Qt.FocusPolicy.NoFocus for a in arrows)
+    nav, keyboard, gamepad = install_gamepad_navigation(window)
+    try:
+        bar.setFocus()
+        process_events()
+        nav.navigate(Direction.DOWN)
+        process_events()
+        landed = QApplication.focusWidget()
+        assert view._tabs.currentWidget().isAncestorOf(
+            landed
+        ), f"Down from the bar went to {_pad_describe(landed, window)}"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+
+
+def test_a_server_without_a_bots_tab_draws_no_bot_count_box_over_its_tabs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The bot-count box exists without a Bots tab (T99); it must not be drawn at the corner."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, T191_SIZES[2])
+    titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
+    assert "Bots" not in titles, "the fixture has a Bots tab to hold the box"
+    assert not view.bot_count_group.isVisible()
+
+
+def test_the_modules_job_row_is_not_drawn_until_a_job_runs_and_then_stays(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I8: no "idle" strip with a dead Stop on a tab that has run nothing.
+
+    Before a job the row is not there and the list has its height. A job
+    started while another tab is open brings it, open; and it STAYS once it is
+    there: folded by hand after the job, it is the strip, not gone -- the
+    T80 promise that a job's last line is one press away holds from the first
+    job on.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, T191_SIZES[2])
+    log = view.rebuild_log
+    assert log.isHidden(), "an idle job row is drawn before any job ran"
+    without_the_row = view.modules_panel.height()
+
+    titles = [view._tabs.tabText(index) for index in range(view._tabs.count())]
+    view._tabs.setCurrentIndex(titles.index("Server"))
+    _ran_a_job(view)
+    assert not log.isHidden(), "the job ran and its log is still not drawn"
+    view._tabs.setCurrentIndex(titles.index("Modules"))
+    process_events()
+    assert not log.collapsed, "the job's log came back folded on a tab with the room for it"
+
+    QTest.mouseClick(log._collapse, Qt.MouseButton.LeftButton)
+    process_events()
+    assert log.collapsed and log.isVisible(), "folded by hand, the row went away"
+    assert (
+        view.modules_panel.height() < without_the_row
+    ), "the list is as tall with the strip as without it: the hidden row was not hidden"
+    _ran_a_job(view)
+    assert log.isVisible(), "a second job hid the row"
+
+
+def test_tortoises_bot_job_rows_are_not_drawn_until_their_jobs_run(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The random-bot rebuild's and the dashboard's rows on Tortoise's Bots tab (I8)."""
+    services = ControllerServices.for_entry(TORTOISE, tmp_path / TORTOISE.id)
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Bots")
+    _at(window, T191_SIZES[2])
+    assert view.bot_rebuild_log is not None and view.dashboard_log is not None
+    assert view.bot_rebuild_log.isHidden() and view.dashboard_log.isHidden()
+
+    assert view.bot_rebuild_log.run(lambda: iter(["rebuilt"]), title="rebuild") is True
+    pump_until(lambda: not view.bot_rebuild_log.running, "the job finished")
+    process_events()
+    assert view.bot_rebuild_log.isVisible()
+    assert view.dashboard_log.isHidden(), "the other job's row came with it"
+
+
 def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -17244,6 +19797,47 @@ def test_past_its_pins_with_a_rebuild_owed_nothing_on_the_modules_tab_is_cut(
         )
 
 
+def _the_list_needs_the_cards_sentence(view: ControllerView) -> None:
+    """Put a job's row on the Modules tab: past the pins, the state where 960x640 folds the card.
+
+    Without it the list has its two rows at 960x640 beside the card whole, and
+    the card keeps its sentence there
+    (`test_at_the_smallest_window_the_card_folds_for_a_jobs_row_and_not_before`).
+    """
+    _ran_a_job(view)
+
+
+def test_at_the_smallest_window_the_card_folds_for_a_jobs_row_and_not_before(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Both sides of the card's rule at ONE size: whole where the list has its rows, else a line.
+
+    Past the pins at 960x640, the list beside the card whole has the two rows the
+    card would give its sentence for, so folding it there would take the words
+    away for nothing. A job's row on the tab takes that room, and then the card
+    goes to its one line. A fit that over-bills the tab -- counting a row that is
+    not drawn -- folds the first state and is caught here, which the tests that
+    only ever run with the job's row cannot see.
+    """
+    import main
+
+    view = _past_its_pin(ps, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.custom_module_card.isVisible(), "the card folded with the list's rows to spare"
+    assert view.custom_module_line.isHidden(), "the one-line card is on screen beside the card"
+    rows = controller_view_module.MODULE_LIST_ROWS_HEIGHT
+    assert view.modules_panel.height() >= rows, (
+        f"the card is whole over a list of {view.modules_panel.height()}px, "
+        f"under the {rows} it gives its sentence for"
+    )
+
+    _the_list_needs_the_cards_sentence(view)
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.custom_module_card.isHidden(), "a job's row took the room and the card stayed whole"
+    assert view.custom_module_line.isVisible(), "neither form of the card is on screen"
+
+
 def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -17251,7 +19845,8 @@ def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
 
     * At the size the app opens at, the card is whole -- title, sentence and both
       buttons -- because the list has its rows there without it.
-    * At 960x640 it is one line, and that line still carries BOTH presses and
+    * At 960x640 with a job's row on the tab (`_the_list_needs_the_cards_sentence`)
+      it is one line, and that line still carries BOTH presses and
       they are the same presses: each opens the same dialog the card's own
       button opens. A fold that hid a press behind a handle would leave a small
       window that cannot install a module from a link at all (see
@@ -17269,6 +19864,7 @@ def test_the_card_gives_its_sentence_for_the_list_and_keeps_both_presses(
         folder_asker=lambda parent, title: asked.append(title),
     )
     window, _tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
 
     _at(window, main.DEFAULT_WINDOW_SIZE)
     assert view.custom_module_card.isVisible(), "the card is not whole at the default window"
@@ -17323,6 +19919,9 @@ def test_the_one_line_cards_presses_are_greyed_by_the_cards_own_gate(
     view._refresh_source_version()
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, main.MINIMUM_WINDOW_SIZE)
+    # A job's row on the tab, as T153 measured it: with no job run the row is
+    # not drawn (T191) and the card has the room to be whole.
+    _ran_a_job(view)
     assert view.custom_module_line.isVisible(), "the one-line card is not what is on screen"
 
     link, folder = view.module_link_line_button, view.module_folder_line_button
@@ -17487,6 +20086,7 @@ def test_the_pad_reaches_whichever_form_of_the_card_is_on_screen(
         folder_asker=lambda parent, title: asked.append(title),
     )
     window, _tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
     nav, keyboard, gamepad = install_gamepad_navigation(window)
     start = view.refresh_modules_button
@@ -17610,7 +20210,8 @@ def test_after_a_bumper_the_first_down_or_right_goes_into_the_new_page(
                 process_events()
                 # A start the bumper key is not typed into (T139).
                 start = next(
-                    (w for w in _in_page(sub.widget(index)) if not accepts_typing(w)), None
+                    (w for w in _in_page(sub.widget(index)) if not accepts_typing(w, int(key))),
+                    None,
                 )
                 if start is None:
                     continue
@@ -18456,6 +21057,7 @@ def test_the_card_changes_form_at_most_once_per_step_of_a_drag(
 
     view = _past_its_pin(ps, tmp_path)
     window, _tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
     _at(window, (960, 640))
     seen = _shows_and_hides(view.custom_module_card)
     apply_dadcraft_theme(window, width=window.width())
@@ -18492,6 +21094,7 @@ def test_the_cards_minimum_taken_while_it_is_folded_is_the_one_it_has_whole(
 
     view = _past_its_pin(ps, tmp_path)
     window, tab = _controller_in_the_real_window(view, "Modules")
+    _the_list_needs_the_cards_sentence(view)
     _at(window, main.MINIMUM_WINDOW_SIZE)
     assert view.custom_module_card.isHidden(), "the card is whole here, so nothing is derived"
     derived = view.modules_fit.card_minimum()
@@ -18541,12 +21144,16 @@ def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
     window, _tab = _controller_in_the_real_window(view, "Modules")
     _at(window, DESKTOP_1080P)
     log = view.rebuild_log
-
-    assert log.collapsed, "the log did not start folded, so `open_minimum()` is not derived here"
+    # A job first: before one the row is not drawn (T191), and a hidden widget
+    # is not polished by the theme, so its numbers are nobody's. Then folded
+    # by hand, which is the state `open_minimum()` is derived in.
+    _ran_a_job(view)
+    _click(_the_handle_on(log))
+    assert log.collapsed and log.isVisible(), "the log is not on screen folded"
     derived_open = log.open_minimum()
 
-    _ran_a_job(view)
-    assert not log.collapsed, "the job did not open the log"
+    _click(_the_handle_on(log))
+    assert not log.collapsed, "the handle did not open the log"
     really_open = log.minimumSizeHint().height()
     derived_folded = log.folded_minimum()
 
@@ -19134,7 +21741,9 @@ def test_a_reset_that_raised_unlocks_the_tab_and_says_so(
     _menu_action(view, TUNING_RESET_ALL).trigger()
 
     assert failures == ["a bug in the reset"]
-    assert "FAILED: a bug in the reset" in view.tuning_report.toPlainText()
+    # T214: a bug's words are Details', not the report's.
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_RESET_BROKE
+    assert view.tuning_details.text() == "a bug in the reset"
     assert view.busy_reason() is None and view.tuning_reset_button.isEnabled() is True
 
 
@@ -19709,7 +22318,8 @@ def test_a_press_whose_files_cannot_be_read_says_so_and_frees_the_button(
 
     assert asked == [] and view._press_asking is None
     assert view.tuning_reset_button.isEnabled() is True
-    assert "could not be read" in view.tuning_report.toPlainText() and failures
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_RESET_UNREADABLE
+    assert "Input/output error" in view.tuning_details.text() and failures  # T214
 
 
 # -- T99: the Bots tab's "Random bots" box, and the bot keys on the Tuning tab --------------
@@ -20726,7 +23336,8 @@ def test_a_refused_restart_or_recreate_from_tuning_stops_and_removes_nothing(
 
     view.restart_server() if press == "restart" else view.recreate_containers()
 
-    assert view.tuning_report.toPlainText() == f"FAILED: {REFUSED_START}"
+    assert view.tuning_report.toPlainText() == REFUSED_START  # T214: ours, as written
+    assert view.tuning_details.isHidden()
     after = ps.calls[calls_before:]
     assert not any(
         c[:3] in (["docker", "compose", "up"], ["docker", "compose", "stop"]) for c in after
@@ -21455,6 +24066,250 @@ def test_the_dialog_makes_only_the_folder_its_numbers_are_for(qapp: object, tmp_
     choice = dialog.choice()
     assert choice is not None and choice.target == elsewhere
     assert dialog.ok_button.isEnabled()
+
+
+RAW_DOCKERISH = "docker exec ac-database mysql exited 1: ERROR 2002 (HY000): Can't connect"
+"""A raw text that must reach the log and never the screen (T194 F7)."""
+
+
+def test_an_older_folders_failure_does_not_undo_a_newer_folders_plan(
+    qapp: object, tmp_path: Path
+) -> None:
+    """F3 (T194 final fix): a stale failure cleared the newer plan and named the wrong folder."""
+    older = tmp_path / "older" / "WoW (Yu'lon)"
+    newer = tmp_path / "newer" / "WoW (Yu'lon)"
+
+    def replan(target: Path) -> play_client.BuildPlan:
+        if target == older:
+            raise RuntimeError(RAW_DOCKERISH)
+        return play_client.BuildPlan(
+            linked=(), copied=(), shared_bytes=1, own_bytes=1, same_volume=True
+        )
+
+    jobs = _Deferred()
+    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan), jobs=jobs)
+    dialog.path_edit.setText(str(older))
+    dialog.path_edit.editingFinished.emit()
+    dialog.path_edit.setText(str(newer))
+    dialog.path_edit.editingFinished.emit()
+    assert len(jobs.queue) == 2
+
+    jobs.run(1)  # the newer folder answers first
+    shown = dialog.size_label.text()
+    assert dialog.ok_button.isEnabled()
+    jobs.run(0)  # then the older one fails
+
+    choice = dialog.choice()
+    assert choice is not None and choice.target == newer
+    assert dialog.ok_button.isEnabled(), "a stale failure greyed Make it"
+    assert dialog.size_label.text() == shown
+    assert str(older) not in dialog.size_label.text()
+
+
+def test_a_folder_check_that_breaks_shows_a_sentence_and_logs_the_reason(
+    qapp: object, tmp_path: Path, caplog: Any
+) -> None:
+    """F7 (T194 final fix): the raw text of an unexpected failure was the dialog's line."""
+    target = tmp_path / "broken" / "WoW (Yu'lon)"
+
+    def replan(_target: Path) -> play_client.BuildPlan:
+        raise RuntimeError(RAW_DOCKERISH)
+
+    jobs = _Deferred()
+    dialog = controller_view_module.PlayClientDialog(_offer(tmp_path, replan), jobs=jobs)
+    dialog.path_edit.setText(str(target))
+    dialog.path_edit.editingFinished.emit()
+    with caplog.at_level(logging.DEBUG):
+        jobs.run(0)
+
+    said = dialog.size_label.text()
+    assert said == (
+        f"Yu'lon couldn't check {target}. Pick another folder, or try again; the Logs tab "
+        "has the reason."
+    )
+    assert "exited" not in said and "ERROR" not in said
+    assert any(RAW_DOCKERISH in r.getMessage() for r in caplog.records)
+    assert not dialog.ok_button.isEnabled()
+
+
+class _Clock:
+    """A clock the test moves by hand, and the timers that run on it (no wall time)."""
+
+    def __init__(self) -> None:
+        self.now = 0
+        self.timers: list[Any] = []
+
+    def timer(self, parent: Any) -> Any:
+        made = _ClockTimer(self, parent)
+        self.timers.append(made)
+        return made
+
+    def advance(self, ms: int) -> None:
+        self.now += ms
+        for timer in self.timers:
+            if timer.due is not None and timer.due <= self.now:
+                timer.due = None
+                timer.timeout.emit()
+
+
+class _ClockTimer(QObject):
+    """The part of `QTimer` the Make dialog uses, timed by `_Clock`."""
+
+    timeout = Signal()
+
+    def __init__(self, clock: _Clock, parent: Any) -> None:
+        super().__init__(parent)
+        self._clock = clock
+        self._interval = 0
+        self.single_shot = False
+        self.due: int | None = None
+
+    def setSingleShot(self, single: bool) -> None:  # noqa: N802 - QTimer's name
+        self.single_shot = single
+
+    def setInterval(self, ms: int) -> None:  # noqa: N802 - QTimer's name
+        self._interval = ms
+
+    def interval(self) -> int:
+        return self._interval
+
+    def start(self) -> None:
+        self.due = self._clock.now + self._interval
+
+    def stop(self) -> None:
+        self.due = None
+
+    def isActive(self) -> bool:  # noqa: N802 - QTimer's name
+        return self.due is not None
+
+
+def _typing_dialog(tmp_path: Path, **kwargs: Any) -> tuple[Any, _Deferred, _Clock, list[Path]]:
+    """A Make dialog on a held job runner and a hand-moved clock; `planned` lists each plan run."""
+    planned: list[Path] = []
+
+    def replan(target: Path) -> play_client.BuildPlan:
+        planned.append(target)
+        return play_client.BuildPlan(
+            linked=(), copied=(), shared_bytes=1, own_bytes=1, same_volume=True
+        )
+
+    jobs = _Deferred()
+    clock = _Clock()
+    dialog = controller_view_module.PlayClientDialog(
+        _offer(tmp_path, replan), jobs=jobs, timer=clock.timer, **kwargs
+    )
+    return dialog, jobs, clock, planned
+
+
+def test_typing_a_folder_checks_it_once_when_the_typing_stops(qapp: object, tmp_path: Path) -> None:
+    """C32 (T195): a Steam Deck has no Enter key, and the dialog asked for one.
+
+    One re-plan, 800 ms after the LAST key: every key restarts the wait, so a
+    path typed slowly is not planned once per letter, and nothing waits on Enter.
+    On a hand-moved clock, so no wall time decides it. Mutation: plan on every
+    `textChanged` and the queue holds one job per key; drop the restart and the
+    plan runs 800 ms after the FIRST key; keep the old label and "Press Enter"
+    is back on screen.
+    """
+    from PySide6.QtTest import QTest
+
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path)
+    (timer,) = clock.timers
+    assert timer.single_shot and timer.interval() == 800
+    dialog.path_edit.clear()
+    typed = str(tmp_path / "Games" / "WoW")
+    QTest.keyClicks(dialog.path_edit, typed[:-2])
+    clock.advance(500)
+    QTest.keyClicks(dialog.path_edit, typed[-2:])
+    assert jobs.queue == [], "a key started a plan before the typing stopped"
+    assert "Press Enter" not in dialog.size_label.text()
+    assert dialog.size_label.text() == "Checking this folder when you stop typing\u2026"
+    assert not dialog.ok_button.isEnabled()
+
+    clock.advance(799)
+    assert jobs.queue == [], "planned before 800 ms had passed since the last key"
+    clock.advance(1)
+    assert len(jobs.queue) == 1, "not planned 800 ms after the last key"
+    clock.advance(10_000)
+    assert len(jobs.queue) == 1, "more than one plan for one stretch of typing"
+    jobs.run(0)
+    assert planned == [Path(typed)]
+    choice = dialog.choice()
+    assert choice is not None and choice.target == Path(typed)
+
+
+def test_change_plans_the_picked_folder_once(qapp: object, tmp_path: Path) -> None:
+    """C32 (T195): Change… writes the field, which starts the typing wait too.
+
+    The pick plans at once; the wait it started is over with it, so nothing is
+    left to run out and plan the same folder again. Mutation: leave the timer
+    running in `_retarget` and it is still due after the click.
+    """
+    picked = tmp_path / "Elsewhere"
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path, pick_dir=lambda *_: picked)
+    (timer,) = clock.timers
+
+    dialog.change_button.click()
+    assert len(jobs.queue) == 1
+    assert not timer.isActive(), "the typing wait outlived the pick"
+    clock.advance(10_000)
+    assert len(jobs.queue) == 1, "Change… planned the folder twice"
+    jobs.run(0)
+    assert planned == [picked / "WoW (Yu'lon)"]
+
+
+def test_leaving_the_field_while_its_folder_is_checked_plans_it_once(
+    qapp: object, tmp_path: Path
+) -> None:
+    """M1 (T195): focus leaving the field fires `editingFinished` with a plan already out.
+
+    On a Deck that is how the field is left now that Enter is gone. Mutation:
+    drop the pending check in `_path_edited` and a second job is queued.
+    """
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path)
+    typed = tmp_path / "Games" / "WoW"
+    dialog.path_edit.setText(str(typed))
+    clock.advance(800)
+    assert len(jobs.queue) == 1
+    dialog.path_edit.editingFinished.emit()
+    clock.advance(10_000)
+    assert len(jobs.queue) == 1, "the folder being checked was planned again"
+    assert dialog.size_label.text() == f"Checking {typed}\u2026"
+    jobs.run(0)
+    assert planned == [typed]
+    assert dialog.ok_button.isEnabled()
+
+
+def test_typing_back_to_the_folder_being_checked_plans_it_once(
+    qapp: object, tmp_path: Path
+) -> None:
+    """M1 (T195): away and back while its plan runs, the folder is not planned twice.
+
+    Mutation: drop the pending check in `_path_edited` and a second plan is
+    queued; drop the pending branch in `_path_typed` and the label says it will
+    check when the typing stops, about a folder already being checked.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    dialog, jobs, clock, planned = _typing_dialog(tmp_path)
+    typed = tmp_path / "Games" / "WoW"
+    dialog.path_edit.setText(str(typed))
+    clock.advance(800)
+    assert len(jobs.queue) == 1
+    QTest.keyClick(dialog.path_edit, "x")
+    QTest.keyClick(dialog.path_edit, Qt.Key.Key_Backspace)
+    assert dialog.path_edit.text() == str(typed)
+    # Back on the folder already being checked: it says so, it does not wait.
+    assert dialog.size_label.text() == f"Checking {typed}\u2026"
+    clock.advance(10_000)
+    dialog.path_edit.editingFinished.emit()
+    assert len(jobs.queue) == 1, "the folder being checked was planned again"
+    assert dialog.size_label.text() == f"Checking {typed}\u2026"
+    jobs.run(0)
+    assert planned == [typed]
+    choice = dialog.choice()
+    assert choice is not None and choice.target == typed
 
 
 def test_the_play_refusal_names_the_menu_entry_it_sends_you_to(
@@ -24119,3 +26974,1078 @@ def test_a_followed_log_that_ends_says_the_world_is_not_running(
     assert not said.startswith("finished"), said
     assert "not running" in said, said
     assert "world log line" in view.console_log.text()
+
+
+def _deferred_view(
+    ps: _Ps, tmp_path: Path
+) -> tuple[ControllerView, list[tuple[Callable[[], object], Any, Any]]]:
+    """A Server tab whose jobs wait in a list until the test runs them."""
+    jobs: list[tuple[Callable[[], object], Any, Any]] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        job_runner=lambda work, ok, err: jobs.append((work, ok, err)),
+    )
+    return view, jobs
+
+
+def _compose_up_broke() -> NoReturn:
+    raise docker.DockerCommandError(
+        "docker compose up -d --no-deps ac-database exited 1: Error response from daemon: "
+        "failed to create task for container: OCI runtime create failed"
+    )
+
+
+def test_a_start_that_broke_says_so_in_words_with_dockers_under_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T214: a Start that Docker refused showed Docker's own error text as the line."""
+    from tests.support_player_text import text_faults
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.services.controller.start = _compose_up_broke  # type: ignore[method-assign]
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.start_server()
+
+    said = view.problem_label.text()
+    assert said == controller_view_module.START_FAILED_BROKE
+    assert text_faults(said) == [], said
+    assert "OCI" not in said and "exited" not in said
+    assert _shown(view, view.problem_details)
+    assert "OCI runtime create failed" in view.problem_details.text()
+    assert len(failures) == 1 and "OCI runtime create failed" in failures[0], "the log lost it"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        StartRefused(
+            "This server's last update did not finish importing its world. Press Update again."
+        ),
+        docker.ServerHeldError(docker.SERVER_IN_MOTION),
+        docker.DockerRefusal(
+            "The WSL distro dml-arch no longer exists - it was deleted, or renamed. Everything "
+            "on this tab runs docker inside dml-arch, so nothing here can start."
+        ),
+    ],
+    ids=["start-guard", "held", "distro-gone"],
+)
+def test_a_start_yulon_refused_says_its_own_sentence_as_written(
+    qapp: object, ps: _Ps, tmp_path: Path, refusal: Exception
+) -> None:
+    """T214: Yu'lon's own refusal is the line; there is nothing more to fold away."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    if "dml-arch" in str(refusal):
+        view.services.controller.wsl_distro = "dml-arch"
+
+    def refuse() -> NoReturn:
+        raise refusal
+
+    view.services.controller.start = refuse  # type: ignore[method-assign]
+
+    view.start_server()
+
+    assert view.problem_label.text() == str(refusal)
+    assert view.problem_details.isHidden()
+
+
+def _docker_odd() -> NoReturn:
+    raise docker.DockerCommandError("docker ps exited 1: something Yu'lon has never seen")
+
+
+def _docker_hung() -> NoReturn:
+    raise docker.DockerTimedOutError("docker ps exited 124: timed out after 30.0s")
+
+
+@pytest.mark.parametrize(
+    ("failure", "greyed"),
+    [
+        (_docker_gone, "Start and Stop come back once Docker is installed."),
+        (_docker_odd, "Start and Stop come back once Docker stops answering with that error."),
+        (_docker_hung, "Start and Stop come back when Docker answers."),
+    ],
+)
+def test_a_greyed_start_and_stop_say_what_they_wait_for_per_failure(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Callable[[], NoReturn],
+    greyed: str,
+) -> None:
+    """T214: "come back when Docker answers" stood under a Docker not installed, or erroring."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _steam_deck_without_docker(monkeypatch, steamos=False)
+    monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
+    view.services.controller.status = failure  # type: ignore[method-assign]
+    view.services.controller.start = failure  # type: ignore[method-assign]
+
+    view.start_server()
+
+    assert view.docker_banner.isVisibleTo(view)
+    for press in (view.start_button, view.stop_button):
+        assert not press.isEnabled(), press.text()
+        assert press.toolTip() == greyed, press.text()
+    assert view.server_reasons.text() == greyed
+
+
+def _run_the_start(view: ControllerView, jobs: list[Any]) -> None:
+    """Run only the Start's own job; the follow-up status read stays queued."""
+    start = [job for job in jobs if job[2] == view._start_failed]
+    assert len(start) == 1, jobs
+    jobs.remove(start[0])
+    run_inline(*start[0])
+    assert any(job[1] == view._status_ready for job in jobs), "no follow-up read was asked"
+
+
+@pytest.mark.parametrize("machine", ["deck", "linux", "windows-down"])
+def test_a_start_that_points_at_the_box_puts_the_box_up_itself(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine: str
+) -> None:
+    """Fix round 2, O1: "in the box above" with no box until the next poll answered."""
+    view, jobs = _deferred_view(ps, tmp_path)
+    if machine == "deck":
+        _steam_deck_without_docker(monkeypatch)
+        view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+        view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+        pointer = controller_view_module.START_FAILED_DOCKER_GONE
+    elif machine == "linux":
+        _steam_deck_without_docker(monkeypatch, steamos=False)
+        monkeypatch.setattr(yulon_platform, "detect", lambda: "linux")
+        view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+        view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+        pointer = controller_view_module.START_FAILED_DOCKER_MISSING
+    else:
+        _windows_with_docker_desktop_down(monkeypatch)
+        pointer = controller_view_module.START_FAILED_NO_DOCKER
+    jobs.clear()
+
+    view.start_server()
+    _run_the_start(view, jobs)
+
+    assert view.problem_label.text() == pointer
+    assert view.docker_banner.isVisibleTo(view), "the line points at a box that is not there"
+    assert view.docker_banner.body_label.text() not in view.problem_label.text()
+    assert view.realm_badge.status == "unknown"
+    assert view.status_label.text() == controller_view_module.STATUS_SEE_THE_BANNER
+    if machine == "deck":
+        assert view.reinstall_docker_button.isVisibleTo(view)
+        assert view.reinstall_docker_button.isEnabled()
+    else:
+        assert not view.reinstall_docker_button.isVisibleTo(view)
+
+    # The follow-up read failing the same way changes nothing on screen.
+    shown = view.docker_banner.body_label.text()
+    for work, ok, err in list(jobs):
+        if ok == view._status_ready:
+            jobs.remove((work, ok, err))
+            run_inline(work, ok, err)
+    assert view.docker_banner.isVisibleTo(view)
+    assert view.docker_banner.body_label.text() == shown
+
+
+# -- T194: results and failures in plain words (C34, A24/I5, C12/C14) ---------
+
+
+def test_add_to_steam_says_the_result_in_words_and_folds_the_files_away(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C34: the paths, backups and compatibility tool came first, "Restart Steam" last."""
+    services = _services(ps, tmp_path, [])
+    services.steam = _FakeSteam(_report(tmp_path))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.steam_button is not None
+    assert view.steam_details.isHidden(), "Details are up before anything was written"
+
+    view.steam_button.click()
+
+    said = view.steam_label.text()
+    assert said.startswith("Added to your Steam library"), said
+    assert "Restart Steam" in said
+    assert "/" not in said, said
+    details = view.steam_details
+    assert details.isVisibleTo(view)
+    assert details.collapsed, "the files are open before anyone asked for them"
+    assert not details.text_box.isVisibleTo(view)
+    assert "shortcuts.vdf.yulon-bak-20260910-200500" in details.text()
+    assert "GE-Proton11-6-x86_64" in details.text()
+    assert str(tmp_path / "userdata/18347166/config/grid") in details.text()
+
+    details.handle.toggle()
+    assert details.text_box.isVisibleTo(view)
+    assert details.text_box.isReadOnly()
+    assert "shortcuts.vdf" in details.text_box.toPlainText()
+
+
+def test_a_refused_add_to_steam_takes_the_last_presss_details_down(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fold under a refusal would hold files this press never wrote."""
+    services = _services(ps, tmp_path, [])
+    fake = _FakeSteam(_report(tmp_path))
+    services.steam = fake
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.steam_button is not None
+    view.steam_button.click()
+    assert view.steam_details.isVisibleTo(view)
+
+    fake.outcome = steam.SteamRefusal(steam.RUNNING)
+    view.steam_button.click()
+
+    assert "Steam is running" in view.steam_label.text()
+    assert view.steam_details.isHidden()
+
+
+def _netsh_plan(mode: str) -> NetworkPlan:
+    """A Windows plan with every kind of command: firewall rules, a portproxy and the SQL."""
+    return NetworkPlan(
+        mode=cast(Any, mode),
+        game_id="wow-wotlk",
+        lan_ip="192.168.1.25",
+        public_ip=None,
+        ports=(3724, 8085),
+        firewall="netsh",
+        firewall_commands=(
+            (
+                "netsh",
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Yulon 3724",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                "localport=3724",
+            ),
+        ),
+        portproxy_commands=(
+            (
+                "netsh",
+                "interface",
+                "portproxy",
+                "add",
+                "v4tov4",
+                "listenport=3724",
+                "connectaddress=172.20.0.2",
+            ),
+        ),
+        realmlist_sql="UPDATE realmlist SET address='192.168.1.25' WHERE id=1;",
+        client_realmlist="192.168.1.25",
+    )
+
+
+def test_the_network_plan_reads_as_words_and_the_commands_are_in_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A24/I5: argv lists and the realmlist UPDATE were the plan a player read."""
+    from tests.support_player_text import visible_texts
+
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    page = view.network_text.parentWidget()
+    view.show_network_plan()
+
+    shown = view.network_text.toPlainText()
+    for word in ("netsh", "UPDATE", "advfirewall", "portproxy", "localport=", "('"):
+        assert word not in shown, f"{word!r} is in the plan a player reads:\n{shown}"
+    assert "192.168.1.25" in shown, shown
+    assert "3724" in shown and "8085" in shown, shown
+    assert "Windows Firewall" in shown, shown
+    for _name, _where, text in visible_texts(page):
+        assert "netsh" not in text and "UPDATE" not in text, text
+
+    details = view.network_details
+    assert details.isVisibleTo(page) and details.collapsed
+    held = details.text()
+    assert (
+        "netsh advfirewall firewall add rule name=Yulon 3724 dir=in action=allow protocol=TCP "
+        "localport=3724"
+    ) in held, held
+    assert "netsh interface portproxy add v4tov4 listenport=3724 connectaddress=172.20.0.2" in held
+    assert "UPDATE realmlist SET address='192.168.1.25' WHERE id=1;" in held
+    assert view.apply_button.isEnabled()
+
+
+def test_a_plan_with_nothing_to_run_has_no_details_fold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """No commands and no SQL: a fold with nothing in it is a press that shows nothing."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: replace(
+        _netsh_plan(mode),
+        firewall="none",
+        firewall_commands=(),
+        portproxy_commands=(),
+        realmlist_sql=None,
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    assert view.network_details.isHidden()
+
+
+def test_a_plan_or_apply_that_fails_says_so_in_a_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C12/C14: "could not plan:" and "APPLY FAILED:" read as shouted log lines."""
+    services = _services(ps, tmp_path, [])
+
+    def refuses(mode: str) -> NetworkPlan:
+        raise RuntimeError("the LAN address could not be read")
+
+    services.network_plan = refuses
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.show_network_plan()
+    # R4 (T194 final fix): a sentence, the reason folded under Details, like Apply.
+    assert view.network_text.toPlainText() == (
+        "Yu'lon could not work out the plan. Details below says why."
+    )
+    assert view.network_details.text() == "What went wrong: the LAN address could not be read"
+    assert view.network_details.collapsed and not view.network_details.isHidden()
+    assert failures == ["the LAN address could not be read"]
+
+    services.network_plan = _netsh_plan
+
+    def apply_refuses(plan: NetworkPlan) -> NetworkReport:
+        raise RuntimeError("netsh needs an administrator")
+
+    services.network_apply = apply_refuses
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    # F7 (T194 final fix): the reason is Details', folded; the box says it in words.
+    assert shown.endswith("\nApply did not finish. Details below says why."), shown
+    assert "netsh needs an administrator" not in shown
+    assert "APPLY FAILED" not in shown
+    assert "netsh needs an administrator" in view.network_details.text()
+    assert view.network_details.collapsed and not view.network_details.isHidden()
+
+
+def test_an_apply_that_breaks_in_docker_keeps_dockers_words_off_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F7 (T194 final fix): `_apply_failed` showed the raw text of whatever it caught."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+
+    def apply_breaks(plan: NetworkPlan) -> NetworkReport:
+        raise docker.DockerCommandError(RAW_DOCKERISH)
+
+    services.network_apply = apply_breaks
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.show_network_plan()
+    view.apply_network_plan()
+
+    shown = view.network_text.toPlainText()
+    assert "exited 1" not in shown and "ERROR 2002" not in shown, shown
+    assert shown.endswith("\nApply did not finish. Details below says why."), shown
+    assert RAW_DOCKERISH in view.network_details.text()
+    assert view.network_details.collapsed
+    assert failures == [RAW_DOCKERISH], "the raw text no longer reaches the app log"
+
+
+def test_a_backup_that_breaks_in_docker_says_so_in_words_and_folds_the_reason(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F7 (T194 final fix): the Restore box said "FAILED: docker exec ... exited 1: ..."."""
+    made = _FakeMaintenance()
+    healthy = made.back_up
+    broken = [True]
+
+    def breaks() -> BackupReport:
+        if broken[0]:
+            raise docker.DockerCommandError(RAW_DOCKERISH)
+        return healthy()
+
+    made.back_up = breaks  # type: ignore[method-assign]
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.back_up()
+
+    shown = view.maintenance_report.toPlainText()
+    assert shown == "The backup did not finish. Details below says why."
+    assert "FAILED" not in shown and "exited" not in shown
+    assert RAW_DOCKERISH in view.maintenance_details.text()
+    assert view.maintenance_details.collapsed and not view.maintenance_details.isHidden()
+    assert failures == [RAW_DOCKERISH], "the raw text no longer reaches the app log"
+
+    broken[0] = False
+    view.back_up()
+    assert "Backed up to" in view.maintenance_report.toPlainText()
+    assert view.maintenance_details.isHidden(), "an old failure's reason under a new success"
+
+
+def test_a_backup_whose_docker_exec_fails_keeps_the_pipe_path_off_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 (T194 final fix): `MaintenanceError` carried docker exec's stderr into the box."""
+    from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
+
+    pipe = (
+        b"error during connect: open //./pipe/dockerDesktopLinuxEngine: The system cannot "
+        b"find the file specified."
+    )
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[bytes]:
+        if kw.get("input") is not None:
+            return subprocess.CompletedProcess(argv, 0, b"acore_world\n", b"")
+        return subprocess.CompletedProcess(argv, 1, b"", pipe)
+
+    made = _FakeMaintenance()
+    made.back_up = lambda: wotlk_maintenance.backup(  # type: ignore[method-assign]
+        tmp_path,
+        wotlk_maintenance.DockerMysql("ac-database", "pw"),
+        running=lambda: ["ac-database"],
+    )
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    monkeypatch.setattr(wotlk_maintenance.subprocess, "run", fake_run)
+
+    view.back_up()
+
+    shown = view.maintenance_report.toPlainText()
+    assert "pipe" not in shown and "error during connect" not in shown, shown
+    assert "INCOMPLETE" in shown, shown
+    assert "//./pipe/" in view.maintenance_details.text()
+    assert view.maintenance_details.collapsed and not view.maintenance_details.isHidden()
+    assert failures and "//./pipe/" in failures[0], "the detail no longer reaches the app log"
+
+
+def test_a_backup_refusal_yulon_wrote_is_the_report_itself(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F7: a `MaintenanceError` is a sentence for the player, so it is not folded away."""
+    made = _FakeMaintenance()
+    refusal = (
+        "ac-database is not running, so there is no database to back up. Start the server first."
+    )
+
+    def refuses() -> BackupReport:
+        raise MaintenanceError(refusal)
+
+    made.back_up = refuses  # type: ignore[method-assign]
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+
+    view.back_up()
+
+    assert view.maintenance_report.toPlainText() == refusal
+    assert view.maintenance_details.isHidden()
+
+
+def test_a_dashboard_read_that_breaks_says_so_in_words_and_logs_the_reason(
+    qapp: object, ps: _Ps, tmp_path: Path, caplog: Any
+) -> None:
+    """F7 (T194 final fix): the verdict line said "could not read ...: docker exec ...".
+
+    Docker answering with an error is not Docker being away, so the banner stays
+    down and the verdict line itself says the read failed.
+    """
+
+    def dashboard_read() -> dashboard.Verdict:
+        raise docker.DockerCommandError(RAW_DOCKERISH)
+
+    services = _services(ps, tmp_path, [])
+    services.dashboard = dashboard_read
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    with caplog.at_level(logging.DEBUG):
+        view.refresh_verdict()
+
+    shown = view.verdict_label.text()
+    assert shown == (
+        "Yu'lon couldn't read this server's dashboard just now; the Logs tab has the reason."
+    )
+    assert not view.verdict_label.isHidden()
+    assert any(RAW_DOCKERISH in r.getMessage() for r in caplog.records)
+
+
+def test_the_status_line_names_the_three_servers_in_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """C12: "status: db up, auth up, world down" was three abbreviations and a colon."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.status_label.text() == "Status unknown"
+    spec = WOTLK.container_spec()
+    ps.names = "\n".join([spec.db, spec.auth])
+
+    view.refresh_status()
+
+    assert view.status_label.text() == (
+        "Database running · Login server running · World server stopped"
+    )
+
+
+def test_a_good_poll_takes_the_starts_pointer_at_the_box_down_with_the_box(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 2's carried finding: "See the box above" stayed up after the box went."""
+    view, jobs = _deferred_view(ps, tmp_path)
+    real_status = view.services.controller.status
+    _steam_deck_without_docker(monkeypatch)
+    view.services.controller.start = _docker_gone  # type: ignore[method-assign]
+    view.services.controller.status = _docker_gone  # type: ignore[method-assign]
+    jobs.clear()
+    view.start_server()
+    _run_the_start(view, jobs)
+    assert view.problem_label.text() == controller_view_module.START_FAILED_DOCKER_GONE
+
+    # The Start's own follow-up read fails the same way: the box stays, and so
+    # does the line pointing at it.
+    for work, ok, err in list(jobs):
+        jobs.remove((work, ok, err))
+        run_inline(work, ok, err)
+    assert view.docker_banner.isVisibleTo(view)
+    assert view.problem_label.text() == controller_view_module.START_FAILED_DOCKER_GONE
+
+    # Docker is back: the next poll is a good one.
+    view.services.controller.status = real_status  # type: ignore[method-assign]
+    ps.names = WOTLK.container_spec().db
+    view.refresh_status()
+    while jobs:
+        run_inline(*jobs.pop(0))
+
+    assert view.docker_banner.isHidden()
+    assert view.problem_label.text() == ""
+    assert view.problem_label.isHidden()
+
+
+def test_a_good_poll_leaves_any_other_problem_line_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Only the three pointers at the box go with it; a refusal of another kind stays."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.problem_label.setText("Port 3724 is in use by another program.")
+    ps.names = WOTLK.container_spec().db
+    view.refresh_status()
+    assert view.problem_label.text() == "Port 3724 is in use by another program."
+
+
+def test_the_apply_result_reads_as_words_and_the_commands_are_in_details(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 1, M3: Apply printed the netsh lines it ran and the SQL it could not."""
+    from tests.support_player_text import visible_texts
+
+    plan = _netsh_plan("lan")
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: plan
+    services.network_apply = lambda p: NetworkReport(
+        plan=p,
+        done=(" ".join(plan.firewall_commands[0]),),
+        skipped=(
+            " ".join(plan.portproxy_commands[0]) + ": exit 1 Access is denied. — run it by hand",
+            f"realmlist not updated (no DB access): {plan.realmlist_sql}",
+        ),
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    page = view.network_text.parentWidget()
+    view.show_network_plan()
+    view.apply_network_plan()
+
+    shown = view.network_text.toPlainText()
+    for word in ("netsh", "UPDATE", "advfirewall", "portproxy", "realmlist not updated"):
+        assert word not in shown, f"{word!r} is in what Apply says:\n{shown}"
+    assert "Apply finished 1 of 3 steps." in shown, shown
+    assert "2 could not be done" in shown, shown
+    for _name, _where, text in visible_texts(page):
+        assert "netsh" not in text and "UPDATE" not in text, text
+    held = view.network_details.text()
+    assert "netsh interface portproxy add v4tov4" in held and "Access is denied" in held, held
+    assert "realmlist not updated (no DB access): UPDATE realmlist" in held, held
+    assert "netsh advfirewall firewall add rule" in held, held
+    assert view.network_details.collapsed
+
+
+def test_the_modes_are_named_as_their_radio_buttons_say_them(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Fix round 1, M7: the plan's mode words are the radio labels, not a second copy."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    for radio in (view.lan_radio, view.internet_radio, view.loopback_radio):
+        radio.setChecked(True)
+        view.show_network_plan()
+        assert f"Playing: {radio.text()}" in view.network_text.toPlainText()
+
+
+# -- T195: a greyed press says why; empty panels say what to do (I3/A10/A23/I4, C35, A26)
+
+
+def test_networking_before_a_plan_says_to_press_show_plan(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I3: Apply sat greyed with nothing to say, over an empty box.
+
+    Mutation: build Apply with a bare `setEnabled(False)` and its tooltip is empty.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert not view.apply_button.isEnabled()
+    reason = view.apply_button.toolTip()
+    assert reason.startswith("Press Show plan first"), reason
+    assert not view.network_reasons.isHidden()
+    assert view.network_reasons.text() == reason
+    assert view.network_text.placeholderText().startswith("Choose who plays with you")
+    assert view.network_text.toPlainText() == ""
+
+    view.show_network_plan()
+
+    assert view.apply_button.isEnabled()
+    assert view.apply_button.toolTip() == ""
+    assert view.network_reasons.isHidden()
+
+
+def test_maintenance_with_backups_says_to_pick_one_and_show_its_plan(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A10: two backups listed, Restore greyed and the report empty, and nothing said why.
+
+    Mutation: drop the placeholder and the report box is blank again.
+    """
+    made = _FakeMaintenance()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    directory = tmp_path / "sql_scripts" / "backups"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("acore_characters-1.sql", "acore_characters-2.sql"):
+        (directory / name).write_bytes(b"-- dump\n")
+
+    view.refresh_backups()
+
+    assert view.backup_list.count() == 2
+    assert view.maintenance_report.toPlainText() == ""
+    hint = view.maintenance_report.placeholderText()
+    assert hint.startswith("Pick a backup") and "Show restore plan" in hint, hint
+    assert not view.restore_button.isEnabled()
+    assert view.restore_button.toolTip() == hint
+    assert not view.restore_reasons.isHidden()
+    assert view.restore_reasons.text() == hint
+
+    view.backup_list.setCurrentRow(0)
+    view.show_restore_plan()
+
+    assert view.restore_button.isEnabled()
+    assert view.restore_button.toolTip() == ""
+    assert view.restore_reasons.isHidden()
+
+
+def test_maintenance_with_no_backups_says_to_make_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.backup_list.count() == 0
+    reason = view.restore_button.toolTip()
+    assert "Back up now" in reason, reason
+    assert view.restore_reasons.text() == reason
+
+
+def test_a_refused_restore_plan_says_why_restore_stays_greyed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    made = _FakeMaintenance()
+    made.refusals = ("the server is running",)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, [], made), status_poll_ms=0)
+    _add_backup(view, tmp_path)
+
+    view.show_restore_plan()
+
+    assert not view.restore_button.isEnabled()
+    reason = view.restore_button.toolTip()
+    assert "cannot be restored" in reason, reason
+    assert view.restore_reasons.text() == reason
+
+
+def test_accounts_with_nothing_chosen_say_to_choose_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A23: Set password and Set GM level greyed under a list, with no word why."""
+    view = ControllerView(
+        WOTLK,
+        _with_accounts(ps, tmp_path, _StubAccounts()),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
+    view.refresh_accounts()
+
+    for button in (view.set_password_button, view.set_gm_button):
+        assert not button.isEnabled()
+        assert button.toolTip() == "Choose an account first."
+    assert not view.account_reasons.isHidden()
+    assert view.account_reasons.text() == "Choose an account first."
+
+    view.account_list.setCurrentRow(0)
+
+    for button in (view.set_password_button, view.set_gm_button):
+        assert button.isEnabled() and button.toolTip() == ""
+    assert view.account_reasons.isHidden()
+
+
+def test_a_running_start_greys_the_server_presses_with_a_wait(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """I4: during a Start every Server press was grey, and nothing said it was waiting.
+
+    The Start never answers here, so the tab stays busy for the asserts.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    base = view.forget_install_button.toolTip()
+    view._run = lambda *_a, **_k: None  # type: ignore[method-assign]
+
+    view.start_button.click()
+
+    line = view.server_reasons
+    assert not line.isHidden()
+    assert line.text() == "Wait: Start is running.", line.text()
+    for button in (
+        view.start_button,
+        view.stop_button,
+        view.refresh_button,
+        view.remove_button,
+        view.forget_install_button,
+    ):
+        assert not button.isEnabled(), button.text()
+        assert button.toolTip() == "Wait: Start is running.", button.text()
+
+    view._set_busy(False)
+
+    assert "Wait:" not in line.text()
+    assert view.forget_install_button.toolTip() == base
+
+
+def test_the_server_line_says_why_start_or_stop_is_greyed_after_a_reading(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.refresh_status()
+
+    assert view.start_button.isEnabled()
+    assert not view.stop_button.isEnabled()
+    assert view.stop_button.toolTip() == "The server is not running."
+    assert view.server_reasons.text() == "The server is not running."
+
+
+def _shown_in_row(press: Any) -> list[Any]:
+    """The presses in `press`'s flow row that are not hidden, in the row's order."""
+    flow = press.parentWidget().flow()
+    widgets = [flow.itemAt(i).widget() for i in range(flow.count())]
+    return [w for w in widgets if w is not None and not w.isHidden()]
+
+
+def test_an_armed_remove_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """C35: the way out of an armed press was "Press Refresh to cancel.", a press elsewhere.
+
+    Mutation: leave Cancel's click unconnected and the remove stays armed.
+    """
+    from PySide6.QtWidgets import QGroupBox
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_remove(view)
+    cancel = view.arm_cancel_button
+    assert cancel.isHidden() and cancel.text() == "Cancel"
+
+    view.remove_button.click()
+
+    assert not cancel.isHidden()
+    danger = view.findChild(QGroupBox, "danger-zone")
+    assert danger is not None and danger.isAncestorOf(cancel)
+    row = _shown_in_row(view.remove_button)
+    assert abs(row.index(cancel) - row.index(view.remove_button)) == 1, [b.text() for b in row]
+    said = view.danger_label.text()
+    assert said.endswith("Press it again to go ahead, or Cancel."), said
+    assert "Press Refresh to cancel" not in said
+
+    view.problem_label.setText("Port 3724 is in use by another program.")
+    cancel.click()
+
+    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    assert cancel.isHidden()
+    assert view.danger_label.isHidden()
+    # Fix round 1, F5 (the lead's ruling): only what the armed press wrote goes.
+    assert view.problem_label.text() == "Port 3724 is in use by another program."
+    view.remove_button.click()
+    assert calls == [], "the press after Cancel removed something"
+
+
+def test_an_armed_repair_offers_cancel_beside_it(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    calls = _watch_repair(view)
+    _db_up(view, ps)
+    cancel = view.arm_cancel_button
+    assert not view.repair_button.isHidden(), "the repair is not offered"
+
+    view.repair_button.click()
+
+    assert not cancel.isHidden()
+    row = _shown_in_row(view.repair_button)
+    assert abs(row.index(cancel) - row.index(view.repair_button)) == 1, [b.text() for b in row]
+    said = view.danger_label.text()
+    assert said.endswith("Press it again to go ahead, or Cancel."), said
+    assert "Refresh" not in said
+
+    cancel.click()
+
+    assert view.repair_button.text() == controller_view_module.REPAIR_IDLE
+    assert cancel.isHidden()
+    assert view.danger_label.isHidden()
+    view.repair_button.click()
+    assert calls == [], "the press after Cancel imported something"
+
+
+def test_the_bot_pages_say_which_page_of_how_many(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """A26: "Page 3, 50 shown." while the total was known."""
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Guglu", level=14, online=True, source="registry")],
+            total=372,
+            by_registry=372,
+            next_after=("Guglu", 4),
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+    assert "Page 1 of 8" in view.bot_summary.text(), view.bot_summary.text()
+
+    view.next_bot_page()
+    view.next_bot_page()
+
+    said = view.bot_summary.text()
+    assert "Page 3 of 8" in said, said
+    assert "shown" not in said
+
+
+def _greys_without_a_reason(view: ControllerView, size: tuple[int, int]) -> list[str]:
+    """Every visible greyed press on `view`'s sub-tabs whose reason is not on its tab.
+
+    Tuning and Modules are left out: their greyed presses explain themselves in
+    their own tooltips and strips, and both tabs are other tickets' to fit.
+    Each sub-tab is also checked for being drawn squeezed (`_page_faults`).
+    """
+    from PySide6.QtWidgets import QAbstractButton
+
+    from yulon.ui.widgets.reasons import ReasonLine
+
+    window, _tab = _controller_in_the_real_window(view, "Server")
+    _at(window, size)
+    faults: list[str] = []
+    for index in range(view._tabs.count()):
+        title = view._tabs.tabText(index)
+        if title in ("Tuning", "Modules"):
+            continue
+        view._tabs.setCurrentIndex(index)
+        process_events()
+        page = view._tabs.widget(index)
+        lines = [line for line in page.findChildren(ReasonLine) if line.isVisible()]
+        for button in page.findChildren(QAbstractButton):
+            if not button.isVisible() or button.isEnabled():
+                continue
+            reason = button.toolTip()
+            if not reason:
+                faults.append(f"{title}: {button.text()!r} has no reason")
+            elif not any(reason in line.text().splitlines() for line in lines):
+                faults.append(f"{title}: {button.text()!r}'s reason is not on the tab")
+        if found := _page_faults(page):
+            faults.append(f"{title}: {found}")
+    window.close()
+    return faults
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_greyed_press_says_why_on_its_own_sub_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """I3/A10/A23/I4: a Deck has no hover, so the reason is on the tab, not only in a tooltip."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    faults = _greys_without_a_reason(view, size)
+    assert faults == [], "\n".join(faults)
+
+
+@pytest.mark.parametrize("size", T191_SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_every_greyed_press_says_why_after_the_tabs_have_read_the_server(
+    qapp: object, ps: _Ps, tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """The same rule once a status reading, the accounts, the characters and the bots are in.
+
+    Fix round 1, F2: the first sweep ran on a view that had read nothing, so
+    the presses a reading greys (Stop, Previous, a chosen-nothing list's
+    actions) were never looked at.
+    """
+    from tests.test_characters_tab import _people, _Play
+
+    services = _with_accounts(ps, tmp_path, _StubAccounts())
+    services.play = _Play(characters=_people())
+    services.bots = _StubBots()
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view.refresh_status()
+    view.refresh_accounts()
+    view.refresh_characters()
+    view.refresh_bots()
+    assert not view.stop_button.isEnabled(), "the reading did not grey Stop"
+    assert not view.previous_bots_button.isEnabled(), "the bots are not on their first page"
+
+    faults = _greys_without_a_reason(view, size)
+
+    assert faults == [], "\n".join(faults)
+
+
+def _a_running_wotlk(ps: _Ps) -> str:
+    spec = WOTLK.container_spec()
+    ps.names = "".join(f"{name}\n" for name in (spec.db, spec.auth, spec.world))
+    return ps.names
+
+
+def test_docker_going_away_under_a_running_server_greys_stop_as_well_as_start(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux live test of PR 291, item 2: Stop stayed live under "Start and Stop come back...".
+
+    The server was running, so Stop was enabled; Docker stopped answering, the
+    box went up, and only the greyed Start took the box's reason. Pressing Stop
+    then ran a stop that could only fail.
+
+    Mutation: grey only the presses that were already greyed, and Stop is
+    enabled at the second block.
+    """
+    names = _a_running_wotlk(ps)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.refresh_status()
+    assert view.stop_button.isEnabled() and not view.start_button.isEnabled()
+
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    down.names = names
+    view.refresh_status()
+
+    assert view.docker_banner.isVisibleTo(view)
+    said = "Start and Stop come back when Docker answers."
+    for press in (view.start_button, view.stop_button):
+        assert not press.isEnabled(), press.text()
+        assert press.toolTip() == said, press.text()
+    assert view.server_reasons.text() == said
+
+    down.down = False
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert view.stop_button.isEnabled(), "Docker answered and the server runs"
+    assert not view.start_button.isEnabled()
+    assert said not in view.server_reasons.text()
+
+
+def test_a_stop_docker_could_not_hear_says_so_plainly_and_goes_when_docker_answers(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2's other half: a Stop pressed before the box went up printed Docker's raw words.
+
+    "could not ask Docker what is running, so the stop cannot be confirmed", in
+    lower case under the presses, and it stayed there after Docker came back.
+
+    Mutation: show `str(exc)` again, and the first assert reads the raw words;
+    leave the line out of `_POINTERS_AT_THE_BANNER`, and it outlives the box.
+    """
+    from tests.support_player_text import player_text_faults
+
+    names = _a_running_wotlk(ps)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.refresh_status()
+    assert view.stop_button.isEnabled()
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    down.names = names
+
+    view.stop_server()
+
+    line = controller_view_module.STOP_FAILED_NO_DOCKER
+    assert view.problem_label.text() == line
+    assert failures == [line]
+    assert view.docker_banner.isVisibleTo(view), "the follow-up poll failed too"
+    assert player_text_faults(view) == []
+
+    down.down = False
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert view.problem_label.text() == ""
+
+
+def test_a_good_reading_during_a_busy_job_replaces_the_see_above_line(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """F4 (T194 final fix): busy, a failed poll, a good poll -- "see above" with no box."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    real_status = view.services.controller.status
+
+    def no_docker() -> NoReturn:
+        raise docker.DockerCommandError(f"docker ps exited 1: {NPIPE_DOWN}")
+
+    view._set_busy(True, "the bot rebuild")
+    view.services.controller.status = no_docker  # type: ignore[method-assign]
+    view.refresh_status()
+    assert view.status_label.text() == "Status unknown (see above)"
+    assert view.docker_banner.isVisibleTo(view)
+
+    view.services.controller.status = real_status  # type: ignore[method-assign]
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert view.status_label.text() == controller_view_module._status_words(real_status())
+    assert "above" not in view.status_label.text()
+    view._set_busy(False)
+
+
+def test_cancel_leaves_a_pointer_at_the_docker_box_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, F5: Cancel wiped "See the box above" while the box was still up."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _windows_with_docker_desktop_down(monkeypatch)
+    view.start_server()
+    pointer = controller_view_module.START_FAILED_NO_DOCKER
+    assert view.problem_label.text() == pointer
+    _watch_remove(view)
+
+    view.remove_button.click()
+    view.arm_cancel_button.click()
+
+    assert view.problem_label.text() == pointer
+    assert view.remove_button.text() == controller_view_module.REMOVE_IDLE
+    assert view.docker_banner.isVisibleTo(view)
+
+
+def test_a_start_docker_could_not_hear_leaves_start_and_stop_saying_why(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, F1: both stayed greyed with an empty tooltip and no line."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    down = _windows_with_docker_desktop_down(monkeypatch)
+    said = "Start and Stop come back when Docker answers."
+
+    view.start_server()
+
+    assert view.docker_banner.isVisibleTo(view)
+    for press in (view.start_button, view.stop_button):
+        assert not press.isEnabled(), press.text()
+        assert press.toolTip() == said, press.text()
+    assert view.server_reasons.isVisibleTo(view)
+    assert view.server_reasons.text() == said
+
+    down.down = False
+    view.refresh_status()
+
+    assert view.docker_banner.isHidden()
+    assert said not in view.server_reasons.text()
+    assert view.start_button.isEnabled()
+    assert view.stop_button.toolTip() == "The server is not running."

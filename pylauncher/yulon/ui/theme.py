@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from yulon import resources
+
 if TYPE_CHECKING:
     from PySide6.QtGui import QPalette
     from PySide6.QtWidgets import QApplication, QWidget
@@ -150,6 +152,27 @@ it the size the launcher is built around, in the theme's colours.
 """
 
 
+SIDEBAR_PIN_BUTTON = "sidebar-pin"
+"""objectName of the Catalog and Logs buttons pinned above the sidebar rail (T192, `sidebar.py`)."""
+
+SIDEBAR_PIN_GAP = 4
+"""The gap (px) above, between and below the two pinned buttons (`sidebar.SidebarPins`)."""
+
+SIDEBAR_RAIL_WIDTH = 64
+"""The rail's thickness (px): what a server tab measures across it under the
+`QTabWidget#sidebar-tabs > QTabBar::tab` rule (measured offscreen 2026-10-03), and
+the floor `sidebar.SidebarRail` keeps when every tab in it is hidden."""
+
+
+CHECK_UPDATES_BUTTON = "check-for-updates"
+"""objectName of the header's "Check for updates" (T90; a real button since T193).
+
+The header is 56px tall with 6px margins, so a button with the theme's 8px
+vertical padding (50px) stood out over its bottom edge. Its rule keeps the
+touch floor and trims only the padding.
+"""
+
+
 # --- Handheld geometry floors -------------------------------------------------
 # The launcher ships on the Steam Deck (1280x800, 7"), driven by controller and
 # touch. Every interactive widget gets a floor of at least `TOUCH_TARGET_PX` in
@@ -185,9 +208,39 @@ def _touch(base: int, scale: float) -> str:
     return f"{max(TOUCH_TARGET_PX, round(base * eased))}px"
 
 
+def _scroller_width(base: int, scale: float) -> str:
+    """A tab bar's two scroll arrows side by side: each `_touch()` plus a 1 px border either side.
+
+    Qt's style sheet gives each arrow half of `QTabBar::scroller`'s width.
+    """
+    return f"{2 * (int(_touch(base, scale).removesuffix('px')) + 2)}px"
+
+
 def _px(base: int, scale: float) -> str:
     """A font size at `scale`, floored so text never becomes unreadable."""
     return f"{max(MIN_FONT_PX, round(base * scale))}px"
+
+
+def _image(name: str) -> str:
+    """`url("<path>")` for one of the theme's SVGs (T193), read at build time.
+
+    Quoted, because the path is the install's: `...\\Yu'lon\\...` carries an
+    apostrophe and often spaces, and an unquoted `url()` would end at either.
+    Forward slashes on every platform, which is what Qt's URL parser expects.
+    Looked up through the module on each call, so a sheet built for a moved
+    bundle (or a test's copy) names the files that are really there.
+    """
+    return f'url("{(resources.theme_images_dir() / name).as_posix()}")'
+
+
+def _indicator_px(scale: float) -> int:
+    """The checkbox / radio indicator's side (px) at `scale`, without its 1px border."""
+    return int(_touch(22, scale).removesuffix("px"))
+
+
+def _spin_button_px(scale: float) -> int:
+    """The side (px) of each of a spin box's square − and + buttons at `scale`."""
+    return int(_touch(28, scale).removesuffix("px"))
 
 
 def _build_qss(scale: float) -> str:
@@ -274,8 +327,10 @@ QTabBar::tab:focus, QTabBar::tab:top:focus {{
    Selected by objectName (`sidebar-tabs` in main.py), never by a negation and
    never by the `:west` pseudo-state: Qt does not reliably honour positional
    pseudo-states on `::tab` (measured). The right edge is left unbordered so the
-   rail merges into the pane beside it. */
-QTabWidget#sidebar-tabs QTabBar::tab {{
+   rail merges into the pane beside it. A CHILD selector (T193, found by T189):
+   with a space it reached every tab bar below the rail too, and capped a
+   server page's own sub-tabs at the rail's 64px. */
+QTabWidget#sidebar-tabs > QTabBar::tab {{
     background-color: {COLOR_BG_PANEL};
     color: {COLOR_TEXT_MUTED};
     border: 1px solid transparent;
@@ -288,21 +343,59 @@ QTabWidget#sidebar-tabs QTabBar::tab {{
     min-height: {_touch(44, scale)};
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:hover {{
+QTabWidget#sidebar-tabs > QTabBar::tab:hover {{
     background-color: #242424;
     color: {COLOR_GOLD_LIGHT};
     border: 1px solid {COLOR_GOLD_BRASS};
     border-left: 3px solid {COLOR_GOLD_BRASS};
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:selected {{
+QTabWidget#sidebar-tabs > QTabBar::tab:selected {{
     background-color: {COLOR_BG_CONTAINER};
     color: {COLOR_GOLD_BRIGHT};
     border: 1px solid {COLOR_BRASS_DARK};
     border-left: 3px solid {COLOR_GOLD_BRIGHT};
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:focus {{
+QTabWidget#sidebar-tabs > QTabBar::tab:focus {{
+    border: 1px solid {COLOR_GOLD_BRIGHT};
+    border-left: 3px solid {COLOR_GOLD_BRIGHT};
+}}
+
+/* T192: Catalog and Logs, pinned above the rail, each drawn as a rail tab is:
+   muted at rest, the gold left edge while its page is on screen. The bar is
+   pushed down by the strip they fill, and that offset is set by `SidebarPins`
+   from the pins' own size hint, not here: their height is the platform font's
+   (an icon over a label), and an offset spelled in this sheet would have to
+   guess it. No horizontal padding: "Catalog" plus the 3px edge just fits the
+   64px rail, and with 2px a side it asked for 66 (measured). */
+QToolButton#{SIDEBAR_PIN_BUTTON} {{
+    background-color: {COLOR_BG_PANEL};
+    color: {COLOR_TEXT_MUTED};
+    border: 1px solid transparent;
+    border-left: 3px solid transparent;
+    border-radius: 0px;
+    padding: 2px 0px;
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(12, scale)};
+    min-height: {_touch(30, scale)};
+}}
+
+QToolButton#{SIDEBAR_PIN_BUTTON}:hover {{
+    background-color: {COLOR_BG_PARCHMENT_LIGHT};
+    color: {COLOR_GOLD_LIGHT};
+    border: 1px solid {COLOR_GOLD_BRASS};
+    border-left: 3px solid {COLOR_GOLD_BRASS};
+}}
+
+QToolButton#{SIDEBAR_PIN_BUTTON}:checked {{
+    background-color: {COLOR_BG_CONTAINER};
+    color: {COLOR_GOLD_BRIGHT};
+    border: 1px solid {COLOR_BRASS_DARK};
+    border-left: 3px solid {COLOR_GOLD_BRIGHT};
+}}
+
+QToolButton#{SIDEBAR_PIN_BUTTON}:focus {{
     border: 1px solid {COLOR_GOLD_BRIGHT};
     border-left: 3px solid {COLOR_GOLD_BRIGHT};
 }}
@@ -324,6 +417,15 @@ QTabBar QToolButton {{
     min-height: {_touch(30, scale)};
 }}
 
+/* Where QTabBar PUTS its two arrows: it places them by this width, halved for
+   each (PM_TabBarScrollButtonWidth, 16 px each unset), not by their min-width
+   above, so at 960x640 each arrow was drawn 34 px wide in a 16 px slot and the
+   right one ran off the bar's end (PR 291 Windows live test). Two arrows, each
+   the floor plus its 1 px border either side. */
+QTabBar::scroller {{
+    width: {_scroller_width(30, scale)};
+}}
+
 QTabBar QToolButton:hover {{
     border-color: {COLOR_GOLD_BRIGHT};
     background-color: #242424;
@@ -336,6 +438,29 @@ QTabBar QToolButton:focus {{
 QTabBar QToolButton:disabled {{
     border-color: {COLOR_BRASS_DEEP};
     color: #5A5A5A;
+}}
+
+/* Their glyphs. Styling the button replaces the base style's arrow, and a sheet
+   draws only what it names: at 960x640 the two were dark boxes with nothing in
+   them (PR 291 Linux live test). */
+QTabBar QToolButton::left-arrow {{
+    image: {_image("arrow-left.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QTabBar QToolButton::left-arrow:disabled {{
+    image: {_image("arrow-left-disabled.svg")};
+}}
+
+QTabBar QToolButton::right-arrow {{
+    image: {_image("arrow-right.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QTabBar QToolButton::right-arrow:disabled {{
+    image: {_image("arrow-right-disabled.svg")};
 }}
 
 /* T95: the × on a server's sidebar tab. Exempt, by objectName, from the scroll
@@ -494,11 +619,18 @@ QPushButton#{LAUNCHER_PLAY_BUTTON} {{
     border-radius: 4px;
 }}
 
-/* Destructive actions (Stop, Purge, Uninstall). */
+/* T193 A20: the header's update check, a real button that fits the header. */
+QPushButton#{CHECK_UPDATES_BUTTON} {{
+    padding: 4px 14px;
+}}
+
+/* Destructive actions (Stop, Purge, Uninstall). The edge is `COLOR_DANGER` at
+   rest (T193): the old `#6A3034` was 1.8:1 against the pane, under the 3:1 a
+   control's edge needs, and read exactly like the `:disabled` look below. */
 QPushButton[danger="true"], QPushButton#stop-server, QPushButton#purge-btn {{
     background-color: #2A1A1C;
     color: #E8A0A4;
-    border: 1px solid #6A3034;
+    border: 1px solid {COLOR_DANGER};
     border-radius: 3px;
 }}
 
@@ -705,6 +837,77 @@ QComboBox::drop-down:hover {{
     border-left: 1px solid {COLOR_GOLD_BRASS};
 }}
 
+/* T193: the combo's arrow. `::drop-down` alone drew an empty well -- the
+   style sheet replaces the base style's arrow and draws only what it names. */
+QComboBox::down-arrow {{
+    image: {_image("arrow-down.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QComboBox::down-arrow:disabled {{
+    image: {_image("arrow-down-disabled.svg")};
+}}
+
+/* T193: a spin box's − and + are two touch-sized squares either side of the
+   number, not the 16-px stacked halves that drew a 1-px dash. The style sheet
+   takes each button's width out of the edit field itself, so the shared
+   padding above is kept as the gap between a button and the number. */
+QSpinBox, QDoubleSpinBox {{
+    min-width: {2 * _spin_button_px(scale) + 48}px;
+}}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: center right;
+    width: {_spin_button_px(scale)}px;
+    height: {_spin_button_px(scale)}px;
+    border: none;
+    border-left: 1px solid {COLOR_BRASS_DARK};
+    background-color: {COLOR_BG_PANEL};
+}}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: center left;
+    width: {_spin_button_px(scale)}px;
+    height: {_spin_button_px(scale)}px;
+    border: none;
+    border-right: 1px solid {COLOR_BRASS_DARK};
+    background-color: {COLOR_BG_PANEL};
+}}
+
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background-color: {COLOR_BG_PARCHMENT_LIGHT};
+    border-color: {COLOR_GOLD_BRASS};
+}}
+
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+    background-color: {COLOR_BG_INPUT};
+}}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: {_image("plus.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: {_image("minus.svg")};
+    width: 14px;
+    height: 14px;
+}}
+
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {{
+    image: {_image("plus-disabled.svg")};
+}}
+
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{
+    image: {_image("minus-disabled.svg")};
+}}
+
 QComboBox QAbstractItemView {{
     background-color: {COLOR_BG_CONTAINER};
     border: 1px solid {COLOR_GOLD_BRASS};
@@ -900,15 +1103,18 @@ QCheckBox, QRadioButton {{
 }}
 
 QCheckBox::indicator, QRadioButton::indicator {{
-    width: {_touch(22, scale)};
-    height: {_touch(22, scale)};
-    border: 1px solid #6A6A6A;
+    width: {_indicator_px(scale)}px;
+    height: {_indicator_px(scale)}px;
+    border: 1px solid {COLOR_TEXT_MUTED};
     background-color: {COLOR_BG_INPUT};
     border-radius: 3px;
 }}
 
+/* Round (T193): the radius is half the box the border is drawn on -- the
+   indicator plus its two 1px borders -- so the radio is a disc, never the
+   rounded square `11 * scale` made of it. */
 QRadioButton::indicator {{
-    border-radius: {max(6, round(11 * scale))}px;
+    border-radius: {(_indicator_px(scale) + 2) // 2}px;
 }}
 
 QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
@@ -924,9 +1130,39 @@ QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
     border-color: {COLOR_GOLD_LIGHT};
 }}
 
+/* T193: a ticked box shows a tick, not only an amber fill. */
+QCheckBox::indicator:checked {{
+    image: {_image("check.svg")};
+}}
+
+/* A checked radio is a gold dot in the dark well, so it never reads as a
+   ticked checkbox beside it. Its gold rim alone still tells it from an
+   unchecked one (muted rim) if the dot's file cannot load. */
+QRadioButton::indicator:checked {{
+    background-color: {COLOR_BG_INPUT};
+    border-color: {COLOR_GOLD_BRIGHT};
+    image: {_image("radio-dot.svg")};
+}}
+
 QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
     border-color: {COLOR_BRASS_DEEP};
     background-color: #161616;
+}}
+
+/* A disabled ticked box kept looking unticked -- the uninstall's "Keep my
+   characters" while a job runs (T193): `:disabled` and `:checked` weigh the
+   same, so the later `:disabled` wiped the checked look. These two pseudo-
+   classes outweigh either alone, so they win wherever they sit in the sheet.
+   A muted tick or dot on the disabled well, and a muted rim against the
+   unticked box's deep one, so the two still differ if the image cannot load. */
+QCheckBox::indicator:checked:disabled {{
+    border-color: {COLOR_TEXT_MUTED};
+    image: {_image("check-disabled.svg")};
+}}
+
+QRadioButton::indicator:checked:disabled {{
+    border-color: {COLOR_TEXT_MUTED};
+    image: {_image("radio-dot-disabled.svg")};
 }}
 
 QCheckBox:disabled, QRadioButton:disabled {{
@@ -1049,7 +1285,11 @@ def build_dadcraft_palette() -> QPalette:
     palette.setColor(QPalette.ColorRole.Button, QColor(COLOR_BG_PANEL))
     palette.setColor(QPalette.ColorRole.ButtonText, QColor(COLOR_TEXT_PRIMARY))
     palette.setColor(QPalette.ColorRole.BrightText, QColor(COLOR_GOLD_BRIGHT))
-    palette.setColor(QPalette.ColorRole.Link, QColor(COLOR_RARE))
+    # Gold, not the info blue (T193): a link is the theme's accent like every
+    # other thing that can be pressed, and visited is the same, since a GitHub
+    # page opened once is no less worth opening again.
+    palette.setColor(QPalette.ColorRole.Link, QColor(COLOR_GOLD_LIGHT))
+    palette.setColor(QPalette.ColorRole.LinkVisited, QColor(COLOR_GOLD_LIGHT))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(COLOR_GOLD_BRASS))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(COLOR_TEXT_PRIMARY))
     # Placeholder text (a QLineEdit hint) would otherwise fall back to a

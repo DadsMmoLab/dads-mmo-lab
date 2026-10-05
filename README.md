@@ -32,8 +32,9 @@ Things the app **cannot** do silently and will ask you for, in plain words:
 
 - **App state and logs:** `~/.local/share/yulon/` (Linux), `%APPDATA%\yulon\` (Windows),
   `~/Library/Application Support/yulon/` (macOS).
-- **Your server files:** wherever you chose at install time (default `~/wow-server-playerbots`
-  for WotLK). Never inside the app folder.
+- **Your server files:** wherever you chose at install time (default `~/yulon-wotlk` for
+  WotLK; a server installed by an earlier version keeps its folder). Never inside the app
+  folder.
 
 ## Unsigned builds
 

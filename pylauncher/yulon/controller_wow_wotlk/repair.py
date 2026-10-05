@@ -123,6 +123,24 @@ class SqlWrite(Protocol):
     def run_statement(self, db: Db, statement: str) -> None: ...
 
 
+def _reason(exc: MaintenanceError) -> str:
+    """`exc` with what the database itself said, for a run log or a repair line (T194 R1).
+
+    `MaintenanceError` keeps a program's words on `detail` so the Restore box can
+    fold them; an install or a repair has no fold, and "could not list the
+    databases" without "Access denied" is a refusal nobody can act on.
+    """
+    return f"{exc} ({exc.detail})" if exc.detail else str(exc)
+
+
+def _databases(mysql: MysqlDocker) -> tuple[str, ...]:
+    """`mysql.databases()`, with the database's own words in the message (T194 R1)."""
+    try:
+        return mysql.databases()
+    except MaintenanceError as exc:
+        raise MaintenanceError(_reason(exc), detail=exc.detail) from exc
+
+
 def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
     """What state this install's `acore_*` schemas are in. Never raises.
 
@@ -139,7 +157,8 @@ def import_state(sql: SqlQuery, mysql: MysqlDocker) -> docker.ImportState:
         # and `phase6-decisions.md` §5 all said three (review, 2026-08-23).
         existing = mysql.databases()
     except MaintenanceError as exc:
-        return docker.ImportState("unreadable", str(exc))
+        logger.warning(f"the databases could not be listed: {_reason(exc)}")
+        return docker.ImportState("unreadable", _reason(exc))
     present = [name for name in CORE_DATABASES if name in existing]
     if not present:
         return docker.ImportState(
@@ -265,7 +284,7 @@ def reset_unfinished(sql: SqlWrite, mysql: MysqlDocker) -> tuple[str, ...]:
             "nothing was dropped."
         )
 
-    existing = mysql.databases()
+    existing = _databases(mysql)
     present = [name for name in CORE_DATABASES if name in existing]
     if not present:
         return ()
@@ -280,7 +299,7 @@ def reset_unfinished(sql: SqlWrite, mysql: MysqlDocker) -> tuple[str, ...]:
         logger.warning(f"dropping {name}: it was left half-written by an interrupted import")
         sql.run_statement(_DB_KEYS[name], f"DROP DATABASE `{name}`;")
 
-    left = [name for name in doomed if name in mysql.databases()]
+    left = [name for name in doomed if name in _databases(mysql)]
     if left:
         raise MaintenanceError(
             f"{', '.join(left)} could not be dropped, so the import was not re-run."
