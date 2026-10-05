@@ -9,11 +9,21 @@ is the same. The fingerprint is a sha256 over one canonical stream:
   `.dockerignore` and of every `dockerfile:` the overlay names. BuildKit reads
   the Dockerfile and the `.dockerignore` on their own even when the walk leaves
   them out, which `*` does on every family that renders one;
-* every entry of the build context that Docker would send, depth first, with
-  the names in each folder sorted by their UTF-8 bytes. A regular file gives its
-  path, size, content and mode; a folder its path and mode; a symlink its path,
-  mode and target string (it is never followed). An excluded folder that holds a
-  re-admitted entry is given too, because BuildKit sends it.
+* the entries of the build context, filtered by the `.dockerignore`, depth first,
+  with the names in each folder sorted by their UTF-8 bytes. A regular file gives
+  its path, size, content and mode; a folder its path and mode; a symlink its
+  path, mode and target string (it is never followed). An excluded folder that
+  holds a re-admitted entry is given too, because BuildKit sends it.
+
+Which entries depends on the recipe (T230). BuildKit sends only the context paths
+the built stages COPY, ADD or bind-mount (`llb.FollowPaths`), not the whole
+filtered context. A recipe whose bytes are in `KNOWN_RECIPES` was read by hand,
+and only its `reads` are walked: the paths themselves, what is inside them and the
+folders on the way to them. A `.git` folder inside them counts as the text of its
+HEAD plus the commit HEAD names (`_git_head`), because that is all the recipe's
+one git reader takes from it, and only while that reader is byte for byte the file
+that was read. Any other recipe, or a `.git` whose HEAD cannot be followed, is
+walked as the whole filtered context, exactly as before T230.
 
 Mtimes are not hashed: a patch applied and then reverted gives the same
 fingerprint, which is the case of 2026-10-04 (an uncommitted patch was built and
@@ -62,8 +72,36 @@ answer": the build is then not kept. It is never a guess. The cases are:
 
 Deliberately left out: Yu'lon's own `.yulon*` files at the context root. They
 are never compiled, and writing the record of a kept build would otherwise change
-the fingerprint that record holds. Not covered, and the player is told so: the
-base image and the packages a build fetches.
+the fingerprint that record holds. On a known recipe two more things are left out,
+each with its proof in the T230 plan §1:
+
+* every context path no built stage reads. On AzerothCore's that is the
+  Maintenance backups and an update's database copy (`sql_scripts/backups`), the
+  module update checks' clones (`sql_scripts/clones`, `ale_scripts`) and the
+  compose files a settings save or a repair rewrites;
+* everything in a `.git` folder but HEAD and its commit: fetched objects and refs,
+  FETCH_HEAD, the index, ORIG_HEAD and the logs. The compile bind-mounts the root
+  `.git`, and `genrev.cmake` runs `git describe --long --match 0.1 --dirty=+
+  --abbrev=12 --always`, `git show -s --format=%ci` and `git rev-parse
+  --abbrev-ref HEAD` there; no other CMake file at the pin, nor any of the 22
+  catalog modules, runs git. Of what those three print, only HEAD and its commit
+  can change: the regex at genrev.cmake:78 strips `0.1-` and `N-g`, so whether a
+  `0.1` tag exists leaves the same hash; and `--dirty` always prints `+`, because
+  the container's work tree holds only the five copied paths, so `apps/` and
+  `data/`, which HEAD tracks, read as deleted whatever the index says.
+  `modules/*/.git` is copied, into the db-import image, but read by no step: the
+  db-import service bind-mounts `./modules` over that copy (`base.yml.tmpl`).
+  The same rule is applied to a `.git` folder anywhere else under the reads (in
+  `deps` or `src`, say). At the pin that is sound for the same reason: the only git
+  run is genrev's, in `/azerothcore`, which reads the root `.git` alone, and the
+  build stage that copies `deps` and `src` passes on only what it compiled.
+
+What that leaves uncovered changes at most the world's version line: a git reader
+other than `genrev.cmake` after an update that leaves it unchanged, or a custom
+module whose build reads its own git metadata beyond HEAD (R1); HEAD's 12-digit
+abbreviation growing on a prefix collision (R2); a tag and a branch of the same
+name making `--abbrev-ref` print `heads/<name>` (R3). Not covered on any recipe,
+and the player is told so: the base image and the packages a build fetches.
 
 The walk holds one sorted folder listing per level of depth and reads every
 file through one fixed buffer, so memory stays bounded however large the tree is.
@@ -81,6 +119,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon.catalog.composegen import BASE_FILE, BUILD_FILE, OVERRIDE_FILE
+from yulon.catalog.git_head import resolve_head
 from yulon.log import get_logger
 
 log = get_logger(__name__)
@@ -116,6 +155,34 @@ _CONTEXT = re.compile(r"^\s*context\s*:\s*(?P<value>.*?)\s*$")
 _DOCKERFILE = re.compile(r"^\s*dockerfile\s*:\s*(?P<value>.*?)\s*$")
 _UNCOVERED_KEY = re.compile(r"^\s*(dockerfile_inline|additional_contexts)\s*:")
 _BUILD_KEY = re.compile(r"^\s+build\s*:")
+
+
+@dataclass(frozen=True)
+class KnownRecipe:
+    """A recipe read by hand: the context paths its stages take, and the file whose git it runs."""
+
+    reads: tuple[str, ...]
+    """Context paths, slash form, that the stages Yu'lon builds COPY, ADD or bind-mount."""
+    git_reader: tuple[str, str]
+    """(path, sha256) of the one file whose git calls were read; `.git` counts as HEAD only
+    while that file is byte for byte the one that was read."""
+
+
+KNOWN_RECIPES: dict[str, KnownRecipe] = {
+    # mod-playerbots/azerothcore-wotlk `apps/docker/Dockerfile` at the catalog pin 7f12e89e,
+    # stages skeleton, build, runtime, authserver, worldserver, db-import and client-data (the
+    # four targets `wow-wotlk/native/build.yml.tmpl` builds; `tools` is not built). T230 plan §1.
+    "e87bc1bd18f94bbf1705b81438b0caf7a1c8c8c8a0330cdaf08511f0f3ae7964": KnownRecipe(
+        reads=(".git", "CMakeLists.txt", "apps", "conf", "data", "deps", "modules", "src"),
+        git_reader=(
+            "src/cmake/genrev.cmake",
+            "a27f319585605516ed82601d87a7785a135ae3b3d0b725d1bf4f24615b6d342b",
+        ),
+    ),
+}
+"""Recipes recognised by the sha256 of their bytes. Any other recipe walks the whole context."""
+MAX_HEAD_BYTES = 4096
+"""A `.git/HEAD` larger than this is not one git wrote; its folder is then walked byte for byte."""
 
 
 class _NoAnswer(Exception):
@@ -478,8 +545,78 @@ def _send_folders(stream: _Stream, stack: list[_Frame]) -> None:
             frame.sent = True
 
 
-def _walk(stream: _Stream, context: Path, rules: Rules) -> None:
-    """Hash every entry Docker sends, depth first; an excluded folder is entered only if needed."""
+def _on_a_read(rel: str, reads: tuple[str, ...]) -> bool:
+    """Whether `rel` is a read, inside one, or a folder on the way to one; whole segments only."""
+    return any(
+        rel == read or rel.startswith(read + "/") or read.startswith(rel + "/") for read in reads
+    )
+
+
+@dataclass(frozen=True)
+class _Known:
+    """Known mode: what the recognised recipes read, and whether `.git` counts as its HEAD."""
+
+    reads: tuple[str, ...]
+    git_readers: tuple[str, ...] | None
+    """The git readers' paths when every one is the file that was read; None walks `.git`."""
+
+
+def _small_file(path: Path, limit: int) -> bytes | None:
+    """A regular file's bytes, not followed through a link; None if it cannot be read whole."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        with os.fdopen(os.open(path, flags), "rb", buffering=0) as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                return None
+            data = handle.read(limit + 1)
+    except OSError:
+        return None
+    return data if len(data) <= limit else None
+
+
+def _git_readers_unchanged(context: Path, readers: Sequence[tuple[str, str]]) -> bool:
+    for path, sha in readers:
+        data = _small_file(context / path, MAX_RECIPE_BYTES)
+        if data is None or hashlib.sha256(data).hexdigest() != sha:
+            return False
+    return True
+
+
+def _git_head(stream: _Stream, gitdir: Path, rel: str, readers: tuple[str, ...]) -> bool:
+    """Put what the git reader takes from `gitdir`: HEAD's text and its commit (T230).
+
+    False, with nothing put, when that cannot be said exactly: a worktree's
+    `commondir`, a reftable, a HEAD that is not a small regular UTF-8 file, or one
+    that does not resolve to a commit. The folder is then walked byte for byte.
+    """
+    if (gitdir / "commondir").exists() or (gitdir / "reftable").exists():
+        return False
+    head = _small_file(gitdir / "HEAD", MAX_HEAD_BYTES)
+    if head is None:
+        return False
+    try:
+        commit = resolve_head(gitdir, head.decode("utf-8"))
+    except (OSError, UnicodeError):
+        return False
+    if commit is None:
+        return False
+    stream.put(b"git")
+    stream.put(_utf8(rel))
+    stream.put(len(readers).to_bytes(8, "big"))
+    for reader in readers:
+        stream.put(_utf8(reader))
+    stream.put(head)
+    stream.put(commit.encode("ascii"))
+    return True
+
+
+def _walk(stream: _Stream, context: Path, rules: Rules, known: _Known | None = None) -> None:
+    """Hash every entry Docker sends, depth first; an excluded folder is entered only if needed.
+
+    In known mode only what the recipes read is looked at, and a `.git` folder
+    inside it counts as its HEAD and the commit HEAD names (`_git_head`).
+    """
     stack = [_Frame((), None, _sorted_entries(str(context), stream), 0, True)]
     while stack:
         frame = stack[-1]
@@ -491,6 +628,8 @@ def _walk(stream: _Stream, context: Path, rules: Rules) -> None:
             continue
         parts = (*frame.parts, entry.name)
         rel = "/".join(parts)
+        if known is not None and not _on_a_read(rel, known.reads):
+            continue
         decision = rules.decide(rel, frame.decision)
         is_junction = getattr(entry, "is_junction", None)
         if is_junction is not None and is_junction():
@@ -499,6 +638,15 @@ def _walk(stream: _Stream, context: Path, rules: Rules) -> None:
         if stat.S_ISDIR(info.st_mode):
             if decision.excluded and not rules.may_admit_under(parts):
                 continue
+            if (
+                known is not None
+                and known.git_readers is not None
+                and entry.name == ".git"
+                and not decision.excluded
+            ):
+                _send_folders(stream, stack)
+                if _git_head(stream, Path(entry.path), rel, known.git_readers):
+                    continue
             listing = _sorted_entries(entry.path, stream)
             stack.append(_Frame(parts, decision, listing, stat.S_IMODE(info.st_mode), False))
             if not decision.excluded:
@@ -519,6 +667,20 @@ def _walk(stream: _Stream, context: Path, rules: Rules) -> None:
             stream.put(oct(mode).encode("ascii"))
         else:
             raise _NoAnswer(f"{rel} is neither a file, a folder nor a symlink")
+
+
+def _known(context: Path, found: Sequence[KnownRecipe | None]) -> _Known | None:
+    """Known mode when every recipe the overlay names was read by hand; None walks it all."""
+    recipes = [recipe for recipe in found if recipe is not None]
+    if not recipes or len(recipes) != len(found):
+        return None
+    readers = sorted({recipe.git_reader for recipe in recipes})
+    return _Known(
+        reads=tuple(sorted({read for recipe in recipes for read in recipe.reads})),
+        git_readers=(
+            tuple(path for path, _ in readers) if _git_readers_unchanged(context, readers) else None
+        ),
+    )
 
 
 def _fingerprint(
@@ -545,15 +707,24 @@ def _fingerprint(
     else:
         stream.put(b"no dockerignore")
         rules = Rules()
+    found: list[KnownRecipe | None] = []
     for recipe in recipes:
         own_ignore = context / (recipe + DOCKERIGNORE)
         if own_ignore.exists() or own_ignore.is_symlink():
             raise _NoAnswer(f"{recipe}{DOCKERIGNORE} replaces the root .dockerignore")
         stream.put(b"dockerfile")
         stream.put(_utf8(recipe))
-        stream.file(context / recipe)
+        _, recipe_bytes = stream.file(context / recipe, keep=True)
+        found.append(KNOWN_RECIPES.get(hashlib.sha256(recipe_bytes).hexdigest()))
+    known = _known(context, found)
+    if known is not None:
+        # Before the walk, so a known-mode stream can never equal a whole-walk one.
+        stream.put(b"reads")
+        stream.put(len(known.reads).to_bytes(8, "big"))
+        for read in known.reads:
+            stream.put(_utf8(read))
     stream.put(b"context")
-    _walk(stream, context, rules)
+    _walk(stream, context, rules, known)
     stream.put(b"end")
     return stream.hexdigest()
 
