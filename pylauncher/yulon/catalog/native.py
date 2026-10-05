@@ -107,6 +107,7 @@ from yulon.catalog.catalog import (
     SqlPhase,
     SqlPlan,
 )
+from yulon.catalog.git_head import read_head_file
 from yulon.catalog.installer import (
     MEASURED_BUILD_TIMES,
     DockerUnavailableError,
@@ -3031,41 +3032,6 @@ class KeptBuildRoute:
 
     check: Callable[[], str | None]
     remove: Callable[[], str]
-
-
-def read_head_file(dest: Path) -> str | None:
-    """The commit a checkout is on, read off `.git/HEAD` with no git run; None = cannot say.
-
-    For a Start, which must not wait on a containerised git: a detached HEAD
-    (what `checkout --detach` leaves) holds the sha itself, and a branch is
-    resolved through its loose ref or `packed-refs`.
-    """
-    gitdir = dest / ".git"
-    try:
-        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
-        if not head.startswith("ref: "):
-            return _a_commit(head)
-        ref = head[len("ref: ") :]
-        loose = gitdir.joinpath(*ref.split("/"))
-        if loose.is_file():
-            # A loose ref that itself says `ref: …` is not a commit: unknown, not a
-            # refusal (scoped re-review of c5bf1b67).
-            return _a_commit(loose.read_text(encoding="utf-8").strip())
-        for line in (gitdir / "packed-refs").read_text(encoding="utf-8").splitlines():
-            sha, _, name = line.partition(" ")
-            if name == ref:
-                return _a_commit(sha)
-    except OSError:
-        return None
-    return None
-
-
-_COMMIT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
-
-
-def _a_commit(text: str) -> str | None:
-    """`text` if it is a full commit id (SHA-1 or SHA-256), else None."""
-    return text if _COMMIT_ID.fullmatch(text) else None
 
 
 @dataclass(frozen=True)

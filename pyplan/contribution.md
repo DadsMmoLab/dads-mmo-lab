@@ -143,6 +143,12 @@ YULON_WOTLK_DB_CONTAINER=ac-database pytest -m integration tests/integration
 # `ac-worldserver`) — only the byte-exactness test needs a ready worldserver, and a pty
 ```
 
+## The changelog
+
+Every change adds one line to `CHANGELOG.md` under `## Unreleased`, in `### New`, `### Fixed` or `### Changed`: plain words, at most about 120 characters, saying what the player gets (players read it in the update dialog). No ticket ids, proof, test notes, backticks or commands; those go in the pull request.
+Examples. New: "Set a server's time zone on the Tuning tab with **Server time zone**." Fixed: "Sending gold to a character no longer crashes the app." Changed: "Opening Yu'lon while it is already running brings the open window to the front."
+`pylauncher/tests/test_changelog_style.py` enforces it.
+
 ## Notes
 
 - Python 3.11+ required (see `pyplan/README.md` §2).
